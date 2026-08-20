@@ -138,6 +138,12 @@ pub struct LayerPlan {
     artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
     /// Member rows whose key said *this point is in no artifact*, per source.
     unclustered: Vec<UnclusteredRows>,
+    /// How many artifacts each layer's member source **created** — a key the artifacts source did
+    /// not declare, under `value_set = "open"` (`artifacts-from-points.md` §3). Counted because a
+    /// typo creates a permanent object rather than being refused, which is the trade open makes
+    /// knowingly, and the mitigation is that the number is printed. The wire says the same thing in
+    /// its own 200.
+    minted: BTreeMap<String, u64>,
 }
 
 /// How many rows of one member source named no artifact.
@@ -220,6 +226,8 @@ pub struct PublishedLayers {
     /// Member rows that named no artifact, per source — carried out of the plan so the build's own
     /// report can state the number rather than leaving it on stderr alone.
     pub unclustered: Vec<UnclusteredRows>,
+    /// Artifacts each layer's member keys **created**, per layer, carried out for the same reason.
+    pub minted: BTreeMap<String, u64>,
 }
 
 impl Default for PublishedLayers {
@@ -233,6 +241,7 @@ impl Default for PublishedLayers {
             artifact_record_extents: Vec::new(),
             paths: Vec::new(),
             unclustered: Vec::new(),
+            minted: BTreeMap::new(),
         }
     }
 }
@@ -248,6 +257,7 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
         declarations: declarations.to_vec(),
         artifacts: BTreeMap::new(),
         unclustered: Vec::new(),
+        minted: BTreeMap::new(),
     };
     for input in inputs {
         // An artifact source names artifacts *in a layer*, and a layer this build does not
@@ -291,6 +301,7 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
             }
         }
         if let Some(members) = &input.members {
+            let before = plan.artifacts.len();
             let (rows, read) = read_members(
                 &input.name,
                 &members.path,
@@ -298,6 +309,20 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
                 declaration,
                 &mut plan,
             )?;
+            let minted = (plan.artifacts.len() - before) as u64;
+            if minted > 0 {
+                // Printed on §7's posture, beside the unclustered count and for the same reason: a
+                // mistyped key under an open value set creates an artifact instead of refusing, and
+                // what tells that apart from a clustering the artifacts source simply does not
+                // enumerate is the number.
+                eprintln!(
+                    "layer '{}': {minted} artifact(s) created by keys in {} that no artifacts \
+                     source declares",
+                    input.name,
+                    members.path.display()
+                );
+                *plan.minted.entry(input.name.clone()).or_default() += minted;
+            }
             if rows > 0 {
                 // Printed here, where the source and its layer are both in hand, on §7's posture:
                 // the operator is present, the numbers are what tell a noisy clustering from a
@@ -912,7 +937,14 @@ pub fn publish(
             incoming.push(incoming_artifact(key, artifact));
         }
         let record = registry
-            .prepare_publish(layer, level, &incoming, &store, &mut alloc)
+            .prepare_publish(
+                layer,
+                level,
+                &incoming,
+                &store,
+                &mut alloc,
+                &tessera_lifecycle::no_pending,
+            )
             .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
         registry.apply(&record);
         let refused = store.apply(&record, 0);
@@ -934,6 +966,7 @@ pub fn publish(
         split_coverage: coverage,
         low_water: alloc.low_water(),
         unclustered: plan.unclustered.clone(),
+        minted: plan.minted.clone(),
         ..PublishedLayers::default()
     };
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;

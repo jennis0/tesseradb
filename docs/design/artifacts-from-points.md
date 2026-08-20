@@ -1,18 +1,17 @@
 # Artifacts declared by the points that belong to them — design
 
 **Date:** 2026-08-20
-**Status:** Draft — owner-ruled in discussion, **§2, §3 and §4 built at build time, and §6 built at
-both entry points bar minting**. The readers take an integer key, skip a noise one, and read a list
-column as the artifacts a point belongs to plus the edges between them; `value_set` decides whether a
-member key may create an artifact, at a build. Points join an artifact that already exists at ingest
-too — a durable delta record, one store method, and a log pin the fold releases (§6.1) — and **an
-ingest batch may now carry a column named for a layer** (§6.2), which is what
-[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) obliges and the breach
-it marked. The reading is shared with the build rather than reimplemented: which position carries
-which level, and which adjacencies are edges, live in `tessera_types::layer`. ⊘ **One thing remains:
-an unknown key is refused rather than minted**, so a layer declared `open` still governs what a
-*build* mints and nothing at ingest (§6.2). The rulings in §5 are the owner's; the rest follows from
-them. Extends
+**Status:** Draft — owner-ruled in discussion, **and built in full at both entry points**. The
+readers take an integer key, skip a noise one, and read a list column as the artifacts a point
+belongs to plus the edges between them; `value_set` decides whether a member key may create an
+artifact, and it now decides it at a build *and* at ingest. Points join an artifact that already
+exists — a durable delta record, one store method, and a log pin the fold releases (§6.1) — an
+ingest batch may carry a column named for a layer (§6.2), and a key that column carries which no
+artifact holds **creates the artifact it names** (§6.3), lineage and all. That discharges
+[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md): there is nothing a
+member table can say that the wire cannot. The reading is shared with the build rather than
+reimplemented: which position carries which level, and which adjacencies are edges, live in
+`tessera_types::layer`. The rulings in §5 are the owner's; the rest follows from them. Extends
 [`configuration.md`](configuration.md) (normative for the surface) and
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §6.1 (normative for artifact semantics).
 
@@ -90,6 +89,21 @@ generally not served, and generally a sign the table is stale. A cluster the poi
 the table omits exists with no title and whatever `content = { computed = … }` gives it. Neither is
 an error.
 
+**What `open` costs is that a typo stops being a refusal**, and the mitigation is that the number is
+reported rather than bounded. A build prints what each member source created and carries the total
+in its report; an ingest batch is told in its own 200 how many artifacts its keys created. Both are
+*counts of what happened*, not thresholds: a bare clustering legitimately mints every artifact it
+has, so there is no number that separates that from a wrong column — only the operator's knowledge
+of which they meant. Whether a declared per-layer bound is worth a key of its own is open (§8).
+
+**Two declarations make a layer unmintable, and both refuse the key rather than minting an artifact
+that could not be served**: a layer declaring supplied content kinds, because an artifact served
+without content its layer declares cannot be told apart from one whose content was withheld; and a
+layer declaring `depends_on`, because a dependent with no attachment would be gated on nothing.
+These are the refusals a publication has always made of an artifact carrying only a key — made
+before the batch is admitted, so they cost one batch rather than the commit window it would have
+joined.
+
 ## 4. A lineage list declares the edges
 
 Where the column is a list, its shape is checked against the hierarchy kind the layer already
@@ -155,7 +169,8 @@ the other.
 *is this key unknown?* — against what is currently served, a suppressed artifact reads as absent, a
 second artifact is minted under its key, and the new one is not suppressed. A suppression would be
 defeated by ingesting a point. This is the only fail-open in the design and it is closed by
-construction rather than by a check.
+construction rather than by a check — three times over, as §6.3 sets out, the innermost being
+publication's own refusal of a key its level already holds.
 
 **Deleting an artifact deletes its suppressions**, and the removal rides the deletion's own entry —
 hidden at the same ack, retired at the same compaction fold. Not a separate sweep: a sweep is a
@@ -170,13 +185,13 @@ at a build has always done and what no route into the artifact store could do �
 wrote a whole record, and the two mutating passes only removed. That is built (§6.1).
 
 **The wire says what a file says** (§6.2): a column named for a layer carries a point's artifacts,
-read by the same rules and joined in the same commit as the rows. ⊘ **One half is not built**: an
-unknown key is refused rather than minted. When it lands, a point carrying a lineage that names
-clusters which do not exist yet mints the chain and links it in one batch, **parent before child** —
-the ordering constraint edges already carry (`annotation-representation.md` §5.0.4), applied to a
-batch rather than to a build. Until then a lineage may only *check* against the edges a publication
-stored: a growth adds members and never lineage, so a contradiction refuses and an edge the layer
-holds no parent for is reported and the memberships still land.
+read by the same rules and joined in the same commit as the rows. **And a key it carries that no
+artifact holds creates one** (§6.3): a point carrying a lineage that names clusters which do not
+exist yet mints the chain and links it in one batch, parent before child — the ordering constraint
+edges already carry (`annotation-representation.md` §5.0.4), applied to a batch rather than to a
+build. Where the artifact *does* exist, a lineage only checks: a growth adds members and never
+lineage, so a contradiction refuses and an edge the layer holds no parent for is reported and the
+memberships still land.
 
 Computed content needs nothing extra: centroid, box and hull are recomputed per viewer from current
 membership, so they follow new points without invalidation.
@@ -255,44 +270,81 @@ which is what a member table with no `level` column means; a levelled list's ent
 **Where it lands.** The handler reads the column into `(layer, level, key) → row positions` and the
 edges the adjacency declared, and hands both to the write executor with the batch. Keys resolve at
 **admission**, through `ArtifactStore::ordinal_of_key` — the same lookup the growth command makes, so
-§5's third ruling holds here for the same reason — and a key naming no artifact refuses *that batch*
-alone, before the window it would have joined is closed. The entities do not exist until the window
+§5's third ruling holds here for the same reason — and on a **closed** layer a key naming no artifact
+refuses *that batch* alone, before the window it would have joined is closed; on an open one it
+travels unresolved to the close, where it mints (§6.3). The entities do not exist until the window
 allocates, so the ordinals are carried from admission to the close and the joins become one
 `ArtifactGrow` per `(layer, level)` appended inside the window's own fsync: the membership is durable
 in the same commit as the point, and there is no state in which a point is ingested and its
 membership is not.
 
-**An edge is checked, never created.** A growth adds members; lineage is settled where the artifact
-is published. A lineage contradicting the parent the layer holds is refused in the words the build
-uses for two points disagreeing — two spellings of one edge, and no correct output. An edge whose
-child holds *no* parent is reported and the memberships still land: the membership half of the same
-entry is unambiguous, and refusing it would block a batch over a roster published without its edges,
-which discloses nothing and costs a republication. That case stops being reachable when minting
-lands, where a chain arrives parent before child in one batch.
+**An edge into an artifact that exists is checked, never created.** A growth adds members; lineage
+is settled where the artifact is published, which for a key that mints is §6.3's publication and for
+a key that already exists is somebody else's, earlier. A lineage contradicting the parent the layer
+holds is refused in the words the build uses for two points disagreeing — two spellings of one edge,
+and no correct output. An edge whose child holds *no* parent is reported and the memberships still
+land: the membership half of the same entry is unambiguous, and refusing it would block a batch over
+a roster published without its edges, which discloses nothing and costs a republication. **Minting
+narrows that case but does not close it**: a chain whose artifacts are all new arrives parent before
+child and is linked, but a child that already exists and holds no parent is still an edge this route
+cannot create, whoever its parent is.
 
 **A column naming a layer whose membership is *evaluated* is refused**, naming it. There is no
 stored membership for a point to join, and a stored answer beside a live predicate is what
 `prepare_publish` already refuses a publication for; this is that refusal one step earlier, where the
 batch can still be rejected without effect.
 
-### 6.3 What remains
+### 6.3 A key that names nothing creates it — built 2026-08-20
 
-⊘ **An unknown key is refused rather than minted.** `value_set` is carried on the layer declaration
-— which is what the write path reads, and why it is not on the acquisition block — and is consulted
-at a build only. At a build minting is one arm of one function: `resolve_member`'s `ValueSet::Open`
-branch, which inserts an address into the plan and lets the rest of the pass treat it as any other
-artifact. At ingest the site is beside the growth command on the write executor rather than in the
-handler — ordinals are claimed serially there, which is the same reason a publication does not claim
-them at admission and a discovered vocabulary does not mint its codes there.
+**Minting is a publication, and it happens at the window close.** An ordinal is claimed from the
+level's own cursor and is durable only in the record that claims it, so a claim made at *admission*
+would sit unappended across everything the executor does before the window closes — including a
+`PublishArtifacts` command, which reads the same cursor and would take the same ordinal. At the close
+there is nothing to interleave with: the window is closed, the allocation is made, and the record
+rides the window's own fsync. That is §5's first ruling — ordinals are claimed serially on the write
+executor, as a publication claims them — read as a placement rather than a slogan.
 
-**§5's third ruling is satisfied by construction and needed no work.** The resolution a point's key
-takes is `ArtifactStore::ordinal_of_key`, which reads the store's key index. That index loses a key
-at exactly one event — the fold retiring the artifact's own entity, which is a *deletion* — and a
-suppression touches no stored structure at all (Rule S). So the lookup is suppression-blind because
-there is nothing in it that could see a suppression, which is the shape §5 asks for: written against
-the served view instead, a suppressed artifact reads as absent and the key mints a second,
-unsuppressed one. Nothing needs to be added to keep that property; it needs only not to be replaced
-by a `verdict` call.
+**What is decided at admission is everything that can still refuse one batch on its own**: whether
+the layer exists, is enumerated and has that level; whether its declaration admits an artifact
+carrying nothing but a name (§3's two unmintable shapes); and whether the batch's own column named
+one child under two parents. A closed layer's unknown key is refused there as before. An open
+layer's travels as a key with no ordinal.
+
+**A minted artifact is published carrying its members**, not published empty and then grown: the
+entities exist by the close, so one record says the whole of what happened and the join needs no
+second record and no log pin of its own. A key that resolves *at* the close — a publication having
+landed since the batch was admitted — becomes an ordinary growth instead.
+
+**Lineage is what the growth record could not carry, and it did not have to.** A growth is a delta of
+members; it has no field for an edge and gains none. What creates the edge is the publication that
+creates the artifact, which has carried `parent_key` since artifacts existed — so a minted chain
+needs no new record shape, only the right order:
+
+- a **nested** lineage is one level and one record. `prepare_publish` resolves a parent that is a
+  sibling of its own batch, so parent and child land together whatever order they sit in.
+- a **tiered** chain is one record per level, coarse first, and the parent's ordinal was fixed by the
+  record before. Nothing has been applied at that point, so the resolution takes a `pending` answer
+  beside the store's — one level up and no further, because entry *k* of a list is the parent of
+  entry *k+1* and searching past a gap would invent an edge the reader deliberately does not read.
+
+**At most one live artifact per key per level, by construction three times over** (§5's second and
+third rulings). The keys are gathered into one map before anything is prepared, so two points in one
+batch — or two batches in one window — mint once. The map is then resolved against
+`ArtifactStore::ordinal_of_key` a second time, so a key that acquired an artifact since admission
+grows instead. And `prepare_publish` refuses a key its level already holds, which it has always done:
+so even if both resolutions were written against the served view, the second artifact would be
+*refused* rather than created. **That is what closes the design's one fail-open** — a suppression
+defeated by ingesting a point — and the innermost of the three guards is the append-only rule rather
+than anything added here.
+
+`ArtifactStore::ordinal_of_key` is suppression-blind because there is nothing in it that could see a
+suppression: the index loses a key at exactly one event, the fold retiring the artifact's own entity,
+which is a *deletion* (Rule S touches no stored structure). It needs only not to be replaced by a
+`verdict` call.
+
+**What a batch minted is reported to the batch that minted it.** `/control/ingest`'s 200 carries
+`minted`, and the executor logs the count with a sample of the keys. A replayed batch reports zero,
+which is the honest reading: the count is what *this submission* created.
 
 ## 7. Joins are reported, not refused
 
@@ -326,7 +378,14 @@ than a mission.
   pipeline. This rides write-path §5.8's existing obligation for deletions that dark-ship, rather
   than needing machinery of its own; ⊘ that report is unbuilt.
 - A per-layer bound on minted artifacts, declared rather than enforced, so a corrupt column warns
-  loudly instead of minting millions. Undecided whether it is worth the key.
+  loudly instead of minting millions. Undecided whether it is worth the key. What exists instead is
+  the count, at both entry points (§3): the build's report and the batch's own 200 say how many
+  artifacts were created, and nothing refuses on the number.
+- Whether a growth naming a key nothing holds should mint. It does not: `/control/layers/{layer}`'s
+  growth route refuses an unknown key whatever the value set says, because it names an artifact to
+  add members to rather than a point declaring the artifact it belongs to. The asymmetry is
+  deliberate and small, and it is not [0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)'s
+  concern — that route has no build counterpart to differ from.
 
 ## 9. Not in scope
 
@@ -337,6 +396,44 @@ a predicate over a `derived` vocabulary is answered by a masked scan, which a vi
 clusters would pay 263 times.
 
 ## Appendix R — review trail
+
+**2026-08-20 — r7. A key that names nothing creates it, at both entry points, and the fail-open is
+closed three times.** §6.3 is built:
+[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)'s last obligation, and
+with it the last difference between what can be *said* at a build and at ingest. An unknown key on an
+open layer no longer refuses a batch; it creates the artifact it names, carrying nothing but the
+name and the points that named it.
+
+**Where minting happens was the first decision, and admission was wrong for it.** An ordinal is
+claimed from the level's cursor and is durable only in the record that claims it, so a claim made at
+admission would be held unappended across everything the executor does before the window closes — and
+a `PublishArtifacts` command executes in exactly that interval, reads the same cursor, and would take
+the same ordinal. So the mint is at the **close**, where the window is shut, the allocation is made,
+and the record rides the window's own fsync. What stays at admission is every refusal that can be
+made about one batch alone, which is what keeps one caller's typo off another caller's rows.
+
+**The growth record carried no lineage and did not need to.** A growth is a delta of members and has
+no field for an edge; what creates an edge is the publication that creates the artifact, which has
+carried `parent_key` since artifacts existed. So a minted chain needed no new record shape — only the
+order: one record for a nested lineage, where a sibling's ordinal is resolved inside its own batch,
+and one record per level coarse-first for a tiered chain, where the parent's ordinal was fixed by the
+record before and is answered by a `pending` resolver one level up. That is §5.0.4's constraint
+applied to a batch, and it is the whole of what minting a lineage required.
+
+**A minted artifact is published carrying its members** rather than published empty and grown: the
+entities exist by the close, so one record says the whole of what happened and no log pin is owed.
+
+**§5's third ruling has three guards and the innermost is not one anybody added.** The resolution at
+admission and the re-resolution at the close both read `ArtifactStore::ordinal_of_key`, which no
+suppression touches; and `prepare_publish` refuses a key its level already holds. Breaking both
+resolutions together turns the suppression test red on that third refusal — a 422 rather than a
+second artifact — which is the fail-closed direction and is how the guards are known to be
+load-bearing.
+
+**One thing the design had wrong, and it cuts against the earlier claim.** §6.2 said the
+edge-with-no-parent warning "stops being reachable when minting lands". It does not: a chain whose
+artifacts are all new is linked, but a child that *already exists* and holds no parent is still an
+edge a growth cannot create, whoever the parent is. §6.2 now says so.
 
 **2026-08-20 — r6. The wire says what a file says, and the shared piece is the rule rather than the
 reader.** §6.2 is built: `/control/ingest` accepts a column named for a declared layer, reads it by

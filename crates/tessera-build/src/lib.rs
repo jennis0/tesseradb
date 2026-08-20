@@ -238,6 +238,13 @@ pub struct BuildReport {
     /// condensed tree, so this is an ordinary number rather than a fault; it is here because a
     /// clustering that skipped *every* row named the wrong column, and only the count says so.
     pub unclustered_member_rows: u64,
+    /// Artifacts **created by a member key no artifacts source declared**, under
+    /// `value_set = "open"` (`artifacts-from-points.md` §3). The ordinary number for a bare
+    /// clustering is *every* cluster, so this is not a fault either; it is here because minting
+    /// cannot be undone — a mistyped key becomes a permanent object — and the count is the whole of
+    /// what stands between an operator and noticing. An ingest batch reports the same number for
+    /// itself in its own 200.
+    pub minted_artifacts: u64,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -1289,6 +1296,7 @@ fn write_manifests(
         bundle_bytes,
         occupancy,
         unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
+        minted_artifacts: published_layers.minted.values().sum(),
     })
 }
 

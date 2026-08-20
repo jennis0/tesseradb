@@ -202,9 +202,11 @@ impl IncomingArtifact {
 /// identifier reaches durable state, where a key rotation would silently redirect it (I10).
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingGrowth {
-    /// The key the artifact was published under. An unknown one is refused rather than minted —
-    /// ⊘ minting from an unknown key at ingest is unbuilt, and is the next stage
-    /// (`artifacts-from-points.md` §6.3).
+    /// The key the artifact was published under. **An unknown one is refused rather than minted**,
+    /// on this route whatever the layer's value set says: a growth names an artifact to add members
+    /// to, and there is no point whose column declared the key, so an unknown one is a typo with
+    /// nothing behind it. Minting is what a *membership column* does — at a build from a member
+    /// source, and at ingest from a column named for the layer (`artifacts-from-points.md` §6.3).
     pub key: String,
     /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
     /// caller can honestly say, and it discloses nothing.

@@ -11,6 +11,11 @@
 //! The artifact then serves the count it had before, which a viewer cannot tell from an artifact
 //! that failed its existence criterion. So every case here that matters ends in a restart, and the
 //! decisive one deletes the log outright: whatever comes back after that came from the prefix.
+//!
+//! **Minting is at the end of the file and is the same question one step further on**: an ingest
+//! batch's key that no artifact holds *creates* the artifact, at the commit window's close and
+//! inside its fsync, on a layer whose `value_set` is open — a path no publication took before, whose
+//! failure would be the same silence.
 
 mod common;
 
@@ -173,6 +178,21 @@ fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
             vec![IncomingGrowth::from_entities("c0".into(), fx.members(sources))],
         )
         .expect("points joining an artifact that exists is an ordinary write");
+}
+
+/// Request a flush and block until it has published — what gives an ingested point a base row, and
+/// therefore what makes it count towards any membership it joined.
+fn flush(engine: &Engine) {
+    let before = engine.write_executor_stats().flushes;
+    engine.request_flush();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while engine.write_executor_stats().flushes == before {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the flush never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// Request a fold and block until it has published, asserting it was not discarded.
@@ -434,9 +454,11 @@ fn growing_a_suppressed_artifact_leaves_it_suppressed() {
     );
 }
 
-/// A key the level does not hold is refused, naming the key. ⊘ Minting from an unknown key at
-/// ingest is the next stage; until it lands, the honest answer to a key naming nothing is that it
-/// names nothing — never an ack for a join into silence.
+/// A key the level does not hold is refused, naming the key. **On this route whatever the layer's
+/// value set says**: a growth names an artifact to add members to, where a membership column names
+/// the artifact a *point* belongs to and may therefore create it. There is no point here whose
+/// column declared the key, so an unknown one is a typo with nothing behind it, and the honest
+/// answer is that it names nothing — never an ack for a join into silence.
 #[test]
 fn an_unknown_key_is_refused_rather_than_minted() {
     let fx = fixture();
@@ -533,4 +555,171 @@ fn a_join_naming_something_other_than_a_point_is_refused() {
         )
         .expect_err("an artifact is not a document");
     assert_eq!(count(&engine), 300);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Minting: the artifact an ingest batch's key created, after a restart
+// ---------------------------------------------------------------------------------------------
+
+/// A layer whose value set is **open**, so a key it does not hold creates the artifact it names
+/// (`artifacts-from-points.md` §3).
+fn open_declaration(name: &str) -> LayerDeclaration {
+    LayerDeclaration {
+        value_set: tessera_types::layer::ValueSet::Open,
+        ..declaration(name)
+    }
+}
+
+/// One ingest batch of one point, carrying the artifacts that point belongs to — what
+/// `/control/ingest`'s membership column decodes to, taken here at the engine boundary so the
+/// restart is a real reopen of a real log.
+fn ingest_naming(
+    engine: &Engine,
+    batch: &str,
+    layer: &str,
+    key: &str,
+) -> u64 {
+    let descriptors = vec![b"0".to_vec()];
+    let mut hash = [0u8; 32];
+    for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
+        *slot = *byte;
+    }
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        external_id: Some(batch.as_bytes().to_vec()),
+        view: "s0".to_string(),
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+    };
+    let (_, minted) = engine
+        .accept_ingest_joining(
+            vec![row],
+            batch.to_string(),
+            hash,
+            tessera_lifecycle::BatchArtifacts {
+                memberships: vec![tessera_lifecycle::BatchMembership {
+                    layer: layer.to_string(),
+                    level: 0,
+                    key: key.to_string(),
+                    rows: vec![0],
+                }],
+                edges: Vec::new(),
+            },
+        )
+        .expect("a point naming an artifact of an open layer is an ordinary write");
+    minted
+}
+
+/// **A minted artifact comes back from a restart, with the point that created it.**
+///
+/// Minting is a publication and rides the commit window's own fsync, so the record is in the log
+/// before the caller is acked — but the record is appended by the *window*, which is a path no
+/// publication took before, and the failure it would have is the one this file is written around:
+/// an artifact that is silently absent, or back to a size it never had.
+#[test]
+fn an_artifact_a_batch_minted_survives_a_restart() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        engine.register_layer(open_declaration("clusters/a")).unwrap();
+        assert_eq!(
+            ingest_naming(&engine, "b1", "clusters/a", "made-by-a-point"),
+            1,
+            "the key named no artifact, so it created one"
+        );
+        // A second batch under the same key creates nothing and joins what the first made.
+        assert_eq!(ingest_naming(&engine, "b2", "clusters/a", "made-by-a-point"), 0);
+        assert_eq!(engine.published_artifacts(), 1, "one key, one artifact");
+        // Deliberately **not** folded: the record is in the log and nowhere else, which is the
+        // state the restart below has to recover from.
+    }
+
+    let engine = fx.open();
+    assert_eq!(
+        engine.published_artifacts(),
+        1,
+        "the artifact its own points created is still there after a restart"
+    );
+    // A membership is projected through base rows, so the count is only readable once the ingested
+    // points have them — which is what makes this the assertion rather than the one above.
+    flush(&engine);
+    fold(&engine);
+    let artifacts = artifacts_of(&engine);
+    assert_eq!(artifacts.len(), 1);
+    assert_eq!(artifacts[0].key.as_deref(), Some("made-by-a-point"));
+    assert_eq!(
+        artifacts[0].masked_count, 2,
+        "and holds the points that created it — an artifact back at a size it never had is the \
+         silent failure this file exists against"
+    );
+}
+
+/// **A fold carries a minted artifact like any other**, which is the second half of the restart
+/// case: the fold rewrites every level whole, so an artifact that entered the store through the
+/// commit window rather than through a publication command must be written into the new prefix.
+/// The log is deleted outright afterwards, so whatever comes back came from the prefix.
+#[test]
+fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        engine.register_layer(open_declaration("clusters/a")).unwrap();
+        assert_eq!(ingest_naming(&engine, "b1", "clusters/a", "c9"), 1);
+        flush(&engine);
+        fold(&engine);
+    }
+    remove_the_whole_log(&fx);
+
+    let engine = fx.open();
+    let artifacts = artifacts_of(&engine);
+    assert_eq!(artifacts.len(), 1, "the fold carried it into the new prefix");
+    assert_eq!(artifacts[0].key.as_deref(), Some("c9"));
+    assert_eq!(artifacts[0].masked_count, 1);
+}
+
+/// **A key the layer's value set does not admit is refused, and the batch has no effect** — the
+/// closed default, at the engine boundary where the row would have been allocated.
+#[test]
+fn a_closed_layers_unknown_key_refuses_the_batch() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(declaration("clusters/a")).unwrap();
+
+    let before = engine.allocator_high_water();
+    let descriptors = vec![b"0".to_vec()];
+    let row = tessera_lifecycle::command::UnallocatedRow {
+        external_id: Some(b"p1".to_vec()),
+        view: "s0".to_string(),
+        descriptors: descriptors.clone(),
+        x: 5.0,
+        y: 5.0,
+        scalars: Vec::new(),
+        terms: engine.resolve_terms(&descriptors),
+    };
+    let refused = engine
+        .accept_ingest_joining(
+            vec![row],
+            "b1".to_string(),
+            [1u8; 32],
+            tessera_lifecycle::BatchArtifacts {
+                memberships: vec![tessera_lifecycle::BatchMembership {
+                    layer: "clusters/a".to_string(),
+                    level: 0,
+                    key: "never-declared".to_string(),
+                    rows: vec![0],
+                }],
+                edges: Vec::new(),
+            },
+        )
+        .expect_err("a closed layer's roster is its artifacts")
+        .to_string();
+    assert!(refused.contains("never-declared"), "{refused}");
+    assert!(refused.contains("value_set"), "and says what would admit it: {refused}");
+    assert_eq!(
+        engine.allocator_high_water(),
+        before,
+        "the batch had no effect at all — not even an entity id"
+    );
 }

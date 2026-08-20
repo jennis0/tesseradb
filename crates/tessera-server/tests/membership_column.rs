@@ -46,10 +46,16 @@ use tessera_build::{build, BuildArgs};
 /// over it has clusters of different sizes and a masked count that moves between principals.
 const N: u64 = 240;
 
-/// How many of those points the *ingest* side builds. Every key the clustering uses appears within
-/// this prefix, because minting from an unknown key at ingest is the next stage: the artifacts must
-/// exist before the points that name them arrive.
+/// How many of those points the *ingest* side builds when the case is about **growth**: every key
+/// the clustering uses appears within this prefix, so every ingested point joins an artifact that
+/// already exists.
 const SEED: u64 = 30;
+
+/// The same, when the case is about **minting**. Four clustered points name a handful of the
+/// clustering's keys and no more, so most of it does not exist when the tail starts arriving and the
+/// arriving points create it — which is what `value_set = "open"` says they may
+/// (`artifacts-from-points.md` §3).
+const MINT_SEED: u64 = 5;
 
 const LAYER: &str = "clusters/a";
 
@@ -108,9 +114,11 @@ extent           = { min = 0.0, max = 1000.0 }
 point_visibility = { default = "public" }
 "#;
 
-/// The layer both sides declare, at the hierarchy kind the case is about. `value_set = "open"` so
-/// the build mints an artifact per key it meets — which is what makes the point column a roster on
-/// the build side, and what the ingest side's seed then hands to the wire.
+/// The layer both sides declare, at the hierarchy kind the case is about. `value_set = "open"` so a
+/// key no artifact declares creates one — at a build, where it makes the point column a roster, and
+/// at ingest, where an arriving point creates the cluster it names. The `closed` half of the same
+/// key is a control-plane layer below, since a build refuses a closed layer with members and no
+/// artifact source of its own.
 fn layer_toml(kind: &str, key_column: &str) -> String {
     format!(
         r#"
@@ -342,6 +350,96 @@ fn lineage_keys(rows: &[u64]) -> ArrayRef {
     ))
 }
 
+/// What a 200 says its own keys created (`artifacts-from-points.md` §3): a typo mints a permanent
+/// object rather than being refused, and the caller who made it is told the number.
+fn minted_of(body: &str) -> u64 {
+    serde_json::from_str::<serde_json::Value>(body).unwrap()["minted"]
+        .as_u64()
+        .expect("every accepted ingest reports what it minted")
+}
+
+/// Register a layer over the control plane, for the cases a build cannot express — a closed layer
+/// binding members with no artifact source of its own, and a layer whose artifacts arrive by
+/// publication rather than from a file.
+async fn register_layer(
+    server: &TestServer,
+    name: &str,
+    kind: &str,
+    value_set: &str,
+    criterion: serde_json::Value,
+) {
+    let criterion = criterion.as_object().is_some_and(|c| !c.is_empty()).then_some(criterion);
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": name,
+            "title": name,
+            "views": ["s0"],
+            "membership": "enumerated",
+            "value_set": value_set,
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": criterion,
+            "hierarchy": { "kind": kind, "prune_children": false },
+            "content": { "computed": [], "supplied": [], "withdraw_on_member_deletion": true },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the fixture layer registers");
+}
+
+/// Publish artifacts into a registered layer, returning the response's per-artifact rows — which is
+/// where a `tessera_id` a suppression can name comes from.
+async fn publish_artifacts(
+    server: &TestServer,
+    layer: &str,
+    artifacts: serde_json::Value,
+) -> Vec<serde_json::Value> {
+    let encoded = layer.replace('/', "%2F");
+    let resp = server
+        .client
+        .put(server.control_url(&format!("/control/layers/{encoded}/artifacts")))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({ "addressing": "external", "artifacts": artifacts }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(status, 201, "{body}");
+    body["artifacts"].as_array().cloned().unwrap_or_default()
+}
+
+/// One `/control/changes` entry against an artifact's own identifier.
+async fn suppress(server: &TestServer, tessera_id: &str, op: &str) {
+    let resp = server
+        .client
+        .post(server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!([{ "tessera_id": tessera_id, "idset": FIXTURE_IDSET, "op": op }]))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    assert_eq!(status, 200, "{}", resp.text().await.unwrap());
+}
+
+/// The keys of one layer's artifacts as a full-coverage principal sees them.
+async fn served_keys(server: &TestServer, layer: &str) -> Vec<String> {
+    client_view(server, &["0", "1"])
+        .await
+        .artifacts
+        .into_iter()
+        .filter(|a| a.layer == layer)
+        .filter_map(|a| a.key)
+        .collect()
+}
+
 async fn post_ingest(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16, String) {
     let resp = server
         .client
@@ -363,17 +461,35 @@ async fn post_ingest(server: &TestServer, batch_id: &str, body: Vec<u8>) -> (u16
 /// (`annotation-write-cycle.md` §4.1), so a point ingested since the last fold contributes to no
 /// masked count however its membership was recorded — fail-closed, and the reason the comparison
 /// below runs after one.
-async fn ingest_tail(server: &TestServer, column: &str, keys: fn(&[u64]) -> ArrayRef) {
-    let tail: Vec<u64> = (SEED..N).collect();
+///
+/// Returns how many artifacts the tail **minted**, summed over its batches — zero where every key
+/// was already in the seed, and the rest of the clustering where it was not.
+async fn ingest_tail(
+    server: &TestServer,
+    column: &str,
+    keys: fn(&[u64]) -> ArrayRef,
+    seed: u64,
+) -> u64 {
+    let tail: Vec<u64> = (seed..N).collect();
+    let mut minted = 0;
     for (i, chunk) in tail.chunks(70).enumerate() {
         let body = ingest_batch(chunk, column, keys(chunk));
         let (status, detail) = post_ingest(server, &format!("tail-{i}"), body).await;
         assert_eq!(status, 200, "{detail}");
+        minted += serde_json::from_str::<serde_json::Value>(&detail).unwrap()["minted"]
+            .as_u64()
+            .expect("every 200 reports what its own keys created");
     }
     flush_and_fold(server).await;
+    minted
 }
 
 async fn flush_and_fold(server: &TestServer) {
+    flush(server).await;
+    fold(server).await;
+}
+
+async fn flush(server: &TestServer) {
     let before = server.state.engine.write_executor_stats();
     let resp = server
         .client
@@ -387,7 +503,9 @@ async fn flush_and_fold(server: &TestServer) {
         now.flushes > before.flushes
     })
     .await;
+}
 
+async fn fold(server: &TestServer) {
     let before = server.state.engine.write_executor_stats();
     let resp = server
         .client
@@ -652,7 +770,12 @@ async fn a_scalar_membership_column_ingests_the_database_a_member_table_builds()
 
     let built = serve(&built).await;
     let ingested = serve(&ingested).await;
-    ingest_tail(&ingested, LAYER, scalar_keys).await;
+    let minted = ingest_tail(&ingested, LAYER, scalar_keys, SEED).await;
+    assert_eq!(
+        minted, 0,
+        "every key of this clustering is in the seed, so this case is growth alone — a mint here \
+         would mean the resolution missed an artifact that exists"
+    );
 
     assert_same_database(&built, &ingested, scalar_key_of, "a cluster column").await;
 }
@@ -670,7 +793,8 @@ async fn a_lineage_column_ingests_the_database_a_member_table_builds() {
 
     let built = serve(&built).await;
     let ingested = serve(&ingested).await;
-    ingest_tail(&ingested, LAYER, lineage_keys).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, SEED).await;
+    assert_eq!(minted, 0, "growth alone, as the scalar case above");
 
     // The fixture is a tree, and the comparison is only worth running if the response says so.
     let view = client_view(&built, &["0", "1"]).await;
@@ -686,18 +810,30 @@ async fn a_lineage_column_ingests_the_database_a_member_table_builds() {
 // The wire's own rules
 // ---------------------------------------------------------------------------------------------
 
-/// **A key no artifact holds refuses the batch, naming it** — and the batch has no effect: no
-/// entity id, no row, no partial membership. Minting from an unknown key is the next stage
-/// (`artifacts-from-points.md` §6.2), and until it lands this refusal is the honest answer.
+/// **On a closed layer a key no artifact holds refuses the batch, naming it** — and the batch has
+/// no effect: no entity id, no row, no partial membership. Closed is declare-then-use, and it is the
+/// default: a mistyped id would otherwise publish a phantom artifact carrying the members it stole
+/// from a real one, whose masked count then goes quietly short.
+///
+/// The layer is registered over the control plane because a *build* refuses a closed layer that
+/// binds members with no artifact source of its own — which is the same rule from the other side.
 #[tokio::test]
-async fn an_unknown_key_refuses_the_batch_and_ingests_nothing() {
+async fn a_closed_layer_refuses_an_unknown_key_and_ingests_nothing() {
     let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
     let server = serve(&built).await;
+    register_layer(&server, "closed/x", "flat", "closed", json!({})).await;
+    publish_artifacts(
+        &server,
+        "closed/x",
+        json!([{ "key": "3", "members": (0..4u64).map(base64_external_id).collect::<Vec<_>>() }]),
+    )
+    .await;
 
     let before = control_status(&server).await;
     let rows = [SEED, SEED + 1];
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3), Some(4_242)]));
-    let (status, detail) = post_ingest(&server, "unknown-key", ingest_batch(&rows, LAYER, keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "unknown-key", ingest_batch(&rows, "closed/x", keys)).await;
     assert_eq!(status, 422, "{detail}");
     assert!(
         detail.contains("4242"),
@@ -711,9 +847,307 @@ async fn an_unknown_key_refuses_the_batch_and_ingests_nothing() {
 
     // And the same batch with every key known is accepted, so the refusal was the key and not the
     // column.
-    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3), Some(4)]));
-    let (status, detail) = post_ingest(&server, "known-key", ingest_batch(&rows, LAYER, keys)).await;
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3), Some(3)]));
+    let (status, detail) =
+        post_ingest(&server, "known-key", ingest_batch(&rows, "closed/x", keys)).await;
     assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        0,
+        "a closed layer never creates an artifact: {detail}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Minting: what an open layer does with a key nothing holds
+// ---------------------------------------------------------------------------------------------
+
+/// **0091's own test, with the clustering arriving rather than existing.** The built side reads the
+/// whole corpus from a member table and mints every key it meets; the ingested side is seeded with
+/// four clustered points and is sent the rest down the wire, minting the clusters it has never
+/// heard of as it goes. The two are then the same database to every client — same memberships,
+/// same masked counts, same computed content, same gates.
+#[tokio::test]
+async fn a_scalar_column_mints_the_clusters_its_seed_never_held() {
+    let layer = layer_toml("flat", "cluster");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = serve(&built).await;
+    let ingested = serve(&ingested).await;
+    let minted = ingest_tail(&ingested, LAYER, scalar_keys, MINT_SEED).await;
+    assert!(
+        minted > 0,
+        "the seed does not hold this clustering, so the tail must have created part of it — \
+         without that this is the growth case again and proves nothing new"
+    );
+
+    assert_same_database(&built, &ingested, scalar_key_of, "a minting cluster column").await;
+}
+
+/// **The same at a lineage, which is where minting is hard.** A point's list names clusters that do
+/// not exist yet — including the interior parents nothing else would ever name — and the chain has
+/// to be created *and linked*, parent before child, in one batch. A growth adds members and never
+/// edges, so the edges here can only come from the publication that mints, which is where lineage
+/// has always been settled.
+#[tokio::test]
+async fn a_lineage_column_mints_the_chain_and_the_edges_it_declares() {
+    let layer = layer_toml("nested", "lineage");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = serve(&built).await;
+    let ingested = serve(&ingested).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
+    assert!(minted > 0, "the seed does not hold this tree");
+
+    // The comparison below carries the edges, and is only worth running if there are any.
+    let view = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        view.artifacts.iter().filter(|a| a.parent_key.is_some()).count() >= 3,
+        "the ingested side served no lineage, so the edges were not created: {:?}",
+        view.artifacts
+    );
+
+    assert_same_database(&built, &ingested, lineage_keys_of, "a minting lineage column").await;
+}
+
+/// **A tiered chain mints a level at a time, coarse first** — the ordering constraint edges carry
+/// (`annotation-representation.md` §5.0.4) applied to one batch. A tiered layer's parent sits in a
+/// *coarser* level than its child, so the level below has to have claimed its ordinals before the
+/// level above can name one, and neither has been applied anywhere a lookup could see.
+#[tokio::test]
+async fn a_tiered_column_mints_the_coarse_level_before_the_fine_one() {
+    let mut layer = layer_toml("tiered", "lineage");
+    layer.push_str("\n[[layer.levels]]\nlevel = 0\n\n[[layer.levels]]\nlevel = 1\n\n[[layer.levels]]\nlevel = 2\n");
+    let all: Vec<u64> = (0..N).collect();
+    let built = build_side(&all, &layer);
+    let ingested = build_side(&(0..MINT_SEED).collect::<Vec<_>>(), &layer);
+
+    let built = serve(&built).await;
+    let ingested = serve(&ingested).await;
+    let minted = ingest_tail(&ingested, LAYER, lineage_keys, MINT_SEED).await;
+    assert!(minted > 0, "the seed does not hold this taxonomy");
+
+    let view = client_view(&ingested, &["0", "1"]).await;
+    assert!(
+        view.artifacts.iter().filter(|a| a.parent_key.is_some()).count() >= 3,
+        "a tiered containment was not created: {:?}",
+        view.artifacts
+    );
+    assert_same_database(&built, &ingested, lineage_keys_of, "a minting tiered column").await;
+}
+
+/// **At most one live artifact per key per level** (`artifacts-from-points.md` §5's second ruling):
+/// several points in one batch naming one unknown key mint **one** artifact and all join it, and a
+/// later batch naming the same key mints nothing at all.
+#[tokio::test]
+async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
+    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let server = serve(&built).await;
+    let before = server.state.engine.published_artifacts();
+
+    let rows: Vec<u64> = (SEED..SEED + 6).collect();
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(9_001); 6]));
+    let (status, detail) = post_ingest(&server, "six-of-one", ingest_batch(&rows, LAYER, keys)).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        1,
+        "six points naming one key are one cluster, not six: {detail}"
+    );
+
+    let more: Vec<u64> = (SEED + 6..SEED + 10).collect();
+    let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(9_001); 4]));
+    let (status, detail) = post_ingest(&server, "four-more", ingest_batch(&more, LAYER, keys)).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        0,
+        "the key names a live artifact now, so this batch grows it: {detail}"
+    );
+    assert_eq!(
+        server.state.engine.published_artifacts(),
+        before + 1,
+        "ten points, one artifact"
+    );
+
+    flush_and_fold(&server).await;
+    let view = client_view(&server, &["0", "1"]).await;
+    let minted = view
+        .artifacts
+        .iter()
+        .find(|a| a.key.as_deref() == Some("9001"))
+        .expect("the minted cluster serves like any other");
+    assert_eq!(minted.masked_count, 10, "every point that named it joined it");
+}
+
+/// **A suppressed artifact still exists, and its key is never minted again** — the one fail-open
+/// this design has, closed by construction (`artifacts-from-points.md` §5's third ruling).
+///
+/// Written the natural way — *is this key unknown?* — against what is currently **served**, a
+/// suppressed artifact reads as absent: a second artifact is minted under its key, the new one is
+/// not suppressed, and a suppression has been defeated by ingesting a point. What stops it is that
+/// resolution reads `ArtifactStore::ordinal_of_key`, the store's own key index, which a suppression
+/// never touches (write-path §5.4, Rule S) — so there is nothing in the lookup that *could* see one.
+///
+/// The test drives exactly that: suppress, ingest a point naming the suppressed key, and assert
+/// nothing was minted, nothing is served, and — after the suppression is lifted — that the point had
+/// joined the artifact that was there all along.
+///
+/// **Three things would each have to fail before a suppression could be defeated**, and the third
+/// is structural rather than a check anyone added: the resolution at admission, the re-resolution at
+/// the close, and `prepare_publish`'s own refusal of a key its level already holds. Breaking the
+/// first two together turns this test red on the *publication's* refusal — a 422 rather than a
+/// second artifact — which is the fail-closed direction and is how the guards are known to be
+/// load-bearing rather than decorative.
+#[tokio::test]
+async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
+    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let server = serve(&built).await;
+    register_layer(&server, "hidden/x", "flat", "open", json!({ "count": 1 })).await;
+    let published = publish_artifacts(
+        &server,
+        "hidden/x",
+        json!([{ "key": "k", "members": (0..4u64).map(base64_external_id).collect::<Vec<_>>() }]),
+    )
+    .await;
+    let id = published[0]["tessera_id"].as_str().unwrap().to_string();
+    let before = server.state.engine.published_artifacts();
+
+    suppress(&server, &id, "suppress").await;
+    assert!(
+        served_keys(&server, "hidden/x").await.is_empty(),
+        "the suppression is in force at the ack"
+    );
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("k")]));
+    let (status, detail) =
+        post_ingest(&server, "join-suppressed", ingest_batch(&[SEED], "hidden/x", keys)).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        0,
+        "the key names an artifact that exists and is merely hidden: {detail}"
+    );
+    assert_eq!(
+        server.state.engine.published_artifacts(),
+        before,
+        "a second artifact under the same key is the fail-open this rule exists against"
+    );
+    assert!(
+        served_keys(&server, "hidden/x").await.is_empty(),
+        "and nothing under that key is served, which is what a defeated suppression would look like"
+    );
+
+    // The point joined the artifact that was there all along: lift the suppression, fold so the
+    // ingested row is a base row, and the masked count carries it.
+    suppress(&server, &id, "unsuppress").await;
+    flush_and_fold(&server).await;
+    let view = client_view(&server, &["0", "1"]).await;
+    let artifact = view
+        .artifacts
+        .iter()
+        .find(|a| a.layer == "hidden/x")
+        .expect("the artifact serves again once the suppression is lifted");
+    assert_eq!(
+        artifact.masked_count, 5,
+        "four published members and the point that joined while it was hidden"
+    );
+}
+
+/// **A deleted key that returns is a new artifact** ([decision 0047](../../../docs/decisions/0047-edit-is-delete-plus-reingest.md)
+/// and [0081](../../../docs/decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)
+/// applied): uniqueness is *at most one live artifact per key*, and a tombstoned one does not count.
+/// Nothing of the old artifact carries — its identity was its ordinal, and minting allocates a new
+/// one.
+#[tokio::test]
+async fn a_deleted_key_that_returns_is_a_new_artifact() {
+    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let server = serve(&built).await;
+    register_layer(&server, "gone/x", "flat", "open", json!({ "count": 1 })).await;
+    let published = publish_artifacts(
+        &server,
+        "gone/x",
+        json!([{ "key": "k", "members": (0..4u64).map(base64_external_id).collect::<Vec<_>>() }]),
+    )
+    .await;
+    let id = published[0]["tessera_id"].as_str().unwrap().to_string();
+
+    suppress(&server, &id, "delete").await;
+    // **The fold is what frees the key**, and that is Rule F rather than anything about minting: a
+    // deletion retires at the compaction fold that executes it, and until then the store's key
+    // index still holds the artifact's own key.
+    fold(&server).await;
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("k")]));
+    let (status, detail) =
+        post_ingest(&server, "key-returns", ingest_batch(&[SEED], "gone/x", keys)).await;
+    assert_eq!(status, 200, "{detail}");
+    assert_eq!(
+        minted_of(&detail),
+        1,
+        "the key names no live artifact, so it creates one: {detail}"
+    );
+
+    flush_and_fold(&server).await;
+    let view = client_view(&server, &["0", "1"]).await;
+    let artifact = view
+        .artifacts
+        .iter()
+        .find(|a| a.layer == "gone/x")
+        .expect("the new artifact serves");
+    assert_eq!(
+        artifact.masked_count, 1,
+        "nothing of the deleted artifact carries: the new one holds the point that named it and \
+         not the four the old one was published with"
+    );
+}
+
+/// **A layer whose declaration a minted artifact could not satisfy refuses the key, naming it** —
+/// the same two refusals a publication makes of an artifact carrying only a name, made where the
+/// batch can still be rejected on its own rather than at the close, where it would cost the window.
+#[tokio::test]
+async fn a_layer_declaring_supplied_content_refuses_to_mint() {
+    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let server = serve(&built).await;
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "labels/x",
+            "title": "a layer whose artifacts carry a description",
+            "views": ["s0"],
+            "membership": "enumerated",
+            "value_set": "open",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": {
+                "computed": [],
+                "supplied": [{ "name": "label", "type": "text", "require_member_visibility": "inherited" }],
+                "withdraw_on_member_deletion": true
+            },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 201, "the layer may be declared");
+
+    let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("nobody-declared-this")]));
+    let (status, detail) =
+        post_ingest(&server, "unmintable", ingest_batch(&[SEED], "labels/x", keys)).await;
+    assert_eq!(status, 422, "{detail}");
+    assert!(
+        detail.contains("nobody-declared-this") && detail.contains("supplied content"),
+        "the refusal names the key and why the layer cannot hold it: {detail}"
+    );
 }
 
 /// A column that names neither a declared scalar nor a registered layer is refused exactly as it

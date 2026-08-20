@@ -2521,13 +2521,16 @@ impl WritePath {
     ///
     /// Rows arrive **unallocated**: entity ids are assigned on the executor, at the close of the
     /// commit window this submission lands in.
+    ///
+    /// Returns the assigned ids and **how many artifacts this batch's membership column created**
+    /// (`Ack::Ingested::minted`).
     pub(crate) fn accept_ingest(
         &self,
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
-    ) -> Result<Vec<EntityId>, AcceptError> {
+    ) -> Result<(Vec<EntityId>, u64), AcceptError> {
         let mark = StageMark::now();
         let receipt = self.handle()?.submit(Command::Ingest {
             rows,
@@ -2537,7 +2540,10 @@ impl WritePath {
         })?;
         self.health().lap(WriteStage::SubmitToReceipt, mark);
         match receipt.outcome {
-            Ok(Ack::Ingested { entity_ids }) => Ok(entity_ids),
+            Ok(Ack::Ingested {
+                entity_ids,
+                minted,
+            }) => Ok((entity_ids, minted)),
             Ok(other) => unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
         }
@@ -4026,10 +4032,15 @@ fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRe
     let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
     for (index, entry) in closed.iter().enumerate() {
         for join in &entry.memberships {
+            // A key with no ordinal was minted at the close, and a minted artifact was published
+            // *carrying* these rows — one record instead of a publication and a growth against it.
+            let Some(ordinal) = join.ordinal else {
+                continue;
+            };
             let (_, ordinals) = by_level
                 .entry((join.layer.as_str(), join.level))
                 .or_insert_with(|| (index, BTreeMap::new()));
-            let joining = ordinals.entry(join.ordinal).or_default();
+            let joining = ordinals.entry(ordinal).or_default();
             for row in &join.rows {
                 let entity = entry.entity_ids[*row as usize];
                 // Entity space is `u32` by I9, so the narrowing is total.
@@ -4046,6 +4057,70 @@ fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRe
         })
         .collect()
 }
+
+/// **The artifacts a closed window's rows named and no artifact holds** — the records that create
+/// them, in the order they must be appended, and how many each entry is to be told it created.
+///
+/// **Minting is a publication, and it happens here rather than at admission.** An ordinal is claimed
+/// from the level's own cursor and is durable only in the record that claims it, so a claim made at
+/// admission would be held, unappended, across everything the executor does before the window
+/// closes — including a `PublishArtifacts` command, which reads the same cursor and would take the
+/// same ordinal. Here there is nothing to interleave with: the window is closed, the allocation is
+/// made, and the record is appended a few statements later inside the window's own fsync.
+///
+/// **One artifact per key per level, for the whole window** (`artifacts-from-points.md` §5's second
+/// ruling). The keys are gathered into one map before anything is prepared, so two points in one
+/// batch — or two batches in one window — naming the same unknown key mint once and join the one
+/// artifact. A key a *live* artifact already holds is not minted at all: it is re-resolved here
+/// against `ArtifactStore::ordinal_of_key`, because a publication may have landed between the
+/// batch's admission and this close, and it grows instead.
+///
+/// **A minted artifact is published carrying its members**, not published empty and then grown. The
+/// entities exist by this point — the allocation is the statement above the caller — so the one
+/// record says the whole of what happened, and the join needs no second record and no log pin of
+/// its own. That is why `growth_records` skips a membership whose ordinal is `None`.
+///
+/// **The edges are created, and this is the one route by which the wire creates one.** A growth adds
+/// members and never lineage, so a lineage naming an artifact that already exists can only be
+/// checked; a lineage naming one that does not yet exist is settled where every edge is settled, at
+/// the publication that creates the artifact. The chain arrives **parent before child** — the
+/// ordering constraint `annotation-representation.md` §5.0.4 puts on edges, applied to a batch — in
+/// the only two shapes a column can spell: a nested lineage is one level and one record, where
+/// `prepare_publish` resolves a sibling's ordinal within its own batch whatever order the artifacts
+/// sit in; and a tiered chain is a record per level, coarse first, where the parent's ordinal was
+/// fixed by the record before and is answered by `pending`.
+fn mint_plan<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+) -> Option<(MintPlan, Vec<tessera_lifecycle::BatchEdge>)> {
+    use std::collections::BTreeMap;
+    let mut wanted: MintPlan = BTreeMap::new();
+    for (index, entry) in closed.iter().enumerate() {
+        for join in &entry.memberships {
+            if join.ordinal.is_some() {
+                continue;
+            }
+            let (_, members) = wanted
+                .entry((join.layer.clone(), join.level, join.key.clone()))
+                // **The first entry that named the key owns the mint**, which is what makes the
+                // per-batch count sum to the window's: `growth_records` blames an append the same
+                // way, and one convention for both keeps a report from double-counting.
+                .or_insert_with(|| (index, croaring::Bitmap::new()));
+            for row in &join.rows {
+                // Entity space is `u32` by I9, so the narrowing is total.
+                members.add(entry.entity_ids[*row as usize].raw() as u32);
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return None;
+    }
+    let edges = closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
+    Some((wanted, edges))
+}
+
+/// What one window is about to mint: `(layer, level, key)` → the entry that first named it, and the
+/// entities joining it.
+type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
 
 /// A second is short against the interval an operator or an orchestrator would take to notice, and
 /// long enough that a genuinely dead device is retried sixty times a minute rather than continuously.
@@ -7104,15 +7179,24 @@ impl Executor {
                 artifacts,
             } = command
             else {
-                // Unreachable while the lane follows the command (`Command::is_never_shed`): a
-                // `Change` rides the deny queue. Executed rather than dropped, so a future variant
-                // that lands here is answered instead of silently losing its waiter.
+                // **Every command but `Ingest` and `Change` arrives here**, which is the layer
+                // registrations, the publications and the growths: the lane follows the command
+                // (`Command::is_never_shed`) and only a `Change` takes the deny queue. A `Change`
+                // itself is therefore unreachable, and is executed rather than dropped so that a
+                // future variant is answered instead of silently losing its waiter.
                 //
-                // **This arm is order-unsafe as written, and must close the window first if it is
-                // ever made reachable.** It applies immediately while a window holding
-                // earlier-arriving ingest is still open, so WAL append order stops equalling
-                // submission order — and for a deny-shaped variant that is the out-of-order apply
-                // lifecycle §4 is written against. Do not make it reachable to save a close.
+                // **This arm applies immediately, while a window holding earlier-arriving ingest is
+                // still open**, so WAL append order stops equalling submission order. That is
+                // tolerable for the four variants that reach it — each appends, fsyncs and applies
+                // its own record, none touches the buffer or swaps the generation, and neither
+                // registry nor artifact state depends on ingest that has not been allocated. It is
+                // **not** tolerable for a deny-shaped variant, whose out-of-order apply is what
+                // lifecycle §4 is written against: such a variant must close the window first.
+                //
+                // One consequence is load-bearing elsewhere: a publication executing here **claims
+                // ordinals from a level's cursor while a window is open**, which is why an ingest
+                // batch's minted key claims its own at the *close* and not at admission
+                // (`Executor::mint_records`).
                 self.execute(Job { command, respond });
                 // This job was counted at submission on the work lane and `execute` counts nothing,
                 // so it is counted here or `work_depth` drifts up one per occurrence forever — the
@@ -7280,7 +7364,17 @@ impl Executor {
             } => {
                 if prev_hash == body_hash {
                     let proof = Published::already_in_force(&entity_ids);
-                    self.ack(&respond, Ack::Ingested { entity_ids }, &proof);
+                    // **A replay mints nothing, and the zero says so**: the artifacts this batch's
+                    // keys created were created when it was first accepted, and this submission
+                    // created none.
+                    self.ack(
+                        &respond,
+                        Ack::Ingested {
+                            entity_ids,
+                            minted: 0,
+                        },
+                        &proof,
+                    );
                 } else {
                     self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
                 }
@@ -7378,16 +7472,22 @@ impl Executor {
     ///
     /// ## The membership column's keys resolve here too, and a bad one refuses this batch alone
     ///
-    /// A batch naming an artifact that does not exist is refused naming the key, and nothing it
-    /// carried is admitted — the standard `/control/ingest` refusals are held to, and the standard
-    /// one for a growth (`artifacts-from-points.md` §6.1: the whole batch or none of it). It
-    /// happens **here** rather than at the close because a window holds several callers' batches:
-    /// one caller's typo may not refuse another caller's rows, and after the allocation there is no
-    /// per-entry refusal left to make.
+    /// A batch naming an artifact that does not exist **on a closed layer** is refused naming the
+    /// key, and nothing it carried is admitted — the standard `/control/ingest` refusals are held
+    /// to, and the standard one for a growth (`artifacts-from-points.md` §6.1: the whole batch or
+    /// none of it). It happens **here** rather than at the close because a window holds several
+    /// callers' batches: one caller's typo may not refuse another caller's rows, and after the
+    /// allocation there is no per-entry refusal left to make.
     ///
-    /// The ordinal is carried from here rather than re-derived at the close — see
-    /// [`tessera_lifecycle::ResolvedMembership`] for why that is safe and what it means when the
-    /// artifact has gone by then.
+    /// **On an open layer the same key mints**, and the ordinal it will hold is *not* claimed here:
+    /// see `Executor::mint_records` for why the claim belongs at the close. What is decided here is
+    /// everything about that key which can still refuse one batch on its own — whether the layer's
+    /// declaration admits an artifact carrying nothing but a name, and whether the batch's own
+    /// column named one child under two parents.
+    ///
+    /// An ordinal a key already resolves to is carried from here rather than re-derived at the
+    /// close — see [`tessera_lifecycle::ResolvedMembership`] for why that is safe and what it means
+    /// when the artifact has gone by then.
     fn admit(
         &mut self,
         rows: Vec<UnallocatedRow>,
@@ -7414,8 +7514,8 @@ impl Executor {
             return None;
         }
 
-        let memberships = match self.resolve_memberships(&artifacts) {
-            Ok(memberships) => memberships,
+        let (memberships, edges) = match self.resolve_memberships(&artifacts) {
+            Ok(resolved) => resolved,
             Err(detail) => {
                 self.ack_failed(&respond, ExecError::LayerRefused { detail });
                 self.health.note_work_refused();
@@ -7428,19 +7528,36 @@ impl Executor {
             batch_id,
             body_hash,
             memberships,
+            edges,
             waiters: vec![respond],
         })
     }
 
-    /// Resolve one batch's membership keys to ordinals, and check the edges its adjacency declared.
+    /// Resolve one batch's membership keys, and check the edges its adjacency declared.
+    ///
+    /// Returns the memberships — each carrying the ordinal it resolved to, or `None` where an open
+    /// layer will mint it at the close — and the edges whose **child** is one of those mints, which
+    /// are the only edges this route creates rather than checks.
     ///
     /// `Err` is the refusal text the caller is answered with, whole batch without effect.
+    ///
+    /// **The memberships resolve first, and that order is what the edge checks rest on**: a key is
+    /// created only by being a membership (every entry of a list column names an artifact the point
+    /// belongs to — `artifacts-from-points.md` §4), so the set of keys this batch is about to mint
+    /// is known once they are done, and neither a child nor a parent can be minted without
+    /// appearing there.
     fn resolve_memberships(
         &self,
         artifacts: &tessera_lifecycle::BatchArtifacts,
-    ) -> Result<Vec<tessera_lifecycle::ResolvedMembership>, String> {
+    ) -> Result<
+        (
+            Vec<tessera_lifecycle::ResolvedMembership>,
+            Vec<tessera_lifecycle::BatchEdge>,
+        ),
+        String,
+    > {
         if artifacts.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         // **One line per batch, not one per edge.** A lineage over a 10⁵-cluster tree whose roster
         // was published without parents would otherwise emit 10⁵ formatted writes on the write
@@ -7449,10 +7566,74 @@ impl Executor {
         let mut unrecorded: Vec<String> = Vec::new();
         let mut unrecorded_total = 0usize;
         let resolved = self.live.with_publication_state(|registry, store, _| {
+            let memberships: Vec<tessera_lifecycle::ResolvedMembership> = artifacts
+                .memberships
+                .iter()
+                .map(|join| {
+                    registry
+                        .resolve_or_mint(&join.layer, join.level, &join.key, store)
+                        .map(|ordinal| tessera_lifecycle::ResolvedMembership {
+                            layer: join.layer.clone(),
+                            level: join.level,
+                            key: join.key.clone(),
+                            ordinal,
+                            rows: join.rows.clone(),
+                        })
+                        .map_err(|e| e.to_string())
+                })
+                .collect::<Result<_, String>>()?;
+            // **Two indexes of one set, because an edge asks two different questions of it.** A
+            // *child*'s level is the edge's own, so it is asked precisely; a *parent*'s is whatever
+            // the layer's shape says to look at, so it is asked of the layer. A levelled taxonomy
+            // legitimately carries one key at two levels, and one index would treat a key minting
+            // at one of them as minting at both.
+            let minting: std::collections::BTreeSet<(&str, u32, &str)> = memberships
+                .iter()
+                .filter(|m| m.ordinal.is_none())
+                .map(|m| (m.layer.as_str(), m.level, m.key.as_str()))
+                .collect();
+            let anywhere: std::collections::BTreeSet<(&str, &str)> =
+                minting.iter().map(|(layer, _, key)| (*layer, *key)).collect();
+
+            // **A child named under two parents refuses the batch**, which is the build's own
+            // refusal at the other entry point (`artifacts-from-points.md` §4): two rows naming
+            // different parents for one artifact are two hierarchies, and which of them was
+            // published would be the batch's row order rather than anything the caller wrote. It is
+            // made here, over the batch's own column, because that is where the two rows are — and
+            // it is the whole check for a minted child, whose parent nothing else has an opinion
+            // about yet.
+            let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> =
+                Default::default();
             for edge in &artifacts.edges {
-                match registry.check_edge(&edge.layer, edge.level, &edge.child, &edge.parent, store)
-                {
+                let at = (edge.layer.as_str(), edge.level, edge.child.as_str());
+                if let Some(first) = claimed.insert(at, edge.parent.as_str()) {
+                    if first != edge.parent {
+                        return Err(format!(
+                            "{} in level {} of {} is named as a child of both {first} and {}. A \
+                             list column declares the edges, so two rows naming different parents \
+                             for one artifact are two hierarchies — and which of them was \
+                             published would be the batch's row order rather than anything the \
+                             caller wrote",
+                            edge.child, edge.level, edge.layer, edge.parent
+                        ));
+                    }
+                }
+            }
+
+            let mut mints = Vec::new();
+            for edge in &artifacts.edges {
+                let layer = edge.layer.as_str();
+                match registry.check_edge(
+                    edge,
+                    store,
+                    minting.contains(&(layer, edge.level, edge.child.as_str())),
+                    &|key| anywhere.contains(&(layer, key)),
+                ) {
                     Ok(tessera_lifecycle::EdgeCheck::Agrees) => {}
+                    // The child does not exist yet, so this edge is its parent rather than a claim
+                    // about a stored one — carried to the close, where the artifact is created and
+                    // where lineage has always been settled.
+                    Ok(tessera_lifecycle::EdgeCheck::Mints) => mints.push(edge.clone()),
                     // **Reported, not refused** — see `LayerRegistry::check_edge`. The membership
                     // half of the same entry is unambiguous and lands; what is lost is an edge this
                     // route cannot create, and an operator who published a roster without its
@@ -7469,21 +7650,7 @@ impl Executor {
                     Err(e) => return Err(e.to_string()),
                 }
             }
-            artifacts
-                .memberships
-                .iter()
-                .map(|join| {
-                    registry
-                        .resolve_growth_key(&join.layer, join.level, &join.key, store)
-                        .map(|ordinal| tessera_lifecycle::ResolvedMembership {
-                            layer: join.layer.clone(),
-                            level: join.level,
-                            ordinal,
-                            rows: join.rows.clone(),
-                        })
-                        .map_err(|e| e.to_string())
-                })
-                .collect()
+            Ok((memberships, mints))
         });
         if unrecorded_total > 0 {
             tracing::warn!(
@@ -7495,6 +7662,160 @@ impl Executor {
             );
         }
         resolved
+    }
+
+    /// Prepare the publications that create every artifact this window's rows named and nothing
+    /// holds — see [`mint_plan`] for what is minted and why it is minted here.
+    ///
+    /// Patches the memberships whose key resolved *since* admission to the ordinal it resolved to,
+    /// so they grow rather than mint; leaves a minted key's ordinal `None`, which is what tells
+    /// [`growth_records`] the publication carried the join.
+    ///
+    /// `Err` is the refusal text every waiter in the window is answered with. It costs the window,
+    /// which is the price of a decision that can only be made once the batches are together — and
+    /// the two shapes that reach it are a lineage two *batches* disagree about, and an allocator
+    /// that could not supply the reserved run. Everything a single batch can be refused for on its
+    /// own was refused at its admission.
+    fn mint_records(
+        &mut self,
+        closed: &mut [tessera_lifecycle::ClosedEntry<Responder>],
+    ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
+        use std::collections::BTreeMap;
+        let mut minted_per_entry = vec![0u64; closed.len()];
+        let Some((wanted, edges)) = mint_plan(closed) else {
+            return Ok((Vec::new(), minted_per_entry));
+        };
+
+        // **A child named under two parents refuses**, across the window as it does within a batch:
+        // two entries naming different parents for one artifact are two hierarchies, and there is no
+        // correct output. Checked before anything is prepared, so a refusal spends nothing.
+        let mut parents: BTreeMap<(String, u32, String), String> = BTreeMap::new();
+        for edge in &edges {
+            let at = (edge.layer.clone(), edge.level, edge.child.clone());
+            match parents.get(&at) {
+                Some(first) if *first != edge.parent => {
+                    return Err(format!(
+                        "{} in level {} of {} is named as a child of both {first} and {}. A list \
+                         column declares the edges, so two rows naming different parents for one \
+                         artifact are two hierarchies — and which of them was published would be \
+                         the order the batches arrived in rather than anything the caller wrote",
+                        edge.child, edge.level, edge.layer, edge.parent
+                    ))
+                }
+                Some(_) => {}
+                None => {
+                    parents.insert(at, edge.parent.clone());
+                }
+            }
+        }
+
+        type Prepared = Result<
+            (
+                Vec<WalRecord>,
+                std::collections::BTreeMap<(String, u32, String), u32>,
+                std::collections::BTreeSet<(String, u32, String)>,
+            ),
+            String,
+        >;
+        let prepared: Prepared = self.live.with_publication_state(|registry, store, alloc| {
+            // Re-resolved here and not trusted from admission: a publication executes between an
+            // admission and this close (it takes the work lane, and the window is open across it),
+            // so a key that named nothing then may name an artifact now — and §5's second ruling is
+            // that a key a live artifact holds is never minted again.
+            let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
+            let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> = BTreeMap::new();
+            for ((layer, level, key), (_, members)) in &wanted {
+                match store.ordinal_of_key(layer, *level, key) {
+                    Some(ordinal) => {
+                        resolved.insert((layer.clone(), *level, key.clone()), ordinal);
+                    }
+                    None => to_mint
+                        .entry((layer.as_str(), *level))
+                        .or_default()
+                        .push((key.as_str(), members)),
+                }
+            }
+
+            // **Ascending level, one record each, coarse first.** A tiered chain's parent sits one
+            // level up and is fixed by the record before this one; a nested lineage is level 0
+            // alone, one record, and `prepare_publish` resolves a parent that is a sibling of its
+            // own batch.
+            let mut assigned: BTreeMap<(&str, u32, &str), u32> = BTreeMap::new();
+            let mut records = Vec::new();
+            for ((layer, level), keys) in &to_mint {
+                let incoming: Vec<tessera_lifecycle::IncomingArtifact> = keys
+                    .iter()
+                    .map(|(key, members)| tessera_lifecycle::IncomingArtifact {
+                        key: Some((*key).to_string()),
+                        members: (*members).clone(),
+                        // **Nothing but its name.** A layer declaring supplied content or a
+                        // dependency refuses the key at admission rather than minting an artifact
+                        // that could not be served — `LayerRegistry::resolve_or_mint` makes both
+                        // refusals, in the words `prepare_publish` would have made them in.
+                        contents: Vec::new(),
+                        attached_to: None,
+                        parent_key: parents
+                            .get(&((*layer).to_string(), *level, (*key).to_string()))
+                            .cloned(),
+                    })
+                    .collect();
+                // **One level up and no further.** Entry *k* of a list is the parent of entry
+                // *k+1*, so a chain minted from one names its parent exactly one level coarser;
+                // searching the levels above that would invent an edge across a gap the reader
+                // deliberately does not read past (`tessera_types::layer::parent_edges`).
+                let pending = |key: &str| {
+                    let coarser = level.checked_sub(1)?;
+                    assigned
+                        .get(&(*layer, coarser, key))
+                        .map(|ordinal| tessera_lifecycle::wal::ParentRef {
+                            level: coarser,
+                            ordinal: *ordinal,
+                        })
+                };
+                let record = registry
+                    .prepare_publish(layer, *level, &incoming, store, alloc, &pending)
+                    .map_err(|e| e.to_string())?;
+                let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
+                    unreachable!("prepare_publish returns an ArtifactPublish");
+                };
+                // Read back off the record rather than recomputed from the level's cursor: what a
+                // finer level's parent resolves to is what this record actually claimed. The order
+                // is `incoming`'s, which is `keys`', which is why the two zip.
+                for ((key, _), artifact) in keys.iter().zip(artifacts) {
+                    debug_assert_eq!(artifact.key.as_deref(), Some(*key));
+                    assigned.insert((*layer, *level, key), artifact.ordinal);
+                }
+                records.push(record);
+            }
+            let minted = assigned
+                .keys()
+                .map(|(layer, level, key)| ((*layer).to_string(), *level, (*key).to_string()))
+                .collect();
+            Ok((records, resolved, minted))
+        });
+        let (records, resolved, minted) = prepared?;
+
+        // A key that acquired an artifact between its batch's admission and this close is an
+        // ordinary growth, and `growth_records` takes it from there. Usually none did — that needs
+        // a publication to have executed inside the window — so the pass is skipped rather than
+        // walked.
+        if !resolved.is_empty() {
+            for entry in closed.iter_mut() {
+                for join in entry.memberships.iter_mut() {
+                    if join.ordinal.is_some() {
+                        continue;
+                    }
+                    let at = (join.layer.clone(), join.level, join.key.clone());
+                    join.ordinal = resolved.get(&at).copied();
+                }
+            }
+        }
+        for ((layer, level, key), (index, _)) in &wanted {
+            if minted.contains(&(layer.clone(), *level, key.clone())) {
+                minted_per_entry[*index] += 1;
+            }
+        }
+        Ok((records, minted_per_entry))
     }
 
     /// **Close a commit window**: one signature-sorted allocation run, one WAL record per entry, one
@@ -7623,6 +7944,18 @@ impl Executor {
             return;
         }
 
+        // **The artifacts this window's rows named and nothing holds, created here** — see
+        // `Executor::mint_records`. Prepared before anything is appended, on `prepare_publish`'s own
+        // rule that every check runs before the first allocation, so a refusal spends nothing. A
+        // failure past that point has spent reserved ids, exactly as a failed window's rows have.
+        let (mint_records, minted_per_entry) = match self.mint_records(&mut closed) {
+            Ok(minted) => minted,
+            Err(detail) => {
+                self.fail_window_layer(closed, detail, entries, started);
+                return;
+            }
+        };
+
         // One record per entry — batch identity is preserved through the window, which is what a
         // joined retry is answered off — appended in entries order, which is also apply order.
         let mut failed_at: Option<(usize, WalError)> = None;
@@ -7670,6 +8003,24 @@ impl Executor {
         // its level's published high-water is held in the log by that position until a fold rewrites
         // the level whole, and releasing it early is the silent loss `ArtifactStore::grow`'s own doc
         // is written against.
+        //
+        // **The publications that minted come first**, because a growth of the same window may name
+        // an ordinal one of them claimed — not today, a minted artifact being published with its
+        // members, but replay applies this sequence in order and an artifact must exist before
+        // anything addresses it.
+        let mut minted: Vec<(WalRecord, u64)> = Vec::new();
+        if failed_at.is_none() {
+            for record in mint_records {
+                let at = self.wal.position();
+                if let Err(e) = self.wal.append(&record) {
+                    // No entry is more to blame than another for a record the whole window's keys
+                    // produced; the first waiter gets the real error, as the fsync arm does.
+                    failed_at = Some((0, e));
+                    break;
+                }
+                minted.push((record, at));
+            }
+        }
         let mut growth: Vec<(WalRecord, u64)> = Vec::new();
         if failed_at.is_none() {
             for (record, i) in growth_records(&closed) {
@@ -7711,12 +8062,19 @@ impl Executor {
         // a store that held the join while the generation still lacked the row would describe an
         // artifact by a point nothing could yet see. The reverse order costs nothing: both are
         // durable by this line, and the log is what a restart reads.
-        if !growth.is_empty() {
-            let undecodable = self.live.with_publication_state(|_, store, _| {
-                growth
-                    .iter()
-                    .map(|(record, position)| store.apply(record, *position))
-                    .sum::<usize>()
+        if !minted.is_empty() || !growth.is_empty() {
+            let undecodable = self.live.with_publication_state(|registry, store, _| {
+                let mut undecodable = 0;
+                // The registry half first, per record: a mint may have extended its level's
+                // reserved runs, and the store's own apply resolves ordinals against them.
+                for (record, position) in &minted {
+                    registry.apply(record);
+                    undecodable += store.apply(record, *position);
+                }
+                for (record, position) in &growth {
+                    undecodable += store.apply(record, *position);
+                }
+                undecodable
             });
             if undecodable > 0 {
                 // Unreachable in practice — these bytes were serialised from a live bitmap moments
@@ -7747,11 +8105,36 @@ impl Executor {
         self.health.lap(WriteStage::RecordBatch, m);
         self.observe_wal();
 
+        // **What a batch minted is reported to the batch that minted it.** Under
+        // `value_set = "open"` a typo creates a permanent object rather than being refused — the
+        // trade the declaration makes knowingly — and the mitigation is that it is visible: the
+        // caller is told the count in its own 200, and the operator gets this line.
+        let created: u64 = minted_per_entry.iter().sum();
+        if created > 0 {
+            tracing::info!(
+                minted = created,
+                artifacts = ?minted
+                    .iter()
+                    .flat_map(|(record, _)| match record {
+                        WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
+                            .iter()
+                            .filter_map(|a| a.key.as_ref())
+                            .map(|key| format!("{key} in level {level} of {layer}"))
+                            .take(8)
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .collect::<Vec<_>>(),
+                "an ingest batch named keys no artifact held, and this layer's value set is open, \
+                 so they were created carrying nothing but their names"
+            );
+        }
+
         // **N waiters, one proof.** A death partway through this loop leaves some waiters acked and
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its ingest is durably in force. That is the widening `ReceiptLost`'s own
         // doc predicts for this task.
-        for entry in closed {
+        for (entry, minted) in closed.into_iter().zip(minted_per_entry) {
             let ClosedEntry {
                 entity_ids,
                 mut waiters,
@@ -7767,9 +8150,9 @@ impl Executor {
                 .expect("an entry always has at least one waiter");
             for waiter in waiters {
                 let entity_ids = entity_ids.clone();
-                self.ack(&waiter, Ack::Ingested { entity_ids }, &published);
+                self.ack(&waiter, Ack::Ingested { entity_ids, minted }, &published);
             }
-            self.ack(&last, Ack::Ingested { entity_ids }, &published);
+            self.ack(&last, Ack::Ingested { entity_ids, minted }, &published);
         }
 
         self.health
@@ -7836,6 +8219,30 @@ impl Executor {
     /// requires — naming the vocabulary and its width, both the deployment's own schema. Mapping it
     /// to a WAL or allocator failure instead would answer a bodyless 500 for a refusal the caller
     /// can act on, and would tell an operator the log was at fault when it was not.
+    /// A window whose **artifact** mint could not be prepared: nothing was appended, nothing
+    /// applied. Every waiter gets the same refusal, which is the cost of a decision that can only be
+    /// made once the window's batches are together — see `Executor::mint_records`.
+    fn fail_window_layer(
+        &self,
+        closed: Vec<ClosedEntry<Responder>>,
+        detail: String,
+        entries: u64,
+        started: std::time::Instant,
+    ) {
+        for entry in closed {
+            for waiter in entry.waiters {
+                self.ack_failed(
+                    &waiter,
+                    ExecError::LayerRefused {
+                        detail: detail.clone(),
+                    },
+                );
+            }
+        }
+        self.health
+            .record_window_service(entries, started.elapsed().as_nanos() as u64);
+    }
+
     fn fail_window_mint(
         &self,
         closed: Vec<ClosedEntry<Responder>>,
@@ -7944,7 +8351,14 @@ impl Executor {
         respond: Responder,
     ) {
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_publish(&layer, level, &incoming, store, alloc)
+            registry.prepare_publish(
+                &layer,
+                level,
+                &incoming,
+                store,
+                alloc,
+                &tessera_lifecycle::no_pending,
+            )
         });
         let record = match prepared {
             Ok(record) => record,
@@ -8023,9 +8437,11 @@ impl Executor {
     /// because a batch's entities do not exist until its window allocates and a command cannot wait
     /// inside one.
     ///
-    /// ⊘ **Minting from an unknown key hooks in here and beside that close** (§6.3): ordinals are
-    /// claimed serially on this thread, which is why it belongs on the executor rather than in a
-    /// handler.
+    /// **Minting is that close's and not this command's** (§6.3). An unknown key here is refused
+    /// whatever the layer's value set says: this route names an artifact to add members to, where a
+    /// membership column names the artifact a *point* belongs to and may therefore create it. Where
+    /// the two do agree is the thread — a mint claims ordinals serially on this executor, exactly as
+    /// `commit_artifacts` does, which is why neither claim is made in a handler.
     fn commit_growth(
         &mut self,
         layer: String,

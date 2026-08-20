@@ -2406,6 +2406,7 @@ impl Engine {
         body_hash: [u8; 32],
     ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
         self.accept_ingest_joining(rows, batch_id, body_hash, Default::default())
+            .map(|(entity_ids, _)| entity_ids)
     }
 
     /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
@@ -2413,9 +2414,14 @@ impl Engine {
     ///
     /// `artifacts` is what a column named for a layer said — which artifacts these rows join, and
     /// which edges the adjacency of a list column declared (`artifacts-from-points.md` §6.2). It is
-    /// resolved and grown **in the same commit as the rows**, so a batch is never half-applied: a
-    /// key naming no artifact refuses the whole batch before an id is spent, and rows that were
-    /// accepted carry their memberships from the moment they exist.
+    /// resolved and grown **in the same commit as the rows**, so a batch is never half-applied: on
+    /// a **closed** layer a key naming no artifact refuses the whole batch before an id is spent,
+    /// on an **open** one it creates the artifact it names, and rows that were accepted carry their
+    /// memberships from the moment they exist.
+    ///
+    /// Returns the assigned ids and **how many artifacts this batch created** — zero for every
+    /// batch whose keys all existed, and the number a caller is owed because minting is not
+    /// undoable (`artifacts-from-points.md` §3).
     ///
     /// Blocking — a tokio handler must call this inside `spawn_blocking`.
     pub fn accept_ingest_joining(
@@ -2424,7 +2430,7 @@ impl Engine {
         batch_id: String,
         body_hash: [u8; 32],
         artifacts: tessera_lifecycle::BatchArtifacts,
-    ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
+    ) -> std::result::Result<(Vec<EntityId>, u64), crate::write::AcceptError> {
         // **Every buffered row has a cell**, established here because this is the boundary rows
         // enter the buffer through — and it has more than one caller. A check in the HTTP handler
         // guarded one of them and left the bench arms, the tests and any future ingest route
@@ -2653,7 +2659,9 @@ impl Engine {
     /// with the rows it is about: `/control/ingest` accepts a column named for a declared layer and
     /// grows these memberships inside the batch's own commit window (`artifacts-from-points.md`
     /// §6.2). This entry point stays what an operator uses for a correction against points that are
-    /// already there. ⊘ An unknown key is not minted at either — it is refused, naming the key.
+    /// already there. An unknown key is refused on **this** route whatever the layer's value set
+    /// says — see [`tessera_lifecycle::IncomingGrowth`]; the column at `/control/ingest` is where an
+    /// open layer creates the artifact a key names.
     pub fn grow_memberships(
         &self,
         layer: String,

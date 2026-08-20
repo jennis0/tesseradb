@@ -361,9 +361,10 @@ pub enum WalRecord {
     ///
     /// **It grows a membership and can do nothing else.** There is no ordinal here that names no
     /// record: growth against a hole adds nothing rather than creating something, so this record
-    /// cannot resurrect an artifact a fold retired, and it cannot mint one either — an unknown key
-    /// is refused at admission (⊘ minting at ingest is unbuilt;
-    /// [`artifacts-from-points.md`](../../../docs/design/artifacts-from-points.md) §6.3).
+    /// cannot resurrect an artifact a fold retired, and it cannot mint one either. A key an open
+    /// layer *creates* the artifact for is not carried here at all: minting is a publication, and
+    /// the artifact is published carrying the points that created it
+    /// ([`artifacts-from-points.md`](../../../docs/design/artifacts-from-points.md) §6.3).
     ///
     /// **Nothing else in the log carries this, and the pin is what keeps it.** A grown record sits
     /// *below* its level's published high-water, and the append-only packer covers only the tail

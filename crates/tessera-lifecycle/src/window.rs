@@ -131,6 +131,11 @@ pub struct WindowEntry<W> {
     /// admission** and the row positions that named it (`artifacts-from-points.md` §6.2). Empty for
     /// a batch carrying no membership column, which is every batch that names no layer.
     pub memberships: Vec<ResolvedMembership>,
+    /// The parent edges this batch's list column declared **whose child is to be minted** — the
+    /// rest were checked against the layer's own lineage at admission and are gone by here
+    /// (`artifacts-from-points.md` §6.3). A minted child takes its parent from these, which is the
+    /// one route by which the wire creates an edge rather than checking one.
+    pub edges: Vec<crate::command::BatchEdge>,
     pub waiters: Vec<W>,
 }
 
@@ -148,7 +153,19 @@ pub struct WindowEntry<W> {
 pub struct ResolvedMembership {
     pub layer: String,
     pub level: u32,
-    pub ordinal: u32,
+    /// The key the caller's column carried, kept beside the ordinal because a key with no ordinal
+    /// is the whole of what minting has to work from.
+    pub key: String,
+    /// The ordinal the key resolved to at admission — `None` where the layer's `value_set` is
+    /// **open** and no live artifact held the key, which is the case the close mints
+    /// (`artifacts-from-points.md` §6.3).
+    ///
+    /// **An open layer's unknown key resolves at the close and not here**, deliberately: an
+    /// ordinal cannot be claimed at admission, because the record that would make the claim durable
+    /// is not appended until the window closes and a publication executing in between would take
+    /// the same one. So the key travels and the resolution is made once, on the executor, where
+    /// nothing can interleave with it.
+    pub ordinal: Option<u32>,
     /// Indices into this entry's `rows`.
     pub rows: Vec<u32>,
 }
@@ -166,7 +183,12 @@ pub struct ClosedEntry<W> {
     pub entity_ids: Vec<EntityId>,
     /// This entry's memberships, carried through the allocation unchanged: the ids the joins name
     /// are `entity_ids[row]`, which is why the two travel together.
+    ///
+    /// **Mutable after the close, at exactly one site**: the mint pass resolves the keys that had
+    /// no ordinal at admission, so that what follows it sees one shape rather than two.
     pub memberships: Vec<ResolvedMembership>,
+    /// The edges of this entry's minted children, carried through the allocation unchanged.
+    pub edges: Vec<crate::command::BatchEdge>,
     pub waiters: Vec<W>,
 }
 
@@ -685,6 +707,7 @@ impl<W> CommitWindow<W> {
                 terms,
                 entity_ids,
                 memberships: entry.memberships,
+                edges: entry.edges,
                 waiters: entry.waiters,
             });
         }
@@ -723,6 +746,7 @@ mod tests {
             batch_id: batch.to_string(),
             body_hash: [0u8; 32],
             memberships: Vec::new(),
+            edges: Vec::new(),
             waiters: vec!["w"],
         }
     }
@@ -844,6 +868,7 @@ mod tests {
             batch_id: "b1".to_string(),
             body_hash: [3u8; 32],
             memberships: Vec::new(),
+            edges: Vec::new(),
             waiters: vec!["w"],
         });
 

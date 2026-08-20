@@ -322,7 +322,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
 | `artifacts` | O | inline array, instead of `source`, for an authored layer — the keys below |
 | `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }` |
-| `value_set` | D `closed` | whether a member key the layer's artifacts do not declare is refused, or creates an artifact carrying nothing but its name ([`artifacts-from-points.md`](artifacts-from-points.md) §3). `closed` makes `artifacts` the roster; `open` makes it enrichment, so a cluster the points name and the table omits exists without a title, a cluster the table carries and no point names is an artifact with no members, and neither is an error. ⊘ The build half mints; the ingest half is specified and unbuilt |
+| `value_set` | D `closed` | whether a member key the layer's artifacts do not declare is refused, or creates an artifact carrying nothing but its name ([`artifacts-from-points.md`](artifacts-from-points.md) §3). `closed` makes `artifacts` the roster; `open` makes it enrichment, so a cluster the points name and the table omits exists without a title, a cluster the table carries and no point names is an artifact with no members, and neither is an error. **It governs both entry points**: a build mints from a member source, and an ingest batch mints from a column named for the layer, at the close of the commit window that allocates the points. What `open` costs is that a mistyped key becomes a permanent object rather than a refusal — reported, at both entry points, and not bounded |
 | `hierarchy` | R | `{ kind = flat \| nested \| stacked \| tiered, prune_children = bool }` — see below |
 | `visibility` | R | an access label, or `public` |
 | `artifact_visibility` | R | `{ field, default }`; `default` may be `inherited` |
@@ -1046,6 +1046,15 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-20 — `value_set` now governs both entry points, and its row loses its marker.** No key is
+added and none changes meaning: `open` said *a key no artifact declares creates one*, and until now
+it said it of a build alone. It now says it of an ingest batch too — a column named for the layer
+carrying a key nothing holds creates the artifact, at the close of the commit window that allocates
+the points, with a lineage's chain created and linked in the same batch
+([`artifacts-from-points.md`](artifacts-from-points.md) §6.3). What the row gains is the cost stated
+plainly: under `open` a mistyped key is a permanent object rather than a refusal, which is reported
+at both entry points and deliberately not bounded.
 
 **2026-08-20 — the wire takes a membership column, and the acquisition split is what decides its
 name.** No key is added and no block changes: `/control/ingest` now accepts a column named for a

@@ -407,7 +407,21 @@ pub enum Ack {
     /// signature-sorted order the IDs were assigned in. The handler turns each into a
     /// `tessera_id` for the response (contracts §3.4 r6), which is the only reason an entity ID
     /// is materialised outside the engine at all (I10).
-    Ingested { entity_ids: Vec<EntityId> },
+    Ingested {
+        entity_ids: Vec<EntityId>,
+        /// How many artifacts this batch's membership column **created** — a key no artifact held,
+        /// on a layer whose `value_set` is open (`artifacts-from-points.md` §3). Zero for every
+        /// batch that named none, which is every batch that carries no membership column and every
+        /// one whose keys all existed.
+        ///
+        /// **Reported because minting is not undoable.** A typo creates a permanent object rather
+        /// than being refused, which is the trade an open layer makes knowingly; the mitigation is
+        /// that the caller who made it is told, in the same 200 that accepted the rows.
+        ///
+        /// **A replayed batch reports zero**, and that is the honest reading: the count is what
+        /// *this submission* created, and a duplicate batch id creates nothing.
+        minted: u64,
+    },
     /// A disposition change applied. Nothing to return: the caller named the item.
     Changed,
     /// A layer was registered. The entity is returned so the handler can hand back its

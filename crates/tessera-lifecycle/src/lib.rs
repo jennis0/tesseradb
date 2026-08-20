@@ -31,7 +31,7 @@ pub use alloc::{
     PendingItem,
 };
 pub use membership::{ArtifactRecord, ArtifactStore, IncomingArtifact, IncomingGrowth};
-pub use registry::{EdgeCheck, LayerRegistry, RegistryError, ResolvedLayers};
+pub use registry::{no_pending, EdgeCheck, LayerRegistry, RegistryError, ResolvedLayers};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
 pub use command::{
     Ack, BatchArtifacts, BatchEdge, BatchMembership, Command, ExecError, Receipt, SubmitError,

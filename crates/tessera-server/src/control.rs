@@ -1189,6 +1189,15 @@ struct IngestResp {
     /// request batch, so a caller can correlate. Present for every accepted row, whether or not
     /// that row carried an external id.
     tessera_ids: Vec<u64>,
+    /// How many artifacts this batch's membership column **created** — a key no artifact held, on
+    /// a layer declared `value_set = "open"` (`artifacts-from-points.md` §3). Zero for every batch
+    /// that carries no membership column, and for every one whose keys all existed.
+    ///
+    /// **Reported because minting cannot be undone.** An open layer trades the roster's refusal
+    /// for a cluster existing because a point says it does, so a mistyped key now creates a
+    /// permanent object instead of being refused — and the mitigation is that the caller who made
+    /// the typo is told the number in the same 200 that took their rows.
+    minted: u64,
 }
 
 /// The Arrow decode through the WAL append/fsync: everything CPU-bound or fsync-bearing for one
@@ -1299,6 +1308,9 @@ fn run_ingest(
                 over_bound,
                 over_bound_ids,
                 tessera_ids,
+                // A replay creates nothing: the artifacts this batch's keys named were minted when
+                // it was first accepted, and this submission had no effect at all.
+                minted: 0,
             });
         }
         return Err(ApiError::Conflict(format!(
@@ -1424,7 +1436,7 @@ fn run_ingest(
     // Never 200 without fsync. Ordering is now a consequence of single ownership rather than of a
     // mutex held across four steps (see `tessera_engine`'s `write` module).
     let accepted = rows.len() as u64;
-    let entity_ids = state
+    let (entity_ids, minted) = state
         .engine
         .accept_ingest_joining(rows, batch_id, body_hash, artifacts)
         .map_err(|e| {
@@ -1444,6 +1456,7 @@ fn run_ingest(
         over_bound,
         over_bound_ids,
         tessera_ids,
+        minted,
     })
 }
 

@@ -112,16 +112,29 @@ pub enum RegistryError {
     /// Refused rather than resolved by search order, which would make the edge's meaning depend on
     /// how the levels were walked.
     AmbiguousParent { layer: String, key: String },
-    /// A growth named a key this level does not hold.
+    /// A growth named a key this level does not hold, on a layer whose value set is **closed**.
     ///
-    /// ⊘ **Minting from an unknown key at ingest is unbuilt** and is the next stage
-    /// (`artifacts-from-points.md` §6.3): under `value_set = "open"` an unknown key will create the
-    /// artifact rather than refuse. Until then the refusal is the honest answer — the alternative
-    /// is accepting a join into nothing and acking it.
+    /// Closed is declare-then-use, and the refusal is the whole of it: a mistyped id would
+    /// otherwise carry away the members it stole from a real artifact, whose masked count then goes
+    /// quietly short. Under `value_set = "open"` the same key mints instead
+    /// (`artifacts-from-points.md` §3).
     NoSuchArtifact {
         layer: String,
         level: u32,
         key: String,
+    },
+    /// An **open** layer met a key it would have minted, and the layer's own declaration says a
+    /// minted artifact could not be served: a minted artifact carries nothing but its name, and
+    /// this layer requires more of every artifact it publishes.
+    ///
+    /// **The same two refusals a publication already makes**, hoisted to admission so they refuse
+    /// the one batch rather than the window it would have joined — and the same two a build makes
+    /// over a member table, which is what keeps one declaration from meaning two things at the two
+    /// entry points ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+    Unmintable {
+        layer: String,
+        key: String,
+        why: String,
     },
     /// The entity space could not supply the layer's entity or its reserved runs.
     Alloc(AllocError),
@@ -139,6 +152,12 @@ pub enum RegistryError {
     },
 }
 
+/// **No artifact is about to exist** — the `pending` answer every caller but the ingest route's
+/// mint pass gives [`LayerRegistry::parent_ref`] and [`LayerRegistry::prepare_publish`].
+pub fn no_pending(_: &str) -> Option<crate::wal::ParentRef> {
+    None
+}
+
 /// What [`LayerRegistry::check_edge`] found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EdgeCheck {
@@ -147,6 +166,11 @@ pub enum EdgeCheck {
     /// The child exists and holds no parent at all, so there is no edge to disagree with — and the
     /// growth route cannot create one. The caller reports it; see [`LayerRegistry::check_edge`].
     Unrecorded,
+    /// The child does not exist yet and is one of the keys this batch is about to mint, so the edge
+    /// is the minted artifact's own parent rather than a claim about a stored one. **The one route
+    /// by which the wire creates an edge**, and it creates it where the artifact is created — which
+    /// is where lineage has always been settled.
+    Mints,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -225,8 +249,13 @@ impl std::fmt::Display for RegistryError {
             RegistryError::NoSuchArtifact { layer, level, key } => write!(
                 f,
                 "{layer} level {level} holds no artifact under the key {key}, so there is \
-                 nothing for these members to join; an unknown key does not yet mint an \
-                 artifact at ingest"
+                 nothing for these members to join; declare `value_set = \"open\"` on the layer \
+                 for a key nothing declares to create the artifact it names"
+            ),
+            RegistryError::Unmintable { layer, key, why } => write!(
+                f,
+                "{layer} is declared open, so the key {key} would create the artifact it names — \
+                 but {why}. A minted artifact carries nothing but its name"
             ),
             RegistryError::ContradictedParent {
                 layer,
@@ -413,6 +442,12 @@ impl LayerRegistry {
     /// nothing.
     ///
     /// [`prepare_create`]: LayerRegistry::prepare_create
+    /// `pending` is what [`parent_ref`] answers a parent key with when the artifact naming it does
+    /// not exist yet and is not in this batch either — empty for every caller but the ingest route's
+    /// mint pass, which fixes a tiered chain's ordinals a level at a time and has applied none of
+    /// them ([`no_pending`] is the empty answer).
+    ///
+    /// [`parent_ref`]: LayerRegistry::parent_ref
     pub fn prepare_publish(
         &self,
         layer_name: &str,
@@ -420,6 +455,7 @@ impl LayerRegistry {
         incoming: &[IncomingArtifact],
         store: &ArtifactStore,
         alloc: &mut Allocator,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
     ) -> Result<WalRecord, RegistryError> {
         let layer = self
             .layers
@@ -580,7 +616,11 @@ impl LayerRegistry {
             incoming
                 .iter()
                 .position(|a| a.key.as_deref() == Some(key))
-                .map(|i| first_ordinal as u32 + i as u32)
+                .map(|i| crate::wal::ParentRef {
+                    level,
+                    ordinal: first_ordinal as u32 + i as u32,
+                })
+                .or_else(|| pending(key))
         };
         let parents: Vec<Option<crate::wal::ParentRef>> = incoming
             .iter()
@@ -672,12 +712,13 @@ impl LayerRegistry {
     /// So there is no allocator here and a refusal spends nothing — where a refused publication has
     /// to be argued about, this one is simply a refusal.
     ///
-    /// **A key the level does not hold is refused.** ⊘ Minting from an unknown key at ingest is
-    /// unbuilt and is the next stage (`artifacts-from-points.md` §6.3); until it lands, the honest
-    /// answer to a key naming nothing is that it names nothing. The resolution is
-    /// [`ArtifactStore::ordinal_of_key`] — the *store's* index, never the served view — which is
-    /// what keeps a suppressed artifact from reading as absent and having a second, unsuppressed
-    /// artifact minted under its key (§5).
+    /// **A key the level does not hold is refused**, whatever the layer's value set says: this is
+    /// a growth naming an artifact to add members to, not a point declaring the artifact it belongs
+    /// to, so there is nothing here for an unknown key to have created — see
+    /// [`crate::IncomingGrowth`], and [`LayerRegistry::resolve_or_mint`] for the route that does
+    /// create one. The resolution is [`ArtifactStore::ordinal_of_key`] — the *store's* index, never
+    /// the served view — which is what keeps a suppressed artifact from reading as absent and
+    /// having a second, unsuppressed artifact minted under its key (§5).
     ///
     /// **Nothing joining is not an error.** A caller may honestly name an artifact and add nothing
     /// to it; `Ok(None)` says the record would be empty and no append is owed. Refusing would block
@@ -725,18 +766,85 @@ impl LayerRegistry {
         Ok(crate::membership::growth_record(layer_name, level, growth))
     }
 
+    /// The ordinal a member key names, or **`None` where the layer is open and nothing holds it**
+    /// — the resolution the ingest route makes at admission (`artifacts-from-points.md` §6.3).
+    ///
+    /// `None` is *this key will be minted at the close*, and it is returned only after the two
+    /// checks a minted artifact could not pass are made: a layer declaring supplied content kinds,
+    /// and a layer declaring a dependency, each refuse here rather than at the close, so one
+    /// caller's key refuses one batch instead of the window it would have joined.
+    ///
+    /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
+    /// is [`ArtifactStore::ordinal_of_key`] — the store's key index — and that index loses a key at
+    /// exactly one event, the fold retiring the artifact's own entity, which is a *deletion*. A
+    /// suppression touches no stored structure at all (write-path §5.4, Rule S), so there is
+    /// nothing here that could see one. Written against the *served* view instead, a suppressed
+    /// artifact would read as absent, its key would mint a second artifact, and the new one would
+    /// not be suppressed — a suppression defeated by ingesting a point. That is why this reads the
+    /// store, and why it must never be replaced by a `verdict` call.
+    pub fn resolve_or_mint(
+        &self,
+        layer_name: &str,
+        level: u32,
+        key: &str,
+        store: &ArtifactStore,
+    ) -> Result<Option<u32>, RegistryError> {
+        match self.resolve_growth_key(layer_name, level, key, store) {
+            Ok(ordinal) => Ok(Some(ordinal)),
+            Err(RegistryError::NoSuchArtifact { layer, level, key }) => {
+                let declaration = &self
+                    .layers
+                    .get(&layer)
+                    .expect("resolve_growth_key found the layer before it reached the key")
+                    .declaration;
+                if declaration.value_set != tessera_types::layer::ValueSet::Open {
+                    return Err(RegistryError::NoSuchArtifact { layer, level, key });
+                }
+                let unmintable = |why: &str| {
+                    Err(RegistryError::Unmintable {
+                        layer: layer.clone(),
+                        key: key.clone(),
+                        why: why.to_string(),
+                    })
+                };
+                // The two refusals `prepare_publish` would make of an artifact carrying only a key,
+                // made here where the batch can still be rejected without effect. Both are
+                // declarations about *every* artifact of the layer, so neither depends on which key
+                // arrived — a layer is mintable or it is not.
+                if !declaration.content.supplied.is_empty() {
+                    return unmintable(&format!(
+                        "the layer declares {} supplied content kind(s), and an artifact served \
+                         without content its layer declares cannot be told apart from one whose \
+                         content was withheld",
+                        declaration.content.supplied.len()
+                    ));
+                }
+                if !declaration.depends_on.is_empty() {
+                    return unmintable(
+                        "the layer declares depends_on, so every artifact it publishes attaches to \
+                         one, and an artifact with no dependency would be gated on nothing",
+                    );
+                }
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// The ordinal a growth's key names, with the layer and level checked — **the resolution half
-    /// of [`prepare_grow`], shared with the ingest route.**
+    /// of [`prepare_grow`], shared with the ingest route through [`resolve_or_mint`].**
     ///
     /// A batch arriving at `/control/ingest` with a column named for a layer resolves its keys here
     /// at admission, before the entities exist, and carries the ordinals to its window's close
     /// (`artifacts-from-points.md` §6.2). The two callers must agree about what a key means and
-    /// about what an unknown one costs — a refusal naming it, whole batch without effect — which is
-    /// why it is this function and not a second lookup.
+    /// about what an unknown one costs — which is why it is this function and not a second lookup.
     ///
     /// **The lookup is `ArtifactStore::ordinal_of_key`, never the served view**, and that is what
     /// makes it suppression-blind by construction: a suppressed artifact resolves like any other,
-    /// grows like any other, and stays suppressed (§5's third ruling).
+    /// grows like any other, and stays suppressed (§5's third ruling — stated in full on
+    /// [`resolve_or_mint`], where the alternative reading would mint).
+    ///
+    /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
     pub fn resolve_growth_key(
         &self,
         layer_name: &str,
@@ -779,28 +887,63 @@ impl LayerRegistry {
     /// holds no parent, so the column states an edge this route cannot create. Reported by the
     /// caller and accepted, because the membership half of the same entry is unambiguous and
     /// refusing it would block a batch over a roster published without its edges — which discloses
-    /// nothing and costs a republication. ⊘ It stops being reachable when a key mints its artifact
-    /// (§6.2), where a chain arrives parent before child in one batch.
+    /// nothing and costs a republication.
+    ///
+    /// The two `minting` arguments answer *is this key one the batch is about to create?* — the keys
+    /// [`resolve_or_mint`] returned `None` for. They decide two of the three answers:
+    ///
+    /// - **the child is minting** → [`EdgeCheck::Mints`]: the edge is the new artifact's own
+    ///   parent, settled where every edge is settled, at the publication that creates it.
+    /// - **the parent is minting** and the child exists → the layer holds no such parent *yet*, and
+    ///   a growth adds members and never lineage. A child holding no parent is
+    ///   [`EdgeCheck::Unrecorded`] as before; a child holding a different one is the contradiction,
+    ///   because a parent that does not exist cannot be the parent it already has.
+    ///
+    /// **The child's is a fact and the parent's is a search**, which is why one is a `bool` and the
+    /// other a closure. A child's level is the edge's own; a parent's is whatever the layer's shape
+    /// says to look at — the child's level for a nested layer and any coarser one for a tiered
+    /// layer — so the question asked of a parent is *does this layer hold that key anywhere*. Asking
+    /// it of the child too would treat a key minting at one level as minting at every level, and a
+    /// levelled taxonomy legitimately carries one key at two.
+    ///
+    /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
     pub fn check_edge(
         &self,
-        layer_name: &str,
-        level: u32,
-        child: &str,
-        parent: &str,
+        edge: &crate::command::BatchEdge,
         store: &ArtifactStore,
+        child_mints: bool,
+        parent_mints: &dyn Fn(&str) -> bool,
     ) -> Result<EdgeCheck, RegistryError> {
-        let ordinal = self.resolve_growth_key(layer_name, level, child, store)?;
-        let claimed = self.parent_ref(layer_name, level, Some(child), parent, store, &|_| None)?;
-        match store.get(layer_name, level, ordinal).and_then(|r| r.parent) {
+        let crate::command::BatchEdge {
+            layer,
+            level,
+            child,
+            parent,
+        } = edge;
+        let (layer, level) = (layer.as_str(), *level);
+        if child_mints {
+            return Ok(EdgeCheck::Mints);
+        }
+        let ordinal = self.resolve_growth_key(layer, level, child, store)?;
+        let held = store.get(layer, level, ordinal).and_then(|r| r.parent);
+        let contradicted = |held| RegistryError::ContradictedParent {
+            layer: layer.to_string(),
+            level,
+            child: child.clone(),
+            claimed: parent.clone(),
+            held: self.key_at(layer, held, store),
+        };
+        if parent_mints(parent) {
+            return match held {
+                None => Ok(EdgeCheck::Unrecorded),
+                Some(held) => Err(contradicted(held)),
+            };
+        }
+        let claimed = self.parent_ref(layer, level, Some(child), parent, store, &no_pending)?;
+        match held {
             None => Ok(EdgeCheck::Unrecorded),
             Some(held) if held == claimed => Ok(EdgeCheck::Agrees),
-            Some(held) => Err(RegistryError::ContradictedParent {
-                layer: layer_name.to_string(),
-                level,
-                child: child.to_string(),
-                claimed: parent.to_string(),
-                held: self.key_at(layer_name, held, store),
-            }),
+            Some(held) => Err(contradicted(held)),
         }
     }
 
@@ -820,13 +963,22 @@ impl LayerRegistry {
     /// **Which direction an edge may run is the layer's declaration.** A nested layer's edges relate
     /// artifacts of one level, and a level is normally published in one batch — so a child's parent
     /// is usually a sibling with no ordinal until the publication assigns one, which is what
-    /// `within_batch` answers. A tiered layer's edges run the other way, from a **coarser level** to
-    /// this one: its parent was published in an earlier batch, so only the store can answer, and the
+    /// `pending` answers. A tiered layer's edges run the other way, from a **coarser level** to
+    /// this one: its parent was published in an earlier batch, so the store usually answers, and the
     /// search runs over the levels above this one. A key found in two of them is a refusal rather
     /// than a first match, because which one an edge meant would then depend on the search order.
     ///
+    /// **`pending` answers for artifacts that are about to exist but do not yet**, at whatever level
+    /// they will land: the siblings of a publication's own batch, and the artifacts an ingest batch
+    /// is minting a level at a time (`artifacts-from-points.md` §6.3). It returns a whole
+    /// [`ParentRef`] rather than an ordinal because a tiered chain's parent sits at a *coarser*
+    /// level than the child, and a caller minting level *k* has already fixed the ordinals of level
+    /// *k−1* without having applied them anywhere a lookup could see.
+    ///
     /// **A layer may not mix the two**, which is what makes the question answerable at all: the
     /// declared kind says which shape its edges have, and an edge of the other shape refuses.
+    ///
+    /// [`ParentRef`]: crate::wal::ParentRef
     pub fn parent_ref(
         &self,
         layer_name: &str,
@@ -834,7 +986,7 @@ impl LayerRegistry {
         child_key: Option<&str>,
         parent_key: &str,
         store: &ArtifactStore,
-        within_batch: &dyn Fn(&str) -> Option<u32>,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
     ) -> Result<crate::wal::ParentRef, RegistryError> {
         let layer = self
             .layers
@@ -868,30 +1020,45 @@ impl LayerRegistry {
         if !cross_level && child_key == Some(parent_key) {
             return Err(missing());
         }
+        let ambiguous = || RegistryError::AmbiguousParent {
+            layer: layer_name.to_string(),
+            key: parent_key.to_string(),
+        };
         if cross_level {
             let mut found = None;
-            for coarser in 0..level {
-                if let Some(ordinal) = store.ordinal_of_key(layer_name, coarser, parent_key) {
-                    if found.is_some() {
-                        return Err(RegistryError::AmbiguousParent {
-                            layer: layer_name.to_string(),
-                            key: parent_key.to_string(),
-                        });
-                    }
-                    found = Some(crate::wal::ParentRef {
-                        level: coarser,
-                        ordinal,
-                    });
+            // **A pending parent is a candidate beside the stored ones, not ahead of them**, so a
+            // key held at one coarser level and minted at another is the same ambiguity it would be
+            // if both were stored — which is the case the search order must not be allowed to
+            // decide.
+            for candidate in pending(parent_key)
+                .into_iter()
+                .filter(|p| p.level < level)
+                .chain((0..level).filter_map(|coarser| {
+                    store
+                        .ordinal_of_key(layer_name, coarser, parent_key)
+                        .map(|ordinal| crate::wal::ParentRef {
+                            level: coarser,
+                            ordinal,
+                        })
+                }))
+            {
+                if found.is_some_and(|held| held != candidate) {
+                    return Err(ambiguous());
                 }
+                found = Some(candidate);
             }
             // A key that exists only at this level or a finer one is an edge running the wrong way
             // — refused rather than reinterpreted, since a tiered layer's whole guarantee is that
             // lineage never runs against the levels.
             return found.ok_or_else(missing);
         }
-        within_batch(parent_key)
-            .or_else(|| store.ordinal_of_key(layer_name, level, parent_key))
-            .map(|ordinal| crate::wal::ParentRef { level, ordinal })
+        pending(parent_key)
+            .filter(|p| p.level == level)
+            .or_else(|| {
+                store
+                    .ordinal_of_key(layer_name, level, parent_key)
+                    .map(|ordinal| crate::wal::ParentRef { level, ordinal })
+            })
             .ok_or_else(missing)
     }
 
@@ -1337,7 +1504,7 @@ mod tests {
         layer: &str,
         incoming: &[IncomingArtifact],
     ) -> Result<WalRecord, RegistryError> {
-        let record = reg.prepare_publish(layer, 0, incoming, store, alloc)?;
+        let record = reg.prepare_publish(layer, 0, incoming, store, alloc, &no_pending)?;
         reg.apply(&record);
         assert_eq!(store.apply(&record, 0), 0);
         Ok(record)
@@ -1601,12 +1768,12 @@ mod tests {
         );
         // And a level the layer never declared is a refusal too, not an implicit creation.
         assert_eq!(
-            reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc),
+            reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc, &no_pending),
             Err(RegistryError::NoSuchLayer("clusters/nope".into()))
         );
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
         assert_eq!(
-            reg.prepare_publish("clusters/a", 3, &[], &store, &mut alloc),
+            reg.prepare_publish("clusters/a", 3, &[], &store, &mut alloc, &no_pending),
             Err(RegistryError::NoSuchLevel {
                 layer: "clusters/a".into(),
                 level: 3
@@ -1633,6 +1800,7 @@ mod tests {
                 &[incoming("c0", &[1, 2, 3]), incoming("c1", &[4])],
                 &store,
                 &mut alloc,
+                &no_pending,
             )
             .unwrap();
         reg.apply(&publication);
@@ -1676,7 +1844,7 @@ mod tests {
             .map(|i| incoming(&format!("c{i}"), &[i as u32]))
             .collect();
         let publication = reg
-            .prepare_publish("clusters/a", 0, &full, &store, &mut alloc)
+            .prepare_publish("clusters/a", 0, &full, &store, &mut alloc, &no_pending)
             .unwrap();
         reg.apply(&publication);
         assert_eq!(store.apply(&publication, 0), 0);

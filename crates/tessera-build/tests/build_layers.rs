@@ -1656,7 +1656,7 @@ fn an_open_layer_mints_the_clusters_its_points_name() {
     let layer = format!(
         "{CURATED_LAYER}value_set = \"open\"\nsource = \"roster.parquet\"\n{FROM_POINTS}"
     );
-    let (out, _tmp, _) = build_spelling_reported(&layer, |inputs| {
+    let (out, _tmp, report) = build_spelling_reported(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
         // The table knows about cluster 0 and about a cluster 9 that no point is in; the points
         // name 1 and 2, which it has never heard of.
@@ -1669,6 +1669,10 @@ fn an_open_layer_mints_the_clusters_its_points_name() {
         .map(|e| e.count)
         .collect();
     assert_eq!(counts, vec![4], "clusters 0, 1 and 2 from the points, and 9 from the table");
+    // **What was created is reported**, because it cannot be undone: 1 and 2 are the two the table
+    // never declared, and a build that minted every key would be a typo in the column rather than
+    // enrichment the operator left out. The wire says the same number for an ingest batch.
+    assert_eq!(report.minted_artifacts, 2);
 }
 
 /// **A bare clustering declares no artifacts at all.** The roster refusal is the closed set's

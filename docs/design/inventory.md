@@ -74,18 +74,18 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | Document | Status | ⊘ |
 |---|---|---|
 | `annotation-representation.md` | Normative for the annotation representat | 39 |
-| `annotation-write-cycle.md` | Normative for the annotation write cycle | 19 |
+| `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
 | `architecture.md` | Normative — r48 | 35 |
-| `artifacts-from-points.md` | Draft | 5 |
+| `artifacts-from-points.md` | Draft | 2 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 23 |
+| `configuration.md` | Normative for the build-time configurati | 22 |
 | `conformance.md` | Normative — r13 | 16 |
-| `contracts.md` | Normative — r36 | 24 |
+| `contracts.md` | Normative — r37 | 23 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |

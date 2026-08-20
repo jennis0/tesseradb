@@ -416,14 +416,16 @@ pub struct LayerDeclaration {
     ///
     /// **On the layer rather than on the acquisition block**, because ingest has no member block: a
     /// key living in a build-only block could not govern what the write path does with an unknown
-    /// id, and governing both entry points is the point of it. ⊘ The build half is implemented; the
-    /// ingest half — minting an artifact for a key a point carries — is specified and unbuilt
-    /// (`artifacts-from-points.md` §6.3), so today an open layer means only that a build mints.
+    /// id, and governing both entry points is the point of it — and it now does. A build mints from
+    /// a member source; an ingest batch mints from a column named for the layer, at the close of the
+    /// commit window that allocates the points, carrying them as the new artifact's membership
+    /// ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) is
+    /// discharged: the two entry points say the same things).
     ///
-    /// **What blocked it is gone** (built 2026-08-20): the write path can grow an existing
-    /// artifact's membership, and an ingest batch can name its artifacts in a column named for the
-    /// layer — so the *closed* case now has a route at both entry points, and what is left here is
-    /// a key that names no artifact. It is refused, naming it.
+    /// **What `open` costs is that a typo is no longer a refusal.** A mistyped key creates a
+    /// permanent object rather than failing, which is the trade the declaration makes knowingly; the
+    /// mitigation is that the number is reported — in the build's own report, and in the 200 that
+    /// accepted the batch.
     #[serde(default)]
     pub value_set: ValueSet,
     /// The access label a viewer must hold to know this layer exists at all, independent of any
