@@ -960,6 +960,23 @@ a filter naming an invisible artifact and one naming a nonexistent artifact do t
 10⁹ with ~10⁷ artifacts, a viewport serves inside its budget and the fold completes inside
 `plan_fold`'s memory ceiling. **Data:** the scale tiers (§5.3).
 
+**The serving half of that check is now measured, and it fails as the path stands** — 2 770 ms
+single-threaded at 10⁷ artifacts, against a budget that must also leave room for ten simultaneous
+viewers on one machine. [`design/artifact-serving-at-scale.md`](design/artifact-serving-at-scale.md)
+carries the options and the numbers; nothing in it is ruled. In outline: the request path is
+`O(artifacts)` four times over and only one of the four has the request in it, so the work is to
+move the other three off it — a hierarchical row-range index over artifacts for the viewport half,
+and `architecture.md` §8.5's servable-label set, which is specified and unbuilt, for the mask half.
+Together **138 ms**, single-threaded, with the served set asserted identical ordinal for ordinal.
+
+Two things the measurement turned up that are not about scale and are live now:
+
+- **Any artifact write invalidates every cached row form in every view** — `ArtifactStore`'s version
+  is global and `ProjectionKey` carries it — and the rebuild is **153 s at 10⁷ artifacts**. Under
+  any read-write load the cache never survives to be used.
+- **`Lineage::new` walks every artifact in the store on every request**, per level, under the
+  artifacts lock, to build something that depends on neither the mask nor the viewport.
+
 ## 4. What holds the line between stages
 
 Stages 2 and 3 ship a bundle that carries layers before the write cycle exists. Two different
@@ -1125,6 +1142,8 @@ allocated here rather than left as a list:
 | **Σ\|G\| and containment per request** | 3 | ~4 B/member *assumed*; refuted if a real deployment's Σ\|G\| approaches membership's order |
 | **Reach**, if it is materialised at all | 5 | the deleted assignment-column framing made it look free; it is a second membership structure |
 | **Predicate evaluation per request** — ~10³ ranges for a 40,000-member corridor, so ~0.3–1.2 ms per artifact per request *(modelled)* | 6 | a nationwide boundary level is seconds without a bound |
+| ✔ **The viewport's artifact pass** — **measured 2026-08-21**, and it was never measured before: the shipped request path is `O(artifacts)` **four** times and three of the four have no request in them. At 10⁷ artifacts, single-threaded, a whole-map request costs **2 770 ms**; a hierarchical row-range index plus the servable-label set `architecture.md` §8.5 already specifies bring it to **138 ms**, with every verdict identical. It also found that the shipped path gets *slower* as a principal gets narrower — 489 ms at a full mask against 1 095 ms at 3.1%. [The probe](../probes/2026-08-20-artifact-serving-scale/README.md), [the options](design/artifact-serving-at-scale.md) | 8 | Stage 8's own check is *"at 10⁹ with ~10⁷ artifacts, a viewport serves inside its budget"* — it does not today, and the two structures that fix it are one new build-time index and one specified-but-unbuilt cache |
+| ✔ **Locality is worth two decades of artifact count** — **measured 2026-08-21**: a layer whose membership is *scattered* (an attribute predicate, a per-analyst selection, a term-as-artifact) walls at ~**2×10⁵** artifacts against 10⁷ for a clustered one, and no spatial structure moves it. 96.8 row blocks per artifact against 1.0 | 8 | the artifact-count target is a statement about **clustered** layers; a scattered layer needs the column route or a declared bound (options §4) |
 | **A real clustering at 10⁹** | never here | Tier A and Tier B agree on direction and not on constant: real membership is 14–170× cheaper per member than the synthetic arm |
 
 Two arms of the existing campaign can be finished now that they could not be then: `data/corpus.parquet`

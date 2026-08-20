@@ -1,22 +1,40 @@
-# Handover — artifact work, after Stage 5's tail and the I3 conformance row
+# Handover — artifact work, after the scale investigation
 
-**Date:** 2026-08-20 · **Status:** Stage 5 fully closed, the conformance suite green, and Stage 6's
-cost discussion held and measured. **What is left is Stage 6's implementation**, which now has its
-shape. Branch `artifacts/stage-4` (the conformance fix is `conformance/fixture-drift`, merged into
-it).
-
-All three items this document carried on 2026-08-20 are done, and so is the finding they turned up.
-The cut's owed tail is built — a dependent is dropped when the response does not contain what it
-depends on — I3 containment has moved from *untested machinery* to a covered conformance row, the
-suite that row lives in runs green again, and Stage 6's opening question is answered by a
-measurement rather than by an argument.
+**Date:** 2026-08-21 · **Status:** Stage 5 closed, the conformance suite green, Stage 6's cost
+discussion held and measured — and **Stage 8's scale question now measured rather than assumed**.
+Branch `artifacts/scale` (off `artifacts/stage-4`).
 
 **Read [`artifact-delivery.md`](artifact-delivery.md) first** — it is the status record for all
 artifact work by owner direction, not GitHub issues, and it wins over this document wherever they
 differ. [`artifact-config-handover.md`](artifact-config-handover.md) is the configuration rework's
 own handover and is still accurate about its surface; this one does not repeat it.
 
-## 1. Where the work stands
+## 0. The scale investigation — read the memo, not this section
+
+[`design/artifact-serving-at-scale.md`](design/artifact-serving-at-scale.md) is an **options memo
+for owner decision**. Nothing in it is built and nothing is ruled. Its measurements are
+[`probes/2026-08-20-artifact-serving-scale/`](../probes/2026-08-20-artifact-serving-scale/README.md).
+
+The four things a reader needs before opening it:
+
+- **The target is reachable for clustered artifacts and walls for scattered ones.** 10⁷ clustered
+  artifacts serve in ~138 ms single-threaded against 2 770 ms today; a *scattered* layer — an
+  attribute predicate, a per-analyst selection, a term-as-artifact — walls at ~2×10⁵, and no spatial
+  structure moves it. Locality is worth two decades of artifact count.
+- **The request path is `O(artifacts)` four times and only one of the four has the request in it.**
+  That is the whole finding; everything else follows from moving the other three off it.
+- **Two live defects turned up, neither about scale.** Any artifact write invalidates every cached
+  row form in every view (153 s to rebuild at 10⁷), and `Lineage::new` walks the whole store on
+  every request. Both are ordinary work and neither touches an invariant.
+- **`architecture.md` §8.5's servable-label set is specified, unbuilt, and its key is incomplete** —
+  it carries the overlay version but nothing for the artifact store, so as specified it is
+  fail-open across a publication. That is worth fixing in the design whether or not any option is
+  taken.
+
+**One owner ruling is asked for**, and it is §4 of the memo: whether a layer with no column and no
+row-space locality carries a declared bound — refused, warned, or merely reported.
+
+## 1. Where the rest of the work stands
 
 **Nothing on this list is blocking.** §1.1 is Stage 6, whose implementation is now specified enough
 to start; §1.2 is closed and is here for what it taught rather than for what it owes.

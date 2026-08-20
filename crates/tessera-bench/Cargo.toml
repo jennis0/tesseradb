@@ -54,6 +54,10 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
+# `artifact_serving_scale` prices the serving loop over the pool the engine already uses:
+# the shipped loop is sequential and the machine has twelve cores, so the constant factor is
+# measured before anything structural is proposed.
+rayon = { workspace = true }
 rustc-hash = "1"
 toml = "0.8"
 libc = "0.2"
