@@ -1,15 +1,26 @@
-# Handover — the configuration rework, for work continuing on artifacts
+# Handover — for work continuing on artifacts
 
-**Date:** 2026-08-19 · **Status:** Complete. Branch `artifacts/stage-4`, `c3a595a`..`b7c5324`.
+**Date:** 2026-08-20 · **Status:** Complete. Branch `artifacts/stage-4`, `c3a595a`..`60b7f47`.
 
-You were paused while the configuration surface was reworked. It is finished, it landed on the
-branch you will be working in, and it moved things you are about to touch: the layer declaration,
-the artifact input shape, three field names inside `IncomingArtifact`, and — the one that changes
-behaviour rather than spelling — what a `depends_on` edge *means*.
+You were paused while the configuration surface was reworked. That finished, and a second body of
+work landed on top of it: **artifacts can now be declared by the points that belong to them**, at
+both entry points. Between them they moved most of what you are about to touch — the layer
+declaration, the artifact input shape, three field names inside `IncomingArtifact`, what a
+`depends_on` edge *means*, and what an ingest batch may carry.
 
-Read this before rebasing anything. **`docs/design/configuration.md` is the normative surface** and
-wins over this document wherever they differ; this is a map of what moved, not a second
-specification.
+Read this before rebasing anything. **`docs/design/configuration.md` is normative for the surface**
+and `docs/design/artifacts-from-points.md` for the second body of work; both win over this document
+wherever they differ. This is a map of what moved, not a second specification.
+
+**Two rulings govern everything below**, and they are worth reading before the detail:
+
+- [Decision 0089](decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md) — a
+  dependency edge carries deletion and visibility. §1.
+- [Decision 0091](decisions/0091-build-is-ingest-into-an-empty-database.md) — **there is no
+  difference in functionality or client experience between a build and an ingest.** A build is a
+  more efficient form of ingesting into an empty database; internals may differ, what a caller can
+  *say* may not. A feature that works at one entry point and not the other is unfinished rather
+  than staged, and a build-only refusal is a bug unless it is about where rows come from.
 
 ## 1. The change that alters artifact semantics
 
@@ -58,7 +69,7 @@ agreement refusal is **gone**. What replaced it:
 name       = "clusters/hdbscan"
 title      = "HDBSCAN clusters"                  # optional
 views      = ["s0"]
-source     = "hdbscan.parquet"                   # one row per artifact
+source     = "hdbscan"                           # a `[sources]` name — see §6
 fields     = { members = "members", parent = "parent_id" }
 membership = "enumerated"                        # or "spatial", or { attribute = "<field>" }
 hierarchy  = { kind = "nested", prune_children = true }
@@ -69,7 +80,7 @@ require_member_visibility = { fraction = 0.05 }  # all | any | {fraction} | {cou
 content                   = { computed = ["centroid", "box"] }
 
   [layer.members]                                # membership in its own source, one row per
-  source = "hdbscan_members.parquet"             # (artifact, entity); or on the artifact row
+  source = "hdbscan_members"                     # (artifact, entity); or on the artifact row
 
   [layer.labels]                                 # sugar — see §4
   ...
@@ -82,7 +93,7 @@ content                   = { computed = ["centroid", "box"] }
   row and there are no copies to disagree. **A key on two rows is refused** as two artifacts under
   one name; that is the agreement refusal's successor, not its survival.
 - **`artifacts = [...]` inline** replaces `source` for an authored layer. Both is refused; neither
-  is legal (a declared, empty layer is the normal write-path state — see §5).
+  is legal (a declared, empty layer is the normal write-path state — see §6).
 - **Membership may be spelled by exclusion.** `excluding` beside `members`, for a set that is nearly
   the whole corpus. **The complement happens once, in the build**, against the entity space the build
   assigned. There is **no request-time complement and none is expressible** — `excluding` exists only
@@ -147,11 +158,74 @@ declaration. The one computable case was `public`, and **that refusal was delete
 `public` label layer under a gated parent now discloses nothing, because the viewer that cannot
 reach the cluster cannot reach its labels. The check became a property.
 
-## 5. The rest of the surface, briefly
+## 5. Artifacts declared by the points that belong to them
+
+`docs/design/artifacts-from-points.md` is the specification; it is **built** at both entry points.
+A clusterer emits a label per point, and the clusters exist only because points reference them. The
+whole design is that a cluster exists because points say it does, and everything else about it is
+optional enrichment.
+
+- **Membership from a point column needed no new surface.** `[layer.members]` already means one row
+  per `(artifact, entity)`, and a point table with a cluster column is that shape:
+  `source = "points"`, `fields = { key = "cluster_id", entity = "id" }`. Pinned byte-identical
+  against a conventional member table.
+- **A key may be an integer**, converted once for the roster and never per point. `null` and
+  exactly `-1` mean *this point is in no artifact* — the row is skipped and counted, not refused.
+  That one matters in practice: a condensed tree sheds a fifth to a quarter of a parent's points as
+  noise at each split, and the natural input shape used to fail the build on exactly that fraction.
+- **`value_set = "open" | "closed"` on `[[layer]]`**, default `closed`, decides whether a key no
+  artifact declares creates one. Under `open`, `artifacts` is enrichment rather than a roster: a
+  cluster the points name and the table omits exists without a title, a cluster the table carries
+  and no point names is an artifact with no members, and neither is an error.
+- **A list column is a hierarchy**, and the kind the layer already declares says how to read it —
+  `flat` plain multi-membership, `stacked`/`tiered` one entry per level, `nested` a lineage whose
+  adjacency declares parent edges. A shape disagreeing with the declared kind is refused; so is a
+  child named under two different parents, because there is no correct output.
+- **A membership can grow**, by a delta record rather than a restated membership. **The part that
+  fails silently**: a level is packed only above its published high-water, so a grown record below
+  that mark stays durable in the log and comes back after a restart *without* the point. A second
+  pin holds the log member and is released only by the fold's whole rewrite. If you touch packing
+  or rotation, `a_rotation_may_not_reclaim_the_member_holding_a_growth` is the test that notices.
+- **An ingest batch may carry a column named for a declared layer** — the layer's own name, as an
+  attribute column is named for the attribute's name and not its `field`. Its value is a key or a
+  list of keys, on exactly the rules the build reads. The *meaning* of a list lives in
+  `tessera-types` so the two entry points cannot drift; only the decode differs.
+- **Minting happens at the window close**, not at admission, because a publish command executes in
+  the bounded work lane without closing the open window and reads the same level cursor. Admission
+  keeps only what can refuse one caller's batch alone.
+
+**The rulings you must not undo** (`artifacts-from-points.md` §5): a key is a name and identity is
+what minting allocates, so a deleted key that returns is a *new* artifact; at most one live artifact
+per key per level; a suppressed artifact still exists, so a point naming its key joins it and it
+stays suppressed; and deleting an artifact deletes its suppressions, riding the same ack and the
+same fold rather than a separate sweep.
+
+**The one fail-open the design names is unreachable here, and know why before you refactor.**
+Written the natural way — *is this key unknown?* — against what is currently served, a suppressed
+artifact reads as absent and a second unsuppressed artifact appears under its key. Three things
+independently prevent it, and the innermost is that minting *is* a publication, and a publication
+refuses a key its level already holds by consulting the store rather than the served view. Breaking
+either resolution alone leaves the tests green; breaking both fails on that refusal — a 422, not a
+duplicate.
+
+## 6. The rest of the surface, briefly
 
 - **One declaration**, not `schema.toml` + `layers.toml`. `tessera build` with no flags is the whole
   invocation: `tessera.toml` (found by walking up) says where the declaration and bundle are, the
   declaration says where the sources are, the environment carries the identity key.
+- **`[sources]` names every file once** — free-form caller-chosen names mapped to paths — and every
+  `source` in the declaration names one of those keys, never a path. `--file NAME=PATH` binds on the
+  same name, so one override moves every reader of that file; it used to bind per object, where
+  missing one left that object silently reading the old file.
+- **`[defaults]` replaced `[corpus]`**, carrying a `source` and an `entity_id_field` that a view or
+  an attribute takes when it names neither. It deliberately reaches no vocabulary, layer, member
+  source or `point_visibility`: an absent source there is itself a declaration, and filling one in
+  would turn it into an acquisition nobody wrote.
+- **Any file may carry an attribute**, joined by entity id, with its own `source` and
+  `entity_id_field`. A row naming an entity the build did not load is **ignored and counted**, and
+  coverage prints against entities covered rather than rows dropped — a legitimate superset and a
+  broken join drop the same overwhelming fraction, and only that number tells them apart. Zero
+  coverage warns loudly and still builds.
 - **Two axes, everywhere** ([decision 0088](decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)):
   `visibility` (which access label) and `require_member_visibility` (how much of the membership the
   viewer must already see). Disclosure controls have **no defaults** — the defaultable value is
@@ -172,7 +246,7 @@ reach the cluster cannot reach its labels. The check became a property.
   accepted keys out of serde's own error message and compares them to `configuration.md`'s tables.
   **Parser and doc table move together** — a key you add is a doc change in the same commit.
 
-## 6. The gate is six commands now
+## 7. The gate is six commands now
 
 ```bash
 cargo test --workspace --no-fail-fast
@@ -183,7 +257,10 @@ python3 scripts/check-doc-links.py
 python3 scripts/check-corpus-integrity.py
 ```
 
-Baseline **1751 Rust tests, 0 failing, 11 ignored**, plus **210 client tests**.
+Baseline **1816 Rust tests, 0 failing, 11 ignored**, plus **210 client tests**.
+
+`tessera-engine --test write` has timing-sensitive deny-latency cases that can fail under load from
+a concurrent cargo invocation; re-run that binary in isolation before reporting one as yours.
 
 - **`--no-fail-fast` is not cosmetic.** Without it cargo stops at the first failing binary and skips
   the rest, so a run reporting no failures beside a *smaller* passing total reads as success. That
@@ -196,7 +273,7 @@ Baseline **1751 Rust tests, 0 failing, 11 ignored**, plus **210 client tests**.
   was never a timing flake: the request was being shed with a 429 the test discarded. Do not
   reintroduce a poll that waits on an instantaneous gauge without also watching `shed_total`.
 
-## 7. Open items in your path
+## 8. Open items in your path
 
 Things deliberately left, so you neither rediscover them nor assume they are done.
 
@@ -224,18 +301,42 @@ Things deliberately left, so you neither rediscover them nor assume they are don
 - **`clients/ts/viewer/smoke.mjs`** carries a stale assurance that `/v1/categories` answers 500 for a
   `derived` column "because the predicate is ⊘ unbuilt". The predicate is built; the test tolerates
   those 500s. Wants a look, and changing what it tolerates is behaviour rather than a rename.
+- **Four things `artifacts-from-points.md` §8 leaves open**, none blocking: whether a minted artifact
+  losing its last member should withdraw by default (the object *was* its membership, unlike a
+  curated set); how the roster appears in `reports/disclosure.json`, since a diff reading *417
+  clusters, unchanged* while every identity churned would mislead in exactly the case that matters;
+  the notification owed when a pipeline rerun deletes a cluster someone had suppressed, which rides
+  write-path §5.8's existing obligation rather than needing machinery; and whether a per-layer bound
+  on minted artifacts is worth the key.
+- ⊘ **The growth command still refuses an unknown key** whatever `value_set` says. It names an
+  artifact to add members to rather than a point declaring the artifact it belongs to, so it has no
+  build counterpart to differ from and sits outside decision 0091's concern. Deliberate, recorded.
+- **`membership = { attribute = … }` is declared and unbuilt**, and is a *different* feature from
+  everything in §5: it makes membership a predicate evaluated per request, where §5 materialises at
+  a build and maintains at ingest. A predicate over a `derived` vocabulary is answered by a masked
+  scan, which a viewport showing 263 clusters would pay 263 times.
 
-## 8. Where authority lives
+## 9. Where authority lives
 
 | | |
 |---|---|
 | `docs/design/configuration.md` | the normative surface — the closed key set, every refusal, the worked example |
-| `docs/design/annotation-write-cycle.md` §6.1 | artifact-side semantics |
+| `docs/design/artifacts-from-points.md` | artifacts declared by their points: the readers, `value_set`, lineage, growth, the wire column, minting, and §8's open items |
+| `docs/design/annotation-write-cycle.md` §6.1 | artifact-side semantics; §3.4 is the timing table |
 | `docs/design/annotation-representation.md` | the representation, and §5.0.4 on edges constraining write order |
-| `docs/decisions/0088`, `0089`, `0090` | the two axes; the dependency edge; a vocabulary's single axis |
+| `docs/decisions/0088`, `0089`, `0090`, `0091` | the two axes; the dependency edge; a vocabulary's single axis; build is ingest |
 | `docs/artifact-delivery.md` | **the status record for artifact work**, by owner direction — not GitHub issues. Move it with the work |
 
-One convention worth stating because it has bitten twice: **`conformance.md` r10 is the model for a
-correction that finds built machinery recorded as absent** — change the reason, move no coverage
-row, and say that a testing gap now exists where one previously did not. *We cannot test this* and
-*we have not tested this* are different claims, and only the first is an excuse.
+Two conventions worth stating because each has bitten more than once.
+
+**`conformance.md` r10 is the model for a correction that finds built machinery recorded as
+absent** — change the reason, move no coverage row, and say that a testing gap now exists where one
+previously did not. *We cannot test this* and *we have not tested this* are different claims, and
+only the first is an excuse.
+
+**Refuse only where something leaks or is irreversible.** CLAUDE.md's *What the strictness is for*
+is the rule, and this branch produced several refusals that had to be unpicked — a `public` label
+under a gated parent, a list column on a `flat` layer, a requirement that something declare entity
+space. Each looked principled and each foreclosed something a caller legitimately wanted. Outside
+the disclosure surface the default is to report the numbers and let the operator decide; a build
+input is recoverable, the operator is present, and the loop is fast.
