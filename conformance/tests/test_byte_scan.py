@@ -600,7 +600,11 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     # spanning more than one Roaring container.
     granted_blocks = ("boundary", "cross_hi", "high_tail")
     granted_descriptors = [catalogue.BLOCKS[n].descriptor.encode("ascii") for n in granted_blocks]
-    granted_terms = {catalogue.BLOCKS[n].term_id for n in granted_blocks}
+    # **The bundle's dictionary ids, not the corpus's own.** `mask_of` below reads the bundle's
+    # `terms/pairs.parquet`, whose `term_id` column is the dictionary's — and `public` is interned
+    # first at term 0, so the corpus's term `g` is the dictionary's `g + 1`. Asking with the wrong
+    # one names entirely different blocks and answers without complaining.
+    granted_terms = catalogue.dict_terms(oracle_bundle, granted_blocks)
 
     auth = server.authorise([d.decode("ascii") for d in granted_descriptors])
     token = auth["token"]

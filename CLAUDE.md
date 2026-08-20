@@ -82,9 +82,10 @@ genuinely divergent plugin before an oracle could disagree at all.
 *We cannot test this* and *we have not tested this* are different claims, and only the first is an
 excuse — a register that records built machinery as absent understates its own gap. Corrected
 2026-08-19; **I3 then moved to covered 2026-08-20**, the first row to move because a test was
-written rather than because machinery arrived. `conformance.md` r14 carries the per-row reasons —
-and its §0 carries the other half of that day's news: **the suite does not run green**, 27 of 432
-failing, for two causes outside the row that moved.
+written rather than because machinery arrived. `conformance.md` r15 carries the per-row reasons, and
+its §0 carries the other half of that day: the suite had not run at all since the configuration
+rework changed a CLI flag under it, and the 27 failures that surfaced when it could were the mask
+catalogue's own assumptions about term ids and entity ids. Both are fixed; it is **432 of 432**.
 
 ## What the strictness is for
 

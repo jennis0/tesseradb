@@ -1,12 +1,14 @@
 # Handover — artifact work, after Stage 5's tail and the I3 conformance row
 
-**Date:** 2026-08-20 · **Status:** Stage 5 fully closed. **One item left on the list and it opens
-with a discussion, not with code.** Branch `artifacts/stage-4`.
+**Date:** 2026-08-20 · **Status:** Stage 5 fully closed, the conformance suite green. **One item
+left on the list and it opens with a discussion, not with code.** Branches `artifacts/stage-4` and
+`conformance/fixture-drift`.
 
-Two of the three items this document carried on 2026-08-20 are done. The cut's owed tail is built —
-a dependent is dropped when the response does not contain what it depends on — and I3 containment
-has moved from *untested machinery* to a covered conformance row. What is left is Stage 6, and the
-owner has ruled that it does not start by writing code.
+Two of the three items this document carried on 2026-08-20 are done, and the finding they turned up
+is fixed. The cut's owed tail is built — a dependent is dropped when the response does not contain
+what it depends on — I3 containment has moved from *untested machinery* to a covered conformance
+row, and the suite that row lives in runs green again. What is left is Stage 6, and the owner has
+ruled that it does not start by writing code.
 
 **Read [`artifact-delivery.md`](artifact-delivery.md) first** — it is the status record for all
 artifact work by owner direction, not GitHub issues, and it wins over this document wherever they
@@ -35,31 +37,31 @@ fail-closed state to start from.
 Also still open at Stage 6 and unchanged: ⊘ the proportional criterion's denominator, since *"the
 points inside this shape"* declares no member set and its size moves at every write.
 
-### 1.2 Not artifact work, and larger than it looks: the conformance suite is red
+### 1.2 The conformance suite — found red, now green
 
-Found while writing the I3 row, recorded in [`design/conformance.md`](design/conformance.md) §0 and
-Appendix R r14, and **not fixed**. Whoever picks it up is not picking up artifact work.
+Found while writing the I3 row and **fixed** on branch `conformance/fixture-drift`
+([`design/conformance.md`](design/conformance.md) r14 diagnosed it, r15 is the fix). 432 of 432
+pass. Nothing in the engine moved: the diff is eleven Python files, every one of them the fixture
+learning something about the build it had been assuming.
 
-The suite could not spawn a server at all: `tessera serve` has taken `--deployment` in place of `-c`
-since the configuration rework, and `oracle/harness.py` still passed the old spelling, so every
-server-backed module died at startup. That one line is fixed. With it fixed, **27 of 432 tests fail
-in seven modules**, for two causes, neither a defect and neither a leak:
+Two things are worth carrying out of it.
 
-- **`public` is interned at term `0`**, so every mask-catalogue descriptor's dictionary id is one
-  higher than `oracle/catalogue.py` assumes.
-- **[Decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md) made the
-  within-signature tiebreak the Morton code**, and the mask catalogue is designed so that
-  `entity_id == source_id` — which held only while the tiebreak was the source id.
+**The suite could not spawn a server at all** — `tessera serve` has taken `--deployment` in place of
+`-c` since the configuration rework, and `oracle/harness.py` still passed the old spelling — so no
+module had run since that landed, CI included. A suite that is not in `CLAUDE.md`'s gate can die
+silently for weeks.
 
-`verify()` does not catch the second, and the reason is worth carrying: its block check compares
-posting **sets**, and a within-block permutation preserves a set. The check whose comment says it
-proves the identity does not test it at all. A fix needs a real source↔entity bridge in the oracle —
-`fx_key` is the one the corpus already plants — and a `verify()` check a set comparison cannot pass
-vacuously.
+**A check that compares sets cannot see a permutation.** The mask catalogue is designed so that
+`entity_id == source_id`, and
+[decision 0073](decisions/0073-entity-ties-are-ordered-by-morton-code.md)'s Morton tiebreak ended
+that. `verify()`'s block check compared each block's postings against its entity range **as a set**,
+which a within-block permutation preserves exactly — so the check whose comment said it re-derived
+the identity had never tested it, and every per-item join in the suite was silently comparing one
+item's planted value against another's. It now compares the two spaces item by item.
 
-`conformance/tests/test_label_containment.py` builds its own fixture and is unaffected, which is why
-the I3 row moves while the suite stays red. **A coverage row is not claimed on a green suite**, and
-§0 says so at the site.
+One fixture-shape fact came with it and no bridge fixes it: **an entity id's position inside its
+block now tracks its position on the map**, so a test denying "the lowest 2,400 entities" was
+denying a contiguous region.
 
 ## 2. What was built on 2026-08-20, so you do not rediscover it
 
@@ -184,9 +186,11 @@ Baseline **1819 Rust tests, 0 failing, 11 ignored**, plus **216 client tests** (
 skips the rest, so a run reporting no failures beside a *smaller* passing total reads as success.
 That has been mistaken for a green gate here.
 
-**The conformance suite is not in this gate and is red** (§1.2). It runs in CI, where it has been
-failing since the configuration rework. `python3 -m pytest conformance/tests -q` is how to see it;
-405 pass, 27 fail, and `conformance/tests/test_label_containment.py` is 16 of the 405.
+**The conformance suite is not in this gate**, and it is worth running anyway (§1.2):
+`python3 -m pytest conformance/tests -q` — 432 pass, of which
+`conformance/tests/test_label_containment.py` is 16. It runs in CI, where it had been failing since
+the configuration rework without that being visible here. ⊘ `conformance/suite` needs Python 3.11+
+for `tomllib` and does not run on this machine.
 
 ## 6. Where authority lives
 

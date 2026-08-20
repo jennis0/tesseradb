@@ -140,6 +140,7 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
 
+from oracle import catalogue
 from oracle import mask as mask_mod
 from oracle.catalogue import catalogue_points_path, ingest_fx_keys
 from oracle.harness import (
@@ -326,9 +327,12 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         member_after_ingest = active_member_of(wal_path)
         sync_after_ingest = read_sync_offset(wal_path)
 
-        term0 = 0
-        base_mask = mask_mod.mask_of({term0}, oracle_bundle.pairs_path())
-        assert len(base_mask) >= 3, "fixture must have >= 3 term-0 members for this test"
+        # **The corpus's first block, resolved through the dictionary**, not term id `0`: that is
+        # `public` now (`per-point-attributes.md` §3.8), which this corpus's points do not carry, so
+        # a hard-coded `0` selects nothing at all.
+        (base_term,) = catalogue.dict_terms(oracle_bundle, ["filler_head"])
+        base_mask = mask_mod.mask_of({base_term}, oracle_bundle.pairs_path())
+        assert len(base_mask) >= 3, "fixture must have >= 3 members in its first block"
         delete_entity, suppress_a, suppress_b = sorted(base_mask)[:3]
 
         def ext_b64(entity_id: int) -> str:
@@ -347,7 +351,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
         changes.apply(delete_entity, "delete")
         changes.apply(suppress_a, "suppress")
         changes.apply(suppress_b, "suppress")
-        resolved_mask = changes.resolve(base_mask, {term0})
+        resolved_mask = changes.resolve(base_mask, {base_term})
 
         dictionary = oracle_bundle.dictionary
         bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
@@ -402,7 +406,7 @@ def test_no_acked_operation_is_lost_when_the_unsynced_tail_is_discarded(
                 "tail — it was acked out of a buffer that was never made durable"
             )
 
-            token = srv2.authorise([dictionary[term0].decode("ascii")])["token"]
+            token = srv2.authorise([dictionary[base_term].decode("ascii")])["token"]
             tiles, _points = decode_viewport(srv2.viewport(token, VIEW, zoom, bbox, k=200))
             assert {t: v for t, v, m, _s in tiles} == expected_counts, (
                 "an acked delete or suppression did not survive the discard of the unsynced tail"
@@ -439,9 +443,12 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         high_water_after_ingest = status_after_ingest["entity_id_high_water"]
 
         # --- suppress two fixture items, delete a third -----------------------------------
-        term0 = 0
-        base_mask = mask_mod.mask_of({term0}, oracle_bundle.pairs_path())
-        assert len(base_mask) >= 3, "fixture must have >= 3 term-0 members for this test"
+        # **The corpus's first block, resolved through the dictionary**, not term id `0`: that is
+        # `public` now (`per-point-attributes.md` §3.8), which this corpus's points do not carry, so
+        # a hard-coded `0` selects nothing at all.
+        (base_term,) = catalogue.dict_terms(oracle_bundle, ["filler_head"])
+        base_mask = mask_mod.mask_of({base_term}, oracle_bundle.pairs_path())
+        assert len(base_mask) >= 3, "fixture must have >= 3 members in its first block"
         ordered = sorted(base_mask)
         delete_entity, suppress_entity_a, suppress_entity_b = ordered[0], ordered[1], ordered[2]
 
@@ -461,10 +468,10 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
         changes.apply(delete_entity, "delete")
         changes.apply(suppress_entity_a, "suppress")
         changes.apply(suppress_entity_b, "suppress")
-        resolved_mask_before = changes.resolve(base_mask, {term0})
+        resolved_mask_before = changes.resolve(base_mask, {base_term})
 
         dictionary = oracle_bundle.dictionary
-        auth = srv.authorise([dictionary[term0].decode("ascii")])
+        auth = srv.authorise([dictionary[base_term].decode("ascii")])
         token = auth["token"]
 
         bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
@@ -492,7 +499,7 @@ def test_deny_ops_and_ingest_survive_a_sigkill_restart(catalogue_bundle_root: Pa
                 "module doc on why this is the ingested batch's replay evidence"
             )
 
-            auth2 = srv2.authorise([dictionary[term0].decode("ascii")])
+            auth2 = srv2.authorise([dictionary[base_term].decode("ascii")])
             token2 = auth2["token"]
             raw2 = srv2.viewport(token2, VIEW, zoom, bbox, k=200)
             tiles2, _points2 = decode_viewport(raw2)

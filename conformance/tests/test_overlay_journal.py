@@ -277,9 +277,22 @@ def denied_overlay(catalogue_bundle: Bundle, overlay_density_server):
     )
     assert v_before == len(base_mask)
 
+    # **Spread along the block, not taken from its head.** Since
+    # [decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md) the
+    # within-signature tiebreak is the Morton code, so an entity id's position inside its block
+    # tracks its position on the map. `ordered[:2400]` is therefore a contiguous *region* — it
+    # empties whole tiles, and the point-level test below then has too few tiles left to draw a
+    # conclusion from, which is how this surfaced. Striding restores what taking a prefix used to
+    # mean back when the tiebreak was the source id: a scattered sample of the block.
     ordered = sorted(base_mask)
-    deletes = ordered[:N_DELETES]
-    suppressions = ordered[N_DELETES : N_DELETES + N_SUPPRESSIONS]
+    total = N_DELETES + N_SUPPRESSIONS
+    step = len(ordered) / total
+    picked = [ordered[int(i * step)] for i in range(total)]
+    assert len(set(picked)) == total, "the stride picked an entity twice"
+    # Interleaved rather than split in two, so neither op is a region either.
+    deletes = picked[0::3]
+    suppressions = [e for i, e in enumerate(picked) if i % 3]
+    assert len(deletes) == N_DELETES and len(suppressions) == N_SUPPRESSIONS
 
     _apply(journal, deletes, "delete")
     _apply(journal, suppressions, "suppress")

@@ -132,8 +132,10 @@ def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
 
 
 @pytest.fixture(scope="module")
-def entity_of_fx() -> dict[int, int]:
-    return {key: e for e, key in enumerate(cat.fx_keys())}
+def entity_of_fx(catalogue_bundle) -> dict[int, int]:
+    """`fx_key -> entity id`. It used to be `enumerate(fx_keys())`, which is `fx_key -> **source**
+    id` — the same number only while the build's tiebreak was the source id (decision 0073)."""
+    return cat.entity_of_fx_key(catalogue_bundle)
 
 
 @pytest.fixture(scope="module")
@@ -345,7 +347,7 @@ def test_a_keyword_leaf_composes_with_the_other_families(
 
 
 def test_the_dictionary_s_first_and_last_values_are_served_exactly(
-    catalogue_server, catalogue_filter_columns, cases, entity_of_fx
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, cases, entity_of_fx
 ):
     """**The ordinal boundaries** (records §10). The base build's dictionary is sorted, so the
     fixture's two anchors are its ordinal 0 and its ordinal `len - 1`.
@@ -364,10 +366,12 @@ def test_the_dictionary_s_first_and_last_values_are_served_exactly(
     token = catalogue_server.authorise(list(case.grants))["token"]
     m_auth = set(case.entities)
 
-    for label, entity, value in [
+    # The anchors are planted on **source** ids; every set below is in entity space.
+    for label, source, value in [
         ("first", cat.SUBMITTER_FIRST_ID, cat.SUBMITTER_FIRST),
         ("last", cat.SUBMITTER_LAST_ID, cat.SUBMITTER_LAST),
     ]:
+        entity = catalogue_bundle.entity_of_source(source)
         assert entity in m_auth, f"{label}: this principal cannot see the anchor at all"
         for operator in ("eq", "prefix"):
             expr = {"submitter": {operator: value}}
@@ -383,7 +387,7 @@ def test_the_dictionary_s_first_and_last_values_are_served_exactly(
 
 
 def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
-    catalogue_server, catalogue_filter_columns, cases, entity_of_fx, unfiltered
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, cases, entity_of_fx, unfiltered
 ):
     """**The sentinel** (records §4.3, §10). A needle absent from every layer's dictionary is an
     ordinal no slot holds, and the scan runs anyway.
@@ -431,7 +435,8 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
     raw = catalogue_server.viewport(
         token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=control
     )
-    assert _served_entities(raw, entity_of_fx) == {SINGLE_CARRIER_ID}, (
+    carrier = catalogue_bundle.entity_of_source(SINGLE_CARRIER_ID)
+    assert _served_entities(raw, entity_of_fx) == {carrier}, (
         "the control failed — a value one visible entity holds was not served, so the four empty "
         "answers above may be a column that matches nothing at all"
     )

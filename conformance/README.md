@@ -26,18 +26,22 @@ CI runs it on every pull request and every push to `main`, alongside the rest of
 (`.github/workflows/ci.yml`). That is conformance §6's per-PR tier; the nightly and release tiers
 it also specifies do not exist.
 
-> **⚠ The suite does not run green (2026-08-20): 405 pass, 27 fail.** Until that date the count was
-> zero — `tessera serve` had taken `--deployment` in place of `-c` since the configuration rework
-> and `harness.spawn_server` still passed the old spelling, so every server-backed module died at
-> startup. With that one line fixed, 27 tests in seven modules fail for **two causes, both fixture
-> drift and neither a defect**: `public` is now interned at term `0`, so every catalogue
-> descriptor's dictionary id is one higher than `oracle/catalogue.py` assumes; and decision 0073
-> made the within-signature tiebreak the Morton code, which broke the mask catalogue's designed
-> `entity_id == source_id` identity. `verify()` does not catch the second — its block check
-> compares posting *sets*, and a within-block permutation preserves a set, so the check that says
-> it proves the identity does not. The fix is a real source↔entity bridge in the oracle (`fx_key`
-> is the one the corpus already plants) and a `verify()` check a set comparison cannot pass
-> vacuously. `test_label_containment.py` builds its own fixture and is unaffected.
+**432 of 432 pass (2026-08-20).** They had not, for the weeks between the configuration rework and
+that date: `tessera serve` took `--deployment` in place of `-c` and `harness.spawn_server` still
+passed the old spelling, so every server-backed module died at startup and nothing noticed. With
+that fixed, 27 failed for **two causes, both the mask catalogue's own assumptions and neither a
+defect** — `public` interned at term `0`, which makes a block's dictionary id one higher than the
+corpus's own, and decision 0073's Morton tiebreak, which broke the designed
+`entity_id == source_id` identity. Both are fixed; `oracle/catalogue.py`'s header carries the
+argument and `conformance.md` §0 the account.
+
+The one to carry: **`verify()`'s block check compares posting *sets***, and a within-block
+permutation preserves a set — so the check whose comment said it re-derived the identity had never
+tested it. `verify()` now compares the two spaces item by item (check 3b), and every planted column
+is keyed by entity through `Bundle.source_of_entity` rather than by source id under an equality.
+
+⊘ `conformance/suite` needs Python 3.11+ for `tomllib`; it is the correctness suite's shared battery
+rather than a row of the invariant matrix, and it is not covered by that count.
 
 
 (`reference/.venv/bin/pytest reference/tests -v` must also stay green. It is **not** run in CI:

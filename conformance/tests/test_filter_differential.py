@@ -81,9 +81,14 @@ def _tiles_by_id(tiles) -> dict[int, tuple[int, int, int]]:
     return {t: (v, m, s) for t, v, m, s in tiles}
 
 
-def _served_entities(raw: bytes) -> set[int]:
+def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
     """The served set as entity ids, joined through the planted `fx_key` — the suite's one
     legitimate handle→item route (no reverse map, no I10 tension).
+
+    `entity_of_fx` is passed rather than derived here because the last hop of that join, `fx_key`'s
+    source id to the entity the build gave it, is the bundle's to answer (`cat.entity_of_fx_key`).
+    This function used to build it from `enumerate(fx_keys())`, which is the source id — the same
+    number only while the build's tiebreak was the source id (decision 0073).
 
     **A response that served nothing carries no points frame**, and therefore no points schema:
     under the streamed format a frame is written per non-empty chunk, so zero points is zero
@@ -92,11 +97,16 @@ def _served_entities(raw: bytes) -> set[int]:
     the zero-visibility principal and a filter that matches nothing both reach it legitimately, and
     both are cases this differential exists to check rather than to skip.
     """
-    entity_of_fx = {key: e for e, key in enumerate(cat.fx_keys())}
     if not any(kind == 3 for kind, _ in split_frames(raw)):
         return set()
     points = decode_viewport_points(raw)
     return {entity_of_fx[k] for k in points.column("fx_key").to_pylist()}
+
+
+@pytest.fixture(scope="module")
+def entity_of_fx(catalogue_bundle) -> dict[int, int]:
+    """See [`_served_entities`]: the handle→item join's last hop is the bundle's."""
+    return cat.entity_of_fx_key(catalogue_bundle)
 
 
 @pytest.fixture(scope="module")
@@ -109,7 +119,9 @@ def sweep_cases():
 # ---------------------------------------------------------------------------------------------
 
 
-def test_the_filter_columns_are_decorrelated_from_the_grant_structure(catalogue_filter_columns):
+def test_the_filter_columns_are_decorrelated_from_the_grant_structure(
+    catalogue_bundle, catalogue_filter_columns
+):
     """If the attribute tracked the permission, every cross-principal assertion below would pass
     while meaning nothing: masking and filtering would select the same items for different
     reasons. So the decorrelation is a checked precondition, not a comment — each cycling
@@ -143,7 +155,11 @@ def test_the_filter_columns_are_decorrelated_from_the_grant_structure(catalogue_
         )
     # hollow: declared, planted nowhere. solo: exactly one member, visible to the crossover pair.
     assert "hollow" not in members
-    assert members["solo"] == {cat.DEPARTMENT_SOLO_ID}
+    # `DEPARTMENT_SOLO_ID` is the **source** id the value was planted on; `members` is keyed by
+    # entity, so the comparison crosses the two spaces and has to say so.
+    assert members["solo"] == {catalogue_bundle.entity_of_source(cat.DEPARTMENT_SOLO_ID)}
+    # Its block, in either space: a block's source range and entity range hold the same items,
+    # which `verify()`'s check 3b asserts item by item.
     assert cat.DEPARTMENT_SOLO_ID in cat.BLOCKS["cross_lo"].entities
 
 
@@ -194,7 +210,7 @@ def test_meta_publishes_the_filter_operands(catalogue_server):
 
 @pytest.mark.parametrize("case", cat.catalogue(), ids=lambda c: c.name)
 def test_i12_a_filter_narrows_matched_and_never_touches_visible(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, case
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, case
 ):
     """The sweep: one composed expression, every catalogue principal, exact agreement.
 
@@ -244,8 +260,8 @@ def test_i12_a_filter_narrows_matched_and_never_touches_visible(
     assert {t: m for t, (_v, m, _s) in filt_tiles.items() if m} == expected_matched
 
     # The served sets: filtered ⊆ unfiltered (I12 on the wire), and filtered == oracle M_sel.
-    plain_served = _served_entities(plain)
-    filt_served = _served_entities(filtered)
+    plain_served = _served_entities(plain, entity_of_fx)
+    filt_served = _served_entities(filtered, entity_of_fx)
     assert filt_served <= plain_served, (
         "the filtered response served points the unfiltered one did not — a filter widened the "
         "served set, which is I12 inverted"
@@ -257,7 +273,7 @@ def test_i12_a_filter_narrows_matched_and_never_touches_visible(
 
 
 def test_a_live_theta_never_thins_a_filtered_selection(
-    catalogue_bundle, catalogue_density_server, catalogue_filter_columns
+    catalogue_bundle, catalogue_density_server, catalogue_filter_columns, entity_of_fx
 ):
     """§8.5's match-layer count rule, at the configuration the density rule actually ships in.
 
@@ -295,7 +311,7 @@ def test_a_live_theta_never_thins_a_filtered_selection(
     # exactly — the same equality the saturated sweep asserts, now with θ live enough to have
     # thinned it if the rule regressed.
     m_sel = filt.evaluate(SWEEP_EXPR, catalogue_filter_columns, set(case.entities))
-    assert _served_entities(filtered) == m_sel
+    assert _served_entities(filtered, entity_of_fx) == m_sel
 
 
 def test_the_empty_combinators_are_their_operators_identities(
@@ -332,7 +348,7 @@ def test_the_empty_combinators_are_their_operators_identities(
 
 
 def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
-    catalogue_server, sweep_cases
+    catalogue_bundle, catalogue_server, entity_of_fx, sweep_cases
 ):
     """Five spellings of "matches nothing this principal may know about", one body.
 
@@ -399,7 +415,8 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
     solo = catalogue_server.viewport(
         token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": "solo"}}
     )
-    assert _served_entities(solo) == {cat.DEPARTMENT_SOLO_ID}, (
+    solo_entity = catalogue_bundle.entity_of_source(cat.DEPARTMENT_SOLO_ID)
+    assert _served_entities(solo, entity_of_fx) == {solo_entity}, (
         "the solo control failed — a single-member value was not served, so the five empty "
         "bodies above may just be a filter that matches nothing"
     )
@@ -428,7 +445,8 @@ ROUTED_EXPRS = [
     "case_name", ["full_100pct", "crossover_above", "sparse_0_01pct"]
 )
 def test_a_public_category_answers_exactly_what_the_definition_says(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases, case_name, name, expr
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases,
+    case_name, name, expr
 ):
     """**The routed differential.** `archive` is `visibility = "public"`, so decision 0063 answers its
     `eq` and `in` from the column's derived per-value postings — a corpus-wide set intersected with
@@ -450,7 +468,7 @@ def test_a_public_category_answers_exactly_what_the_definition_says(
     raw = catalogue_server.viewport(
         token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
     )
-    assert _served_entities(raw) == m_sel, f"{case_name} / {name}"
+    assert _served_entities(raw, entity_of_fx) == m_sel, f"{case_name} / {name}"
 
     expected_matched = vp.counts(catalogue_bundle, m_sel, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     tiles = _tiles_by_id(decode_viewport(raw)[0])
@@ -460,7 +478,7 @@ def test_a_public_category_answers_exactly_what_the_definition_says(
 
 
 def test_the_two_routes_compose_with_each_other(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
 ):
     """A `public` leaf and a `derived` leaf in one expression. The two are evaluated by
     different constructions and must still intersect and union as sets — a routed leaf that
@@ -479,7 +497,7 @@ def test_the_two_routes_compose_with_each_other(
         raw = catalogue_server.viewport(
             token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
         )
-        assert _served_entities(raw) == m_sel, expr
+        assert _served_entities(raw, entity_of_fx) == m_sel, expr
         assert m_sel <= m_auth, "I12: a filter may not widen the mask"
 
 
@@ -507,7 +525,7 @@ DISTRIBUTED_EXPR = {
 
 
 def test_a_nested_tree_agrees_with_brute_force_and_its_algebra(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
 ):
     case = sweep_cases["crossover_above"]
     token = catalogue_server.authorise(list(case.grants))["token"]
@@ -521,7 +539,7 @@ def test_a_nested_tree_agrees_with_brute_force_and_its_algebra(
     nested = catalogue_server.viewport(
         token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=NESTED_EXPR
     )
-    assert _served_entities(nested) == m_sel
+    assert _served_entities(nested, entity_of_fx) == m_sel
     expected_matched = vp.counts(catalogue_bundle, m_sel, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     tiles = _tiles_by_id(decode_viewport(nested)[0])
     assert {t: m for t, (_v, m, _s) in tiles.items() if m} == expected_matched
@@ -606,7 +624,7 @@ def test_an_over_deep_expression_is_a_contract_refusal_not_a_server_fault(
 
 
 def test_none_of_requires_a_value_and_names_one_column(
-    catalogue_server, catalogue_filter_columns, sweep_cases
+    catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
 ):
     """**Decision 0066 on the wire**: `none_of` means *carries a value in this column, and none of
     these matches it* — so an item carrying no value for the column is outside it, where a
@@ -622,7 +640,7 @@ def test_none_of_requires_a_value_and_names_one_column(
     expr = {"none_of": [{"department": {"eq": "alpha"}}]}
 
     raw = catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr)
-    served = _served_entities(raw)
+    served = _served_entities(raw, entity_of_fx)
 
     m_auth = set(case.entities)
     expected = filt.evaluate(expr, catalogue_filter_columns, m_auth)

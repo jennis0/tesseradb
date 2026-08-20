@@ -578,6 +578,47 @@ class Bundle:
             self._entity_to_external = mapping
         return self._entity_to_external[entity_id]
 
+    def source_of_entity(self, entity_id: int) -> int:
+        """The source-corpus id the build assigned `entity_id` to.
+
+        **The bridge between the fixture's own space and the bundle's**, and the reason it has to
+        exist rather than being an equality. A fixture plants its values by source id — it is what
+        the generation functions take and what the Parquet rows are keyed by — while every answer
+        the engine gives is in entity space. Those two coincided for the mask catalogue until
+        [decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md) made
+        the within-signature tiebreak the Morton code; the corpus's blocks still land on the entity
+        ranges they were designed to, but the order *inside* a block is now geometric and no longer
+        the source order.
+
+        A fixture that assumes the equality is therefore comparing one item's planted value against
+        another item's served one, and every such comparison is silently wrong rather than loudly
+        so. Route the join through here.
+
+        The 8 bytes are little-endian of the source id, which is the build's stated convention for
+        a minted external id (`external_id_of`), so this is one decode rather than a second index.
+        """
+        return int.from_bytes(self.external_id_of(entity_id), "little")
+
+    def entity_of_source(self, source_id: int) -> int:
+        """[`source_of_entity`] the other way, over an inversion built once.
+
+        `KeyError` where the corpus's source id reached no entity — a row the build did not load,
+        which is a fixture fault and not something to paper over with a default.
+        """
+        if not hasattr(self, "_source_to_entity"):
+            self.external_id_of(0)  # populates `_entity_to_external`
+            self._source_to_entity = {
+                int.from_bytes(ext, "little"): ent
+                for ent, ext in self._entity_to_external.items()
+            }
+        return self._source_to_entity[source_id]
+
+    def entities_by_source(self) -> dict[int, int]:
+        """The whole of [`entity_of_source`] as a dict, for a caller keying a planted column by
+        entity id — one pass rather than a lookup per item."""
+        self.entity_of_source(0)
+        return self._source_to_entity
+
     def _ext_locator_path(self) -> Path:
         """The locator's real path: memo §7 gives it a fixed name (`ext-locator.u32`, singular,
         no `<k>` suffix) *alongside the extents*, which the build writes under

@@ -195,15 +195,23 @@ def test_fx_key_is_served_in_the_points_batch(catalogue_bundle: Bundle, catalogu
     )
     assert points.num_rows > 0, "no points were served, so nothing was checked"
 
-    # The fixture planted `source_id -> fx_key`, and `entity_id == source_id` for this corpus
-    # (`verify()` proves that from the bundle's own postings). The identity->entity map is built
-    # from the segment because only the fixture may make that translation: on the viewer plane an
-    # identity is opaque (I10), and this test is the fixture, not a viewer.
+    # The fixture planted `source_id -> fx_key`, so the join is identity -> entity -> **source**.
+    # The middle hop comes from the segment and the last from the external-ID sidecar; both are
+    # translations only the fixture may make, because on the viewer plane an identity is opaque
+    # (I10) and this test is the fixture, not a viewer.
+    #
+    # **The last hop used to be an equality**, `entity_id == source_id`, and it stopped being one
+    # when decision 0073 made the within-signature tiebreak the Morton code. What that cost is
+    # exactly this assertion: it compared one item's planted key against another item's served one,
+    # which is a comparison that fails loudly here and would have failed *silently* anywhere the
+    # values were not unique per item.
     planted = cat.fx_keys()
     seg = catalogue_bundle.segment(cat.VIEW_ID)
     entity_of = {int(seg.tessera_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)}
     for ident, key in zip(points.column("tessera_id").to_pylist(), points.column("fx_key").to_pylist()):
-        assert key == planted[entity_of[ident]], (
-            f"served fx_key {key} for tessera_id {ident} is not the planted key "
-            f"{planted[entity_of[ident]]} — the join the whole catalogue depends on is wrong"
+        source = catalogue_bundle.source_of_entity(entity_of[ident])
+        assert key == planted[source], (
+            f"served fx_key {key} for tessera_id {ident} (entity {entity_of[ident]}, source "
+            f"{source}) is not the planted key {planted[source]} — the join the whole catalogue "
+            "depends on is wrong"
         )
