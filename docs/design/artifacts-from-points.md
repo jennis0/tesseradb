@@ -1,16 +1,18 @@
 # Artifacts declared by the points that belong to them — design
 
 **Date:** 2026-08-20
-**Status:** Draft — owner-ruled in discussion, **§2, §3 and §4 built at build time**. The readers
-take an integer key, skip a noise one, and read a list column as the artifacts a point belongs to
-plus the edges between them; `value_set` decides whether a member key may create an artifact, at a
-build. ⊘ **§6 (the ingest half of `value_set`) and §5's write-path rulings are unbuilt, and §6 is
-blocked rather than merely outstanding** — nothing in the write path can add an entity to an
-artifact that already exists, and the document this one extends rules the consequence *never*
-(`annotation-write-cycle.md` §3.4). §6.1 states both, and no part of the ingest half is built: an
-ingest batch carrying a column named for a layer is refused today exactly as any undeclared column
-is. A layer declared `open` therefore governs what a *build* mints and nothing at ingest. The
-rulings in §5 are the owner's; the rest follows from them. Extends
+**Status:** Draft — owner-ruled in discussion, **§2, §3 and §4 built at build time, and §6's growth
+mechanism built on the write path**. The readers take an integer key, skip a noise one, and read a
+list column as the artifacts a point belongs to plus the edges between them; `value_set` decides
+whether a member key may create an artifact, at a build. Points now join an artifact that already
+exists at ingest too — a durable delta record, one store method, and a log pin the fold releases
+(§6.1) — which is what [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)
+obliges and what `annotation-write-cycle.md` §3.4 now says. ⊘ **Two things remain, and both sit on
+top of the growth rather than beside it: a point cannot name its artifacts on the wire, and an
+unknown key is refused rather than minted** (§6.2). An ingest batch carrying a column named for a
+layer is refused today exactly as any undeclared column is, so a layer declared `open` still governs
+what a *build* mints and nothing at ingest. The rulings in §5 are the owner's; the rest follows from
+them. Extends
 [`configuration.md`](configuration.md) (normative for the surface) and
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §6.1 (normative for artifact semantics).
 
@@ -162,78 +164,92 @@ the artifact would serve unsuppressed in the gap. One removal rule, as write-pat
 
 ## 6. Build and ingest are one rule at two entry points
 
-⊘ **The ingest half is unbuilt, and none of it is partly built.** `value_set` is carried on the
-layer declaration — which is what the write path reads, and why it is not on the acquisition
-block — and is consulted at a build only. `/control/ingest` accepts a reserved column or a
-declared attribute's name and nothing else, so a column named for a layer is refused there exactly
-as a misspelt one is. §6.1 is why that is where it stopped.
+Everything above holds identically whichever way a point arrives. What that requires of the write
+path is one thing that did not exist: **a membership that can grow**, which is what a member table
+at a build has always done and what no route into the artifact store could do — every one of them
+wrote a whole record, and the two mutating passes only removed. That is built (§6.1).
 
-Everything above holds identically whichever way a point arrives. At ingest a point may carry a
-cluster id, or a lineage naming clusters that do not exist yet; under `open` the chain is minted and
-linked in one batch, **parent before child** — the ordering constraint edges already carry
+⊘ **The two halves of the ingest route that sit on top of it are not** (§6.2): a point cannot name
+its artifacts on the wire, and an unknown key is refused rather than minted. When they land, a point
+carrying a lineage that names clusters which do not exist yet mints the chain and links it in one
+batch, **parent before child** — the ordering constraint edges already carry
 (`annotation-representation.md` §5.0.4), applied to a batch rather than to a build.
 
 Computed content needs nothing extra: centroid, box and hull are recomputed per viewer from current
 membership, so they follow new points without invalidation.
 
-### 6.1 What this needs that does not exist — investigated 2026-08-20, owner's to rule
+### 6.1 How a membership grows — built 2026-08-20
 
-Two obstacles, and the first is a contradiction in the corpus rather than a gap in the code.
+Three pieces, and the third is the one that decides whether it is correct rather than merely
+working.
 
-**The document this one extends says the consequence is *never*.**
-`annotation-write-cycle.md` §3.4's timing table carries the row *an ingested point enters
-enumerated membership — **never**, a layer refresh*, reasoned from **I8** and *the caller declared
-the set*. §5's second ruling here says the opposite in as many words: a point carrying a suppressed
-artifact's key **joins the membership**. Both documents are normative for artifact semantics, so
-one of them is wrong, and which one is a ruling rather than a reading. I8 itself is about a
-**generating set** and not about a membership, so the literal invariant is not at stake — what is
-at stake is whether an enumerated membership is a *declaration* the caller owns or a *set the
-service maintains*, which is exactly the distinction §9 uses to keep predicate membership out of
-scope.
+**A durable record carrying a delta.** `ArtifactGrow` names a layer, a level and, per artifact, an
+ordinal and the entities joining it as a portable Roaring bitmap. Restating the whole record at its
+own ordinal would have replayed correctly and needed no new shape — it is what a publication already
+does — but it costs `O(|membership|)` bytes on the fsync path for every batch naming the artifact,
+~12 MB for a 10⁸-member cluster, which is not a write path. The ordinal is **resolved on the
+executor and recorded**, exactly as a publication records the ordinals it claimed: replay applies
+what was decided rather than re-resolving a key whose index has since moved.
 
-**And nothing in the write path can add an entity to an artifact that already exists.** This is not
-a wiring gap. Every route into `ArtifactStore` writes a whole record: publication is append-only
-and refuses a key the level already holds (an edit is delete plus re-ingest, decision 0047), and
-the fold's `repack_all` and `retire` only ever *remove*. There is one durable record shape for a
-membership and it carries the set entire. Growing one therefore needs, at minimum:
+**One store method that grows a membership**, shared by the live path and replay because both go
+through the record. It is a second way state enters a structure whose *removal* rules have been
+conflated twice, so it says at the site how it stands to them: it adds bits and never removes one,
+and a member that joined has no separate provenance once it is in the set — the fold's rewrite and
+its retirement cannot tell it from a declared member, which is what stops growth becoming a third
+removal rule by the back door. An ordinal naming no record adds nothing, so a growth cannot
+resurrect an artifact a fold retired.
 
-- a durable record that carries a **delta** rather than a set. Restating the record at the same
-  ordinal is the shape that needs no new variant, and it costs `O(|membership|)` bytes on the
-  fsync path per batch that names the artifact — a cluster of 10⁸ members is ~12 MB per batch —
-  which is not a viable write path, so the record has to be new;
-- a store method that grows a membership, which is a **second way state enters** a structure whose
-  removal rules have already been conflated twice (write-path §5.4). A growth path is the same
-  class of mistake in the other direction, and it wants the same treatment: one rule, stated once;
-- and the packing bookkeeping, which is where it actually bites. `published_through` is a
-  per-level high-water and `unpublished` packs the tail above it, so a grown record below that mark
-  never reaches a manifest again; meanwhile the rotation pin is released as soon as every level is
-  marked published. A growth that is WAL-durable and never repacked is therefore reclaimable, and
-  what comes back after a restart is the artifact **without** the point — acked, silent, and
-  indistinguishable from a criterion the artifact failed to clear.
+**The packing rule, which is where it bites.** A level is packed only above its published
+high-water, so a grown record below that mark never reaches a manifest by the append-only route; the
+log holds the only copy of the join until the fold rewrites every level whole. So the log is
+**pinned at the growth**, and the mark that releases a packed tail does *not* release it —
+`mark_published` and `mark_growth_packed` are separate calls with separate preconditions, the second
+made only by the fold and only after its flip. Releasing at the first is the silent failure this
+whole piece exists against: the record is reclaimed, the extent still holds the pre-growth
+membership, and the artifact comes back from a restart **without** the point — acked, quiet, and
+indistinguishable from an artifact that failed its existence criterion. `artifact_growth.rs` asserts
+it at the one place it bites: a rotation may not reclaim the member holding a growth, and the same
+membership comes back whole after the fold with the log deleted outright.
 
-**The fold is the candidate home, and the reason is already written down.** The row form covers
-members holding **base** rows (`annotation-write-cycle.md` §4.1), so a point ingested since the
-last fold contributes nothing to any masked count until the fold folds it — the growth has no
-observable effect before then whatever route it takes. The fold already rewrites every level whole
-(`repack_all`, `ordinal_lo = 0`), so it is the one existing publication that a grown membership
-reaches without new packing rules. What that leaves to decide is only how the growth stays durable
-in the interval, and how the pin holds until it lands.
+**The fold is the home, and the interval needed durability rather than a second packing rule.** A
+membership is projected through **base** rows (`annotation-write-cycle.md` §4.1), so a point
+ingested since the last fold contributes to no masked count however its membership was recorded —
+but that is a statement about *newly ingested* points, and it is not what makes the fold sufficient
+here. A point that already holds a base row joins and is counted at the ack, projection and all;
+what waits for the fold is only where the join is *stored*. Growth is therefore observable
+immediately in exactly the case the fold's timing argument does not cover, and correct in both.
 
-**§5's third ruling is already satisfied by construction, and is the one part of this that needed
-no work.** The resolution a point's key would take is `ArtifactStore::ordinal_of_key`, which reads
-the store's key index. That index loses a key at exactly one event — the fold retiring the
-artifact's own entity, which is a *deletion* — and a suppression touches no stored structure at all
-(Rule S). So the lookup is suppression-blind because there is nothing in it that could see a
-suppression, which is the shape §5 asks for: written against the served view instead, a suppressed
-artifact reads as absent and the key mints a second, unsuppressed one. Nothing needs to be added to
-keep that property; it needs only not to be replaced by a `verdict` call.
+**Two refusals and one no-op.** A key the level does not hold refuses the whole batch rather than
+growing the artifacts beside it; a member that is deleted refuses it too, on the rule a publication
+naming one already follows (§3.1) — a suppressed member joins, being live and merely outside every
+mask. A batch with nothing joining appends no record and acks: nothing joining is a thing a caller
+can honestly say, and pinning the log at a growth that changed nothing would be the cost of refusing
+it twice over.
 
-**Where minting would hook in.** At a build it is one arm of one function: `resolve_member`'s
-`ValueSet::Open` branch, which inserts an address into the plan and lets the rest of the pass treat
-it as any other artifact. At ingest there is no equivalent site yet, and the natural one is beside
-`commit_artifacts` on the write executor rather than in the handler — ordinals are claimed serially
-there, which is the same reason a publication does not claim them at admission and a discovered
-vocabulary does not mint its codes there.
+### 6.2 What remains, and where it hooks in
+
+⊘ **A point cannot name its artifacts on the wire.** `/control/ingest` accepts a reserved column or
+a declared attribute's name and nothing else, so a column named for a layer is refused there exactly
+as a misspelt one is. The seam is the write executor's growth command: an ingest batch carrying such
+a column resolves its keys and arrives at that command in the same commit as its rows. Until it
+lands, growth is reachable only through the engine's own `grow_memberships`.
+
+⊘ **An unknown key is refused rather than minted.** `value_set` is carried on the layer declaration
+— which is what the write path reads, and why it is not on the acquisition block — and is consulted
+at a build only. At a build minting is one arm of one function: `resolve_member`'s `ValueSet::Open`
+branch, which inserts an address into the plan and lets the rest of the pass treat it as any other
+artifact. At ingest the site is beside the growth command on the write executor rather than in the
+handler — ordinals are claimed serially there, which is the same reason a publication does not claim
+them at admission and a discovered vocabulary does not mint its codes there.
+
+**§5's third ruling is satisfied by construction and needed no work.** The resolution a point's key
+takes is `ArtifactStore::ordinal_of_key`, which reads the store's key index. That index loses a key
+at exactly one event — the fold retiring the artifact's own entity, which is a *deletion* — and a
+suppression touches no stored structure at all (Rule S). So the lookup is suppression-blind because
+there is nothing in it that could see a suppression, which is the shape §5 asks for: written against
+the served view instead, a suppressed artifact reads as absent and the key mints a second,
+unsuppressed one. Nothing needs to be added to keep that property; it needs only not to be replaced
+by a `verdict` call.
 
 ## 7. Joins are reported, not refused
 
@@ -278,6 +294,31 @@ a predicate over a `derived` vocabulary is answered by a masked scan, which a vi
 clusters would pay 263 times.
 
 ## Appendix R — review trail
+
+**2026-08-20 — r5. The growth mechanism is built, and the packing rule is the part that decides it
+is correct rather than working.**
+[Decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) ruled r4's
+contradiction — an ingested point *does* enter an enumerated membership, because a build
+reading a member table has always done exactly that — and what r4 investigated was then built as it
+described: a delta record (`ArtifactGrow`), one store method taken by both the live path and replay,
+and a log pin that only the fold's whole rewrite releases. §6.1 is now what exists rather than what
+is needed, and the three refusals it names are the whole of what growth declines to do.
+
+**The failure r4 named as the one to get right is the one the tests are built around.** A grown
+record sits below its level's published high-water and no tail pack reaches it, so releasing the log
+at `mark_published` would leave the join durable nowhere: the artifact comes back from a restart at
+its pre-growth size, acked and silent. It is asserted where it bites — a rotation may not reclaim
+the member holding a growth (removing the pin fails that case and nothing else, which is why the
+case is written against rotation rather than against a restart alone) — and the fold's rewrite is
+asserted by deleting the log outright and reading the membership back from the prefix.
+
+**One thing §6.1 had slightly wrong, and it is worth stating because it cuts the other way.** The
+argument that a growth has no observable effect before the fold is about points *ingested* since the
+last structural pass, which hold no base row; a point that already holds one joins and is counted at
+the **ack**, because the row-space projection is keyed on the store's version and growth moves it.
+So the fold is the right home for where a membership is *stored*, and the interval is not
+unobservable — it is observable and correct. That is a stronger position than the one the
+investigation described, not a weaker one.
 
 **2026-08-20 — r4. §6 was attempted and stopped, and §6.1 is what the attempt found.** The stage
 was to be the first half of the ingest route — a column named for a layer, resolved against

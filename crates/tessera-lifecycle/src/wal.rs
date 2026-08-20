@@ -349,6 +349,46 @@ pub enum WalRecord {
         extend_runs: Vec<EntityRun>,
         artifacts: Vec<PublishedArtifact>,
     },
+    /// Entities joining the memberships of artifacts that **already exist** — a build's member
+    /// table performed at the other entry point
+    /// ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+    ///
+    /// **A delta, never a restated membership, and that is the whole reason this variant exists.**
+    /// Restating the record at its own ordinal replays correctly and needs no new shape — it is
+    /// what [`WalRecord::ArtifactPublish`] already does — but it costs `O(|membership|)` bytes on
+    /// the fsync path for every batch that names the artifact: ~12 MB per batch for a 10⁸-member
+    /// cluster. A write path priced by the size of what it is joining is not a write path.
+    ///
+    /// **It grows a membership and can do nothing else.** There is no ordinal here that names no
+    /// record: growth against a hole adds nothing rather than creating something, so this record
+    /// cannot resurrect an artifact a fold retired, and it cannot mint one either — an unknown key
+    /// is refused at admission (⊘ minting at ingest is unbuilt;
+    /// [`artifacts-from-points.md`](../../../docs/design/artifacts-from-points.md) §6).
+    ///
+    /// **Nothing else in the log carries this, and the pin is what keeps it.** A grown record sits
+    /// *below* its level's published high-water, and the append-only packer covers only the tail
+    /// above it — so until the fold rewrites every level whole, this record is the only copy of the
+    /// join. `ArtifactStore::oldest_wal_pos` holds the log at it, and the fold releases it.
+    ArtifactGrow {
+        layer: String,
+        level: u32,
+        growth: Vec<MembershipGrowth>,
+    },
+}
+
+/// One artifact's growth inside a [`WalRecord::ArtifactGrow`].
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MembershipGrowth {
+    /// The position in the level whose membership grows. **Resolved from the caller's key on the
+    /// executor and recorded**, exactly as a publication records the ordinals it claimed: replay
+    /// applies what was decided rather than re-resolving a key whose index has since moved.
+    pub ordinal: u32,
+    /// The entities joining, CRoaring portable — **entity space and a delta**. Entity space for
+    /// [`PublishedArtifact::members`]'s reason (a row-space set is a frozen projection); a delta
+    /// for this variant's own.
+    pub joining: Vec<u8>,
 }
 
 /// One artifact inside a [`WalRecord::ArtifactPublish`].
@@ -525,8 +565,12 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// [`tessera_types::layer::LayerDeclaration`] its `value_set` — an *inserted* struct field, so
 /// every field after it decodes from the wrong bytes on version 13's rules, and the fields after it
 /// are the gate and the membership requirement. A registration whose criterion decoded out of
-/// alignment is a disclosure control read from whatever follows it.
-const WAL_VERSION: u16 = 14;
+/// alignment is a disclosure control read from whatever follows it. Version 15 adds
+/// [`WalRecord::ArtifactGrow`], appended so no existing discriminant moves — and the bump is the
+/// guard, because a version-14 reader meeting one would decode a growth as whatever it thinks that
+/// index means, which is nothing: the members that joined would be silently absent from the
+/// artifact a caller was acked for.
+const WAL_VERSION: u16 = 15;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

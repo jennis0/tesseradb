@@ -251,10 +251,13 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             }
             WalRecord::ChangeByEntity { .. } => {}
             // A row-less allocation moves the *other* mark, and moving this one with it would
-            // hand every point id below the row-less region away in a single step.
+            // hand every point id below the row-less region away in a single step. A growth
+            // allocates nothing at all — it names an artifact that already has its ordinal and its
+            // entity — so it moves neither mark.
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
-            | WalRecord::ArtifactPublish { .. } => {}
+            | WalRecord::ArtifactPublish { .. }
+            | WalRecord::ArtifactGrow { .. } => {}
         }
     }
     hw

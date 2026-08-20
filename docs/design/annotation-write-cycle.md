@@ -362,7 +362,7 @@ both takes both columns.
 | A denied point leaves every count, hull, criterion and containment test | **accept** | the ack asserts the disposition is in force (write-path §5.2); any later point serves a hidden item inside an aggregate — fail-open |
 | A **permissive** layer's `G` loses the deleted member, and its content serves again | **the fold** (spec §2.1) | the interim is fail-closed — containment fails for everyone while the member is denied — so the only cost of waiting is availability. Earlier is the deny lane, where finding the affected sets is the inverted lookup §4.5 exists to avoid; the fold already computes the list for §4.2's report |
 | An ingested point enters predicate membership | **its flush** | counts are row-space questions and the point has no row before flush (§11.2); earlier is impossible, later is a gratuitous staleness |
-| An ingested point enters enumerated membership | **its flush**, as a predicate membership does — the point joins and the artifact then behaves as though it had been there all along ([decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)) | a build reading a member table has always entered points into an enumerated membership, so a build is the same operation at the other entry point. This row read **never** and cited I8; I8 governs a *generating set*, which is a different set, is never grown either way, and was not at stake. ⊘ The growth mechanism is unbuilt: a delta record, one store method, and the packing rule that keeps a grown record reachable after a restart |
+| An ingested point enters enumerated membership | **its flush**, as a predicate membership does — the point joins and the artifact then behaves as though it had been there all along ([decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)) | a build reading a member table has always entered points into an enumerated membership, so a build is the same operation at the other entry point. This row read **never** and cited I8; I8 governs a *generating set*, which is a different set, is never grown either way, and was not at stake. The growth mechanism is built (`artifacts-from-points.md` §6.1): a delta record, one store method taken by both the live path and replay, and a log pin that only the fold's whole rewrite releases — the packing rule is what keeps a grown record reachable after a restart, since a level is packed only above its published high-water. ⊘ What is unbuilt is the **wire**: a point cannot yet name its artifacts on an ingest batch, so a join arrives through the engine's own growth call rather than beside the row |
 | An artifact's row operator is rebased over the merged span | **the merge that publishes it** | a merge permutes row space inside its span, so a row id there names a different entity afterwards (lifecycle §2.1); an operator holding extent rows is wrong from the publication until it is rebased. Entity space is untouched, so the ground truth needs nothing |
 | Membership row forms reconcile with executed deletes | **the fold** (rep §5.0.3's pass, minus `G`) | the interim is already enforced by the overlay — the fold changes what is *stored*, never what is *served*, so its timing is an efficiency, not a safety property |
 | A deleted `G` member's exclusion becomes structural (postings blanked) | **the fold** | the deny entry enforces it until the flip; Rule F retires the entry in the same publication that blanks the postings — no gap (compaction §4) |
@@ -778,6 +778,25 @@ For mechanical integration; neither sibling document is edited here.
 
 ## Appendix R
 
+**2026-08-20 — the growth the ruled row promised is built, and §3.4's unbuilt marker moves to the wire.** What
+an ingested point needed in order to join an enumerated membership was machinery that did not exist:
+a durable record carrying a **delta** rather than a restated set (a restatement costs ~12 MB per
+batch naming a 10⁸-member cluster, on the fsync path), one store method that grows a membership, and
+the packing bookkeeping that keeps a grown record reachable. The third is the one that decides it:
+a level is packed only above its published high-water, so releasing the log at the mark that covers
+a packed *tail* would leave the join durable nowhere and the artifact back at its pre-growth size
+after a restart — acked, silent, indistinguishable from an artifact below its criterion. The fold's
+whole rewrite is what reaches it, so the pin it releases is a separate call with a separate
+precondition. `artifacts-from-points.md` §6.1 is the mechanism; what the row still marks unbuilt is the
+wire, which cannot yet carry a point's artifacts.
+
+Two things this document said that the building qualified. **§4.1's base-row rule is about the
+member, not about the membership**: a point that already holds a base row joins and is counted at
+the ack, because the row-space projection is keyed on the artifact store's version — so the interval
+before the fold is observable and correct, not merely unobservable, and the fold's role is where the
+membership is *stored*. And growth is a second way state enters the artifact store, which is why the
+one method says at the site how it stands to write-path §5.4's two removal rules: it adds bits and
+removes none, and a member that joined has no separate provenance once it is in the set.
 
 **2026-08-20 — the contested membership row is ruled, and the rule is larger than the row**
 ([decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)). §3.4 said an

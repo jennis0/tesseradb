@@ -2599,6 +2599,73 @@ impl Engine {
             .collect()
     }
 
+    /// Add points to the memberships of artifacts that already exist, each named by the key it was
+    /// published under.
+    ///
+    /// **A build reading a member table has always done this; this is the same operation at the
+    /// other entry point** ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+    /// The artifact then behaves exactly as though the point had been there all along: there is no
+    /// state in which a cluster holds some of its points because of how they arrived.
+    ///
+    /// **A suppressed artifact grows like any other and stays suppressed.** The key resolves
+    /// against the *store*, never against what is served — so a suppression cannot be defeated by
+    /// growing the artifact it hides, and cannot make the growth refuse either
+    /// (`artifacts-from-points.md` §5).
+    ///
+    /// The two member checks are `publish_artifacts`'s, unchanged and for its reasons: a member
+    /// with no row would count towards the declared size the proportional criterion divides by
+    /// while being visible to nobody, and a **deleted** member can never contribute to a count
+    /// again. A **suppressed** member joins: it is a live member temporarily outside every mask.
+    ///
+    /// ⊘ **A point cannot yet name its artifacts on the wire**, which is what
+    /// `artifacts-from-points.md` §6 exists to close and the next stage's work; `/control/ingest`
+    /// refuses a column named for a layer exactly as it refuses a misspelt one. Nor is an unknown
+    /// key minted — it is refused here, naming the key.
+    pub fn grow_memberships(
+        &self,
+        layer: String,
+        level: u32,
+        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        let high_water = self.allocator_high_water() as u32;
+        let rowless: u64 = joins
+            .iter()
+            .map(|j| j.joining.cardinality() - j.joining.range_cardinality(0..high_water))
+            .sum();
+        if rowless > 0 {
+            return Err(crate::write::AcceptError::Exec(
+                tessera_lifecycle::ExecError::LayerRefused {
+                    detail: format!(
+                        "{rowless} of these joining member(s) name no point; a membership is a set \
+                         of documents, and a member with no row would count towards the \
+                         artifact's declared size while being visible to nobody"
+                    ),
+                },
+            ));
+        }
+
+        let generation = self.generation();
+        let deleted: Vec<u64> = joins
+            .iter()
+            .flat_map(|join| join.joining.iter())
+            .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
+            .map(u64::from)
+            .take(16)
+            .collect();
+        if !deleted.is_empty() {
+            return Err(crate::write::AcceptError::Exec(
+                tessera_lifecycle::ExecError::LayerRefused {
+                    detail: format!(
+                        "these joins name deleted entities {deleted:?}; a deleted member contributes \
+                         to no count, so the join is refused rather than applied into silence"
+                    ),
+                },
+            ));
+        }
+
+        self.write.grow_memberships(layer, level, joins)
+    }
+
     /// Which layers this principal may know exist, and which of those are currently served.
     ///
     /// **Two questions, answered in that order, and the order is the disclosure control.**

@@ -112,6 +112,17 @@ pub enum RegistryError {
     /// Refused rather than resolved by search order, which would make the edge's meaning depend on
     /// how the levels were walked.
     AmbiguousParent { layer: String, key: String },
+    /// A growth named a key this level does not hold.
+    ///
+    /// ⊘ **Minting from an unknown key at ingest is unbuilt** and is the next stage
+    /// (`artifacts-from-points.md` §6): under `value_set = "open"` an unknown key will create the
+    /// artifact rather than refuse. Until then the refusal is the honest answer — the alternative
+    /// is accepting a join into nothing and acking it.
+    NoSuchArtifact {
+        layer: String,
+        level: u32,
+        key: String,
+    },
     /// The entity space could not supply the layer's entity or its reserved runs.
     Alloc(AllocError),
 }
@@ -188,6 +199,12 @@ impl std::fmt::Display for RegistryError {
                 "{layer} publishes an artifact whose parent {key} exists in more than one coarser \
                  level; which level the edge meant would depend on the search order, so it is \
                  refused rather than resolved"
+            ),
+            RegistryError::NoSuchArtifact { layer, level, key } => write!(
+                f,
+                "{layer} level {level} holds no artifact under the key {key}, so there is \
+                 nothing for these members to join; an unknown key does not yet mint an \
+                 artifact at ingest"
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -673,6 +690,84 @@ impl LayerRegistry {
             extend_runs,
             artifacts,
         })
+    }
+
+    /// Validates a batch of joins against the artifacts they name and returns the record that makes
+    /// them durable — on [`prepare_publish`]'s contract: the caller appends, syncs, and only then
+    /// applies.
+    ///
+    /// **It allocates nothing, and that is the difference from a publication.** A join takes no
+    /// ordinal and no entity: the artifact exists, so the identities it is addressed by exist too.
+    /// So there is no allocator here and a refusal spends nothing — where a refused publication has
+    /// to be argued about, this one is simply a refusal.
+    ///
+    /// **A key the level does not hold is refused.** ⊘ Minting from an unknown key at ingest is
+    /// unbuilt and is the next stage (`artifacts-from-points.md` §6); until it lands, the honest
+    /// answer to a key naming nothing is that it names nothing. The resolution is
+    /// [`ArtifactStore::ordinal_of_key`] — the *store's* index, never the served view — which is
+    /// what keeps a suppressed artifact from reading as absent and having a second, unsuppressed
+    /// artifact minted under its key (§5).
+    ///
+    /// **Nothing joining is not an error.** A caller may honestly name an artifact and add nothing
+    /// to it; `Ok(None)` says the record would be empty and no append is owed. Refusing would block
+    /// a write over an input that discloses nothing.
+    ///
+    /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    pub fn prepare_grow(
+        &self,
+        layer_name: &str,
+        level: u32,
+        incoming: &[crate::membership::IncomingGrowth],
+        store: &ArtifactStore,
+    ) -> Result<Option<WalRecord>, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+
+        // A predicate layer's membership is evaluated per request, so there is nothing to grow —
+        // and a stored answer beside a live predicate is exactly what `prepare_publish` refuses for
+        // the same reason.
+        if layer.declaration.membership != MembershipSource::Enumerated {
+            return Err(RegistryError::NotEnumerated {
+                layer: layer_name.to_string(),
+            });
+        }
+        if layer.runs.get(level as usize).is_none() {
+            return Err(RegistryError::NoSuchLevel {
+                layer: layer_name.to_string(),
+                level,
+            });
+        }
+
+        // Every key resolves before anything is written: the whole batch or none of it, on
+        // `prepare_publish`'s rule. A partially applied growth would leave a caller unable to say
+        // which of their joins happened.
+        let mut growth = Vec::with_capacity(incoming.len());
+        for join in incoming {
+            let ordinal = store
+                .ordinal_of_key(layer_name, level, &join.key)
+                .ok_or_else(|| RegistryError::NoSuchArtifact {
+                    layer: layer_name.to_string(),
+                    level,
+                    key: join.key.clone(),
+                })?;
+            if join.joining.is_empty() {
+                continue;
+            }
+            growth.push(crate::wal::MembershipGrowth {
+                ordinal,
+                joining: serialise_members(&join.joining),
+            });
+        }
+        if growth.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(WalRecord::ArtifactGrow {
+            layer: layer_name.to_string(),
+            level,
+            growth,
+        }))
     }
 
     /// Validates a drop and returns the record that makes it durable, on [`prepare_create`]'s

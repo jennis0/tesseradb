@@ -1269,8 +1269,8 @@ mod ack {
     /// Proof that a generation carrying a command's effect is live.
     ///
     /// [`super::Responder::ack`] cannot send a *successful* receipt without one, and the only
-    /// producers are the **two** named constructors below — the same two `scripts/check-layers.sh`
-    /// pins to this file.
+    /// producers are the named constructors below — the ones `scripts/check-layers.sh` pins to this
+    /// file.
     #[must_use = "a Published token exists to be handed to `ack`; dropping it discards the proof"]
     pub(super) struct Published(());
 
@@ -1293,11 +1293,25 @@ mod ack {
             Published(())
         }
 
-        /// A registry record applied. **The registry is not carried by a generation**, which is why
-        /// this is honest without a swap: `/v1/meta` and every reachability check read it from
-        /// `LiveState` behind its own lock, so the effect is in force the instant
-        /// `LayerRegistry::apply` returns. A generation swap would prove something about row space,
-        /// which a layer has none of.
+        /// A command that resolved to **no change at all**: every key it named exists and nothing
+        /// was joining, so no record was appended and no structure moved.
+        ///
+        /// This is honest without a swap for the one reason none of the others can claim — there is
+        /// no effect whose being in force could lag the ack. It is the narrowest of the four and
+        /// the easiest to misuse: *nothing to do* and *not done yet* are the same shape from the
+        /// caller's side and opposite from the service's, so a site reaching for this must have
+        /// established the first. Takes the resolved batch, on the constructors above's rule: the
+        /// argument is the evidence that something was looked at.
+        pub(super) fn nothing_to_apply(_resolved: &[tessera_lifecycle::IncomingGrowth]) -> Self {
+            Published(())
+        }
+
+        /// A registry or artifact-store record applied. **Neither structure is carried by a
+        /// generation**, which is why this is honest without a swap: `/v1/meta`, every reachability
+        /// check and every membership read them from `LiveState` behind its own lock, so the effect
+        /// is in force the instant `LayerRegistry::apply` or `ArtifactStore::apply` returns. A
+        /// generation swap would prove something about row space, which a layer has none of and an
+        /// artifact holds only through its members.
         ///
         /// Takes the applied record for the same reason the replay constructor takes its ids: the
         /// argument is the evidence, so the token cannot be minted at a site that has applied
@@ -1526,6 +1540,17 @@ impl LiveState {
         for (layer, level, len) in levels {
             artifacts.mark_published(&layer, level, len);
         }
+    }
+
+    /// Release the log from every growth the fold's whole rewrite has just made durable — see
+    /// [`tessera_lifecycle::membership::ArtifactStore::mark_growth_packed`].
+    ///
+    /// **Called from the fold and from nowhere else.** `mark_memberships_published` is the
+    /// append-only packer's mark and covers only the tail above each level's high-water; a growth
+    /// lands below it. Releasing the pin there would leave a join durable nowhere the next restart
+    /// reads.
+    fn mark_growth_packed(&self) {
+        lock_recover(&self.artifacts).mark_growth_packed();
     }
 
     /// Apply the fold's executed deletions to the resident artifact store — the second half of the
@@ -2592,6 +2617,27 @@ impl WritePath {
             Ok(Ack::ArtifactsPublished { entities }) => Ok(entities),
             Ok(other) => {
                 unreachable!("a PublishArtifacts command answers ArtifactsPublished, not {other:?}")
+            }
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Grow the memberships of artifacts that already exist. See `Executor::commit_growth`.
+    pub(crate) fn grow_memberships(
+        &self,
+        layer: String,
+        level: u32,
+        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+    ) -> Result<(), AcceptError> {
+        let receipt = self.handle()?.submit(Command::GrowMemberships {
+            layer,
+            level,
+            joins,
+        })?;
+        match receipt.outcome {
+            Ok(Ack::MembershipsGrown) => Ok(()),
+            Ok(other) => {
+                unreachable!("a GrowMemberships command answers MembershipsGrown, not {other:?}")
             }
             Err(e) => Err(AcceptError::Exec(e)),
         }
@@ -5665,6 +5711,12 @@ impl Executor {
         let retired = executed.clone();
         self.live.retire_artifacts(&retired);
         self.live.mark_memberships_published();
+        // **And the growths, which only a whole rewrite reaches.** `rewrite_membership_extents`
+        // wrote every level entire, from the resident store, so a membership that grew since the
+        // last fold is in the prefix `CURRENT` now names — the one publication that carries a
+        // record sitting below its level's high-water. Until this point the log was holding those
+        // records as the only copy.
+        self.live.mark_growth_packed();
         self.membership_extents = repacked;
         *lock_recover(&self.health.last_fold_report) = degraded;
 
@@ -7680,6 +7732,11 @@ impl Executor {
                 level,
                 artifacts,
             } => self.commit_artifacts(layer, level, artifacts, respond),
+            Command::GrowMemberships {
+                layer,
+                level,
+                joins,
+            } => self.commit_growth(layer, level, joins, respond),
         }
     }
 
@@ -7753,6 +7810,89 @@ impl Executor {
         // has nowhere to reach, which is what the rotation pin holds the log for.
         self.deny_dirty = true;
         respond.ack(Ack::ArtifactsPublished { entities }, &published);
+    }
+
+    /// Grow the memberships of artifacts that already exist — `commit_artifacts`'s sequence
+    /// (validate, append, sync, apply) with nothing allocated, because a join takes no ordinal and
+    /// no entity.
+    ///
+    /// **This is the second way state enters the artifact store, and the first that is not a whole
+    /// record.** It is a *growth* path, which is why it is admissible at all: write-path §5.4's two
+    /// removal rules govern how a bit **leaves** a membership, and this adds bits that are then
+    /// retired by exactly the routes every other member is retired by — `ArtifactStore::grow`
+    /// carries the argument in full, and there is one such method rather than one per caller.
+    ///
+    /// **Nothing is applied before the record is durable**, on `commit_artifacts`'s reason, one
+    /// step sharper: a join applied and then lost is an artifact that comes back from a restart
+    /// *without* the point, which nothing distinguishes from an artifact that failed its existence
+    /// criterion. The same failure is what the pin `ArtifactStore::mark_growth_packed` releases
+    /// exists against, on the packing side.
+    ///
+    /// ⊘ **The wire seam is here.** A point naming its artifacts on the wire
+    /// (`artifacts-from-points.md` §6) is the next stage: an ingest batch carrying a column named
+    /// for a layer would resolve its keys and arrive at this command, in the same commit as the
+    /// rows — which is where minting from an unknown key would hook in too, beside this call rather
+    /// than in the handler, because ordinals are claimed serially on this thread. Today the only
+    /// caller is `Engine::grow_memberships`, and `/control/ingest` refuses a column named for a
+    /// layer exactly as it refuses a misspelt one.
+    fn commit_growth(
+        &mut self,
+        layer: String,
+        level: u32,
+        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+        respond: Responder,
+    ) {
+        let prepared = self.live.with_publication_state(|registry, store, _| {
+            registry.prepare_grow(&layer, level, &joins, store)
+        });
+        let record = match prepared {
+            // Every key resolved and nothing was joining. No record is owed for a no-op, and
+            // appending an empty one would pin the log at a growth that changed nothing.
+            Ok(None) => {
+                respond.ack(Ack::MembershipsGrown, &Published::nothing_to_apply(&joins));
+                return;
+            }
+            Ok(Some(record)) => record,
+            Err(e) => {
+                respond.fail(ExecError::LayerRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
+
+        // The position the record will occupy, read **before** the append — `commit_artifacts`'s
+        // reason, and here it is the bound that holds the log until the fold rewrites the level
+        // whole, since a grown record sits below the high-water the tail pack starts from.
+        let position = self.wal.position();
+
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                "ALARM: a membership growth could not be made durable; the entities did not join"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+
+        let undecodable = self
+            .live
+            .with_publication_state(|_, store, _| store.apply(&record, position));
+        if undecodable > 0 {
+            // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
+            // — and alarmed rather than asserted, because the alternative to noticing is an
+            // artifact that is quietly the size it was before.
+            tracing::error!(
+                count = undecodable,
+                "ALARM: a membership growth did not survive its own round trip"
+            );
+        }
+        let published = Published::registry_applied(&record);
+        // A growth against an artifact **above** its level's high-water is carried by the next
+        // tail pack like any other unpublished record; one below it waits for the fold, held in the
+        // log by the pin. Marking the manifest dirty is what gets the first case published.
+        self.deny_dirty = true;
+        respond.ack(Ack::MembershipsGrown, &published);
     }
 
     /// Validate, allocate, append, sync, apply — in that order, which is the whole of the

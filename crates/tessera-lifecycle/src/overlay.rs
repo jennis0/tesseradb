@@ -342,7 +342,8 @@ pub fn replay<'a>(
             // to the artifact store, rebuilt in that same second pass.
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
-            | WalRecord::ArtifactPublish { .. } => {}
+            | WalRecord::ArtifactPublish { .. }
+            | WalRecord::ArtifactGrow { .. } => {}
         }
     }
 

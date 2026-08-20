@@ -174,6 +174,25 @@ pub enum Command {
         level: u32,
         artifacts: Vec<crate::membership::IncomingArtifact>,
     },
+    /// Add entities to the memberships of artifacts that **already exist**, each named by the key
+    /// it was published under.
+    ///
+    /// **Members are entities already**, on [`Command::PublishArtifacts`]'s rule, and the keys are
+    /// **not** resolved here: `ordinal_of_key` reads state only the executor may write, so a
+    /// handler that resolved first could be overtaken by a fold retiring the artifact between its
+    /// lookup and the enqueue, and would have grown an ordinal a later publication now holds.
+    ///
+    /// The whole batch or none of it: a key that names no artifact refuses the command rather than
+    /// growing the rest, so a caller is never left unable to say which of their joins happened.
+    ///
+    /// **It rides the bounded, sheddable lane**, like the publication it grows — a join refused for
+    /// load is backpressure and the caller retries, where a deny refused for load is an item left
+    /// visible. See [`Command::is_never_shed`].
+    GrowMemberships {
+        layer: String,
+        level: u32,
+        joins: Vec<crate::membership::IncomingGrowth>,
+    },
 }
 
 impl Command {
@@ -346,6 +365,11 @@ pub enum Ack {
     /// between; across two principals it is a corpus-wide count over objects one of them may not
     /// see, which is C8's row. The `tessera_id` is the only artifact address that crosses the wire.
     ArtifactsPublished { entities: Vec<EntityId> },
+    /// Memberships grew. **Nothing to return: the caller named the artifacts**, by the keys they
+    /// published them under — the same reason [`Ack::Changed`] carries nothing. No identity was
+    /// minted, so there is no new `tessera_id` to hand back, and the ordinals the growth resolved
+    /// to are exactly what never crosses the wire (C8).
+    MembershipsGrown,
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"

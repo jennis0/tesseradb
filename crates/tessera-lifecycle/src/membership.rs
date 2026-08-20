@@ -190,6 +190,44 @@ impl IncomingArtifact {
     }
 }
 
+/// Entities joining an artifact that already exists, as a caller offers them.
+///
+/// **Addressed by the caller's own key, and resolved on the executor.** An ordinal never crosses
+/// the wire (C8) and the caller holds none; the key is the address they published under, and
+/// `ArtifactStore::ordinal_of_key` is what resolves it — a lookup in the *store*, never in what is
+/// served, so a suppressed artifact resolves like any other and a growth against it leaves it
+/// suppressed (`artifacts-from-points.md` §5).
+///
+/// **Members are entities, resolved at admission**, on [`IncomingArtifact`]'s rule: no blinded
+/// identifier reaches durable state, where a key rotation would silently redirect it (I10).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IncomingGrowth {
+    /// The key the artifact was published under. An unknown one is refused rather than minted —
+    /// ⊘ minting from an unknown key at ingest is unbuilt, and is the next stage
+    /// (`artifacts-from-points.md` §6).
+    pub key: String,
+    /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
+    /// caller can honestly say, and it discloses nothing.
+    pub joining: Bitmap,
+}
+
+impl IncomingGrowth {
+    /// Builds one from resolved entities — [`IncomingArtifact::from_entities`]'s reason: the
+    /// bitmap type stays inside this crate, so a request plane can name a set without being able
+    /// to do arithmetic on one.
+    pub fn from_entities(key: String, joining: impl IntoIterator<Item = EntityId>) -> Self {
+        let mut bitmap = Bitmap::new();
+        for entity in joining {
+            // Entity space is `u32` by I9, so the narrowing is total.
+            bitmap.add(entity.raw() as u32);
+        }
+        IncomingGrowth {
+            key,
+            joining: bitmap,
+        }
+    }
+}
+
 /// What one fold's deletions took from one artifact — a row of the fold's report.
 ///
 /// **Addressed by the caller's own key where they supplied one**, because that is the name they can
@@ -338,6 +376,14 @@ pub struct ArtifactStore {
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
     oldest_wal_pos: Option<u64>,
+    /// Where the oldest **growth** not yet covered by a whole-level rewrite sits in the log — the
+    /// second half of the same bound, held separately because it is released by a different event.
+    ///
+    /// A publication's records are free once the level's tail is packed and marked; a growth's are
+    /// not, because it lands *below* the high-water the packer starts from and no append-only pack
+    /// will ever reach it. Only the fold's whole rewrite does, so only
+    /// [`ArtifactStore::mark_growth_packed`] clears this. See [`ArtifactStore::grow`].
+    grown_wal_pos: Option<u64>,
     /// Per `(layer, level)`, the ordinal high-water already durable in a manifest. Everything at or
     /// above it lives only in the WAL, which is what the rotation pin holds the log for.
     published_through: BTreeMap<(String, u32), u32>,
@@ -477,19 +523,26 @@ impl ArtifactStore {
     /// until it lands, an unbounded log is the safe direction and a visible one. It is the same
     /// posture `oldest_wal_pos`'s unknown-position arm takes in the ingest buffer, and for the same
     /// reason: a sequence that grows is noticed, a record that vanishes is not.
+    ///
+    /// **Two bounds, one answer.** The oldest unpacked publication, and the oldest growth no whole
+    /// rewrite has covered — the minimum of the two, because rotation takes a single bound and the
+    /// two are released by different events (`grown_wal_pos`).
     pub fn oldest_wal_pos(&self) -> Option<u64> {
-        self.oldest_wal_pos
+        match (self.oldest_wal_pos, self.grown_wal_pos) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
-    /// Applies a durable publication — the one path by which memberships enter, taken by both the
-    /// live write path and replay.
+    /// Applies a durable publication or a durable growth — the **two** paths by which memberships
+    /// enter, taken by both the live write path and replay.
     ///
     /// `position` is where the record sits in the log. **Replay applies the recorded ordinals and
     /// entities rather than re-deriving them**, on [`crate::LayerRegistry::apply`]'s contract: a
     /// re-derived ordinal would move an artifact under every suppression naming it.
     ///
-    /// Records other than a publication are ignored, so a caller can hand the whole replay stream
-    /// to this and to the registry alike.
+    /// Records other than these two are ignored, so a caller can hand the whole replay stream to
+    /// this and to the registry alike.
     ///
     /// Returns how many memberships **did not decode** — always zero in any healthy log. The count
     /// is returned rather than logged because this crate carries no tracing dependency by design
@@ -498,15 +551,29 @@ impl ArtifactStore {
     /// that never cleared its criterion.
     #[must_use]
     pub fn apply(&mut self, record: &crate::wal::WalRecord, position: u64) -> usize {
-        let crate::wal::WalRecord::ArtifactPublish {
-            layer,
-            level,
-            artifacts,
-            ..
-        } = record
-        else {
-            return 0;
-        };
+        match record {
+            crate::wal::WalRecord::ArtifactPublish {
+                layer,
+                level,
+                artifacts,
+                ..
+            } => self.apply_publish(layer, *level, artifacts, position),
+            crate::wal::WalRecord::ArtifactGrow {
+                layer,
+                level,
+                growth,
+            } => self.apply_growth(layer, *level, growth, position),
+            _ => 0,
+        }
+    }
+
+    fn apply_publish(
+        &mut self,
+        layer: &str,
+        level: u32,
+        artifacts: &[crate::wal::PublishedArtifact],
+        position: u64,
+    ) -> usize {
         let mut refused = 0;
         for published in artifacts {
             // Damage is a refusal, not an empty membership — see `deserialise_members`. Skipping
@@ -536,7 +603,7 @@ impl ArtifactStore {
             };
             self.put(
                 layer,
-                *level,
+                level,
                 published.ordinal,
                 ArtifactRecord {
                     entity: published.entity,
@@ -559,6 +626,72 @@ impl ArtifactStore {
         });
         self.version += 1;
         refused
+    }
+
+    fn apply_growth(
+        &mut self,
+        layer: &str,
+        level: u32,
+        growth: &[crate::wal::MembershipGrowth],
+        position: u64,
+    ) -> usize {
+        let mut refused = 0;
+        for grown in growth {
+            // Damage is a refusal, not an empty delta, on the publication's argument: a growth
+            // decoded short is an acked join that silently did not happen, and the artifact then
+            // serves the count it had before — which nothing distinguishes from a criterion it
+            // failed to clear.
+            let Some(joining) = deserialise_members(&grown.joining) else {
+                refused += 1;
+                continue;
+            };
+            self.grow(layer, level, grown.ordinal, &joining);
+        }
+        // **Held from here until a whole rewrite covers it, and `mark_published` does not release
+        // it.** The append-only packer starts at the level's high-water and a grown record sits
+        // below it, so this record is the only durable copy of the join until the fold.
+        self.grown_wal_pos = Some(match self.grown_wal_pos {
+            Some(existing) => existing.min(position),
+            None => position,
+        });
+        self.version += 1;
+        refused
+    }
+
+    /// **The one way a membership grows**, taken by every route through the durable record above
+    /// and by no other caller.
+    ///
+    /// ## How this stands to the two removal rules
+    ///
+    /// It does not touch them, and that is the whole of its relationship to them. Write-path §5.4's
+    /// rules govern *retirement* — a suppression retires only on unsuppress and never touches a
+    /// stored structure (Rule S); a deletion retires only at the compaction fold that executes it
+    /// (Rule F) — and the hazard they exist against is a second route by which a bit **leaves** a
+    /// membership. This adds bits. A member added here is retired by exactly the routes every other
+    /// member is retired by, having no separate provenance once it is in the set: [`Self::retire`]
+    /// and [`Self::repack_all`] cannot tell it from a declared one, which is the property that keeps
+    /// growth from becoming a third removal rule by the back door.
+    ///
+    /// What it must not become is a second *entry* route with its own rules, which is why it is one
+    /// method and not one per caller: an unsuppress that restored a member by re-growing it, say,
+    /// would give a suppression a retirement route through the growth path. A suppression's bit
+    /// never leaves, so it never needs putting back.
+    ///
+    /// **An ordinal naming no record adds nothing.** That is a hole — an artifact a fold retired —
+    /// and creating a record here would resurrect it under an identity a caller's `tessera_id`
+    /// still names. Nothing is counted for it either: the state is reachable and legitimate (a
+    /// growth still in the log for an artifact this fold removed), so alarming on it would alarm on
+    /// every restart after such a fold.
+    fn grow(&mut self, layer: &str, level: u32, ordinal: u32, joining: &Bitmap) {
+        let Some(record) = self
+            .levels
+            .get_mut(&(layer.to_string(), level))
+            .and_then(|slots| slots.get_mut(ordinal as usize))
+            .and_then(Option::as_mut)
+        else {
+            return;
+        };
+        record.members.or_inplace(joining);
     }
 
     pub fn get(&self, layer: &str, level: u32, ordinal: u32) -> Option<&ArtifactRecord> {
@@ -951,6 +1084,25 @@ impl ArtifactStore {
             .or_insert(0);
         *entry = (*entry).max(through);
         self.recompute_pin();
+    }
+
+    /// Record that every level has been rewritten **whole** into a durable manifest, releasing the
+    /// log from the growths that rewrite carried.
+    ///
+    /// **Called only from the fold, and only after its flip.** [`Self::mark_published`] is the
+    /// wrong home for this and calling it from there would be the silent failure this bookkeeping
+    /// exists against: that one records how far the *append-only* packer has reached, and the
+    /// append-only packer never touches a record below the high-water. A growth marked published by
+    /// a tail pack is a join that is durable nowhere — reclaimable in the log, absent from every
+    /// extent, and back to its pre-growth membership at the next restart, with an ack already given
+    /// and nothing anywhere reporting a fault.
+    ///
+    /// One flag rather than a per-level map, because the fold rewrites every level in one
+    /// publication ([`Self::repack_all`]): a mark that could be half-set would need an argument
+    /// about which half, and the executor is single-threaded, so nothing grows between the rewrite
+    /// and this call.
+    pub fn mark_growth_packed(&mut self) {
+        self.grown_wal_pos = None;
     }
 
     /// The log position of the oldest publication whose memberships are not yet in a manifest.
@@ -1392,6 +1544,152 @@ mod tests {
                 blob.len()
             );
         }
+    }
+
+    /// A growth record for one artifact of one level.
+    fn growth(layer: &str, level: u32, ordinal: u32, joining: &[u32]) -> crate::wal::WalRecord {
+        crate::wal::WalRecord::ArtifactGrow {
+            layer: layer.to_string(),
+            level,
+            growth: vec![crate::wal::MembershipGrowth {
+                ordinal,
+                joining: serialise_members(&Bitmap::of(joining)),
+            }],
+        }
+    }
+
+    /// A publication of one artifact at one ordinal, so the pin cases start from the state a live
+    /// deployment is in rather than from a hand-placed record.
+    fn publication(layer: &str, ordinal: u32, entity: u64, members: &[u32]) -> crate::wal::WalRecord {
+        crate::wal::WalRecord::ArtifactPublish {
+            layer: layer.to_string(),
+            level: 0,
+            extend_runs: Vec::new(),
+            artifacts: vec![crate::wal::PublishedArtifact {
+                ordinal,
+                entity: EntityId::new(entity),
+                key: Some(format!("c{ordinal}")),
+                members: serialise_members(&Bitmap::of(members)),
+                contents: Vec::new(),
+                attached_to: None,
+                parent: None,
+            }],
+        }
+    }
+
+    /// **Growth is a union, and it touches nothing else about the record.** The identity, the key,
+    /// the contents and the edges are what the publication decided; what a join changes is the set.
+    #[test]
+    fn a_growth_unions_into_the_membership_and_changes_nothing_else() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2, 3]), 0), 0);
+        let before = store.version();
+
+        assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3, 4, 5]), 8), 0);
+
+        let record = store.get("clusters/a", 0, 0).expect("the artifact is still there");
+        assert_eq!(record.members, Bitmap::of(&[1, 2, 3, 4, 5]), "the union, not the delta");
+        assert_eq!(record.declared_size(), 5, "the criterion's denominator moves with it");
+        assert_eq!(record.key.as_deref(), Some("c0"));
+        assert_eq!(record.entity, EntityId::new(100));
+        assert!(
+            store.version() > before,
+            "every row-space projection built from this membership is now stale; a version \
+             that did not move would serve the artifact without the members that just joined"
+        );
+    }
+
+    /// **A growth cannot create an artifact**, which is what keeps it from resurrecting one a fold
+    /// retired — its record can outlive the artifact in the log, and replay would then put the
+    /// deleted identity back holding nothing but the join.
+    #[test]
+    fn a_growth_against_a_hole_adds_nothing() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1]), 0), 0);
+        store.retire(&Bitmap::of(&[100]), &|_| false);
+
+        assert_eq!(
+            store.apply(&growth("clusters/a", 0, 0, &[7, 8]), 8),
+            0,
+            "an ordinal that is a hole is a legitimate state, not a decode failure to alarm on"
+        );
+        assert!(store.get("clusters/a", 0, 0).is_none(), "the hole is still a hole");
+        assert_eq!(store.total(), 0);
+    }
+
+    /// Damage is a refusal, on the publication's argument: a delta decoded to nothing is an acked
+    /// join that did not happen, and the artifact then serves the count it had before — which
+    /// nothing distinguishes from a criterion it failed to clear.
+    #[test]
+    fn a_growth_whose_delta_will_not_decode_is_refused_and_counted() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1]), 0), 0);
+        let damaged = crate::wal::WalRecord::ArtifactGrow {
+            layer: "clusters/a".to_string(),
+            level: 0,
+            growth: vec![crate::wal::MembershipGrowth {
+                ordinal: 0,
+                joining: vec![0xff, 0xff, 0xff, 0xff],
+            }],
+        };
+        assert_eq!(store.apply(&damaged, 8), 1);
+        assert_eq!(
+            store.get("clusters/a", 0, 0).unwrap().members,
+            Bitmap::of(&[1]),
+            "and nothing was added from bytes that are not a bitmap"
+        );
+    }
+
+    /// **The failure this bookkeeping exists against, stated as an assertion.**
+    ///
+    /// The append-only packer starts at a level's published high-water, so a record that grew below
+    /// that mark is never packed again. Releasing the log at `mark_published` — which is what marks
+    /// the tail durable — would leave the growth reclaimable in the log and absent from every
+    /// extent: the artifact comes back from a restart without the point, acked and silent. Only the
+    /// fold's whole rewrite reaches it, so only `mark_growth_packed` releases it.
+    #[test]
+    fn a_growth_pins_the_log_past_every_tail_publication_and_only_a_whole_rewrite_releases_it() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2]), 40), 0);
+        store.mark_published("clusters/a", 0, 1);
+        assert_eq!(
+            store.oldest_wal_pos(),
+            None,
+            "the publication itself is in an extent, so its record is free"
+        );
+
+        assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3]), 96), 0);
+        assert_eq!(store.oldest_wal_pos(), Some(96), "the growth is the only copy of the join");
+
+        // A second publication into the level, packed and marked. The tail is durable and the
+        // growth still is not: it sits below the mark this pack started from.
+        assert_eq!(store.apply(&publication("clusters/a", 1, 101, &[9]), 128), 0);
+        store.mark_published("clusters/a", 0, 2);
+        assert_eq!(
+            store.oldest_wal_pos(),
+            Some(96),
+            "marking the tail published must not release the growth below it"
+        );
+
+        store.mark_growth_packed();
+        assert_eq!(store.oldest_wal_pos(), None, "the fold rewrote the level whole");
+    }
+
+    /// The growth path is not a removal rule in the other direction: a member that joined is
+    /// retired by exactly the routes a declared member is, having no separate provenance once it is
+    /// in the set — and a *suppressed* member is retired by neither, growth included.
+    #[test]
+    fn a_member_that_joined_retires_like_any_other() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2]), 0), 0);
+        assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3, 4]), 8), 0);
+
+        store.retire(&Bitmap::of(&[3]), &|_| false);
+        assert_eq!(
+            store.get("clusters/a", 0, 0).unwrap().members,
+            Bitmap::of(&[1, 2, 4]),
+            "the fold's executed deletion takes the joined member exactly as it takes a declared one"
+        );
     }
 
     #[test]
