@@ -115,6 +115,60 @@ impl UnallocatedRow {
     }
 }
 
+/// **An artifact one ingest batch's rows join**, named by the key the caller's column carried and
+/// pointing back at the rows that carried it (`artifacts-from-points.md` §6.2).
+///
+/// **Rows, not entities, because the entities do not exist yet.** A batch's ids are assigned when
+/// its commit window closes, so a membership column read at the boundary can only say *which rows
+/// of this batch* named the key; the executor turns those positions into entities after the
+/// assignment and before the append, which is what puts the join in the same commit as the rows.
+///
+/// **The key travels as a key**, on [`Command::PublishArtifacts`]'s rule: `ordinal_of_key` reads
+/// state only the executor may write. It is resolved once, at admission, and the ordinal is carried
+/// from there — recorded rather than re-derived, so what the log holds is what was decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchMembership {
+    pub layer: String,
+    pub level: u32,
+    pub key: String,
+    /// Indices into this batch's `rows`, ascending and without repeats.
+    pub rows: Vec<u32>,
+}
+
+/// **A parent edge one batch's list column declared**, as the caller's own keys spell it.
+///
+/// Carried beside the memberships rather than folded into them because it is a different claim
+/// about the same data: an entry names a membership, and *consecutive* entries name an edge
+/// ([`tessera_types::layer::parent_edges`]). The wire route cannot create an edge — a growth adds
+/// members and never lineage — so what the executor does with one is check it against the edge the
+/// publication already stored, and refuse where the two disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchEdge {
+    pub layer: String,
+    /// The child's level; the parent sits at this level for a lineage and one coarser for a tiered
+    /// containment, which is the resolution `LayerRegistry` already performs at publication.
+    pub level: u32,
+    pub child: String,
+    pub parent: String,
+}
+
+/// What one ingest batch's membership column said (`artifacts-from-points.md` §6.2): which
+/// artifacts its rows join, and which parent edges its adjacency declared.
+///
+/// Default-empty, and that is every batch that names no layer — the overwhelming majority, and the
+/// shape of the path before this existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchArtifacts {
+    pub memberships: Vec<BatchMembership>,
+    pub edges: Vec<BatchEdge>,
+}
+
+impl BatchArtifacts {
+    pub fn is_empty(&self) -> bool {
+        self.memberships.is_empty() && self.edges.is_empty()
+    }
+}
+
 /// One unit of work for the write executor.
 ///
 /// Ingest and change are the whole vocabulary. A flush and a compaction fold are specified as
@@ -133,6 +187,10 @@ pub enum Command {
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+        /// The artifacts this batch's rows named in a column named for a layer — empty for a batch
+        /// that named none (§6.2). Resolved and grown when the window closes, in the same commit as
+        /// the rows, so there is no state in which a point is ingested and its membership is not.
+        artifacts: BatchArtifacts,
     },
     /// One accepted `/control/changes` entry.
     ///
@@ -592,6 +650,7 @@ mod tests {
             rows: vec![row()],
             batch_id: "b".into(),
             body_hash: [0u8; 32],
+            artifacts: Default::default(),
         };
         assert!(!ingest.is_never_shed());
     }

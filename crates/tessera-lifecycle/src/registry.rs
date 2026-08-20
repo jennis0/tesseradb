@@ -115,7 +115,7 @@ pub enum RegistryError {
     /// A growth named a key this level does not hold.
     ///
     /// ⊘ **Minting from an unknown key at ingest is unbuilt** and is the next stage
-    /// (`artifacts-from-points.md` §6): under `value_set = "open"` an unknown key will create the
+    /// (`artifacts-from-points.md` §6.3): under `value_set = "open"` an unknown key will create the
     /// artifact rather than refuse. Until then the refusal is the honest answer — the alternative
     /// is accepting a join into nothing and acking it.
     NoSuchArtifact {
@@ -125,6 +125,28 @@ pub enum RegistryError {
     },
     /// The entity space could not supply the layer's entity or its reserved runs.
     Alloc(AllocError),
+    /// A list column's adjacency named one parent for an artifact and the layer holds another.
+    ///
+    /// Two spellings of one edge, disagreeing: the same refusal a build makes when two points name
+    /// different parents for one cluster. There is no correct output — choosing between them would
+    /// publish a hierarchy the caller did not write.
+    ContradictedParent {
+        layer: String,
+        level: u32,
+        child: String,
+        claimed: String,
+        held: String,
+    },
+}
+
+/// What [`LayerRegistry::check_edge`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeCheck {
+    /// The layer holds exactly this edge.
+    Agrees,
+    /// The child exists and holds no parent at all, so there is no edge to disagree with — and the
+    /// growth route cannot create one. The caller reports it; see [`LayerRegistry::check_edge`].
+    Unrecorded,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -205,6 +227,18 @@ impl std::fmt::Display for RegistryError {
                 "{layer} level {level} holds no artifact under the key {key}, so there is \
                  nothing for these members to join; an unknown key does not yet mint an \
                  artifact at ingest"
+            ),
+            RegistryError::ContradictedParent {
+                layer,
+                level,
+                child,
+                claimed,
+                held,
+            } => write!(
+                f,
+                "a list column names {claimed} as the parent of {child} in level {level} of \
+                 {layer}, which holds {held} as its parent. The two are spellings of one edge, so \
+                 publishing either would state a hierarchy nobody wrote"
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -538,31 +572,10 @@ impl LayerRegistry {
         let first_ordinal = store.next_ordinal(layer_name, level) as u64;
         let needed = first_ordinal + incoming.len() as u64;
 
-        // **Parents, and which direction an edge may run is the layer's declaration.**
-        //
-        // A nested layer's edges relate artifacts of one level, and a level is normally published
-        // in one batch — so a child's parent is usually a sibling in `incoming` that has no ordinal
-        // until this call assigns one. Resolving the batch by position and falling through to the
-        // store is what lets a level arrive whole or in pieces without the caller having to know
-        // which.
-        //
-        // A tiered layer's edges run the other way: from a **coarser level** to this one.
-        // Its parent was published in an earlier batch, so only the store can answer, and the
-        // search runs over the levels above this one. A key found in two of them is a refusal
-        // rather than a first-match, because which one an edge meant would then depend on the
-        // search order.
-        //
-        // **A layer may not mix the two**, which is what makes the question answerable at all: the
-        // declared kind says which shape its edges have, and an edge of the other shape refuses.
-        let cross_level = matches!(
-            layer.declaration.hierarchy.kind,
-            tessera_types::layer::HierarchyKind::Tiered
-        );
-        let edges_allowed = cross_level
-            || matches!(
-                layer.declaration.hierarchy.kind,
-                tessera_types::layer::HierarchyKind::Nested
-            );
+        // The parent each artifact names, resolved by the layer's declared edge shape — see
+        // [`LayerRegistry::parent_ref`], which the ingest route's edge check shares. A child's
+        // parent is often a **sibling in this batch** that has no ordinal until this call assigns
+        // one, which is what `batch_ordinal` answers and why the resolution takes it.
         let batch_ordinal = |key: &str| {
             incoming
                 .iter()
@@ -575,57 +588,15 @@ impl LayerRegistry {
                 let Some(key) = artifact.parent_key.as_deref() else {
                     return Ok(None);
                 };
-                let missing = || RegistryError::NoSuchParent {
-                    layer: layer_name.to_string(),
+                self.parent_ref(
+                    layer_name,
                     level,
-                    key: key.to_string(),
-                };
-                if !edges_allowed {
-                    return Err(RegistryError::EdgesOnUntreedLayer {
-                        layer: layer_name.to_string(),
-                        kind: format!("{:?}", layer.declaration.hierarchy.kind).to_lowercase(),
-                    });
-                }
-                // **Only a within-level edge can name itself.** A key is unique per
-                // `(layer, level)`, so a levelled taxonomy legitimately carries the same key at two
-                // levels — an arXiv archive with no subclass is `hep-ph` at both, and the level-1
-                // artifact's parent is the level-0 one of the same name. Refusing that would force
-                // a caller to rename half their taxonomy to satisfy a check meant for a tree.
-                if !cross_level && artifact.key.as_deref() == Some(key) {
-                    return Err(missing());
-                }
-
-                if cross_level {
-                    let mut found = None;
-                    for coarser in 0..level {
-                        if let Some(ordinal) = store.ordinal_of_key(layer_name, coarser, key) {
-                            if found.is_some() {
-                                return Err(RegistryError::AmbiguousParent {
-                                    layer: layer_name.to_string(),
-                                    key: key.to_string(),
-                                });
-                            }
-                            found = Some(crate::wal::ParentRef {
-                                level: coarser,
-                                ordinal,
-                            });
-                        }
-                    }
-                    // A key that exists only at this level or a finer one is an edge running the
-                    // wrong way — refused rather than reinterpreted, since a tiered
-                    // layer's whole guarantee is that lineage never runs against the levels.
-                    return found.map(Some).ok_or_else(missing);
-                }
-
-                batch_ordinal(key)
-                    .or_else(|| store.ordinal_of_key(layer_name, level, key))
-                    .map(|ordinal| {
-                        Some(crate::wal::ParentRef {
-                            level,
-                            ordinal,
-                        })
-                    })
-                    .ok_or_else(missing)
+                    artifact.key.as_deref(),
+                    key,
+                    store,
+                    &batch_ordinal,
+                )
+                .map(Some)
             })
             .collect::<Result<_, _>>()?;
 
@@ -702,7 +673,7 @@ impl LayerRegistry {
     /// to be argued about, this one is simply a refusal.
     ///
     /// **A key the level does not hold is refused.** ⊘ Minting from an unknown key at ingest is
-    /// unbuilt and is the next stage (`artifacts-from-points.md` §6); until it lands, the honest
+    /// unbuilt and is the next stage (`artifacts-from-points.md` §6.3); until it lands, the honest
     /// answer to a key naming nothing is that it names nothing. The resolution is
     /// [`ArtifactStore::ordinal_of_key`] — the *store's* index, never the served view — which is
     /// what keeps a suppressed artifact from reading as absent and having a second, unsuppressed
@@ -745,29 +716,183 @@ impl LayerRegistry {
         // which of their joins happened.
         let mut growth = Vec::with_capacity(incoming.len());
         for join in incoming {
-            let ordinal = store
-                .ordinal_of_key(layer_name, level, &join.key)
-                .ok_or_else(|| RegistryError::NoSuchArtifact {
-                    layer: layer_name.to_string(),
-                    level,
-                    key: join.key.clone(),
-                })?;
+            let ordinal = self.resolve_growth_key(layer_name, level, &join.key, store)?;
             if join.joining.is_empty() {
                 continue;
             }
-            growth.push(crate::wal::MembershipGrowth {
-                ordinal,
-                joining: serialise_members(&join.joining),
+            growth.push((ordinal, &join.joining));
+        }
+        Ok(crate::membership::growth_record(layer_name, level, growth))
+    }
+
+    /// The ordinal a growth's key names, with the layer and level checked — **the resolution half
+    /// of [`prepare_grow`], shared with the ingest route.**
+    ///
+    /// A batch arriving at `/control/ingest` with a column named for a layer resolves its keys here
+    /// at admission, before the entities exist, and carries the ordinals to its window's close
+    /// (`artifacts-from-points.md` §6.2). The two callers must agree about what a key means and
+    /// about what an unknown one costs — a refusal naming it, whole batch without effect — which is
+    /// why it is this function and not a second lookup.
+    ///
+    /// **The lookup is `ArtifactStore::ordinal_of_key`, never the served view**, and that is what
+    /// makes it suppression-blind by construction: a suppressed artifact resolves like any other,
+    /// grows like any other, and stays suppressed (§5's third ruling).
+    pub fn resolve_growth_key(
+        &self,
+        layer_name: &str,
+        level: u32,
+        key: &str,
+        store: &ArtifactStore,
+    ) -> Result<u32, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        if layer.declaration.membership != MembershipSource::Enumerated {
+            return Err(RegistryError::NotEnumerated {
+                layer: layer_name.to_string(),
             });
         }
-        if growth.is_empty() {
-            return Ok(None);
+        if layer.runs.get(level as usize).is_none() {
+            return Err(RegistryError::NoSuchLevel {
+                layer: layer_name.to_string(),
+                level,
+            });
         }
-        Ok(Some(WalRecord::ArtifactGrow {
+        store
+            .ordinal_of_key(layer_name, level, key)
+            .ok_or_else(|| RegistryError::NoSuchArtifact {
+                layer: layer_name.to_string(),
+                level,
+                key: key.to_string(),
+            })
+    }
+
+    /// Whether the edge a caller's list column declared is the edge this layer already holds.
+    ///
+    /// **A growth adds members and never lineage**, so this checks rather than writes: the edge was
+    /// settled when the artifact was published, and a point's list is a second spelling of it. The
+    /// two disagreeing is the build's `two_parents` refusal at the other entry point — there is no
+    /// correct output, and picking one would publish a hierarchy nobody wrote.
+    ///
+    /// [`EdgeCheck::Unrecorded`] is the third state and is **not** an error: the artifact exists and
+    /// holds no parent, so the column states an edge this route cannot create. Reported by the
+    /// caller and accepted, because the membership half of the same entry is unambiguous and
+    /// refusing it would block a batch over a roster published without its edges — which discloses
+    /// nothing and costs a republication. ⊘ It stops being reachable when a key mints its artifact
+    /// (§6.2), where a chain arrives parent before child in one batch.
+    pub fn check_edge(
+        &self,
+        layer_name: &str,
+        level: u32,
+        child: &str,
+        parent: &str,
+        store: &ArtifactStore,
+    ) -> Result<EdgeCheck, RegistryError> {
+        let ordinal = self.resolve_growth_key(layer_name, level, child, store)?;
+        let claimed = self.parent_ref(layer_name, level, Some(child), parent, store, &|_| None)?;
+        match store.get(layer_name, level, ordinal).and_then(|r| r.parent) {
+            None => Ok(EdgeCheck::Unrecorded),
+            Some(held) if held == claimed => Ok(EdgeCheck::Agrees),
+            Some(held) => Err(RegistryError::ContradictedParent {
+                layer: layer_name.to_string(),
+                level,
+                child: child.to_string(),
+                claimed: parent.to_string(),
+                held: self.key_at(layer_name, held, store),
+            }),
+        }
+    }
+
+    /// The caller's own name for the artifact at a resolved position, for a refusal that has to
+    /// mention it. An artifact published without a key has none, and its address is what the caller
+    /// can act on instead.
+    fn key_at(&self, layer_name: &str, at: crate::wal::ParentRef, store: &ArtifactStore) -> String {
+        store
+            .get(layer_name, at.level, at.ordinal)
+            .and_then(|r| r.key.clone())
+            .unwrap_or_else(|| format!("the artifact at level {} ordinal {}", at.level, at.ordinal))
+    }
+
+    /// Where a parent key sits, for an artifact at `level` — **one resolution, used by the
+    /// publication that stores an edge and by the ingest route that checks one.**
+    ///
+    /// **Which direction an edge may run is the layer's declaration.** A nested layer's edges relate
+    /// artifacts of one level, and a level is normally published in one batch — so a child's parent
+    /// is usually a sibling with no ordinal until the publication assigns one, which is what
+    /// `within_batch` answers. A tiered layer's edges run the other way, from a **coarser level** to
+    /// this one: its parent was published in an earlier batch, so only the store can answer, and the
+    /// search runs over the levels above this one. A key found in two of them is a refusal rather
+    /// than a first match, because which one an edge meant would then depend on the search order.
+    ///
+    /// **A layer may not mix the two**, which is what makes the question answerable at all: the
+    /// declared kind says which shape its edges have, and an edge of the other shape refuses.
+    pub fn parent_ref(
+        &self,
+        layer_name: &str,
+        level: u32,
+        child_key: Option<&str>,
+        parent_key: &str,
+        store: &ArtifactStore,
+        within_batch: &dyn Fn(&str) -> Option<u32>,
+    ) -> Result<crate::wal::ParentRef, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        let missing = || RegistryError::NoSuchParent {
             layer: layer_name.to_string(),
             level,
-            growth,
-        }))
+            key: parent_key.to_string(),
+        };
+        let cross_level = matches!(
+            layer.declaration.hierarchy.kind,
+            tessera_types::layer::HierarchyKind::Tiered
+        );
+        let edges_allowed = cross_level
+            || matches!(
+                layer.declaration.hierarchy.kind,
+                tessera_types::layer::HierarchyKind::Nested
+            );
+        if !edges_allowed {
+            return Err(RegistryError::EdgesOnUntreedLayer {
+                layer: layer_name.to_string(),
+                kind: format!("{:?}", layer.declaration.hierarchy.kind).to_lowercase(),
+            });
+        }
+        // **Only a within-level edge can name itself.** A key is unique per `(layer, level)`, so a
+        // levelled taxonomy legitimately carries the same key at two levels — an arXiv archive with
+        // no subclass is `hep-ph` at both, and the level-1 artifact's parent is the level-0 one of
+        // the same name. Refusing that would force a caller to rename half their taxonomy to
+        // satisfy a check meant for a tree.
+        if !cross_level && child_key == Some(parent_key) {
+            return Err(missing());
+        }
+        if cross_level {
+            let mut found = None;
+            for coarser in 0..level {
+                if let Some(ordinal) = store.ordinal_of_key(layer_name, coarser, parent_key) {
+                    if found.is_some() {
+                        return Err(RegistryError::AmbiguousParent {
+                            layer: layer_name.to_string(),
+                            key: parent_key.to_string(),
+                        });
+                    }
+                    found = Some(crate::wal::ParentRef {
+                        level: coarser,
+                        ordinal,
+                    });
+                }
+            }
+            // A key that exists only at this level or a finer one is an edge running the wrong way
+            // — refused rather than reinterpreted, since a tiered layer's whole guarantee is that
+            // lineage never runs against the levels.
+            return found.ok_or_else(missing);
+        }
+        within_batch(parent_key)
+            .or_else(|| store.ordinal_of_key(layer_name, level, parent_key))
+            .map(|ordinal| crate::wal::ParentRef { level, ordinal })
+            .ok_or_else(missing)
     }
 
     /// Validates a drop and returns the record that makes it durable, on [`prepare_create`]'s

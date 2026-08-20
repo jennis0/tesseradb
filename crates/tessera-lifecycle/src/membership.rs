@@ -204,7 +204,7 @@ impl IncomingArtifact {
 pub struct IncomingGrowth {
     /// The key the artifact was published under. An unknown one is refused rather than minted —
     /// ⊘ minting from an unknown key at ingest is unbuilt, and is the next stage
-    /// (`artifacts-from-points.md` §6).
+    /// (`artifacts-from-points.md` §6.3).
     pub key: String,
     /// The entities joining. Empty is a no-op rather than a refusal: nothing joining is a thing a
     /// caller can honestly say, and it discloses nothing.
@@ -1368,6 +1368,33 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
 /// record fails to deserialise rather than yielding a plausible wrong set.
 pub fn serialise_members(members: &Bitmap) -> Vec<u8> {
     members.serialize::<Portable>()
+}
+
+/// **The durable record one growth becomes** — the one construction site, taken by the control
+/// plane's `GrowMemberships` and by an ingest batch's membership column alike.
+///
+/// `None` where nothing is joining: no record is owed for a no-op, and appending an empty one would
+/// pin the log at a growth that changed nothing (`artifacts-from-points.md` §6.1). Ordinals are
+/// already resolved — see `LayerRegistry::resolve_growth_key` — because what replay applies must be
+/// what was decided, not a key re-read against an index that has since moved.
+pub fn growth_record<'a>(
+    layer: &str,
+    level: u32,
+    joins: impl IntoIterator<Item = (u32, &'a Bitmap)>,
+) -> Option<crate::wal::WalRecord> {
+    let growth: Vec<crate::wal::MembershipGrowth> = joins
+        .into_iter()
+        .filter(|(_, joining)| !joining.is_empty())
+        .map(|(ordinal, joining)| crate::wal::MembershipGrowth {
+            ordinal,
+            joining: serialise_members(joining),
+        })
+        .collect();
+    (!growth.is_empty()).then(|| crate::wal::WalRecord::ArtifactGrow {
+        layer: layer.to_string(),
+        level,
+        growth,
+    })
 }
 
 /// The inverse, refusing bytes that are not a bitmap.

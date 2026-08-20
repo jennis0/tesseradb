@@ -418,13 +418,12 @@ pub struct LayerDeclaration {
     /// key living in a build-only block could not govern what the write path does with an unknown
     /// id, and governing both entry points is the point of it. ⊘ The build half is implemented; the
     /// ingest half — minting an artifact for a key a point carries — is specified and unbuilt
-    /// (`artifacts-from-points.md` §6), so today an open layer means only that a build mints.
+    /// (`artifacts-from-points.md` §6.3), so today an open layer means only that a build mints.
     ///
-    /// **Blocked rather than outstanding, and the blocker is not minting** (§6.1, investigated
-    /// 2026-08-20): nothing in the write path can add an entity to an artifact that already
-    /// exists, so the closed case has no route in either. `annotation-write-cycle.md` §3.4 also
-    /// rules that consequence *never*, which `artifacts-from-points.md` §5 contradicts — a ruling
-    /// the field cannot settle for itself.
+    /// **What blocked it is gone** (built 2026-08-20): the write path can grow an existing
+    /// artifact's membership, and an ingest batch can name its artifacts in a column named for the
+    /// layer — so the *closed* case now has a route at both entry points, and what is left here is
+    /// a key that names no artifact. It is refused, naming it.
     #[serde(default)]
     pub value_set: ValueSet,
     /// The access label a viewer must hold to know this layer exists at all, independent of any
@@ -779,6 +778,116 @@ impl LayerDeclaration {
     pub fn run_count(&self) -> usize {
         self.levels.len().max(1)
     }
+
+    /// What a **list** of keys naming this layer's artifacts means, position by position
+    /// ([`ListMeaning`]).
+    pub fn list_meaning(&self) -> ListMeaning {
+        ListMeaning::of(self.hierarchy.kind, self.levels.len())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A membership column's reading rule — shared by the build and the wire
+// ---------------------------------------------------------------------------------------------
+
+/// What the positions in a list of member keys mean (`artifacts-from-points.md` §4).
+///
+/// **The rule lives here because two implementations read it.** A build reads a member source's
+/// key column out of Parquet; `/control/ingest` reads a column named for a layer out of an Arrow
+/// batch. The *decode* cannot be shared — this crate carries no `arrow` dependency and is not
+/// getting one — but the meaning must be, or the two entry points come to disagree about what a
+/// caller's data says, which is exactly what
+/// [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) forbids.
+/// So the transport stays with each reader and the rule — which positions carry which level, which
+/// adjacencies are edges, what a fixed arity must equal — is this type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListMeaning {
+    /// `stacked` and `tiered`: entry *k* is the artifact at level *k*, one entry per declared
+    /// level. `edges` is `tiered`'s containment between consecutive entries; `stacked`'s levels are
+    /// independent analyses and carry none.
+    Levelled { levels: usize, edges: bool },
+    /// `nested`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at level 0** — a
+    /// nested layer's hierarchy is its edges and it declares no levels (decision 0082).
+    Lineage,
+    /// `flat`: a membership each, at level 0, in no order. A flat layer has no positions for a list
+    /// to index, so the entries are a set and nothing is read from their adjacency.
+    Unordered,
+}
+
+impl ListMeaning {
+    pub fn of(kind: HierarchyKind, levels: usize) -> Self {
+        match kind {
+            HierarchyKind::Flat => ListMeaning::Unordered,
+            HierarchyKind::Nested => ListMeaning::Lineage,
+            HierarchyKind::Stacked => ListMeaning::Levelled {
+                levels,
+                edges: false,
+            },
+            HierarchyKind::Tiered => ListMeaning::Levelled {
+                levels,
+                edges: true,
+            },
+        }
+    }
+
+    /// The level the artifact at `position` belongs to.
+    pub fn level_of(&self, position: usize) -> u32 {
+        match self {
+            ListMeaning::Levelled { .. } => position as u32,
+            ListMeaning::Lineage | ListMeaning::Unordered => 0,
+        }
+    }
+
+    /// Whether consecutive entries declare a parent edge.
+    pub fn declares_edges(&self) -> bool {
+        match self {
+            ListMeaning::Levelled { edges, .. } => *edges,
+            ListMeaning::Lineage => true,
+            ListMeaning::Unordered => false,
+        }
+    }
+
+    /// The length every row's list must have, where the declaration fixes one. `None` for a lineage
+    /// and for plain multi-membership, whose rows are as long as each point's own branch.
+    pub fn arity(&self) -> Option<usize> {
+        match self {
+            ListMeaning::Levelled { levels, .. } => Some(*levels),
+            ListMeaning::Lineage | ListMeaning::Unordered => None,
+        }
+    }
+}
+
+/// **This point is in no artifact** — the sentinel every clusterer emits for noise
+/// (`artifacts-from-points.md` §2).
+///
+/// Exactly `-1`, and not any negative: a negative id is otherwise unusual enough that swallowing
+/// `-7` would more likely be eating data than handling noise.
+pub const NOISE_KEY: i128 = -1;
+
+/// The key an integer cell names, or `None` where it names no artifact.
+///
+/// **The decimal spelling is the key**, so `3` and `"3"` name one artifact whichever column type a
+/// producer wrote — which is what lets a member table and an ingest batch spell one membership two
+/// ways.
+pub fn integer_key(value: i128) -> Option<String> {
+    (value != NOISE_KEY).then(|| value.to_string())
+}
+
+/// The parent edges one row's entries declare: entry *k* is the parent of entry *k+1*.
+///
+/// **Adjacent entries only, and both of them present.** An entry naming no artifact is a point that
+/// is noise at that resolution, not a link across it — reading past it would invent an edge from a
+/// level to one two below, which is a containment claim the caller never made and which the next
+/// point, clustered at that resolution, would contradict.
+///
+/// Generic in the entry, because the two readers hold different things at this point: the build
+/// holds an interned address and the wire holds a key. The adjacency is the same rule either way,
+/// and it is the half most likely to drift if each wrote its own.
+pub fn parent_edges<T>(entries: &[Option<T>]) -> impl Iterator<Item = (&T, &T)> {
+    entries.windows(2).filter_map(|pair| match (&pair[0], &pair[1]) {
+        (Some(parent), Some(child)) => Some((parent, child)),
+        _ => None,
+    })
 }
 
 #[cfg(test)]
@@ -1019,5 +1128,62 @@ mod tests {
         assert_eq!(decl(HierarchyKind::Nested, vec![]).run_count(), 1);
         assert_eq!(decl(HierarchyKind::Flat, vec![]).run_count(), 1);
         assert_eq!(decl(HierarchyKind::Stacked, vec![0, 1, 2]).run_count(), 3);
+    }
+
+    /// **§4's table, as the two readers read it.** A build reads a member table's key column and
+    /// `/control/ingest` reads a column named for the layer; both ask this one type what a
+    /// position means, so the table is asserted here rather than twice over Arrow.
+    #[test]
+    fn a_list_means_what_the_declared_hierarchy_says_it_means() {
+        let levelled = ListMeaning::of(HierarchyKind::Tiered, 3);
+        assert_eq!(levelled.arity(), Some(3), "one entry per declared level");
+        assert_eq!(levelled.level_of(2), 2, "entry k is the artifact at level k");
+        assert!(levelled.declares_edges(), "tiered entries contain one another");
+
+        let stacked = ListMeaning::of(HierarchyKind::Stacked, 3);
+        assert_eq!(stacked.arity(), Some(3));
+        assert!(
+            !stacked.declares_edges(),
+            "stacked levels are independent analyses, so adjacency states nothing"
+        );
+
+        let lineage = ListMeaning::of(HierarchyKind::Nested, 0);
+        assert_eq!(lineage.arity(), None, "a lineage is as deep as its own branch");
+        assert_eq!(lineage.level_of(2), 0, "a nested layer holds every artifact at level 0");
+        assert!(lineage.declares_edges());
+
+        let flat = ListMeaning::of(HierarchyKind::Flat, 0);
+        assert_eq!(flat.arity(), None);
+        assert_eq!(flat.level_of(7), 0);
+        assert!(
+            !flat.declares_edges(),
+            "a flat list is plain multi-membership — a set, with no positions to read"
+        );
+    }
+
+    /// **The gap is not an edge.** An entry naming no artifact is a point that is noise at that
+    /// resolution, and reading past it would state a containment no row makes.
+    #[test]
+    fn an_entry_naming_nothing_links_nothing_across_itself() {
+        let full = [Some("a"), Some("b"), Some("c")];
+        assert_eq!(
+            parent_edges(&full).collect::<Vec<_>>(),
+            vec![(&"a", &"b"), (&"b", &"c")]
+        );
+
+        let gapped = [Some("a"), None, Some("c")];
+        assert!(
+            parent_edges(&gapped).next().is_none(),
+            "a point clustered at level 0 and level 2 and noise between declares no edge at all"
+        );
+    }
+
+    /// `-1` and nothing else: a negative id is otherwise unusual enough that swallowing `-7` would
+    /// more likely be eating data than handling noise.
+    #[test]
+    fn only_minus_one_means_this_point_is_in_no_artifact() {
+        assert_eq!(integer_key(-1), None);
+        assert_eq!(integer_key(-7), Some("-7".to_string()));
+        assert_eq!(integer_key(3), Some("3".to_string()));
     }
 }

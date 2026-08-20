@@ -2393,15 +2393,37 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
-    /// assigned on the executor, at the close of the commit window this submission lands in.
+    /// Submit an ingest batch whose rows name no artifacts — the plain form, and every batch that
+    /// carries no membership column.
     ///
-    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    /// One line of delegation rather than a second implementation: what a batch says about
+    /// artifacts is a *field* of the command, and defaulting it here keeps the ordinary caller from
+    /// having to spell an empty one.
     pub fn accept_ingest(
         &self,
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+    ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
+        self.accept_ingest_joining(rows, batch_id, body_hash, Default::default())
+    }
+
+    /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
+    /// assigned on the executor, at the close of the commit window this submission lands in.
+    ///
+    /// `artifacts` is what a column named for a layer said — which artifacts these rows join, and
+    /// which edges the adjacency of a list column declared (`artifacts-from-points.md` §6.2). It is
+    /// resolved and grown **in the same commit as the rows**, so a batch is never half-applied: a
+    /// key naming no artifact refuses the whole batch before an id is spent, and rows that were
+    /// accepted carry their memberships from the moment they exist.
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn accept_ingest_joining(
+        &self,
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
     ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
         // **Every buffered row has a cell**, established here because this is the boundary rows
         // enter the buffer through — and it has more than one caller. A check in the HTTP handler
@@ -2449,7 +2471,7 @@ impl Engine {
                 quantisation,
             });
         }
-        self.write.accept_ingest(rows, batch_id, body_hash)
+        self.write.accept_ingest(rows, batch_id, body_hash, artifacts)
     }
 
     /// Submit one `/control/changes` entry and wait for its receipt.
@@ -2480,6 +2502,16 @@ impl Engine {
         op: ChangeOp,
     ) -> std::result::Result<crate::write::PendingChange, crate::write::AcceptError> {
         self.write.submit_change(entity, op)
+    }
+
+    /// One registered layer's declaration, by name — **the control plane's lookup, with no gate**.
+    ///
+    /// It answers what a *declaration* says, never what is served: the viewer plane's question is
+    /// [`Engine::visible_layers`], which resolves reachability per principal and asks the overlay
+    /// live. This one exists for `/control/ingest`, which must decide whether a column names a
+    /// layer, and for a caller already holding the operator credential that registered it.
+    pub fn registered_layer(&self, name: &str) -> Option<tessera_types::layer::RegisteredLayer> {
+        self.write.registered_layer(name)
     }
 
     /// Register an annotation layer, returning its `tessera_id`.
@@ -2617,10 +2649,11 @@ impl Engine {
     /// while being visible to nobody, and a **deleted** member can never contribute to a count
     /// again. A **suppressed** member joins: it is a live member temporarily outside every mask.
     ///
-    /// ⊘ **A point cannot yet name its artifacts on the wire**, which is what
-    /// `artifacts-from-points.md` §6 exists to close and the next stage's work; `/control/ingest`
-    /// refuses a column named for a layer exactly as it refuses a misspelt one. Nor is an unknown
-    /// key minted — it is refused here, naming the key.
+    /// **A point may also name its artifacts on the wire**, which is the same operation arriving
+    /// with the rows it is about: `/control/ingest` accepts a column named for a declared layer and
+    /// grows these memberships inside the batch's own commit window (`artifacts-from-points.md`
+    /// §6.2). This entry point stays what an operator uses for a correction against points that are
+    /// already there. ⊘ An unknown key is not minted at either — it is refused, naming the key.
     pub fn grow_memberships(
         &self,
         layer: String,

@@ -31,13 +31,16 @@ pub use alloc::{
     PendingItem,
 };
 pub use membership::{ArtifactRecord, ArtifactStore, IncomingArtifact, IncomingGrowth};
-pub use registry::{LayerRegistry, RegistryError, ResolvedLayers};
+pub use registry::{EdgeCheck, LayerRegistry, RegistryError, ResolvedLayers};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
-pub use command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
+pub use command::{
+    Ack, BatchArtifacts, BatchEdge, BatchMembership, Command, ExecError, Receipt, SubmitError,
+    UnallocatedRow,
+};
 pub use faults::WalMeter;
 pub use overlay::{replay, Overlay};
 pub use wal::{
     ChangeOp, ExecutorWal, MembershipGrowth, OverlaySnapshotEntry, PublishedArtifact, Wal, WalError,
     WalRecord, WalRow, WalScalar,
 };
-pub use window::{ClosedEntry, CommitWindow, WindowEntry};
+pub use window::{ClosedEntry, CommitWindow, ResolvedMembership, WindowEntry};

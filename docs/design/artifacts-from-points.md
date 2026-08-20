@@ -1,17 +1,17 @@
 # Artifacts declared by the points that belong to them — design
 
 **Date:** 2026-08-20
-**Status:** Draft — owner-ruled in discussion, **§2, §3 and §4 built at build time, and §6's growth
-mechanism built on the write path**. The readers take an integer key, skip a noise one, and read a
-list column as the artifacts a point belongs to plus the edges between them; `value_set` decides
-whether a member key may create an artifact, at a build. Points now join an artifact that already
-exists at ingest too — a durable delta record, one store method, and a log pin the fold releases
-(§6.1) — which is what [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)
-obliges and what `annotation-write-cycle.md` §3.4 now says. ⊘ **Two things remain, and both sit on
-top of the growth rather than beside it: a point cannot name its artifacts on the wire, and an
-unknown key is refused rather than minted** (§6.2). An ingest batch carrying a column named for a
-layer is refused today exactly as any undeclared column is, so a layer declared `open` still governs
-what a *build* mints and nothing at ingest. The rulings in §5 are the owner's; the rest follows from
+**Status:** Draft — owner-ruled in discussion, **§2, §3 and §4 built at build time, and §6 built at
+both entry points bar minting**. The readers take an integer key, skip a noise one, and read a list
+column as the artifacts a point belongs to plus the edges between them; `value_set` decides whether a
+member key may create an artifact, at a build. Points join an artifact that already exists at ingest
+too — a durable delta record, one store method, and a log pin the fold releases (§6.1) — and **an
+ingest batch may now carry a column named for a layer** (§6.2), which is what
+[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) obliges and the breach
+it marked. The reading is shared with the build rather than reimplemented: which position carries
+which level, and which adjacencies are edges, live in `tessera_types::layer`. ⊘ **One thing remains:
+an unknown key is refused rather than minted**, so a layer declared `open` still governs what a
+*build* mints and nothing at ingest (§6.2). The rulings in §5 are the owner's; the rest follows from
 them. Extends
 [`configuration.md`](configuration.md) (normative for the surface) and
 [`annotation-write-cycle.md`](annotation-write-cycle.md) §6.1 (normative for artifact semantics).
@@ -169,11 +169,14 @@ path is one thing that did not exist: **a membership that can grow**, which is w
 at a build has always done and what no route into the artifact store could do — every one of them
 wrote a whole record, and the two mutating passes only removed. That is built (§6.1).
 
-⊘ **The two halves of the ingest route that sit on top of it are not** (§6.2): a point cannot name
-its artifacts on the wire, and an unknown key is refused rather than minted. When they land, a point
-carrying a lineage that names clusters which do not exist yet mints the chain and links it in one
-batch, **parent before child** — the ordering constraint edges already carry
-(`annotation-representation.md` §5.0.4), applied to a batch rather than to a build.
+**The wire says what a file says** (§6.2): a column named for a layer carries a point's artifacts,
+read by the same rules and joined in the same commit as the rows. ⊘ **One half is not built**: an
+unknown key is refused rather than minted. When it lands, a point carrying a lineage that names
+clusters which do not exist yet mints the chain and links it in one batch, **parent before child** —
+the ordering constraint edges already carry (`annotation-representation.md` §5.0.4), applied to a
+batch rather than to a build. Until then a lineage may only *check* against the edges a publication
+stored: a growth adds members and never lineage, so a contradiction refuses and an edge the layer
+holds no parent for is reported and the memberships still land.
 
 Computed content needs nothing extra: centroid, box and hull are recomputed per viewer from current
 membership, so they follow new points without invalidation.
@@ -226,13 +229,53 @@ mask. A batch with nothing joining appends no record and acks: nothing joining i
 can honestly say, and pinning the log at a growth that changed nothing would be the cost of refusing
 it twice over.
 
-### 6.2 What remains, and where it hooks in
+### 6.2 A column named for a layer — built 2026-08-20
 
-⊘ **A point cannot name its artifacts on the wire.** `/control/ingest` accepts a reserved column or
-a declared attribute's name and nothing else, so a column named for a layer is refused there exactly
-as a misspelt one is. The seam is the write executor's growth command: an ingest batch carrying such
-a column resolves its keys and arrives at that command in the same commit as its rows. Until it
-lands, growth is reachable only through the engine's own `grow_memberships`.
+**The acceptance rule is reserved, or a declared attribute's name, or a declared layer's name.** The
+layer's own `name`, exactly as an attribute column is named for the attribute's `name` and not its
+`field`: `fields` on `[layer.members]` maps a *file's* column onto the canonical meaning and is
+build-only for the reason `source` is — it says where rows come from rather than what they mean
+([`configuration.md`](configuration.md) §2), and a name a running node had to be told about could be
+checked against nothing.
+
+**The value is the member table's, and the rule is shared rather than reimplemented.** Text or an
+integer; `null` and `-1` meaning the point is in no artifact of that layer; a list whose positions
+mean what the declared `hierarchy.kind` says (§4). The Arrow decode is *not* shared and should not
+be: `tessera-types` and `tessera-lifecycle` deliberately carry no `arrow` dependency, and forcing
+one to make a reader common would be a layering change bought for a decode either side writes in
+twenty lines. What is shared is the part that would drift — which position carries which level,
+which adjacencies are parent edges, and what an integer key spells — as `ListMeaning`, `parent_edges`
+and `integer_key` in `tessera_types::layer`, read by the build's member pass and by the ingest
+handler alike.
+
+**A column names a layer, and the level is the list's own.** A scalar names the artifact at level 0,
+which is what a member table with no `level` column means; a levelled list's entry *k* names level
+*k*. There is no level column on the wire and there is not going to be one: the positions carry it.
+
+**Where it lands.** The handler reads the column into `(layer, level, key) → row positions` and the
+edges the adjacency declared, and hands both to the write executor with the batch. Keys resolve at
+**admission**, through `ArtifactStore::ordinal_of_key` — the same lookup the growth command makes, so
+§5's third ruling holds here for the same reason — and a key naming no artifact refuses *that batch*
+alone, before the window it would have joined is closed. The entities do not exist until the window
+allocates, so the ordinals are carried from admission to the close and the joins become one
+`ArtifactGrow` per `(layer, level)` appended inside the window's own fsync: the membership is durable
+in the same commit as the point, and there is no state in which a point is ingested and its
+membership is not.
+
+**An edge is checked, never created.** A growth adds members; lineage is settled where the artifact
+is published. A lineage contradicting the parent the layer holds is refused in the words the build
+uses for two points disagreeing — two spellings of one edge, and no correct output. An edge whose
+child holds *no* parent is reported and the memberships still land: the membership half of the same
+entry is unambiguous, and refusing it would block a batch over a roster published without its edges,
+which discloses nothing and costs a republication. That case stops being reachable when minting
+lands, where a chain arrives parent before child in one batch.
+
+**A column naming a layer whose membership is *evaluated* is refused**, naming it. There is no
+stored membership for a point to join, and a stored answer beside a live predicate is what
+`prepare_publish` already refuses a publication for; this is that refusal one step earlier, where the
+batch can still be rejected without effect.
+
+### 6.3 What remains
 
 ⊘ **An unknown key is refused rather than minted.** `value_set` is carried on the layer declaration
 — which is what the write path reads, and why it is not on the acquisition block — and is consulted
@@ -294,6 +337,41 @@ a predicate over a `derived` vocabulary is answered by a masked scan, which a vi
 clusters would pay 263 times.
 
 ## Appendix R — review trail
+
+**2026-08-20 — r6. The wire says what a file says, and the shared piece is the rule rather than the
+reader.** §6.2 is built: `/control/ingest` accepts a column named for a declared layer, reads it by
+the same rules a member table is read by, and the joins ride the batch's own commit window — one
+`ArtifactGrow` per `(layer, level)`, inside the fsync that makes the rows durable. That closes the ⊘
+[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) marked as the one
+genuine breach of its own rule.
+
+**Two things were decided in the building.** *Where the keys resolve*: at **admission**, not at the
+close, because a commit window holds several callers' batches and one caller's typo may not refuse
+another's rows — after the allocation there is no per-entry refusal left to make. The ordinal is then
+carried rather than re-derived, which is safe for a reason worth writing down: between admission and
+the close nothing can move an existing ordinal (a publication appends, and both operations that
+remove an artifact close the open window before they run), and an ordinal whose record has gone by
+then adds nothing, which is what stops a growth resurrecting an artifact a fold retired. *What a
+lineage may do at ingest*: **check, never create**. A growth adds members and never edges, so a
+contradiction is the build's own two-parents refusal and an edge the layer holds no parent for is a
+warning with the memberships still applied — a refusal there would block a batch over a roster
+published without its edges, which is outside the disclosure surface entirely.
+
+**The sharing is deliberately partial, and the split is where the drift would be.** `tessera-types`
+carries no `arrow` dependency and does not acquire one: the Arrow decode stays with each reader,
+and `ListMeaning`, `parent_edges` and `integer_key` move into `tessera_types::layer` so that the
+*meaning* — which position is which level, which adjacencies are edges, what `-1` says — has one
+definition. The build's own reader now takes its list meaning, its noise sentinel and its adjacency
+from there, so the two cannot read one file two ways.
+
+**The test 0091 names is `tessera-server`'s `membership_column.rs`, and it is not the test that was
+first planned.** *Ingest into an empty database* cannot be reached through this system's own tools:
+`tessera build` refuses a bundle with no items, so the honest form is one corpus arriving two ways —
+every point built on one side, a seed built and the rest ingested on the other — compared at what a
+client sees, for three principals, at a scalar key and at a lineage. The built side is additionally
+pinned to an oracle computed from the fixture, because two sides that both dropped the membership
+column would otherwise agree perfectly. Removing the column from the handler's submission turns both
+comparisons red, which is how it is known to be load-bearing.
 
 **2026-08-20 — r5. The growth mechanism is built, and the packing rule is the part that decides it
 is correct rather than working.**

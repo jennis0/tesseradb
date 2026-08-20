@@ -127,7 +127,30 @@ pub struct WindowEntry<W> {
     pub rows: Vec<UnallocatedRow>,
     pub batch_id: String,
     pub body_hash: [u8; 32],
+    /// The artifacts this batch's rows join, each with the **ordinal its key resolved to at
+    /// admission** and the row positions that named it (`artifacts-from-points.md` §6.2). Empty for
+    /// a batch carrying no membership column, which is every batch that names no layer.
+    pub memberships: Vec<ResolvedMembership>,
     pub waiters: Vec<W>,
+}
+
+/// One artifact a batch's rows join, resolved: the address the store gave its key, and which rows
+/// named it.
+///
+/// **The ordinal is resolved once, at admission, and carried rather than re-derived.** That is the
+/// rule the growth record already follows (`crate::membership::ArtifactStore::apply`) — what is
+/// applied is what was decided — and between admission and the close nothing can move an existing
+/// ordinal: a publication appends, and the two operations that remove an artifact (the fold, and a
+/// deletion on the deny lane) both close the open window before they run. An ordinal whose record
+/// has gone by then adds nothing, which is `ArtifactStore::grow`'s stated behaviour and the right
+/// one: a growth may not resurrect an artifact a fold retired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMembership {
+    pub layer: String,
+    pub level: u32,
+    pub ordinal: u32,
+    /// Indices into this entry's `rows`.
+    pub rows: Vec<u32>,
 }
 
 /// One entry after allocation: the record to append, and everything the apply and the ack need.
@@ -141,6 +164,9 @@ pub struct ClosedEntry<W> {
     pub terms: Vec<Vec<TermId>>,
     /// The assigned ids, **in the caller's submitted row order** — what the ack returns.
     pub entity_ids: Vec<EntityId>,
+    /// This entry's memberships, carried through the allocation unchanged: the ids the joins name
+    /// are `entity_ids[row]`, which is why the two travel together.
+    pub memberships: Vec<ResolvedMembership>,
     pub waiters: Vec<W>,
 }
 
@@ -658,6 +684,7 @@ impl<W> CommitWindow<W> {
                 },
                 terms,
                 entity_ids,
+                memberships: entry.memberships,
                 waiters: entry.waiters,
             });
         }
@@ -695,6 +722,7 @@ mod tests {
             rows,
             batch_id: batch.to_string(),
             body_hash: [0u8; 32],
+            memberships: Vec::new(),
             waiters: vec!["w"],
         }
     }
@@ -815,6 +843,7 @@ mod tests {
             rows: vec![row(Some("k"), &[1])],
             batch_id: "b1".to_string(),
             body_hash: [3u8; 32],
+            memberships: Vec::new(),
             waiters: vec!["w"],
         });
 

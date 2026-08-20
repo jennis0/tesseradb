@@ -2526,12 +2526,14 @@ impl WritePath {
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
     ) -> Result<Vec<EntityId>, AcceptError> {
         let mark = StageMark::now();
         let receipt = self.handle()?.submit(Command::Ingest {
             rows,
             batch_id,
             body_hash,
+            artifacts,
         })?;
         self.health().lap(WriteStage::SubmitToReceipt, mark);
         match receipt.outcome {
@@ -4000,6 +4002,49 @@ fn views_of(generation: &Generation) -> Vec<String> {
     views.sort_unstable();
     views.dedup();
     views
+}
+
+/// **The growth records one closed window owes**, with the index of the entry to blame if an append
+/// fails, in the order they are to be appended.
+///
+/// **One record per `(layer, level)` for the whole window, not one per entry.** A record is a list
+/// of `(ordinal, joining)`, entries in a window are already committed together under one fsync, and
+/// several batches naming one cluster are the ordinary shape of a client ingesting in parallel — so
+/// merging costs one union and saves a record and a pin per batch. What may not merge is the
+/// address: a join carries its own `(layer, level, ordinal)` and nothing infers one from another's.
+///
+/// The entities are `entity_ids[row]` — the assignment this window just made, in the caller's own
+/// row order (`tessera_lifecycle::ClosedEntry`) — which is what puts a point's membership in the
+/// same commit as the point.
+fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRecord, usize)> {
+    use std::collections::BTreeMap;
+    /// One `(layer, level)`'s joins: the entry to blame for the append, and a bitmap per ordinal.
+    type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
+    // Ordered, so the records a window appends do not depend on hash iteration order: two nodes
+    // replaying one log must read the same sequence, and a test comparing two runs is entitled to
+    // the same one.
+    let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
+    for (index, entry) in closed.iter().enumerate() {
+        for join in &entry.memberships {
+            let (_, ordinals) = by_level
+                .entry((join.layer.as_str(), join.level))
+                .or_insert_with(|| (index, BTreeMap::new()));
+            let joining = ordinals.entry(join.ordinal).or_default();
+            for row in &join.rows {
+                let entity = entry.entity_ids[*row as usize];
+                // Entity space is `u32` by I9, so the narrowing is total.
+                joining.add(entity.raw() as u32);
+            }
+        }
+    }
+    by_level
+        .into_iter()
+        .filter_map(|((layer, level), (index, ordinals))| {
+            let joins = ordinals.iter().map(|(ordinal, joining)| (*ordinal, joining));
+            tessera_lifecycle::membership::growth_record(layer, level, joins)
+                .map(|record| (record, index))
+        })
+        .collect()
 }
 
 /// A second is short against the interval an operator or an orchestrator would take to notice, and
@@ -7056,6 +7101,7 @@ impl Executor {
                 rows,
                 batch_id,
                 body_hash,
+                artifacts,
             } = command
             else {
                 // Unreachable while the lane follows the command (`Command::is_never_shed`): a
@@ -7078,7 +7124,8 @@ impl Executor {
 
             let admitted;
             let m = StageMark::now();
-            (window, admitted) = self.admit_ingest(window, rows, batch_id, body_hash, respond);
+            (window, admitted) =
+                self.admit_ingest(window, rows, batch_id, body_hash, artifacts, respond);
             self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
@@ -7223,6 +7270,7 @@ impl Executor {
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
         respond: Responder,
     ) -> (CommitWindow<Responder>, Admission) {
         match BatchState::of(&self.live, &window, &batch_id) {
@@ -7304,7 +7352,7 @@ impl Executor {
                     // joins rather than closing.
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Some(entry) = self.admit(rows, batch_id, body_hash, respond) {
+                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, respond) {
                     if window.is_empty() {
                         // The in-flight gauge is armed at the **first entry**, never at window
                         // construction: an empty window is never closed, so a gauge armed there
@@ -7327,11 +7375,25 @@ impl Executor {
     ///
     /// This check reads state written at **apply**, which is why an entry naming an external id the
     /// *open window* holds must close it before reaching here (see the caller).
+    ///
+    /// ## The membership column's keys resolve here too, and a bad one refuses this batch alone
+    ///
+    /// A batch naming an artifact that does not exist is refused naming the key, and nothing it
+    /// carried is admitted — the standard `/control/ingest` refusals are held to, and the standard
+    /// one for a growth (`artifacts-from-points.md` §6.1: the whole batch or none of it). It
+    /// happens **here** rather than at the close because a window holds several callers' batches:
+    /// one caller's typo may not refuse another caller's rows, and after the allocation there is no
+    /// per-entry refusal left to make.
+    ///
+    /// The ordinal is carried from here rather than re-derived at the close — see
+    /// [`tessera_lifecycle::ResolvedMembership`] for why that is safe and what it means when the
+    /// artifact has gone by then.
     fn admit(
         &mut self,
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
         respond: Responder,
     ) -> Option<WindowEntry<Responder>> {
         // The fail-closed backstop for the widened check-to-apply race — see
@@ -7352,12 +7414,87 @@ impl Executor {
             return None;
         }
 
+        let memberships = match self.resolve_memberships(&artifacts) {
+            Ok(memberships) => memberships,
+            Err(detail) => {
+                self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                self.health.note_work_refused();
+                return None;
+            }
+        };
+
         Some(WindowEntry {
             rows,
             batch_id,
             body_hash,
+            memberships,
             waiters: vec![respond],
         })
+    }
+
+    /// Resolve one batch's membership keys to ordinals, and check the edges its adjacency declared.
+    ///
+    /// `Err` is the refusal text the caller is answered with, whole batch without effect.
+    fn resolve_memberships(
+        &self,
+        artifacts: &tessera_lifecycle::BatchArtifacts,
+    ) -> Result<Vec<tessera_lifecycle::ResolvedMembership>, String> {
+        if artifacts.is_empty() {
+            return Ok(Vec::new());
+        }
+        // **One line per batch, not one per edge.** A lineage over a 10⁵-cluster tree whose roster
+        // was published without parents would otherwise emit 10⁵ formatted writes on the write
+        // path, which is the shape that makes a log a second bottleneck. The count is the signal
+        // and the examples are what an operator acts on.
+        let mut unrecorded: Vec<String> = Vec::new();
+        let mut unrecorded_total = 0usize;
+        let resolved = self.live.with_publication_state(|registry, store, _| {
+            for edge in &artifacts.edges {
+                match registry.check_edge(&edge.layer, edge.level, &edge.child, &edge.parent, store)
+                {
+                    Ok(tessera_lifecycle::EdgeCheck::Agrees) => {}
+                    // **Reported, not refused** — see `LayerRegistry::check_edge`. The membership
+                    // half of the same entry is unambiguous and lands; what is lost is an edge this
+                    // route cannot create, and an operator who published a roster without its
+                    // parents needs to be told rather than blocked.
+                    Ok(tessera_lifecycle::EdgeCheck::Unrecorded) => {
+                        unrecorded_total += 1;
+                        if unrecorded.len() < 5 {
+                            unrecorded.push(format!(
+                                "{} of {} under {}",
+                                edge.child, edge.layer, edge.parent
+                            ));
+                        }
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            artifacts
+                .memberships
+                .iter()
+                .map(|join| {
+                    registry
+                        .resolve_growth_key(&join.layer, join.level, &join.key, store)
+                        .map(|ordinal| tessera_lifecycle::ResolvedMembership {
+                            layer: join.layer.clone(),
+                            level: join.level,
+                            ordinal,
+                            rows: join.rows.clone(),
+                        })
+                        .map_err(|e| e.to_string())
+                })
+                .collect()
+        });
+        if unrecorded_total > 0 {
+            tracing::warn!(
+                count = unrecorded_total,
+                examples = ?unrecorded,
+                "an ingest batch's list column names parent edges these layers do not hold; the \
+                 memberships are applied and the edges are not — a growth adds members, and \
+                 lineage is declared where the artifact is published"
+            );
+        }
+        resolved
     }
 
     /// **Close a commit window**: one signature-sorted allocation run, one WAL record per entry, one
@@ -7522,6 +7659,28 @@ impl Executor {
                 positions.push(at);
             }
         }
+
+        // **The joins this window's rows declared, in the same commit as the rows** — one record
+        // per `(layer, level)` over every entry, appended behind the batch records and inside the
+        // one fsync below (`artifacts-from-points.md` §6.2). Built after the allocation because
+        // that is the first moment a row has an entity to join with, and the ordinals were resolved
+        // at admission.
+        //
+        // Each record's position is read before its append and carried to the apply: a growth below
+        // its level's published high-water is held in the log by that position until a fold rewrites
+        // the level whole, and releasing it early is the silent loss `ArtifactStore::grow`'s own doc
+        // is written against.
+        let mut growth: Vec<(WalRecord, u64)> = Vec::new();
+        if failed_at.is_none() {
+            for (record, i) in growth_records(&closed) {
+                let at = self.wal.position();
+                if let Err(e) = self.wal.append(&record) {
+                    failed_at = Some((i, e));
+                    break;
+                }
+                growth.push((record, at));
+            }
+        }
         mark = self.health.lap(WriteStage::WalAppend, mark);
         // **One fsync for the whole window.** This is the amortisation half of group commit; the
         // allocation scope above is the point of it.
@@ -7547,6 +7706,32 @@ impl Executor {
         // the mutated `vocabularies`, so the next generation publishes this window's mints and not
         // merely its rows.
         let published = self.apply_window(&mut closed, &positions, vocabularies);
+
+        // **After the rows are in force, never before.** A membership is projected through rows, so
+        // a store that held the join while the generation still lacked the row would describe an
+        // artifact by a point nothing could yet see. The reverse order costs nothing: both are
+        // durable by this line, and the log is what a restart reads.
+        if !growth.is_empty() {
+            let undecodable = self.live.with_publication_state(|_, store, _| {
+                growth
+                    .iter()
+                    .map(|(record, position)| store.apply(record, *position))
+                    .sum::<usize>()
+            });
+            if undecodable > 0 {
+                // Unreachable in practice — these bytes were serialised from a live bitmap moments
+                // ago — and alarmed rather than asserted, because the alternative to noticing is an
+                // artifact that is quietly the size it was before.
+                tracing::error!(
+                    count = undecodable,
+                    "ALARM: a membership growth did not survive its own round trip"
+                );
+            }
+            // A growth against an artifact **above** its level's high-water is carried by the next
+            // tail pack like any other unpublished record; one below it waits for the fold, held in
+            // the log by the pin. Marking the manifest dirty is what gets the first case published.
+            self.deny_dirty = true;
+        }
 
         // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
         // where the generation has swapped but the idempotency index has not caught up.
@@ -7687,9 +7872,11 @@ impl Executor {
                 rows,
                 batch_id,
                 body_hash,
+                artifacts,
             } => {
                 let window = CommitWindow::new(self.next_window_seq());
-                let (window, _) = self.admit_ingest(window, rows, batch_id, body_hash, respond);
+                let (window, _) =
+                    self.admit_ingest(window, rows, batch_id, body_hash, artifacts, respond);
                 if !window.is_empty() {
                     self.close_window(window);
                 }
@@ -7828,13 +8015,17 @@ impl Executor {
     /// criterion. The same failure is what the pin `ArtifactStore::mark_growth_packed` releases
     /// exists against, on the packing side.
     ///
-    /// ⊘ **The wire seam is here.** A point naming its artifacts on the wire
-    /// (`artifacts-from-points.md` §6) is the next stage: an ingest batch carrying a column named
-    /// for a layer would resolve its keys and arrive at this command, in the same commit as the
-    /// rows — which is where minting from an unknown key would hook in too, beside this call rather
-    /// than in the handler, because ordinals are claimed serially on this thread. Today the only
-    /// caller is `Engine::grow_memberships`, and `/control/ingest` refuses a column named for a
-    /// layer exactly as it refuses a misspelt one.
+    /// **This is the control plane's route into growth, and it is no longer the only one.** An
+    /// ingest batch carrying a column named for a layer grows the same memberships through
+    /// `Executor::close_window` instead (`artifacts-from-points.md` §6.2) — resolved at admission,
+    /// appended inside the window's own fsync, and applied through the same `ArtifactStore::grow`
+    /// this command reaches. The two share the record and the store method rather than the command,
+    /// because a batch's entities do not exist until its window allocates and a command cannot wait
+    /// inside one.
+    ///
+    /// ⊘ **Minting from an unknown key hooks in here and beside that close** (§6.3): ordinals are
+    /// claimed serially on this thread, which is why it belongs on the executor rather than in a
+    /// handler.
     fn commit_growth(
         &mut self,
         layer: String,

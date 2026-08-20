@@ -68,7 +68,9 @@ use tessera_lifecycle::membership::{
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
 use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::{HierarchyKind, LayerDeclaration, ValueSet};
+use tessera_types::layer::{
+    parent_edges, LayerDeclaration, ListMeaning, ValueSet,
+};
 use tessera_types::EntityId;
 
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
@@ -677,7 +679,9 @@ fn resolve_member(
                 Some(index) => Some(Member::Interned(index)),
                 None => {
                     // The one decimal string an integer key ever costs: once per artifact minted,
-                    // never once per point.
+                    // never once per point. The spelling is the one
+                    // `tessera_types::layer::integer_key` states for the wire — `3` and "3" name
+                    // one artifact — taken here without allocating for the point that matched.
                     let address = (layer.to_string(), level, value.to_string());
                     if value_set == ValueSet::Closed {
                         return Err(undeclared_key(path, &address));
@@ -737,22 +741,19 @@ fn null_entity(path: &Path, what: &str) -> BuildError {
     ))
 }
 
-/// The edges one row's list declares: entry *k* is the parent of entry *k+1*.
+/// The edges one row's list declares, folded into the map of what each child's parent is.
 ///
-/// **Adjacent entries only, and both of them present.** An entry naming no artifact is a point that
-/// is noise at that resolution, not a link across it — reading past it would invent an edge from a
-/// level to one two below, which is a containment claim the caller never made and which the next
-/// point, clustered at that resolution, would contradict.
+/// The adjacency itself is [`parent_edges`]'s — the wire reads the same rule off the same function
+/// — and what is added here is the conflict: **one entry per child, not one per row**, so a cluster
+/// of a hundred thousand points states its parent a hundred thousand times and the second statement
+/// onward is a comparison rather than an insertion.
 fn record_lineage(
     entries: &[Option<Member>],
     roster: &Option<IntegerRoster>,
     lineage: &mut BTreeMap<Address, String>,
     path: &Path,
 ) -> Result<()> {
-    for pair in entries.windows(2) {
-        let (Some(parent), Some(child)) = (&pair[0], &pair[1]) else {
-            continue;
-        };
+    for (parent, child) in parent_edges(entries) {
         let parent = parent.address(roster).2.as_str();
         let child = child.address(roster);
         match lineage.get(child) {
@@ -1790,6 +1791,9 @@ impl<'a> KeyColumn<'a> {
     }
 
     /// What one member row's key says — **the non-allocating read, for one row per point.**
+    ///
+    /// The noise sentinel is [`tessera_types::layer::NOISE_KEY`]'s, not a literal here: the wire
+    /// reads the same cell out of an Arrow batch and the two must agree about what `-1` means.
     fn read_at(&self, row: usize) -> KeyRead<'a> {
         if self.array().is_null(row) {
             return KeyRead::Unclustered;
@@ -1797,7 +1801,7 @@ impl<'a> KeyColumn<'a> {
         match self {
             KeyColumn::Text(a) => KeyRead::Named(a.value(row)),
             _ => match self.integer_at(row).expect("an integer column") {
-                -1 => KeyRead::Unclustered,
+                tessera_types::layer::NOISE_KEY => KeyRead::Unclustered,
                 value => KeyRead::Numbered(value),
             },
         }
@@ -1872,38 +1876,6 @@ enum ListShape<'a> {
     Fixed(&'a FixedSizeListArray),
 }
 
-/// What the positions in a list of keys mean.
-#[derive(Clone, Copy)]
-enum ListMeaning {
-    /// `stacked` and `tiered`: entry *k* is the artifact at level *k*, one per declared level.
-    /// `edges` is `tiered`'s containment between consecutive entries; `stacked`'s levels are
-    /// independent analyses and carry none.
-    Levelled { levels: usize, edges: bool },
-    /// `nested`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at level 0** —
-    /// a nested layer's hierarchy is its edges and it declares no levels (decision 0082).
-    Lineage,
-    /// `flat`: a membership each, at level 0, in no order. A flat layer has no positions for a
-    /// list to index, so the entries are a set and nothing is read from their adjacency.
-    Unordered,
-}
-
-impl ListMeaning {
-    fn level_of(&self, position: usize) -> u32 {
-        match self {
-            ListMeaning::Levelled { .. } => position as u32,
-            ListMeaning::Lineage | ListMeaning::Unordered => 0,
-        }
-    }
-
-    fn declares_edges(&self) -> bool {
-        match self {
-            ListMeaning::Levelled { edges, .. } => *edges,
-            ListMeaning::Lineage => true,
-            ListMeaning::Unordered => false,
-        }
-    }
-}
-
 impl ListedKeys<'_> {
     /// The row's entries, as a range into the element array — `None` where the row named no
     /// artifact at all.
@@ -1972,45 +1944,33 @@ fn member_keys<'a>(
         arrow::datatypes::DataType::FixedSizeList(_, size) => Some(*size as usize),
         _ => return Ok(MemberKeys::Scalar(key_column(path, batch, fields, "key")?)),
     };
-    let kind = declaration.hierarchy.kind;
-    let meaning = match kind {
-        // **A flat layer takes a list as plain multi-membership.** A flat layer has no levels
-        // and no lineage, so the positions mean nothing — but the entries still do: the point is
-        // a member of every artifact its list names, which is exactly what the same membership
-        // written as several rows of a member table already means. Refusing the list spelling
-        // would make two spellings of one membership disagree, and overlapping flat groupings —
-        // a document under three topics — are ordinary rather than a mistake.
-        HierarchyKind::Flat => ListMeaning::Unordered,
-        HierarchyKind::Nested => {
-            if let Some(size) = fixed {
+    // **The meaning of the positions is the layer's own declaration**, read through the one rule
+    // both entry points share ([`ListMeaning`]). What is left here is the *type* half of the arity
+    // check: an Arrow `FixedSizeList` states its length in its own type, which a plain list does
+    // not, so it is the one place a disagreement can be caught before a row is read.
+    let meaning = declaration.list_meaning();
+    if let Some(size) = fixed {
+        match meaning {
+            ListMeaning::Lineage => {
                 return Err(BuildError::Invalid(format!(
                     "{}: column {name} is a fixed-size list of {size} and layer '{layer}' is \
                      declared nested, whose lineage is as deep as each point's own branch — a \
                      fixed arity is one entry per level, which is the stacked and tiered shape. \
                      Write the column as a list, or declare the layer tiered and its levels",
                     path.display()
-                )));
+                )))
             }
-            ListMeaning::Lineage
+            ListMeaning::Levelled { levels, .. } if size != levels => {
+                return Err(BuildError::Invalid(format!(
+                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' \
+                     declares {levels} levels. Entry k is the artifact at level k, so the two \
+                     counts are one number written twice",
+                    path.display()
+                )))
+            }
+            _ => {}
         }
-        HierarchyKind::Stacked | HierarchyKind::Tiered => {
-            let levels = declaration.levels.len();
-            if let Some(size) = fixed {
-                if size != levels {
-                    return Err(BuildError::Invalid(format!(
-                        "{}: column {name} is a fixed-size list of {size} and layer '{layer}' \
-                         declares {levels} levels. Entry k is the artifact at level k, so the two \
-                         counts are one number written twice",
-                        path.display()
-                    )));
-                }
-            }
-            ListMeaning::Levelled {
-                levels,
-                edges: matches!(kind, HierarchyKind::Tiered),
-            }
-        }
-    };
+    }
     let shape = match array.data_type() {
         arrow::datatypes::DataType::List(_) => {
             ListShape::Variable(typed::<ListArray>(path, array, name)?)

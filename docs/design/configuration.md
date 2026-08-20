@@ -573,6 +573,12 @@ no sources is a legal config rather than a special mode.
   registry and allocator the control plane runs (`annotation-write-cycle.md` §6.1). A `[[layer]]`
   block minus its acquisition keys *is* that payload. `[layer.labels]` expands to a second
   declaration, so the sugar is available to both.
+- **Memberships.** A point names its artifacts in a column **named for the layer** — the
+  declaration's `name`, exactly as an attribute column is named for the attribute's `name`
+  ([`artifacts-from-points.md`](artifacts-from-points.md) §6.2). `[layer.members]`'s `source` and
+  `fields` are the acquisition half and stay build-only for the reason above: they say which *file*
+  and which of its columns, which is nothing a running node could check. The values and the list
+  rules are identical on both routes.
 - **Views.** A view is created online by a control verb carrying `{name, gate, projection
   provenance}`, or declared here and compiled. Same object either way.
 
@@ -1040,6 +1046,15 @@ across every view it appears in, and it is what a member row names.
 
 
 ## Appendix R — review trail
+
+**2026-08-20 — the wire takes a membership column, and the acquisition split is what decides its
+name.** No key is added and no block changes: `/control/ingest` now accepts a column named for a
+declared layer, which §2's list of what the write path already consumes gains a bullet for. The
+name is the *declaration's* — the layer's `name` — because `[layer.members]`'s `fields` maps a
+file's column onto the canonical meaning and a deployment writing through the service has no file;
+that is the same split `[[attribute]]` has between its `name` and its `field`, and this document's
+§2 rule ("`source`, `fields` and inline data are acquisition keys") is what settles it rather than a
+new decision. Full argument in [`artifacts-from-points.md`](artifacts-from-points.md) §6.2.
 
 **2026-08-19 — a member key column may be a list, and the hierarchy kind says what its positions
 mean.** No key is added and no block changes: a hierarchical clusterer's one list per point is
