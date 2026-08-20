@@ -48,23 +48,70 @@
 //!
 //! # Measured 2026-08-20, WSL2 on this host, release
 //!
-//! Rows = 1 000 000. Mask = half the corpus visible. `N` is the layer's artifact count; each
-//! artifact holds `rows / N` scattered members. **263 is the demo corpus's HDBSCAN layer**, which
-//! is the number the owner named as the one to hold in mind.
+//! Mask = half the corpus visible. `N` is the layer's artifact count and the corpus is partitioned
+//! across it, so members per artifact is `rows / N` — which is what an attribute predicate is: a
+//! column's distinct values partition its carriers. **263 is the demo corpus's HDBSCAN layer**, the
+//! number the owner named as the one to hold in mind. A `~` marks a `B request` scaled from
+//! `B_SET_CAP` sets rather than measured whole.
 //!
-//! | N | viewport | A move | A request | B request | B / A request |
-//! |---:|---|---:|---:|---:|---:|
-//! | 64 | whole | 8.09 ms | 0.64 ms | 2 347 ms | 3 690× |
-//! | 64 | tenth | 8.09 ms | 0.43 ms | 236 ms | 554× |
-//! | **263** | **whole** | **15.10 ms** | **1.02 ms** | **8 202 ms** | **8 040×** |
-//! | 263 | tenth | 15.10 ms | 0.62 ms | 844 ms | 1 355× |
-//! | 1 024 | whole | 31.74 ms | 1.31 ms | 23 890 ms | 18 211× |
-//! | 1 024 | tenth | 31.74 ms | 0.58 ms | 2 284 ms | 3 908× |
+//! **10⁶ rows** — one member per artifact at the top of the table, which is the degenerate end and
+//! is here to isolate the per-artifact term:
+//!
+//! | N | members | viewport | A move | A request | B request | A held |
+//! |---:|---:|---|---:|---:|---:|---:|
+//! | 64 | 15 625 | whole | 7.4 ms | 0.6 ms | 2 261 ms | 2 MB |
+//! | **263** | 3 802 | **whole** | **15.5 ms** | **0.9 ms** | ~6 933 ms | 2 MB |
+//! | 1 024 | 976 | whole | 28.6 ms | 1.4 ms | ~15 996 ms | 2 MB |
+//! | 10 000 | 100 | whole | 221.8 ms | 6.7 ms | ~79 540 ms | 3 MB |
+//! | 100 000 | 10 | whole | 1 566 ms | 39.7 ms | ~435 520 ms | 11 MB |
+//! | **1 000 000** | 1 | **whole** | **6 804 ms** | **69.4 ms** | ~2 247 387 ms | 18 MB |
+//! | 1 000 000 | 1 | tenth | 6 804 ms | 30.8 ms | ~228 609 ms | 18 MB |
+//!
+//! **10⁷ rows**, the same layer sizes — which separates *a million artifacts costs this* from *a
+//! million members costs this*:
+//!
+//! | N | members | viewport | A move | A request | B request | A held |
+//! |---:|---:|---|---:|---:|---:|---:|
+//! | 64 | 156 250 | whole | 113.5 ms | 6.6 ms | 56 570 ms | 20 MB |
+//! | **263** | 38 022 | **whole** | **200.6 ms** | **10.3 ms** | ~128 078 ms | 20 MB |
+//! | 1 024 | 9 765 | whole | 334.7 ms | 24.8 ms | ~361 935 ms | 21 MB |
+//! | 10 000 | 1 000 | whole | 1 704 ms | 109.1 ms | ~1 614 102 ms | 32 MB |
+//! | 100 000 | 100 | whole | 10 337 ms | 615.2 ms | ~10 189 715 ms | 101 MB |
+//! | **1 000 000** | 10 | **whole** | **15 524 ms** | **475.9 ms** | ~39 574 147 ms | 108 MB |
+//! | 1 000 000 | 10 | tenth | 15 524 ms | 131.5 ms | ~3 939 833 ms | 108 MB |
+//!
+//! ## At a million artifacts the caching arm is what needs bounding, and B is not a candidate
+//!
+//! **A layer of a million predicate artifacts costs ~0.5 s per request over the whole map** on a
+//! ten-million-point corpus, and 0.13 s over a tenth of it. That is the serving loop testing every
+//! artifact — `intersects` then `masked_count` — and **the cut cannot reduce it**, because the cut
+//! runs after the verdicts and so serves fewer artifacts while evaluating exactly as many.
+//! Comfortable is a few thousand: 25 ms at 1 024, 109 ms at 10 000, and past that it dominates
+//! whatever else the viewport is doing.
+//!
+//! **The generation-move cost is the harder constraint: 15.5 s**, paid whenever the generation
+//! moves rather than once. It is mostly a per-artifact term — a million `project_base` calls — so a
+//! bigger corpus makes it worse only slowly (6.8 s at 10⁶ rows against 15.5 s at 10⁷, for ten times
+//! the members), and it is the number to attack first if a layer this size is ever wanted.
+//!
+//! **Memory is not the problem at this scale and it is worth saying so**: 108 MB of row forms for a
+//! million artifacts over ten million points, which is the one resource that scales the way a
+//! reader expects.
+//!
+//! **B is out at every scale, and the gap widens with N** — 3 700× at 64 artifacts, 83 000× at a
+//! million, where it is eleven hours per request. Its probe term is `rows × artifacts` and a layer
+//! is exactly a collection of sets, so growing the layer is growing the thing it is linear in.
+//!
+//! **What this says about the per-request bound** (delivery §2, ⊘ unspecified): it has to be a
+//! **refusal on the layer's declared artifact count**, checked before any evaluation. Not on the
+//! principal's visible count — that requires the evaluation the bound exists to avoid, and a
+//! refusal that varies by principal is a disclosure channel of its own. A total artifact count is
+//! corpus-wide and identical for everyone, so refusing on it discloses nothing.
 //!
 //! **A, and not marginally.** The arithmetic set up above — `A move` against `B request` × requests
 //! between generation moves — does not need doing: A's entire generation-move cost is repaid by
 //! **one** request, at every size and both viewport widths. At the demo corpus's 263 artifacts over
-//! the whole map, A costs 15 ms once per move and 1.0 ms per request where B costs 8.2 **seconds**
+//! the whole map, A costs 15 ms once per move and 0.9 ms per request where B costs 6.9 **seconds**
 //! per request.
 //!
 //! **The reason is that B's cost is `rows × artifacts` and A's is `containers × artifacts`.** One
@@ -81,22 +128,29 @@
 //! which is always, and it is the option to reach for if the caching invalidation rule ever turns
 //! out to be the hard part.
 //!
-//! **`A request` is 3.9 µs per artifact at N = 263**, which is `annotation-representation.md` §2's
+//! **`A request` is 3.5 µs per artifact at N = 263**, which is `annotation-representation.md` §2's
 //! own microseconds-per-artifact figure arrived at independently — a sign the fixture is at a
-//! realistic density rather than a flattering one.
+//! realistic density rather than a flattering one. It falls to 69 ns at a million artifacts of one
+//! member each, which is the floor: one container touched, twice.
+//!
+//! Run at a second corpus size by passing one: `… --bin predicate_membership_cost 10000000`.
 //!
 //! Run: `cargo run --release -p tessera-bench --bin predicate_membership_cost`
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use croaring::Bitmap;
+use croaring::{Bitmap, Portable};
 use tessera_engine::artifacts::ArtifactRows;
 use tessera_engine::compose::MaskedSet;
 use tessera_lifecycle::membership::ArtifactRecord;
 use tessera_store::permutation::{Permutation, RowSpace};
 use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 use tessera_types::{EntityId, RowId};
+
+/// How many of a layer's sets the B arm actually probes. Its probe term is linear in the set count,
+/// so beyond this the figure is scaled rather than measured — see the call site.
+const B_SET_CAP: usize = 64;
 
 /// A composed mask stripped to what both arms ask of one.
 ///
@@ -183,39 +237,53 @@ fn main() {
     // on the way out rather than left for the next run to reuse by accident.
     let dir = std::env::temp_dir().join(format!("tessera-predicate-cost-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a working directory");
-    const ROWS: u32 = 1_000_000;
-    let space = row_space(&dir, ROWS);
+    // The corpus size, so the same layer sizes can be run against two of them — which is what
+    // separates "a million artifacts costs this" from "a million members costs this".
+    let rows: u32 = std::env::args()
+        .nth(1)
+        .map(|a| a.parse().expect("a row count"))
+        .unwrap_or(1_000_000);
+    let space = row_space(&dir, rows);
 
     // Half the corpus visible: a mask dense enough that a count touches every container, which is
     // the expensive side of Roaring's O(containers touched) rather than the flattering one.
     let mut mask = Bitmap::new();
-    for row in (0..ROWS).step_by(2) {
+    for row in (0..rows).step_by(2) {
         mask.add(row);
     }
     mask.run_optimize();
     let mask = PlainMask(mask);
 
-    println!("rows = {ROWS}, mask = half of them");
+    println!("rows = {rows}, mask = half of them");
     println!(
-        "{:>6} {:>10} {:>12} {:>12} {:>12} {:>12} {:>10}",
-        "N", "viewport", "A move", "A request", "B request", "B/A request", "moves"
+        "{:>9} {:>8} {:>10} {:>12} {:>12} {:>14} {:>12} {:>9}",
+        "N", "members", "viewport", "A move", "A request", "B request", "B/A request", "A held"
     );
 
-    for n in [64usize, 263, 1024] {
-        let sets = memberships(ROWS, n);
+    for n in [64usize, 263, 1024, 10_000, 100_000, 1_000_000] {
+        let sets = memberships(rows, n);
         let recs = records(&sets);
 
         // **A's whole extra cost, and it is paid at a generation move.** `ArtifactRows::build` is
         // one `project_base` per artifact, and `project_base` decodes the whole membership — the
         // same call an enumerated layer already pays at open and at a move.
         let started = Instant::now();
-        let rows = ArtifactRows::build(
+        let row_forms = ArtifactRows::build(
             recs.iter().enumerate().map(|(i, r)| (i as u32, r)),
             &space,
         );
         let a_move = started.elapsed();
 
-        for (label, span) in [("whole", ROWS), ("tenth", ROWS / 10)] {
+        // What A holds between moves, which is the other half of its price and becomes the live
+        // question long before the timings do. Serialised size stands for resident size: it is the
+        // container payload without the allocator's own overhead, so it is the floor rather than
+        // the figure.
+        let held: u64 = (0..n as u32)
+            .filter_map(|o| row_forms.get(o))
+            .map(|b| b.get_serialized_size_in_bytes::<Portable>() as u64)
+            .sum();
+
+        for (label, span) in [("whole", rows), ("tenth", rows / 10)] {
             let mut tile_rows = Bitmap::new();
             tile_rows.add_range(0..span);
             tile_rows.run_optimize();
@@ -225,8 +293,8 @@ fn main() {
             let started = Instant::now();
             let mut served = 0u64;
             for ordinal in 0..n as u32 {
-                if rows.intersects(ordinal, &tile_rows, &mask) {
-                    served += rows.masked_count(ordinal, &mask);
+                if row_forms.intersects(ordinal, &tile_rows, &mask) {
+                    served += row_forms.masked_count(ordinal, &mask);
                 }
             }
             let a_request = started.elapsed();
@@ -235,42 +303,64 @@ fn main() {
             // **B's shape: one inversion, N probes per row.** The domain is the viewport's rows;
             // each is inverted once however many entity-space sets ride on it, and each set costs
             // one probe on top (`per_tile_crossing_multi`'s own cost note).
+            //
+            // **Capped, and the cap is why the large-N figures are modelled.** At a million
+            // artifacts this arm is 10¹² probes, which is hours per cell. The probe term is exactly
+            // linear in the set count — that is the whole of what the cost note claims — so it is
+            // measured over `B_SET_CAP` sets and scaled, with the inversion (which is paid once
+            // whatever the set count) held out of the scaling. A row marked `~` is that.
+            let probed = sets.len().min(B_SET_CAP);
             let started = Instant::now();
             let mut hits = 0u64;
+            let mut inversions = 0u64;
             for row in 0..span {
                 let Some(entity) = space.entity_of(RowId::new(row)) else {
                     continue;
                 };
+                inversions += 1;
                 let raw = entity.raw() as u32;
-                for set in &sets {
+                for set in &sets[..probed] {
                     if set.contains(raw) {
                         hits += 1;
                     }
                 }
             }
-            let b_request = started.elapsed();
+            let b_capped = started.elapsed();
             std::hint::black_box(hits);
+            std::hint::black_box(inversions);
 
-            let ratio = b_request.as_secs_f64() / a_request.as_secs_f64();
-            // How many requests A's generation-move cost is worth, priced in B's per-request extra
-            // over A's. Below one, B is cheaper however often the layer is served.
-            let extra = b_request.as_secs_f64() - a_request.as_secs_f64();
-            let moves = if extra > 0.0 {
-                format!("{:.0}", a_move.as_secs_f64() / extra)
-            } else {
-                "-".to_string()
-            };
+            // The inversion, measured on its own so the probe term can be scaled without carrying
+            // it along — it is paid once per row however many sets ride on the walk.
+            let started = Instant::now();
+            let mut only_inversions = 0u64;
+            for row in 0..span {
+                if space.entity_of(RowId::new(row)).is_some() {
+                    only_inversions += 1;
+                }
+            }
+            let b_walk = started.elapsed();
+            std::hint::black_box(only_inversions);
+
+            let probe_term = (b_capped.as_secs_f64() - b_walk.as_secs_f64()).max(0.0);
+            let b_request =
+                b_walk.as_secs_f64() + probe_term * (n as f64 / probed as f64);
+            let modelled = if probed < n { "~" } else { " " };
+
+            let ratio = b_request / a_request.as_secs_f64();
             println!(
-                "{:>6} {:>10} {:>10.2}ms {:>10.2}ms {:>10.2}ms {:>11.1}x {:>10}",
+                "{:>9} {:>8} {:>10} {:>10.1}ms {:>10.1}ms {}{:>11.1}ms {:>11.0}x {:>7.0}MB",
                 n,
+                rows as usize / n,
                 label,
                 a_move.as_secs_f64() * 1e3,
                 a_request.as_secs_f64() * 1e3,
-                b_request.as_secs_f64() * 1e3,
+                modelled,
+                b_request * 1e3,
                 ratio,
-                moves,
+                held as f64 / 1e6,
             );
         }
+        drop(row_forms);
     }
 
     let _ = std::fs::remove_dir_all(&dir);

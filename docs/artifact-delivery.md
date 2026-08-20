@@ -54,8 +54,9 @@ when the response does not contain what it depends on, server-side, with the att
 reaching the wire (Stage 5 below). **I3 containment is a conformance row rather than a claim** —
 `conformance.md` r14 moves it to covered on a black-box test whose two principals are one entity
 apart. What does not exist yet is membership by predicate, runtime artifacts, and the filter, search
-and scale work — Stages 6 to 8 below, of which **Stage 6 opens with a cost discussion and not with
-code**.
+and scale work — Stages 6 to 8 below, of which **Stage 6's cost discussion is now held and
+measured**: a predicate layer's row form is cached at a generation move, and the per-request bound
+must refuse on a layer's declared artifact count.
 
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
@@ -68,7 +69,7 @@ code**.
 | **The configuration surface** | **stages 1–8 done** 2026-08-18/19 (`artifacts/stage-4`) — [decision 0088](decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) | one document declares the corpus and `tessera build` takes no flags; every retired key is refused rather than aliased | **built and gate-green.** Two visibility axes in place of six keys, `public` interned at term `0`, points carrying their own labels, the plugin taking a term list with the manifest hash enforced, one row per artifact with ranked `contents`, `[layer.labels]` expanding to a real layer, `tessera check`, the frame report and `disclosure.json`. ⊘ Stage 9 — the notebook and the corpus's citations — is the remainder |
 | **Artifacts from points** | **all five stages done** 2026-08-19/20 (`artifacts/stage-4`) — [the design](design/artifacts-from-points.md) | a clusterer's own output builds a layer: one integer per point or one list per point, noise included, and no artifact table required | **§2, §3 and §4 built and gate-green.** The membership route needed no new surface and is asserted so — a `[layer.members]` block over the points file builds the same bundle, byte for byte, as the same layer declared with a member table. Added in the first stage: an integer key column canonicalised to its decimal spelling (converted once per artifact, never per point); a null key and exactly `-1` skipped, counted and reported rather than refusing the build; and `value_set = "open" \| "closed"` on `[[layer]]`, closed being today's roster rule, open making a key no artifact declares create one. **In the second, a list key column**, whose entries are the artifacts the point belongs to and whose positions mean what the layer's `hierarchy.kind` already declares — one per level under `stacked` and `tiered`, a lineage under `nested`. The same byte-for-byte assertion holds both ways: a lineage column against an artifact table with a `parent` column, and a fixed-length column against a member table with a `level`. A child named under two different parents refuses the build; a shape disagreeing with the declared kind refuses rather than guessing; a null or `-1` entry places the point at no artifact at that level and links nothing across itself. **In the third, a membership grows** ([decision 0091](decisions/0091-build-is-ingest-into-an-empty-database.md) ruled the contradiction r4 found: a point ingested into an enumerated membership joins it, because a build reading a member table has always done exactly that). Three pieces: a durable WAL record carrying a **delta** rather than a restated set — restating a 10⁸-member cluster costs ~12 MB on the fsync path per batch naming it — one store method taken by both the live path and replay, and the packing bookkeeping, which is the part that decides whether it is correct. A level is packed only above its published high-water, so a grown record below that mark reaches a manifest by no append-only route: the log is pinned at the growth and released only by the fold, which rewrites every level whole. Releasing it at the mark that covers a packed tail is the silent failure — the artifact comes back from a restart at its pre-growth size, acked, indistinguishable from one below its criterion — and it is asserted where it bites: **a rotation may not reclaim the member holding a growth**, and after a fold the membership comes back whole with the log deleted outright. Growing a suppressed artifact leaves it suppressed, the key resolving in the store rather than in what is served. Fourteen tests. **In the fourth, the wire says what a file says** (contracts **r36**): `/control/ingest` accepts a column **named for the layer** — its own `name`, as an attribute column is named for the attribute's `name` and not its `field`, which stays build-time acquisition — carrying a key or a list of keys at exactly the values a member table carries, `-1` and null included. The keys resolve at **admission**, so one caller's typo refuses that batch alone rather than the window it would have joined, and the joins become one `ArtifactGrow` per `(layer, level)` inside the batch's own fsync: there is no state in which a point is ingested and its membership is not. **The rule is shared and the reader is not** — `tessera-types` carries no `arrow` dependency and does not acquire one, so `ListMeaning`, `parent_edges` and `integer_key` move there and each side decodes its own Arrow; the build's member pass now reads its list meaning, its noise sentinel and its adjacency from the same three. A lineage **checks** rather than creates: a contradiction is the build's own two-parents refusal, and an edge the layer holds no parent for is reported with the memberships still applied. **The test is 0091's own** — the same corpus built from a member table and ingested with a membership column is the same database to every client, at a scalar key and at a lineage, for three principals, with the built side pinned to an oracle computed from the fixture; dropping the column from the handler's submission turns both red. Ten tests over HTTP, three more on the shared rule itself. **In the fifth, a key that names nothing creates it** (contracts **r37**), which was
 [decision 0091](decisions/0091-build-is-ingest-into-an-empty-database.md)'s last obligation and with it the last difference in what can be *said* at the two entry points. Under `value_set = "open"` a membership column's key that no artifact holds mints an artifact carrying nothing but its name, the points of that batch that named it, and whatever computed content follows. **Minting is a publication and it happens at the commit window's close**, not at admission: an ordinal is claimed from the level's cursor and is durable only in the record that claims it, and a `PublishArtifacts` command executes while a window is open and reads the same cursor — so a claim made at admission would be taken twice. What stays at admission is every refusal that can be made about one batch alone, which is what keeps one caller's typo off another caller's rows: a closed layer's unknown key, a layer whose declaration a minted artifact could not satisfy (supplied content kinds, or `depends_on` — the two refusals a publication already makes of an artifact carrying only a key), and a child the batch's own column named under two parents. **A lineage needed no new record shape**: a growth is a delta of members and carries no edge, but the publication that *creates* an artifact has carried `parent_key` since artifacts existed — so a minted chain needed only the order, one record for a nested lineage where a sibling resolves inside its own batch, and one record per level coarse-first for a tiered chain where the parent's ordinal was fixed by the record before. That is `annotation-representation.md` §5.0.4's constraint applied to a batch. **The design's one fail-open is closed three times**: the resolution at admission and the re-resolution at the close both read the store's key index, which no suppression touches, and `prepare_publish` refuses a key its level already holds — so breaking both resolutions together turns the suppression test red on a *refusal* rather than on a second artifact. **What a batch minted is reported to the batch that minted it** — `minted` in the 200, a count in the build's own report, and no bound anywhere, because a bare clustering legitimately creates every artifact it has. Seven more tests over HTTP, of which four are 0091's comparison run again with a seed holding almost none of the clustering, so the tail creates it: at a scalar key, at a nested lineage, at a tiered chain, and against the identity rulings (one key minted once however many points name it; a suppressed artifact's key never minted again; a deleted key returning as a new artifact). **One thing the design had wrong**: the edge-with-no-parent warning was said to stop being reachable once minting landed, and it does not — a child that already exists and holds no parent is still an edge a growth cannot create, whoever its parent is |
-| **6** Predicate membership | not started — **opens with a cost discussion, not with code** (owner, 2026-08-20) | one layer built by rule and by list returns identical masked counts for every principal and every viewport | — |
+| **6** Predicate membership | not started — **its cost discussion is held and measured**, 2026-08-20 | one layer built by rule and by list returns identical masked counts for every principal and every viewport | **the row form is cached at a generation move**, as an enumerated layer's is ([the probe](../crates/tessera-bench/src/bin/predicate_membership_cost.rs)): deriving per request by crossing costs **7 900×** a cached count at the demo corpus's 263 artifacts — 6.9 s against 0.9 ms — because a crossing is `rows × artifacts` where a count is `containers × artifacts`, and the caching arm's whole move cost is repaid by one request. Filtering before evaluation stays refused. **The per-request bound carries the weight and must refuse on the layer's declared count before any evaluation**, biting well below a million artifacts: 476 ms per request and 15.5 s per move at 10⁶ artifacts over 10⁷ points, against 25 ms at 1 024. ⊘ The bound itself, and the proportional criterion's denominator, stay open |
 | **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
 | **8** Filters, search, scale | not started — carries the `excluding` complement's price (owner, 2026-08-20) | an invisible artifact and a nonexistent one cost the same; 10⁹ points with ~10⁷ artifacts serves and folds inside budget | — |
 
@@ -833,19 +834,51 @@ and never stale.
   this shape"* declares no member set and its size changes at every write. Until it is ruled a
   predicate layer may declare an absolute criterion or none.
 
-**This stage opens with a cost discussion and not with code** (owner, 2026-08-20). A predicate
-membership is answered by a masked scan per artifact, and **the cut cannot save it**: the cut runs
-after the verdicts, so it serves fewer artifacts and never evaluates fewer, and a viewport over a
-layer of a few hundred predicate artifacts pays every one of them whatever `artifact_budget` the
-client sent. The budget looks like a cost control here and is not one. Whether the per-request bound
-above carries the whole weight, or something filters before evaluation, is the discussion — and the
-second is the dangerous half, because anything that skips evaluation on geometry is a disclosure
-decision taken on a stamp, which is the shape
-[decision 0041](decisions/0041-pins-become-a-staleness-stamp.md) already refused for pins.
-`membership = { attribute = … }` is declared and unbuilt today, which is the fail-closed state to
-start from. **Filtering before evaluation is refused**, and the measurement is why it need not be
-argued again: the route that would have justified it is three orders of magnitude the wrong side of
-the one that needs no such filter.
+**This stage opened with a cost discussion and not with code** (owner, 2026-08-20), and the
+discussion is held and measured
+([the probe](../crates/tessera-bench/src/bin/predicate_membership_cost.rs)).
+
+**A predicate layer's row form is cached and rebuilt at a generation move**, exactly as an
+enumerated layer's is, so its per-request cost is Stage 2's and the predicate is invisible to the
+serving path. The alternative — deriving per request by crossing the posting lists into row space,
+which is what the filter surface's row route does for a leaf — is **7 900×** more expensive per
+request at the demo corpus's 263 artifacts over the whole map: 6.9 seconds against 0.9 ms. A
+crossing's cost is `rows × artifacts` where a cached count's is `containers × artifacts`; one
+crossing does serve every set (decision 0062's rule holds), but each set still costs a probe per row
+and a layer is exactly a collection of sets, so the ~5% crossover that makes the row route right for
+a single leaf never arrives. **The caching arm's whole generation-move cost is repaid by one
+request** — 15 ms at 263 artifacts — which is why the arithmetic did not need doing. Projecting per
+request rather than crossing is the honest third shape and costs that same 15 ms *per request*; it
+is the option to reach for only if the invalidation rule turns out to be the hard part.
+
+**Filtering before evaluation is refused**, and the measurement is why it need not be argued again:
+anything that skips evaluation on geometry is a disclosure decision taken on a stamp, the shape
+[decision 0041](decisions/0041-pins-become-a-staleness-stamp.md) already refused for pins, and the
+route that would have justified it is three orders of magnitude the wrong side of the one needing no
+such filter. `membership = { attribute = … }` is declared and unbuilt today, which is the
+fail-closed state to start from.
+
+**What the discussion was called for remains true**, and is why it was held first: a predicate
+membership is answered by a masked scan per artifact, and **the cut cannot save it** — the cut runs
+after the verdicts, so it serves fewer artifacts and never evaluates fewer, and a viewport over such
+a layer pays every one of its artifacts whatever `artifact_budget` the client sent. The budget looks
+like a cost control here and is not one.
+
+**So the per-request bound carries the weight, and the measurement fixes two things about its
+form.** ⊘ The bound itself is still unspecified (§2 above).
+
+*It has to bite well below a million artifacts.* At 10⁶ predicate artifacts over 10⁷ points the
+cached route costs **476 ms per request** over the whole map — the serving loop testing every
+artifact — and **15.5 s per generation move** to rebuild the row forms. Comfortable is a few
+thousand: 25 ms at 1 024 artifacts, 109 ms at 10 000. Memory is the one resource that behaves as a
+reader expects, 108 MB for that million. The crossing arm at the same size is eleven hours per
+request, so nothing about scale rehabilitates it — its gap *widens* with the layer, from 3 700× at
+64 artifacts to 83 000× at a million.
+
+*And it must refuse on the layer's **declared** artifact count, before any evaluation* — never on
+the principal's visible count, which requires the evaluation the bound exists to avoid and which
+would make the refusal itself vary by principal. A total artifact count is corpus-wide and identical
+for everyone, so refusing on it discloses nothing.
 
 **The check:** the tagged-programme layer is built twice — once enumerated, once as an attribute
 predicate here — and the two return **identical** masked counts for every principal and every

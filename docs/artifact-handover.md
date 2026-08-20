@@ -31,20 +31,33 @@ invisible to the serving path.
 The measurement is
 [`predicate_membership_cost`](../crates/tessera-bench/src/bin/predicate_membership_cost.rs) and it
 is not close. Deriving per request by crossing the posting lists into row space — which is what the
-filter surface's row route does for a leaf — costs **8 040×** a cached count at the demo corpus's
-263 artifacts over the whole map: 8.2 seconds against 1.0 ms. A crossing's cost is
+filter surface's row route does for a leaf — costs **7 900×** a cached count at the demo corpus's
+263 artifacts over the whole map: 6.9 seconds against 0.9 ms. A crossing's cost is
 `rows × artifacts` where a cached count's is `containers × artifacts`; one crossing serves every set
 (decision 0062's rule holds), but each set still costs a probe per row, and a layer is exactly a
 collection of sets. The ~5% crossover that makes the row route right for a *single* leaf therefore
 never arrives — the tenth-of-the-map column is that route's best case and still loses by three
-orders of magnitude. **The caching arm's whole generation-move cost is repaid by one request**,
-15 ms at 263 artifacts.
+orders of magnitude, and the gap **widens** with the layer — 3 700× at 64 artifacts, 83 000× at a
+million, where it is eleven hours per request. **The caching arm's whole generation-move cost is
+repaid by one request**, 15 ms at 263 artifacts.
 
 Two things follow, and both are worth carrying into the implementation.
 
-**The per-request bound is a response-size guard, not a cost control** — which is what it always
-should have been. A bound is about how much a client gets back; caching is about what the server
-spends getting it. ⊘ The bound itself stays unspecified (delivery §2).
+**The per-request bound is a response-size guard, not a cost control** at the sizes a layer is
+normally published at. A bound is about how much a client gets back; caching is about what the
+server spends getting it. ⊘ The bound itself stays unspecified (delivery §2) — but the measurement
+fixes two things about its form.
+
+*It has to bite well below a million artifacts.* At 10⁶ predicate artifacts over 10⁷ points the
+cached route costs **476 ms per request** over the whole map and **15.5 s per generation move**, and
+the cut reduces neither — it runs after the verdicts, so it serves fewer and evaluates exactly as
+many. A few thousand is comfortable: 25 ms at 1 024, 109 ms at 10 000. Memory is the one resource
+that behaves, 108 MB for that million.
+
+*And it must refuse on the layer's declared artifact count, before any evaluation* — never on the
+principal's visible count, which needs the evaluation the bound exists to avoid, and which would
+make the refusal vary by principal and so become a channel of its own. A total artifact count is
+corpus-wide and identical for everyone.
 
 **Filtering before evaluation is refused and need not be argued again.** Anything that skips
 evaluation on geometry is a disclosure decision taken on a stamp — the shape
