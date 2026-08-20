@@ -1,43 +1,75 @@
 # Handover — artifact work, after Stage 5's tail and the I3 conformance row
 
-**Date:** 2026-08-20 · **Status:** Stage 5 fully closed, the conformance suite green. **One item
-left on the list and it opens with a discussion, not with code.** Branches `artifacts/stage-4` and
-`conformance/fixture-drift`.
+**Date:** 2026-08-20 · **Status:** Stage 5 fully closed, the conformance suite green, and Stage 6's
+cost discussion held and measured. **What is left is Stage 6's implementation**, which now has its
+shape. Branch `artifacts/stage-4` (the conformance fix is `conformance/fixture-drift`, merged into
+it).
 
-Two of the three items this document carried on 2026-08-20 are done, and the finding they turned up
-is fixed. The cut's owed tail is built — a dependent is dropped when the response does not contain
-what it depends on — I3 containment has moved from *untested machinery* to a covered conformance
-row, and the suite that row lives in runs green again. What is left is Stage 6, and the owner has
-ruled that it does not start by writing code.
+All three items this document carried on 2026-08-20 are done, and so is the finding they turned up.
+The cut's owed tail is built — a dependent is dropped when the response does not contain what it
+depends on — I3 containment has moved from *untested machinery* to a covered conformance row, the
+suite that row lives in runs green again, and Stage 6's opening question is answered by a
+measurement rather than by an argument.
 
 **Read [`artifact-delivery.md`](artifact-delivery.md) first** — it is the status record for all
 artifact work by owner direction, not GitHub issues, and it wins over this document wherever they
 differ. [`artifact-config-handover.md`](artifact-config-handover.md) is the configuration rework's
 own handover and is still accurate about its surface; this one does not repeat it.
 
-## 1. What is left
+## 1. Where the work stands
 
-### 1.1 Stage 6 — and it opens with a discussion
+**Nothing on this list is blocking.** §1.1 is Stage 6, whose implementation is now specified enough
+to start; §1.2 is closed and is here for what it taught rather than for what it owes.
 
-**Do not start Stage 6 by writing code** (owner, 2026-08-20).
+### 1.1 Stage 6 — its cost discussion is held, and the answer is measured
 
-A predicate membership is answered by a masked scan per artifact. **The cut cannot save it**: the
-cut runs after the verdicts, so it serves fewer artifacts and never evaluates fewer. A viewport over
-a layer of a few hundred predicate artifacts pays every one of them whatever `artifact_budget` the
-client sent — the demo corpus serves 263 HDBSCAN clusters to a broad principal, which is the number
-to hold in mind. The budget looks like a cost control here and is not one.
+**Do not start Stage 6 by writing code** was the owner's direction (2026-08-20), and the discussion
+it called for is done. **A predicate layer's row form is cached and rebuilt at a generation move**,
+exactly as an enumerated layer's is, so its per-request cost is Stage 2's and the predicate is
+invisible to the serving path.
 
-The discussion is whether the per-request predicate bound (delivery §2, owed and unspecified)
-carries the whole weight, or whether something filters before evaluation. **The second is the
-dangerous half**: anything that skips evaluation on geometry is a disclosure decision taken on a
-stamp, which is the shape [decision 0041](decisions/0041-pins-become-a-staleness-stamp.md) already
-refused for pins. `membership = { attribute = … }` is declared and unbuilt today, which is the
-fail-closed state to start from.
+The measurement is
+[`predicate_membership_cost`](../crates/tessera-bench/src/bin/predicate_membership_cost.rs) and it
+is not close. Deriving per request by crossing the posting lists into row space — which is what the
+filter surface's row route does for a leaf — costs **8 040×** a cached count at the demo corpus's
+263 artifacts over the whole map: 8.2 seconds against 1.0 ms. A crossing's cost is
+`rows × artifacts` where a cached count's is `containers × artifacts`; one crossing serves every set
+(decision 0062's rule holds), but each set still costs a probe per row, and a layer is exactly a
+collection of sets. The ~5% crossover that makes the row route right for a *single* leaf therefore
+never arrives — the tenth-of-the-map column is that route's best case and still loses by three
+orders of magnitude. **The caching arm's whole generation-move cost is repaid by one request**,
+15 ms at 263 artifacts.
+
+Two things follow, and both are worth carrying into the implementation.
+
+**The per-request bound is a response-size guard, not a cost control** — which is what it always
+should have been. A bound is about how much a client gets back; caching is about what the server
+spends getting it. ⊘ The bound itself stays unspecified (delivery §2).
+
+**Filtering before evaluation is refused and need not be argued again.** Anything that skips
+evaluation on geometry is a disclosure decision taken on a stamp — the shape
+[decision 0041](decisions/0041-pins-become-a-staleness-stamp.md) already refused for pins — and the
+measurement removes its motive: the route that would have justified it is three orders of magnitude
+the wrong side of the one needing no such filter.
+
+The honest third shape, for whoever finds the invalidation rule hard: derive per request by
+*projecting* rather than crossing, which is the caching arm's work done per request instead of per
+move. 15 ms per request at 263 artifacts, ~15× the cached cost. It loses whenever a generation
+serves more than one request.
+
+What the measurement does **not** cover, stated rather than glossed: a **spatially clustered**
+predicate — a boundary whose members share a region — where the crossing's domain is small and the
+projection's cost is unchanged. That case favours the crossing and is unmeasured.
+
+What the discussion was called for remains true, and is why it was held first: a predicate
+membership is answered by a masked scan per artifact and **the cut cannot save it**, because the cut
+runs after the verdicts and so serves fewer artifacts while never evaluating fewer. The budget looks
+like a cost control there and is not one.
 
 Also still open at Stage 6 and unchanged: ⊘ the proportional criterion's denominator, since *"the
 points inside this shape"* declares no member set and its size moves at every write.
 
-### 1.2 The conformance suite — found red, now green
+### 1.2 The conformance suite — found red, now green (done)
 
 Found while writing the I3 row and **fixed** on branch `conformance/fixture-drift`
 ([`design/conformance.md`](design/conformance.md) r14 diagnosed it, r15 is the fix). 432 of 432

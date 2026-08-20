@@ -843,7 +843,9 @@ second is the dangerous half, because anything that skips evaluation on geometry
 decision taken on a stamp, which is the shape
 [decision 0041](decisions/0041-pins-become-a-staleness-stamp.md) already refused for pins.
 `membership = { attribute = … }` is declared and unbuilt today, which is the fail-closed state to
-start from.
+start from. **Filtering before evaluation is refused**, and the measurement is why it need not be
+argued again: the route that would have justified it is three orders of magnitude the wrong side of
+the one that needs no such filter.
 
 **The check:** the tagged-programme layer is built twice — once enumerated, once as an attribute
 predicate here — and the two return **identical** masked counts for every principal and every
