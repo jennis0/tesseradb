@@ -49,25 +49,39 @@ server spends getting it. ⊘ The bound itself stays unspecified (delivery §2) 
 fixes two things about its form.
 
 *It has to bite well below a million artifacts — unless the counts come from the column.* At 10⁶
-predicate artifacts over 10⁷ points the per-artifact loop costs **455 ms per request** over the
-whole map and **15.8 s per generation move**, and the cut reduces neither — it runs after the
-verdicts, so it serves fewer and evaluates exactly as many. A few thousand is comfortable: 23 ms at
-1 024, 108 ms at 10 000. Memory behaves, 108 MB for that million.
+predicate artifacts over 10⁷ points the per-artifact loop costs **462 ms per request** over the
+whole map and **15.6 s per generation move**, and the cut reduces neither — it runs after the
+verdicts, so it serves fewer and evaluates exactly as many. A few thousand is comfortable: 22 ms at
+1 024, 106 ms at 10 000. Memory behaves, 108 MB for that million.
 
 *And a third route removes the artifact count from the request path, with no new storage.* A
 single-valued attribute predicate **partitions** the corpus — the column's distinct values are its
-artifacts and every point carries one — so the column the predicate names is already the
-row→artifact map. One masked pass over the visible rows answers every artifact at once:
-**35–37 ms over the whole map at every layer size from 64 to a million**, measured, and asserted
-against the per-artifact loop's own answers rather than assumed equal. Two passes with different
-domains, and that is a disclosure rule rather than an optimisation — a masked count is over the
-whole membership (`annotations.md` §4.2) so its pass walks the mask, while candidacy is against the
-viewport. A **route choice with a crossover near 3 000 artifacts**, the same shape the filter
-surface already has, and a latency choice with no disclosure content on either side. ⊘ Two further
-reductions are modelled, not measured: the counting pass is a function of `M_auth` and the layer
-rather than of the request, so it can be held per session on the mask fragment's cadence; and with
-counts from the column, row forms are needed only for the artifacts actually served, which the
-budget bounds — so the move cost becomes a handful of lazy projections.
+artifacts and every point carries one — so the column already says which artifact each point belongs
+to, and one pass answers every artifact at once. **It lives in `attrs/`, not the render table:**
+`membership = { attribute = … }` names an *indexed* column, and an indexed column is a
+`ValueColumn` — a dense typed code array plus a presence bitmap, addressed by entity — which is
+exactly what `category_membership` already walks. Entity space is where the counting pass wants to
+be anyway, a masked count being `|membership ∩ M_auth|`.
+
+It is **flat in the artifact count** where the per-artifact loop is not, so the two cross: near
+10 000 artifacts on a 10⁶-point corpus and near 30 000 on a 10⁷-point one. At a million artifacts
+over 10⁷ points it is **175 ms against 462 ms — 2.6×**; over 10⁶ points, 8.6 ms against 68.5 ms.
+Each wins on its own side, and the choice carries no disclosure content: both compute the same
+quantities from inside `M_auth`. Answers asserted against the loop's rather than assumed equal.
+
+Two passes with different domains, and that is a disclosure rule rather than an optimisation — the
+count is over the whole membership (`annotations.md` §4.2) so its pass walks the mask, while
+candidacy is against the viewport. **The candidacy pass is the expensive half**: ~120 ms of the 175
+at a broad viewport, one inversion per viewport row, against ~30 ms for the counting pass.
+
+⊘ Three reductions are modelled, not measured: the counting pass is a function of `M_auth` and the
+layer rather than of the request, so it can be held per session on the mask fragment's cadence; the
+candidacy inversion is exactly what a **rendered** copy of the column would remove; and with counts
+from the column, row forms are needed only for the artifacts actually served, which the budget
+bounds — so the move cost becomes a handful of lazy projections. ⊘ It is for a single-valued
+**category** predicate: a multi-valued column does not partition, a **keyword** column's ordinals
+are per layer and would need each layer's dictionary to merge, and a spatial predicate has no column
+at all though its Morton-range membership makes `range_cardinality` cheap per artifact anyway.
 
 *And it must refuse on the layer's declared artifact count, before any evaluation* — never on the
 principal's visible count, which needs the evaluation the bound exists to avoid, and which would

@@ -59,69 +59,84 @@
 //!
 //! | N | members | viewport | A move | A request | B request | C request | A held |
 //! |---:|---:|---|---:|---:|---:|---:|---:|
-//! | 64 | 15 625 | whole | 7.6 ms | 0.6 ms | 2 181 ms | 3.5 ms | 2 MB |
-//! | **263** | 3 802 | **whole** | **14.7 ms** | **0.9 ms** | ~6 677 ms | 3.5 ms | 2 MB |
-//! | 1 024 | 976 | whole | 29.5 ms | 1.3 ms | ~15 882 ms | 3.4 ms | 2 MB |
-//! | 10 000 | 100 | whole | 221.4 ms | 6.7 ms | ~78 652 ms | 3.4 ms | 3 MB |
-//! | 100 000 | 10 | whole | 1 547 ms | 39.5 ms | ~455 922 ms | 3.6 ms | 11 MB |
-//! | **1 000 000** | 1 | **whole** | **6 738 ms** | **66.6 ms** | ~2 458 505 ms | **4.5 ms** | 18 MB |
-//! | 1 000 000 | 1 | tenth | 6 738 ms | 30.8 ms | ~246 291 ms | 2.2 ms | 18 MB |
+//! | 64 | 15 625 | whole | 7.6 ms | 0.5 ms | 2 199 ms | 7.9 ms | 2 MB |
+//! | **263** | 3 802 | **whole** | **13.9 ms** | **0.7 ms** | ~6 547 ms | 9.2 ms | 2 MB |
+//! | 1 024 | 976 | whole | 29.8 ms | 1.3 ms | ~15 640 ms | 9.2 ms | 2 MB |
+//! | 10 000 | 100 | whole | 220.5 ms | 6.7 ms | ~81 336 ms | 8.7 ms | 3 MB |
+//! | 100 000 | 10 | whole | 1 525 ms | 39.3 ms | ~445 522 ms | 7.8 ms | 11 MB |
+//! | **1 000 000** | 1 | **whole** | **6 665 ms** | **68.5 ms** | ~2 373 701 ms | **8.6 ms** | 18 MB |
+//! | 1 000 000 | 1 | tenth | 6 665 ms | 30.2 ms | ~238 062 ms | 3.1 ms | 18 MB |
 //!
 //! **10⁷ rows**, the same layer sizes — which separates *a million artifacts costs this* from *a
 //! million members costs this*, and carries the third arm:
 //!
 //! | N | members | viewport | A move | A request | B request | **C request** | A held |
 //! |---:|---:|---|---:|---:|---:|---:|---:|
-//! | 64 | 156 250 | whole | 112.5 ms | 6.8 ms | 56 921 ms | 37.3 ms | 20 MB |
-//! | **263** | 38 022 | **whole** | **196.2 ms** | **10.9 ms** | ~128 447 ms | **35.8 ms** | 20 MB |
-//! | 1 024 | 9 765 | whole | 329.7 ms | 22.6 ms | ~319 180 ms | 34.5 ms | 21 MB |
-//! | 10 000 | 1 000 | whole | 1 658 ms | 107.5 ms | ~1 641 616 ms | 35.4 ms | 32 MB |
-//! | 100 000 | 100 | whole | 9 752 ms | 591.1 ms | ~10 342 985 ms | 35.0 ms | 101 MB |
-//! | **1 000 000** | 10 | **whole** | **15 757 ms** | **455.4 ms** | ~40 031 270 ms | **37.3 ms** | 108 MB |
-//! | 1 000 000 | 10 | tenth | 15 757 ms | 124.0 ms | ~3 995 110 ms | 18.6 ms | 108 MB |
+//! | 64 | 156 250 | whole | 113.6 ms | 6.5 ms | 55 688 ms | 145.6 ms | 20 MB |
+//! | **263** | 38 022 | **whole** | **194.0 ms** | **10.4 ms** | ~126 059 ms | **170.3 ms** | 20 MB |
+//! | 1 024 | 9 765 | whole | 335.0 ms | 22.0 ms | ~322 175 ms | 163.7 ms | 21 MB |
+//! | 10 000 | 1 000 | whole | 1 672 ms | 106.3 ms | ~1 579 225 ms | 155.8 ms | 32 MB |
+//! | 100 000 | 100 | whole | 10 017 ms | 572.6 ms | ~10 354 640 ms | 155.5 ms | 101 MB |
+//! | **1 000 000** | 10 | **whole** | **15 571 ms** | **461.6 ms** | ~39 387 944 ms | **175.2 ms** | 108 MB |
+//! | 1 000 000 | 10 | tenth | 15 571 ms | 133.7 ms | ~3 953 351 ms | 52.5 ms | 108 MB |
 //!
 //! ## C: the counts come from the column, and the artifact count stops mattering
 //!
-//! **C is flat.** 35–37 ms over the whole map and ~19 ms over a tenth, at every layer size from 64
-//! artifacts to a million — because it never mentions the artifact count. A single-valued attribute
-//! predicate *partitions* the corpus: the column's distinct values are its artifacts and every point
-//! carries one, so the column the predicate names is already the row→artifact map. One pass over the
-//! visible rows, incrementing a counter per row, answers **every** artifact at once.
+//! **C is flat in the artifact count.** 146–175 ms over the whole map at 10⁷ rows and 8–9 ms at
+//! 10⁶, at every layer size from 64 artifacts to a million, because it never mentions the artifact
+//! count. A single-valued attribute predicate *partitions* the corpus — the column's distinct values
+//! are its artifacts and every point carries one — so the column already says which artifact each
+//! point belongs to, and one pass answers **every** artifact at once.
 //!
 //! Its answers are asserted against A's rather than assumed equal — a fast wrong answer is worth
 //! nothing — at a sampled thirty-second of the ordinals, for both the count and the candidacy.
 //!
-//! **It is two passes and they have different domains, which is a disclosure rule rather than an
-//! optimisation.** A masked count is `|membership ∩ M_auth|` over the whole membership
-//! (`annotations.md` §4.2: what this principal can see of the artifact, not what is on screen), so
-//! the counting pass walks the mask. Candidacy is against the viewport, so that pass walks
-//! `viewport ∩ mask`. Only the second shrinks with the viewport, which is why `tenth` is 19 ms and
-//! not 3.5.
+//! **Where the column actually lives, because the first draft of this arm assumed wrong.** Not the
+//! render table: `membership = { attribute = … }` names an **indexed** column, and `attrs/` holds
+//! it as a `tessera_filter::ValueColumn` — a dense typed code array plus a presence bitmap,
+//! addressed by **entity**. That is what `FilterColumns::category_membership` already walks to
+//! answer *which values can this principal see*. Entity space is also where the counting pass wants
+//! to be: a masked count is `|membership ∩ M_auth|` and `M_auth` is entity-space, so that pass
+//! projects nothing and crosses nothing.
 //!
-//! **So it is a route choice with a crossover, exactly like the filter surface's own.** Below about
-//! a thousand artifacts the per-artifact loop wins — 10.9 ms against 35.8 ms at the demo corpus's
-//! 263 — and above about ten thousand it is not close: 107 ms against 35 ms, and 455 ms against
-//! 37 ms at a million. The crossover sits near 3 000, and it is a *latency* choice with no
-//! disclosure content: both arms compute the same quantities from inside `M_auth`.
+//! **It is two passes with different domains, and that is a disclosure rule rather than an
+//! optimisation.** The count is over the whole membership (`annotations.md` §4.2: what this
+//! principal can see of the artifact, not what is on screen) so its pass walks the mask; candidacy
+//! is against the viewport, so that pass walks `viewport ∩ mask` — **and it is the expensive half**.
+//! At 10⁷ rows a tenth-of-map request is 52 ms against the whole map's 175 ms, so roughly 120 ms of
+//! C is the inversion, one `entity_of` per viewport row. The counting pass alone is ~30 ms.
 //!
-//! **This is an upper bound on C, twice over.** The column here is a `u32` per row where a real
-//! category is a `u8` or `u16`, and the pass iterates a Roaring bitmap rather than scanning a range,
-//! so it is random-access into 40 MB. `row_route_cost` holds the built row route's own constant for
-//! this scan — 0.48–0.73 ns per viewport row (records §6.2) — against the ~3.7 ns per row here.
+//! **So a route choice with a crossover, exactly like the filter surface's own — and the crossover
+//! moves with the corpus.** At 10⁶ rows it sits near 10 000 artifacts and C wins 8× at a million;
+//! at 10⁷ rows it sits near 30 000 and C wins **2.6×** at a million (175 ms against 462 ms). C is
+//! flat in artifacts and *worse than linear* in corpus size — 8.6 ms to 175 ms for ten times the
+//! rows, because at 10⁷ neither the code array nor the row→entity table fits in cache — while A is
+//! linear in artifacts and indifferent to the corpus. Neither dominates; the choice is a latency
+//! one with no disclosure content, since both compute the same quantities from inside `M_auth`.
 //!
-//! ⊘ **Two further reductions are modelled, not measured.** The counting pass is a function of
-//! `M_auth` and the layer and **not of the request**, so it can be computed once per session and
-//! reused, on the same cadence and the same invalidation as the session's mask fragment — leaving
-//! only the candidacy pass per request. And if the counts come from C, the cached row forms are
-//! needed only for the artifacts actually **served**, whose number the budget bounds — so `A move`
-//! becomes a handful of lazy projections rather than a million eager ones, and the 15.7 s
-//! generation-move cost largely goes with it.
+//! **The width dispatch matters and the width itself does not.** Hoisting the `Codes` match out of
+//! the loop, which is what `ValueColumn`'s own scan does, is worth 264 ms → 170 ms at 10⁷ rows.
+//! The declared width is not visible in these numbers — `u8` at 263 artifacts and `u32` at 1 024
+//! measure the same — because the pass is bound by random access and by the inversion rather than
+//! by the buffer. A million artifacts needs `u32` and gets it: `[[vocabulary]].width` is already a
+//! required key taking `u8 | u16 | u32` (`configuration.md` §1), and `Codes` carries all three.
 //!
-//! ⊘ **C is for a single-valued attribute predicate and says nothing about the others.** A
-//! multi-valued column does not partition, so its histogram costs one increment per value per row
-//! rather than one per row. A **spatial** predicate has no column at all — but its membership is
-//! Morton ranges and its masked count is a `range_cardinality`, which is cheap per artifact without
-//! needing any of this.
+//! ⊘ **Three reductions are modelled, not measured.** The counting pass is a function of `M_auth`
+//! and the layer and **not of the request**, so it can be held per session on the mask fragment's
+//! own cadence, leaving only candidacy per request. The candidacy pass's inversion is exactly what
+//! a **rendered** copy of the column would remove — the render table is not needed for counting and
+//! is precisely what would make candidacy cheap, which is the one thing the first draft of this arm
+//! got right for the wrong reason. And with counts coming from C, row forms are needed only for the
+//! artifacts actually **served**, whose number the budget bounds, so `A move` becomes a handful of
+//! lazy projections rather than a million eager ones.
+//!
+//! ⊘ **C is for a single-valued *category* predicate and says nothing about the others.** A
+//! multi-valued column does not partition, so its histogram costs one increment per value per row.
+//! A **keyword** column's ordinals are per *layer* — the base and every extent mint their own — so
+//! a histogram over one would count per layer and need each layer's dictionary to merge, which is a
+//! real complication at the scale where a million distinct values is plausible. A **spatial**
+//! predicate has no column at all, but its membership is Morton ranges and its masked count is a
+//! `range_cardinality`, cheap per artifact without any of this.
 //!
 //! ## At a million artifacts the caching arm needs a second route, and B is not a candidate
 //!
@@ -129,8 +144,8 @@
 //! ten-million-point corpus, and 0.12 s over a tenth of it. That is the serving loop testing every
 //! artifact — `intersects` then `masked_count` — and **the cut cannot reduce it**, because the cut
 //! runs after the verdicts and so serves fewer artifacts while evaluating exactly as many.
-//! Comfortable is a few thousand: 23 ms at 1 024, 108 ms at 10 000, and past that it dominates
-//! whatever else the viewport is doing — **which is what C is for**.
+//! Comfortable is a few thousand: 22 ms at 1 024, 106 ms at 10 000, and past that it dominates
+//! whatever else the viewport is doing — **which is what C is for**, above the crossover.
 //!
 //! **The generation-move cost is the harder constraint: 15.5 s**, paid whenever the generation
 //! moves rather than once. It is mostly a per-artifact term — a million `project_base` calls — so a
@@ -183,13 +198,19 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use arrow::buffer::ScalarBuffer;
 use croaring::{Bitmap, Portable};
+use tessera_filter::{Codes, ValueColumn};
 use tessera_engine::artifacts::ArtifactRows;
 use tessera_engine::compose::MaskedSet;
 use tessera_lifecycle::membership::ArtifactRecord;
 use tessera_store::permutation::{Permutation, RowSpace};
 use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 use tessera_types::{EntityId, RowId};
+
+/// Best-of, for the per-request arms. The move arm is single-shot: it is seconds at the top of the
+/// table and a repeat would say the same thing more slowly.
+const REPEATS: usize = 3;
 
 /// How many of a layer's sets the B arm actually probes. Its probe term is linear in the set count,
 /// so beyond this the figure is scaled rather than measured — see the call site.
@@ -261,29 +282,39 @@ fn memberships(rows: u32, n: usize) -> Vec<Bitmap> {
     sets
 }
 
-/// The predicate's own column, in row space: which artifact each row's point belongs to.
+/// The predicate's own column, **as the engine already stores it**: a `ValueColumn` over the
+/// artifact each entity belongs to.
 ///
-/// **Not a new structure.** A single-valued attribute predicate partitions the corpus — a column's
-/// distinct values are its artifacts and every point carries one — so the column the predicate
-/// names *is* the row→artifact map, read the way the filter surface's row route already reads a
-/// category leaf. This mirrors [`memberships`] exactly, or the two arms would be answering about
-/// different layers.
+/// **Not a new structure, and not the render table.** A single-valued attribute predicate
+/// partitions the corpus — a column's distinct values are its artifacts and every point carries
+/// one — and `membership = { attribute = … }` names a column the build has indexed, so `attrs/`
+/// already holds exactly this: a dense typed code array plus a presence bitmap, addressed by entity
+/// (`tessera_filter::ValueColumn`). It is what `FilterColumns::category_membership` already walks
+/// to answer *which values can this principal see*; the histogram below accumulates counts over the
+/// same walk.
 ///
-/// A `u32` per row where a real category is a `u8` or `u16`, and with none of the `ScalarSlice`
-/// dispatch the built route pays: the shape is the claim here, and `row_route_cost` holds the
-/// built route's own constant (0.48–0.73 ns per viewport row, records §6.2).
-fn codes_by_row(space: &RowSpace, rows: u32, n: usize) -> Vec<u32> {
+/// **Entity space, which is where the counting pass wants to be anyway.** A masked count is
+/// `|membership ∩ M_auth|` and `M_auth` is entity-space, so nothing is projected and nothing is
+/// crossed. Universal presence, because a partitioning predicate is exactly the case where every
+/// point carries a value — which is also the case `slot_of` answers with a bare index rather than a
+/// rank.
+///
+/// The width is the vocabulary's declared one (`configuration.md` §1: `u8 | u16 | u32`), so it is a
+/// real variable rather than a caveat: a layer of a million artifacts needs `u32` and one of a few
+/// hundred needs `u8`.
+fn value_column(rows: u32, n: usize, wide: bool) -> ValueColumn {
     let mut of_entity = vec![0u32; rows as usize];
     for (i, entity) in scatter(rows, 13).into_iter().enumerate() {
         of_entity[entity as usize] = (i % n) as u32;
     }
-    let mut by_row = vec![0u32; rows as usize];
-    for row in 0..rows {
-        if let Some(e) = space.entity_of(RowId::new(row)) {
-            by_row[row as usize] = of_entity[e.raw() as usize];
-        }
-    }
-    by_row
+    let codes = if wide {
+        Codes::U32(ScalarBuffer::from(of_entity))
+    } else {
+        Codes::U8(ScalarBuffer::from(
+            of_entity.iter().map(|&c| c as u8).collect::<Vec<u8>>(),
+        ))
+    };
+    ValueColumn::universal(codes)
 }
 
 fn records(sets: &[Bitmap]) -> Vec<ArtifactRecord> {
@@ -320,6 +351,16 @@ fn main() {
         mask.add(row);
     }
     mask.run_optimize();
+    // The same set in entity space, which is where `M_auth` and the value column both live. In the
+    // engine this is the composed mask itself and the row-space one is its projection; here the two
+    // are derived from each other so the arms are comparing the same principal.
+    let mut mask_entities = Bitmap::new();
+    for row in mask.iter() {
+        if let Some(e) = space.entity_of(RowId::new(row)) {
+            mask_entities.add(e.raw() as u32);
+        }
+    }
+    mask_entities.run_optimize();
     let mask = PlainMask(mask);
 
     println!("rows = {rows}, mask = half of them");
@@ -352,7 +393,10 @@ fn main() {
             .map(|b| b.get_serialized_size_in_bytes::<Portable>() as u64)
             .sum();
 
-        let by_row = codes_by_row(&space, rows, n);
+        // The column at its real declared width: `u8` while the artifact count fits it, `u32`
+        // beyond — which a layer of a million artifacts needs, so at the bottom of this table the
+        // wide arm is the honest one rather than a pessimism.
+        let column = value_column(rows, n, n > u8::MAX as usize + 1);
 
         for (label, span) in [("whole", rows), ("tenth", rows / 10)] {
             let mut tile_rows = Bitmap::new();
@@ -361,15 +405,18 @@ fn main() {
 
             // **The loop both arms ride on**: candidacy against the viewport, then the masked
             // count that the criterion tests and the response carries.
-            let started = Instant::now();
-            let mut served = 0u64;
-            for ordinal in 0..n as u32 {
-                if row_forms.intersects(ordinal, &tile_rows, &mask) {
-                    served += row_forms.masked_count(ordinal, &mask);
+            let mut a_request = std::time::Duration::MAX;
+            for _ in 0..REPEATS {
+                let started = Instant::now();
+                let mut served = 0u64;
+                for ordinal in 0..n as u32 {
+                    if row_forms.intersects(ordinal, &tile_rows, &mask) {
+                        served += row_forms.masked_count(ordinal, &mask);
+                    }
                 }
+                a_request = a_request.min(started.elapsed());
+                std::hint::black_box(served);
             }
-            let a_request = started.elapsed();
-            std::hint::black_box(served);
 
             // **B's shape: one inversion, N probes per row.** The domain is the viewport's rows;
             // each is inverted once however many entity-space sets ride on it, and each set costs
@@ -422,20 +469,47 @@ fn main() {
             // Two walks, because the two questions have different domains and that is a disclosure
             // rule rather than an optimisation: a masked count is `|membership ∩ M_auth|` over the
             // **whole** membership (`annotations.md` §4.2 — what this principal can see of the
-            // artifact, not what is on screen), while candidacy is against the viewport. So the
-            // counts come from a pass over the mask and the candidacy from a pass over
-            // `viewport ∩ mask`. Both are O(visible rows) and neither mentions `n`.
+            // artifact, not what is on screen), while candidacy is against the viewport.
+            //
+            // **The counting pass is entity-space and touches no row at all** — `M_auth` is entity
+            // space and so is `attrs/`'s value column, so there is nothing to project and nothing
+            // to cross. The candidacy pass is the one that needs row space, and it needs exactly
+            // one inversion per viewport row — decision 0062's one crossing, used to read *one*
+            // code per row rather than to probe `n` sets.
+            //
+            // **The width dispatch is hoisted out of the loop**, which is not a liberty — it is
+            // what `ValueColumn`'s own scan does (`ScanWork`), and it is the difference between
+            // reading a typed slice and matching an enum per element. Left inside, this arm
+            // measures the `match` rather than the read: 264 ms against 44 ms at 10⁷ rows,
+            // measured, which is most of the arm.
             let visible_here = tile_rows.and(&mask.0);
-            let started = Instant::now();
             let mut counts = vec![0u32; n];
-            for row in mask.0.iter() {
-                counts[by_row[row as usize] as usize] += 1;
-            }
             let mut here = vec![false; n];
-            for row in visible_here.iter() {
-                here[by_row[row as usize] as usize] = true;
+            let mut c_request = std::time::Duration::MAX;
+            for _ in 0..REPEATS {
+                counts.iter_mut().for_each(|c| *c = 0);
+                here.iter_mut().for_each(|h| *h = false);
+                let started = Instant::now();
+                macro_rules! histogram {
+                    ($codes:expr) => {{
+                        let codes = $codes;
+                        for entity in mask_entities.iter() {
+                            counts[codes[entity as usize] as usize] += 1;
+                        }
+                        for row in visible_here.iter() {
+                            if let Some(e) = space.entity_of(RowId::new(row)) {
+                                here[codes[e.raw() as usize] as usize] = true;
+                            }
+                        }
+                    }};
+                }
+                match column.codes() {
+                    Codes::U8(v) => histogram!(v.as_ref()),
+                    Codes::U32(v) => histogram!(v.as_ref()),
+                    _ => unreachable!("this fixture writes only the two declared widths"),
+                }
+                c_request = c_request.min(started.elapsed());
             }
-            let c_request = started.elapsed();
             std::hint::black_box(&counts);
             std::hint::black_box(&here);
 
