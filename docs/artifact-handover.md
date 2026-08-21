@@ -36,10 +36,13 @@ Five things a reader needs before opening it:
   in memory at all: 4 GB against 78.5 GB.
 - **The cut is built.** 1 008 ms → 188 ms at 10⁷, peak RSS 1 078 MB → 470 MB, serving exactly what
   it served before — checked against the reference implementation over random trees.
-- **The per-token structure is the part most worth arguing about**, and §4.2 prices it without
-  assuming shared grant sets, which are rare. It is 840 ms and 40 MB per session — but that buys
-  843 ms *per wide request*, and most of it is the masked count, which a layer declaring no
-  existence criterion does not need per candidate at all. Split that way it is ~246 ms and ≤1.25 MB.
+- **There is no per-token structure.** An earlier draft leaned on `architecture.md` §8.5's
+  servable-label set, cached per token; there are a great many tokens (owner), so that is the wrong
+  cadence however cheap one copy is. Containment does not need it: `G ⊆ M_auth` is a boolean
+  expression over **terms**, composable at build time, and artifacts sharing an expression share an
+  answer for every principal that will ever exist. Measured at parity with the per-token route and
+  ahead of it for narrow principals — 4.09 ms against 13.1 ms — for 40 MB of build-time state that
+  names nobody. The masked count is the one quantity that does not fully dissolve; §4.3 splits it.
 - **Two live defects gate the rest**, neither about scale: any artifact write invalidates every
   cached row form in every view (138 s to rebuild at 10⁷), and `Lineage` is rebuilt per request from
   something that depends on neither the mask nor the viewport. A third is a spec bug —

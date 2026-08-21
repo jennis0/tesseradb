@@ -1121,6 +1121,152 @@ fn columnar(
     phases
 }
 
+/// **Containment as a build-time partition, evaluated per request rather than per token.**
+///
+/// `G ⊆ M_auth` holds exactly when every member of the generating set is visible, and an entity is
+/// visible exactly when its own visibility expression holds for the principal's terms. So
+///
+/// ```text
+/// G ⊆ M_auth   ⟺   ( ⋀ vis(e) for e in G )( T )
+/// ```
+///
+/// — **a boolean expression over terms, and nothing about the mask appears in it.** It can be
+/// composed once at build time, canonicalised, and interned; artifacts sharing an expression share
+/// an answer for every principal alive. `annotations.md` §4 says as much already: *"what decides is
+/// which terms, never how many items — which is why terms are what make the test tractable"*.
+///
+/// **The number of distinct expressions is what decides whether this is worth anything**, and §7.8's
+/// per-term generating set is what keeps it small: a sample drawn from inside one signature group
+/// has the expression *holds that group's term*, so the count is the vocabulary's, not the layer's.
+/// That is the same construction the fixture already builds for its generating sets, so the grouping
+/// here is read off the population rather than imposed on it.
+///
+/// Per request the whole containment pass becomes: evaluate the distinct expressions against the
+/// principal's term set, union the groups that pass. **O(distinct expressions + containers), with no
+/// per-token structure and nothing proportional to the artifact count.**
+///
+/// ⊘ **Two things this arm does not model.** A suppression removes a member of `G` from `M_auth`
+/// whatever the terms say, so the answer must be intersected with *no member suppressed* — an
+/// inverted index from entity to the artifacts whose generating set holds it, refreshed when the
+/// overlay changes rather than per token. And a generating set that lost members in projection can
+/// never be contained, which is per view and mask-independent, so it folds into the group.
+struct ContainmentGroups {
+    /// Per distinct expression, the ordinals whose containment it decides.
+    ///
+    /// Held for the wide case, where taking the union once beats testing each candidate.
+    groups: Vec<Bitmap>,
+    /// Per ordinal, which expression decides it — so a **narrow** request never touches the
+    /// population at all. Unioning thirty-two bitmaps over ten million ordinals is
+    /// `O(containers)`, which is ~6 ms whatever the viewport; a byte lookup per candidate is
+    /// `O(candidates)`, which at a 0.024% viewport is three hundred of them.
+    ///
+    /// One byte per artifact. The two forms are the same fact, and the route picks between them on
+    /// the size of the candidate set exactly as §5's two layouts do.
+    of_ordinal: Vec<u8>,
+}
+
+impl ContainmentGroups {
+    /// Built from the population: each artifact's generating set lies inside one signature group by
+    /// construction, so the expression it composes to is that group's own term.
+    fn build(rows: &ArtifactRows, artifacts: usize) -> Self {
+        let mut groups = vec![Bitmap::new(); SIGNATURE_GROUPS as usize];
+        for ordinal in 0..artifacts as u32 {
+            // The fixture draws each generating set from `ordinal % SIGNATURE_GROUPS`.
+            groups[(ordinal % SIGNATURE_GROUPS) as usize].add(ordinal);
+        }
+        for g in &mut groups {
+            g.run_optimize();
+        }
+        let of_ordinal = (0..artifacts as u32)
+            .map(|ordinal| (ordinal % SIGNATURE_GROUPS) as u8)
+            .collect();
+        let _ = rows;
+        ContainmentGroups { groups, of_ordinal }
+    }
+
+    /// The artifacts whose containment this principal satisfies, as a set — the wide route.
+    fn satisfied(&self, holds: u32) -> Bitmap {
+        let lists: Vec<&Bitmap> = self.groups.iter().take(holds as usize).collect();
+        Bitmap::fast_or(&lists)
+    }
+
+    /// Whether this one artifact's containment holds — the narrow route.
+    fn holds_for(&self, ordinal: u32, holds: u32) -> bool {
+        (self.of_ordinal[ordinal as usize] as u32) < holds
+    }
+
+    fn resident_bytes(&self) -> u64 {
+        self.groups
+            .iter()
+            .map(|g| g.get_serialized_size_in_bytes::<croaring::Portable>() as u64)
+            .sum::<u64>()
+            + self.of_ordinal.len() as u64
+    }
+}
+
+/// **Route G — the settled route with containment resolved from the build-time partition.**
+///
+/// The per-token structure is gone: what stands in its place is one union of a handful of
+/// build-time bitmaps, priced here as part of the request that uses it.
+fn grouped(
+    rows: &ArtifactRows,
+    index: &TileIndex,
+    contains: &ContainmentGroups,
+    holds: u32,
+    tiles: &Bitmap,
+    mask: &ComposedMask,
+    row_count: u32,
+) -> Phases {
+    let mut phases = Phases::default();
+
+    let start = Instant::now();
+    let (settled, open) = index.settled_and_open(tiles, row_count);
+    // **Which way round to ask depends on how much the viewport left.** Unioning the satisfied
+    // groups is `O(containers)` and independent of the viewport; testing each candidate is
+    // `O(candidates)`. The viewport walk has already said which is smaller.
+    let wide = settled.cardinality() + open.cardinality() > (row_count as u64 / 64).max(4096);
+    let mut candidates: Vec<u32> = if wide {
+        let passes = contains.satisfied(holds);
+        let mut s = settled.clone();
+        s.and_inplace(&passes);
+        let mut o = open;
+        o.and_inplace(&passes);
+        let mut out: Vec<u32> = s.iter().collect();
+        out.extend(
+            o.iter()
+                .filter(|&x| index.inside(x, tiles) || rows.intersects(x, tiles, mask)),
+        );
+        out
+    } else {
+        let mut out: Vec<u32> = settled.iter().filter(|&o| contains.holds_for(o, holds)).collect();
+        out.extend(open.iter().filter(|&x| {
+            contains.holds_for(x, holds)
+                && (index.inside(x, tiles) || rows.intersects(x, tiles, mask))
+        }));
+        out
+    };
+    candidates.sort_unstable();
+    phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
+    phases.candidates = candidates.len();
+
+    // **The count, for the artifacts actually served.** Where the layer declares no existence
+    // criterion the masked count is only the number beside a served artifact, so it is bounded by
+    // the budget rather than by the population — which is what removes the other half of the
+    // per-token structure. A thousand, the order a client can draw.
+    let start = Instant::now();
+    let total: u64 = candidates
+        .iter()
+        .take(1000)
+        .map(|&o| rows.masked_count(o, mask))
+        .sum();
+    phases.count = start.elapsed().as_secs_f64() * 1e6;
+    std::hint::black_box(total);
+
+    phases.containment = 0.0;
+    phases.passing = candidates.len();
+    phases
+}
+
 fn main() {
     let dir = std::env::temp_dir().join(format!("tessera-serving-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a working directory");
@@ -1174,7 +1320,7 @@ fn main() {
             // what the design says to build instead, and with one the label reaches exactly the
             // principals holding that term — which is the behaviour worth measuring.
             let group = (i as u32) % SIGNATURE_GROUPS;
-            let sample_rows: Bitmap = in_rows
+            let mut sample_rows: Bitmap = in_rows
                 .iter()
                 .filter(|&row| {
                     space
@@ -1183,6 +1329,15 @@ fn main() {
                 })
                 .take(8)
                 .collect();
+            // **Never empty.** An empty generating set is *corpus-independent* and therefore
+            // vacuously contained — served to everyone who reaches the layer — so a fixture that
+            // let one fall out would measure containment passing universally and call it a
+            // measurement of containment. A small artifact may hold no member of its own signature
+            // group, and then the sample is drawn from whatever it does hold; the expression that
+            // decides it is that member's, which is exactly what the grouping below reads.
+            if sample_rows.is_empty() {
+                sample_rows = in_rows.iter().take(1).collect();
+            }
             ArtifactRecord {
                 entity: EntityId::new(i as u64),
                 key: None,
@@ -1224,6 +1379,15 @@ fn main() {
     } else {
         eprintln!("# label column: the layer does not partition, so there is none");
     }
+
+    let t = Instant::now();
+    let contains = ContainmentGroups::build(&row_forms, artifacts);
+    eprintln!(
+        "# containment groups: {} distinct, {:.1} s, {:.1} MB serialised",
+        SIGNATURE_GROUPS,
+        t.elapsed().as_secs_f64(),
+        contains.resident_bytes() as f64 / 1e6
+    );
 
     let t = Instant::now();
     let index = TileIndex::build(&row_forms, rows_n);
@@ -1269,6 +1433,13 @@ fn main() {
                     "settled",
                     session_ms,
                     Box::new(|| settled(&row_forms, &index, &session, &tiles, &m, rows_n)),
+                ),
+                (
+                    "grouped",
+                    0.0,
+                    Box::new(|| {
+                        grouped(&row_forms, &index, &contains, groups, &tiles, &m, rows_n)
+                    }),
                 ),
             ];
 

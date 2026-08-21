@@ -60,9 +60,12 @@ bounds what is *served* and never what is *evaluated*. Nothing here changes that
 - **For a layer that partitions**, a **row-addressed label column** *instead of* the per-artifact
   bitmaps (§5).
 
-**Per token**, the servable-label set [`architecture.md`](architecture.md) §8.5 already specifies —
-built when the mask is composed, at session establishment. **This is the part of the design most
-worth arguing about**, so §4.2 prices it on its own rather than asserting it.
+- **A containment partition** — one byte per artifact naming the boolean expression over *terms*
+  that decides it, plus a bitmap per distinct expression. **10 MB at 10⁷**, build-time, and it names
+  no principal, so it is shared by all of them. This is what replaces §8.5's per-token servable-label
+  set; see §4.2.
+
+**Per token: nothing**, except for a layer declaring an existence criterion — see §4.3.
 
 ## 4. The request
 
@@ -95,52 +98,81 @@ The geometry decides only *which question to ask*. The probe asserts the served 
 the shipped loop's, ordinal for ordinal, at every mask and every zoom — and, for the row-major route,
 count for count as well.
 
-### 4.2 What the per-token structure actually costs, and how much of it is needed
+### 4.2 Containment does not need a per-token structure at all
 
-**Do not rest this on sharing.** §8.5's key is content-addressed on the auth data, so viewers holding
-identical grants would share one copy — but identical grant sets are rare, so the honest assumption
-is one structure per session and the figures below make it.
+**There are a great many tokens** (owner, 2026-08-21), so anything materialised per token over the
+artifact population is the wrong shape however cheap one copy is. `architecture.md` §8.5 specifies a
+servable-label set on that cadence; **for containment it is not needed**, and the design says why in
+`annotations.md` §4 already:
 
-The comparison is not *840 ms at login against nothing*. It is **840 ms once against 840 ms every
-time that viewer zooms out**, because that is what the two hoisted passes cost per request when they
-are left in place. At 10⁷ artifacts, full mask:
+> what decides is **which** terms, never *how many* items — which is why terms are what make the
+> test tractable (**I5**)
 
-| viewport | candidates | `masked_count` | containment | per request |
-|---|---:|---:|---:|---:|
-| whole map | 10 000 000 | 596 ms | 246 ms | **843 ms** |
-| 6.25% | 705 662 | 40.4 ms | 16.5 ms | 56.9 ms |
-| 0.39% | 44 166 | 2.8 ms | 0.8 ms | **3.6 ms** |
-| 0.024% | 2 837 | 0.2 ms | 0.1 ms | 0.3 ms |
+Containment is `G ⊆ M_auth`, and an entity is in `M_auth` exactly when its own visibility expression
+holds for the principal's terms. So
 
-So it earns nothing at a narrow viewport — §4's index has already cut the candidates to hundreds —
-and everything at a wide one. It breaks even on the first zoom-out, which on a map is usually the
-opening view.
+```text
+G ⊆ M_auth   ⟺   ( ⋀ vis(e) for e in G )( T )
+```
 
-**Most of it is avoidable, and the two halves should not be hoisted together.** `masked_count` is 596
-of the 843 ms and the *entire* 40 MB, and `ArtifactView::verdict` computes it unconditionally but
-**tests** it only where the layer declares `require_member_visibility`. Without a criterion it is
-simply the number served — needed for artifacts that survive the cut, which the budget bounds.
+— a boolean expression over terms with **nothing about the mask in it**. Compose it once at build,
+canonicalise, intern: artifacts sharing an expression share an answer for every principal that will
+ever exist. §7.8's per-term generating set is what keeps the number of distinct expressions small —
+a sample drawn from inside one signature group composes to *holds that group's term* — so the count
+is the vocabulary's rather than the layer's.
 
-| layer | what the token must hold | build | residency |
-|---|---|---:|---:|
-| declares an existence criterion | the pass bitmap **and** a `u32` count per artifact | ~840 ms | 40 MB |
-| declares none | the pass bitmap alone, count computed after the cut | **~246 ms** | **≤1.25 MB** |
+Per request that is either a union of the satisfied groups' bitmaps, or a byte lookup per candidate,
+whichever the viewport has left smaller. **Measured against the per-token route at 10⁷ artifacts,
+full mask:**
 
-Ten concurrent viewers of a criterion-free layer is then ~12 MB and ~2.5 s of one core spread across
-their logins, rather than 400 MB and 8.4 s. ⊘ The split is not implemented; the figures are the
-measured halves of a pass that today does both.
+| viewport | shipped | per-token *(151 ms setup)* | **build-time groups *(no setup)*** |
+|---|---:|---:|---:|
+| whole map | 2 929 ms | 141.9 ms | **140.0 ms** |
+| 6.25% | 891 ms | 10.1 ms | **9.87 ms** |
+| 0.39% | 692 ms | 0.845 ms | **0.869 ms** |
+| 0.024% | 666 ms | 0.186 ms | **0.221 ms** |
 
-**And a viewer who never zooms out never needs it.** The structure can fill lazily — a narrow request
-wants verdicts for a few hundred artifacts, so compute and keep those — which bounds the cost to what
-a viewer actually looks at. That does not help the case where the opening view *is* the whole map,
-which is the case that matters.
+**Parity, with the per-token structure deleted.** And at a narrower principal it is ahead outright —
+a 9.4% mask at whole-map zoom is **4.09 ms against 13.1 ms** — because the groups a principal fails
+are never touched, where the per-token pass had to evaluate every artifact once to find that out.
 
-**The question underneath it is why a whole-map request evaluates 10⁷ artifacts at all.** The serving
-loop runs every level of a treed layer, and at whole-map zoom a client can only draw the coarse one.
-A request that evaluated only the levels it can serve from would face ~10³ artifacts there and would
-not need the hoist. That changes what is *evaluated* and not what is served, but it reaches the
-request contract, so it is a ruling rather than an optimisation — and the saving depends on the
-hierarchy's shape. ⊘ Not measured.
+Storage is one byte per artifact plus the group bitmaps: **40 MB at 10⁷**, build-time, and it names
+no principal, so one copy serves all of them however many tokens there are.
+
+**Two forms of the same fact, and the route picks between them on size**, exactly as §5's two layouts
+do: unioning the satisfied groups is `O(containers)` and independent of the viewport, ~6 ms at 10⁷;
+testing each candidate through the byte table is `O(candidates)`, which at a 0.024% viewport is three
+hundred of them. Taking the union unconditionally cost 626 µs at a viewport whose answer was 73 µs.
+
+⊘ **Two things the arm does not model.** A **suppression** removes a member of `G` from `M_auth`
+whatever the terms say, so the answer must be intersected with *no member suppressed* — an inverted
+index from entity to the artifacts whose generating set holds it, refreshed when the **overlay**
+changes rather than per token. And a generating set that lost members in projection can never be
+contained, which is per view and mask-independent, so it folds into the group.
+
+### 4.3 The masked count, which is the part that does not fully dissolve
+
+`|membership ∩ M_auth|` is genuinely per-principal. It splits by what the layer declares:
+
+- **No existence criterion** — the count is only the number *beside* a served artifact, so it is
+  needed for what survives the cut. `O(budget)`: measured at **22–205 µs** for a thousand artifacts,
+  against 596 ms for ten million. Solved.
+- **An existence criterion** — the count decides whether the artifact exists for this viewer, so it
+  is needed per candidate. The viewport bounds that: **0.2 ms at a 0.024% viewport and 2.8 ms at
+  0.39%** over 10⁷ artifacts, but **596 ms at whole-map zoom**.
+
+So one case remains: **a criterion layer at a wide viewport**. Three ways out, and the third is the
+one worth ruling on:
+
+- Hold the counts per token after all — which is what §8.5 buys, and what many tokens make
+  expensive. It is now the *only* thing that structure would be for.
+- Keep, per artifact, a count **per signature group** — build-time and mask-independent, summed over
+  the satisfied groups per request. ⊘ Not measured, and the storage is real: an artifact spanning
+  thirty-two groups is ~200 bytes, so ~2 GB at 10⁷.
+- **Evaluate only the levels the request can serve from.** A whole-map request runs every level of a
+  treed layer when the client can draw the coarse one; bounded to what it can serve, the wide case is
+  ~10³ artifacts and the question does not arise. This changes what is *evaluated* and not what is
+  served, but it reaches the request contract. ⊘ Not measured.
 
 ### 4.3 Two things the construction needs to work at all
 
@@ -261,10 +293,13 @@ path always produces; and **depth moved to `Lineage`**, which is why that column
 
 | viewport | shipped | design | |
 |---|---:|---:|---:|
-| whole map | 2 875 ms | **131 ms** | 22× |
-| 6.25% | 819 ms | **9.8 ms** | 84× |
-| 0.39% | 679 ms | **1.05 ms** | 650× |
-| 0.024% | 672 ms | **0.29 ms** | 2 285× |
+| whole map | 2 929 ms | **140 ms** | 21× |
+| 6.25% | 891 ms | **9.9 ms** | 90× |
+| 0.39% | 692 ms | **0.87 ms** | 795× |
+| 0.024% | 666 ms | **0.22 ms** | 3 027× |
+
+Those are the **build-time-groups** route, so nothing above is amortised over a session: every row is
+what one request costs on a cold token.
 
 **Flat in the corpus size**, which is the property the whole construction is for — 10⁶ artifacts,
 ten times the points:
@@ -280,10 +315,10 @@ ten times the points:
 
 | | before | now |
 |---|---:|---:|
-| verdict pass | ~135 ms | ~135 ms |
+| verdict pass | ~140 ms | ~140 ms |
 | lineage build *(belongs per generation)* | 45 ms | 87 ms |
 | cut | ~1 010 ms | **188 ms** |
-| **total** | **~1 190 ms** | **~410 ms, or ~325 ms once the lineage is cached** |
+| **total** | **~1 195 ms** | **~415 ms, or ~328 ms once the lineage is cached** |
 
 ⊘ **10⁷ artifacts over 10⁹ points is not measured directly** — the entity-space fixture for it needs
 ~41 GB against 47 GB of RAM. Two independent measurements agree on ~135 ms for the verdict there: the
