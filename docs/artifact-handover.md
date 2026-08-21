@@ -34,7 +34,9 @@ Six things a reader needs before opening it.
   route, ahead of it for narrow principals — 4.09 ms against 13.1 — for 40 MB of state naming nobody.
 - **Cost should track what a viewer may see, and today it inverts.** At 10⁹ points a principal seeing
   9.4% of the corpus costs the shipped path 1 635 ms at whole-map zoom against 727 ms for one seeing
-  everything. The same two requests cost the design 0.49 ms and 13.5 ms.
+  everything. ⊘ The pair once quoted here for the design — 0.49 ms and 13.5 ms — is **withdrawn**: it
+  was measured on the per-token route 0093 deletes, setup excluded. The direction holds on §7.2's
+  grid; the pair does not.
 - **Locality decides the scale, not the artifact count.** A clustered layer reaches 10⁷; a scattered
   one walls at ~2×10⁵ under the same structures, at 96.8 row blocks per artifact against 1.0. A
   **row-major** layout — a label per row where the layer partitions, a list per row where it overlaps
@@ -43,10 +45,11 @@ Six things a reader needs before opening it.
   walking down from the roots instead of sweeping the level. Serves exactly what it served before,
   checked against the reference implementation over random trees.
 - **On a real hierarchy the bound is the masked count of a coarse node**, not the cut — 3.6 ms at a
-  full mask and ~52 ms at any mask below one, flat across the viewport, because a shallow cut serves
-  coarse nodes and a coarse node's membership is most of the corpus. Per-signature counts for the
-  coarse nodes would remove it for ~1.3 MB; scoped, unbuilt, and the thing to check first is how that
-  scales with a real corpus's signature count.
+  full mask and **20–52 ms below one, falling ~4× as the viewport narrows, measured at 10⁶ nodes
+  only**, because a shallow cut serves coarse nodes and a coarse node's membership is most of the
+  corpus. Per-signature counts for the coarse nodes would remove it for ~1.3 MB; scoped, unbuilt, and
+  the thing to check first is how that scales with a real corpus's signature count — the fixture's
+  thirty-two against the demo corpus's 54,791.
 
 **Two cautions about the numbers, both learned the hard way.**
 
@@ -57,6 +60,14 @@ probe's fixture section lists all six; read it before trusting a figure.
 
 **A grid whose extremes are cheap says nothing about its interior.** Sampling four viewports and
 three coverages understated the worst request by 2.1× (owner). Sweep both axes through their middles.
+
+**The review has run, and it moved two things in the design** (2026-08-21;
+[the record](evidence/memos/2026-08-21-artifact-serving-scale-review.md)). Two fail-opens in the
+unbuilt design — the settled half tested containment where it needed the mask, and the containment
+partition's deny correction is its acceptance test rather than a refinement — are amended in place.
+**Every grid in the memo's §7 is superseded pending re-measurement**, because the probe's routes
+shared the first of those two; the ratios are the shape of the answer and not its value. Read the
+review record before quoting a figure from this section.
 
 **The memo's §9 ruling is taken** (2026-08-21): every build reports blocks per artifact, the
 row-major layouts are used wherever the layer partitions, and **there is no declared bound at all** —
@@ -162,8 +173,10 @@ be anyway, a masked count being `|membership ∩ M_auth|`.
 It is **flat in the artifact count** where the per-artifact loop is not, so the two cross: near
 10 000 artifacts on a 10⁶-point corpus and near 30 000 on a 10⁷-point one. At a million artifacts
 over 10⁷ points it is **175 ms against 462 ms — 2.6×**; over 10⁶ points, 8.6 ms against 68.5 ms.
-Each wins on its own side, and the choice carries no disclosure content: both compute the same
-quantities from inside `M_auth`. Answers asserted against the loop's rather than assumed equal.
+Each wins on its own side, and **nothing on the wire names which route served**: both compute the
+same quantities from inside `M_auth`. What the choice does reach is the timing channel, which the
+register now annotates (architecture r49, C4 and C15 shapes). Answers asserted against the loop's
+rather than assumed equal.
 
 Two passes with different domains, and that is a disclosure rule rather than an optimisation — the
 count is over the whole membership (`annotations.md` §4.2) so its pass walks the mask, while

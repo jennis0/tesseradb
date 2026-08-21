@@ -1,6 +1,7 @@
 # 0094 — The serving layout is chosen at build, overridable per layer, and re-evaluated at every fold
 
-**Date:** 2026-08-21 · **Status:** Settled (owner ruling)
+**Date:** 2026-08-21 · **Status:** Settled (owner ruling) — **amended the same day** with the fold's
+real flip point and the C15-shaped register annotation ([the record](../evidence/memos/2026-08-21-artifact-serving-scale-review.md)).
 
 ## Context
 
@@ -56,24 +57,38 @@ whose measured shape says one thing and whose operator knows another — a level
 benchmark, a bug being cornered. If the next nightly fold silently reverted it, the key would be a
 suggestion.
 
-**A flip is not a client-visible event.** Both layouts answer identically — the probe asserts the
-served set ordinal for ordinal and, on the row-major route, count for count — so nothing on the wire
-names a layout and no client can tell which one served it.
+**Nothing on the wire names a layout.** Both layouts answer identically — the probe asserts the
+served set ordinal for ordinal and, on the row-major route, count for count — so no request field
+selects one, no response field reports one, and the answers do not differ. What an earlier drafting
+of this paragraph added to that, and should not have, is *"no client can tell which one served it"*:
+a flip changes what a request costs, and service time is observable. The register carries it —
+**C15**-shaped, about one bit per (layer, level) per fold, saying that the corpus's shape moved rather
+than what it holds, and bounded by the layer gate, since a principal who does not reach the layer
+observes nothing (`architecture.md` Appendix C, owner-approved 2026-08-21). Accepted on C15's basis:
+knowing the corpus moved is not a leak, and this says less than the generation stamp already does.
 
 ## Consequences
 
-- The layout is not a contract. It is a latency choice with no disclosure content
+- The layout is not a contract. It is a latency choice that puts nothing on the wire
   ([decision 0092](0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)
-  rules the same thing about reporting it), so it may change freely at a fold.
+  rules the same thing about reporting it, and carries the two register annotations), so it may
+  change freely at a fold.
 - Publishing artifacts into a level does not flip its layout, and neither does ingest. The shape
   that would justify a flip is observed at the fold, which is also the only place the flip is cheap.
 - Whatever the fold flips, it must also drop — a level whose layout changed has projections in the
   old form that nothing will read again.
 - The blocks-per-artifact figure the build reports under 0092 is one of this decision's own inputs,
-  so an operator can see what the automatic choice was made from.
+  so an operator can see what the automatic choice was made from. ⊘ *The threshold that figure is
+  compared against is not yet a number: every recorded run sits at 1.0–1.6 or at 10.0–96.8, both
+  generator-imposed, with nothing measured between (selection memo §3).*
+- **The re-evaluation sits inside the fold's artifact pass, before anything is written** — the fold
+  writes the membership files first and snapshots the registry after, so a choice taken later reaches
+  neither the files nor the manifest (selection memo §5). `MembershipExtent` carries a layout tag and
+  each format carries a distinct magic, so a manifest that disagrees with a file is a refusal rather
+  than a misread.
 
 ⊘ **None of it is built.** Today there is one layout — artifact-major row forms, rebuilt eagerly at
 a generation move — with nothing recorded about it, no key to pin it, and a fold that rebuilds those
 forms without re-evaluating anything. The surface this decision rules is designed in
 [`2026-08-21-artifact-layout-selection.md`](../evidence/memos/2026-08-21-artifact-layout-selection.md),
-which is input to the campaign's adversarial review and is not yet binding.
+whose §9 carries the constraints the build wave inherits.

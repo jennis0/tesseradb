@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 48
+**Status:** Draft for review — revision 49
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -1087,6 +1087,33 @@ The alternative formulation — project the fragment into row space, then test t
 
 **C17, annotated again: an undeclared criterion moves the bound from what a principal sees to the layer's gate** *(r44; owner-ruled 2026-08-16, [decision 0084](../decisions/0084-an-undeclared-criterion-declares-no-test.md))*. The annotation above says the artifact routes stay inside C17's bound of *items the principal already sees*. That holds wherever a layer declares an existence criterion, and **not** where it declares none: an artifact whose masked count is zero passes an absent criterion, so a principal holding its identifier is told it exists while seeing no member of it. The viewport never shows such an artifact — candidacy is *any visible member inside the requested tiles* — so the channel is the identifier route alone, and a principal reaches it only for an identifier someone handed them. **The bound is therefore the layer's gate**: a principal who does not reach the layer learns nothing, by the same single set probe a never-registered name gets. Three properties bound it inside that, and each is structural rather than a mitigation: an identifier is a keyed permutation and so is neither guessable nor enumerable; what is disclosed is existence and a zero, never a membership, an unmasked size, an ordinal or another artifact; and **any** declared criterion closes it, `min_visible = 1` being the weakest form the schema can express. Accepted as the declaration's meaning — the service adds no floor the operator did not write, because a floor applied on the service's own initiative would make two identically-declared layers behave differently for a reason no reader of the declaration could recover.
 
+**C4, annotated: an artifact request's service time varies with where artifacts the viewer cannot see
+sit in row space** *(2026-08-21, owner-approved)*. The artifact path's candidate generator walks a
+hierarchical row-range index and takes whole subtrees the viewport covers, descending only where it
+cuts one (`artifact-serving-at-scale.md` §4). The **answer** is masked throughout — every artifact
+served cleared a test against `M_auth`, and the geometry decides only which question to ask, which is
+why this is an annotation on the timing row rather than an **I2** exception. What varies is the
+**cost**: how many nodes the walk descends, and how many artifacts it hands back for the per-artifact
+probe, are functions of the density of *unmasked* artifacts near the viewport's boundary. That is the
+same quantity C4 already registers for the point path — corpus density including rows the viewer
+cannot see — reaching the same channel through a second surface, so it is named here rather than left
+to be inferred from the row above. Low, and unmitigated for the same reason C4 is: the disclosing
+component is a residual after the correlation with the viewer's own visible count, and it is
+unquantified.
+
+**C15, annotated: a layout flip at a fold is observable in the timing channel** *(2026-08-21,
+owner-approved)*. A level's serving layout is chosen automatically and re-evaluated at every
+compaction fold ([decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+Nothing on the wire names it — no request field selects one, no response reports one, and both forms
+return the same set and the same counts — but the two have different cost profiles across zoom, so a
+viewer panning the same layer across a fold may observe that it flipped. That is about **one bit per
+(layer, level) per fold**, and what it says is that the corpus's *shape* moved past a threshold:
+activity, not content, and less than the generation stamp this row already accepts. **Bounded by the
+layer gate** — a principal who does not reach the layer observes nothing, by the same identical set
+probe a never-registered name gets. Accepted on this row's basis, under the same owner ruling
+(2026-08-02) that knowing data has been ingested is not a security leak. ⊘ **Not built**: there is one
+layout today and nothing flips.
+
 **A row deliberately not added, recorded so it is not read as an oversight.** A variant was considered in which the served set is *truncated* to whatever a fixed-width precomputed list happens to yield, rather than evaluated from the mask. No such list exists (§7.2 declines the route), and this variant must not arrive with one: the drawn count would then depend on *unmasked* tile density, which is both a mild I7 regression — a partial-coverage viewer on a dense tile is under-served relative to the definition, the same failure mode as sample-then-filter in attenuated form — and a genuine new channel needing its own entry. If it is ever revisited, it is not a no-op.
 
 Owner and review date for C1, C4, C6, C12, C14, C15, C16, C17, C18, C19, C27 and C28 to be assigned before launch.
@@ -1196,6 +1223,21 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r49** — **two annotations for the artifact serving path** (2026-08-21, **owner-approved on the
+  day**, which is what licenses an edit to Appendix C here). The artifact scale campaign's adversarial
+  review ([the record](../evidence/memos/2026-08-21-artifact-serving-scale-review.md)) found two
+  channels the campaign's own documents had described as absent. **C4 gains an annotation**: the
+  artifact path's candidate generator walks a row-range index, so service time varies with the density
+  of artifacts the viewer cannot see near the viewport's boundary — the answer stays masked, the cost
+  does not, and it is the same quantity C4 registers for the point path reaching it through a second
+  surface. **C15 gains an annotation**: a serving-layout flip at a fold is detectable in timing, about
+  one bit per (layer, level) per fold about corpus shape, bounded by the layer gate and accepted on
+  C15's basis. Both Low, both ⊘ not built. Three sentences in the campaign's documents claiming the
+  layout choice carried *no disclosure content* are narrowed to what is true — **nothing on the wire
+  names a layout** — with these citations beside them. No invariant changes and no row is added: both
+  are annotations on existing rows, in the same form C4's `/v1/items` closure and C17's artifact
+  annotations already take.
 
 - **r48** — **the ranked-content vocabulary is settled** (2026-08-19). §7.7's *variations* are
   entries of an artifact's ranked `contents`, each identified by its **rank**; the caller's own name

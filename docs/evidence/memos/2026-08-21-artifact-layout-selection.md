@@ -1,9 +1,9 @@
 # Choosing a layer's serving layout
 
-**Date:** 2026-08-21 · **Status:** Design — for review. **This document is input to the artifact
-scale campaign's adversarial review**, together with
-[`artifact-serving-at-scale.md`](../../design/artifact-serving-at-scale.md), and is not binding
-until that review is dispositioned. Nothing in it is built.
+**Date:** 2026-08-21 · **Status:** Design — **reviewed and amended** (2026-08-21;
+[the record](2026-08-21-artifact-serving-scale-review.md)), together with
+[`artifact-serving-at-scale.md`](../../design/artifact-serving-at-scale.md). Nothing in it is built,
+and §9 is the list of constraints the build wave inherits.
 
 Ruled by
 [decision 0094](../../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md):
@@ -22,8 +22,11 @@ A **layout** is how a level's membership is stored and scanned. Three of the str
 campaign proposes are *not* alternatives and are not in the enum:
 
 - **The containment partition** (§4.2) is built for every layer whatever its layout. It answers
-  `G ⊆ M_auth` from terms alone and names no principal
-  ([decision 0093](../../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)).
+  `G ⊆ M_auth` from terms alone, per `(artifact, rank)`, and names no principal
+  ([decision 0093](../../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md))
+  — but it is not the whole answer: `denied = deleted ∪ suppressed` is applied live against the
+  overlay beside it, and the entity→artifacts index that needs is sized by `Σ|G|` whatever layout the
+  level is in.
 - **The hierarchical row-range index and the per-artifact extents** (§4.4) belong to the
   artifact-major layout alone. A row-major layer has nothing to index: its candidacy is a scan of
   `viewport ∩ M_auth`, which is already bounded by the viewport.
@@ -46,12 +49,12 @@ entity space to row space, which is where ~120 ms of that 175 went.
 ⊘ **Specified here, not implemented.** `ServingLayout` lives in `tessera-types` beside
 `MembershipSource`:
 
-| variant | the membership is | candidacy | count |
-|---|---|---|---|
-| `ArtifactMajor` | one row-space bitmap per artifact | the hierarchical index, then the extent test, then a masked `intersects` at the viewport's edge | `masked_count` per served artifact |
-| `RowMajorLabel` | one artifact label per row | one scan of `viewport ∩ M_auth`, marking labels | one histogram over `M_auth` |
-| `RowMajorList` | a list of labels per row | the same scan at a larger constant | the same histogram at a larger constant |
-| `SpatialRanges` | the declared shape decomposed to Morton ranges | range-against-tile arithmetic | `count_range` per artifact |
+| variant | the membership is | candidacy | count | what it does **not** replace |
+|---|---|---|---|---|
+| `ArtifactMajor` | one row-space bitmap per artifact | the hierarchical index, then the extent test, then the composed probe at the viewport's edge | `masked_count` per served artifact | — |
+| `RowMajorLabel` | one artifact label per row | one scan of `viewport ∩ M_auth`, marking labels | one histogram over `M_auth`, held per (session, layer) | the generating set (entity space); the proportional denominator (per artifact); the containment partition |
+| `RowMajorList` | a list of labels per row | the same scan at a larger constant | the same histogram at a larger constant | the same three |
+| `SpatialRanges` | the declared shape decomposed to Morton ranges | range-against-tile arithmetic | `count_range` per artifact | the generating set; the declared denominator, which a predicate does not have at all |
 
 **Recorded per (layer, level)**, as `layouts: Vec<ServingLayout>` on the registered layer, which the
 manifest already serialises. A treed layer's coarse level and its leaf level have different
@@ -87,10 +90,14 @@ Four inputs, and the last two are observations rather than declarations.
   the integer-key or list column `artifacts-from-points` already reads — the build was handed the
   layout and keeps it. Where it does not, producing one is an inversion of the whole level.
 
-⊘ **The crossover is measured at 10⁸ points and modelled above it.** Row-major costs ~4–5 ns per
-visible row and is flat in the artifact count; artifact-major costs blocks per artifact and is flat
-in the corpus size. The campaign's sweep is what turns the threshold from a shape into a number, and
-until it runs the pick should be conservative in the direction of what is built today.
+⊘ **The threshold is not a number yet, and "a few row blocks per artifact" is a placeholder.** Every
+recorded run sits at 1.0–1.6 blocks per artifact or at 10.0–96.8, both ends constructed by the
+generator rather than observed, and **no measurement exists between 1.6 and 10** (scale memo §5).
+So the *axis* is measured — it separates the two costs by two decades — and the point on it where the
+pick should flip is unbracketed. Row-major costs ~4–5 ns per visible row and is flat in the artifact
+count; artifact-major costs blocks per artifact and is flat in the corpus size; the crossover is
+measured at 10⁸ points and modelled above it. Until the campaign's sweep brackets it, the pick should
+be conservative in the direction of what is built today.
 
 ## 4. The override
 
@@ -131,14 +138,29 @@ is built.
 
 ## 5. Re-evaluation at the fold
 
-**Where.** In the fold's publication path, between the artifact pass — which rewrites every level's
-membership into the new prefix, minus what the fold retired — and the eager row-form rebuild that
-follows it. That is the only point where both inputs are true of the level as it will be served and
-nothing has yet been materialised in the outgoing layout.
+**Where: inside the artifact pass, before the registry snapshot.** The fold's real order is
+`rewrite_membership_extents` — *which writes the files* — then the degradation report, then the
+segments assembly, then `registry_for_publication`, then the manifest, then the `CURRENT` flip, then
+retirement, then the warm. An earlier revision of this section placed the re-evaluation "between the
+artifact pass and the row-form rebuild", which is **after** the files and **after** the manifest: the
+choice would have reached neither, and the fold would have published a level in the old layout with a
+record claiming the new one.
+
+So the decision is taken **inside** the artifact pass, before a byte is written. The observations it
+needs are available there: `repack_all` takes `&self`, so the retired-out blobs — the memberships as
+they will be, minus what the fold executes — exist as values before anything is serialised, and both
+inputs can be counted off them.
 
 **What it reads.** The artifact count and the blocks-per-artifact figure, both observed
 **post-retirement**. A fold that retired most of a level has changed the answer, which is exactly
 the case the re-evaluation exists for.
+
+**What makes a disagreement loud rather than silent.** `MembershipExtent` carries a **layout tag**, so
+the manifest states which form each level's file is in; and each layout's file format carries a
+**distinct magic**, so a reader that opens a file the manifest mis-describes refuses at the first
+bytes rather than decoding a `u32` column as a bitmap. Neither is compatibility machinery — there are
+no old bundles ([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md))
+— both are the fail-closed guard a *running* process needs, of exactly the kind that rule keeps.
 
 **What it does.**
 
@@ -180,7 +202,13 @@ anyway. There is no case for it that a nightly fold does not already answer.
   served it, and `/v1/meta` does not carry it. A client that could tell the layouts apart would be
   reading a fact about storage.
 - **It does not make the layout a disclosure control.** Both forms compute the same quantities from
-  inside `M_auth`, so **I2** is untouched and there is no leak-register row here.
+  inside `M_auth` — the principal's visible set — so **I2** is untouched. What is true is that
+  **nothing on the wire names a layout**; what is *not* true is that the choice is outside the leak
+  register. Two annotations cover it (`architecture.md` Appendix C, owner-approved 2026-08-21): a
+  **C4-shaped** one, because the candidate-generator walk makes artifact-path service time vary with
+  where in row space artifacts the viewer cannot see happen to sit; and a **C15-shaped** one, because
+  a layout flip at a fold is detectable in the timing channel — about one bit per (layer, level) per
+  fold, about corpus shape rather than content, bounded by the layer gate.
 - **It does not bound anything.** A layer whose shape suits no layout is reported and served
   ([decision 0092](../../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)).
 - **It does not re-evaluate on publication or on ingest.** Both move the observations; neither is a
@@ -207,3 +235,65 @@ Five, in the order they would hurt.
    layout proposed later would have to be added to a manifest field, which is free pre-release
    ([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)) and
    not free afterwards.
+
+## 9. What the build wave inherits
+
+Twelve constraints the review recorded rather than settled. Each is small enough to lose and large
+enough to cost a rewrite if it is lost, and none of them is a design question still open — they are
+things the implementation must not be free to decide differently.
+
+1. **One snapshot and one lock for the whole per-generation family.** The row form, the index and the
+   extents describe the same population, and a **growth** between two reads leaves a stale-narrow
+   extent — an artifact whose membership reaches beyond the `(min_row, max_row)` a request is testing
+   against, which settles it wrongly. Growth is the only producer of that state (`artifacts-from-points`
+   §6.1), and it is why the three are acquired together rather than each on its own.
+2. **`ArtifactProjections` and `Lineages` need a `forget(layer)`.** A dropped layer's entries are
+   otherwise pinned by the last generation's `Arc` for the process's life, and the flip in §5 has the
+   same problem in the other direction. The hazard to name at the call site is **drop and
+   re-register**: a layer name reused after a drop must not alias the old layer's cached objects. The
+   cadence track carries this and is briefed on it; this section exists so the two do not diverge.
+3. **`None` is a hole, not an empty membership.** The extent vector is dense over ordinals, and an
+   ordinal may be a hole — a deleted artifact whose slot is held open because an ordinal is identity
+   (write cycle §3.4, Rule F's artifact arm). A hole must not read as an artifact with an empty
+   membership: the first is absent, the second is served with a zero count where the layer declares no
+   criterion.
+4. **Expression identifiers are interned and canonicalised at build**, with a width of **at least
+   `u16`** and a stated rule for what makes two expressions equal. The scale memo's §4.2 records why a
+   byte is not enough; the canonical form is what makes sharing an answer sound.
+5. **The wide/narrow switch is a constant with a measurement behind it and no home in the design.**
+   The probe uses `settled + open > max(rows / 64, 4096)` to choose between unioning the satisfied
+   expressions and testing each candidate. It appears nowhere in the scale memo, and a build that
+   picks a different constant measures a different system.
+6. **The index's fan-out and depth are the probe's**, `FINEST_SHIFT = 10` and `LEVEL_STEP = 4`. The
+   scale memo's §4.4 argues that a fixed granularity is wrong at most scales; that argument applies to
+   these two constants, and neither is measured at any other value.
+7. **`everywhere` is part of the index, not an implementation detail of the walk.** Artifacts too wide
+   for any node are returned on every request whatever the viewport, and they are what makes a
+   scattered layer expensive at whole-map zoom — the one direct run at the target spends 137 s there
+   (scale memo §7.2). A rebuild that folds them into the root's subtree loses the distinction the cost
+   model rests on.
+8. **The row-major file formats are a durable surface**: the label width per `configuration.md` §1's
+   `u8`/`u16`/`u32` declarations, an explicit **HOLE** sentinel for a row belonging to no artifact,
+   the list layout's own encoding, and one manifest entry per level carrying the layout tag and the
+   format's magic (§5).
+9. **What the index, the extents and the partition add to the fold's artifact pass is unpriced.** The
+   pass is measured at 32.8 s on eight threads for the memberships alone; three derived structures
+   ride on top of it, and no figure covers them.
+10. **Where the build reads `vis(e)` at composition time is an open question with a soundness
+    consequence.** The partition composes `⋀ vis(e)` over a generating set, and the candidate shape is
+    the entity's **term signature**, with per-signature satisfaction asked once per session. **Whether
+    a plugin may make satisfaction non-signature-shaped decides whether the partition is sound at
+    all** — a plugin whose answer depends on something other than the satisfied term set breaks the
+    equivalence the whole structure rests on, and that reaches **I5** and **I6**. Nothing in the
+    corpus currently forbids it, and no plugin exists to test it (`conformance.md` r15: I6 is the one
+    uncovered row that wants an implementation rather than a test). **This is the first thing to
+    settle in the build wave**, because everything else in the partition is downstream of it.
+11. **The masked-count histogram is byte-budgeted and per (session, layer).** ~4 B per artifact, 4 MB
+    at 10⁶ and 40 MB at 10⁷, on the session-geometry refresh cadence and inside the same byte budget
+    the row-projection cache answers to — the single exception
+    [decision 0093](../../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+    names, and it applies to row-major layers alone.
+12. **The deny correction is on the accept path or it is fail-open.** `deleted ∪ suppressed`, live
+    against the overlay per request or applied synchronously with the acknowledgement; the inverted
+    entity→artifacts index it needs is sized by `Σ|G|` and contradicts `annotation-write-cycle.md`
+    §4.5's *"the deny lane does no artifact work"*. Reconciling those two is work, not a detail.

@@ -1,6 +1,7 @@
 # 0092 — The build reports a layer's shape, and no layer carries a declared bound
 
-**Date:** 2026-08-21 · **Status:** Settled (owner ruling)
+**Date:** 2026-08-21 · **Status:** Settled (owner ruling) — **amended the same day** with the two
+leak-register annotations the campaign's review raised ([the record](../evidence/memos/2026-08-21-artifact-serving-scale-review.md)).
 
 ## Context
 
@@ -47,17 +48,26 @@ vocabulary-made, the realistic counts are thousands, and at thousands the cost i
 scattered layer measures 96.8 row blocks per artifact against 1.0 for a clustered one, so 10⁷
 clustered artifacts are cheaper to serve than 2×10⁵ scattered ones. A threshold on the count admits
 the dear layer and refuses the cheap one, and no count the author declares says which they have.
+⊘ *Both ends of that statistic are constructed by the probe's generators rather than observed, and no
+measurement exists between 1.6 and 10 blocks per artifact — so the axis is measured and any threshold
+on it is not.* Nothing in this ruling depends on the threshold: what is reported is the measured
+number itself, and the operator reads it.
 
 **A warning would have to be told the number the report already prints.** (b) compares a *declared*
 count against a threshold; (c) states the *measured* shape of what was built. The layer a warning
 exists for is exactly the one whose author mis-stated its shape.
 
 **Nothing here leaks and nothing is irreversible.** Both layouts compute the same quantities from
-inside `M_auth` — the principal's visible set — so **I2** is untouched and the choice carries no
-disclosure content; the probe asserts the served set identical ordinal for ordinal and, on the
-row-major route, count for count. A wrong choice costs a rebuild. That puts it outside the small
-enumerable surface where a refusal is the safe option, and inside the case where the house rule is
-report loudly, print the numbers, and let the operator decide.
+inside `M_auth` — the principal's visible set — so **I2** is untouched, and **nothing on the wire
+names a layout**; the probe asserts the served set identical ordinal for ordinal and, on the
+row-major route, count for count. That is narrower than *the choice carries no disclosure content*,
+which an earlier drafting of this paragraph claimed: the register carries two annotations covering
+what the choice does put into the timing channel — a **C4**-shaped one for the candidate-generator
+walk, whose service time varies with where artifacts the viewer cannot see sit in row space, and a
+**C15**-shaped one for a layout flip being observable at a fold (`architecture.md` Appendix C,
+owner-approved 2026-08-21). Both are Low and both are accepted. A wrong choice costs a rebuild. That
+puts it outside the small enumerable surface where a refusal is the safe option, and inside the case
+where the house rule is report loudly, print the numbers, and let the operator decide.
 
 ## What this supersedes
 
