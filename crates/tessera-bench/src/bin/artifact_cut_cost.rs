@@ -36,6 +36,27 @@
 //! | 10⁶ | flat | 1.177 ms | 3.725 ms | 3.066 ms | 1.2 |
 //! | 10⁶ | treed | 5.634 ms | 100.5 ms | 110.9 ms | 5.6 |
 //!
+//! # Extended to 10⁷ 2026-08-21, and the top row is the operating point after all
+//!
+//! | level | arm | lineage | cut, no budget | cut, budgeted | ns/artifact |
+//! |---:|---|---:|---:|---:|---:|
+//! | 10⁶ | flat | 0.554 ms | 3.053 ms | 2.810 ms | 0.6 |
+//! | 10⁶ | treed | 4.563 ms | 80.13 ms | 86.56 ms | 4.6 |
+//! | **10⁷** | flat | 4.969 ms | 32.64 ms | 35.98 ms | 0.5 |
+//! | **10⁷** | **treed** | 44.90 ms | **1 063 ms** | **1 008 ms** | 4.5 |
+//!
+//! The line above saying 10⁶ "is not an operating point this system serves" was written before the
+//! serving pass was measured, and it is wrong in one case: **a principal who can see the whole
+//! corpus passes every artifact**, so at a 10⁷-artifact treed layer and whole-map zoom the cut is
+//! handed the entire population and costs **a second**. That is now the largest single term in such
+//! a request — larger than the verdict pass it rides on, which
+//! [the serving-scale probe](../../../../probes/2026-08-20-artifact-serving-scale/README.md) brings
+//! to ~135 ms with the same population.
+//!
+//! It does not contradict the ~100 ns per *passing* artifact rule; it is that rule at a passing
+//! count nothing had measured. Every narrower principal stays cheap for the same reason: at a mask
+//! admitting 9.4% of the corpus, ~94 000 artifacts pass and the cut is ~10 ms.
+//!
 //! **The lineage build is 0.3–5.6 ns per artifact of the level** — memory-bandwidth work against a
 //! per-artifact candidacy test that does Roaring arithmetic, so the derivation is comfortably a
 //! fraction of the loop it rides on and the cache it replaces would not have paid for itself.
@@ -74,7 +95,7 @@ fn main() {
         "level", "arm", "lineage", "cut(none)", "cut(budget)", "ns/artifact"
     );
 
-    for &n in &[1_000u32, 10_000, 100_000, 1_000_000] {
+    for &n in &[1_000u32, 10_000, 100_000, 1_000_000, 10_000_000] {
         flat_arm(n);
         treed_arm(n);
     }

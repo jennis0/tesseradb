@@ -712,7 +712,9 @@ a cut at a deeper one agree on every artifact both return, and neither reveals a
 failed its own test.
 
 The cut is measured ([`artifact_cut_cost`](../crates/tessera-bench/src/bin/artifact_cut_cost.rs)) at
-0.6 ms per ten thousand visible artifacts, after ordinal-indexed side tables and a memoised depth
+0.6 ms per ten thousand visible artifacts — **and 1 008 ms at ten million, which is a principal who
+can see the whole corpus on a treed layer, measured 2026-08-21 and the largest single term in such a
+request** — after ordinal-indexed side tables and a memoised depth
 replaced tree lookups. The corpus is re-derivable end to end from
 [the notebook](../notebooks/README.md), which publishes all three shapes over the same points —
 k-means flat, HDBSCAN's condensed tree nested, and arXiv's own classification tiered across two

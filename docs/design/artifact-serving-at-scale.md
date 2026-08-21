@@ -36,6 +36,11 @@ the per-token pass has already removed most of the population:
 So the answer is **yes for artifacts that are somewhere, and conditionally for artifacts that are
 everywhere** — which is §4, and is the part that needs a ruling rather than an implementation.
 
+**These are verdict costs, not response costs, and for one principal the difference matters.** A
+viewer who can see the whole corpus passes every artifact, so the *cut* is then handed all 10⁷ and
+costs **~1 010 ms** on a treed layer — seven times the pass above it. §5.4 has the measurement and
+the candidate fix. Nothing else in this memo is the largest term in that request.
+
 **And it is flat in the corpus size**, which the ten-fold step from 10⁸ to 10⁹ points confirms
 directly at a fixed artifact count — the design's cost is a function of how many artifacts there are
 and how much map is on screen, not of how many points are underneath:
@@ -333,7 +338,7 @@ does not partition and has no column. Every real instance of that shape is human
 vocabulary-made, which is why (b) is a warning about a case rather than a bound on the design; and
 the list-per-row form in §3.3 is the same inversion again if one ever turns up.
 
-## 5. Two defects found on the way, neither of which is about scale
+## 5. What the verdict pass does not cover, and two defects beside it
 
 **5.1 Any artifact write invalidates every cached row form, in every view.** `ArtifactStore`'s
 `version` is global and `ProjectionKey` carries it, so one suppression, one grown membership or one
@@ -356,24 +361,43 @@ they touch are exactly `index.candidates(overlay_rows)` — **the same hierarchi
 "which artifacts does this suppression touch"**. Patch those and leave the rest. ⊘ Modelled, not
 measured.
 
-**5.4 What the request allocates after the verdict, which is the next thing anyone would hit.**
-The serving loop collects `passing: Vec<(u32, EntityId, u64, Option<u32>)>` — every artifact that
-cleared the predicate — and hands its ordinals to the cut. At 10⁷ passing that is **~240 MB
-allocated and freed per request**, on top of the verdict this memo is about, and it is not in any
-figure here: the probe measures the predicate and stops.
+**5.4 For a principal who can see the whole corpus, the cut is now the bottleneck — and it is
+bigger than everything this memo fixes.** Measured 2026-08-21 by extending
+[`artifact_cut_cost`](../../crates/tessera-bench/src/bin/artifact_cut_cost.rs) to 10⁷, which is
+where it had never been run:
 
-It is not the same problem, and it has a different answer. The routes in §3 leave the passing set as
-a **bitmap**, so the materialisation is a choice rather than a consequence — and what actually has
-to be materialised is bounded by `artifact_budget`, not by the population. The cut is what stands in
-the way: it takes `&[u32]` and computes a frontier over the whole set. Whether it can take a bitmap
-instead is an ordinary question about `cut.rs` and is not a disclosure one — the cut is a rendering
-choice ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)) and every
-artifact in either set already cleared its own test.
+| level | arm | lineage | cut, no budget | cut, budgeted |
+|---:|---|---:|---:|---:|
+| 10⁶ | treed | 4.6 ms | 80.1 ms | 86.6 ms |
+| **10⁷** | flat | 5.0 ms | 32.6 ms | 36.0 ms |
+| **10⁷** | **treed** | **44.9 ms** | **1 063 ms** | **1 008 ms** |
 
-⊘ **Unmeasured.** Named here because a reader who takes §3 and stops would find it, and because it
-is the reason the 131 ms figure is a *verdict* cost and not a *response* cost.
+So the whole-map request that §1 puts at 131 ms is, end to end on a treed layer:
 
-## 6. Three things a reader will ask that the numbers already answer
+| | |
+|---|---:|
+| the verdict pass (§3) | ~135 ms |
+| the lineage build (§5.2 — per generation, not per request) | 45 ms |
+| **the cut** | **~1 010 ms** |
+| materialising `passing` (§5.4 below) | ⊘ unmeasured, ~240 MB |
+
+**The cut is seven times the pass this memo is about.** It is not a new fault and it does not
+contradict the cut probe's own rule — ~100 ns per *passing* artifact — it is that rule at a passing
+count nothing had measured, and the probe's note that 10⁶ "is not an operating point this system
+serves" turns out to be false for exactly one principal: **the one who can see everything passes
+everything.** Every narrower principal stays cheap for the same reason the rest of this memo works —
+at a mask admitting 9.4% of the corpus, ~94 000 artifacts pass and the cut is ~10 ms. A **flat**
+layer is fine at any width: 36 ms at 10⁷.
+
+**The candidate fix is the one this memo already uses twice, and it is unmeasured.** The cut's
+answer at whole-map zoom is a function of the layer's tree and the passing set, and at whole-map
+zoom the passing set *is* the token's — no viewport in it. So the plan belongs beside the
+servable-label set, built once per grant set rather than once per request, with only the budget's
+bisection left live. What is not known is how `cut`'s a second divides between building the plan and
+serving a depth from it; the probe times them together. That split is the measurement to take before
+anyone builds this, and it is cheap to take.
+
+**5.5 What the request allocates after the verdict.**## 6. Three things a reader will ask that the numbers already answer
 
 **A hierarchy of levels does not multiply the cost.** The serving loop runs every level of a treed
 layer, so a reader expects an *L*× multiplier. There is none: each level's cost is proportional to
