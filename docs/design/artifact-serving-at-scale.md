@@ -1,9 +1,15 @@
 # Serving ten million artifacts — design and options
 
 **Date:** 2026-08-21
-**Status:** **Options memo, for owner decision.** One part is built and gate-green — the cut rewrite
-(§6) — because it was a data-structure choice rather than a design one. Everything else is measured
-and proposed, not implemented.
+**Status:** **Ruled, and awaiting review.** §9's question is answered by
+[decision 0092](../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md),
+with [0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md) and
+[0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)
+beside it; the adversarial review runs over this document and
+[the selection surface](../evidence/memos/2026-08-21-artifact-layout-selection.md) before any of it
+reaches the serving path. One part is built and gate-green — the cut rewrite (§6) — because it was a
+data-structure choice rather than a design one. Everything else is measured and proposed, not
+implemented.
 
 Every figure comes from the shipped structures, measured by
 [`probes/2026-08-20-artifact-serving-scale/`](../../probes/2026-08-20-artifact-serving-scale/README.md)
@@ -611,6 +617,13 @@ wrong guess costs a rebuild:
   built rather than when it is panned.
 
 **Recommended: (c) always, (a) wherever the layer partitions, (b) as a warning.**
+
+**Ruled 2026-08-21: (c) always, (a) wherever the layer partitions, and (b) not at all** —
+[decision 0092](../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md).
+The recommendation is not taken in full: there is no declared-bound machinery, as a refusal or as a
+warning key, because what costs is locality rather than the count and the report already prints the
+measured number a declared one would have been compared against. The ruling also withdraws the
+per-request bound the delivery record had owed since the model was written.
 
 ## 10. What is not in scope, and what is not measured
 

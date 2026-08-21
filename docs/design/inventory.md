@@ -77,6 +77,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
 | `architecture.md` | Normative — r48 | 35 |
+| `artifact-serving-at-scale.md` | Ruled, and awaiting review. §9's questio | 13 |
 | `artifacts-from-points.md` | Draft | 2 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |

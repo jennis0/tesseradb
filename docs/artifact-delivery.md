@@ -53,10 +53,21 @@ close, which was 0091's last obligation. The cut's owed tail is closed: a depend
 when the response does not contain what it depends on, server-side, with the attachment never
 reaching the wire (Stage 5 below). **I3 containment is a conformance row rather than a claim** —
 `conformance.md` r14 moves it to covered on a black-box test whose two principals are one entity
-apart. What does not exist yet is membership by predicate, runtime artifacts, and the filter, search
-and scale work — Stages 6 to 8 below, of which **Stage 6's cost discussion is now held and
-measured**: a predicate layer's row form is cached at a generation move, and the per-request bound
-must refuse on a layer's declared artifact count.
+apart. What does not exist yet is membership by predicate, the serving layouts, runtime
+artifacts, and the filter and search work — Stages 6 to 9 below.
+
+**Stage 6's cost discussion is held and measured, and its rulings are taken** (2026-08-21). A
+predicate layer's row form is cached at a generation move; a layer that partitions is served
+row-major instead, which is the layout that scales; the layout is chosen automatically and
+re-evaluated at each fold ([decision 0094](decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md));
+containment comes from a build-time partition over terms rather than from anything held per token
+([decision 0093](decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md));
+and **there is no declared bound** — a layer that will be slow says so in the build's report and the
+operator decides ([decision 0092](decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)),
+which withdraws the per-request refusal this file has owed since the model was written. **Scale
+validation is pulled forward to Stage 7**, ahead of runtime artifacts (owner, 2026-08-21). The
+campaign's plan is [its own memo](evidence/memos/2026-08-21-artifact-scale-plan.md); its adversarial
+review is running, and three of its tracks are in flight.
 
 | Stage | State | Finished when | Evidence |
 |---|---|---|---|
@@ -69,13 +80,21 @@ must refuse on a layer's declared artifact count.
 | **The configuration surface** | **stages 1–8 done** 2026-08-18/19 (`artifacts/stage-4`) — [decision 0088](decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md) | one document declares the corpus and `tessera build` takes no flags; every retired key is refused rather than aliased | **built and gate-green.** Two visibility axes in place of six keys, `public` interned at term `0`, points carrying their own labels, the plugin taking a term list with the manifest hash enforced, one row per artifact with ranked `contents`, `[layer.labels]` expanding to a real layer, `tessera check`, the frame report and `disclosure.json`. ⊘ Stage 9 — the notebook and the corpus's citations — is the remainder |
 | **Artifacts from points** | **all five stages done** 2026-08-19/20 (`artifacts/stage-4`) — [the design](design/artifacts-from-points.md) | a clusterer's own output builds a layer: one integer per point or one list per point, noise included, and no artifact table required | **§2, §3 and §4 built and gate-green.** The membership route needed no new surface and is asserted so — a `[layer.members]` block over the points file builds the same bundle, byte for byte, as the same layer declared with a member table. Added in the first stage: an integer key column canonicalised to its decimal spelling (converted once per artifact, never per point); a null key and exactly `-1` skipped, counted and reported rather than refusing the build; and `value_set = "open" \| "closed"` on `[[layer]]`, closed being today's roster rule, open making a key no artifact declares create one. **In the second, a list key column**, whose entries are the artifacts the point belongs to and whose positions mean what the layer's `hierarchy.kind` already declares — one per level under `stacked` and `tiered`, a lineage under `nested`. The same byte-for-byte assertion holds both ways: a lineage column against an artifact table with a `parent` column, and a fixed-length column against a member table with a `level`. A child named under two different parents refuses the build; a shape disagreeing with the declared kind refuses rather than guessing; a null or `-1` entry places the point at no artifact at that level and links nothing across itself. **In the third, a membership grows** ([decision 0091](decisions/0091-build-is-ingest-into-an-empty-database.md) ruled the contradiction r4 found: a point ingested into an enumerated membership joins it, because a build reading a member table has always done exactly that). Three pieces: a durable WAL record carrying a **delta** rather than a restated set — restating a 10⁸-member cluster costs ~12 MB on the fsync path per batch naming it — one store method taken by both the live path and replay, and the packing bookkeeping, which is the part that decides whether it is correct. A level is packed only above its published high-water, so a grown record below that mark reaches a manifest by no append-only route: the log is pinned at the growth and released only by the fold, which rewrites every level whole. Releasing it at the mark that covers a packed tail is the silent failure — the artifact comes back from a restart at its pre-growth size, acked, indistinguishable from one below its criterion — and it is asserted where it bites: **a rotation may not reclaim the member holding a growth**, and after a fold the membership comes back whole with the log deleted outright. Growing a suppressed artifact leaves it suppressed, the key resolving in the store rather than in what is served. Fourteen tests. **In the fourth, the wire says what a file says** (contracts **r36**): `/control/ingest` accepts a column **named for the layer** — its own `name`, as an attribute column is named for the attribute's `name` and not its `field`, which stays build-time acquisition — carrying a key or a list of keys at exactly the values a member table carries, `-1` and null included. The keys resolve at **admission**, so one caller's typo refuses that batch alone rather than the window it would have joined, and the joins become one `ArtifactGrow` per `(layer, level)` inside the batch's own fsync: there is no state in which a point is ingested and its membership is not. **The rule is shared and the reader is not** — `tessera-types` carries no `arrow` dependency and does not acquire one, so `ListMeaning`, `parent_edges` and `integer_key` move there and each side decodes its own Arrow; the build's member pass now reads its list meaning, its noise sentinel and its adjacency from the same three. A lineage **checks** rather than creates: a contradiction is the build's own two-parents refusal, and an edge the layer holds no parent for is reported with the memberships still applied. **The test is 0091's own** — the same corpus built from a member table and ingested with a membership column is the same database to every client, at a scalar key and at a lineage, for three principals, with the built side pinned to an oracle computed from the fixture; dropping the column from the handler's submission turns both red. Ten tests over HTTP, three more on the shared rule itself. **In the fifth, a key that names nothing creates it** (contracts **r37**), which was
 [decision 0091](decisions/0091-build-is-ingest-into-an-empty-database.md)'s last obligation and with it the last difference in what can be *said* at the two entry points. Under `value_set = "open"` a membership column's key that no artifact holds mints an artifact carrying nothing but its name, the points of that batch that named it, and whatever computed content follows. **Minting is a publication and it happens at the commit window's close**, not at admission: an ordinal is claimed from the level's cursor and is durable only in the record that claims it, and a `PublishArtifacts` command executes while a window is open and reads the same cursor — so a claim made at admission would be taken twice. What stays at admission is every refusal that can be made about one batch alone, which is what keeps one caller's typo off another caller's rows: a closed layer's unknown key, a layer whose declaration a minted artifact could not satisfy (supplied content kinds, or `depends_on` — the two refusals a publication already makes of an artifact carrying only a key), and a child the batch's own column named under two parents. **A lineage needed no new record shape**: a growth is a delta of members and carries no edge, but the publication that *creates* an artifact has carried `parent_key` since artifacts existed — so a minted chain needed only the order, one record for a nested lineage where a sibling resolves inside its own batch, and one record per level coarse-first for a tiered chain where the parent's ordinal was fixed by the record before. That is `annotation-representation.md` §5.0.4's constraint applied to a batch. **The design's one fail-open is closed three times**: the resolution at admission and the re-resolution at the close both read the store's key index, which no suppression touches, and `prepare_publish` refuses a key its level already holds — so breaking both resolutions together turns the suppression test red on a *refusal* rather than on a second artifact. **What a batch minted is reported to the batch that minted it** — `minted` in the 200, a count in the build's own report, and no bound anywhere, because a bare clustering legitimately creates every artifact it has. Seven more tests over HTTP, of which four are 0091's comparison run again with a seed holding almost none of the clustering, so the tail creates it: at a scalar key, at a nested lineage, at a tiered chain, and against the identity rulings (one key minted once however many points name it; a suppressed artifact's key never minted again; a deleted key returning as a new artifact). **One thing the design had wrong**: the edge-with-no-parent warning was said to stop being reachable once minting landed, and it does not — a child that already exists and holds no parent is still an edge a growth cannot create, whoever its parent is |
-| **6** Predicate membership | not started — **its cost discussion is held and measured**, 2026-08-20 | one layer built by rule and by list returns identical masked counts for every principal and every viewport | **the row form is cached at a generation move**, as an enumerated layer's is ([the probe](../crates/tessera-bench/src/bin/predicate_membership_cost.rs)): deriving per request by crossing costs **7 900×** a cached count at the demo corpus's 263 artifacts — 6.9 s against 0.9 ms — because a crossing is `rows × artifacts` where a count is `containers × artifacts`, and the caching arm's whole move cost is repaid by one request. Filtering before evaluation stays refused. **The per-request bound must refuse on the layer's declared count before any evaluation**, and **a second route removes the artifact count from the request path**: a single-valued attribute predicate partitions the corpus, so one masked histogram over the column it names answers every artifact at once, flat in the layer size — **175 ms against 462 ms** at 10⁶ artifacts over 10⁷ points. The column is `attrs/`'s entity-space `ValueColumn`, not the render table. A crossover near 30 000 artifacts at that corpus size, no new storage, and no disclosure content either way. ⊘ The bound itself, and the proportional criterion's denominator, stay open |
-| **7** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | — |
-| **8** Filters, search, scale | not started — carries the `excluding` complement's price (owner, 2026-08-20) | an invisible artifact and a nonexistent one cost the same; 10⁹ points with ~10⁷ artifacts serves and folds inside budget | — |
+| **6** Predicate membership and the serving layouts | not started — **its cost discussion is held and measured**, 2026-08-20; **its rulings taken and its review pending**, 2026-08-21 | one layer built by rule and by list returns identical masked counts for every principal and every viewport, and a layer with no row-space locality is served by a layout that does not walk its artifacts | **the row form is cached at a generation move**, as an enumerated layer's is ([the probe](../crates/tessera-bench/src/bin/predicate_membership_cost.rs)): deriving per request by crossing costs **7 900×** a cached count at the demo corpus's 263 artifacts — 6.9 s against 0.9 ms — because a crossing is `rows × artifacts` where a count is `containers × artifacts`, and the caching arm's whole move cost is repaid by one request. Filtering before evaluation stays refused. **A second route removes the artifact count from the request path**: a single-valued attribute predicate partitions the corpus, so one masked histogram over the column it names answers every artifact at once, flat in the layer size — **175 ms against 462 ms** at 10⁶ artifacts over 10⁷ points. The column is `attrs/`'s entity-space `ValueColumn`, not the render table. A crossover near 30 000 artifacts at that corpus size, no new storage, and no disclosure content either way. **The scale campaign then found that route is the general one** ([the memo](design/artifact-serving-at-scale.md), [the probe](../probes/2026-08-20-artifact-serving-scale/README.md)): what decides cost is row-space **locality** rather than membership source, so a **row-major** layout — a label per row where the layer partitions, a list per row where it overlaps — serves every scattered shape, and at 10⁹ points it is the only layout that fits at all, 4 GB against 78.5. **Three rulings, 2026-08-21**: no declared bound, and every build reports blocks per artifact ([0092](decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)); nothing per token over the artifact population, containment coming from a build-time partition over terms ([0093](decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)); the layout chosen automatically per (layer, level), pinnable per layer, re-evaluated at each fold ([0094](decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)). **The per-request bound is withdrawn, not deferred.** ⊘ The proportional criterion's denominator stays open; the adversarial review over the ruled memo and [the selection surface](evidence/memos/2026-08-21-artifact-layout-selection.md) is pending, and the two cache-cadence defects the build depends on are in flight on `artifacts/cache-cadence` |
+| **7** Scale and the write cycle under load | not started — **pulled forward ahead of runtime artifacts** (owner, 2026-08-21) | 10⁹ points carrying 10⁶ artifacts, with 10⁷ as targeted probes, serve inside budget for many concurrent principals, fold under load, and leave the write path correct at every interleaving | **the serving half is measured and the target is met probe-side** — the whole grid of principals by zooms runs **7.7–232 ms** at 10⁷ artifacts over 10⁹ points, against ~1 190 ms for one cell of it when the campaign began ([the memo](design/artifact-serving-at-scale.md) §7.2, [the probe](../probes/2026-08-20-artifact-serving-scale/README.md)). Only the **cut** is in the engine: 1 008 ms → **3.05 ms** at 10⁷, peak RSS 1 078 → 470 MB, serving exactly what it served before, checked against the reference implementation over random trees. What this stage owes is everything else — the generator's artifact arm reaching disk, the campaign matrix with its 1/8/32/128 concurrency sweep, **serving during a fold** at 10⁹ (the named gap; the fold's artifact pass is measured unloaded only), the write-path interleaving battery, and the configuration-matrix, census and conformance fill. [The plan](evidence/memos/2026-08-21-artifact-scale-plan.md); three tracks in flight |
+| **8** Runtime artifacts | not started | a set of ten shared across a clearance boundary shows seven, and the day-one bookmark survives a hundred edits | it gains two items recorded rather than built elsewhere: the **layout-forcing control verb**, which sets the override for the next fold rather than rewriting a live level ([decision 0094](decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)), and the **HTTP growth route** the design mentions and which does not exist |
+| **9** Filters, search and excluding | not started — carries the `excluding` complement's price (owner, 2026-08-20) | an invisible artifact and a nonexistent one cost the same | it keeps the **replica-carried artifact tiers**, which Stage 7 declines in favour of the closed-form generator: a census answers at sizes where no expectation can be stored, and real geometry earns its fixtures here instead |
 
-Stage 5 was the one stage with a partner — it and Stage 6 touch largely disjoint machinery, so they
-could have run beside each other. With it closed, **nothing remaining can run beside anything
-else**, and Stages 6, 7 and 8 are taken in order.
+**The remaining stages are not monoliths, and the seams in them are deliberate.** The scale campaign
+decomposes Stage 7 into tracks that run beside each other
+([the plan](evidence/memos/2026-08-21-artifact-scale-plan.md)), and three are in flight: the two
+cache-cadence defects (`artifacts/cache-cadence`), the write-path interleaving battery
+(`artifacts/interleavings`), and the generator's artifact arm reaching disk (`artifacts/generator`).
+None needs a ruling, each is depended on by the serving build or the campaign, and the interleaving
+battery must land **before** the serving build moves the write paths. The serving path itself stays
+one serialised chain: the review, then the cadence fixes, then the structures in the order §4.2 →
+§4.4 → §5. *(This file previously said that with Stage 5 closed nothing remaining could run beside
+anything else. That was true of Stages 6, 7 and 8 taken whole.)*
 
 ## 1. What decides the shape of this plan
 
@@ -93,9 +112,9 @@ dispositioned by decisions 0074–0083, the register carries their rows, and the
 rulings owed the normative architecture are performed — §7.5's descent and §7.7's ladder, with
 §8.4's second threshold withdrawn alongside them (architecture r43). The roadmap's gate on this work
 is discharged. **Five items stay open inside those normative documents**, marked ⊘ at their sites and
-allocated to the stages that need them: search's containment gate and the filter axis (Stage 8),
+allocated to the stages that need them: search's containment gate and the filter axis (Stage 9),
 membership packaging (Stage 2), the proportional criterion's denominator for predicate membership
-(Stage 6), and the edit pass (Stage 7). None of them touches the spine, which is why promoting
+(Stage 6), and the edit pass (Stage 8). None of them touches the spine, which is why promoting
 before they close was the cheaper order — the alternative was holding an implementer on a question
 about search.
 
@@ -121,10 +140,10 @@ No code, and it is finished. The adversarial review is run, the ruling pass is m
 | **Review ruling 1** — where artifact entity IDs come from | ✔ **ruled** — [decision 0074](decisions/0074-row-less-entities-are-allocated-downward.md) | Stages 1–4 | row-less entities allocate downward from the top; the repairs from the review's other findings are made |
 | **Review ruling 2** — the masked count as an existence criterion | ✔ **ruled** — [decision 0075](decisions/0075-the-masked-count-is-an-existence-criterion.md) | Stages 1–2 | it never suppressed a count: it decides whether the artifact is served. Declared per layer, absolute or proportional, no default, **independent of the own-terms flag** |
 | **Review ruling 3** — does a label's existence follow its content? | ✔ **ruled** — [decision 0076](decisions/0076-an-artifact-is-served-whole-or-not-at-all.md) | Stage 3 | wider than asked: **no levels of restriction within one artifact**, beyond ranked contents. C3's question evaporates; the model's degrade-to-derived is deleted |
-| **Review ruling 4** — the artifact **edit** mechanism | **deferred to its own design pass** *(owner, 2026-08-15)* | Stage 7 only | not load-bearing: publishing and republishing artifacts needs no edit route. Two consequences, both stated rather than discovered — the emergency path becomes *suppress, then republish* (slower, not weaker), and runtime selections, whose whole lifecycle is editing, wait for it |
+| **Review ruling 4** — the artifact **edit** mechanism | **deferred to its own design pass** *(owner, 2026-08-15)* | Stage 8 only | not load-bearing: publishing and republishing artifacts needs no edit route. Two consequences, both stated rather than discovered — the emergency path becomes *suppress, then republish* (slower, not weaker), and runtime selections, whose whole lifecycle is editing, wait for it |
 | Where supplied content **lives** | ✔ **ruled** — [decision 0077](decisions/0077-supplied-content-lives-in-the-record-blob.md) | Stage 3 | the record blob, at the artifact's entity. Its addressing is rank in the blob's **own** has-row bitmap, independent of row space, so an artifact having no row does not bear on it |
 | **Does the attachment term inherit the target's criterion?** | ✔ **reversed 2026-08-19** — [decision 0089](decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md) supersedes [0086](decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md) | Stage 4 | it does, and by the whole target `verdict` rather than by the threshold alone: a dependent is served only where the artifact it depends on is served, and deleted when it is deleted, neither configurable. 0086 had declined exactly this and named the asymmetry it left — a viewer too sparse to be shown a cluster was still shown the label written about it — which is now closed at the price 0086 disputed, one masked count per attached artifact per request. 0086 stands unedited as the record of why the case first went the other way |
-| **Review ruling 5** — how search gates on containment | open | Stage 8 | the term-signature conjunction is the candidate shape; the route stays withdrawn until ruled, which costs nothing before Stage 8 |
+| **Review ruling 5** — how search gates on containment | open | Stage 9 | the term-signature conjunction is the candidate shape; the route stays withdrawn until ruled, which costs nothing before Stage 9 |
 | **A hierarchy lives in its edges; levels are resolutions** | ✔ **ruled** — [decision 0082](decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md) | Stage 5 | a condensed tree is unbalanced, so a level number says nothing about lineage. A treed layer declares **no levels**; levels stay for balanced semantic resolutions and for stacked independent analyses, and the two are independent declarations. Rollup then falls out of per-artifact testing — ⊘ under an **absolute** criterion only, since a ratio does not shrink downward |
 | **The frontier is a request-time budget** | ✔ **ruled** — [decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md) | Stages 2, 5 | levels had been bounding the response quietly; with the tree in edges a viewport intersects a root and every passing descendant. The cut's depth becomes a request parameter beside the mark budget, met by serving ancestors and never by sampling. **A budget is not a disclosure control** — every artifact it returns passed its own test — which §8.4's maximum depth was, and the two occupy the same place in a request |
 | Implement [0072](decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) — slot reuse | **deferred, deliberately** *(owner, 2026-08-15)* | nothing here | not a dependency: artifacts need identity, the deny lane and the opaque identifier, none of which need reuse. Deferring **removes** the recycled-slot fail-open rather than carrying it; the membership-reconciliation clause ships with it whenever it lands |
@@ -133,16 +152,22 @@ No code, and it is finished. The adversarial review is run, the ruling pass is m
 | The label ladder reduced to guidance | ✔ **ruled** — [decision 0078](decisions/0078-the-service-takes-no-opinion-on-which-variation.md) | Stage 3 | the service resolves a caller-supplied ordering and chooses nothing. **A variation is a general artifact property**, not a label one |
 | The three gate modes | ✔ **ruled** — [decision 0079](decisions/0079-the-gate-is-one-flag-not-three-modes.md) | Stages 1–2 | they were a two-by-two in three names. One flag — does the artifact carry its own terms — beside the independent criterion, which also stops a schema word disabling a disclosure control |
 | The suppression-carry refusal | ✔ **withdrawn** — [decision 0081](decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md) | — | the premise was wrong: a refresh need not mint identities. An **edit** keeps them and suppressions survive natively; a **replacement** ends them and nothing carries, correctly. A report replaces the refusal; the key is optional again |
-| Membership as a filter (rep §7) | open | Stage 8 | a disclosure question, not a cost one |
+| Membership as a filter (rep §7) | open | Stage 9 | a disclosure question, not a cost one |
 | Appendix C edits | ✔ **done** — architecture r43 | Stages 2–4 | **C1** annotated twice: a criterion bounds a grouping's existence and shape and **never its count**, which §7.1 and §7.3 already serve exactly, so a compact artifact's masked count is recoverable by summing the underlay whatever it declares; and where several layers cover the same points, the most permissive declaration governs what is recoverable about all of them. **C27** — the artifact's own-label declaration, C23-shaped; it follows `artifact_visibility`'s `field` since the two axes landed (0088, architecture r46). **C28** — the caller's membership requirement on supplied content, C12-shaped, `High if mis-declared`; it follows `require_member_visibility`. **C17** — an artifact identifier probes the same channel and stays inside the same bound. C7's disposition was already written (r42) |
 | `derived-artifact-gating.md` — retired | ✔ **deleted** 2026-08-15 | — | its taxonomy is superseded; what existed nowhere else — the point-scale edge argument, the edge gate's form, the induced-subgraph sampling problem — is carried in the model (§5, §11), and the roadmap names the three successors |
 
-**Two design items are owed and are not rulings.** The entity budget under repeated replacement —
+**One design item is owed and is not a ruling.** The entity budget under repeated replacement —
 a 10⁷-artifact layer mints 10⁷ IDs per wholesale replacement against a `u32` space (write-cycle §9; the burn is replacement's, not the model's — decision 0081), with
 [decision 0072](decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md) as the likely
-answer since a dropped layer's slots return at the fold; and the **per-request bound on predicate
-evaluation** (rep §2.0), without which a nationwide boundary level is seconds per query. The first
-is due before Stage 7, the second before Stage 6.
+answer since a dropped layer's slots return at the fold. It is due before Stage 8.
+
+**The second item on this list is withdrawn.** The **per-request bound on predicate evaluation**
+(rep §2.0) was owed here, due before Stage 6, on the premise that without it a nationwide boundary
+level is seconds per query. That premise held while a predicate layer's only serving form was one
+masked scan per artifact; the row-major layouts remove it for every layer that partitions, and what
+is left — scattered *and* overlapping *and* numerous — is reported at the build rather than bounded
+at the request ([decision 0092](decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)).
+No bound machinery is owed by any stage.
 
 ## 3. The stages
 
@@ -827,14 +852,20 @@ wrong.
 - ⊘ **Stage 9 outstanding** — the notebook emits one config and one source per layer, and the term
   dictionary becomes a real build output. The corpus citations are swept.
 
-### Stage 6 — Predicate membership
+### Stage 6 — Predicate membership and the serving layouts
 
 **Capability:** a boundary or a tagged set behaves as a layer, with membership derived per request
-and never stale.
+and never stale — and every layer is served by the layout its own shape calls for.
 
 - Spatial predicate: the shape only, decomposed to Morton ranges, counted by `range_cardinality`.
 - Attribute predicate: no new storage — the existing value column and postings.
-- The per-request bound the design does not yet specify (§2 above).
+- **The serving layouts and the surface that picks between them**: the containment partition, the
+  hierarchical row-range index and extents, and the row-major label and list forms, under
+  [decision 0094](decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)'s
+  automatic choice with its per-layer override. The design is
+  [the scale memo](design/artifact-serving-at-scale.md) and
+  [the selection surface](evidence/memos/2026-08-21-artifact-layout-selection.md); the order of work
+  is [the campaign plan](evidence/memos/2026-08-21-artifact-scale-plan.md).
 - ⊘ The proportional criterion's denominator, which this stage is where it bites: *"the points inside
   this shape"* declares no member set and its size changes at every write. Until it is ruled a
   predicate layer may declare an absolute criterion or none.
@@ -869,8 +900,13 @@ after the verdicts, so it serves fewer artifacts and never evaluates fewer, and 
 a layer pays every one of its artifacts whatever `artifact_budget` the client sent. The budget looks
 like a cost control here and is not one.
 
-**So the per-request bound carries the weight, and the measurement fixes two things about its
-form.** ⊘ The bound itself is still unspecified (§2 above).
+**The measurement then fixed two things about the shape of the answer**, and neither of them turned
+out to be a bound. **The per-request bound this section used to require — refusing on the layer's
+declared artifact count before any evaluation — is withdrawn**
+([decision 0092](decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md),
+2026-08-21): what costs is row-space locality rather than the count, so a threshold on the count
+refuses the cheap layer and admits the dear one, and every build reports blocks per artifact
+instead. The text below stands as the record of what the two measurements said.
 
 *It has to bite well below a million artifacts — unless the counts come from the column.* At 10⁶
 predicate artifacts over 10⁷ points the per-artifact loop costs **455 ms per request** over the
@@ -900,8 +936,12 @@ is against the viewport, so that pass walks `viewport ∩ mask` — **and it is 
 roughly 120 ms of the 175 at a broad viewport, being one inversion per viewport row. The counting
 pass alone is ~30 ms.
 
-⊘ Three reductions are modelled rather than measured: the counting pass is a function of `M_auth`
-and the layer and not of the request, so it can be held per session on the mask fragment's cadence;
+⊘ Three reductions are modelled rather than measured, and **the first of them is now foreclosed**:
+the counting pass is a function of `M_auth` and the layer and not of the request, so it could be held
+per session on the mask fragment's cadence — which
+[decision 0093](decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+rules out, because it is sized by the artifact population and there are a great many tokens. The
+other two stand:
 the candidacy inversion is exactly what a **rendered** copy of the column would remove; and with
 counts coming from the column, row forms are needed only for the artifacts actually **served**,
 which the budget bounds, so the generation-move cost becomes a handful of lazy projections. ⊘ It is
@@ -909,10 +949,19 @@ for a single-valued **category** predicate: a multi-valued column does not parti
 column's ordinals are per layer and would need each layer's dictionary to merge, and a spatial
 predicate has no column but makes `range_cardinality` cheap per artifact anyway.
 
-*And it must refuse on the layer's **declared** artifact count, before any evaluation* — never on
-the principal's visible count, which requires the evaluation the bound exists to avoid and which
-would make the refusal itself vary by principal. A total artifact count is corpus-wide and identical
-for everyone, so refusing on it discloses nothing.
+**And the column route turned out to be the general one.** The scale campaign
+([the memo](design/artifact-serving-at-scale.md), [the probe](../probes/2026-08-20-artifact-serving-scale/README.md))
+found that what decides cost is **row-space locality** rather than the membership source: a
+scattered layer measures 96.8 row blocks per artifact against 1.0 for a clustered one, and no
+spatial structure helps it. So the column histogram above is one instance of a **row-major** layout
+— a label per row where the layer partitions, a list per row where it overlaps — which is flat in
+the artifact count, applies to enumerated and per-analyst layers as well as to predicates, and at
+10⁹ points is the only layout that fits at all: 4 GB against 78.5. It also moves from entity space
+to row space, which is where ~120 ms of the 175 went. Which layout a level gets is chosen
+automatically and re-evaluated at each fold
+([decision 0094](decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)),
+and containment stops being a per-request scan at all
+([decision 0093](decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)).
 
 **The check:** the tagged-programme layer is built twice — once enumerated, once as an attribute
 predicate here — and the two return **identical** masked counts for every principal and every
@@ -921,7 +970,50 @@ The layer earns the attribute source by declaring **derived** geometry: a tagged
 draw is a category, and the model sends that case to a column rather than to an artifact. **Data:**
 `programmes/portfolio` and `regions/synthetic-geo` (§5.2).
 
-### Stage 7 — Runtime artifacts
+### Stage 7 — Scale and the write cycle under load
+
+**Pulled forward ahead of runtime artifacts** (owner, 2026-08-21). It used to be the second half of
+the filters-search-and-scale stage; the scale investigation measured the serving path and made the
+validation the next thing worth doing rather than the last.
+
+**Capability:** the target scenario runs — one shared bundle at 10⁹ points carrying 10⁶ artifacts,
+with 10⁷ as targeted probes, 1M+ unique access terms, and many concurrent principals each with
+their own `M_auth` — while the write path stays correct at every interleaving of point and artifact
+writes.
+
+- **Fixtures**: the seeded generator's artifact arm reaching disk — a partition arm, attribute
+  column and members-file emission, spatial boundary layers, and an **artifact census verb** giving
+  expected masked counts per (grant, artifact) in closed form, which is what replaces an enumerated
+  twin at 10⁹ where the twin's own member file would be ~10⁹ rows. `TERM_SPACE` parameterised so a
+  campaign bundle carries ~10⁶ terms and 10⁶ artifacts together.
+- **The campaign matrix**: three corpus tiers × three artifact counts × the layouts, with forced
+  overrides on both sides of each crossover, principal breadths broad/median/narrow, and a
+  **concurrency sweep** at 1/8/32/128 sessions **reporting the envelope** rather than a pinned
+  pass/fail count. **Serving during a fold** at 10⁹ with live sessions is the named gap — the fold's
+  artifact pass has only ever been measured on an idle box. Ingest-during-serving freshness, and a
+  layout flip observed by live sessions, go with it.
+- **The write-path interleaving battery**: publication against a batch's admission and close, two
+  batches naming one unminted key, growth racing window close both ways, a fold racing a growth with
+  crash-replay equivalence, suppression racing publish and mid-fold, window atomicity around the
+  single fsync, and a threaded case asserting monotone freshness. **Zero tests construct these
+  interleavings today**, which is why the battery lands before the serving build moves the write
+  paths.
+- **The configuration matrix, the census extension and the conformance fill**: the build refusals
+  nothing reaches today, the census parametrised over entry point × membership kind × shape, and a
+  `layers` field on the conformance battery's viewport query — **no recording carries an artifacts
+  frame at all** at present, so that is the artifact channel's only cross-stage regression net.
+- **Cache cadence, which the whole of it rests on**: the artifact store's version is global, so one
+  write invalidates every cached row form in every view, and the lineage is rebuilt per request from
+  something that depends on neither the mask nor the viewport.
+
+**The check:** at 10⁹ points with 10⁷ artifacts a viewport serves inside its budget across the whole
+grid of principals and zooms — both axes swept through their middles, because sampling their
+extremes understated the worst request by 2.1× — the fold completes inside `plan_fold`'s memory
+ceiling under a live serving load, and the row-major counts match the generator census **exactly**.
+**Data:** the seeded generator at the scale tiers (§5.1, §5.3). **The plan:**
+[the campaign memo](evidence/memos/2026-08-21-artifact-scale-plan.md).
+
+### Stage 8 — Runtime artifacts
 
 **Capability:** an analyst assembles a set mid-session, shares it, and edits it without breaking the
 share.
@@ -934,6 +1026,12 @@ share.
   (decision 0081).
 - Optional keys; the replacement report (a replacement that strands live suppressions is
   reported, not refused); the dangling-dependent refusal, which binds replacement only.
+- **The layout-forcing control verb**, deferred here from the scale campaign
+  ([decision 0094](decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)):
+  it sets a layer's override, which takes effect at the next fold, rather than rewriting a live
+  level — the operation the fold exists to batch.
+- **The HTTP growth route**, which the design mentions and which does not exist; recorded here
+  rather than built during the campaign.
 
 **The check:** a set of ten shared with a colleague who cannot see three of its members shows
 **seven**; a hundred edits later the day-one bookmark still resolves; a replacement that would
@@ -941,16 +1039,17 @@ dangle an edge is refused with the offending dependents named, and one that stra
 is reported. **Data:**
 `selections/analyst-*` and `programmes/portfolio` (§5.2).
 
-### Stage 8 — Filters, search and scale
+### Stage 9 — Filters, search and excluding
 
-**Capability:** artifacts are searchable and filterable within their disclosure rules, at the scale
-the design claims.
+**Capability:** artifacts are searchable and filterable within their disclosure rules.
 
 - Membership as a filter — unrestricted for layers declaring no criterion, criterion-inherited for
   those declaring one, and refused work-indistinguishably for a non-visible artifact.
 - Search over artifact text via the token index on the artifact population, with C25 re-read against
   a population two orders smaller.
-- The 25M / 250M / 10⁹ artifact tiers, built once with the corpus tiers.
+- **The replica-carried artifact tiers**, which Stage 7 declines in favour of the closed-form
+  generator — a census answers where no expectation can be stored, and real geometry earns its
+  fixtures here, where search and filtering are what need it.
 - **The `excluding` complement, priced** (owner, 2026-08-20 — deferred here from the configuration
   work, where it is recorded as correct per the design and unresolved). A membership spelled by
   exclusion is complemented once, in the build, against the entity space the build assigned; three
@@ -960,27 +1059,21 @@ the design claims.
   build-time only and **no request-time complement is expressible** — that part is settled and is
   not what needs pricing.
 
-**The check:** per-tile counts under a membership filter never resolve below the layer's existence criterion;
-a filter naming an invisible artifact and one naming a nonexistent artifact do the same work. At
-10⁹ with ~10⁷ artifacts, a viewport serves inside its budget and the fold completes inside
-`plan_fold`'s memory ceiling. **Data:** the scale tiers (§5.3).
+**The check:** per-tile counts under a membership filter never resolve below the layer's existence
+criterion; a filter naming an invisible artifact and one naming a nonexistent artifact do the same
+work. **Data:** the real 2.4M corpus's layers (§5.2), and the scale tiers where the filter's cost is
+what is in question (§5.3).
 
-**The serving half of that check is now measured, and it fails as the path stands** — 2 770 ms
-single-threaded at 10⁷ artifacts, against a budget that must also leave room for ten simultaneous
-viewers on one machine. [`design/artifact-serving-at-scale.md`](design/artifact-serving-at-scale.md)
-carries the options and the numbers; nothing in it is ruled. In outline: the request path is
-`O(artifacts)` four times over and only one of the four has the request in it, so the work is to
-move the other three off it — a hierarchical row-range index over artifacts for the viewport half,
-and `architecture.md` §8.5's servable-label set, which is specified and unbuilt, for the mask half.
-Together **138 ms**, single-threaded, with the served set asserted identical ordinal for ordinal.
-
-Two things the measurement turned up that are not about scale and are live now:
-
-- **Any artifact write invalidates every cached row form in every view** — `ArtifactStore`'s version
-  is global and `ProjectionKey` carries it — and the rebuild is **153 s at 10⁷ artifacts**. Under
-  any read-write load the cache never survives to be used.
-- **`Lineage::new` walks every artifact in the store on every request**, per level, under the
-  artifacts lock, to build something that depends on neither the mask nor the viewport.
+**The scale half of this stage's old check has moved to Stage 7**, where it is measured rather than
+claimed. What was written here — that the serving half *fails as the path stands*, at 2 770 ms
+single-threaded over 10⁷ artifacts — was true when it was written and is what the scale campaign
+answered. Two corrections a reader of the old text needs: the mask half does **not** want
+`architecture.md` §8.5's per-token servable-label set
+([decision 0093](decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)),
+and the artifact-major index is not the whole answer either, because a layer with no row-space
+locality has nothing to index
+([decision 0092](decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md),
+[0094](decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
 
 ## 4. What holds the line between stages
 
@@ -1141,15 +1234,15 @@ allocated here rather than left as a list:
 
 | Owed | Stage | Why it could refute something |
 |---|---|---|
-| ✔ **Residency** — **measured 2026-08-16**: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts, so **6.16×** serialised on contiguous membership and **7.79×** on the synthetic arm. 794 MB is ~4.9–6.2 GB resident; the pessimistic arm at 10⁷ artifacts does not fit in 47 GB. [The probe](../probes/2026-08-16-membership-residency/README.md) | 2 ✔, re-measured at 8 | the view budget still has no line for the multipliers, which stand on top of this |
+| ✔ **Residency** — **measured 2026-08-16**: ~80–94 B per Roaring container, flat over 10⁴–10⁷ artifacts, so **6.16×** serialised on contiguous membership and **7.79×** on the synthetic arm. 794 MB is ~4.9–6.2 GB resident; the pessimistic arm at 10⁷ artifacts does not fit in 47 GB. [The probe](../probes/2026-08-16-membership-residency/README.md) | 2 ✔, re-measured at 7 | the view budget still has no line for the multipliers, which stand on top of this |
 | ✔ **The fold's artifact pass** — **measured 2026-08-16**: projecting per artifact through the new permutation beats riding pass 1 on memory (**+3.5 GB against +9.2 GB**, page cache against anonymous), and threads where riding cannot (**32.8 s on eight threads against 101.3 s** at 10⁹ rows / 10⁷ artifacts, linear in rows). Half the comparison dissolved on re-posing: membership is entity-canonical, so no `old_row → new_row` table exists to build. [The probe](../probes/2026-08-16-fold-artifact-pass/README.md) | 4 | `plan_fold`'s ~9–10 GB anonymous peak **stays where it is** — the pass adds the output row forms and page cache |
 | **The three arms** — flush-union, merge-rebase, fold-rebuild | 4 | the merge arm's bound is proportional to the merged span, not to the artifact population |
 | **Σ\|G\| and containment per request** | 3 | ~4 B/member *assumed*; refuted if a real deployment's Σ\|G\| approaches membership's order |
 | **Reach**, if it is materialised at all | 5 | the deleted assignment-column framing made it look free; it is a second membership structure |
-| **Predicate evaluation per request** — ~10³ ranges for a 40,000-member corridor, so ~0.3–1.2 ms per artifact per request *(modelled)* | 6 | a nationwide boundary level is seconds without a bound |
-| ✔ **The viewport's artifact pass** — **measured 2026-08-21**, and never measured before: the shipped request path is `O(artifacts)` **four** times and three of the four have no request in them. At 10⁷ artifacts over 10⁹ points, single-threaded, a whole-map request costs **2 988 ms**; a hierarchical row-range index for the viewport half and a **build-time partition over terms** for the mask half bring the verdict to **31.7 ms**, with every verdict identical. Two things it found beside the figure: the shipped path gets *slower* as a principal gets narrower (489 ms at a full mask against 1 095 at 3.1%), and §8.5's per-token servable-label set is **not** what the mask half wants — containment is a boolean expression over terms, so it is build-time and needs no per-token state, which matters because there are a great many tokens. [The probe](../probes/2026-08-20-artifact-serving-scale/README.md), [the options](design/artifact-serving-at-scale.md) | 8 | Stage 8's own check is *"at 10⁹ with ~10⁷ artifacts, a viewport serves inside its budget"* — it did not, and now does |
-| ✔ **Locality is worth two decades of artifact count** — **measured 2026-08-21**: a layer whose membership is *scattered* (an attribute predicate, a per-analyst selection, a term-as-artifact) measures **96.8 row blocks per artifact against 1.0**, and no spatial structure helps it — it walls at ~2×10⁵ where a clustered layer reaches 10⁷. What removes the wall is a **row-major** layout, a label per row where the layer partitions and a list per row where it overlaps, which is flat in the artifact count and at 10⁹ points the only layout that fits: **4 GB against 78.5** | 8 | the artifact-count target is a statement about layers with **locality**; without it the layout has to invert (options §5) |
-| ✔ **A nested hierarchy costs neither what its member count nor its cut suggests** — **measured 2026-08-21**: every level covers the corpus, so the layer holds `depth × rows` of membership — but a node is a contiguous range and therefore one run whatever its size, so the whole layer is **1.2 row blocks per artifact**. And the cut over it is **0.3–11.4 ms** at every principal and zoom measured, against 176 ms on a fixture whose tree was unrelated to its geometry. What bounds such a layer is the **masked count of a coarse node** — 3.6 ms at a full mask, ~52 ms at any mask below one — because a shallow cut serves coarse nodes and a coarse node's membership is most of the corpus | 8 | ⊘ per-signature counts for the coarse nodes would remove it for ~1.3 MB, and their storage scales with the **signature** count rather than the artifact count |
+| **Predicate evaluation per request** — ~10³ ranges for a 40,000-member corridor, so ~0.3–1.2 ms per artifact per request *(modelled)* | 6 | a nationwide boundary level was seconds per query, which is what the withdrawn bound was for; the answer is the layout the level is given, not a refusal ([decision 0092](decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)) |
+| ✔ **The viewport's artifact pass** — **measured 2026-08-21**, and never measured before: the shipped request path is `O(artifacts)` **four** times and three of the four have no request in them. At 10⁷ artifacts over 10⁹ points, single-threaded, a whole-map request costs **2 988 ms**; a hierarchical row-range index for the viewport half and a **build-time partition over terms** for the mask half bring the verdict to **31.7 ms**, with every verdict identical. Two things it found beside the figure: the shipped path gets *slower* as a principal gets narrower (489 ms at a full mask against 1 095 at 3.1%), and §8.5's per-token servable-label set is **not** what the mask half wants — containment is a boolean expression over terms, so it is build-time and needs no per-token state, which matters because there are a great many tokens. [The probe](../probes/2026-08-20-artifact-serving-scale/README.md), [the options](design/artifact-serving-at-scale.md) | 7 | the scale check — *"at 10⁹ with ~10⁷ artifacts, a viewport serves inside its budget"* — did not hold, and now does |
+| ✔ **Locality is worth two decades of artifact count** — **measured 2026-08-21**: a layer whose membership is *scattered* (an attribute predicate, a per-analyst selection, a term-as-artifact) measures **96.8 row blocks per artifact against 1.0**, and no spatial structure helps it — it walls at ~2×10⁵ where a clustered layer reaches 10⁷. What removes the wall is a **row-major** layout, a label per row where the layer partitions and a list per row where it overlaps, which is flat in the artifact count and at 10⁹ points the only layout that fits: **4 GB against 78.5** | 7 | the artifact-count target is a statement about layers with **locality**; without it the layout has to invert (options §5) |
+| ✔ **A nested hierarchy costs neither what its member count nor its cut suggests** — **measured 2026-08-21**: every level covers the corpus, so the layer holds `depth × rows` of membership — but a node is a contiguous range and therefore one run whatever its size, so the whole layer is **1.2 row blocks per artifact**. And the cut over it is **0.3–11.4 ms** at every principal and zoom measured, against 176 ms on a fixture whose tree was unrelated to its geometry. What bounds such a layer is the **masked count of a coarse node** — 3.6 ms at a full mask, ~52 ms at any mask below one — because a shallow cut serves coarse nodes and a coarse node's membership is most of the corpus | 7 | ⊘ per-signature counts for the coarse nodes would remove it for ~1.3 MB, and their storage scales with the **signature** count rather than the artifact count |
 | **A real clustering at 10⁹** | never here | Tier A and Tier B agree on direction and not on constant: real membership is 14–170× cheaper per member than the synthetic arm |
 
 Two arms of the existing campaign can be finished now that they could not be then: `data/corpus.parquet`
@@ -1174,7 +1267,7 @@ argument for the frozen-format option, and it is now measured rather than aesthe
 
 **What is not answered** is the multipliers: by view, by level, and by two during a replace. The
 engine also holds two resident copies today — the entity-space store and the row-space projection —
-so the design's point is 3.6 GB *per copy* before any multiplier. Re-measured at Stage 8.
+so the design's point is 3.6 GB *per copy* before any multiplier. Re-measured at Stage 7.
 
 **The fold — answered, and it does not refute the shape.** The artifact pass fits: projecting each
 membership through the new permutation adds the output row forms (~3.5 GB at 10⁷ artifacts) and page
