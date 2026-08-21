@@ -397,6 +397,75 @@ artifact meets the viewport anyway.
 ⊘ **Not in this table**: the gather, the record-blob reads for supplied content, and the wire
 encoding.
 
+### 7.2 The whole picture, by artifact type and principal
+
+**10⁹ points, 10⁷ artifacts, single-threaded.** Per-request totals in milliseconds, with the lineage
+held per generation (§8.2 — without it add ~96 ms to every cell).
+
+**Per session: nothing.** The containment partition (§4.2) is build-time and names no principal, so a
+token costs what it always did — the mask fragment — and no artifact structure at all. That is the
+change this campaign made that matters most at a large token count.
+
+**Per generation, per view:** the row form (3.6 GB, unchanged), the tile index and extents (~84 MB),
+the containment partition (~40 MB), the lineage with depth and child index (~200 MB).
+
+#### Clustered and regional — HDBSCAN, point-and-radius, boundaries, hierarchy levels
+
+| principal sees | whole map | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|
+| everything | **35** | 68 | 44 | 23 |
+| 9.4% | 64 | 46 | 24 | 23 |
+| 3.1% | 56 | 43 | 24 | 23 |
+
+The verdict half of those is measured; the cut half is interpolated from the measured ladder against
+the candidate count each cell produces. **Everything is between 23 and 68 ms**, and it is the cut's
+sweep floor rather than the verdict that decides almost every cell — the verdict itself ranges from
+0.03 ms to 31.7.
+
+#### Scattered and partitioning — a single-valued attribute predicate
+
+Served row-major (§5.1), at ~4–5 ns per visible row of the viewport and **flat in the artifact
+count**. ⊘ Derived from that measured constant at 10⁹ points; the constant is measured at 10⁸.
+
+| principal sees | whole map | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|
+| everything | ~50 † | ~280 | ~18 | ~1 |
+| 9.4% | ~50 † | ~26 | ~2 | ~0.2 |
+| 3.1% | ~50 † | ~9 | ~1 | ~0.1 |
+
+† at whole-map zoom the extent test settles the layer without a scan, so this is the artifact-major
+route and the artifact count decides it, not the corpus. **Mid-zoom is this shape's worst case**,
+inverting the clustered one, because that is where the viewport is large in rows and small in
+settled blocks.
+
+#### Scattered and overlapping — per-analyst selections, terms-as-artifacts
+
+**Not servable at this scale, and no layout here changes that.** Every artifact touches every node,
+so none is ever settled and each pays a masked intersection: ~2.4 µs apiece, measured, which is
+**~24 s** at 10⁷. The wall is around **4×10⁵ artifacts** for a sub-second budget at 10⁹ points.
+
+That is the ruling §9 asks for. It is not a gap in the design so much as a shape nothing can serve:
+a million arbitrary overlapping sets over a billion points, each spread across the whole map, is not
+a picture. Every real instance — an analyst's selection, a vocabulary term — is made by a person or a
+controlled list, and lands in the thousands, where the cost is 2.4–24 ms.
+
+### 7.3 What bounds the system now
+
+**The cut's sweep floor, at ~23 ms.** The downward walk (§6) applies only where more than half the
+level passes, which after viewport filtering is the whole-map request alone; everywhere else the
+sweep runs and it is `O(level)` — 23 ms at a 10⁷ level even when two thousand artifacts pass.
+
+So the ordering has inverted twice over. The whole-corpus principal at whole-map zoom, which began
+this campaign as the worst request at ~1 190 ms, is now the **cheapest** at ~35 ms, because passing
+everything is exactly what makes the containment groups and the downward walk collapse. What is
+expensive now is a **mid-zoom request for a broad principal** — 68 ms — where the viewport does not
+narrow much, the walk declines, and the sweep pays for a level the request barely touches.
+
+⊘ **The next reduction is the sweep's floor**, and it is bookkeeping rather than design: the sweep
+scans `0..span` to find the on-chain nodes, which could be collected as a list during the frontier
+climb it already performs. That would make it `O(passing)` and take the floor to single-digit
+milliseconds, putting every cell above under ~35 ms. Not attempted.
+
 ## 8. What this depends on, and is not yet true
 
 Two live defects. Neither is about scale, and the design is worth little without them.
