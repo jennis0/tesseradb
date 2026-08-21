@@ -17,9 +17,11 @@ owner decision**, backed by
 One part of it is built and gate-green — the cut rewrite — because it was a data-structure choice
 rather than a design one. Everything else is measured and proposed.
 
-**The target is met.** The worst request in the system — a principal who can see the whole corpus, at
-whole-map zoom, on a treed 10⁷-artifact layer — goes from **~1 190 ms to ~410 ms**, and to ~325 ms
-once the lineage is held per generation. Every other request shape is one to three orders better.
+**The target is met with room.** The worst request in the system — a principal who can see the whole
+corpus, at whole-map zoom, on a treed 10⁷-artifact layer — goes from **~1 190 ms to ~131 ms**, and to
+**~35 ms** once the lineage is held per generation, which is the one piece of ordinary work the rest
+now waits on. The whole-corpus principal ends up the *cheapest* case rather than the worst, because
+passing everything is exactly what makes the containment groups and the downward cut collapse.
 
 Five things a reader needs before opening it:
 
@@ -34,8 +36,12 @@ Five things a reader needs before opening it:
   under the same structures, at 96.8 row blocks per artifact against 1.0. A **row-major** layout
   removes that wall for anything that partitions, and at 10⁹ points it is the only layout that fits
   in memory at all: 4 GB against 78.5 GB.
-- **The cut is built.** 1 008 ms → 188 ms at 10⁷, peak RSS 1 078 MB → 470 MB, serving exactly what
-  it served before — checked against the reference implementation over random trees.
+- **The cut is built, and it is the one thing here that is finished.** 1 008 ms → **3.05 ms** at
+  10⁷ for the principal that bounds the system, by walking down from the roots instead of sweeping
+  the level: a budget settles on a shallow depth, so the answer lives in the top of the tree. It
+  declines and falls back to the sweep where a node above the cut fails, so a broad-but-fragmented
+  mask still pays ~60 ms. Serves exactly what it served before, checked against the reference
+  implementation over random trees, with a test asserting the walk is actually taken.
 - **There is no per-token structure.** An earlier draft leaned on `architecture.md` §8.5's
   servable-label set, cached per token; there are a great many tokens (owner), so that is the wrong
   cadence however cheap one copy is. Containment does not need it: `G ⊆ M_auth` is a boolean

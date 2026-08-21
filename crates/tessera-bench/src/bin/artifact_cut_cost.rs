@@ -112,6 +112,33 @@
 //! 198 at full passing, and **32 ms against 24** where only a few thousand pass, because a second
 //! sequential scan of ten million costs more than the reallocation it avoids.
 //!
+//! # The downward walk — 2026-08-21, and this is the one that mattered
+//!
+//! | 10⁷ level, passing | lineage | cut(budget), cold | **cut(budget), warm** |
+//! |---:|---:|---:|---:|
+//! | 2 838 | 148 ms | 23.6 ms | 23.1 ms |
+//! | 44 248 | 101 ms | 44.6 ms | 42.8 ms |
+//! | 714 286 | 95 ms | 62.7 ms | 59.8 ms |
+//! | **10 000 000** | 96 ms | 117 ms | **3.05 ms** |
+//!
+//! **The whole-corpus principal's budgeted cut is 3 ms, from 1 008.** A budget settles on a shallow
+//! depth — a thousand artifacts is depth six in a three-way tree — so the answer lives in the top of
+//! the tree while every revision before this swept the level to find it. Walking down from the roots
+//! and stopping at the first depth the budget cannot hold touches `O(budget × branching)` nodes.
+//!
+//! **Why the rule collapses there**: with every node above the cut passing, a node above it has a
+//! passing child so something deeper represents it, a node *at* it has none so nothing does, and
+//! every node has a passing parent so none is its lineage's fallback. The served set is exactly the
+//! nodes at that depth, plus the leaves shallower than it, which have nothing deeper to be replaced
+//! by. Where a node above the cut fails, that reasoning stops and the walk declines — the sweep
+//! answers, at the cost it has always had. Both routes are checked against the same reference
+//! implementation over random trees rather than against each other.
+//!
+//! **Cold against warm is the lineage question, not the cut's.** The walk reads a child index that
+//! is a property of the tree, built on first use and reused after; a lineage held per generation —
+//! which is what it should be, since it depends on neither the mask nor the viewport — sees only the
+//! warm column. Today it is rebuilt per request, so the cold column is what a request pays.
+//!
 //! **Depth moved to `Lineage`**, where the remaining ~40 ms of the lineage column now sits: depth is
 //! a property of the tree and not of the viewer, so a request that recomputes it is redoing
 //! generation work. That is why the lineage column rose as the cut column fell — the work did not
@@ -166,8 +193,8 @@ fn main() {
     // answers is whether the cut's cost follows the *passing* count or the level's.
     println!("\n# a 10^7 level, by how much of it passes\n");
     println!(
-        "{:>12}  {:>10}  {:>12}  {:>12}",
-        "passing", "lineage", "cut(none)", "cut(budget)"
+        "{:>12}  {:>10}  {:>12}  {:>12}  {:>12}",
+        "passing", "lineage", "cut(none)", "cut(budget)", "cut(warm)"
     );
     for &passing in &[2_837u32, 44_166, 705_662, 6_666_666] {
         passing_arm(10_000_000, passing);
@@ -265,12 +292,21 @@ fn passing_arm(n: u32, want: u32) {
     let budgeted = start.elapsed();
     assert!(narrow.len() <= full.len());
 
+    // **Again on the same lineage.** The downward route reads a child index that is a property of
+    // the tree, so it is built once and reused — the first call pays for it and every later one
+    // does not. A lineage held per generation, which is what it should be, sees only this column.
+    let start = Instant::now();
+    let warm = cut(&lineage, &passing, Some(1_000), PRUNE);
+    let warmed = start.elapsed();
+    assert_eq!(warm, narrow, "a second cut over one lineage must answer the same");
+
     println!(
-        "{:>12}  {:>8.3}ms  {:>10.3}ms  {:>10.3}ms",
+        "{:>12}  {:>8.3}ms  {:>10.3}ms  {:>10.3}ms  {:>10.3}ms",
         passing.len(),
         build.as_secs_f64() * 1e3,
         unbudgeted.as_secs_f64() * 1e3,
-        budgeted.as_secs_f64() * 1e3
+        budgeted.as_secs_f64() * 1e3,
+        warmed.as_secs_f64() * 1e3
     );
 }
 

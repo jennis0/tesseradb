@@ -317,8 +317,8 @@ ten times the points:
 |---|---:|---:|
 | verdict pass | ~140 ms | **~32 ms** |
 | lineage build *(belongs per generation)* | 45 ms | 87 ms |
-| cut | ~1 010 ms | **199 ms** |
-| **total** | **~1 195 ms** | **~318 ms, or ~231 ms once the lineage is cached** |
+| cut | ~1 010 ms | **3.05 ms** |
+| **total** | **~1 195 ms** | **~131 ms, or ~35 ms once the lineage is cached** |
 
 ⊘ **10⁷ artifacts over 10⁹ points is not measured directly** — the entity-space fixture for it needs
 ~41 GB against 47 GB of RAM. Two independent measurements agree on ~135 ms for the verdict there: the
@@ -335,10 +335,16 @@ state:
 |---|---:|---:|---:|---:|
 | verdict — index walk, containment, viewport edge | 31.7 ms | 8.2 ms | 0.96 ms | 0.28 ms |
 | masked count, no criterion — `O(budget)` | 0.06 ms | 0.04 ms | 0.07 ms | 0.04 ms |
-| lineage *(per generation; §8.2)* | ~87 ms | ~87 ms | ~87 ms | ~87 ms |
-| **cut** | **199 ms** | 58 ms | 38 ms | 20 ms |
-| total | **~318 ms** | ~153 ms | ~126 ms | ~107 ms |
-| *with the lineage held per generation* | **~231 ms** | ~66 ms | ~39 ms | ~20 ms |
+| lineage *(per generation; §8.2)* | ~96 ms | ~96 ms | ~96 ms | ~96 ms |
+| **cut** | **3.05 ms** | 60 ms | 43 ms | 23 ms |
+| total | ~131 ms | ~164 ms | ~140 ms | ~119 ms |
+| **with the lineage held per generation** | **~35 ms** | ~68 ms | ~44 ms | ~23 ms |
+
+**The worst request is now the cheapest**, which is the shape the whole design has been converging
+on: a principal who can see everything passes everything, and passing everything is exactly what
+makes both the containment groups and the downward walk collapse. The expensive request is now a
+*mid-zoom* one for a principal who sees most but not all — where the viewport does not narrow much
+and the walk declines.
 
 Against **~1 190 ms** for the same request before this campaign. Two of the four lines got there in
 this round and both were the same mistake — materialising something to look at a fraction of it:
@@ -351,22 +357,36 @@ this round and both were the same mistake — materialising something to look at
   arrays of ten million, 120 MB — and scanned all of them to select the 729 a budget serves. It now
   reads only the depth buckets a cut can reach.
 
-**The cut is the remaining bound, and it is `O(level)` rather than `O(passing)`** — measured by
-holding the level at 10⁷ and moving only the passing share:
+**The cut is no longer the bound.** It was `O(level)` — five sequential passes over the ordinal
+space — and it is now `O(budget × branching)` for the principal that bounds the system, by walking
+down from the roots instead of sweeping across:
 
-| passing | lineage | cut, budgeted |
-|---:|---:|---:|
-| 2 838 | 88 ms | **20.2 ms** |
-| 44 248 | 88 ms | 37.9 ms |
-| 714 286 | 87 ms | 57.8 ms |
-| 10 000 000 | 94 ms | 198.6 ms |
+| 10⁷ level, passing | lineage | cut, cold | **cut, warm** |
+|---:|---:|---:|---:|
+| 2 838 | 148 ms | 23.6 ms | 23.1 ms |
+| 44 248 | 101 ms | 44.6 ms | 42.8 ms |
+| 714 286 | 95 ms | 62.7 ms | 59.8 ms |
+| **10 000 000** | 96 ms | 117 ms | **3.05 ms** |
 
-The floor is five sequential passes over the ordinal space — the frontier walk, the depth buckets,
-and three sweeps — none dominant, at ~5–7 ns a node each. ⊘ **A top-down formulation would remove
-it**: a budget settles on a shallow depth, so walking depths from the root and stopping when the
-count exceeds the budget touches `O(budget × branching)` nodes rather than the level. It is scoped
-and not built; the awkward part is that the fallback set — passing nodes whose every ancestor fails —
-is not bounded by depth, so a narrow mask can still force a full walk.
+**A budget settles on a shallow depth** — a thousand artifacts is depth six in a three-way tree — so
+the answer lives in the top of the tree while every earlier revision swept the level to find it.
+With every node above the cut passing, the rule collapses: a node above it has a passing child so
+something deeper represents it; a node *at* it has none so nothing does; and every node has a passing
+parent so none is its lineage's fallback. The served set is exactly the nodes at that depth, plus the
+leaves shallower than it, which have nothing deeper to replace them.
+
+**Where a node above the cut fails, the walk declines** and the sweep answers at the cost it always
+had. That is the residual: a mask that is broad **and** fragmented — many artifacts passing, with
+failures scattered near the top. It is not the shape that bounds throughput, because a principal who
+passes everything leaves no fragmentation at all, and a principal who fails much is one for whom the
+sweep is already proportional to the little they can see. Both routes are checked against the same
+reference implementation over random trees rather than against each other, and a test asserts the
+walk is actually taken rather than silently declining everywhere.
+
+**Cold against warm is the lineage's question, not the cut's.** The walk reads a child index that is
+a property of the tree, built on first use and reused after. A lineage held per generation sees only
+the warm column; today it is rebuilt per request, so the cold column is what a request pays and
+§8.2 is the difference between them.
 
 ⊘ **Two things measured and reverted**, recorded so they are not re-attempted: pre-sizing the depth
 buckets from a counting pass (193 ms against 198 at full passing, and **32 against 24** at a level

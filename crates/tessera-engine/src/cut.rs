@@ -60,6 +60,28 @@ pub struct Lineage {
     /// How many ordinals name a parent. **The cycle bound**, and tighter than the vector's length:
     /// a chain cannot be longer than the number of edges that exist.
     edges: usize,
+    /// The child direction, as a CSR: `children[child_at[u]..child_at[u + 1]]`.
+    ///
+    /// **The parent direction alone cannot be walked downward**, and a budgeted cut wants to go
+    /// downward: it settles on a shallow depth, so a walk from the roots that stops when the count
+    /// exceeds the budget touches a thousand nodes where a sweep of the level touches ten million.
+    /// Like [`Lineage::depth`] this is a property of the tree and not of the viewer.
+    ///
+    /// **Built on first use, and that is not premature.** It costs about as much as the depth table
+    /// — ~105 ms at a level of ten million — and only the downward route reads it. A viewer narrow
+    /// enough that the sweep is already cheap would otherwise pay for a structure their request
+    /// never touches, which measured as a regression from 107 ms to 241 ms before this was made
+    /// lazy.
+    child_index: std::sync::OnceLock<(Vec<u32>, Vec<u32>)>,
+    /// The ordinals with no parent, ascending — where the downward walk starts.
+    roots: Vec<u32>,
+    /// Whether every named parent is itself an ordinal this lineage holds.
+    ///
+    /// **A node whose parent sits outside the table cannot be reached downward at all**, so a walk
+    /// from the roots would silently miss it while the sweep, which climbs, would not. The two
+    /// directions are not interchangeable over a malformed tree, and the downward route declines
+    /// rather than answering differently.
+    walkable: bool,
 }
 
 impl Lineage {
@@ -82,11 +104,67 @@ impl Lineage {
             edges += 1;
         }
         let depth = Self::depths(&parent, edges);
+        let mut roots = Vec::new();
+        let mut walkable = true;
+        for (ordinal, of) in parent.iter().enumerate() {
+            match of {
+                Some(up) if (*up as usize) < parent.len() => {}
+                Some(_) => walkable = false,
+                None => roots.push(ordinal as u32),
+            }
+        }
         Lineage {
             parent,
             depth,
             edges,
+            child_index: std::sync::OnceLock::new(),
+            roots,
+            walkable,
         }
+    }
+
+    /// The child direction as a CSR, and the roots — one counting pass and one fill.
+    ///
+    /// An ordinal the level does not hold is a root here, which is what it is everywhere else in
+    /// this module: a parent it cannot name is a parent it does not have.
+    fn children_of(parent: &[Option<u32>]) -> (Vec<u32>, Vec<u32>) {
+        let span = parent.len();
+        let mut counts = vec![0u32; span + 1];
+        for up in parent.iter().flatten() {
+            if (*up as usize) < span {
+                counts[*up as usize] += 1;
+            }
+        }
+        let mut child_at = vec![0u32; span + 1];
+        let mut running = 0u32;
+        for (slot, n) in counts.iter().take(span).enumerate() {
+            child_at[slot] = running;
+            running += n;
+        }
+        child_at[span] = running;
+        let mut cursor = child_at.clone();
+        let mut children = vec![0u32; running as usize];
+        for (ordinal, of) in parent.iter().enumerate() {
+            if let Some(up) = of {
+                if (*up as usize) < span {
+                    children[cursor[*up as usize] as usize] = ordinal as u32;
+                    cursor[*up as usize] += 1;
+                }
+            }
+        }
+        (child_at, children)
+    }
+
+    /// The children of `ordinal`, ascending — building the index on the first call.
+    fn children_of_node(&self, ordinal: u32) -> &[u32] {
+        let (child_at, children) = self
+            .child_index
+            .get_or_init(|| Self::children_of(&self.parent));
+        let at = ordinal as usize;
+        if at + 1 >= child_at.len() {
+            return &[];
+        }
+        &children[child_at[at] as usize..child_at[at + 1] as usize]
     }
 
     /// Every ordinal's depth, resolved in one pass with the ancestors memoised.
@@ -481,6 +559,128 @@ impl Plan {
     }
 }
 
+/// **The budgeted cut, walked down from the roots instead of swept across the level.**
+///
+/// A budget settles on a shallow depth — a thousand artifacts is depth six in a three-way tree — so
+/// the answer lives in the top of the tree while the general plan in [`Plan`] sweeps all ten million
+/// nodes to find it. This walks depths from the roots and stops at the first one the budget cannot
+/// hold, touching `O(budget × branching)` nodes.
+///
+/// # When it applies, and why the guard is what it is
+///
+/// It runs while **every node it has seen passes**, and gives up otherwise. That is not a
+/// simplification of the rule but the condition under which the rule collapses:
+///
+/// - a node above the cut has a passing child, so some lineage through it reaches a passing node at
+///   or above the cut, so a deeper node represents it and it is **not** served;
+/// - a node *at* the cut has only strict descendants below it, so no lineage through it reaches a
+///   passing node at or above the cut, and it **is** served;
+/// - every node has a passing parent, so none is its lineage's fallback except a root, which is
+///   served only at depth zero.
+///
+/// So the served set is exactly *the nodes at that depth*, and the count is how many there are.
+/// Under `prune_children = false` every passing node is its own lineage's deepest entry, so the
+/// served set is instead everything at or above the cut — the other branch below.
+///
+/// **This is the whole-corpus principal's case**, which is the one that bounds the system: a viewer
+/// who can see everything passes everything, so nothing above the cut fails and the walk never
+/// stops early. A viewer who cannot is exactly a viewer for whom the general plan's cost is already
+/// proportional to the little they can see. What the guard gives up on is a mask that is broad
+/// **and** fragmented — many artifacts passing, with failures scattered near the top — and there
+/// the answer is the sweep, at the cost it has always had.
+fn cut_top_down(
+    lineage: &Lineage,
+    passing: &[u32],
+    budget: u32,
+    prune: bool,
+) -> Option<Vec<u32>> {
+    if !lineage.walkable {
+        return None;
+    }
+    // **Attempted only where it can succeed.** The walk needs every node above the cut to pass, so
+    // a level most of which fails will decline at its first step — after paying to build the child
+    // index. Half is a heuristic and nothing rests on it: both routes return the same cut, and this
+    // only decides which one runs.
+    if (passing.len() as u64) * 2 < lineage.parent.len() as u64 {
+        return None;
+    }
+    let holds = |n: u32| passing.binary_search(&n).is_ok();
+    if !passing.windows(2).all(|w| w[0] < w[1]) {
+        // The lookup above is a binary search, so an unordered `passing` would answer wrongly rather
+        // than slowly. The serving path always hands this over ascending; a caller that does not
+        // gets the sweep.
+        return None;
+    }
+
+    // Depth zero is every ordinal with no parent — which includes the tail above the parent table,
+    // since an ordinal it does not mention has no parent to name.
+    let named = lineage.parent.len() as u32;
+    let span = passing.last().map_or(named, |&n| n + 1).max(named);
+    let mut roots = lineage.roots.clone();
+    roots.extend(named..span);
+    if roots.is_empty() || !roots.iter().all(|&n| holds(n)) {
+        // A root that fails puts its whole subtree's lineages into the general rule — every node
+        // below it may be its own fallback — which is the sweep's business, not this walk's.
+        return None;
+    }
+    let mut level: Vec<u32> = roots;
+
+    let mut served = level.clone();
+    let mut above: Vec<u32> = if prune { Vec::new() } else { level.clone() };
+    // **The leaves already passed, and they stay.** A node with no children has no passing
+    // descendant, so it is its own lineage's deepest entry — a head — and a deeper cut has nothing
+    // to replace it with. A walk that swapped each depth for the next wholesale would drop the
+    // shallow branches of an unbalanced tree and blank their regions, which is the failure the
+    // budget exists to avoid rather than one it may cause.
+    let mut leaves: Vec<u32> = Vec::new();
+    // The walk is bounded twice over: by the budget, which stops it as soon as a depth is too wide,
+    // and by the level's own depth, which the edge count bounds.
+    for _ in 0..=lineage.edges {
+        let mut next: Vec<u32> = Vec::new();
+        for &node in &level {
+            let kids = lineage.children_of_node(node);
+            if kids.is_empty() {
+                leaves.push(node);
+            }
+            next.extend_from_slice(kids);
+        }
+        if next.is_empty() {
+            // The tree ran out before the budget did, so the deepest cut is the one in hand.
+            return Some(finish(served));
+        }
+        // **The guard.** A failure anywhere at or below the frontier puts the rule back into its
+        // general form, which this walk does not implement.
+        if !next.iter().all(|&n| holds(n)) {
+            return None;
+        }
+        let candidate: Vec<u32> = if prune {
+            let mut all = leaves.clone();
+            all.extend_from_slice(&next);
+            all
+        } else {
+            let mut all = above.clone();
+            all.extend_from_slice(&next);
+            all
+        };
+        if candidate.len() as u32 > budget {
+            return Some(finish(served));
+        }
+        if !prune {
+            above.extend_from_slice(&next);
+        }
+        served = candidate;
+        level = next;
+    }
+    Some(finish(served))
+}
+
+/// Ascending and deduplicated, which every cut promises — see [`cut_at`].
+fn finish(mut served: Vec<u32>) -> Vec<u32> {
+    served.sort_unstable();
+    served.dedup();
+    served
+}
+
 /// The artifacts of `passing` that a cut at `depth` serves.
 ///
 /// Each node of the frontier — a passing node with no passing node beneath it — is replaced by the
@@ -534,10 +734,17 @@ pub fn cut(lineage: &Lineage, passing: &[u32], budget: Option<u32>, prune: bool)
     if lineage.is_flat() {
         return ascending(passing);
     }
-    let plan = Plan::new(lineage, passing, prune);
     let Some(budget) = budget else {
-        return plan.serve_at(u32::MAX);
+        return Plan::new(lineage, passing, prune).serve_at(u32::MAX);
     };
+    // **The downward walk first, where it applies.** It answers in the top of the tree rather than
+    // across the level; where its guard does not hold it declines and the sweep below runs
+    // unchanged. Both return the same cut, which the tests assert against the obvious rule over
+    // random trees rather than against each other.
+    if let Some(served) = cut_top_down(lineage, passing, budget, prune) {
+        return served;
+    }
+    let plan = Plan::new(lineage, passing, prune);
     if plan.count_at(u32::MAX) <= budget {
         return plan.serve_at(u32::MAX);
     }
@@ -836,6 +1043,93 @@ mod tests {
                 "case {case}: the unbudgeted cuts disagree"
             );
         }
+    }
+
+    /// **The downward walk is actually taken**, which the tests above do not establish: they assert
+    /// that `cut` answers correctly, and it would do that with the walk deleted.
+    #[test]
+    fn the_downward_walk_answers_where_every_artifact_passes() {
+        let mut next = stream(0xC0FFEE);
+        let mut taken = 0;
+        for case in 0..200 {
+            let n = 1 + (next() % 40) as u32;
+            let lineage = random_lineage(&mut next, n);
+            // Every artifact passes — the whole-corpus principal, and the case that bounds the
+            // system, since a viewer who can see everything withholds nothing from the cut.
+            let passing: Vec<u32> = (0..n).collect();
+            for budget in 1..=8u32 {
+                let walked = cut_top_down(&lineage, &passing, budget, true);
+                if let Some(served) = walked {
+                    taken += 1;
+                    assert_eq!(
+                        served,
+                        reference_cut(&lineage, &passing, Some(budget)),
+                        "case {case}: the walk and the rule disagree at budget {budget}"
+                    );
+                }
+            }
+        }
+        assert!(
+            taken > 100,
+            "the walk declined almost everything ({taken} taken), so the agreement above is vacuous"
+        );
+    }
+
+    /// **And it declines rather than answering differently.** A mask that fails artifacts near the
+    /// top puts every node below them into the general rule — each may be its own lineage's
+    /// fallback — which the walk does not implement and must not guess at.
+    #[test]
+    fn the_downward_walk_declines_a_fragmented_mask() {
+        let wide = Lineage::new([
+            (0, None),
+            (1, Some(0)),
+            (2, Some(0)),
+            (3, Some(1)),
+            (4, Some(1)),
+            (5, Some(2)),
+            (6, Some(2)),
+        ]);
+        // The root passes and one of its children does not, so a subtree below the failure has no
+        // passing ancestor and is served where it stands at every cut.
+        let fragmented = [0u32, 2, 3, 4, 5, 6];
+        assert!(
+            cut_top_down(&wide, &fragmented, 2, true).is_none(),
+            "a failure above the cut must send the request to the sweep"
+        );
+        // And the answer that comes back is still the rule's.
+        assert_eq!(
+            cut(&wide, &fragmented, Some(2), true),
+            reference_cut(&wide, &fragmented, Some(2))
+        );
+
+        // A failing **root** is the same story one level up.
+        let no_root = [1u32, 3, 4];
+        assert!(cut_top_down(&wide, &no_root, 2, true).is_none());
+        assert_eq!(
+            cut(&wide, &no_root, Some(2), true),
+            reference_cut(&wide, &no_root, Some(2))
+        );
+    }
+
+    /// The walk keeps a shallow leaf that a deeper cut has nothing to replace — the failure the
+    /// first revision had, where each depth was swapped for the next wholesale and an unbalanced
+    /// tree's short branches were dropped.
+    #[test]
+    fn the_downward_walk_keeps_a_leaf_shallower_than_the_cut() {
+        // 0 ─┬─ 1 (a leaf at depth 1)
+        //    └─ 2 ─┬─ 3
+        //          └─ 4
+        let lopsided = Lineage::new([
+            (0, None),
+            (1, Some(0)),
+            (2, Some(0)),
+            (3, Some(2)),
+            (4, Some(2)),
+        ]);
+        let all = [0u32, 1, 2, 3, 4];
+        let served = cut_top_down(&lopsided, &all, 3, true).expect("every artifact passes");
+        assert_eq!(served, vec![1, 3, 4], "the depth-1 leaf stays beside the depth-2 pair");
+        assert_eq!(served, reference_cut(&lopsided, &all, Some(3)));
     }
 
     /// **The served count does not decrease with depth**, which is the property the budget's
