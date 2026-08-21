@@ -293,10 +293,10 @@ path always produces; and **depth moved to `Lineage`**, which is why that column
 
 | viewport | shipped | design | |
 |---|---:|---:|---:|
-| whole map | 2 929 ms | **140 ms** | 21× |
-| 6.25% | 891 ms | **9.9 ms** | 90× |
-| 0.39% | 692 ms | **0.87 ms** | 795× |
-| 0.024% | 666 ms | **0.22 ms** | 3 027× |
+| whole map | 2 988 ms | **31.7 ms** | 94× |
+| 6.25% | 904 ms | **8.2 ms** | 111× |
+| 0.39% | 725 ms | **0.96 ms** | 755× |
+| 0.024% | 713 ms | **0.28 ms** | 2 547× |
 
 Those are the **build-time-groups** route, so nothing above is amortised over a session: every row is
 what one request costs on a cold token.
@@ -315,10 +315,10 @@ ten times the points:
 
 | | before | now |
 |---|---:|---:|
-| verdict pass | ~140 ms | ~140 ms |
+| verdict pass | ~140 ms | **~32 ms** |
 | lineage build *(belongs per generation)* | 45 ms | 87 ms |
-| cut | ~1 010 ms | **188 ms** |
-| **total** | **~1 195 ms** | **~415 ms, or ~328 ms once the lineage is cached** |
+| cut | ~1 010 ms | **199 ms** |
+| **total** | **~1 195 ms** | **~318 ms, or ~231 ms once the lineage is cached** |
 
 ⊘ **10⁷ artifacts over 10⁹ points is not measured directly** — the entity-space fixture for it needs
 ~41 GB against 47 GB of RAM. Two independent measurements agree on ~135 ms for the verdict there: the
@@ -327,40 +327,55 @@ count (13.5 ms at 10⁶ over 10⁹).
 
 ### 7.1 What a request pays, stage by stage
 
-10⁷ artifacts, treed layer, full mask, single-threaded, no per-token state:
+**The worst case is what bounds the system**, since it fixes how many viewers one core carries.
+10⁷ artifacts, treed layer, a principal who sees the whole corpus, single-threaded, no per-token
+state:
 
 | stage | whole map | 6.25% | 0.39% | 0.024% |
 |---|---:|---:|---:|---:|
-| verdict — index walk, containment, viewport edge | 140 ms | 9.9 ms | 0.83 ms | 0.18 ms |
-| masked count, no criterion — `O(budget)` | 0.06 ms | 0.04 ms | 0.04 ms | 0.04 ms |
-| **lineage** | **~85 ms** | **~85 ms** | **~85 ms** | **~85 ms** |
-| **cut** | **254 ms** | **70 ms** | **35 ms** | **20 ms** |
-| total | **~480 ms** | **~165 ms** | **~121 ms** | **~105 ms** |
+| verdict — index walk, containment, viewport edge | 31.7 ms | 8.2 ms | 0.96 ms | 0.28 ms |
+| masked count, no criterion — `O(budget)` | 0.06 ms | 0.04 ms | 0.07 ms | 0.04 ms |
+| lineage *(per generation; §8.2)* | ~87 ms | ~87 ms | ~87 ms | ~87 ms |
+| **cut** | **199 ms** | 58 ms | 38 ms | 20 ms |
+| total | **~318 ms** | ~153 ms | ~126 ms | ~107 ms |
+| *with the lineage held per generation* | **~231 ms** | ~66 ms | ~39 ms | ~20 ms |
 
-**The verdict pass this memo is mostly about is now 0.2% of a narrow request.** Everything else is
-the lineage and the cut, and both are `O(level)` rather than `O(passing)` — measured by holding the
-level at 10⁷ and moving only the passing share:
+Against **~1 190 ms** for the same request before this campaign. Two of the four lines got there in
+this round and both were the same mistake — materialising something to look at a fraction of it:
+
+- **The verdict was 140 ms and is 31.7**, because it collected ten million ordinals out of a bitmap
+  and then **sorted** them. Both inputs are already ascending, so the sort was 110 of the 140 ms and
+  bought nothing. What remains is the materialisation itself, which exists only because `cut` takes
+  a slice.
+- **The cut was 254 ms and is 199**, because it built one interval per *servable* node — three
+  arrays of ten million, 120 MB — and scanned all of them to select the 729 a budget serves. It now
+  reads only the depth buckets a cut can reach.
+
+**The cut is the remaining bound, and it is `O(level)` rather than `O(passing)`** — measured by
+holding the level at 10⁷ and moving only the passing share:
 
 | passing | lineage | cut, budgeted |
 |---:|---:|---:|
-| 2 838 | 85 ms | **19.9 ms** |
-| 44 248 | 66 ms | 34.9 ms |
-| 714 286 | 91 ms | 70.5 ms |
-| 10 000 000 | 88 ms | 253.8 ms |
+| 2 838 | 88 ms | **20.2 ms** |
+| 44 248 | 88 ms | 37.9 ms |
+| 714 286 | 87 ms | 57.8 ms |
+| 10 000 000 | 94 ms | 198.6 ms |
 
-So the cut has a **~20 ms floor at a level of ten million however few artifacts pass**, and the
-lineage is flat at ~85 ms. Two things follow, and they are the next work rather than open questions:
+The floor is five sequential passes over the ordinal space — the frontier walk, the depth buckets,
+and three sweeps — none dominant, at ~5–7 ns a node each. ⊘ **A top-down formulation would remove
+it**: a budget settles on a shallow depth, so walking depths from the root and stopping when the
+count exceeds the budget touches `O(budget × branching)` nodes rather than the level. It is scoped
+and not built; the awkward part is that the fallback set — passing nodes whose every ancestor fails —
+is not bounded by depth, so a narrow mask can still force a full walk.
 
-- **The lineage is per-generation work done per request** (§8.2). Removing it takes the narrow
-  request from ~105 ms to ~20 ms and the wide one from ~480 to ~395 ms. It depends on neither the
-  mask nor the viewport, so this is bookkeeping, not design.
-- **The cut's floor is two full scans of the ordinal space** — building the depth buckets and the
-  intervals — plus ~70 MB of zeroed side tables. Iterating the on-chain nodes as a list rather than
-  scanning the span would make it `O(passing)`, which is what the ~20 ms at 2 838 passing says it is
-  not yet. ⊘ Not attempted.
+⊘ **Two things measured and reverted**, recorded so they are not re-attempted: pre-sizing the depth
+buckets from a counting pass (193 ms against 198 at full passing, and **32 against 24** at a level
+where a few thousand pass — the second sequential scan costs more than the growth it avoids), and
+`ArtifactRows::intersects`' early exit at whole-map zoom, which loses about a tenth where every
+artifact meets the viewport anyway.
 
-⊘ **Not in this table**: materialising `passing` (§8.4), the gather, the record-blob reads for
-supplied content, and the wire encoding.
+⊘ **Not in this table**: the gather, the record-blob reads for supplied content, and the wire
+encoding.
 
 ## 8. What this depends on, and is not yet true
 

@@ -1225,27 +1225,36 @@ fn grouped(
     // groups is `O(containers)` and independent of the viewport; testing each candidate is
     // `O(candidates)`. The viewport walk has already said which is smaller.
     let wide = settled.cardinality() + open.cardinality() > (row_count as u64 / 64).max(4096);
-    let mut candidates: Vec<u32> = if wide {
+    let mut passing = if wide {
         let passes = contains.satisfied(holds);
-        let mut s = settled.clone();
+        let mut s = settled;
         s.and_inplace(&passes);
         let mut o = open;
         o.and_inplace(&passes);
-        let mut out: Vec<u32> = s.iter().collect();
-        out.extend(
-            o.iter()
-                .filter(|&x| index.inside(x, tiles) || rows.intersects(x, tiles, mask)),
-        );
-        out
+        for x in o.iter() {
+            if index.inside(x, tiles) || rows.intersects(x, tiles, mask) {
+                s.add(x);
+            }
+        }
+        s
     } else {
-        let mut out: Vec<u32> = settled.iter().filter(|&o| contains.holds_for(o, holds)).collect();
-        out.extend(open.iter().filter(|&x| {
-            contains.holds_for(x, holds)
+        let mut s: Bitmap = settled.iter().filter(|&o| contains.holds_for(o, holds)).collect();
+        for x in open.iter() {
+            if contains.holds_for(x, holds)
                 && (index.inside(x, tiles) || rows.intersects(x, tiles, mask))
-        }));
-        out
+            {
+                s.add(x);
+            }
+        }
+        s
     };
-    candidates.sort_unstable();
+    passing.run_optimize();
+    // **The result stays a set until something needs a list**, which is the difference between
+    // 141 ms and 35 ms at ten million: `Bitmap::iter` is ascending by construction, so the sort the
+    // earlier revision ran over ten million ordinals — 110 ms of that 141 — was sorting two runs
+    // that were already in order. What is left is the materialisation itself, which only exists
+    // because `cut` takes a slice.
+    let candidates: Vec<u32> = passing.iter().collect();
     phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
     phases.candidates = candidates.len();
 

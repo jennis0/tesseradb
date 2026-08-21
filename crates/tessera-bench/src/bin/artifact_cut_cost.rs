@@ -84,6 +84,34 @@
 //! - **The passing set is borrowed where it already arrives ascending**, which the serving path
 //!   always produces, rather than copied and sorted.
 //!
+//! # And once more, for the worst case — 2026-08-21
+//!
+//! The worst case is what bounds the system, since it fixes how many viewers one core carries, so
+//! the pass was profiled again at full passing rather than left at 188 ms:
+//!
+//! | | before | after |
+//! |---|---:|---:|
+//! | 10⁷ treed, budgeted | 254 ms | **199 ms** |
+//! | 10⁷, only 2 838 passing | 20 ms | 20 ms |
+//!
+//! The plan built one interval per **servable** node — three arrays of ten million, 120 MB — and
+//! then scanned all of them to select the 729 a budget actually serves. It now keeps the depth
+//! buckets it already had, carries `until` per ordinal, and reads only `by_depth[0..=d]`: nothing
+//! below the chosen depth contributes except the fallbacks, which carry their own depth so the test
+//! is a comparison rather than a search. `heads` stopped being materialised in the same pass — six
+//! and a half million ordinals into a 27 MB vector, for a question that is one array read.
+//!
+//! **What is left is a floor of five sequential passes over the ordinal space** — the frontier walk,
+//! the depth buckets and three sweeps — none dominant, at ~5–7 ns a node. That is why the cut is
+//! `O(level)` and not `O(passing)`: a level of ten million costs ~20 ms even when a few thousand
+//! pass. ⊘ A top-down formulation would remove it, walking depths from the root and stopping when
+//! the count exceeds the budget; the awkward part is the fallback set, which is not bounded by
+//! depth, so a narrow mask can still force a full walk.
+//!
+//! ⊘ **Pre-sizing the depth buckets from a counting pass was tried and reverted**: 193 ms against
+//! 198 at full passing, and **32 ms against 24** where only a few thousand pass, because a second
+//! sequential scan of ten million costs more than the reallocation it avoids.
+//!
 //! **Depth moved to `Lineage`**, where the remaining ~40 ms of the lineage column now sits: depth is
 //! a property of the tree and not of the viewer, so a request that recomputes it is redoing
 //! generation work. That is why the lineage column rose as the cut column fell — the work did not

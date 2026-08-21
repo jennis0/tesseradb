@@ -205,19 +205,29 @@ impl Lineage {
 /// frontier walk of 12 ms and side tables of 2 ms, so the storage was the whole cost and not the
 /// arithmetic.
 struct Plan {
-    /// The servable nodes, **ascending** — which is what lets [`Plan::serve_at`] return an
-    /// ascending, deduplicated result without sorting one.
-    nodes: Vec<u32>,
-    /// Parallel to `nodes`: the first depth at which this node is served.
+    /// The on-chain nodes of each depth, ascending within a depth — so a cut at depth *d* reads
+    /// `by_depth[0..=d]` and never touches the rest of the level.
     ///
-    /// Its own depth, except where it has no passing ancestor at all — then it is what its lineage
-    /// falls back to at every shallower cut, which is the rule that keeps a branch whose ancestors
-    /// were suppressed, deleted or below their bar on the map rather than blanking its region.
-    from: Vec<u32>,
-    /// Parallel to `nodes`: the first depth at which this node is **no longer** served, because a
-    /// passing node beneath it has become reachable in some lineage that was picking this one.
-    /// `u32::MAX` for a frontier node, which is picked at every depth from its own downward.
+    /// **This is what keeps the answer proportional to itself.** A budget forces a shallow cut, so
+    /// the served set is the top of the tree: 729 artifacts out of ten million in the measured case.
+    /// An earlier revision built one interval per *servable* node — three arrays of ten million,
+    /// 120 MB — and then scanned all of them to pick those 729, which was 83 ms of the cut's 262.
+    by_depth: Vec<Vec<u32>>,
+    /// Per ordinal, the first depth at which it is **no longer** served, because a passing node
+    /// beneath it has become reachable in some lineage that was picking it. `u32::MAX` for a
+    /// frontier node, which is picked at every depth from its own downward.
     until: Vec<u32>,
+    /// Per ordinal, whether it is passing **and** on some lineage — the two conditions for being
+    /// servable at any depth at all.
+    servable: Vec<bool>,
+    /// `(depth, ordinal)` for each node with **no passing ancestor at all**.
+    ///
+    /// **They are their lineage's fallback**, served at every depth shallower than their own — which
+    /// is the rule that keeps a branch whose ancestors were suppressed, deleted or below their bar
+    /// on the map rather than blanking its region. A cut at depth *d* reads `by_depth[0..=d]`, so it
+    /// would miss exactly the fallbacks sitting deeper than *d*; the depth is carried here so that
+    /// test is a comparison rather than a search.
+    fallbacks: Vec<(u32, u32)>,
     /// `counts[d]` is `serve_at(d).len()`, for `d` in `0..=deepest`.
     counts: Vec<u32>,
 }
@@ -287,17 +297,17 @@ impl Plan {
             }
         }
 
-        // The heads: the nodes whose lineages the cut picks from. Ascending, because `sorted` is —
-        // and this *is* the answer at an unbounded depth, since every lineage's deepest entry is
-        // its own head.
-        let heads: Vec<u32> = sorted
-            .iter()
-            .copied()
-            .filter(|&n| !prune || !covered[n as usize])
-            .collect();
+        // The heads: the nodes whose lineages the cut picks from — and at an unbounded depth, the
+        // answer itself, since every lineage's deepest entry is its own head.
+        //
+        // **Marked, not collected.** Materialising them cost 34 ms of the pass at a level of ten
+        // million: six and a half million ordinals into a 27 MB vector, to answer a question that
+        // is one array read wherever it is asked.
         let mut is_head = vec![false; span];
-        for &h in &heads {
-            is_head[h as usize] = true;
+        for &n in sorted {
+            if !prune || !covered[n as usize] {
+                is_head[n as usize] = true;
+            }
         }
 
         // **Everything on some lineage is `climbed ∪ passing`, so there is no second climb.** Every
@@ -311,13 +321,24 @@ impl Plan {
             on_chain[n as usize] = true;
         }
 
+
         // Depths, and the on-chain nodes bucketed by depth in the same pass — a counting sort,
         // since a level's depth is small and bounded by its own edge count. Both sweeps below need
         // one order or the other.
         let mut deepest = 0u32;
-        for &head in &heads {
-            deepest = deepest.max(lineage.depth(head));
+        for &n in sorted {
+            if is_head[n as usize] {
+                deepest = deepest.max(lineage.depth(n));
+            }
         }
+
+        // The on-chain nodes bucketed by depth — a counting sort, since a level's depth is small and
+        // bounded by its own edge count. Both sweeps below need one order or the other.
+        //
+        // ⊘ **Pre-sizing the buckets was tried and reverted.** A counting pass ahead of the fill
+        // removes the reallocation, and measured *worse*: 193 ms against 198 at full passing, and
+        // 32 ms against 23 at a level where only a few thousand pass, because the second sequential
+        // scan of ten million costs more than the growth it avoids.
         let mut by_depth: Vec<Vec<u32>> = vec![Vec::new(); deepest as usize + 1];
         for node in 0..span as u32 {
             if on_chain[node as usize] {
@@ -348,51 +369,48 @@ impl Plan {
 
         // **Shallowest first: does this node have a passing ancestor at all?** Where it has none it
         // is its lineage's fallback, so it is served from depth zero rather than from its own.
+        //
+        // The per-depth counts are accumulated in the same sweep, into a difference array — so the
+        // budget search is answered without materialising a single cut, and without an array over
+        // the ordinal space to scan for it afterwards.
         let mut has_passing_ancestor = vec![false; span];
-        for level in by_depth.iter() {
+        let mut servable = vec![false; span];
+        let mut fallbacks: Vec<(u32, u32)> = Vec::new();
+        let mut delta = vec![0i64; deepest as usize + 2];
+        for (depth, level) in by_depth.iter().enumerate() {
             for &node in level {
                 if let Some(parent) = lineage.parent_of(node) {
                     has_passing_ancestor[node as usize] =
                         is_passing[parent as usize] || has_passing_ancestor[parent as usize];
                 }
+                if !is_passing[node as usize] {
+                    continue;
+                }
+                let lo = if has_passing_ancestor[node as usize] {
+                    depth as u32
+                } else {
+                    0
+                };
+                // A head is picked at every depth from its own downward, so its interval is open at
+                // the top. Written into `until` rather than carried beside it, because the sweep
+                // that filled `until` has already run and nothing below reads the old value.
+                if is_head[node as usize] {
+                    until[node as usize] = u32::MAX;
+                }
+                let hi = until[node as usize];
+                if lo >= hi {
+                    continue;
+                }
+                servable[node as usize] = true;
+                if lo == 0 && depth > 0 {
+                    fallbacks.push((depth as u32, node));
+                }
+                delta[lo as usize] += 1;
+                if (hi as usize) < delta.len() {
+                    delta[hi as usize] -= 1;
+                }
             }
         }
-
-        // Every passing node on a lineage is servable at *some* depth, not only the heads — a
-        // parent is what its children's lineages fall back to. Sizing these to the head count
-        // instead grows them through several reallocations at a level where the difference is a
-        // hundred megabytes.
-        let servable = sorted.len().max(1);
-        let mut nodes = Vec::with_capacity(servable);
-        let mut from = Vec::with_capacity(servable);
-        let mut until_of = Vec::with_capacity(servable);
-        let mut delta = vec![0i64; deepest as usize + 2];
-        for node in 0..span as u32 {
-            if !on_chain[node as usize] || !is_passing[node as usize] {
-                continue;
-            }
-            let lo = if has_passing_ancestor[node as usize] {
-                lineage.depth(node)
-            } else {
-                0
-            };
-            let hi = if is_head[node as usize] {
-                u32::MAX
-            } else {
-                until[node as usize]
-            };
-            if lo >= hi {
-                continue;
-            }
-            nodes.push(node);
-            from.push(lo);
-            until_of.push(hi);
-            delta[lo as usize] += 1;
-            if (hi as usize) < delta.len() {
-                delta[hi as usize] -= 1;
-            }
-        }
-
         let mut counts = Vec::with_capacity(deepest as usize + 1);
         let mut running = 0i64;
         for step in delta.iter().take(deepest as usize + 1) {
@@ -401,9 +419,10 @@ impl Plan {
         }
 
         Plan {
-            nodes,
-            from,
-            until: until_of,
+            by_depth,
+            until,
+            servable,
+            fallbacks,
             counts,
         }
     }
@@ -430,15 +449,34 @@ impl Plan {
     /// sort runs here at all.
     fn serve_at(&self, depth: u32) -> Vec<u32> {
         // Clamped, as [`Plan::count_at`] is: an unbounded depth means *the deepest cut there is*,
-        // and a frontier node's interval is open at the top. Comparing against `u32::MAX` itself
-        // would exclude exactly the nodes an unbounded depth is meant to serve.
+        // and a head's interval is open at the top. Comparing against `u32::MAX` itself would
+        // exclude exactly the nodes an unbounded depth is meant to serve.
         let depth = depth.min(self.deepest());
-        let mut served = Vec::new();
-        for i in 0..self.nodes.len() {
-            if self.from[i] <= depth && depth < self.until[i] {
-                served.push(self.nodes[i]);
+        // **Only the depths a cut here can reach.** Every node served at `depth` either sits at or
+        // above it — where its own depth is what it is served from — or has no passing ancestor at
+        // all, and those are carried separately. Nothing below `depth` contributes, so the deeper
+        // buckets are never read: at a budget that settles on depth six over a ten-million-artifact
+        // level, that is a thousand nodes examined rather than ten million.
+        let mut served: Vec<u32> = Vec::new();
+        for level in self.by_depth.iter().take(depth as usize + 1) {
+            for &node in level {
+                if self.servable[node as usize] && depth < self.until[node as usize] {
+                    served.push(node);
+                }
             }
         }
+        // The lineages whose every ancestor failed, where they sit deeper than this cut — the
+        // shallower ones are already in the buckets above, which is what `> depth` avoids
+        // double-counting.
+        for &(at, node) in &self.fallbacks {
+            if at > depth && depth < self.until[node as usize] {
+                served.push(node);
+            }
+        }
+        // Ascending is a contract (see [`cut_at`]), and the buckets are read shallow-first rather
+        // than in ordinal order, so the merge happens here — over the served set, which the budget
+        // bounds, and never over the level.
+        served.sort_unstable();
         served
     }
 }
