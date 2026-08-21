@@ -53,6 +53,27 @@ principal leaves fewer artifacts alive after the per-token pass.
 **The remaining worst case is a broad principal at whole-map zoom**, the one request where neither
 the viewport nor the mask removes anything: **131 ms at 10⁷ artifacts**.
 
+**And it is flat in the corpus size.** Ten times the points at a fixed artifact count moves nothing:
+
+| viewport | 10⁶ artifacts / 10⁸ points | / **10⁹ points** | shipped at 10⁹ |
+|---|---:|---:|---:|
+| whole map | 12.9 ms | **13.5 ms** | 727 ms |
+| 6.25% | 1.92 ms | **2.05 ms** | 148 ms |
+| 0.39% | 0.45 ms | **0.42 ms** | 101 ms |
+| 0.024% | 0.24 ms | **0.18 ms** | 94.8 ms |
+
+That is the property the whole construction is for: cost is a function of the artifacts and the
+viewport, not of the corpus beneath them. The shipped path is not flat in it — at 10⁹ points a
+principal seeing 9.4% of the corpus costs it **1 635 ms** at whole-map zoom against 727 ms for one
+seeing everything, and this design 0.49 ms against 13.5 ms.
+
+**One correction the 10⁹ tier forced, recorded because it was invisible below it.** The first walk
+built a `Bitmap` per node just to ask whether the viewport met it — a `malloc` on every node of
+every descent. At 10⁸ rows that cost nothing measurable; at 10⁹, where the hierarchy is two levels
+deeper and a narrow viewport descends all of it, it was **5×** (1.46 ms against 0.29 ms at a 0.024%
+viewport). `range_cardinality` answers both the disjoint and the covered question from one call and
+allocates nothing.
+
 ## What the four passes are
 
 ```text

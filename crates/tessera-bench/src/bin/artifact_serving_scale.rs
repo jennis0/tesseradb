@@ -702,10 +702,18 @@ impl TileIndex {
             }
             let hi = (lo + (1u64 << shift) - 1).min(row_count as u64 - 1);
             let (lo, hi) = (lo as u32, hi as u32);
-            if !tiles.intersect(&range_bitmap(lo, hi)) {
+            // **One range query, and no allocation.** A first revision built a `Bitmap` per node
+            // just to ask whether the viewport met it, which put a `malloc` on every node of every
+            // walk — invisible at 10⁸ rows and worth 5× at 10⁹, where the hierarchy is two levels
+            // deeper and a narrow viewport descends all of it. `range_cardinality` answers both
+            // questions from the same call: zero is disjoint, full is covered, anything else is the
+            // viewport's edge.
+            let width = hi as u64 - lo as u64 + 1;
+            let inside = tiles.range_cardinality(lo..=hi);
+            if inside == 0 {
                 continue;
             }
-            if tiles.contains_range(lo..=hi) {
+            if inside == width {
                 if let Some(b) = self.subtree[level].get(block as usize) {
                     settled.push(b);
                 }
@@ -754,14 +762,6 @@ impl TileIndex {
             .map(|p| p.get_serialized_size_in_bytes::<croaring::Portable>() as u64)
             .sum()
     }
-}
-
-/// A contiguous row range as a bitmap — the node's own extent, for the two set questions the walk
-/// asks of the viewport.
-fn range_bitmap(lo: u32, hi: u32) -> Bitmap {
-    let mut b = Bitmap::new();
-    b.add_range(lo..=hi);
-    b
 }
 
 /// **Route C — candidates from the index, then the shipped verdict on each.**

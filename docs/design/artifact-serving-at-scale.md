@@ -36,6 +36,22 @@ the per-token pass has already removed most of the population:
 So the answer is **yes for artifacts that are somewhere, and conditionally for artifacts that are
 everywhere** — which is §4, and is the part that needs a ruling rather than an implementation.
 
+**And it is flat in the corpus size**, which the ten-fold step from 10⁸ to 10⁹ points confirms
+directly at a fixed artifact count — the design's cost is a function of how many artifacts there are
+and how much map is on screen, not of how many points are underneath:
+
+| viewport | 10⁶ artifacts over 10⁸ points | over **10⁹ points** | shipped, at 10⁹ |
+|---|---:|---:|---:|
+| whole map | 12.9 ms | **13.5 ms** | 727 ms |
+| 6.25% | 1.92 ms | **2.05 ms** | 148 ms |
+| 0.39% | 0.45 ms | **0.42 ms** | 101 ms |
+| 0.024% | 0.24 ms | **0.18 ms** | 94.8 ms |
+
+The shipped path is not flat in it. At 10⁹ points a principal seeing 9.4% of the corpus costs it
+**1 635 ms** at whole-map zoom against 727 ms for one seeing everything — the fragmentation effect
+§2 describes, and it is sharper at the real corpus size than at a tenth of it. The same two requests
+cost this design 0.49 ms and 13.5 ms: the narrow principal is the **cheap** one.
+
 ## 2. Where the time goes
 
 The request path is `O(artifacts)` four separate times, and **three of the four have no request in
