@@ -1395,11 +1395,7 @@ impl Engine {
             artifacts: sink.artifacts,
             points,
             sub_cells: sink.sub_cells,
-            scalar_names: head
-                .render_scalars
-                .iter()
-                .map(|d| d.name.clone())
-                .collect(),
+            scalar_names: head.render_scalars.iter().map(|d| d.name.clone()).collect(),
             timings,
         })
     }
@@ -3113,7 +3109,6 @@ impl Engine {
             denied,
         );
 
-        let store_version = self.write.with_artifacts(|store| store.version());
         let rows = self.write.with_artifacts(|store| {
             self.artifact_projections.get_or_build(
                 &generation.prefix,
@@ -3121,7 +3116,6 @@ impl Engine {
                 &name,
                 level,
                 store,
-                store_version,
                 &view_data.row_space,
             )
         });
@@ -3146,10 +3140,8 @@ impl Engine {
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
         // `artifact_visibility` names a field withholds here as it does on the viewport, which is
         // the same fail-closed answer reached by the same call.
-        let crate::artifacts::ArtifactVerdict::Serve {
-            masked_count,
-            rank,
-        } = artifact_view.verdict(entity, ordinal, None)
+        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
+            artifact_view.verdict(entity, ordinal, None)
         else {
             return Ok(None);
         };
@@ -3192,9 +3184,7 @@ impl Engine {
             layer: name.clone(),
             tessera_id: id,
             key: self.write.with_artifacts(|store| {
-                store
-                    .get(&name, level, ordinal)
-                    .and_then(|r| r.key.clone())
+                store.get(&name, level, ordinal).and_then(|r| r.key.clone())
             }),
             masked_count,
             derived,
@@ -3338,13 +3328,10 @@ impl Engine {
         if !layer.declaration.views.iter().any(|s| s == ctx.view) {
             return false;
         }
-        let (store_version, record) = self.write.with_artifacts(|store| {
-            (
-                store.version(),
-                store
-                    .get(&attachment.layer, attachment.level, attachment.ordinal)
-                    .map(|record| record.entity),
-            )
+        let record = self.write.with_artifacts(|store| {
+            store
+                .get(&attachment.layer, attachment.level, attachment.ordinal)
+                .map(|record| record.entity)
         });
         // **The slot answers, and it must answer with the entity the edge names.** A hole is what
         // the fold leaves where it executed a deletion — in the same publication that retired the
@@ -3360,7 +3347,6 @@ impl Engine {
                 &attachment.layer,
                 attachment.level,
                 store,
-                store_version,
                 &ctx.view_data.row_space,
             )
         });
@@ -3457,10 +3443,7 @@ impl Engine {
             return Ok(Vec::new());
         }
 
-        let (store_version, shard) = (
-            self.write.with_artifacts(|store| store.version()),
-            generation.bundle.manifest.identity.shard_id,
-        );
+        let shard = generation.bundle.manifest.identity.shard_id;
 
         // **The layers this response walks**, which is what makes the dependent drop below
         // decidable. A target missing from a response that never looked at its layer was not
@@ -3513,7 +3496,6 @@ impl Engine {
                         &name,
                         level,
                         store,
-                        store_version,
                         &view_data.row_space,
                     )
                 });
@@ -3543,10 +3525,8 @@ impl Engine {
                     // visibly so. The per-artifact label arrives with content (Stage 3); until then
                     // the named field has nothing to satisfy, and admitting the artifact instead
                     // would make a missing declaration a grant to everyone.
-                    let crate::artifacts::ArtifactVerdict::Serve {
-                        masked_count,
-                        rank,
-                    } = view.verdict(entity, ordinal, None)
+                    let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
+                        view.verdict(entity, ordinal, None)
                     else {
                         continue;
                     };
@@ -3570,18 +3550,29 @@ impl Engine {
                 // the mask nor the viewport, so a request that rebuilds them is doing generation
                 // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
                 // costs.
-                let lineage = self.lineages.get_or_build(&name, level, store_version, || {
-                    self.write.with_artifacts(|store| {
-                        crate::cut::Lineage::new(store.level(&name, level).map(
-                            |(ordinal, record)| {
-                                let within = record
-                                    .parent
-                                    .filter(|parent| parent.level == level)
-                                    .map(|parent| parent.ordinal);
-                                (ordinal, within)
-                            },
-                        ))
-                    })
+                //
+                // **The version and the build are taken inside one hold of the artifacts lock**,
+                // which is what makes the cached lineage the lineage *of* the version it is filed
+                // under: read separately, a write landing between the two would file the new
+                // level's edges under the old level's version, and the next request would serve a
+                // cut through a tree that has moved.
+                let lineage = self.write.with_artifacts(|store| {
+                    self.lineages.get_or_build(
+                        &name,
+                        level,
+                        store.level_version(&name, level),
+                        || {
+                            crate::cut::Lineage::new(store.level(&name, level).map(
+                                |(ordinal, record)| {
+                                    let within = record
+                                        .parent
+                                        .filter(|parent| parent.level == level)
+                                        .map(|parent| parent.ordinal);
+                                    (ordinal, within)
+                                },
+                            ))
+                        },
+                    )
                 });
                 let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
                 // Ascending and deduplicated, which the cut guarantees — so the membership test in
@@ -3641,12 +3632,12 @@ impl Engine {
                             .unwrap_or_default();
                         crate::derived::compute(&declared_derived, &visible, &locator)
                     };
-                    let (key, parent) = self.write.with_artifacts(|store| {
-                        match store.get(&name, level, ordinal) {
-                            Some(record) => (record.key.clone(), record.parent),
-                            None => (None, None),
-                        }
-                    });
+                    let (key, parent) =
+                        self.write
+                            .with_artifacts(|store| match store.get(&name, level, ordinal) {
+                                Some(record) => (record.key.clone(), record.parent),
+                                None => (None, None),
+                            });
                     // Recorded, not resolved: which artifacts this response holds is not known
                     // until every layer and level has been walked, and a parent — or the artifact
                     // a dependent hangs from — may sit in a level this loop has not reached.

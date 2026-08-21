@@ -285,9 +285,17 @@ impl ArtifactRows {
 /// - the **prefix**, because a fold renumbers the base row space wholesale, so a projection built
 ///   over the old one names other people's documents;
 /// - the **view**, because row space is per view;
-/// - the **store version**, because a publication adds memberships the projection has never seen —
-///   and a cached projection that silently omitted them would serve a level with its newest
-///   clusters absent, indistinguishable from clusters that failed their criterion.
+/// - the **level's version**, because a publication adds memberships the projection has never
+///   seen — and a cached projection that silently omitted them would serve a level with its
+///   newest clusters absent, indistinguishable from clusters that failed their criterion.
+///
+/// **The level's version and not the store's**, which is what this carried until the scale
+/// campaign measured the difference (`design/artifact-serving-at-scale.md` §8.1): a store-wide
+/// counter makes one suppression, one growth or one publication *anywhere* invalidate every
+/// level's form in every view — 138 s of rebuild at 10⁷ artifacts over 10⁹ rows, so under any
+/// read-write load the cache never survives to be used. The narrower key is sound because the
+/// build reads exactly two things: the records of one `(layer, level)`, which is what that level's
+/// version counts, and the view's row space, which is fixed by the two terms above it.
 ///
 /// **The segments version is deliberately not a term, and that is what the base-row rule buys.**
 /// A flush and a merge both move it, and both leave every bit of this projection correct: the form
@@ -300,7 +308,7 @@ impl ArtifactRows {
 struct ProjectionKey {
     prefix: String,
     view: String,
-    store_version: u64,
+    level_version: u64,
 }
 
 /// One row-space projection per `(view, layer, level)`, rebuilt when its [`ProjectionKey`] moves.
@@ -321,6 +329,11 @@ type LevelAddress = (String, String, u32);
 #[derive(Debug, Default)]
 pub struct ArtifactProjections {
     cached: Mutex<BTreeMap<LevelAddress, (ProjectionKey, Arc<ArtifactRows>)>>,
+    /// How many forms this has built since the engine opened. **The cadence, counted** — what
+    /// §8.1 is about is not the cost of one build but how many a write provokes, and that is a
+    /// number nothing reported until the grain changed. Read by the fold's own log line and by
+    /// [`crate::Engine::artifact_projection_builds`].
+    builds: std::sync::atomic::AtomicU64,
 }
 
 impl ArtifactProjections {
@@ -328,13 +341,24 @@ impl ArtifactProjections {
         Self::default()
     }
 
-    /// This level's row form for the given generation, building it if what is held is stale.
+    /// See [`Self::builds`].
+    pub fn builds(&self) -> u64 {
+        self.builds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// This level's row form for the generation `store` is in, building it if what is held is
+    /// stale.
     ///
-    /// **The build runs outside the lock**, so a slow projection does not block every other layer's
-    /// requests behind it. Two threads racing the same key both build and the last one wins; they
-    /// build from the same store version over the same row space, so the two results are equal and
-    /// the waste is one projection, not a wrong answer.
-    #[allow(clippy::too_many_arguments)]
+    /// **The version is read from the store this builds from, never handed in.** Both come from
+    /// the one borrow, so the form cached under version *v* is the form of the level *at* version
+    /// *v* — there is no window in which a caller's separately-read version could label a form
+    /// built from records that have since moved. That is the whole of the freshness argument, and
+    /// a stale form here is a wrong masked count with nothing reporting a fault.
+    ///
+    /// **The build runs outside this cache's lock**, so a slow projection does not block every
+    /// other layer's requests behind it. Two threads racing the same key both build and the last
+    /// one wins; they build from the same level version over the same row space, so the two
+    /// results are equal and the waste is one projection, not a wrong answer.
     pub fn get_or_build(
         &self,
         prefix: &str,
@@ -342,17 +366,20 @@ impl ArtifactProjections {
         layer: &str,
         level: u32,
         store: &ArtifactStore,
-        store_version: u64,
         space: &RowSpace,
     ) -> Arc<ArtifactRows> {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
             view: view.to_string(),
-            store_version,
+            level_version: store.level_version(layer, level),
         };
         let map_key = (view.to_string(), layer.to_string(), level);
 
-        if let Some((held, rows)) = self.cached.lock().unwrap_or_else(|e| e.into_inner()).get(&map_key)
+        if let Some((held, rows)) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&map_key)
         {
             if *held == key {
                 return Arc::clone(rows);
@@ -360,6 +387,8 @@ impl ArtifactProjections {
         }
 
         let rows = Arc::new(ArtifactRows::build(store.level(layer, level), space));
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -538,10 +567,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             Containment::Unsatisfied => return ArtifactVerdict::Absent(Withheld::Containment),
         };
 
-        ArtifactVerdict::Serve {
-            masked_count,
-            rank,
-        }
+        ArtifactVerdict::Serve { masked_count, rank }
     }
 
     /// The artifact's full membership size, in **row** terms.
@@ -564,7 +590,10 @@ mod tests {
         ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, MembershipSource,
     };
 
-    fn declaration(carries_own_labels: bool, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
+    fn declaration(
+        carries_own_labels: bool,
+        criterion: Option<ExistenceCriterion>,
+    ) -> LayerDeclaration {
         LayerDeclaration {
             name: "clusters/a".into(),
             title: Some("A".into()),
@@ -771,7 +800,8 @@ mod tests {
         // Terms satisfied, criterion not: still absent. Under the old gate modes this artifact
         // would have been served, with an exact masked count of 4.
         assert_eq!(
-            fx.view(&d, true).verdict(EntityId::new(999), 0, Some(TermId::new(7))),
+            fx.view(&d, true)
+                .verdict(EntityId::new(999), 0, Some(TermId::new(7))),
             ArtifactVerdict::Absent(Withheld::Criterion)
         );
     }
@@ -856,7 +886,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &all,
-                dependency_served: &dependency_served,
+            dependency_served: &dependency_served,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -876,7 +906,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &nearly,
-                dependency_served: &dependency_served,
+            dependency_served: &dependency_served,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -947,7 +977,7 @@ mod tests {
             layer_reachable: true,
             rows: &rows,
             mask: &everything,
-                dependency_served: &dependency_served,
+            dependency_served: &dependency_served,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1070,7 +1100,8 @@ mod tests {
         let mask = Bitmap::of(&[1, 2, 3]);
         // A prerequisite that panics rather than one that refuses: refusing would let this pass
         // for a predicate that asked and was told no, which is a different property.
-        let never = |_: &Attachment| -> bool { panic!("an unattached artifact asked its dependency") };
+        let never =
+            |_: &Attachment| -> bool { panic!("an unattached artifact asked its dependency") };
         assert!(ArtifactView {
             declaration: &d,
             overlay: &Overlay::new(),

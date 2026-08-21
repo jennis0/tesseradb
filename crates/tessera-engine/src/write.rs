@@ -70,11 +70,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
-use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
+use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
 use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
@@ -1606,7 +1606,9 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
-    fn registry_for_publication(&self) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
+    fn registry_for_publication(
+        &self,
+    ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
         let registry = lock_recover(&self.registry);
         let low_water = lock_recover(&self.allocator).low_water();
         let (layers, tombstones) = registry.snapshot();
@@ -2540,11 +2542,10 @@ impl WritePath {
         })?;
         self.health().lap(WriteStage::SubmitToReceipt, mark);
         match receipt.outcome {
-            Ok(Ack::Ingested {
-                entity_ids,
-                minted,
-            }) => Ok((entity_ids, minted)),
-            Ok(other) => unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}"),
+            Ok(Ack::Ingested { entity_ids, minted }) => Ok((entity_ids, minted)),
+            Ok(other) => {
+                unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -2571,14 +2572,14 @@ impl WritePath {
         &self,
         declaration: tessera_types::layer::LayerDeclaration,
     ) -> Result<EntityId, AcceptError> {
-        let receipt = self
-            .handle()?
-            .submit(Command::RegisterLayer {
-                declaration: Box::new(declaration),
-            })?;
+        let receipt = self.handle()?.submit(Command::RegisterLayer {
+            declaration: Box::new(declaration),
+        })?;
         match receipt.outcome {
             Ok(Ack::LayerRegistered { entity }) => Ok(entity),
-            Ok(other) => unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}"),
+            Ok(other) => {
+                unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -3624,7 +3625,7 @@ mod vocabulary_extensions_tests {
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
-        text_extents: Vec::new(),
+            text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -4051,7 +4052,9 @@ fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRe
     by_level
         .into_iter()
         .filter_map(|((layer, level), (index, ordinals))| {
-            let joins = ordinals.iter().map(|(ordinal, joining)| (*ordinal, joining));
+            let joins = ordinals
+                .iter()
+                .map(|(ordinal, joining)| (*ordinal, joining));
             tessera_lifecycle::membership::growth_record(layer, level, joins)
                 .map(|record| (record, index))
         })
@@ -4114,7 +4117,10 @@ fn mint_plan<W>(
     if wanted.is_empty() {
         return None;
     }
-    let edges = closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
+    let edges = closed
+        .iter()
+        .flat_map(|e| e.edges.iter().cloned())
+        .collect();
     Some((wanted, edges))
 }
 
@@ -5246,8 +5252,7 @@ impl Executor {
             .views
             .iter()
             .flat_map(|view| {
-                view
-                    .segments
+                view.segments
                     .iter()
                     .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
             })
@@ -5479,7 +5484,9 @@ impl Executor {
         ) {
             Ok(repacked) => repacked,
             Err(e) => {
-                discard(&format!("its artifact memberships would not be rewritten ({e})"));
+                discard(&format!(
+                    "its artifact memberships would not be rewritten ({e})"
+                ));
                 return;
             }
         };
@@ -7592,8 +7599,10 @@ impl Executor {
                 .filter(|m| m.ordinal.is_none())
                 .map(|m| (m.layer.as_str(), m.level, m.key.as_str()))
                 .collect();
-            let anywhere: std::collections::BTreeSet<(&str, &str)> =
-                minting.iter().map(|(layer, _, key)| (*layer, *key)).collect();
+            let anywhere: std::collections::BTreeSet<(&str, &str)> = minting
+                .iter()
+                .map(|(layer, _, key)| (*layer, *key))
+                .collect();
 
             // **A child named under two parents refuses the batch**, which is the build's own
             // refusal at the other entry point (`artifacts-from-points.md` §4): two rows naming
@@ -7723,7 +7732,8 @@ impl Executor {
             // so a key that named nothing then may name an artifact now — and §5's second ruling is
             // that a key a live artifact holds is never minted again.
             let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
-            let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> = BTreeMap::new();
+            let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
+                BTreeMap::new();
             for ((layer, level, key), (_, members)) in &wanted {
                 match store.ordinal_of_key(layer, *level, key) {
                     Some(ordinal) => {
@@ -7765,12 +7775,12 @@ impl Executor {
                 // deliberately does not read past (`tessera_types::layer::parent_edges`).
                 let pending = |key: &str| {
                     let coarser = level.checked_sub(1)?;
-                    assigned
-                        .get(&(*layer, coarser, key))
-                        .map(|ordinal| tessera_lifecycle::wal::ParentRef {
+                    assigned.get(&(*layer, coarser, key)).map(|ordinal| {
+                        tessera_lifecycle::wal::ParentRef {
                             level: coarser,
                             ordinal: *ordinal,
-                        })
+                        }
+                    })
                 };
                 let record = registry
                     .prepare_publish(layer, *level, &incoming, store, alloc, &pending)
@@ -8517,7 +8527,8 @@ impl Executor {
         prepare: impl FnOnce(
             &mut LayerRegistry,
             &mut Allocator,
-        ) -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
+        )
+            -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
         ack_of: impl FnOnce(&WalRecord) -> Ack,
         respond: Responder,
     ) {
@@ -8891,12 +8902,8 @@ impl Executor {
             // in extents of its own but on the same list and behind the same reader. Artifact and
             // point entities are disjoint by construction — two regions, growing towards each other
             // — so the rows never collide and each side reads its tags against its own declaration.
-            match self.write_content_extent(
-                &prefix_dir,
-                partition,
-                live.bundle.partitions.len(),
-                n,
-            ) {
+            match self.write_content_extent(&prefix_dir, partition, live.bundle.partitions.len(), n)
+            {
                 // **Assigned from the held list, never pushed onto the clone.** The manifest this
                 // publication started from is the *stale* generation's, so extending it drops
                 // every earlier publication's entry — and an artifact whose content extent is
@@ -9016,7 +9023,10 @@ impl Executor {
         };
         let io = |path: &std::path::Path| {
             let path = path.to_path_buf();
-            move |source| tessera_store::StoreError::Io { path: path.clone(), source }
+            move |source| tessera_store::StoreError::Io {
+                path: path.clone(),
+                source,
+            }
         };
         let blocks = prefix_dir.join(&extent.blocks);
         let hasrow = prefix_dir.join(&extent.hasrow);
@@ -9144,7 +9154,10 @@ impl Executor {
             return Ok(Vec::new());
         }
 
-        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("members");
         std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
             path: dir.clone(),
             source,
@@ -9190,8 +9203,7 @@ impl Executor {
             return;
         }
         let started = std::time::Instant::now();
-        let store_version = self.live.with_artifacts(|store| store.version());
-        let mut built = 0usize;
+        let before_projections = self.artifact_projections.builds();
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
@@ -9202,16 +9214,14 @@ impl Executor {
                             layer,
                             *level,
                             store,
-                            store_version,
                             &view_data.row_space,
                         )
                     });
-                    built += 1;
                 }
             }
         }
         tracing::info!(
-            projections = built,
+            projections = self.artifact_projections.builds() - before_projections,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "the fold's artifact pass rebuilt every level's row form"
         );
@@ -9245,7 +9255,10 @@ impl Executor {
             return Ok(Vec::new());
         }
 
-        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("members");
         std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
             path: dir.clone(),
             source,
@@ -9383,11 +9396,11 @@ impl Executor {
                 presence: record_dir.join(&e.presence),
             })
             .collect();
-        let filter_columns =
-            match live
-                .filter_columns
-                .with_extents(&extents, &record_paths, &text_paths)
-            {
+        let filter_columns = match live.filter_columns.with_extents(
+            &extents,
+            &record_paths,
+            &text_paths,
+        ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
