@@ -18,8 +18,8 @@ or derived says so at the claim. Extends [`annotations.md`](annotations.md) and
 carries ten or more simultaneous viewers, so a budget met by spending the machine is not met at all.
 
 **Yes for artifacts that are somewhere; for artifacts that are everywhere, only with a different
-layout.** The worst request in the system — a principal who can see the whole corpus, at whole-map
-zoom, on a treed layer — goes from **~1 190 ms to ~325 ms**, and every other request shape is one to
+layout.** At the target the whole grid of principals and zooms runs **7.7–232 ms** (§7.2), against
+~1 190 ms for one cell of it when this began, and every other request shape is one to
 three orders of magnitude better than that.
 
 ## 2. The one idea
@@ -412,22 +412,36 @@ the containment partition (~40 MB), the lineage with depth and child index (~200
 #### Clustered and regional — HDBSCAN, point-and-radius, boundaries, hierarchy levels
 
 **Measured at the target**, 10⁷ artifacts over 10⁹ points, treed, lineage held per generation, no
-per-session state, all stages on one fixture. Peak RSS 19.8 GB.
+per-session state, all stages on one fixture. Peak RSS 25.3 GB. Milliseconds per request.
 
-| principal sees | whole map | 6.25% | 0.39% | 0.024% |
-|---|---:|---:|---:|---:|
-| everything | 108.1 | 32.8 | 9.6 | 8.3 |
-| 9.4% | **91.3** | 16.0 | 8.8 | 8.0 |
-| 3.1% | 62.5 | 13.8 | 8.5 | **8.0** |
+| principal sees \ viewport | 100% | 75% | 50% | 25% | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **100%** | 111.1 | **232.4** | 182.1 | 92.7 | 32.8 | 9.7 | 8.1 |
+| **75%** | 211.2 | 194.7 | 146.5 | 73.0 | 27.4 | 10.0 | 8.0 |
+| **50%** | 152.3 | 147.9 | 109.6 | 57.6 | 22.2 | 8.8 | 8.0 |
+| **25%** | 127.2 | 125.5 | 92.4 | 51.3 | 17.9 | 8.7 | 8.0 |
+| **9.4%** | 90.6 | 89.0 | 66.7 | 36.4 | 14.2 | 8.4 | 7.7 |
+| **3.1%** | 63.1 | 65.7 | 50.0 | 28.2 | 12.5 | 8.3 | **7.7** |
 
-**Between 8 and 108 ms**, against ~1 190 ms for the top-left cell when this campaign began. The split
-is the same at every scale measured: the verdict runs 0.1–105 ms and the cut 2.8–55 ms, and **the cut
-is the larger term in nine of the twelve cells** — 8 ms of floor at a 10⁷ level however few artifacts
-pass.
+**The worst case is a ridge just inside the grid, not a corner of it** — 232 ms at a full mask and a
+*three-quarter* viewport, against 111 ms at the same mask and the whole map. An earlier revision of
+this table sampled 100%, 6.25%, 0.39% and 0.024% and reported 108 ms as the worst request; it
+stepped over the peak, and **understated it by 2.1×** (owner, 2026-08-21). Both axes are swept
+through their middles here for that reason.
 
-**The corpus is ten times the earlier run's and the cells barely move** — 10⁷ artifacts over 10⁸
-points measured 7.8–60.3 ms — which is the flatness result holding at the artifact count that
-matters rather than only at 10⁶.
+**The cliff is the downward walk's guard, and the split says so exactly.** At a full mask and the
+whole map every artifact passes, the walk applies, and the cut is **2.7 ms**. Narrow the viewport to
+three-quarters and 1.2 million artifacts fall out of view — so nodes above the cut fail, the walk
+declines, and the sweep runs over 8.8 million passing: **133.7 ms**, fifty times as much. The verdict
+barely moves across that step, 108 → 99 ms.
+
+⊘ **That guard is the largest remaining item, and it is too strict.** It requires *every* node the
+walk sees to pass, so one failing artifact near the root sends a request that passes 88% of the layer
+back to the sweep. Handling a failing node locally — check its children; where one passes, nothing
+below it can be a fallback — would keep the walk on the whole top-left quadrant and take 232 ms to
+around 100, leaving the verdict as the bound. It needs a work-bounded descent for the case where a
+failing node's whole subtree fails, and a bail-out to the sweep when that descent runs long. Scoped,
+not built.
 
 #### Scattered — attribute predicates, per-analyst selections, terms-as-artifacts
 

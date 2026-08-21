@@ -17,11 +17,12 @@ owner decision**, backed by
 One part of it is built and gate-green — the cut rewrite — because it was a data-structure choice
 rather than a design one. Everything else is measured and proposed.
 
-**The target is met with room.** The worst request in the system — a principal who can see the whole
-corpus, at whole-map zoom, on a treed 10⁷-artifact layer — goes from **~1 190 ms to ~131 ms**, and to
-**~35 ms** once the lineage is held per generation, which is the one piece of ordinary work the rest
-now waits on. The whole-corpus principal ends up the *cheapest* case rather than the worst, because
-passing everything is exactly what makes the containment groups and the downward cut collapse.
+**The target is met, and the worst case is a ridge rather than a corner.** At 10⁷ artifacts over 10⁹
+points the whole grid of six principal coverages by seven zooms runs **7.7–232 ms** (memo §7.2),
+against ~1 190 ms for one cell of it when this began. The peak is at a **full mask and a
+three-quarter viewport**, not at either extreme — an earlier table sampled 100%, 6.25%, 0.39% and
+0.024% on both axes, stepped over the peak, and understated the worst request by 2.1× (owner,
+2026-08-21). Sample both axes through their middles.
 
 Five things a reader needs before opening it:
 

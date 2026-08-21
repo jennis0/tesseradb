@@ -1649,7 +1649,11 @@ fn main() {
     println!("arm,rows,artifacts,mask_pct,viewport_pct,depth,route,setup_ms,candidacy_us,count_us,containment_us,cut_us,total_us,candidates,served");
 
     // Whole signature groups, so the mask percentages are the ones a principal can actually have.
-    for groups in [SIGNATURE_GROUPS, 3, 1] {
+    // **Swept through the middle, not around it.** Three densities — everything, a tenth, a
+    // thirtieth — miss the band where the cut is dearest: enough artifacts pass to make the sweep
+    // expensive, not enough for the downward walk's guard to hold. That band is somewhere between
+    // them, and a table sampling only the ends reports the wrong worst case.
+    for groups in [SIGNATURE_GROUPS, 24, 16, 8, 3, 1] {
         let mask_pct = 100.0 * groups as f64 / SIGNATURE_GROUPS as f64;
         let m = mask(rows_n, &row_order, groups, group_size, &mut rng);
 
@@ -1662,7 +1666,18 @@ fn main() {
         );
 
         // Depth is what a client picks: enough tiles to fill a screen, so roughly sixteen a side.
-        for (viewport_pct, depth) in [(100.0f64, 0u8), (6.25, 6), (0.39, 8), (0.024, 10)] {
+        // **Through the wide end too.** Jumping from a sixteenth of the map to all of it steps
+        // over the zooms a viewer spends most of their time at, and the wide end is where a
+        // viewport stops narrowing the candidate set — so it is where the cut's cost is decided.
+        for (viewport_pct, depth) in [
+            (100.0f64, 0u8),
+            (75.0, 4),
+            (50.0, 4),
+            (25.0, 5),
+            (6.25, 6),
+            (0.39, 8),
+            (0.024, 10),
+        ] {
             let tiles = viewport(rows_n, viewport_pct / 100.0, depth);
             assert_same_answer(&row_forms, &index, &tiles, &m, rows_n);
 
