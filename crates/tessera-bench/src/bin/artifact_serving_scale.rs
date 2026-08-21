@@ -1591,13 +1591,26 @@ fn main() {
         eprintln!("# label column: the layer does not partition, so there is none");
     }
 
+    // **Built only for the shapes that would be served from it.** It is `Σ|membership|` entries, so
+    // at a corpus-covering layer over 10⁹ rows it is gigabytes — and a clustered layer is served
+    // artifact-major at every zoom, so building one for the `runs` arm measures nothing and costs
+    // the run its headroom.
     let t = Instant::now();
-    let lists = ListColumn::build(&row_forms, rows_n, artifacts);
-    eprintln!(
-        "# list column: {:.1} s to build, {:.0} MB resident",
-        t.elapsed().as_secs_f64(),
-        lists.resident_bytes() as f64 / 1e6
-    );
+    let lists = if matches!(arm, Arm::Scattered | Arm::Partition) {
+        let built = ListColumn::build(&row_forms, rows_n, artifacts);
+        eprintln!(
+            "# list column: {:.1} s to build, {:.0} MB resident",
+            t.elapsed().as_secs_f64(),
+            built.resident_bytes() as f64 / 1e6
+        );
+        built
+    } else {
+        eprintln!("# list column: not built — this arm is served artifact-major at every zoom");
+        ListColumn {
+            at: vec![0; 1],
+            of_row: Vec::new(),
+        }
+    };
 
     let t = Instant::now();
     let contains = ContainmentGroups::build(&row_forms, artifacts);
@@ -1677,11 +1690,7 @@ fn main() {
                         grouped(&held, groups, &tiles, &m)
                     }),
                 ),
-                (
-                    "listed",
-                    0.0,
-                    Box::new(|| listed(&held, groups, &tiles, &m)),
-                ),
+
                 (
                     "hoisted",
                     0.0,
@@ -1692,7 +1701,14 @@ fn main() {
             ];
 
             let mut routes = routes;
-            {
+            if matches!(arm, Arm::Scattered | Arm::Partition) {
+                routes.push((
+                    "listed",
+                    0.0,
+                    Box::new(|| listed(&held, groups, &tiles, &m)),
+                ));
+            }
+            if matches!(arm, Arm::Scattered | Arm::Partition) {
                 // **The row-major list answers candidacy by a different mechanism**, so the claim
                 // that it answers it identically is the one worth checking rather than describing.
                 let mut theirs: Vec<u32> = lists.present(&tiles, &m, artifacts).iter().collect();
@@ -1735,7 +1751,20 @@ fn main() {
                 ));
             }
 
+            // **`--only` keeps the legacy routes out of a run that cannot afford them.** The
+            // shipped loop is `O(artifacts)` with a masked intersection apiece, which at ten million
+            // scattered artifacts is ~24 s a call — hours across the sweep, to re-measure a figure
+            // three smaller scales already establish. Which routes run does not change what any of
+            // them answers: each builds its own result from the same held state.
+            let only: Option<Vec<&str>> = args
+                .iter()
+                .position(|a| a == "--only")
+                .and_then(|i| args.get(i + 1))
+                .map(|v| v.split(',').collect());
             for (route, setup_ms, run) in routes {
+                if only.as_ref().is_some_and(|keep| !keep.contains(&route)) {
+                    continue;
+                }
                 let mut best = Phases::default();
                 let mut best_total = f64::MAX;
                 for _ in 0..3 {

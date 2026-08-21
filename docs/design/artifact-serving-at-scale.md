@@ -320,10 +320,10 @@ ten times the points:
 | cut | ~1 010 ms | **3.05 ms** |
 | **total** | **~1 195 ms** | **~131 ms, or ~35 ms once the lineage is cached** |
 
-⊘ **10⁷ artifacts over 10⁹ points is not measured directly** — the entity-space fixture for it needs
-~41 GB against 47 GB of RAM. Two independent measurements agree on ~135 ms for the verdict there: the
-design is flat in corpus size (10⁶ artifacts, 10⁸ → 10⁹ points, no movement) and linear in artifact
-count (13.5 ms at 10⁶ over 10⁹).
+**10⁷ artifacts over 10⁹ points is now measured directly** — §7.2 — at 19.8 GB peak, once the list
+column stopped being built for a layer that is never served from one. The flatness argument that
+stood in for it holds: the same twelve cells over 10⁸ points measure 7.8–60.3 ms against 8.0–108.1
+at ten times the corpus.
 
 ### 7.1 What a request pays, stage by stage
 
@@ -411,28 +411,29 @@ the containment partition (~40 MB), the lineage with depth and child index (~200
 
 #### Clustered and regional — HDBSCAN, point-and-radius, boundaries, hierarchy levels
 
-**Measured end to end on one fixture**, 10⁷ artifacts, treed, lineage held per generation, no
-per-session state — verdict, count and cut in one loop rather than assembled from two probes:
+**Measured at the target**, 10⁷ artifacts over 10⁹ points, treed, lineage held per generation, no
+per-session state, all stages on one fixture. Peak RSS 19.8 GB.
 
 | principal sees | whole map | 6.25% | 0.39% | 0.024% |
 |---|---:|---:|---:|---:|
-| everything | **36.8** | 31.4 | 9.9 | 8.1 |
-| 9.4% | 60.3 | 14.7 | 8.5 | 8.1 |
-| 3.1% | 35.0 | 13.1 | 8.4 | **7.8** |
+| everything | 108.1 | 32.8 | 9.6 | 8.3 |
+| 9.4% | **91.3** | 16.0 | 8.8 | 8.0 |
+| 3.1% | 62.5 | 13.8 | 8.5 | **8.0** |
 
-**Everything is between 7.8 and 60 ms**, and the cut is the larger term in eleven of the twelve
-cells — 7.7 ms of floor at a 10⁷ level however few artifacts pass, rising to 56 ms where a million
-do. The verdict ranges from 0.05 ms to 34.
+**Between 8 and 108 ms**, against ~1 190 ms for the top-left cell when this campaign began. The split
+is the same at every scale measured: the verdict runs 0.1–105 ms and the cut 2.8–55 ms, and **the cut
+is the larger term in nine of the twelve cells** — 8 ms of floor at a 10⁷ level however few artifacts
+pass.
 
-⊘ Measured at 10⁸ points. The design is flat in corpus size (§7, 10⁶ artifacts, 10⁸ → 10⁹, no
-movement), so these carry; the direct run at 10⁷ × 10⁹ needs ~41 GB against 47 and is the one
-measurement still owed.
+**The corpus is ten times the earlier run's and the cells barely move** — 10⁷ artifacts over 10⁸
+points measured 7.8–60.3 ms — which is the flatness result holding at the artifact count that
+matters rather than only at 10⁶.
 
 #### Scattered — attribute predicates, per-analyst selections, terms-as-artifacts
 
-**Served row-major** (§5.1 for a partitioning layer, a list per row where it overlaps), at ~10 ns per
-visible row and **flat in the artifact count**. Measured at 10⁵ overlapping artifacts over 10⁷
-points, against the best artifact-major route:
+**Served row-major** — §5.1's label column where the layer partitions, a list per row where it
+overlaps — at ~10 ns per visible row and **flat in the artifact count**. Measured at 10⁵ overlapping
+artifacts over 10⁷ points against the best artifact-major route:
 
 | viewport | artifact-major | **row-major list** |
 |---|---:|---:|
@@ -442,14 +443,27 @@ points, against the best artifact-major route:
 | 0.024% | 16.1 ms | **0.14 ms** |
 
 The two cross where they should: a row-major scan is cheapest where the viewport is small, and at
-whole-map zoom the extent test settles the layer without scanning anything. **So there is no shape
-left with no answer** — what changed between drafts is that the list column generalises §5.1 from
-partitioning layers to overlapping ones, and `artifacts-from-points` already reads it.
+whole-map zoom the extent test settles the layer without scanning anything. **No artifact shape is
+left without an answer**, which is what the list column changed — it generalises the row-major
+layout from partitioning layers to overlapping ones, and `artifacts-from-points` already reads it.
 
-⊘ **The awkward band is mid-zoom at the full corpus.** The scan costs `O(k × visible rows)`, so a
-6.25% viewport over 10⁹ points is 6×10⁷ rows ≈ **600 ms** *(derived from the measured constant)*.
-Narrow viewports are tens of milliseconds and whole-map is answered artifact-major; the middle is
-where this shape is dearest, inverting the clustered case.
+⊘ **At the target the numbers are derived, not measured.** The scan costs `O(k × visible rows)`, so
+a 6.25% viewport over 10⁹ points is 6×10⁷ rows ≈ **600 ms**; a 0.39% one is ~40 ms and whole-map is
+answered artifact-major. **Mid-zoom at the full corpus is where this shape is dearest**, inverting
+the clustered case. The direct run is in flight and slow for a reason worth recording: the
+correctness assertions each scan the whole population through the shipped loop, which is ~24 s a
+call at ten million scattered artifacts.
+
+#### What this costs to hold
+
+| | at 10⁷ artifacts over 10⁹ points |
+|---|---:|
+| row form *(exists)* | 3.6 GB per view, per level |
+| lineage — parents, depth, child index | ~200 MB |
+| tile index and extents | 42 MB + 80 MB |
+| containment partition | 40 MB |
+| list column *(scattered layers only)* | 4.4 GB |
+| **per session** | **nothing** |
 
 ### 7.3 What bounds the system now
 
