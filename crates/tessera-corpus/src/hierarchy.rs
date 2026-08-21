@@ -30,7 +30,8 @@
 //!   are simply absent: an unbalanced tree is what makes a single-depth cut visibly wrong, which
 //!   is the check Stage 5 owes.
 
-use crate::Corpus;
+use crate::artifacts::layer_salt;
+use crate::{keyed, salt, Corpus, Grant};
 
 /// Children per internal node. Three rather than two: a binary tree makes "the middle child" and
 /// "the only other child" the same case, and a fan-out that is not a power of two keeps the
@@ -41,6 +42,8 @@ pub const BRANCH: u64 = 3;
 /// The measured noise fraction at an HDBSCAN split is 20–25%, so this is its pessimistic end.
 pub const COVERAGE_NUM: u64 = 3;
 pub const COVERAGE_DEN: u64 = 4;
+
+const SALT_T_COUNT: u64 = salt(b"trd-cnt ");
 
 impl Corpus {
     /// The parent of node `a`, or `None` at the root.
@@ -145,13 +148,10 @@ impl Corpus {
         let mut holders = vec![0];
         let mut node = 0;
         loop {
-            let next = self
-                .artifact_children(count, node)
-                .into_iter()
-                .find(|&c| {
-                    let (lo, hi) = self.treed_interval(count, c);
-                    e >= lo && e < hi
-                });
+            let next = self.artifact_children(count, node).into_iter().find(|&c| {
+                let (lo, hi) = self.treed_interval(count, c);
+                e >= lo && e < hi
+            });
             match next {
                 Some(child) => {
                     holders.push(child);
@@ -160,6 +160,32 @@ impl Corpus {
                 None => return holders,
             }
         }
+    }
+
+    /// How many nodes this level's tree holds — the one place `n` is licensed in this arm, on
+    /// [`crate::artifacts::Corpus::artifacts_in`]'s reasoning.
+    ///
+    /// **Scaled far more gently than the flat and partition arms' population.** Those size at
+    /// `n / 100` because their membership costs `O(1)` rows per member; a tree node's membership
+    /// includes every descendant's ([`Corpus::treed_members`]), so this arm's total member-row
+    /// count is `O(count * depth)` rather than `O(n)` — the same shape a real condensed tree has,
+    /// and `artifact-delivery.md` §5.3 models it in exactly these terms (a 2.4M-point corpus
+    /// carrying ~10⁴ tree nodes). `n / 10_000` keeps this arm's cost the same order as that model
+    /// rather than letting a population sized for the other arms make the lineage the fixture's
+    /// dominant cost.
+    pub fn treed_count(&self, layer: u64) -> u64 {
+        let scaled = self.n() / 10_000;
+        let by_layer = keyed(self.seed(), SALT_T_COUNT ^ layer_salt(layer, 0), layer) % 4;
+        scaled.saturating_sub(by_layer).max(BRANCH + 2)
+    }
+
+    /// The treed census: one O(*n*) pass, per-node visible counts — see
+    /// [`crate::Corpus::bucket_census`]. Every entity is counted once per ancestor it has
+    /// ([`Corpus::treed_holding`]'s whole chain, root included), which is the containment property
+    /// this arm plants: a node's masked count is never less than the sum any one child reports.
+    pub fn treed_artifact_census(&self, layer: u64, grant: &Grant) -> Vec<(u64, u64)> {
+        let count = self.treed_count(layer);
+        self.bucket_census(grant, |e| self.treed_holding(count, e))
     }
 }
 
@@ -248,7 +274,10 @@ mod tests {
             holders.sort_unstable();
             let mut got = c.treed_holding(count, e as u64);
             got.sort_unstable();
-            assert_eq!(got, *holders, "the reverse direction disagrees at entity {e}");
+            assert_eq!(
+                got, *holders,
+                "the reverse direction disagrees at entity {e}"
+            );
         }
     }
 
@@ -308,5 +337,36 @@ mod tests {
                 large.artifact_children(40, a)
             );
         }
+    }
+
+    /// The census oracle agrees with `treed_members`, by brute force — the containment property
+    /// carried through: the root's count is the corpus's own visible total.
+    #[test]
+    fn the_census_agrees_with_treed_members_by_brute_force() {
+        let c = corpus(20_000);
+        let grant = crate::Grant::parse("0,1,2,3").unwrap();
+        let count = c.treed_count(8);
+        let mut expected = std::collections::BTreeMap::new();
+        for a in 0..count {
+            let visible = c
+                .treed_members(count, a)
+                .into_iter()
+                .filter(|e| c.visible(*e, &grant))
+                .count() as u64;
+            if visible > 0 {
+                expected.insert(a, visible);
+            }
+        }
+        let census = c.treed_artifact_census(8, &grant);
+        let got: std::collections::BTreeMap<u64, u64> = census.into_iter().collect();
+        assert_eq!(
+            got, expected,
+            "the census and the brute-force count disagree"
+        );
+        assert_eq!(
+            got[&0],
+            (0..c.n()).filter(|e| c.visible(*e, &grant)).count() as u64,
+            "the root's masked count is not the corpus's own visible total"
+        );
     }
 }
