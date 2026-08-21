@@ -17,10 +17,12 @@ for owner decision**. Nothing in it is built and nothing is ruled. Its measureme
 
 The four things a reader needs before opening it:
 
-- **The target is reachable for clustered artifacts and walls for scattered ones.** 10⁷ clustered
-  artifacts serve in ~138 ms single-threaded against 2 770 ms today; a *scattered* layer — an
-  attribute predicate, a per-analyst selection, a term-as-artifact — walls at ~2×10⁵, and no spatial
-  structure moves it. Locality is worth two decades of artifact count.
+- **The target is reachable for clustered artifacts, and for scattered ones only with a different
+  layout.** 10⁷ clustered artifacts serve in **131 ms** single-threaded against 2 875 ms today. A
+  *scattered* layer walls at ~2×10⁵ under the same structures, because no tree helps an artifact
+  that is everywhere — but a **row-major** layout does: one label per row instead of one bitmap per
+  artifact, which is flat in the artifact count and, at 10⁹ points, the only layout that fits in
+  memory at all (4 GB against 78.5 GB).
 - **The request path is `O(artifacts)` four times and only one of the four has the request in it.**
   That is the whole finding; everything else follows from moving the other three off it.
 - **Two live defects turned up, neither about scale.** Any artifact write invalidates every cached

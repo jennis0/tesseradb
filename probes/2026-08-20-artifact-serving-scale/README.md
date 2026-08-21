@@ -173,6 +173,51 @@ map the viewport contains everything and the extent test settles the entire popu
 boundary set measures 1.6 blocks per artifact at 10⁴ and 1.0 at 10⁶, because the regions have to get
 smaller as they get more numerous to keep fitting the same map.
 
+## And a different layout for the ones that are everywhere
+
+The scattered shapes have a property clusters do not: **a single-valued attribute predicate
+partitions the corpus.** Every point carries exactly one value, so the memberships are disjoint and
+the natural storage is one label per **row** rather than one bitmap per artifact. That inverts both
+questions — candidacy becomes one scan of `viewport ∩ M_auth` marking labels, and the count becomes
+one histogram over `M_auth` — and both then cost points rather than artifacts.
+
+Measured over 10⁸ points, single-threaded, both against the same per-token structure. **The point is
+the columns, not the rows:**
+
+| viewport | artifacts | shipped | artifact-major (the index) | **row-major (a label per row)** |
+|---|---:|---:|---:|---:|
+| whole map | 10³ | 376 ms | **1.9 ms** | 333 ms |
+| whole map | 10⁴ | 2 320 ms | **15.5 ms** | 332 ms |
+| 6.25% | 10³ | 102 ms | 26.1 ms | **23.4 ms** |
+| 6.25% | 10⁴ | 448 ms | 193 ms | **23.3 ms** |
+| 0.39% | 10³ | 79.0 ms | 2.06 ms | **1.48 ms** |
+| 0.39% | 10⁴ | 271 ms | 21.2 ms | **1.56 ms** |
+| 0.024% | 10⁴ | 259 ms | 5.07 ms | **0.18 ms** |
+
+Ten times the artifacts and the row-major route does not move. Its cost is ~4–5 ns per visible row
+in the viewport and nothing else. The two cross where you would want them to — row-major is dearest
+at whole-map zoom, where it walks the corpus and where the extent test needs no scan at all — so the
+rule is *take the cheaper*, and both are exact.
+
+**Candidates and counts are asserted identical to the shipped loop's** — ordinal for ordinal and
+count for count, every artifact, before either route is timed.
+
+### The part that is not about speed
+
+At the target the artifact-major form does not fit. From the residency campaign's measured 78.5 B
+per container on scattered membership, over 10⁹ rows:
+
+| scattered artifacts | members each | artifact-major | row-major |
+|---:|---:|---:|---:|
+| 10⁴ | 10⁵ | 12.0 GB | **4.0 GB** |
+| 10⁵ | 10⁴ | 78.5 GB | **4.0 GB** |
+| 10⁶ | 10³ | 78.5 GB | **4.0 GB** |
+
+⊘ Derived from the measured constant, not measured at 10⁹ — and consistent with what the residency
+campaign saw directly, where the scattered arm at 10⁷ artifacts was OOM-killed rather than slow. The
+row-major form is one `u32` per row whatever the artifact count, narrower at the `u8`/`u16` widths
+`configuration.md` already declares, and a mappable array rather than anonymous allocation.
+
 ## What this does not measure, stated so it is not read as settled
 
 - **Not a real clustering.** The `runs` arm is a partition of the map into row-contiguous artifacts,
@@ -182,5 +227,8 @@ smaller as they get more numerous to keep fitting the same map.
   synthetic arm.
 - **One level, one layer.** A treed layer's serving loop runs the whole thing per level and a
   request may name several layers; both are linear multipliers on everything here.
+- **The row-major arm is single-valued only.** An overlapping layer needs a list per row rather than
+  a label — the same inversion at a larger constant, and the shape `artifacts-from-points` already
+  calls a list column. Not measured.
 - **Nothing is served.** The gather, the record-blob reads for supplied content, the wire encoding
   and the cut are all downstream of this and are not in these numbers.

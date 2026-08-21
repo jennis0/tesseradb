@@ -110,6 +110,7 @@ enum Arm {
     Runs,
     Regions,
     Scattered,
+    Partition,
 }
 
 impl Arm {
@@ -118,6 +119,7 @@ impl Arm {
             Arm::Runs => "runs",
             Arm::Regions => "regions",
             Arm::Scattered => "scattered",
+            Arm::Partition => "partition",
         }
     }
 
@@ -126,6 +128,7 @@ impl Arm {
             "runs" => Some(Arm::Runs),
             "regions" => Some(Arm::Regions),
             "scattered" => Some(Arm::Scattered),
+            "partition" => Some(Arm::Partition),
             _ => None,
         }
     }
@@ -323,6 +326,24 @@ fn membership_rows(
             // it touches every node of the tree, so it is never inside one and never outside one.
             for _ in 0..members {
                 bitmap.add(rng.below(row_count as u64) as u32);
+            }
+        }
+        Arm::Partition => {
+            // Scattered like the arm above, and **disjoint**, which is the property that changes
+            // what can be stored. A single-valued attribute predicate partitions the corpus: every
+            // point carries exactly one value, so the layer's memberships cover the row space
+            // without overlapping and one label per row says everything the bitmaps do.
+            //
+            // Every `artifacts`-th row, offset by this artifact's index — a deterministic
+            // partition with no locality at all, which is the pessimistic placement for the
+            // artifact-major route and makes no difference to the row-major one.
+            let mut row = artifact as u32;
+            while (row as u64) < row_count as u64 {
+                bitmap.add(row);
+                row = row.saturating_add(artifacts as u32);
+                if artifacts == 0 {
+                    break;
+                }
             }
         }
     }
@@ -978,6 +999,128 @@ fn settled(
     phases
 }
 
+/// **The row-major layout: one label per row, in place of one bitmap per artifact.**
+///
+/// A single-valued attribute predicate **partitions** the corpus — the column's distinct values are
+/// its artifacts and every point carries one — so the whole layer is `label[row]`, and both
+/// questions the request path asks become sequential scans whose cost is in **points rather than
+/// artifacts**:
+///
+/// - **candidacy** — walk `viewport ∩ M_auth` and mark the labels seen. The result is exactly *which
+///   artifacts have a visible member in view*, for every artifact at once, in one pass.
+/// - **the count** — walk `M_auth` and increment per label. No viewport in it, so it belongs in the
+///   per-token structure beside the containment verdicts.
+///
+/// **Row-addressed, and that is the point.** `attrs/` already holds this column, but addressed by
+/// **entity** — which is right for a filter and wrong for a viewport, because a viewport is a set of
+/// contiguous *row* ranges and reaching the entity form needs an `entity_of` per row. The Stage 6
+/// measurement is where that shows: ~120 ms of its 175 ms was the inversion, not the counting. A
+/// row-addressed copy is what removes it, and it costs one array.
+///
+/// **This is not a new mechanism.** `artifacts-from-points` already *reads* this layout — an integer
+/// key column, or a list column of the artifacts a point belongs to — and converts it into
+/// artifact-major bitmaps on the way in. The option is to keep what the build was handed.
+///
+/// ⊘ **Single-valued only.** A multi-valued or overlapping layer needs a list per row rather than a
+/// label, which is the same inversion at a larger constant and is not measured here.
+struct LabelColumn {
+    /// `label[row]` — the artifact that row belongs to, or `HOLE`.
+    label: Vec<u32>,
+}
+
+const HOLE: u32 = u32::MAX;
+
+impl LabelColumn {
+    /// Build one, or decline where the layer does not partition — a row claimed twice is not a
+    /// partition, and silently keeping the last writer would measure a layer the fixture did not
+    /// build.
+    fn build(rows: &ArtifactRows, row_count: u32) -> Option<Self> {
+        let mut label = vec![HOLE; row_count as usize];
+        for ordinal in 0..rows.len() as u32 {
+            let Some(m) = rows.get(ordinal) else { continue };
+            for row in m.iter() {
+                if label[row as usize] != HOLE {
+                    return None;
+                }
+                label[row as usize] = ordinal;
+            }
+        }
+        Some(LabelColumn { label })
+    }
+
+    /// The per-token half: `|membership ∩ M_auth|` for every artifact, in one walk of the mask.
+    fn counts(&self, mask: &ComposedMask, artifacts: usize) -> Vec<u32> {
+        let mut counts = vec![0u32; artifacts];
+        let visible = {
+            let mut v = mask.base.clone();
+            v.andnot_inplace(&mask.minus);
+            v.or_inplace(&mask.plus);
+            v
+        };
+        for row in visible.iter() {
+            let at = self.label[row as usize];
+            if at != HOLE {
+                counts[at as usize] += 1;
+            }
+        }
+        counts
+    }
+
+    /// The per-request half: which artifacts have a visible member inside the viewport.
+    fn present(&self, tiles: &Bitmap, mask: &ComposedMask, artifacts: usize) -> Bitmap {
+        let here = mask.visible_rows(tiles);
+        let mut seen = vec![false; artifacts];
+        for row in here.iter() {
+            let at = self.label[row as usize];
+            if at != HOLE {
+                seen[at as usize] = true;
+            }
+        }
+        let mut out = Bitmap::new();
+        for (ordinal, &hit) in seen.iter().enumerate() {
+            if hit {
+                out.add(ordinal as u32);
+            }
+        }
+        out.run_optimize();
+        out
+    }
+
+    fn resident_bytes(&self) -> u64 {
+        (self.label.len() * std::mem::size_of::<u32>()) as u64
+    }
+}
+
+/// **Route F — the row-major layout, with containment still per token.**
+///
+/// Candidacy is one scan and the count is a lookup, so nothing in this request is a function of how
+/// many artifacts the layer has.
+fn columnar(
+    column: &LabelColumn,
+    session: &SessionVerdicts,
+    tiles: &Bitmap,
+    mask: &ComposedMask,
+    artifacts: usize,
+) -> Phases {
+    let mut phases = Phases::default();
+
+    let start = Instant::now();
+    let mut present = column.present(tiles, mask, artifacts);
+    present.and_inplace(&session.passes);
+    let candidates: Vec<u32> = present.iter().collect();
+    phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
+    phases.candidates = candidates.len();
+
+    let start = Instant::now();
+    let total: u64 = candidates.iter().map(|&o| session.counts[o as usize] as u64).sum();
+    phases.count = start.elapsed().as_secs_f64() * 1e6;
+    std::hint::black_box(total);
+
+    phases.containment = 0.0;
+    phases.passing = candidates.len();
+    phases
+}
+
 fn main() {
     let dir = std::env::temp_dir().join(format!("tessera-serving-scale-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("a working directory");
@@ -1071,6 +1214,18 @@ fn main() {
     drop(records);
 
     let t = Instant::now();
+    let column = LabelColumn::build(&row_forms, rows_n);
+    if let Some(c) = &column {
+        eprintln!(
+            "# label column: {:.1} s to build, {:.0} MB resident",
+            t.elapsed().as_secs_f64(),
+            c.resident_bytes() as f64 / 1e6
+        );
+    } else {
+        eprintln!("# label column: the layer does not partition, so there is none");
+    }
+
+    let t = Instant::now();
     let index = TileIndex::build(&row_forms, rows_n);
     eprintln!(
         "# tile index: {:.1} s to build, {:.1} MB serialised",
@@ -1116,6 +1271,36 @@ fn main() {
                     Box::new(|| settled(&row_forms, &index, &session, &tiles, &m, rows_n)),
                 ),
             ];
+
+            let mut routes = routes;
+            if let Some(c) = &column {
+                // **Asserted before it is timed.** The row-major route answers candidacy by a
+                // different mechanism entirely, so the claim that it answers it *identically* is
+                // the one worth checking rather than describing.
+                let mut theirs: Vec<u32> = c.present(&tiles, &m, artifacts).iter().collect();
+                let mut ours: Vec<u32> = (0..row_forms.len() as u32)
+                    .filter(|&o| row_forms.intersects(o, &tiles, &m))
+                    .collect();
+                theirs.sort_unstable();
+                ours.sort_unstable();
+                assert_eq!(
+                    ours, theirs,
+                    "the row-major layout changed which artifacts are candidates"
+                );
+                let counts = c.counts(&m, artifacts);
+                for ordinal in 0..row_forms.len() as u32 {
+                    assert_eq!(
+                        counts[ordinal as usize] as u64,
+                        row_forms.masked_count(ordinal, &m),
+                        "the row-major masked count disagrees at ordinal {ordinal}"
+                    );
+                }
+                routes.push((
+                    "column",
+                    session_ms,
+                    Box::new(|| columnar(c, &session, &tiles, &m, artifacts)),
+                ));
+            }
 
             for (route, setup_ms, run) in routes {
                 let mut best = Phases::default();

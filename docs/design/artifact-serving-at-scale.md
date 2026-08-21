@@ -178,6 +178,86 @@ today and a reader would build it as specified.
 **And that version must become per-layer before this is worth building** — see §5.1. A structure
 invalidated by every write in the database is invalidated continuously.
 
+#### 3.3 A different layout for artifacts that are everywhere *(new, and it is an inversion)*
+
+§3.1 helps a layer whose artifacts are *somewhere*. For one whose artifacts are everywhere, no tree
+helps — but a different **layout** does, and it exploits a property the scattered shapes have and
+clusters do not: **a single-valued attribute predicate partitions the corpus.** Every point carries
+exactly one value, so the memberships are disjoint and cover the row space, and the natural storage
+is not a set of per-artifact bitmaps at all. It is one label per row.
+
+That inverts both questions from artifact-major to row-major, and both then cost **points rather
+than artifacts**:
+
+| | artifact-major (today) | row-major |
+|---|---|---|
+| candidacy | `intersects` per artifact | one scan of `viewport ∩ M_auth`, marking labels — **every artifact at once** |
+| the count | `masked_count` per artifact | one histogram over `M_auth` — no viewport, so it lives in §3.2 |
+
+**Row-addressed, and that is the whole of the change.** `attrs/` already holds this column, but
+addressed by **entity**, which is right for a filter and wrong for a viewport: a viewport is a set
+of contiguous *row* ranges, so reaching the entity form costs an `entity_of` per row. That is
+visible in Stage 6's own measurement — ~120 ms of its 175 ms was the inversion rather than the
+counting. A row-addressed copy removes it, and it is a row-space projection of a durable entity-space
+column, which is the same lifecycle `ArtifactRows` already has.
+
+**Not a new mechanism.** `artifacts-from-points` already *reads* this layout — an integer key column,
+or a list column naming the artifacts a point belongs to — and converts it into artifact-major
+bitmaps on the way in. The option is to keep what the build was handed.
+
+**Measured**, over 10⁸ points, single-threaded, both routes against the same per-token structure.
+The point of the table is the pair of **columns**, not the rows: one is flat in the artifact count
+and the other is not.
+
+| viewport | artifacts | shipped | §3.1 artifact-major | **row-major** |
+|---|---:|---:|---:|---:|
+| whole map | 10³ | 376 ms | **1.9 ms** | 333 ms |
+| whole map | 10⁴ | 2 320 ms | **15.5 ms** | 332 ms |
+| 6.25% | 10³ | 102 ms | 26.1 ms | **23.4 ms** |
+| 6.25% | 10⁴ | 448 ms | 193 ms | **23.3 ms** |
+| 0.39% | 10³ | 79.0 ms | 2.06 ms | **1.48 ms** |
+| 0.39% | 10⁴ | 271 ms | 21.2 ms | **1.56 ms** |
+| 0.024% | 10⁴ | 259 ms | 5.07 ms | **0.18 ms** |
+
+**Ten times the artifacts, and the row-major route does not move** — 23.4 → 23.3 ms, 1.48 → 1.56 ms
+— while the artifact-major one goes up sevenfold to tenfold. Its cost is ~4–5 ns per visible row in
+the viewport and nothing else, which puts a 6.25% viewport over 10⁹ points at ⊘ ~280 ms *(modelled
+from that constant)* however many artifacts the layer holds.
+
+The candidate sets and the masked counts are asserted identical to the shipped loop's — ordinal for
+ordinal and count for count, every artifact, before either route is timed.
+
+**The two layouts cross, and they cross where you would want them to.** Row-major scans the
+viewport, so it is cheapest when the viewport is small and dearest at whole-map zoom where it walks
+the corpus; artifact-major is exactly the reverse, because at whole map `membership ⊆ viewport`
+holds for every artifact and §3.1's extent test answers the whole layer from the per-token structure
+without scanning anything. So the rule is *take the cheaper*, and at 10⁸ points the crossover at
+whole-map zoom is around **2×10⁵ artifacts** — below it the extent test wins, above it the flat scan
+does. Both are exact; neither is an approximation of the other.
+
+### The argument that is not about speed
+
+For a scattered layer at the target, the artifact-major form **does not fit in memory**, and the row
+major one is flat. From the residency campaign's measured constant of 78.5 B per Roaring container
+on scattered membership, over 10⁹ rows:
+
+| scattered artifacts | members each | artifact-major | row-major |
+|---:|---:|---:|---:|
+| 10⁴ | 10⁵ | 12.0 GB | **4.0 GB** |
+| 10⁵ | 10⁴ | 78.5 GB | **4.0 GB** |
+| 10⁶ | 10³ | 78.5 GB | **4.0 GB** |
+
+⊘ **Derived, not measured at 10⁹** — the per-container constant is measured and the arithmetic is
+this table. It agrees with what the residency campaign observed directly: its scattered arm at 10⁷
+artifacts was **OOM-killed** rather than merely slow. The row-major form is one `u32` per row
+regardless of how many artifacts there are — narrower still at the `u8`/`u16` widths
+`configuration.md` §1 already declares for a category — and it is a mappable array rather than
+anonymous allocation, so it costs page cache the kernel can reclaim rather than heap it cannot.
+
+⊘ **Single-valued only.** An overlapping or multi-valued layer needs a list per row rather than a
+label. That is the same inversion at a larger constant, and it is the shape `artifacts-from-points`
+already calls a list column — but it is not measured here.
+
 ## 4. Artifacts that are everywhere — the part that needs a ruling
 
 `annotation-representation.md` §2.0 names three membership *sources*. The axis that decides cost is
@@ -213,13 +293,11 @@ request path.
 
 Three routes exist and the choice is per layer, exactly as Stage 6's crossover already is:
 
-- **(a) An attribute predicate has a column, and the column answers every artifact at once.** This
-  is Stage 6's measured third route — one pass over the `attrs/` `ValueColumn` the predicate names,
-  flat in the artifact count. Split by cadence it gets better still: the **counting** pass is over
-  `M_auth` and has no viewport, so it belongs in §3.2's per-token structure; the **candidacy** pass
-  is over `viewport ∩ mask`, so per request it costs what the point path already pays for the same
-  viewport. ⊘ Modelled — the split is not measured, and the measured single-pass figure is 175 ms at
-  10⁶ artifacts over 10⁷ points.
+- **(a) Store it row-major — §3.3, and it is now measured rather than argued.** A single-valued
+  predicate partitions, so one label per row answers every artifact at once. Flat in the artifact
+  count (23.4 ms at 10³ and 23.3 ms at 10⁴, same viewport), and at the target it is the only layout
+  that **fits**: 4 GB against 78.5 GB. This removes the wall for the attribute-predicate case
+  outright rather than bounding it.
 - **(b) Enumerated scattered sets are small, and could be required to be.** A per-analyst selection
   or a terms-as-artifacts layer is made by a person or by a vocabulary, not by a clusterer; the
   realistic counts are thousands. At 10³–10⁴ the wall is 1.5–15 ms. **This is the ruling worth
@@ -229,9 +307,15 @@ Three routes exist and the choice is per layer, exactly as Stage 6's crossover a
   frame report — blocks per artifact is one number and the build already computes the row form it
   comes from — so a layer that will be slow says so when it is built rather than when it is panned.
 
-Recommended reading of the house rule: **(c) always, plus (a) where a column exists, and (b) as a
-warning rather than a refusal.** Nothing here leaks and nothing here is irreversible, so a wrong
-guess costs a rebuild.
+Recommended reading of the house rule: **(c) always, plus (a) wherever the layer partitions, and (b)
+as a warning rather than a refusal.** Nothing here leaks and nothing here is irreversible, so a
+wrong guess costs a rebuild.
+
+**With (a) in place the wall moves off the shapes that would actually hit it.** What is left
+un-helped is a layer that is scattered *and* overlapping *and* numerous — an enumerated set that
+does not partition and has no column. Every real instance of that shape is human-made or
+vocabulary-made, which is why (b) is a warning about a case rather than a bound on the design; and
+the list-per-row form in §3.3 is the same inversion again if one ever turns up.
 
 ## 5. Two defects found on the way, neither of which is about scale
 
