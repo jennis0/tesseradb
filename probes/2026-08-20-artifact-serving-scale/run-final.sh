@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# **Superseded by `run-remeasure.sh`** (2026-08-21). The routes this script measured admitted the
+# settled half without a masked candidacy probe, and its fixture could not have shown that: read
+# the README's "corrections after review" before quoting anything in `data/` that came from here.
 # The headline ladder, re-run after the extent test landed. One configuration per process.
 set -u
 BIN=./target/release/artifact_serving_scale
