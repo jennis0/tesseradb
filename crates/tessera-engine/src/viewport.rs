@@ -3565,14 +3565,23 @@ impl Engine {
                 // polygon across a region whose neighbours are still counties. So the cut does not
                 // see them, such a layer's lineage is empty here, and its budget is inert exactly
                 // as a flat layer's is.
-                let lineage = self.write.with_artifacts(|store| {
-                    crate::cut::Lineage::new(store.level(&name, level).map(|(ordinal, record)| {
-                        let within = record
-                            .parent
-                            .filter(|parent| parent.level == level)
-                            .map(|parent| parent.ordinal);
-                        (ordinal, within)
-                    }))
+                //
+                // **Held per generation, not derived per request.** The pointers depend on neither
+                // the mask nor the viewport, so a request that rebuilds them is doing generation
+                // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
+                // costs.
+                let lineage = self.lineages.get_or_build(&name, level, store_version, || {
+                    self.write.with_artifacts(|store| {
+                        crate::cut::Lineage::new(store.level(&name, level).map(
+                            |(ordinal, record)| {
+                                let within = record
+                                    .parent
+                                    .filter(|parent| parent.level == level)
+                                    .map(|parent| parent.ordinal);
+                                (ordinal, within)
+                            },
+                        ))
+                    })
                 });
                 let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
                 // Ascending and deduplicated, which the cut guarantees — so the membership test in

@@ -45,6 +45,7 @@
 /// lookup is an index rather than a tree descent. This is on the request path for every treed
 /// layer, beside a per-artifact loop that already walks the whole level — so it has to cost a
 /// fraction of that loop rather than a multiple of it, which a per-node map insert would have been.
+#[derive(Debug)]
 pub struct Lineage {
     /// `parent[ordinal]`, `None` at a root and at an ordinal the level does not hold.
     parent: Vec<Option<u32>>,
@@ -259,6 +260,66 @@ impl Lineage {
     }
 }
 
+/// One [`Lineage`] per `(layer, level)`, rebuilt when the artifact store moves.
+///
+/// **A level's parent pointers depend on neither the mask nor the viewport**, so deriving them on
+/// every request is generation work charged to a request. At a level of ten million it is ~96 ms —
+/// larger than everything the cut itself now costs — and it is the same fact for the depth table
+/// and the child index the lineage carries beside them.
+///
+/// Keyed on the store's version and nothing else: unlike a row-space projection this holds no view,
+/// because a parent is an ordinal in the same level whichever view is being served.
+/// A level of a layer — what a lineage is held against.
+type LevelOf = (String, u32);
+
+/// A held lineage and the store version it was derived from.
+type Held = (u64, std::sync::Arc<Lineage>);
+
+#[derive(Debug, Default)]
+pub struct Lineages {
+    cached: std::sync::Mutex<std::collections::BTreeMap<LevelOf, Held>>,
+}
+
+impl Lineages {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// This level's lineage for the given store version, building it if what is held is stale.
+    ///
+    /// **The build runs outside the lock**, as [`crate::artifacts::ArtifactProjections`]'s does and
+    /// for the same reason: two threads racing one key both build, from the same store version, so
+    /// the two results are equal and the waste is one derivation rather than a wrong answer.
+    pub fn get_or_build<F>(
+        &self,
+        layer: &str,
+        level: u32,
+        store_version: u64,
+        build: F,
+    ) -> std::sync::Arc<Lineage>
+    where
+        F: FnOnce() -> Lineage,
+    {
+        let key = (layer.to_string(), level);
+        if let Some((held, lineage)) = self
+            .cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            if *held == store_version {
+                return std::sync::Arc::clone(lineage);
+            }
+        }
+        let lineage = std::sync::Arc::new(build());
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, (store_version, std::sync::Arc::clone(&lineage)));
+        lineage
+    }
+}
+
 /// One request's cut, resolved once and then asked for any depth.
 ///
 /// **Every node this cut can serve is served over exactly one contiguous range of depths**, and
@@ -391,9 +452,13 @@ impl Plan {
         // **Everything on some lineage is `climbed ∪ passing`, so there is no second climb.** Every
         // passing node is an ancestor-or-self of a head — descend through passing descendants and
         // the descent ends at a node with none, which is a head — so the passing set is on-chain
-        // outright; and an ancestor of a head is an ancestor of a passing node, which is what
-        // `climbed` already marked. The two sets are therefore equal, and the walk that used to
-        // recompute one of them was a second pass over the spine for an answer already held.
+        // outright; and an ancestor of a head is an ancestor of a passing node, which is what the
+        // climb marked.
+        //
+        // ⊘ **Collecting them as a list during the climb was tried and reverted.** It removes the
+        // scan below, and measured *worse* — 40 ms against 23 at a level where two thousand pass —
+        // because the scan reads `depth` in ordinal order, which is the order it is stored in,
+        // where a list reads it at random. The scan is not the floor; the side tables are.
         let mut on_chain = climbed;
         for &n in sorted {
             on_chain[n as usize] = true;

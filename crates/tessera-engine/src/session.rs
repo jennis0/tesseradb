@@ -611,6 +611,10 @@ pub struct Engine {
     /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
     /// published), and they move on different events.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// One lineage per `(layer, level)` — see [`crate::cut::Lineages`]. Keyed per *deployment* like
+    /// the projections beside it, and on the store's version alone, because a level's parent
+    /// pointers are the same whichever view is served.
+    pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
@@ -1132,6 +1136,7 @@ impl Engine {
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
             artifact_projections: Arc::new(crate::artifacts::ArtifactProjections::new()),
+            lineages: Arc::new(crate::cut::Lineages::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
             config,
