@@ -1261,7 +1261,8 @@ impl Engine {
     /// including the wake: the executor draining nothing is what parks it, so unpausing must ring
     /// the doorbell.
     pub fn set_merge_publication_paused_for_test(&self, paused: bool) {
-        self.merge_publication_paused.store(paused, Ordering::SeqCst);
+        self.merge_publication_paused
+            .store(paused, Ordering::SeqCst);
         if !paused {
             self.write.wake();
         }
@@ -2216,6 +2217,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                lineages: Arc::clone(&self.lineages),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2272,6 +2274,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                lineages: Arc::clone(&self.lineages),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2324,6 +2327,27 @@ impl Engine {
     /// unauthenticated surface).
     pub fn write_executor_stats(&self) -> crate::write::ExecutorStats {
         self.write.health().stats()
+    }
+
+    /// How many artifact row forms, and how many lineages, this engine has built since it opened.
+    ///
+    /// **The cadence, not the cost.** Both structures are per `(layer, level)` and both are
+    /// rebuilt when that level's version moves; what these two numbers answer is how *often* that
+    /// happens, which is the question `design/artifact-serving-at-scale.md` §8.1 and §8.2 are
+    /// about and the one nothing reported while the store carried a single global version.
+    /// Operator plane only, beside [`Engine::write_executor_stats`] — they count structures a
+    /// deployment built, and name no artifact, no layer and no principal.
+    pub fn artifact_cache_builds(&self) -> (u64, u64) {
+        (self.artifact_projections.builds(), self.lineages.builds())
+    }
+
+    /// How many artifact row forms, and how many lineages, are held right now.
+    ///
+    /// The gauge beside [`Engine::artifact_cache_builds`]'s counter, and the one that moves in
+    /// both directions: a dropped layer's entries leave both caches at the drop. Operator plane
+    /// only — counts of structures, naming no artifact, no layer and no principal.
+    pub fn artifact_cache_held(&self) -> (usize, usize) {
+        (self.artifact_projections.held(), self.lineages.held())
     }
 
     /// The last compaction fold's per-pass wall clock and resident set — empty before the first
@@ -2482,7 +2506,8 @@ impl Engine {
                 quantisation,
             });
         }
-        self.write.accept_ingest(rows, batch_id, body_hash, artifacts)
+        self.write
+            .accept_ingest(rows, batch_id, body_hash, artifacts)
     }
 
     /// Submit one `/control/changes` entry and wait for its receipt.
@@ -2541,9 +2566,11 @@ impl Engine {
         let generation = self.generation();
         self.identity_key
             .forward(generation.bundle.manifest.identity.shard_id, entity)
-            .map_err(|_| crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
-                detail: "the layer's entity id lies outside the identity space".to_string(),
-            }))
+            .map_err(|_| {
+                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+                    detail: "the layer's entity id lies outside the identity space".to_string(),
+                })
+            })
     }
 
     /// Drop a layer. Its name is tombstoned and refused on recreation for ever.
@@ -2761,9 +2788,11 @@ impl Engine {
     /// principal may not see is C8's row.
     pub fn locate_artifact(&self, entity: EntityId) -> Option<PublishedArtifactAddress> {
         let (layer, level, ordinal) = self.write.locate_artifact(entity)?;
-        let key = self
-            .write
-            .with_artifacts(|store| store.get(&layer, level, ordinal).and_then(|r| r.key.clone()));
+        let key = self.write.with_artifacts(|store| {
+            store
+                .get(&layer, level, ordinal)
+                .and_then(|r| r.key.clone())
+        });
         Some(PublishedArtifactAddress {
             layer,
             level,

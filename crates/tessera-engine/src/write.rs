@@ -70,11 +70,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
-use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
+use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
 use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
@@ -1606,7 +1606,9 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
-    fn registry_for_publication(&self) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
+    fn registry_for_publication(
+        &self,
+    ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
         let registry = lock_recover(&self.registry);
         let low_water = lock_recover(&self.allocator).low_water();
         let (layers, tombstones) = registry.snapshot();
@@ -2338,6 +2340,7 @@ impl WritePath {
                     generation,
                     row_projection_cache,
                     artifact_projections: flush.artifact_projections,
+                    lineages: flush.lineages,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -2540,11 +2543,10 @@ impl WritePath {
         })?;
         self.health().lap(WriteStage::SubmitToReceipt, mark);
         match receipt.outcome {
-            Ok(Ack::Ingested {
-                entity_ids,
-                minted,
-            }) => Ok((entity_ids, minted)),
-            Ok(other) => unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}"),
+            Ok(Ack::Ingested { entity_ids, minted }) => Ok((entity_ids, minted)),
+            Ok(other) => {
+                unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -2571,14 +2573,14 @@ impl WritePath {
         &self,
         declaration: tessera_types::layer::LayerDeclaration,
     ) -> Result<EntityId, AcceptError> {
-        let receipt = self
-            .handle()?
-            .submit(Command::RegisterLayer {
-                declaration: Box::new(declaration),
-            })?;
+        let receipt = self.handle()?.submit(Command::RegisterLayer {
+            declaration: Box::new(declaration),
+        })?;
         match receipt.outcome {
             Ok(Ack::LayerRegistered { entity }) => Ok(entity),
-            Ok(other) => unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}"),
+            Ok(other) => {
+                unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -3245,6 +3247,9 @@ pub(crate) struct MaintenanceDeps {
     /// per-session value, so leaving it to the first request after the flip is a stall of tens of
     /// seconds for whoever arrives first.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The lineages, shared for the half of the same warm that is theirs — see
+    /// [`Executor::warm_artifact_caches`].
+    pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
@@ -3624,7 +3629,7 @@ mod vocabulary_extensions_tests {
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
-        text_extents: Vec::new(),
+            text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -4051,7 +4056,9 @@ fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRe
     by_level
         .into_iter()
         .filter_map(|((layer, level), (index, ordinals))| {
-            let joins = ordinals.iter().map(|(ordinal, joining)| (*ordinal, joining));
+            let joins = ordinals
+                .iter()
+                .map(|(ordinal, joining)| (*ordinal, joining));
             tessera_lifecycle::membership::growth_record(layer, level, joins)
                 .map(|record| (record, index))
         })
@@ -4114,7 +4121,10 @@ fn mint_plan<W>(
     if wanted.is_empty() {
         return None;
     }
-    let edges = closed.iter().flat_map(|e| e.edges.iter().cloned()).collect();
+    let edges = closed
+        .iter()
+        .flat_map(|e| e.edges.iter().cloned())
+        .collect();
     Some((wanted, edges))
 }
 
@@ -4161,6 +4171,8 @@ struct Executor {
     /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
     /// [`MaintenanceDeps::artifact_projections`].
     artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The lineages, rebuilt beside them and for the same reason.
+    lineages: Arc<crate::cut::Lineages>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
@@ -5246,8 +5258,7 @@ impl Executor {
             .views
             .iter()
             .flat_map(|view| {
-                view
-                    .segments
+                view.segments
                     .iter()
                     .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
             })
@@ -5479,7 +5490,9 @@ impl Executor {
         ) {
             Ok(repacked) => repacked,
             Err(e) => {
-                discard(&format!("its artifact memberships would not be rewritten ({e})"));
+                discard(&format!(
+                    "its artifact memberships would not be rewritten ({e})"
+                ));
                 return;
             }
         };
@@ -5929,7 +5942,7 @@ impl Executor {
         // for; built before the store retires, every projection would be keyed to a store version
         // the retire is about to bump, and the whole warm would be discarded on the first request —
         // paying the stall it exists to prevent, having already paid for the warm.
-        self.warm_artifact_projections();
+        self.warm_artifact_caches();
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -7592,8 +7605,10 @@ impl Executor {
                 .filter(|m| m.ordinal.is_none())
                 .map(|m| (m.layer.as_str(), m.level, m.key.as_str()))
                 .collect();
-            let anywhere: std::collections::BTreeSet<(&str, &str)> =
-                minting.iter().map(|(layer, _, key)| (*layer, *key)).collect();
+            let anywhere: std::collections::BTreeSet<(&str, &str)> = minting
+                .iter()
+                .map(|(layer, _, key)| (*layer, *key))
+                .collect();
 
             // **A child named under two parents refuses the batch**, which is the build's own
             // refusal at the other entry point (`artifacts-from-points.md` §4): two rows naming
@@ -7723,7 +7738,8 @@ impl Executor {
             // so a key that named nothing then may name an artifact now — and §5's second ruling is
             // that a key a live artifact holds is never minted again.
             let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
-            let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> = BTreeMap::new();
+            let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
+                BTreeMap::new();
             for ((layer, level, key), (_, members)) in &wanted {
                 match store.ordinal_of_key(layer, *level, key) {
                     Some(ordinal) => {
@@ -7765,12 +7781,12 @@ impl Executor {
                 // deliberately does not read past (`tessera_types::layer::parent_edges`).
                 let pending = |key: &str| {
                     let coarser = level.checked_sub(1)?;
-                    assigned
-                        .get(&(*layer, coarser, key))
-                        .map(|ordinal| tessera_lifecycle::wal::ParentRef {
+                    assigned.get(&(*layer, coarser, key)).map(|ordinal| {
+                        tessera_lifecycle::wal::ParentRef {
                             level: coarser,
                             ordinal: *ordinal,
-                        })
+                        }
+                    })
                 };
                 let record = registry
                     .prepare_publish(layer, *level, &incoming, store, alloc, &pending)
@@ -8517,7 +8533,8 @@ impl Executor {
         prepare: impl FnOnce(
             &mut LayerRegistry,
             &mut Allocator,
-        ) -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
+        )
+            -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
         ack_of: impl FnOnce(&WalRecord) -> Ack,
         respond: Responder,
     ) {
@@ -8548,6 +8565,21 @@ impl Executor {
 
         let ack = ack_of(&record);
         self.live.apply_registry_record(&record);
+        // **A dropped layer's derived structures go with it.** Neither cache had a removal path,
+        // so each was bounded by the triples a process had ever seen rather than the ones it
+        // holds — gigabytes a level at the campaign's target, pinned for the life of the process.
+        // Retention only, never correctness: a tombstoned name never resolves through the registry
+        // again, so nothing held here was reachable to be served.
+        //
+        // ⊘ **The store's own copy of a dropped layer's memberships is not released**, because
+        // `ArtifactStore::remove_layer` is reached from nowhere — a drop touches the registry and
+        // stops there. That is the larger half of the same retention, and it is a write-path
+        // question rather than a caching one: releasing it changes what the next fold repacks and
+        // how far back the rotation pin holds the log.
+        if let WalRecord::LayerDrop { name } = &record {
+            self.artifact_projections.forget(name);
+            self.lineages.forget(name);
+        }
         let published = Published::registry_applied(&record);
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same
@@ -8891,12 +8923,8 @@ impl Executor {
             // in extents of its own but on the same list and behind the same reader. Artifact and
             // point entities are disjoint by construction — two regions, growing towards each other
             // — so the rows never collide and each side reads its tags against its own declaration.
-            match self.write_content_extent(
-                &prefix_dir,
-                partition,
-                live.bundle.partitions.len(),
-                n,
-            ) {
+            match self.write_content_extent(&prefix_dir, partition, live.bundle.partitions.len(), n)
+            {
                 // **Assigned from the held list, never pushed onto the clone.** The manifest this
                 // publication started from is the *stale* generation's, so extending it drops
                 // every earlier publication's entry — and an artifact whose content extent is
@@ -9016,7 +9044,10 @@ impl Executor {
         };
         let io = |path: &std::path::Path| {
             let path = path.to_path_buf();
-            move |source| tessera_store::StoreError::Io { path: path.clone(), source }
+            move |source| tessera_store::StoreError::Io {
+                path: path.clone(),
+                source,
+            }
         };
         let blocks = prefix_dir.join(&extent.blocks);
         let hasrow = prefix_dir.join(&extent.hasrow);
@@ -9144,7 +9175,10 @@ impl Executor {
             return Ok(Vec::new());
         }
 
-        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("members");
         std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
             path: dir.clone(),
             source,
@@ -9169,16 +9203,23 @@ impl Executor {
         Ok(entries)
     }
 
-    /// Rebuild every level's row-space membership against the live generation.
+    /// Rebuild every level's row-space membership, and every lineage this fold moved, against the
+    /// live generation.
     ///
     /// Called at the fold's own publication, on this thread, for the reason §5.0.3 gives: the
     /// alternative is not a cache miss but a stall, and it lands on a request rather than on
     /// maintenance. Cheap everywhere else — a deployment with no artifacts iterates nothing.
     ///
+    /// **The lineages are warmed here for the same reason and not the same extent.** A row form is
+    /// invalid at every level because the prefix renumbered row space; a lineage is invalid only
+    /// where this fold retired an artifact, because it holds ordinals. So this asks for all of
+    /// both and pays for one of each per level that moved — and what it is buying is the ~96 ms at
+    /// a level of ten million that would otherwise land on whichever request arrived first.
+    ///
     /// **Errors are impossible to have here and absences are not**: a view the generation does not
     /// carry is simply not warmed, and its first request builds what it needs, which is the same
     /// outcome this method exists to avoid but not a wrong one.
-    fn warm_artifact_projections(&self) {
+    fn warm_artifact_caches(&self) {
         let generation = self.generation.load_full();
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             store
@@ -9190,8 +9231,8 @@ impl Executor {
             return;
         }
         let started = std::time::Instant::now();
-        let store_version = self.live.with_artifacts(|store| store.version());
-        let mut built = 0usize;
+        let before_projections = self.artifact_projections.builds();
+        let before_lineages = self.lineages.builds();
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
@@ -9202,16 +9243,35 @@ impl Executor {
                             layer,
                             *level,
                             store,
-                            store_version,
                             &view_data.row_space,
                         )
                     });
-                    built += 1;
                 }
             }
         }
+        for (layer, level) in &levels {
+            self.live.with_artifacts(|store| {
+                self.lineages.get_or_build(
+                    layer,
+                    *level,
+                    store.level_version(layer, *level),
+                    || {
+                        crate::cut::Lineage::new(store.level(layer, *level).map(
+                            |(ordinal, record)| {
+                                let within = record
+                                    .parent
+                                    .filter(|parent| parent.level == *level)
+                                    .map(|parent| parent.ordinal);
+                                (ordinal, within)
+                            },
+                        ))
+                    },
+                )
+            });
+        }
         tracing::info!(
-            projections = built,
+            projections = self.artifact_projections.builds() - before_projections,
+            lineages = self.lineages.builds() - before_lineages,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "the fold's artifact pass rebuilt every level's row form"
         );
@@ -9245,7 +9305,10 @@ impl Executor {
             return Ok(Vec::new());
         }
 
-        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("members");
         std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
             path: dir.clone(),
             source,
@@ -9383,11 +9446,11 @@ impl Executor {
                 presence: record_dir.join(&e.presence),
             })
             .collect();
-        let filter_columns =
-            match live
-                .filter_columns
-                .with_extents(&extents, &record_paths, &text_paths)
-            {
+        let filter_columns = match live.filter_columns.with_extents(
+            &extents,
+            &record_paths,
+            &text_paths,
+        ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);

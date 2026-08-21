@@ -40,17 +40,30 @@ use tessera_types::EntityId;
 /// That is [decision 0076](../../../docs/decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)
 /// reached from the write side: the alternative is serving the identity and the count with the
 /// description missing, which is the in-between state the decision forbids.
-fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw: bool) {
+///
+/// Returns whether the record moved, which is what tells [`ArtifactStore::retire`] whether the
+/// level's version has to move with it: a level a fold walked over and did not change has a row
+/// form that is still correct, and rebuilding it would be the global grain back again in a
+/// narrower place.
+fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw: bool) -> bool {
     match withdraw {
         true => {
+            let before = record.contents.len();
             record
                 .contents
                 .retain(|content| content.generated_from.and_cardinality(retired) == 0);
+            record.contents.len() != before
         }
         false => {
+            let mut moved = false;
             for content in &mut record.contents {
+                if content.generated_from.and_cardinality(retired) == 0 {
+                    continue;
+                }
                 content.generated_from.andnot_inplace(retired);
+                moved = true;
             }
+            moved
         }
     }
 }
@@ -148,10 +161,7 @@ impl IncomingArtifact {
     /// assembles these from a resolved batch and carries no Roaring dependency — a layering
     /// `check-layers.sh` holds, and one worth holding: the request plane should be able to name a
     /// membership without being able to do arithmetic on one.
-    pub fn from_entities(
-        key: Option<String>,
-        members: impl IntoIterator<Item = EntityId>,
-    ) -> Self {
+    pub fn from_entities(key: Option<String>, members: impl IntoIterator<Item = EntityId>) -> Self {
         let mut bitmap = Bitmap::new();
         for entity in members {
             // Entity space is `u32` by I9, so the narrowing is total.
@@ -399,11 +409,24 @@ pub struct ArtifactStore {
     /// index and not a second copy of the truth: every entry is derived from a record's
     /// `attached_to`, added where the record enters and removed where it leaves.
     dependents: BTreeMap<EntityId, Vec<EntityId>>,
-    /// Bumped by every publication and every layer removal. **A derived row-space projection is
-    /// valid only for the version it was built from**: a cache that missed a bump would serve a
-    /// level with its newest artifacts absent, which a viewer cannot tell from artifacts that
-    /// failed their existence criterion.
-    version: u64,
+    /// Per `(layer, level)`, how many artifact writes have landed on it. **A derived structure is
+    /// valid only for the version of the level it was derived from**: a cache that missed a bump
+    /// would serve a level with its newest artifacts absent, which a viewer cannot tell from
+    /// artifacts that failed their existence criterion.
+    ///
+    /// **Per level rather than one counter for the store**, which is what it was until the scale
+    /// campaign measured the difference (`design/artifact-serving-at-scale.md` §8.1): a global
+    /// counter makes one suppression, one growth or one publication *anywhere* invalidate every
+    /// level's row form in every view — 138 s of rebuild at 10⁷ artifacts over 10⁹ rows, so under
+    /// any read-write load the cache never survives to be used. Everything derived from a level
+    /// reads that level's records and nothing else, so the level is the grain at which a
+    /// derivation can go wrong.
+    ///
+    /// **Monotonic, and an entry is never removed.** A version that went backwards — by erasing a
+    /// dropped layer's entry and starting again at zero when the name is re-registered — would
+    /// make a cached form built over the *old* artifacts compare equal to the new level and be
+    /// served. [`Self::remove_layer`] therefore bumps what it drops rather than forgetting it.
+    versions: BTreeMap<(String, u32), u64>,
 }
 
 impl ArtifactStore {
@@ -424,10 +447,7 @@ impl ArtifactStore {
             .map(|attachment| (attachment.entity, record.entity));
         let idx = ordinal as usize;
         let previous = {
-            let slots = self
-                .levels
-                .entry((layer.to_string(), level))
-                .or_default();
+            let slots = self.levels.entry((layer.to_string(), level)).or_default();
             if slots.len() <= idx {
                 slots.resize(idx + 1, None);
             }
@@ -626,7 +646,7 @@ impl ArtifactStore {
             Some(existing) => existing.min(position),
             None => position,
         });
-        self.version += 1;
+        self.bump(layer, level);
         refused
     }
 
@@ -656,7 +676,10 @@ impl ArtifactStore {
             Some(existing) => existing.min(position),
             None => position,
         });
-        self.version += 1;
+        // **Unconditional, including where every delta was refused.** A refusal has already
+        // returned a count to a caller who will act on it; spending one rebuild of one level to
+        // keep the bump off a decision about damaged input is the cheaper of the two mistakes.
+        self.bump(layer, level);
         refused
     }
 
@@ -744,6 +767,18 @@ impl ArtifactStore {
         // attached into it — and one full pass over the remaining records is simpler to audit than
         // two removals whose union has to be argued. A layer drop is rare and never on a request
         // path.
+        //
+        // **Its levels' versions move before the levels do**, and the entries stay behind: see
+        // [`Self::versions`] on why a dropped level's version may not be forgotten.
+        let dropped: Vec<u32> = self
+            .levels
+            .keys()
+            .filter(|(l, _)| l == layer)
+            .map(|(_, level)| *level)
+            .collect();
+        for level in dropped {
+            self.bump(layer, level);
+        }
         self.levels.retain(|(l, _), _| l != layer);
         self.keys.retain(|(l, _, _), _| l != layer);
         self.dependents.clear();
@@ -762,12 +797,23 @@ impl ArtifactStore {
         for (target, dependent) in edges {
             self.dependents.entry(target).or_default().push(dependent);
         }
-        self.version += 1;
     }
 
-    /// See the field: what a derived projection's validity is keyed on.
-    pub fn version(&self) -> u64 {
-        self.version
+    /// See [`Self::versions`]: what a structure derived from this level is valid for.
+    ///
+    /// **A level nothing has ever written to is version 0**, and so is a caller's first read of
+    /// it — which is right rather than a coincidence: there are no records, so the empty
+    /// derivation a cache would hold is the correct one, and the first write moves it off zero.
+    pub fn level_version(&self, layer: &str, level: u32) -> u64 {
+        self.versions
+            .get(&(layer.to_string(), level))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Move one level's version — called by every route that changes what a level's records say.
+    fn bump(&mut self, layer: &str, level: u32) {
+        *self.versions.entry((layer.to_string(), level)).or_insert(0) += 1;
     }
 
     /// Every level's artifacts that are **not yet in a manifest**, as
@@ -781,7 +827,10 @@ impl ArtifactStore {
         let mut ready = Vec::new();
         let mut skipped = Vec::new();
         for ((layer, level), slots) in &self.levels {
-            let from = *self.published_through.get(&(layer.clone(), *level)).unwrap_or(&0) as usize;
+            let from = *self
+                .published_through
+                .get(&(layer.clone(), *level))
+                .unwrap_or(&0) as usize;
             if from >= slots.len() {
                 continue;
             }
@@ -947,7 +996,7 @@ impl ArtifactStore {
                     }
                     let mut record = record.clone();
                     record.members.andnot_inplace(retired);
-                    apply_deletion_policy(&mut record, retired, on_deletion);
+                    let _ = apply_deletion_policy(&mut record, retired, on_deletion);
                     encode_record(&record)
                 })
                 .collect();
@@ -965,15 +1014,21 @@ impl ArtifactStore {
     /// **A retired artifact's slot becomes a hole rather than disappearing**, and its key
     /// goes with it — the key indexes an ordinal, and a key left behind would resolve a caller's
     /// republication onto the identity of the artifact this fold just removed.
+    ///
+    /// **Only the levels this actually changed have their version moved.** A fold walks every
+    /// level and most folds touch few of them; bumping the ones it read would be the global grain
+    /// [`Self::versions`] exists to escape, in the one place where it is least affordable.
     pub fn retire(&mut self, retired: &Bitmap, policy: &dyn Fn(&str) -> bool) {
         if retired.is_empty() {
             return;
         }
-        // Collected during the walk and applied after it: the index is a field beside `levels`,
+        // Collected during the walk and applied after it: both indexes are fields beside `levels`,
         // which is borrowed mutably here.
         let mut gone: Vec<(EntityId, EntityId)> = Vec::new();
+        let mut moved: Vec<(String, u32)> = Vec::new();
         for ((layer, level), slots) in self.levels.iter_mut() {
             let on_deletion = policy(layer);
+            let mut changed = false;
             for slot in slots.iter_mut() {
                 let Some(record) = slot else { continue };
                 if retired.contains(record.entity.raw() as u32) {
@@ -984,11 +1039,24 @@ impl ArtifactStore {
                         gone.push((attachment.entity, record.entity));
                     }
                     *slot = None;
+                    changed = true;
                     continue;
                 }
+                // Asked before the removal rather than compared after it: `and_cardinality` is the
+                // same walk over the same containers `andnot_inplace` takes, and it answers the
+                // question the version needs without a second copy of the membership to compare
+                // against.
+                let shrinks = record.members.and_cardinality(retired) != 0;
                 record.members.andnot_inplace(retired);
-                apply_deletion_policy(record, retired, on_deletion);
+                changed |= shrinks;
+                changed |= apply_deletion_policy(record, retired, on_deletion);
             }
+            if changed {
+                moved.push((layer.clone(), *level));
+            }
+        }
+        for (layer, level) in moved {
+            self.bump(&layer, level);
         }
         // A retired artifact's edge leaves with it, in both directions: its own outgoing edge here,
         // and any edges pointing *at* it — nothing can attach to an artifact that is gone, and a
@@ -1003,9 +1071,6 @@ impl ArtifactStore {
         }
         self.dependents
             .retain(|target, _| !retired.contains(target.raw() as u32));
-        // Every row-space projection built from these is now wrong in both directions — memberships
-        // that shrank, and artifacts that are gone.
-        self.version += 1;
     }
 
     /// The supplied content of every artifact not yet in a manifest, as `(entity, tagged values)`.
@@ -1023,7 +1088,10 @@ impl ArtifactStore {
     pub fn unpublished_content(&self) -> Vec<(EntityId, Vec<(u16, String)>)> {
         let mut out = Vec::new();
         for ((layer, level), slots) in &self.levels {
-            let from = *self.published_through.get(&(layer.clone(), *level)).unwrap_or(&0) as usize;
+            let from = *self
+                .published_through
+                .get(&(layer.clone(), *level))
+                .unwrap_or(&0) as usize;
             if from >= slots.len() {
                 continue;
             }
@@ -1220,8 +1288,9 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
         .iter()
         .map(|v| serialise_members(&v.generated_from))
         .collect();
-    let mut out =
-        Vec::with_capacity(8 + key.len() + members.len() + sets.iter().map(Vec::len).sum::<usize>());
+    let mut out = Vec::with_capacity(
+        8 + key.len() + members.len() + sets.iter().map(Vec::len).sum::<usize>(),
+    );
     // A key longer than a `u16` cannot round-trip, and truncating one would silently rename an
     // artifact. The control plane bounds the request body long before this, so the clamp is a
     // backstop; it refuses at encode rather than writing a key it cannot read back.
@@ -1516,6 +1585,38 @@ mod tests {
         assert_eq!(store.layer("clusters/a").count(), 0);
     }
 
+    /// **A level's version is monotone for the life of the store, and a drop is not an exception.**
+    ///
+    /// The hazard the per-level grain would otherwise have: a form cached for
+    /// `(view, layer, level)` outlives the layer, and a name arriving at that address again with a
+    /// version the cache has already seen would be answered from the previous incarnation's
+    /// members. It is closed twice over — the registry tombstones a dropped name for ever, so the
+    /// address is never reoccupied at all — and this is the half that belongs here, because it is
+    /// the half a later decision to allow reuse would not silently invalidate.
+    #[test]
+    fn a_dropped_layers_version_moves_and_is_never_forgotten() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1]), 0), 0);
+        let published = store.level_version("clusters/a", 0);
+        assert!(published > 0);
+
+        store.remove_layer("clusters/a");
+        let dropped = store.level_version("clusters/a", 0);
+        assert!(
+            dropped > published,
+            "the drop moves it, so a form cached under the published version is stale"
+        );
+
+        // The address occupied again, as a re-registration would occupy it.
+        assert_eq!(store.apply(&publication("clusters/a", 0, 200, &[9]), 8), 0);
+        assert!(
+            store.level_version("clusters/a", 0) > dropped,
+            "and it counts on from where the drop left it rather than starting again — a version \
+             that restarted at zero would let a form built over the artifacts that are gone \
+             compare equal to the level that replaced them"
+        );
+    }
+
     #[test]
     fn a_membership_round_trips_and_damage_is_refused_rather_than_emptied() {
         let members = Bitmap::of(&[1, 2, 3, 70_000, 4_000_000]);
@@ -1589,7 +1690,12 @@ mod tests {
 
     /// A publication of one artifact at one ordinal, so the pin cases start from the state a live
     /// deployment is in rather than from a hand-placed record.
-    fn publication(layer: &str, ordinal: u32, entity: u64, members: &[u32]) -> crate::wal::WalRecord {
+    fn publication(
+        layer: &str,
+        ordinal: u32,
+        entity: u64,
+        members: &[u32],
+    ) -> crate::wal::WalRecord {
         crate::wal::WalRecord::ArtifactPublish {
             layer: layer.to_string(),
             level: 0,
@@ -1611,20 +1717,38 @@ mod tests {
     #[test]
     fn a_growth_unions_into_the_membership_and_changes_nothing_else() {
         let mut store = ArtifactStore::new();
-        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2, 3]), 0), 0);
-        let before = store.version();
+        assert_eq!(
+            store.apply(&publication("clusters/a", 0, 100, &[1, 2, 3]), 0),
+            0
+        );
+        let before = store.level_version("clusters/a", 0);
 
         assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3, 4, 5]), 8), 0);
 
-        let record = store.get("clusters/a", 0, 0).expect("the artifact is still there");
-        assert_eq!(record.members, Bitmap::of(&[1, 2, 3, 4, 5]), "the union, not the delta");
-        assert_eq!(record.declared_size(), 5, "the criterion's denominator moves with it");
+        let record = store
+            .get("clusters/a", 0, 0)
+            .expect("the artifact is still there");
+        assert_eq!(
+            record.members,
+            Bitmap::of(&[1, 2, 3, 4, 5]),
+            "the union, not the delta"
+        );
+        assert_eq!(
+            record.declared_size(),
+            5,
+            "the criterion's denominator moves with it"
+        );
         assert_eq!(record.key.as_deref(), Some("c0"));
         assert_eq!(record.entity, EntityId::new(100));
         assert!(
-            store.version() > before,
+            store.level_version("clusters/a", 0) > before,
             "every row-space projection built from this membership is now stale; a version \
              that did not move would serve the artifact without the members that just joined"
+        );
+        assert_eq!(
+            store.level_version("clusters/b", 0),
+            0,
+            "a level nobody wrote to is unmoved — the grain the scale campaign's §8.1 is about"
         );
     }
 
@@ -1642,7 +1766,10 @@ mod tests {
             0,
             "an ordinal that is a hole is a legitimate state, not a decode failure to alarm on"
         );
-        assert!(store.get("clusters/a", 0, 0).is_none(), "the hole is still a hole");
+        assert!(
+            store.get("clusters/a", 0, 0).is_none(),
+            "the hole is still a hole"
+        );
         assert_eq!(store.total(), 0);
     }
 
@@ -1679,7 +1806,10 @@ mod tests {
     #[test]
     fn a_growth_pins_the_log_past_every_tail_publication_and_only_a_whole_rewrite_releases_it() {
         let mut store = ArtifactStore::new();
-        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2]), 40), 0);
+        assert_eq!(
+            store.apply(&publication("clusters/a", 0, 100, &[1, 2]), 40),
+            0
+        );
         store.mark_published("clusters/a", 0, 1);
         assert_eq!(
             store.oldest_wal_pos(),
@@ -1688,11 +1818,18 @@ mod tests {
         );
 
         assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3]), 96), 0);
-        assert_eq!(store.oldest_wal_pos(), Some(96), "the growth is the only copy of the join");
+        assert_eq!(
+            store.oldest_wal_pos(),
+            Some(96),
+            "the growth is the only copy of the join"
+        );
 
         // A second publication into the level, packed and marked. The tail is durable and the
         // growth still is not: it sits below the mark this pack started from.
-        assert_eq!(store.apply(&publication("clusters/a", 1, 101, &[9]), 128), 0);
+        assert_eq!(
+            store.apply(&publication("clusters/a", 1, 101, &[9]), 128),
+            0
+        );
         store.mark_published("clusters/a", 0, 2);
         assert_eq!(
             store.oldest_wal_pos(),
@@ -1701,7 +1838,11 @@ mod tests {
         );
 
         store.mark_growth_packed();
-        assert_eq!(store.oldest_wal_pos(), None, "the fold rewrote the level whole");
+        assert_eq!(
+            store.oldest_wal_pos(),
+            None,
+            "the fold rewrote the level whole"
+        );
     }
 
     /// The growth path is not a removal rule in the other direction: a member that joined is
@@ -1710,7 +1851,10 @@ mod tests {
     #[test]
     fn a_member_that_joined_retires_like_any_other() {
         let mut store = ArtifactStore::new();
-        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1, 2]), 0), 0);
+        assert_eq!(
+            store.apply(&publication("clusters/a", 0, 100, &[1, 2]), 0),
+            0
+        );
         assert_eq!(store.apply(&growth("clusters/a", 0, 0, &[3, 4]), 8), 0);
 
         store.retire(&Bitmap::of(&[3]), &|_| false);

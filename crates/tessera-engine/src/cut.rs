@@ -260,24 +260,35 @@ impl Lineage {
     }
 }
 
-/// One [`Lineage`] per `(layer, level)`, rebuilt when the artifact store moves.
+/// One [`Lineage`] per `(layer, level)`, rebuilt when that level moves.
 ///
 /// **A level's parent pointers depend on neither the mask nor the viewport**, so deriving them on
 /// every request is generation work charged to a request. At a level of ten million it is ~96 ms —
 /// larger than everything the cut itself now costs — and it is the same fact for the depth table
 /// and the child index the lineage carries beside them.
 ///
-/// Keyed on the store's version and nothing else: unlike a row-space projection this holds no view,
-/// because a parent is an ordinal in the same level whichever view is being served.
+/// Keyed on the level's version and nothing else: unlike a row-space projection this holds no view
+/// and no prefix, because a parent is an ordinal in the same level whichever view is served, and a
+/// fold renumbers rows rather than ordinals. The level's own version therefore carries the whole
+/// of the invalidation, and it reaches: the two writes that can move a parent pointer are a
+/// publication and the fold's retire, and both bump it.
+///
+/// **A growth rebuilds this and cannot have moved an edge** — it unions members and touches
+/// nothing else about a record — so that is a rebuild the shared version buys and the lineage does
+/// not need. One version per level is one thing to keep in step; a second counter for structure
+/// alone would be two, and what argues for it is a cost rather than a correctness case.
 /// A level of a layer — what a lineage is held against.
 type LevelOf = (String, u32);
 
-/// A held lineage and the store version it was derived from.
+/// A held lineage and the level version it was derived from.
 type Held = (u64, std::sync::Arc<Lineage>);
 
 #[derive(Debug, Default)]
 pub struct Lineages {
     cached: std::sync::Mutex<std::collections::BTreeMap<LevelOf, Held>>,
+    /// How many lineages this has built since the engine opened — the cadence, counted, for the
+    /// reason [`crate::artifacts::ArtifactProjections`]'s own counter carries.
+    builds: std::sync::atomic::AtomicU64,
 }
 
 impl Lineages {
@@ -285,16 +296,41 @@ impl Lineages {
         Self::default()
     }
 
-    /// This level's lineage for the given store version, building it if what is held is stale.
+    /// See [`Self::builds`].
+    pub fn builds(&self) -> u64 {
+        self.builds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many lineages are held — the gauge beside [`Self::builds`].
+    pub fn held(&self) -> usize {
+        self.cached.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Drop every lineage held for one layer, when the layer is dropped — see
+    /// [`crate::artifacts::ArtifactProjections::forget`], which this is the other half of and
+    /// which carries the argument for both.
+    pub fn forget(&self, layer: &str) {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(held, _), _| held != layer);
+    }
+
+    /// This level's lineage at `level_version`, building it if what is held is stale.
     ///
-    /// **The build runs outside the lock**, as [`crate::artifacts::ArtifactProjections`]'s does and
-    /// for the same reason: two threads racing one key both build, from the same store version, so
-    /// the two results are equal and the waste is one derivation rather than a wrong answer.
+    /// **The version and the build must come from one reading of the store**, which is the
+    /// caller's obligation rather than this module's: `cut` knows nothing about an artifact store
+    /// and is the better for it. The serving path takes both inside one `with_artifacts`.
+    ///
+    /// **The build runs outside this cache's lock**, as [`crate::artifacts::ArtifactProjections`]'s
+    /// does and for the same reason: two threads racing one key both build, from the same level
+    /// version, so the two results are equal and the waste is one derivation rather than a wrong
+    /// answer.
     pub fn get_or_build<F>(
         &self,
         layer: &str,
         level: u32,
-        store_version: u64,
+        level_version: u64,
         build: F,
     ) -> std::sync::Arc<Lineage>
     where
@@ -307,15 +343,17 @@ impl Lineages {
             .unwrap_or_else(|e| e.into_inner())
             .get(&key)
         {
-            if *held == store_version {
+            if *held == level_version {
                 return std::sync::Arc::clone(lineage);
             }
         }
         let lineage = std::sync::Arc::new(build());
+        self.builds
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.cached
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(key, (store_version, std::sync::Arc::clone(&lineage)));
+            .insert(key, (level_version, std::sync::Arc::clone(&lineage)));
         lineage
     }
 }
@@ -463,7 +501,6 @@ impl Plan {
         for &n in sorted {
             on_chain[n as usize] = true;
         }
-
 
         // Depths, and the on-chain nodes bucketed by depth in the same pass — a counting sort,
         // since a level's depth is small and bounded by its own edge count. Both sweeps below need
@@ -653,12 +690,7 @@ impl Plan {
 /// proportional to the little they can see. What the guard gives up on is a mask that is broad
 /// **and** fragmented — many artifacts passing, with failures scattered near the top — and there
 /// the answer is the sweep, at the cost it has always had.
-fn cut_top_down(
-    lineage: &Lineage,
-    passing: &[u32],
-    budget: u32,
-    prune: bool,
-) -> Option<Vec<u32>> {
+fn cut_top_down(lineage: &Lineage, passing: &[u32], budget: u32, prune: bool) -> Option<Vec<u32>> {
     if !lineage.walkable {
         return None;
     }
@@ -999,9 +1031,8 @@ mod tests {
         if lineage.is_flat() {
             return passing.to_vec();
         }
-        let is_ancestor = |ancestor: u32, node: u32| {
-            lineage.chain(node).iter().skip(1).any(|&n| n == ancestor)
-        };
+        let is_ancestor =
+            |ancestor: u32, node: u32| lineage.chain(node).iter().skip(1).any(|&n| n == ancestor);
         let mut served: Vec<u32> = passing
             .iter()
             .copied()
@@ -1193,7 +1224,11 @@ mod tests {
         ]);
         let all = [0u32, 1, 2, 3, 4];
         let served = cut_top_down(&lopsided, &all, 3, true).expect("every artifact passes");
-        assert_eq!(served, vec![1, 3, 4], "the depth-1 leaf stays beside the depth-2 pair");
+        assert_eq!(
+            served,
+            vec![1, 3, 4],
+            "the depth-1 leaf stays beside the depth-2 pair"
+        );
         assert_eq!(served, reference_cut(&lopsided, &all, Some(3)));
     }
 
@@ -1317,7 +1352,10 @@ mod tests {
             let mut previous = 0;
             for depth in 0..10u32 {
                 let count = cut_at(&lineage, &passing, depth, false).len();
-                assert!(count >= previous, "case {case}: the count fell at depth {depth}");
+                assert!(
+                    count >= previous,
+                    "case {case}: the count fell at depth {depth}"
+                );
                 previous = count;
             }
         }
