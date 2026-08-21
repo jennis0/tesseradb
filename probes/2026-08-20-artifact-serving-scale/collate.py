@@ -28,7 +28,11 @@ def main() -> int:
         print(__doc__, file=sys.stderr)
         return 2
     data, tag = sys.argv[1], sys.argv[2]
-    paths = sorted(glob.glob(f"{data}/{tag}-run*.csv"))
+    # `-run<n>.csv` only: the driver also writes `-run<n>-costs.csv` beside it, and that is a build
+    # record rather than a grid.
+    paths = sorted(
+        p for p in glob.glob(f"{data}/{tag}-run*.csv") if re.search(r"-run\d+\.csv$", p)
+    )
     if not paths:
         print(f"no runs matching {data}/{tag}-run*.csv", file=sys.stderr)
         return 1
