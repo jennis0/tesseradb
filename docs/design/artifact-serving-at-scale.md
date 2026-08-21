@@ -60,10 +60,9 @@ bounds what is *served* and never what is *evaluated*. Nothing here changes that
 - **For a layer that partitions**, a **row-addressed label column** *instead of* the per-artifact
   bitmaps (§5).
 
-**Per token**, the servable-label set [`architecture.md`](architecture.md) §8.5 already specifies: a
-bitmap of ordinals whose mask-dependent conjuncts pass, and a `u32` masked count each. **40 MB** at
-10⁷, **~840 ms** single-threaded to build (138 ms on the pool), once per *distinct grant set* — the
-key is content-addressed on the auth data, so viewers with the same grants share one copy.
+**Per token**, the servable-label set [`architecture.md`](architecture.md) §8.5 already specifies —
+built when the mask is composed, at session establishment. **This is the part of the design most
+worth arguing about**, so §4.2 prices it on its own rather than asserting it.
 
 ## 4. The request
 
@@ -96,7 +95,54 @@ The geometry decides only *which question to ask*. The probe asserts the served 
 the shipped loop's, ordinal for ordinal, at every mask and every zoom — and, for the row-major route,
 count for count as well.
 
-### 4.2 Two things the construction needs to work at all
+### 4.2 What the per-token structure actually costs, and how much of it is needed
+
+**Do not rest this on sharing.** §8.5's key is content-addressed on the auth data, so viewers holding
+identical grants would share one copy — but identical grant sets are rare, so the honest assumption
+is one structure per session and the figures below make it.
+
+The comparison is not *840 ms at login against nothing*. It is **840 ms once against 840 ms every
+time that viewer zooms out**, because that is what the two hoisted passes cost per request when they
+are left in place. At 10⁷ artifacts, full mask:
+
+| viewport | candidates | `masked_count` | containment | per request |
+|---|---:|---:|---:|---:|
+| whole map | 10 000 000 | 596 ms | 246 ms | **843 ms** |
+| 6.25% | 705 662 | 40.4 ms | 16.5 ms | 56.9 ms |
+| 0.39% | 44 166 | 2.8 ms | 0.8 ms | **3.6 ms** |
+| 0.024% | 2 837 | 0.2 ms | 0.1 ms | 0.3 ms |
+
+So it earns nothing at a narrow viewport — §4's index has already cut the candidates to hundreds —
+and everything at a wide one. It breaks even on the first zoom-out, which on a map is usually the
+opening view.
+
+**Most of it is avoidable, and the two halves should not be hoisted together.** `masked_count` is 596
+of the 843 ms and the *entire* 40 MB, and `ArtifactView::verdict` computes it unconditionally but
+**tests** it only where the layer declares `require_member_visibility`. Without a criterion it is
+simply the number served — needed for artifacts that survive the cut, which the budget bounds.
+
+| layer | what the token must hold | build | residency |
+|---|---|---:|---:|
+| declares an existence criterion | the pass bitmap **and** a `u32` count per artifact | ~840 ms | 40 MB |
+| declares none | the pass bitmap alone, count computed after the cut | **~246 ms** | **≤1.25 MB** |
+
+Ten concurrent viewers of a criterion-free layer is then ~12 MB and ~2.5 s of one core spread across
+their logins, rather than 400 MB and 8.4 s. ⊘ The split is not implemented; the figures are the
+measured halves of a pass that today does both.
+
+**And a viewer who never zooms out never needs it.** The structure can fill lazily — a narrow request
+wants verdicts for a few hundred artifacts, so compute and keep those — which bounds the cost to what
+a viewer actually looks at. That does not help the case where the opening view *is* the whole map,
+which is the case that matters.
+
+**The question underneath it is why a whole-map request evaluates 10⁷ artifacts at all.** The serving
+loop runs every level of a treed layer, and at whole-map zoom a client can only draw the coarse one.
+A request that evaluated only the levels it can serve from would face ~10³ artifacts there and would
+not need the hoist. That changes what is *evaluated* and not what is served, but it reaches the
+request contract, so it is a ruling rather than an optimisation — and the saving depends on the
+hierarchy's shape. ⊘ Not measured.
+
+### 4.3 Two things the construction needs to work at all
 
 - **A hierarchy, not a granularity.** A flat index at 65 536-row blocks is worth nothing at mid-zoom:
   the viewport is then made of tiles smaller than the block, so no block is ever fully covered and

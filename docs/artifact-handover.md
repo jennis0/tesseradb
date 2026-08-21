@@ -36,6 +36,10 @@ Five things a reader needs before opening it:
   in memory at all: 4 GB against 78.5 GB.
 - **The cut is built.** 1 008 ms → 188 ms at 10⁷, peak RSS 1 078 MB → 470 MB, serving exactly what
   it served before — checked against the reference implementation over random trees.
+- **The per-token structure is the part most worth arguing about**, and §4.2 prices it without
+  assuming shared grant sets, which are rare. It is 840 ms and 40 MB per session — but that buys
+  843 ms *per wide request*, and most of it is the masked count, which a layer declaring no
+  existence criterion does not need per candidate at all. Split that way it is ~246 ms and ≤1.25 MB.
 - **Two live defects gate the rest**, neither about scale: any artifact write invalidates every
   cached row form in every view (138 s to rebuild at 10⁷), and `Lineage` is rebuilt per request from
   something that depends on neither the mask nor the viewport. A third is a spec bug —
