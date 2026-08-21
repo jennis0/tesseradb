@@ -11,36 +11,39 @@ own handover and is still accurate about its surface; this one does not repeat i
 
 ## 0. The scale investigation — read the memo, not this section
 
-[`design/artifact-serving-at-scale.md`](design/artifact-serving-at-scale.md) is an **options memo
-for owner decision**. Nothing in it is built and nothing is ruled. Its measurements are
+[`design/artifact-serving-at-scale.md`](design/artifact-serving-at-scale.md) is an **options memo for
+owner decision**, backed by
 [`probes/2026-08-20-artifact-serving-scale/`](../probes/2026-08-20-artifact-serving-scale/README.md).
+One part of it is built and gate-green — the cut rewrite — because it was a data-structure choice
+rather than a design one. Everything else is measured and proposed.
 
-The four things a reader needs before opening it:
+**The target is met.** The worst request in the system — a principal who can see the whole corpus, at
+whole-map zoom, on a treed 10⁷-artifact layer — goes from **~1 190 ms to ~410 ms**, and to ~325 ms
+once the lineage is held per generation. Every other request shape is one to three orders better.
 
-- **The target is reachable for clustered artifacts, and for scattered ones only with a different
-  layout.** 10⁷ clustered artifacts serve in **131 ms** single-threaded against 2 875 ms today. A
-  *scattered* layer walls at ~2×10⁵ under the same structures, because no tree helps an artifact
-  that is everywhere — but a **row-major** layout does: one label per row instead of one bitmap per
-  artifact, which is flat in the artifact count and, at 10⁹ points, the only layout that fits in
-  memory at all (4 GB against 78.5 GB).
+Five things a reader needs before opening it:
+
 - **The request path is `O(artifacts)` four times and only one of the four has the request in it.**
-  That is the whole finding; everything else follows from moving the other three off it.
-- **The cut was the largest term for one principal, and has been rewritten.** A viewer who can see
-  the whole corpus passes every artifact, so the cut is handed all 10⁷ — **1 008 ms** on a treed
-  layer, found by running `artifact_cut_cost` at 10⁷ for the first time, and now **188 ms** with
-  peak RSS down from 1 078 MB to 470 MB. It serves exactly what it served before, checked against
-  the reference implementation over random trees. This is the one part of the work that is built
-  rather than proposed: it was a data-structure choice, not a design one.
-- **Two live defects turned up, neither about scale.** Any artifact write invalidates every cached
-  row form in every view (153 s to rebuild at 10⁷), and `Lineage::new` walks the whole store on
-  every request. Both are ordinary work and neither touches an invariant.
-- **`architecture.md` §8.5's servable-label set is specified, unbuilt, and its key is incomplete** —
-  it carries the overlay version but nothing for the artifact store, so as specified it is
-  fail-open across a publication. That is worth fixing in the design whether or not any option is
-  taken.
+  That is the whole finding; the design is separating them by cadence — request, token, generation —
+  and giving each the layout that suits it.
+- **Cost should track what a viewer may see, and today it inverts.** At 10⁹ points a principal
+  seeing 9.4% of the corpus costs the shipped path 1 635 ms at whole-map zoom against 727 ms for one
+  seeing everything. The same two requests cost the design 0.49 ms and 13.5 ms.
+- **Locality decides the scale, not the artifact count.** A clustered layer reaches 10⁷; a
+  *scattered* one — attribute predicate, per-analyst selection, term-as-artifact — walls at ~2×10⁵
+  under the same structures, at 96.8 row blocks per artifact against 1.0. A **row-major** layout
+  removes that wall for anything that partitions, and at 10⁹ points it is the only layout that fits
+  in memory at all: 4 GB against 78.5 GB.
+- **The cut is built.** 1 008 ms → 188 ms at 10⁷, peak RSS 1 078 MB → 470 MB, serving exactly what
+  it served before — checked against the reference implementation over random trees.
+- **Two live defects gate the rest**, neither about scale: any artifact write invalidates every
+  cached row form in every view (138 s to rebuild at 10⁷), and `Lineage` is rebuilt per request from
+  something that depends on neither the mask nor the viewport. A third is a spec bug —
+  `architecture.md` §8.5's servable-label key carries the overlay version but nothing for the
+  artifact store, which is fail-open across a publication.
 
-**One owner ruling is asked for**, and it is §4 of the memo: whether a layer with no column and no
-row-space locality carries a declared bound — refused, warned, or merely reported.
+**One owner ruling is asked for**, §9 of the memo: whether a layer with no column and no locality
+carries a declared bound — refused, warned, or merely reported.
 
 ## 1. Where the rest of the work stands
 
