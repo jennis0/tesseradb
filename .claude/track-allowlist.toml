@@ -80,3 +80,14 @@ paths = [
   "crates/tessera-cli/tests/*",
   "probes/*",
 ]
+
+# Wave 2 — the probe corrections the adversarial review found (controller, 2026-08-21): the
+# masked candidacy test restored to the routes the headline figures come from, the fixture
+# decorrelated, contents ranked, the members rule fixed at 10^9, medians reported, every quoted
+# table recorded. Owns the serving-scale probe campaign's directory, not probes/ wholesale —
+# the generator track owns its own campaign records beside it.
+[track.probe]
+paths = [
+  "crates/tessera-bench/*",
+  "probes/2026-08-20-artifact-serving-scale/*",
+]
