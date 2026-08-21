@@ -66,9 +66,9 @@ use rayon::prelude::*;
 use tessera_engine::artifacts::ArtifactRows;
 use tessera_engine::compose::MaskedSet;
 use tessera_lifecycle::membership::{ArtifactRecord, ContentSet};
+use tessera_spatial::morton::{tiles_for_bbox, Bounds};
 use tessera_store::permutation::{Permutation, RowSpace};
 use tessera_store::row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
-use tessera_spatial::morton::{tiles_for_bbox, Bounds};
 use tessera_types::{EntityId, RowId};
 
 /// A deterministic 64-bit stream — the same population on every run, so two runs compare.
@@ -112,6 +112,7 @@ enum Arm {
     Scattered,
     Partition,
     Nested,
+    Dispersed,
 }
 
 impl Arm {
@@ -122,6 +123,7 @@ impl Arm {
             Arm::Scattered => "scattered",
             Arm::Partition => "partition",
             Arm::Nested => "nested",
+            Arm::Dispersed => "dispersed",
         }
     }
 
@@ -132,6 +134,7 @@ impl Arm {
             "scattered" => Some(Arm::Scattered),
             "partition" => Some(Arm::Partition),
             "nested" => Some(Arm::Nested),
+            "dispersed" => Some(Arm::Dispersed),
             _ => None,
         }
     }
@@ -190,9 +193,9 @@ impl MaskedSet for ComposedMask {
 ///
 /// Three sets rather than one, because that is what `EffectiveMask` is: base minus the overlay's
 /// denials plus the buffer's additions, and `count_intersection` pays all three.
-fn mask(rows: u32, row_order: &[u32], groups: u32, group_size: u32, rng: &mut Rng) -> ComposedMask {
+fn mask(rows: u32, row_order: &[u32], bases: &[u32], groups: u32, rng: &mut Rng) -> ComposedMask {
     let mut base = Bitmap::new();
-    let ceiling = groups.saturating_mul(group_size);
+    let ceiling = bases[groups as usize];
     for (row, &entity) in row_order.iter().enumerate() {
         if entity < ceiling {
             base.add(row as u32);
@@ -201,16 +204,27 @@ fn mask(rows: u32, row_order: &[u32], groups: u32, group_size: u32, rng: &mut Rn
     base.run_optimize();
 
     // The deny lane: a few thousand suppressed entities, which is the order a real overlay carries.
+    // **Drawn from the reserved stripe** — see [`reserved_for_deny`] for why, and for what that
+    // means the figures below do not price.
+    let mut draw = |want: usize, into: &mut Bitmap| {
+        let mut taken = 0;
+        let mut attempts = 0;
+        while taken < want && attempts < want * 64 {
+            attempts += 1;
+            let row = rng.below(rows as u64) as u32;
+            let entity = row_order[row as usize];
+            if reserved_for_deny(entity, bases[signature_group(row) as usize]) {
+                into.add(row);
+                taken += 1;
+            }
+        }
+    };
     let mut minus = Bitmap::new();
-    for _ in 0..4096 {
-        minus.add(rng.below(rows as u64) as u32);
-    }
+    draw(4096, &mut minus);
     minus.and_inplace(&base);
 
     let mut plus = Bitmap::new();
-    for _ in 0..1024 {
-        plus.add(rng.below(rows as u64) as u32);
-    }
+    draw(1024, &mut plus);
     plus.andnot_inplace(&base);
 
     ComposedMask { base, minus, plus }
@@ -266,6 +280,16 @@ fn viewport(rows: u32, fraction: f64, depth: u8) -> Bitmap {
     tiles
 }
 
+/// How wide a membership is spread, which is the only axis that decides its cost.
+#[derive(Clone, Copy)]
+struct Shape {
+    members: u32,
+    /// `runs` arm: how many pieces the membership is broken into inside its own stretch.
+    runs: u32,
+    /// `dispersed` arm: how many distinct row blocks it occupies.
+    blocks: u32,
+}
+
 /// One artifact's membership, **in row space** — and generating it there is the correction that
 /// makes this probe measure the system it claims to.
 ///
@@ -283,17 +307,47 @@ fn viewport(rows: u32, fraction: f64, depth: u8) -> Bitmap {
 /// |---|---|
 /// | `runs` | artifact *i* sits at its own stretch of the space, in `runs` pieces — a clustering **partitions** the map, so the artifacts tile it rather than landing on top of one another |
 /// | `scattered` | uniform over the whole space — an attribute predicate's carriers, which have no locality at all |
+/// | `dispersed` | `blocks` separate row blocks — the bracket between the two, swept so the layout heuristic's threshold can be found rather than assumed |
 fn membership_rows(
     arm: Arm,
     row_count: u32,
     artifact: usize,
     artifacts: usize,
-    members: u32,
-    runs: u32,
+    shape: Shape,
     rng: &mut Rng,
 ) -> Bitmap {
+    let Shape {
+        members,
+        runs,
+        blocks,
+    } = shape;
     let mut bitmap = Bitmap::new();
     match arm {
+        Arm::Dispersed => {
+            // **The bracket between `runs` (1.0 blocks per artifact) and `scattered` (96.8).**
+            // Nothing was ever measured between 1.6 and 10 blocks per artifact, which is exactly
+            // where a layout heuristic's threshold has to sit — so this arm places a membership in
+            // a controlled number of 65 536-row blocks rather than letting the shape decide.
+            //
+            // Blocks step one container at a time from the artifact's own stretch, so each piece
+            // lands in a container of its own while the **extent stays local** — which is what
+            // separates this arm from `scattered`. An earlier revision strided the pieces across the
+            // whole row space, and every artifact then straddled the root at every block count: the
+            // arm collapsed onto `scattered` and measured nothing but its own dispersal.
+            let stride = (row_count as u64 / artifacts.max(1) as u64).max(1);
+            let blocks = blocks.max(1);
+            let per_block = (members / blocks).max(1);
+            let span = (blocks as u64 * 65_536).min(row_count as u64) as u32;
+            let base = ((artifact as u64 * stride) as u32).min(row_count.saturating_sub(span));
+            for b in 0..blocks {
+                // One container is 65 536 rows; step whole containers so each piece is its own.
+                let start = base
+                    .saturating_add(b * 65_536)
+                    .min(row_count.saturating_sub(per_block.min(row_count)));
+                bitmap.add_range(start..start.saturating_add(per_block).min(row_count));
+            }
+            bitmap.run_optimize();
+        }
         Arm::Runs => {
             // The stretch this artifact owns, and a local window a few times wider so neighbours
             // interleave at their edges as real clusters do.
@@ -303,7 +357,9 @@ fn membership_rows(
             let per_run = (members / runs.max(1)).max(1);
             for _ in 0..runs.max(1) {
                 let offset = rng.below(window.max(1) as u64) as u32;
-                let start = base.saturating_add(offset).min(row_count - per_run.min(row_count));
+                let start = base
+                    .saturating_add(offset)
+                    .min(row_count - per_run.min(row_count));
                 bitmap.add_range(start..start.saturating_add(per_run).min(row_count));
             }
             bitmap.run_optimize();
@@ -418,6 +474,71 @@ fn to_entities(rows: &Bitmap, space: &RowSpace) -> Bitmap {
     entities
 }
 
+/// A keyed permutation of the signature groups. Any odd multiplier is a bijection modulo a power of
+/// two; this one exists so that an artifact's **generating** group is not its ordinal's group.
+fn permuted_group(g: u32) -> u32 {
+    (g.wrapping_mul(17).wrapping_add(5)) % SIGNATURE_GROUPS
+}
+
+/// One ranked content's **generating set**, as entity ids — and the decorrelation that makes the
+/// masked candidacy test observable at all.
+///
+/// The earlier fixture drew every generating set from the artifact's own members, inside the group
+/// `ordinal % 32`, while a principal's mask was the first `holds` groups and `ContainmentGroups`
+/// returned `ordinal % 32` — one 32-way partition doing four jobs. Two things follow from that, and
+/// both are fatal to what this probe is for:
+///
+/// - *contains G* implied *has a visible member*, because `G ⊆ members` and containment means every
+///   member of `G` is visible. So a route that admitted a settled artifact on containment alone was
+///   **indistinguishable from one that also probed the mask**, and the assertion that compares them
+///   could not fail however the routes were written;
+/// - the build-time containment partition was read off the ordinal rather than off the population,
+///   so it could not disagree with `satisfied_rank` either.
+///
+/// Here the group is `permuted_group(hash(ordinal) + rank)` — independent of the ordinal's own
+/// group and of where the membership sits — and the set is **not drawn from the membership**.
+/// `annotations.md` §7.8's review trail already says a generating set need not be one (*"a
+/// contrastive labeller's generating set includes the contrast material"*), and §8.2's boundary
+/// artifacts have empty ones over memberships that may be entirely invisible. So an artifact can
+/// now be *contained but invisible* and *visible but uncontained*, which is what gives
+/// [`assert_same_answer`] something to catch.
+///
+/// **Entity space, not row space, and that is what §7.8 describes.** A per-term generating set is a
+/// sample sharing a signature, and a signature group is contiguous in entity space — so drawing
+/// entities directly from `[bases[g], bases[g + 1])` is the shape the design names, and its row
+/// form is scattered exactly as a real one's would be.
+fn generating_entities(ordinal: usize, rank: u32, spread: u32, size: u32, bases: &[u32]) -> Bitmap {
+    let mut h = (ordinal as u64)
+        .wrapping_mul(0xD6E8_FEB8_6659_FD93)
+        .rotate_left(29)
+        .wrapping_add(rank as u64);
+    h ^= h >> 31;
+    let mut out = Bitmap::new();
+    let spread = spread.clamp(1, SIGNATURE_GROUPS);
+    for j in 0..spread {
+        let g =
+            permuted_group(((h as u32).wrapping_add(rank).wrapping_add(j * 7)) % SIGNATURE_GROUPS);
+        let (lo, hi) = (bases[g as usize], bases[g as usize + 1]);
+        let span = (hi - lo).max(1);
+        // The set is split across the groups it spans, so `size` is the whole content's sample.
+        let take = (size / spread).max(1);
+        for i in 0..take {
+            let mut z = h
+                .wrapping_add((j as u64) << 40)
+                .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            z ^= z >> 27;
+            z = z.wrapping_mul(0x94D0_49BB_1331_11EB);
+            let mut e = lo + (z % span as u64) as u32;
+            // Never the deny lane's stripe — see [`reserved_for_deny`].
+            if reserved_for_deny(e, lo) {
+                e = if e + 1 < hi { e + 1 } else { e - 1 };
+            }
+            out.add(e);
+        }
+    }
+    out
+}
+
 /// How many signature groups the fixture's entity space is divided into.
 ///
 /// **Entity ids are allocated in signature-sorted order with the Morton code as the within-signature
@@ -431,38 +552,67 @@ fn to_entities(rows: &Bitmap, space: &RowSpace) -> Bitmap {
 /// runs in entity space, and the ratio comes out near 12× for the hundred-member artifacts here.
 const SIGNATURE_GROUPS: u32 = 32;
 
+/// Which signature group a row's document belongs to.
+///
+/// Signature and map position are uncorrelated — what a document is *about* does not follow from
+/// where it sits — so this is a hash of the row rather than a function of its neighbourhood.
+fn signature_group(row: u32) -> u32 {
+    let mut z = (row as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z ^= z >> 29;
+    (z % SIGNATURE_GROUPS as u64) as u32
+}
+
+/// One entity in every four is **never drawn into a generating set**, and the deny lane draws only
+/// from those.
+///
+/// The overlay and the build-time containment expression interact: a suppression removes a member
+/// of `G` from `M_auth` whatever the principal's terms say, so an expression composed at build
+/// needs a correction the design carries as an explicit ⊘ (§4.2) and does not propose measuring
+/// here. A fixture whose deny lane landed on generating sets would put that unmodelled correction
+/// inside every containment figure and inside the assertion that checks it — so the two routes
+/// would differ for a reason neither of them is about.
+///
+/// Reserving a stripe keeps the expression **exact**, which is what makes
+/// [`assert_containment_partition`] a real check rather than a tolerance. It is a property of the
+/// fixture and not of the design, and it is the reason no figure here prices the overlay
+/// correction.
+fn reserved_for_deny(entity: u32, base: u32) -> bool {
+    (entity - base) % 4 == 3
+}
+
 /// A row space whose permutation is the one the build actually produces.
 ///
 /// Row *r*'s entity is `base[g] + rank of r within group g`, where *g* is *r*'s signature group.
-/// Signature and map position are uncorrelated — what a document is *about* does not follow from
-/// where it sits — so the group is drawn from a hash of the row rather than from its neighbourhood,
-/// and the consequence is the one that matters for every measurement below: **an artifact that is
+/// The consequence is the one that matters for every measurement below: **an artifact that is
 /// contiguous in row space is 32 runs in entity space, and a principal's visible set is contiguous
 /// in entity space and scattered in row space.** The two directions are not symmetric and a fixture
 /// that shuffled would have neither.
-fn row_space(dir: &std::path::Path, rows: u32) -> (RowSpace, Vec<u32>) {
+///
+/// Returns the group bases as well, one per group plus a terminator, because a principal's mask is
+/// the union of whole groups and **the boundary has to be the group's own**. An earlier revision
+/// took the ceiling as `holds × (rows / 32)`, which is a few hundred entities away from
+/// `base[holds]` wherever the hash divided unevenly — so a handful of entities were visible whose
+/// group the principal did not hold, and the build-time containment expression could not be exact
+/// for them.
+fn row_space(dir: &std::path::Path, rows: u32) -> (RowSpace, Vec<u32>, Vec<u32>) {
     // Pass one: how big is each group.
-    let group_of = |row: u32| -> u32 {
-        let mut z = (row as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        z ^= z >> 29;
-        (z % SIGNATURE_GROUPS as u64) as u32
-    };
     let mut sizes = vec![0u32; SIGNATURE_GROUPS as usize];
     for row in 0..rows {
-        sizes[group_of(row) as usize] += 1;
+        sizes[signature_group(row) as usize] += 1;
     }
-    let mut base = vec![0u32; SIGNATURE_GROUPS as usize];
+    let mut base = vec![0u32; SIGNATURE_GROUPS as usize + 1];
     let mut running = 0u32;
     for (g, size) in sizes.iter().enumerate() {
         base[g] = running;
         running += size;
     }
+    base[SIGNATURE_GROUPS as usize] = running;
 
     // Pass two: the assignment itself.
     let mut cursor = base.clone();
     let mut row_order: Vec<u32> = Vec::with_capacity(rows as usize);
     for row in 0..rows {
-        let g = group_of(row) as usize;
+        let g = signature_group(row) as usize;
         row_order.push(cursor[g]);
         cursor[g] += 1;
     }
@@ -481,7 +631,7 @@ fn row_space(dir: &std::path::Path, rows: u32) -> (RowSpace, Vec<u32>) {
     .with_row_entity(Arc::new(
         RowToEntity::load(&table_path).expect("row-entity table loads"),
     ));
-    (space, row_order)
+    (space, row_order, base)
 }
 
 /// One route's name, its once-per-token setup cost, and the closure that runs one request of it.
@@ -529,9 +679,13 @@ struct Held<'a> {
 /// at, and the order the cut probe uses.
 fn frontier(lineage: &tessera_engine::cut::Lineage, candidates: &[u32]) -> (f64, usize) {
     let start = Instant::now();
-    let served = tessera_engine::cut::cut(lineage, candidates, Some(1_000), true);
+    let served = tessera_engine::cut::cut(lineage, candidates, Some(BUDGET as u32), true);
     (start.elapsed().as_secs_f64() * 1e6, served.len())
 }
+
+/// A request's artifact ceiling — the order `annotation-representation.md` §2.0.0 puts it at, and
+/// the order a client can draw.
+const BUDGET: usize = 1_000;
 
 /// The containment test's verdict, called through the shipped entry point.
 fn contained(rows: &ArtifactRows, ordinal: u32, mask: &ComposedMask) -> bool {
@@ -560,7 +714,10 @@ fn shipped(rows: &ArtifactRows, tiles: &Bitmap, mask: &ComposedMask, parallel: b
 
     let start = Instant::now();
     let total: u64 = if parallel {
-        candidates.par_iter().map(|&o| rows.masked_count(o, mask)).sum()
+        candidates
+            .par_iter()
+            .map(|&o| rows.masked_count(o, mask))
+            .sum()
     } else {
         candidates.iter().map(|&o| rows.masked_count(o, mask)).sum()
     };
@@ -569,9 +726,15 @@ fn shipped(rows: &ArtifactRows, tiles: &Bitmap, mask: &ComposedMask, parallel: b
 
     let start = Instant::now();
     phases.passing = if parallel {
-        candidates.par_iter().filter(|&&o| contained(rows, o, mask)).count()
+        candidates
+            .par_iter()
+            .filter(|&&o| contained(rows, o, mask))
+            .count()
     } else {
-        candidates.iter().filter(|&&o| contained(rows, o, mask)).count()
+        candidates
+            .iter()
+            .filter(|&&o| contained(rows, o, mask))
+            .count()
     };
     phases.containment = start.elapsed().as_secs_f64() * 1e6;
 
@@ -599,7 +762,10 @@ fn early_exit(rows: &ArtifactRows, tiles: &Bitmap, mask: &ComposedMask, parallel
     let mut phases = Phases::default();
     let start = Instant::now();
     let candidates: Vec<u32> = if parallel {
-        (0..rows.len() as u32).into_par_iter().filter(|&o| candidate(o)).collect()
+        (0..rows.len() as u32)
+            .into_par_iter()
+            .filter(|&o| candidate(o))
+            .collect()
     } else {
         (0..rows.len() as u32).filter(|&o| candidate(o)).collect()
     };
@@ -608,7 +774,10 @@ fn early_exit(rows: &ArtifactRows, tiles: &Bitmap, mask: &ComposedMask, parallel
 
     let start = Instant::now();
     let total: u64 = if parallel {
-        candidates.par_iter().map(|&o| rows.masked_count(o, mask)).sum()
+        candidates
+            .par_iter()
+            .map(|&o| rows.masked_count(o, mask))
+            .sum()
     } else {
         candidates.iter().map(|&o| rows.masked_count(o, mask)).sum()
     };
@@ -617,9 +786,15 @@ fn early_exit(rows: &ArtifactRows, tiles: &Bitmap, mask: &ComposedMask, parallel
 
     let start = Instant::now();
     phases.passing = if parallel {
-        candidates.par_iter().filter(|&&o| contained(rows, o, mask)).count()
+        candidates
+            .par_iter()
+            .filter(|&&o| contained(rows, o, mask))
+            .count()
     } else {
-        candidates.iter().filter(|&&o| contained(rows, o, mask)).count()
+        candidates
+            .iter()
+            .filter(|&&o| contained(rows, o, mask))
+            .count()
     };
     phases.containment = start.elapsed().as_secs_f64() * 1e6;
 
@@ -871,16 +1046,27 @@ fn indexed(
     let shortlist = index.candidates(tiles, row_count);
     let shortlist: Vec<u32> = shortlist.iter().collect();
     let candidates: Vec<u32> = if parallel {
-        shortlist.par_iter().filter(|&&o| rows.intersects(o, tiles, mask)).copied().collect()
+        shortlist
+            .par_iter()
+            .filter(|&&o| rows.intersects(o, tiles, mask))
+            .copied()
+            .collect()
     } else {
-        shortlist.iter().filter(|&&o| rows.intersects(o, tiles, mask)).copied().collect()
+        shortlist
+            .iter()
+            .filter(|&&o| rows.intersects(o, tiles, mask))
+            .copied()
+            .collect()
     };
     phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
     phases.candidates = candidates.len();
 
     let start = Instant::now();
     let total: u64 = if parallel {
-        candidates.par_iter().map(|&o| rows.masked_count(o, mask)).sum()
+        candidates
+            .par_iter()
+            .map(|&o| rows.masked_count(o, mask))
+            .sum()
     } else {
         candidates.iter().map(|&o| rows.masked_count(o, mask)).sum()
     };
@@ -889,9 +1075,15 @@ fn indexed(
 
     let start = Instant::now();
     phases.passing = if parallel {
-        candidates.par_iter().filter(|&&o| contained(rows, o, mask)).count()
+        candidates
+            .par_iter()
+            .filter(|&&o| contained(rows, o, mask))
+            .count()
     } else {
-        candidates.iter().filter(|&&o| contained(rows, o, mask)).count()
+        candidates
+            .iter()
+            .filter(|&&o| contained(rows, o, mask))
+            .count()
     };
     phases.containment = start.elapsed().as_secs_f64() * 1e6;
 
@@ -965,16 +1157,27 @@ fn sessioned(
     shortlist.and_inplace(&session.passes);
     let shortlist: Vec<u32> = shortlist.iter().collect();
     let candidates: Vec<u32> = if parallel {
-        shortlist.par_iter().filter(|&&o| rows.intersects(o, tiles, mask)).copied().collect()
+        shortlist
+            .par_iter()
+            .filter(|&&o| rows.intersects(o, tiles, mask))
+            .copied()
+            .collect()
     } else {
-        shortlist.iter().filter(|&&o| rows.intersects(o, tiles, mask)).copied().collect()
+        shortlist
+            .iter()
+            .filter(|&&o| rows.intersects(o, tiles, mask))
+            .copied()
+            .collect()
     };
     phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
     phases.candidates = candidates.len();
 
     // The count is a lookup, not an intersection.
     let start = Instant::now();
-    let total: u64 = candidates.iter().map(|&o| session.counts[o as usize] as u64).sum();
+    let total: u64 = candidates
+        .iter()
+        .map(|&o| session.counts[o as usize] as u64)
+        .sum();
     phases.count = start.elapsed().as_secs_f64() * 1e6;
     std::hint::black_box(total);
 
@@ -995,13 +1198,50 @@ fn sessioned(
 /// in the block the viewport touches, so it is in the shortlist. And every shortlisted artifact is
 /// then put through the identical masked `intersects` before it is served. Pruning cannot admit
 /// what the mask rejects, and it cannot reject what the mask admits.
-fn assert_same_answer(
+/// **The build-time containment partition decides exactly what `satisfied_rank` decides** — every
+/// artifact, every mask, the rank included and not merely the verdict.
+///
+/// This is [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+/// whole claim, and until the fixture was decorrelated it could not be checked: the expression was
+/// read off the ordinal and the generating set was drawn from the same partition, so the two sides
+/// agreed by construction. Now the expression is composed from the population and the two can
+/// disagree — which is what makes agreeing worth asserting.
+///
+/// Under `--legacy-fixture` a disagreement is **reported rather than fatal**, because demonstrating
+/// it is what that flag is for.
+fn assert_containment_partition(
     rows: &ArtifactRows,
-    index: &TileIndex,
-    tiles: &Bitmap,
+    contains: &ContainmentGroups,
     mask: &ComposedMask,
-    row_count: u32,
+    holds: u32,
+    strict: bool,
 ) {
+    let sat = contains.satisfied_exprs(holds);
+    let wrong = (0..rows.len() as u32)
+        .into_par_iter()
+        .filter(|&o| {
+            let theirs = contains.rank_for(o, &sat);
+            let ours = match rows.satisfied_rank(o, mask, true) {
+                tessera_engine::artifacts::Containment::Satisfied(i) => Some(i),
+                _ => None,
+            };
+            theirs != ours
+        })
+        .count();
+    if wrong == 0 {
+        return;
+    }
+    let msg = format!(
+        "the build-time containment partition disagrees with satisfied_rank at {wrong} of {} \
+         ordinals, mask holds {holds} groups",
+        rows.len()
+    );
+    assert!(!strict, "{msg}");
+    eprintln!("# legacy fixture: {msg}");
+}
+
+fn assert_same_answer(held: &Held, tiles: &Bitmap, mask: &ComposedMask, holds: u32, strict: bool) {
+    let (rows, index, contains, row_count) = (held.rows, held.index, held.contains, held.row_count);
     let viewport_rows = tiles.cardinality();
     let full: Vec<u32> = (0..rows.len() as u32)
         .filter(|&o| rows.intersects(o, tiles, mask))
@@ -1036,6 +1276,69 @@ fn assert_same_answer(
         "the settled half is not settled — an artifact wholly inside a covered block had its \
          viewport answer differ from its mask answer"
     );
+
+    // **Routes G and H, whose answer is the campaign's headline and was never checked.** They are
+    // the only routes that resolve containment from the build-time partition rather than from
+    // `satisfied_rank`, and — until this revision — the only ones that admitted a candidate without
+    // asking the mask anything. Both halves of that are checked here, against the shipped loop's
+    // own verdict: candidacy through `ArtifactRows::intersects`, containment through
+    // `ArtifactRows::satisfied_rank`, on the structures the engine ships.
+    let shipped_verdict: Vec<u32> = (0..rows.len() as u32)
+        .into_par_iter()
+        .filter(|&o| {
+            rows.intersects(o, tiles, mask)
+                && rows.satisfied_rank(o, mask, true)
+                    != tessera_engine::artifacts::Containment::Unsatisfied
+        })
+        .collect();
+    let oracle: Bitmap = shipped_verdict.iter().copied().collect();
+    let sat = contains.satisfied_exprs(holds);
+    for (route, produced) in [
+        ("grouped", grouped_candidates(held, &sat, tiles, mask)),
+        ("hoisted", hoisted_candidates(held, &sat, tiles, mask)),
+    ] {
+        // **The artifacts served with nothing visible in them**, named separately from the set
+        // difference because it is the specific failure the masked candidacy test exists to
+        // prevent: a viewer shown a label over a region holding nothing they may see.
+        let blind = produced
+            .iter()
+            .filter(|&o| rows.masked_count(o, mask) == 0)
+            .count();
+        let extra = produced.andnot(&oracle).cardinality();
+        let missing = oracle.andnot(&produced).cardinality();
+        if extra == 0 && missing == 0 {
+            continue;
+        }
+        let msg = format!(
+            "route {route} served {} where the shipped loop served {} — {extra} it should not \
+             have ({blind} of them with no visible member at all), {missing} it should have",
+            produced.cardinality(),
+            oracle.cardinality()
+        );
+        assert!(!strict, "{msg}");
+        eprintln!("# legacy fixture: {msg}");
+    }
+
+    // **The rank beside each served artifact**, which is what decides the text on the wire — and
+    // the count, which is the number beside it. Both over the artifacts a request would actually
+    // return, which is what the budget bounds.
+    if strict {
+        for &o in shipped_verdict.iter().take(BUDGET) {
+            let ours = match rows.satisfied_rank(o, mask, true) {
+                tessera_engine::artifacts::Containment::Satisfied(i) => Some(i),
+                _ => None,
+            };
+            assert_eq!(
+                contains.rank_for(o, &sat),
+                ours,
+                "the containment partition serves ordinal {o} at the wrong rank"
+            );
+            assert!(
+                rows.masked_count(o, mask) > 0,
+                "ordinal {o} is served with no visible member"
+            );
+        }
+    }
 }
 
 /// **Route E — the settled half is free, and it is almost the whole population.**
@@ -1084,7 +1387,10 @@ fn settled(
     phases.candidates = candidates.len();
 
     let start = Instant::now();
-    let total: u64 = candidates.iter().map(|&o| session.counts[o as usize] as u64).sum();
+    let total: u64 = candidates
+        .iter()
+        .map(|&o| session.counts[o as usize] as u64)
+        .sum();
     phases.count = start.elapsed().as_secs_f64() * 1e6;
     std::hint::black_box(total);
 
@@ -1206,7 +1512,10 @@ fn columnar(
     phases.candidates = candidates.len();
 
     let start = Instant::now();
-    let total: u64 = candidates.iter().map(|&o| session.counts[o as usize] as u64).sum();
+    let total: u64 = candidates
+        .iter()
+        .map(|&o| session.counts[o as usize] as u64)
+        .sum();
     phases.count = start.elapsed().as_secs_f64() * 1e6;
     std::hint::black_box(total);
 
@@ -1245,57 +1554,190 @@ fn columnar(
 /// overlay changes rather than per token. And a generating set that lost members in projection can
 /// never be contained, which is per view and mask-independent, so it folds into the group.
 struct ContainmentGroups {
-    /// Per distinct expression, the ordinals whose containment it decides.
+    /// The distinct expressions, canonicalised and interned. Each is the **sorted, deduplicated**
+    /// list of signature groups whose terms a principal must hold — a conjunction, and the
+    /// canonical form is what lets two artifacts with the same requirement share an id.
+    exprs: Vec<Vec<u16>>,
+    /// Per distinct expression, the ordinals it decides at some rank.
     ///
     /// Held for the wide case, where taking the union once beats testing each candidate.
-    groups: Vec<Bitmap>,
-    /// Per ordinal, which expression decides it — so a **narrow** request never touches the
-    /// population at all. Unioning thirty-two bitmaps over ten million ordinals is
-    /// `O(containers)`, which is ~6 ms whatever the viewport; a byte lookup per candidate is
-    /// `O(candidates)`, which at a 0.024% viewport is three hundred of them.
+    holders: Vec<Bitmap>,
+    /// Per `(ordinal, rank)`, which expression decides it — so a **narrow** request never touches
+    /// the population at all. Unioning the satisfied expressions over ten million ordinals is
+    /// `O(containers)`; a lookup per candidate is `O(candidates)`, which at a 0.024% viewport is
+    /// three hundred of them.
     ///
-    /// One byte per artifact. The two forms are the same fact, and the route picks between them on
-    /// the size of the candidate set exactly as §5's two layouts do.
-    of_ordinal: Vec<u8>,
+    /// **`u16`, not `u8`.** A byte holds 256 expressions, which is fewer than a real vocabulary has
+    /// and fewer than a two-group conjunction can produce from 32 groups; the earlier width was
+    /// sized to the fixture's 32 rather than to the quantity, so it would have understated the
+    /// state by the exact factor that matters to
+    /// [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+    /// storage claim. Two bytes per artifact per rank.
+    of_ordinal: Vec<u16>,
+    ranks: usize,
 }
 
 impl ContainmentGroups {
-    /// Built from the population: each artifact's generating set lies inside one signature group by
-    /// construction, so the expression it composes to is that group's own term.
-    fn build(rows: &ArtifactRows, artifacts: usize) -> Self {
-        let mut groups = vec![Bitmap::new(); SIGNATURE_GROUPS as usize];
-        for ordinal in 0..artifacts as u32 {
-            // The fixture draws each generating set from `ordinal % SIGNATURE_GROUPS`.
-            groups[(ordinal % SIGNATURE_GROUPS) as usize].add(ordinal);
+    /// Built from the population — **from each artifact's actual generating set**, not from its
+    /// ordinal.
+    ///
+    /// `G ⊆ M_auth` holds exactly when every member of `G` is visible, and a member is visible
+    /// exactly when the principal holds its signature's term. So the expression is the set of
+    /// signature groups the generating set spans, and reading it off the record is the only way the
+    /// structure can be wrong in the way a real one could be. The earlier revision returned
+    /// `ordinal % 32` and so agreed with `satisfied_rank` by construction rather than by
+    /// computation.
+    fn build(records: &[ArtifactRecord], bases: &[u32], ranks: usize, legacy: bool) -> Self {
+        let mut intern: rustc_hash::FxHashMap<Vec<u16>, u16> = Default::default();
+        let mut exprs: Vec<Vec<u16>> = Vec::new();
+        let mut holders: Vec<Bitmap> = Vec::new();
+        let mut of_ordinal = vec![0u16; records.len() * ranks];
+        let group_of_entity = |e: u32| -> u16 {
+            // `bases` is ascending with a terminator, so this is the group whose extent holds `e`.
+            (bases.partition_point(|&b| b <= e) - 1) as u16
+        };
+        for (ordinal, record) in records.iter().enumerate() {
+            for rank in 0..ranks {
+                let mut canonical: Vec<u16> = if legacy {
+                    // The alignment the earlier fixture had: the expression is read off the
+                    // ordinal. Kept so the before/after is demonstrable rather than described.
+                    vec![(ordinal as u32 % SIGNATURE_GROUPS) as u16]
+                } else {
+                    record
+                        .contents
+                        .get(rank)
+                        .map(|c| c.generated_from.iter().map(group_of_entity).collect())
+                        .unwrap_or_default()
+                };
+                canonical.sort_unstable();
+                canonical.dedup();
+                let id = match intern.get(&canonical) {
+                    Some(&id) => id,
+                    None => {
+                        let id = u16::try_from(exprs.len())
+                            .expect("more distinct expressions than a u16 id can address");
+                        intern.insert(canonical.clone(), id);
+                        exprs.push(canonical);
+                        holders.push(Bitmap::new());
+                        id
+                    }
+                };
+                of_ordinal[ordinal * ranks + rank] = id;
+                holders[id as usize].add(ordinal as u32);
+            }
         }
-        for g in &mut groups {
-            g.run_optimize();
+        for h in &mut holders {
+            h.run_optimize();
         }
-        let of_ordinal = (0..artifacts as u32)
-            .map(|ordinal| (ordinal % SIGNATURE_GROUPS) as u8)
-            .collect();
-        let _ = rows;
-        ContainmentGroups { groups, of_ordinal }
+        ContainmentGroups {
+            exprs,
+            holders,
+            of_ordinal,
+            ranks,
+        }
     }
 
-    /// The artifacts whose containment this principal satisfies, as a set — the wide route.
-    fn satisfied(&self, holds: u32) -> Bitmap {
-        let lists: Vec<&Bitmap> = self.groups.iter().take(holds as usize).collect();
+    fn distinct(&self) -> usize {
+        self.exprs.len()
+    }
+
+    /// Which expressions this principal satisfies — `O(distinct expressions)`, evaluated once per
+    /// request against the token's terms and against nothing else. **An empty expression is
+    /// vacuously satisfied**, which is `annotations.md` §8.2's corpus-independent content and is
+    /// what `satisfied_rank` does with an empty generating set.
+    fn satisfied_exprs(&self, holds: u32) -> Vec<bool> {
+        self.exprs
+            .iter()
+            .map(|e| e.iter().all(|&g| (g as u32) < holds))
+            .collect()
+    }
+
+    /// The artifacts whose containment this principal satisfies at some rank, as a set — the wide
+    /// route.
+    fn satisfied(&self, sat: &[bool]) -> Bitmap {
+        let lists: Vec<&Bitmap> = self
+            .holders
+            .iter()
+            .zip(sat)
+            .filter_map(|(h, &ok)| ok.then_some(h))
+            .collect();
         Bitmap::fast_or(&lists)
     }
 
-    /// Whether this one artifact's containment holds — the narrow route.
-    fn holds_for(&self, ordinal: u32, holds: u32) -> bool {
-        (self.of_ordinal[ordinal as usize] as u32) < holds
+    /// The first rank this principal is served, or `None` — the narrow route, and the quantity
+    /// `ArtifactRows::satisfied_rank` returns.
+    fn rank_for(&self, ordinal: u32, sat: &[bool]) -> Option<u32> {
+        let at = ordinal as usize * self.ranks;
+        (0..self.ranks)
+            .find(|&r| sat[self.of_ordinal[at + r] as usize])
+            .map(|r| r as u32)
+    }
+
+    /// Whether this one artifact's containment holds at any rank.
+    fn holds_for(&self, ordinal: u32, sat: &[bool]) -> bool {
+        let at = ordinal as usize * self.ranks;
+        (0..self.ranks).any(|r| sat[self.of_ordinal[at + r] as usize])
     }
 
     fn resident_bytes(&self) -> u64 {
-        self.groups
+        self.holders
             .iter()
             .map(|g| g.get_serialized_size_in_bytes::<croaring::Portable>() as u64)
             .sum::<u64>()
-            + self.of_ordinal.len() as u64
+            + (self.of_ordinal.len() * std::mem::size_of::<u16>()) as u64
+            + self
+                .exprs
+                .iter()
+                .map(|e| (e.len() * std::mem::size_of::<u16>()) as u64)
+                .sum::<u64>()
     }
+}
+
+/// **The masked candidacy test, restored to routes G and H — and it is not optional.**
+///
+/// Both routes admitted the settled half on the containment partition alone and short-circuited the
+/// open half through `TileIndex::inside`, so **no candidate anywhere on either route was asked
+/// whether the principal can see a member of it**. That is a disclosure and a mismeasurement at the
+/// same time: the artifacts it serves are ones the shipped loop withholds, and the work it omits is
+/// the work those routes exist to price.
+///
+/// The settle test does not remove the question, it *changes* it: `membership ⊆ viewport` makes
+/// *"has a visible member here"* the same question as *"has a visible member"*, and the second still
+/// has to be asked of somebody. `SessionVerdicts` is where routes D and E ask it — which
+/// [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+/// rules out, leaving these routes to ask it per request. So every candidate pays one early-exiting
+/// intersection, settled or open.
+///
+/// The two routes differ in *where the mask meets the viewport*, which is what they are named for
+/// and the one thing the comparison is about: [`grouped`] composes per artifact through the shipped
+/// `ArtifactRows::intersects`, [`hoisted`] composes `viewport ∩ M_auth` once. Both answer
+/// `membership ∩ viewport ∩ M_auth ≠ ∅`, and identically.
+fn grouped_candidates(held: &Held, sat: &[bool], tiles: &Bitmap, mask: &ComposedMask) -> Bitmap {
+    let (rows, index, contains, row_count) = (held.rows, held.index, held.contains, held.row_count);
+    let (settled, open) = index.settled_and_open(tiles, row_count);
+    // **Which way round to ask depends on how much the viewport left.** Unioning the satisfied
+    // expressions is `O(containers)` and independent of the viewport; testing each candidate is
+    // `O(candidates)`. The viewport walk has already said which is smaller.
+    let wide = settled.cardinality() + open.cardinality() > (row_count as u64 / 64).max(4096);
+    let mut passing: Bitmap = if wide {
+        let passes = contains.satisfied(sat);
+        let mut s = settled;
+        s.and_inplace(&passes);
+        let mut o = open;
+        o.and_inplace(&passes);
+        s.or_inplace(&o);
+        s.iter()
+            .filter(|&x| rows.intersects(x, tiles, mask))
+            .collect()
+    } else {
+        let mut s = settled;
+        s.or_inplace(&open);
+        s.iter()
+            .filter(|&x| contains.holds_for(x, sat) && rows.intersects(x, tiles, mask))
+            .collect()
+    };
+    passing.run_optimize();
+    passing
 }
 
 /// **Route G — the settled route with containment resolved from the build-time partition.**
@@ -1303,46 +1745,13 @@ impl ContainmentGroups {
 /// The per-token structure is gone: what stands in its place is one union of a handful of
 /// build-time bitmaps, priced here as part of the request that uses it.
 fn grouped(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phases {
-    let (rows, index, contains, lineage, row_count) = (
-        held.rows,
-        held.index,
-        held.contains,
-        held.lineage,
-        held.row_count,
-    );
-    let viewport_rows = tiles.cardinality();
+    let (rows, contains, lineage) = (held.rows, held.contains, held.lineage);
     let mut phases = Phases::default();
 
     let start = Instant::now();
-    let (settled, open) = index.settled_and_open(tiles, row_count);
-    // **Which way round to ask depends on how much the viewport left.** Unioning the satisfied
-    // groups is `O(containers)` and independent of the viewport; testing each candidate is
-    // `O(candidates)`. The viewport walk has already said which is smaller.
-    let wide = settled.cardinality() + open.cardinality() > (row_count as u64 / 64).max(4096);
-    let mut passing = if wide {
-        let passes = contains.satisfied(holds);
-        let mut s = settled;
-        s.and_inplace(&passes);
-        let mut o = open;
-        o.and_inplace(&passes);
-        for x in o.iter() {
-            if index.inside(x, tiles, viewport_rows) || rows.intersects(x, tiles, mask) {
-                s.add(x);
-            }
-        }
-        s
-    } else {
-        let mut s: Bitmap = settled.iter().filter(|&o| contains.holds_for(o, holds)).collect();
-        for x in open.iter() {
-            if contains.holds_for(x, holds)
-                && (index.inside(x, tiles, viewport_rows) || rows.intersects(x, tiles, mask))
-            {
-                s.add(x);
-            }
-        }
-        s
-    };
-    passing.run_optimize();
+    // Evaluated against the token's terms and against nothing else — `O(distinct expressions)`.
+    let sat = contains.satisfied_exprs(holds);
+    let passing = grouped_candidates(held, &sat, tiles, mask);
     // **The result stays a set until something needs a list**, which is the difference between
     // 141 ms and 35 ms at ten million: `Bitmap::iter` is ascending by construction, so the sort the
     // earlier revision ran over ten million ordinals — 110 ms of that 141 — was sorting two runs
@@ -1359,13 +1768,23 @@ fn grouped(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phas
     let start = Instant::now();
     let total: u64 = candidates
         .iter()
-        .take(1000)
+        .take(BUDGET)
         .map(|&o| rows.masked_count(o, mask))
         .sum();
     phases.count = start.elapsed().as_secs_f64() * 1e6;
     std::hint::black_box(total);
 
-    phases.containment = 0.0;
+    // **Which rank is served, for the artifacts actually served.** Ranked contents mean containment
+    // has an answer and not just a verdict, and the answer decides which text goes on the wire.
+    let start = Instant::now();
+    let ranks: u32 = candidates
+        .iter()
+        .take(BUDGET)
+        .filter_map(|&o| contains.rank_for(o, &sat))
+        .sum();
+    phases.containment = start.elapsed().as_secs_f64() * 1e6;
+    std::hint::black_box(ranks);
+
     let (cut_us, served) = frontier(lineage, &candidates);
     phases.cut = cut_us;
     phases.passing = served;
@@ -1387,34 +1806,29 @@ fn grouped(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phas
 ///
 /// Exact, and trivially so: `rows ∩ (viewport ∩ M_auth) ≠ ∅` and `rows ∩ viewport ∩ M_auth ≠ ∅` are
 /// the same statement. What is bought is where the composition happens, not what it computes.
+fn hoisted_candidates(held: &Held, sat: &[bool], tiles: &Bitmap, mask: &ComposedMask) -> Bitmap {
+    let (rows, index, contains, row_count) = (held.rows, held.index, held.contains, held.row_count);
+    let (settled, open) = index.settled_and_open(tiles, row_count);
+    // The one composition. Its cost is the viewport's containers, not the population's — and every
+    // candidate below is then a single early-exiting `Bitmap::intersect` against it. See
+    // [`grouped_candidates`] for why the settled half pays it too.
+    let here = mask.visible_rows(tiles);
+    let mut all = settled;
+    all.or_inplace(&open);
+    let mut passing: Bitmap = all
+        .iter()
+        .filter(|&x| contains.holds_for(x, sat) && rows.get(x).is_some_and(|m| m.intersect(&here)))
+        .collect();
+    passing.run_optimize();
+    passing
+}
+
 fn hoisted(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phases {
-    let (rows, index, contains, lineage, row_count) = (
-        held.rows,
-        held.index,
-        held.contains,
-        held.lineage,
-        held.row_count,
-    );
-    let viewport_rows = tiles.cardinality();
+    let (rows, contains, lineage) = (held.rows, held.contains, held.lineage);
     let mut phases = Phases::default();
     let start = Instant::now();
-    let (settled, open) = index.settled_and_open(tiles, row_count);
-    // The one composition. Its cost is the viewport's containers, not the population's.
-    let here = mask.visible_rows(tiles);
-    let mut passing: Bitmap = settled.iter().filter(|&o| contains.holds_for(o, holds)).collect();
-    for x in open.iter() {
-        if !contains.holds_for(x, holds) {
-            continue;
-        }
-        if index.inside(x, tiles, viewport_rows) {
-            passing.add(x);
-            continue;
-        }
-        if rows.get(x).is_some_and(|m| m.intersect(&here)) {
-            passing.add(x);
-        }
-    }
-    passing.run_optimize();
+    let sat = contains.satisfied_exprs(holds);
+    let passing = hoisted_candidates(held, &sat, tiles, mask);
     let candidates: Vec<u32> = passing.iter().collect();
     phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
     phases.candidates = candidates.len();
@@ -1422,12 +1836,21 @@ fn hoisted(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phas
     let start = Instant::now();
     let total: u64 = candidates
         .iter()
-        .take(1000)
+        .take(BUDGET)
         .map(|&o| rows.masked_count(o, mask))
         .sum();
     phases.count = start.elapsed().as_secs_f64() * 1e6;
     std::hint::black_box(total);
-    phases.containment = 0.0;
+
+    let start = Instant::now();
+    let ranks: u32 = candidates
+        .iter()
+        .take(BUDGET)
+        .filter_map(|&o| contains.rank_for(o, &sat))
+        .sum();
+    phases.containment = start.elapsed().as_secs_f64() * 1e6;
+    std::hint::black_box(ranks);
+
     let (cut_us, served) = frontier(lineage, &candidates);
     phases.cut = cut_us;
     phases.passing = served;
@@ -1491,7 +1914,10 @@ impl ListColumn {
         let here = mask.visible_rows(tiles);
         let mut seen = vec![false; artifacts];
         for row in here.iter() {
-            let (from, to) = (self.at[row as usize] as usize, self.at[row as usize + 1] as usize);
+            let (from, to) = (
+                self.at[row as usize] as usize,
+                self.at[row as usize + 1] as usize,
+            );
             for &ordinal in &self.of_row[from..to] {
                 seen[ordinal as usize] = true;
             }
@@ -1518,7 +1944,7 @@ fn listed(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phase
     let mut phases = Phases::default();
     let start = Instant::now();
     let mut passing = column.present(tiles, mask, artifacts);
-    passing.and_inplace(&contains.satisfied(holds));
+    passing.and_inplace(&contains.satisfied(&contains.satisfied_exprs(holds)));
     let candidates: Vec<u32> = passing.iter().collect();
     phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
     phases.candidates = candidates.len();
@@ -1528,6 +1954,129 @@ fn listed(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phase
     phases.cut = cut_us;
     phases.passing = served;
     phases
+}
+
+/// **How many distinct canonicalised expressions a generating-set population produces.**
+///
+/// [Decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+/// replaces a per-token structure with a build-time one whose size is *the number of distinct
+/// expressions*, and that number was asserted rather than counted. It is not the artifact count and
+/// it is not the vocabulary: it is the number of distinct **sets of signatures** the layer's
+/// generating sets span, which depends on how large a sample each content carries and on how
+/// concentrated the corpus's signatures are.
+///
+/// Two populations, because they bracket the answer:
+///
+/// - the **fixture's own** construction, at several sample sizes and spreads — what the grid above
+///   is measured on;
+/// - a **real signature distribution**, read from `--signatures <file>`: one carrier count per
+///   line (the last whitespace-separated integer on the line; `#` and blanks skipped). Each member
+///   of a sample lands in a signature with probability proportional to its carriers, and the
+///   expression is the distinct signatures the sample spans — which is the count the 2.4M-artifact
+///   corpus run needs and cannot be guessed at.
+///
+/// 240 is in the size sweep because `annotations.md` §7.8's worked example uses a 240-document
+/// prompt sample spanning eleven terms, which is the case the design predicts label creep for.
+fn expression_census(args: &[String], sets: usize) {
+    println!("population,sets,size,spread,distinct_exprs,mean_expr_len,ids_bytes,exprs_bytes");
+
+    let report =
+        |population: &str, size: u32, spread: &str, seen: &rustc_hash::FxHashSet<Vec<u32>>| {
+            let distinct = seen.len();
+            let total_len: usize = seen.iter().map(Vec::len).sum();
+            let id_width = if distinct > u16::MAX as usize { 4 } else { 2 };
+            println!(
+                "{population},{sets},{size},{spread},{distinct},{:.2},{},{}",
+                total_len as f64 / distinct.max(1) as f64,
+                sets * id_width,
+                total_len * 2,
+            );
+        };
+
+    // The fixture's own population. Only the group bases matter, so they are spaced evenly.
+    let span = 1u32 << 30;
+    let bases: Vec<u32> = (0..=SIGNATURE_GROUPS)
+        .map(|g| (g as u64 * span as u64 / SIGNATURE_GROUPS as u64) as u32)
+        .collect();
+    let group_of = |e: u32| -> u32 { (bases.partition_point(|&b| b <= e) - 1) as u32 };
+    for size in [1u32, 2, 4, 8, 16, 64, 240] {
+        for spread in [1u32, 2, 4] {
+            let mut seen: rustc_hash::FxHashSet<Vec<u32>> = Default::default();
+            for i in 0..sets {
+                let g = generating_entities(i, 0, spread, size, &bases);
+                let mut expr: Vec<u32> = g.iter().map(group_of).collect();
+                expr.sort_unstable();
+                expr.dedup();
+                seen.insert(expr);
+            }
+            report("fixture", size, &spread.to_string(), &seen);
+        }
+    }
+
+    // **The fixture's own construction pins the count at 32**, because it draws each set from a
+    // fixed number of groups chosen by one hash — which is `annotations.md` §8.1's per-term
+    // mitigation working exactly as its author intends, and is therefore the *best* case rather than
+    // the expected one. The population below is what happens without it: each member of the sample
+    // lands wherever its own document's signature is, and the expression is the distinct signatures
+    // the sample turns out to span. That is the number a layer whose contents were summarised from
+    // arbitrary samples would carry.
+    let mut rng = Rng(0xB0BB1E);
+    for size in [1u32, 2, 4, 8, 16, 64, 240] {
+        let mut seen: rustc_hash::FxHashSet<Vec<u32>> = Default::default();
+        for _ in 0..sets {
+            let mut expr: Vec<u32> = (0..size)
+                .map(|_| rng.below(SIGNATURE_GROUPS as u64) as u32)
+                .collect();
+            expr.sort_unstable();
+            expr.dedup();
+            seen.insert(expr);
+        }
+        report("uniform", size, "drawn", &seen);
+    }
+
+    let Some(path) = args
+        .iter()
+        .position(|a| a == "--signatures")
+        .and_then(|i| args.get(i + 1))
+    else {
+        eprintln!("# no --signatures file given, so only the fixture's own population is counted");
+        return;
+    };
+    let text = std::fs::read_to_string(path).expect("the signature distribution reads");
+    let weights: Vec<u64> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .filter_map(|l| l.split_whitespace().last().and_then(|w| w.parse().ok()))
+        .collect();
+    assert!(
+        !weights.is_empty(),
+        "the signature distribution names no signatures"
+    );
+    let mut cumulative = Vec::with_capacity(weights.len());
+    let mut running = 0u64;
+    for w in &weights {
+        running += w;
+        cumulative.push(running);
+    }
+    eprintln!(
+        "# signature distribution: {} signatures, {running} carriers",
+        weights.len()
+    );
+    for size in [1u32, 2, 4, 8, 16, 64, 240] {
+        let mut seen: rustc_hash::FxHashSet<Vec<u32>> = Default::default();
+        for _ in 0..sets {
+            let mut expr: Vec<u32> = (0..size)
+                .map(|_| {
+                    let draw = rng.below(running);
+                    cumulative.partition_point(|&c| c <= draw) as u32
+                })
+                .collect();
+            expr.sort_unstable();
+            expr.dedup();
+            seen.insert(expr);
+        }
+        report("corpus", size, "drawn", &seen);
+    }
 }
 
 fn main() {
@@ -1542,26 +2091,67 @@ fn main() {
             .map(|v| v.parse().expect("a number"))
             .unwrap_or(default)
     };
+    let text = |name: &str| -> Option<&String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+    };
+    let present = |name: &str| args.iter().any(|a| a == name);
+
     let rows_n: u32 = flag("--rows", 100_000_000) as u32;
     let artifacts: usize = flag("--artifacts", 1_000_000) as usize;
-    let members: u32 = flag("--members", 100) as u32;
+    // **The members rule is `rows / artifacts`.** A layer is a partition of the corpus, so its
+    // memberships have to cover it; a run whose members are a tenth of that measures a tenth of a
+    // layer and every candidacy figure in it is proportionally cheap. The default follows the rule
+    // rather than a constant, and the coverage line below says what any override actually did.
+    let members: u32 = flag(
+        "--members",
+        (rows_n as u64 / artifacts.max(1) as u64).max(1),
+    ) as u32;
     let runs_per: u32 = flag("--runs", 4) as u32;
-    let arm = args
-        .iter()
-        .position(|a| a == "--arm")
-        .and_then(|i| args.get(i + 1))
+    let blocks: u32 = flag("--blocks", 4) as u32;
+    let ranks: usize = flag("--ranks", 2).max(1) as usize;
+    let gset: u32 = flag("--gset", 8).max(1) as u32;
+    let spread: u32 = flag("--spread", 1).max(1) as u32;
+    let iters: usize = flag("--iters", 3).max(1) as usize;
+    let shape = Shape {
+        members,
+        runs: runs_per,
+        blocks,
+    };
+    let legacy = present("--legacy-fixture");
+    let coverage = present("--coverage");
+    let arm = text("--arm")
         .and_then(|n| Arm::parse(n))
         .unwrap_or(Arm::Runs);
 
+    if present("--expressions") {
+        expression_census(&args, artifacts);
+        return;
+    }
+
+    // Under `--legacy-fixture` the ranks collapse to one and the generating sets come back from the
+    // membership, which is the alignment the corrections removed. Assertions then **report** rather
+    // than fail, because demonstrating the disagreement is the whole point of the flag.
+    let ranks = if legacy { 1 } else { ranks };
+    let strict = !legacy;
+
     eprintln!(
-        "# rows={rows_n} artifacts={artifacts} members={members} runs={runs_per} arm={}",
+        "# rows={rows_n} artifacts={artifacts} members={members} runs={runs_per} blocks={blocks} \
+         ranks={ranks} gset={gset} spread={spread} iters={iters} legacy={legacy} arm={}",
         arm.name()
     );
 
+    // Every build phase, recorded rather than printed and forgotten — `--costs-out` writes them
+    // beside the grid. The index build and the projection rebuild are quoted in the design and had
+    // no data file behind them.
+    let mut costs: Vec<(String, f64, u64)> = Vec::new();
+
     let mut rng = Rng(0x5EED);
     let t = Instant::now();
-    let (space, row_order) = row_space(&dir, rows_n);
+    let (space, row_order, bases) = row_space(&dir, rows_n);
     let group_size = rows_n / SIGNATURE_GROUPS;
+    costs.push(("row_space".into(), t.elapsed().as_secs_f64(), 0));
     eprintln!("# row space: {:.1} s", t.elapsed().as_secs_f64());
 
     // The tree's extents, where the arm takes its membership from the tree.
@@ -1573,6 +2163,14 @@ fn main() {
 
     let t = Instant::now();
     let mut row_span_total = 0u64;
+    let mut member_total = 0u64;
+    // One bit per row, only where asked: the exact covered fraction costs a pass over every
+    // membership, which at the target is a second or two and not worth paying on every run.
+    let mut covered = if coverage {
+        vec![0u64; (rows_n as usize).div_ceil(64)]
+    } else {
+        Vec::new()
+    };
     let records: Vec<ArtifactRecord> = (0..artifacts)
         .map(|i| {
             let in_rows = if arm == Arm::Nested {
@@ -1584,57 +2182,100 @@ fn main() {
                 b.run_optimize();
                 b
             } else {
-                membership_rows(arm, rows_n, i, artifacts, members, runs_per, &mut rng)
+                membership_rows(arm, rows_n, i, artifacts, shape, &mut rng)
             };
             row_span_total += in_rows.statistics().n_containers as u64;
-            // One content, whose generating set is a handful of the artifact's own members: the
-            // One content, whose generating set is a handful of the artifact's own members: the
-            // prompt sample a summariser was shown, not the whole cluster.
-            //
-            // **Drawn from inside one signature group, which is `annotations.md` §7.8's own
-            // mitigation and not a convenience.** Containment is `|G ∩ M| == |G|` and it "is not a
-            // coverage fraction" — *what decides is **which** terms, never how many items*. A
-            // sample scattered across thirty-two signature groups needs a principal holding all
-            // thirty-two, so no narrower principal is ever served any label at all, and every arm
-            // below 100% would be timing a layer that serves nothing. A per-term generating set is
-            // what the design says to build instead, and with one the label reaches exactly the
-            // principals holding that term — which is the behaviour worth measuring.
-            let group = (i as u32) % SIGNATURE_GROUPS;
-            let mut sample_rows: Bitmap = in_rows
-                .iter()
-                .filter(|&row| {
-                    space
-                        .entity_of(RowId::new(row))
-                        .is_some_and(|e| (e.raw() as u32) / group_size.max(1) == group)
-                })
-                .take(8)
-                .collect();
-            // **Never empty.** An empty generating set is *corpus-independent* and therefore
-            // vacuously contained — served to everyone who reaches the layer — so a fixture that
-            // let one fall out would measure containment passing universally and call it a
-            // measurement of containment. A small artifact may hold no member of its own signature
-            // group, and then the sample is drawn from whatever it does hold; the expression that
-            // decides it is that member's, which is exactly what the grouping below reads.
-            if sample_rows.is_empty() {
-                sample_rows = in_rows.iter().take(1).collect();
+            member_total += in_rows.cardinality();
+            if coverage {
+                for row in in_rows.iter() {
+                    covered[row as usize / 64] |= 1 << (row % 64);
+                }
             }
+            // **Ranked contents, with disjoint generating sets** — which is what an artifact
+            // actually carries: `annotations.md` §6 has the caller supply a ladder of descriptions
+            // and the viewer served the first whose set they contain. A fixture with one content
+            // measures a verdict where the model has an answer, and the rank is the thing that
+            // decides which text goes on the wire.
+            let contents: Vec<ContentSet> = (0..ranks)
+                .map(|rank| {
+                    let generated_from = if legacy {
+                        // The old alignment: a sample of the artifact's own members inside the
+                        // group its ordinal names. See [`generating_entities`] for what that made
+                        // impossible to observe.
+                        let group = (i as u32) % SIGNATURE_GROUPS;
+                        let mut sample: Bitmap = in_rows
+                            .iter()
+                            .filter(|&row| {
+                                space
+                                    .entity_of(RowId::new(row))
+                                    .is_some_and(|e| (e.raw() as u32) / group_size.max(1) == group)
+                            })
+                            .take(gset as usize)
+                            .collect();
+                        if sample.is_empty() {
+                            sample = in_rows.iter().take(1).collect();
+                        }
+                        to_entities(&sample, &space)
+                    } else {
+                        generating_entities(i, rank as u32, spread, gset, &bases)
+                    };
+                    ContentSet {
+                        values: Some(vec![format!("a label, rank {rank}")]),
+                        generated_from,
+                    }
+                })
+                .collect();
             ArtifactRecord {
                 entity: EntityId::new(i as u64),
                 key: None,
                 members: to_entities(&in_rows, &space),
-                contents: vec![ContentSet {
-                    values: Some(vec!["a label".to_string()]),
-                    generated_from: to_entities(&sample_rows, &space),
-                }],
+                contents,
                 attached_to: None,
                 parent: None,
             }
         })
         .collect();
+    costs.push(("records".into(), t.elapsed().as_secs_f64(), 0));
     eprintln!(
         "# entity-space records: {:.1} s, {:.1} row blocks per artifact",
         t.elapsed().as_secs_f64(),
         row_span_total as f64 / artifacts as f64
+    );
+    // **Coverage, so a mis-sized run says so rather than reading as a cheap one.** A layer that
+    // covers a tenth of the corpus has a tenth of the candidacy work in it, and the ratio is the
+    // first thing to check against a headline.
+    eprint!(
+        "# coverage: {:.3} members per row ({member_total} members over {rows_n} rows), \
+         {:.1} row blocks per artifact",
+        member_total as f64 / rows_n as f64,
+        row_span_total as f64 / artifacts as f64,
+    );
+    if coverage {
+        let bits: u64 = covered.iter().map(|w| w.count_ones() as u64).sum();
+        eprint!(
+            ", {:.1}% of the row space covered",
+            100.0 * bits as f64 / rows_n as f64
+        );
+    }
+    eprintln!();
+    drop(covered);
+
+    // Built from the records, before they are dropped — the expression is the population's, and
+    // reading it off anything else is what made the earlier revision unfalsifiable.
+    let t = Instant::now();
+    let contains = ContainmentGroups::build(&records, &bases, ranks, legacy);
+    costs.push((
+        "containment_groups".into(),
+        t.elapsed().as_secs_f64(),
+        contains.resident_bytes(),
+    ));
+    eprintln!(
+        "# containment groups: {} distinct expressions over {} (artifact, rank) pairs, {:.1} s, \
+         {:.1} MB serialised",
+        contains.distinct(),
+        artifacts * ranks,
+        t.elapsed().as_secs_f64(),
+        contains.resident_bytes() as f64 / 1e6
     );
 
     let t = Instant::now();
@@ -1642,6 +2283,7 @@ fn main() {
         records.iter().enumerate().map(|(i, r)| (i as u32, r)),
         &space,
     );
+    costs.push(("projection".into(), t.elapsed().as_secs_f64(), 0));
     eprintln!(
         "# projection (the generation move): {:.1} s",
         t.elapsed().as_secs_f64()
@@ -1651,6 +2293,11 @@ fn main() {
     let t = Instant::now();
     let column = LabelColumn::build(&row_forms, rows_n);
     if let Some(c) = &column {
+        costs.push((
+            "label_column".into(),
+            t.elapsed().as_secs_f64(),
+            c.resident_bytes(),
+        ));
         eprintln!(
             "# label column: {:.1} s to build, {:.0} MB resident",
             t.elapsed().as_secs_f64(),
@@ -1667,6 +2314,11 @@ fn main() {
     let t = Instant::now();
     let lists = if matches!(arm, Arm::Scattered | Arm::Partition) {
         let built = ListColumn::build(&row_forms, rows_n, artifacts);
+        costs.push((
+            "list_column".into(),
+            t.elapsed().as_secs_f64(),
+            built.resident_bytes(),
+        ));
         eprintln!(
             "# list column: {:.1} s to build, {:.0} MB resident",
             t.elapsed().as_secs_f64(),
@@ -1682,41 +2334,43 @@ fn main() {
     };
 
     let t = Instant::now();
-    let contains = ContainmentGroups::build(&row_forms, artifacts);
-    eprintln!(
-        "# containment groups: {} distinct, {:.1} s, {:.1} MB serialised",
-        SIGNATURE_GROUPS,
-        t.elapsed().as_secs_f64(),
-        contains.resident_bytes() as f64 / 1e6
-    );
-
-    let t = Instant::now();
     let index = TileIndex::build(&row_forms, rows_n);
+    costs.push((
+        "tile_index".into(),
+        t.elapsed().as_secs_f64(),
+        index.resident_bytes(),
+    ));
     eprintln!(
         "# tile index: {:.1} s to build, {:.1} MB serialised",
         t.elapsed().as_secs_f64(),
         index.resident_bytes() as f64 / 1e6
+    );
+    // **The fourth population, named.** An artifact too wide for any node of the hierarchy is
+    // neither settled nor prunable: it is handed back on every request at every zoom, and it pays a
+    // masked intersection each time. On the clustered arms it is empty; on the scattered arm it is
+    // the **whole layer**, which is the shape behind that arm's flat cost and behind the 137 s
+    // datum. A run that does not report it reads as though the index applied.
+    let everywhere = index.everywhere.cardinality();
+    eprintln!(
+        "# everywhere (too wide for any node): {everywhere} of {artifacts} artifacts, {:.1}%{}",
+        100.0 * everywhere as f64 / artifacts.max(1) as f64,
+        if everywhere * 2 > artifacts as u64 {
+            " — the index settles nothing for the majority of this layer"
+        } else {
+            ""
+        }
     );
 
     // **A three-way tree over the layer**, so the cut has a frontier to resolve rather than a flat
     // level it short-circuits. Held once, as a generation object is: `Lineages` caches it in the
     // engine now, and a request that rebuilt it would be timing a build rather than a cut.
     //
-    // ⊘ **This tree is not a hierarchy, and every treed figure here is suspect because of it.** The
-    // parent of ordinal *o* is `(o - 1) / 3`, so the tree's shape is the ordinal space's and has no
-    // relation to the geometry — while each artifact's membership sits near its *own* ordinal.
-    // A real nested layer is the opposite: a parent's membership **contains** its children's, so a
-    // parent is in view whenever any child is, and the root is in view always.
-    //
-    // The consequence is measurable and was measured. At a three-quarter viewport the artifacts near
-    // ordinal zero — which here are the whole top of the tree — fall out of view, so no node above
-    // the cut passes, every lineage below is its own fallback, and the cut pays for a shape a real
-    // hierarchy cannot have. It is why the campaign's ridge at a three-quarter viewport is
-    // **unexplained rather than established**: part of it is this.
-    //
-    // Fixing it means assigning membership from the tree rather than the tree from the ordinals —
-    // a parent's rows being the union of its children's — which also changes what a level costs to
-    // store, since every level then covers the corpus.
+    // ⊘ **This tree is not a hierarchy on any arm but `nested`, and every treed figure on the other
+    // arms is suspect because of it.** The parent of ordinal *o* is `(o - 1) / 3`, so the tree's
+    // shape is the ordinal space's and has no relation to the geometry — while each artifact's
+    // membership sits near its *own* ordinal. A real nested layer is the opposite: a parent's
+    // membership **contains** its children's, so a parent is in view whenever any child is, and the
+    // root is in view always. The `nested` arm is that correction.
     let lineage = tessera_engine::cut::Lineage::new(
         (0..artifacts as u32).map(|o| (o, (o > 0).then(|| (o - 1) / 3))),
     );
@@ -1731,7 +2385,25 @@ fn main() {
         artifacts,
     };
 
-    println!("arm,rows,artifacts,mask_pct,viewport_pct,depth,route,setup_ms,candidacy_us,count_us,containment_us,cut_us,total_us,candidates,served");
+    // **Every iteration, not the best of them.** The design quoted the minimum of three whole runs
+    // over a grid that already reported the minimum of three iterations, which is a minimum of nine
+    // and is not a number any request will see. The median is what a cell is worth; the spread is
+    // what says whether the median means anything.
+    println!("arm,rows,artifacts,mask_pct,viewport_pct,depth,route,setup_ms,candidacy_us,count_us,containment_us,cut_us,total_us,min_total_us,max_total_us,candidates,served");
+
+    // **`--only` keeps the legacy routes out of a run that cannot afford them.** The shipped loop is
+    // `O(artifacts)` with a masked intersection apiece, which at ten million scattered artifacts is
+    // ~24 s a call — hours across the sweep, to re-measure a figure three smaller scales already
+    // establish. Which routes run does not change what any of them answers: each builds its own
+    // result from the same held state.
+    //
+    // `--parity` is §4.2's comparison and nothing else: the shipped loop, the per-token route it was
+    // measured against, and the two build-time-partition routes that replaced it. It had no data
+    // file behind it.
+    let parity_routes = "shipped,index+session,settled,grouped,hoisted";
+    let only: Option<Vec<&str>> = text("--only")
+        .map(|v| v.split(',').collect())
+        .or_else(|| present("--parity").then(|| parity_routes.split(',').collect()));
 
     // Whole signature groups, so the mask percentages are the ones a principal can actually have.
     // **Swept through the middle, not around it.** Three densities — everything, a tenth, a
@@ -1740,11 +2412,19 @@ fn main() {
     // them, and a table sampling only the ends reports the wrong worst case.
     for groups in [SIGNATURE_GROUPS, 24, 16, 8, 3, 1] {
         let mask_pct = 100.0 * groups as f64 / SIGNATURE_GROUPS as f64;
-        let m = mask(rows_n, &row_order, groups, group_size, &mut rng);
+        let m = mask(rows_n, &row_order, &bases, groups, &mut rng);
+
+        // Decision 0093's claim, checked before anything is timed against it.
+        assert_containment_partition(&row_forms, &contains, &m, groups, strict);
 
         let t = Instant::now();
         let session = SessionVerdicts::build(&row_forms, &m, 1);
         let session_ms = t.elapsed().as_secs_f64() * 1e3;
+        costs.push((
+            format!("session_verdicts_mask{groups}"),
+            t.elapsed().as_secs_f64(),
+            0,
+        ));
         eprintln!(
             "# session verdicts at mask={mask_pct}%: {session_ms:.0} ms, {} of {artifacts} pass",
             session.passes.cardinality()
@@ -1764,15 +2444,39 @@ fn main() {
             (0.024, 10),
         ] {
             let tiles = viewport(rows_n, viewport_pct / 100.0, depth);
-            assert_same_answer(&row_forms, &index, &tiles, &m, rows_n);
+            assert_same_answer(&held, &tiles, &m, groups, strict);
 
             let routes: Vec<Route> = vec![
-                ("shipped", 0.0, Box::new(|| shipped(&row_forms, &tiles, &m, false))),
-                ("shipped+par", 0.0, Box::new(|| shipped(&row_forms, &tiles, &m, true))),
-                ("early", 0.0, Box::new(|| early_exit(&row_forms, &tiles, &m, false))),
-                ("early+par", 0.0, Box::new(|| early_exit(&row_forms, &tiles, &m, true))),
-                ("index", 0.0, Box::new(|| indexed(&row_forms, &index, &tiles, &m, rows_n, false))),
-                ("index+par", 0.0, Box::new(|| indexed(&row_forms, &index, &tiles, &m, rows_n, true))),
+                (
+                    "shipped",
+                    0.0,
+                    Box::new(|| shipped(&row_forms, &tiles, &m, false)),
+                ),
+                (
+                    "shipped+par",
+                    0.0,
+                    Box::new(|| shipped(&row_forms, &tiles, &m, true)),
+                ),
+                (
+                    "early",
+                    0.0,
+                    Box::new(|| early_exit(&row_forms, &tiles, &m, false)),
+                ),
+                (
+                    "early+par",
+                    0.0,
+                    Box::new(|| early_exit(&row_forms, &tiles, &m, true)),
+                ),
+                (
+                    "index",
+                    0.0,
+                    Box::new(|| indexed(&row_forms, &index, &tiles, &m, rows_n, false)),
+                ),
+                (
+                    "index+par",
+                    0.0,
+                    Box::new(|| indexed(&row_forms, &index, &tiles, &m, rows_n, true)),
+                ),
                 (
                     "index+session",
                     session_ms,
@@ -1786,17 +2490,12 @@ fn main() {
                 (
                     "grouped",
                     0.0,
-                    Box::new(|| {
-                        grouped(&held, groups, &tiles, &m)
-                    }),
+                    Box::new(|| grouped(&held, groups, &tiles, &m)),
                 ),
-
                 (
                     "hoisted",
                     0.0,
-                    Box::new(|| {
-                        hoisted(&held, groups, &tiles, &m)
-                    }),
+                    Box::new(|| hoisted(&held, groups, &tiles, &m)),
                 ),
             ];
 
@@ -1807,8 +2506,6 @@ fn main() {
                     0.0,
                     Box::new(|| listed(&held, groups, &tiles, &m)),
                 ));
-            }
-            if matches!(arm, Arm::Scattered | Arm::Partition) {
                 // **The row-major list answers candidacy by a different mechanism**, so the claim
                 // that it answers it identically is the one worth checking rather than describing.
                 let mut theirs: Vec<u32> = lists.present(&tiles, &m, artifacts).iter().collect();
@@ -1851,42 +2548,35 @@ fn main() {
                 ));
             }
 
-            // **`--only` keeps the legacy routes out of a run that cannot afford them.** The
-            // shipped loop is `O(artifacts)` with a masked intersection apiece, which at ten million
-            // scattered artifacts is ~24 s a call — hours across the sweep, to re-measure a figure
-            // three smaller scales already establish. Which routes run does not change what any of
-            // them answers: each builds its own result from the same held state.
-            let only: Option<Vec<&str>> = args
-                .iter()
-                .position(|a| a == "--only")
-                .and_then(|i| args.get(i + 1))
-                .map(|v| v.split(',').collect());
             for (route, setup_ms, run) in routes {
                 if only.as_ref().is_some_and(|keep| !keep.contains(&route)) {
                     continue;
                 }
-                let mut best = Phases::default();
-                let mut best_total = f64::MAX;
-                for _ in 0..3 {
-                    let p = run();
-                    if p.total() < best_total {
-                        best_total = p.total();
-                        best = p;
-                    }
-                }
+                let mut taken: Vec<Phases> = (0..iters).map(|_| run()).collect();
+                taken.sort_by(|a, b| a.total().total_cmp(&b.total()));
+                let median = taken[taken.len() / 2];
+                let (lo, hi) = (taken[0].total(), taken[taken.len() - 1].total());
                 println!(
-                    "{},{rows_n},{artifacts},{mask_pct},{viewport_pct},{depth},{route},{setup_ms:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{},{}",
+                    "{},{rows_n},{artifacts},{mask_pct},{viewport_pct},{depth},{route},{setup_ms:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{lo:.0},{hi:.0},{},{}",
                     arm.name(),
-                    best.candidacy,
-                    best.count,
-                    best.containment,
-                    best.cut,
-                    best_total,
-                    best.candidates,
-                    best.passing
+                    median.candidacy,
+                    median.count,
+                    median.containment,
+                    median.cut,
+                    median.total(),
+                    median.candidates,
+                    median.passing
                 );
             }
         }
+    }
+
+    if let Some(path) = text("--costs-out") {
+        let mut out = String::from("phase,seconds,resident_bytes\n");
+        for (name, secs, bytes) in &costs {
+            out.push_str(&format!("{name},{secs:.3},{bytes}\n"));
+        }
+        std::fs::write(path, out).expect("the build-cost record writes");
     }
 
     let _ = std::fs::remove_dir_all(&dir);

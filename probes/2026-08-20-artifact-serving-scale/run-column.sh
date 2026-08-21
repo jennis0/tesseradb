@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# **Superseded by `run-remeasure.sh`** (2026-08-21). The routes this script measured admitted the
+# settled half without a masked candidacy probe, and its fixture could not have shown that: read
+# the README's "corrections after review" before quoting anything in `data/` that came from here.
 # The row-major layout against the artifact-major one, swept over the artifact count. The claim
 # being tested is that the row-major route is **flat** in it, so the ladder is the measurement.
 set -u
