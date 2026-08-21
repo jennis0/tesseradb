@@ -301,6 +301,21 @@ impl Lineages {
         self.builds.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// How many lineages are held — the gauge beside [`Self::builds`].
+    pub fn held(&self) -> usize {
+        self.cached.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Drop every lineage held for one layer, when the layer is dropped — see
+    /// [`crate::artifacts::ArtifactProjections::forget`], which this is the other half of and
+    /// which carries the argument for both.
+    pub fn forget(&self, layer: &str) {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(held, _), _| held != layer);
+    }
+
     /// This level's lineage at `level_version`, building it if what is held is stale.
     ///
     /// **The version and the build must come from one reading of the store**, which is the

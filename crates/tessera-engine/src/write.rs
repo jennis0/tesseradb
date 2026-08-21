@@ -8565,6 +8565,21 @@ impl Executor {
 
         let ack = ack_of(&record);
         self.live.apply_registry_record(&record);
+        // **A dropped layer's derived structures go with it.** Neither cache had a removal path,
+        // so each was bounded by the triples a process had ever seen rather than the ones it
+        // holds — gigabytes a level at the campaign's target, pinned for the life of the process.
+        // Retention only, never correctness: a tombstoned name never resolves through the registry
+        // again, so nothing held here was reachable to be served.
+        //
+        // ⊘ **The store's own copy of a dropped layer's memberships is not released**, because
+        // `ArtifactStore::remove_layer` is reached from nowhere — a drop touches the registry and
+        // stops there. That is the larger half of the same retention, and it is a write-path
+        // question rather than a caching one: releasing it changes what the next fold repacks and
+        // how far back the rotation pin holds the log.
+        if let WalRecord::LayerDrop { name } = &record {
+            self.artifact_projections.forget(name);
+            self.lineages.forget(name);
+        }
         let published = Published::registry_applied(&record);
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same

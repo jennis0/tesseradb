@@ -346,6 +346,27 @@ impl ArtifactProjections {
         self.builds.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// How many forms are held. Operator plane only, beside [`Self::builds`] — a count of
+    /// structures, naming no artifact and no principal.
+    pub fn held(&self) -> usize {
+        self.cached.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+
+    /// Drop everything held for one layer, in every view.
+    ///
+    /// **Called when the layer is dropped, and this is a retention fix rather than a correctness
+    /// one.** A dropped name is tombstoned for ever and the serving path resolves the layer
+    /// through the registry before it reaches this cache, so a form left behind could never be
+    /// handed to anybody. What it could do is stay: at the campaign's target a level's form is
+    /// gigabytes, and nothing here ever removed an entry — the map was bounded by the number of
+    /// `(view, layer, level)` triples a process had *ever* seen rather than the number it holds.
+    pub fn forget(&self, layer: &str) {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, _), _| held != layer);
+    }
+
     /// This level's row form for the generation `store` is in, building it if what is held is
     /// stale.
     ///

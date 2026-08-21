@@ -1585,6 +1585,38 @@ mod tests {
         assert_eq!(store.layer("clusters/a").count(), 0);
     }
 
+    /// **A level's version is monotone for the life of the store, and a drop is not an exception.**
+    ///
+    /// The hazard the per-level grain would otherwise have: a form cached for
+    /// `(view, layer, level)` outlives the layer, and a name arriving at that address again with a
+    /// version the cache has already seen would be answered from the previous incarnation's
+    /// members. It is closed twice over — the registry tombstones a dropped name for ever, so the
+    /// address is never reoccupied at all — and this is the half that belongs here, because it is
+    /// the half a later decision to allow reuse would not silently invalidate.
+    #[test]
+    fn a_dropped_layers_version_moves_and_is_never_forgotten() {
+        let mut store = ArtifactStore::new();
+        assert_eq!(store.apply(&publication("clusters/a", 0, 100, &[1]), 0), 0);
+        let published = store.level_version("clusters/a", 0);
+        assert!(published > 0);
+
+        store.remove_layer("clusters/a");
+        let dropped = store.level_version("clusters/a", 0);
+        assert!(
+            dropped > published,
+            "the drop moves it, so a form cached under the published version is stale"
+        );
+
+        // The address occupied again, as a re-registration would occupy it.
+        assert_eq!(store.apply(&publication("clusters/a", 0, 200, &[9]), 8), 0);
+        assert!(
+            store.level_version("clusters/a", 0) > dropped,
+            "and it counts on from where the drop left it rather than starting again — a version \
+             that restarted at zero would let a form built over the artifacts that are gone \
+             compare equal to the level that replaced them"
+        );
+    }
+
     #[test]
     fn a_membership_round_trips_and_damage_is_refused_rather_than_emptied() {
         let members = Bitmap::of(&[1, 2, 3, 70_000, 4_000_000]);

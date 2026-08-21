@@ -2341,6 +2341,15 @@ impl Engine {
         (self.artifact_projections.builds(), self.lineages.builds())
     }
 
+    /// How many artifact row forms, and how many lineages, are held right now.
+    ///
+    /// The gauge beside [`Engine::artifact_cache_builds`]'s counter, and the one that moves in
+    /// both directions: a dropped layer's entries leave both caches at the drop. Operator plane
+    /// only — counts of structures, naming no artifact, no layer and no principal.
+    pub fn artifact_cache_held(&self) -> (usize, usize) {
+        (self.artifact_projections.held(), self.lineages.held())
+    }
+
     /// The last compaction fold's per-pass wall clock and resident set — empty before the first
     /// fold. Operator plane only, beside [`Engine::write_executor_stats`].
     pub fn last_fold_passes(&self) -> Vec<crate::compact::PassCost> {

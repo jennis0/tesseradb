@@ -356,6 +356,73 @@ fn a_publication_that_adds_an_edge_is_in_the_next_requests_cut() {
     );
 }
 
+/// **A dropped layer's derived structures leave both caches, and nobody else's do.**
+///
+/// Retention rather than correctness — a tombstoned name never resolves through the registry
+/// again, so a form left behind could not be served to anyone — but it is retention that does not
+/// come back: neither cache had a removal path, so each was bounded by the `(view, layer, level)`
+/// triples the process had ever seen rather than the ones it holds, and at the campaign's target a
+/// level's row form is gigabytes.
+///
+/// The layer beside it is the half that makes the assertion mean anything: `forget` has to be a
+/// scalpel, and a cache cleared wholesale would pass a test that only counted the drop.
+#[test]
+fn dropping_a_layer_takes_its_row_form_and_its_lineage_with_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(flat("clusters/a")).unwrap();
+    engine.register_layer(treed("clusters/tree")).unwrap();
+    publish(
+        &engine,
+        "clusters/a",
+        vec![IncomingArtifact::from_entities(
+            Some("a0".into()),
+            fx.members(0..100),
+        )],
+    );
+    publish(
+        &engine,
+        "clusters/tree",
+        vec![
+            node(&fx, "root", None, 500..800),
+            node(&fx, "left", Some("root"), 500..600),
+        ],
+    );
+    let before_a = served(&engine, "clusters/a");
+    let (held_rows, held_lineages) = engine.artifact_cache_held();
+    assert!(
+        held_rows > 0 && held_lineages > 0,
+        "the request has to have left something held for the drop to remove"
+    );
+
+    engine
+        .drop_layer("clusters/tree".into())
+        .expect("a layer is droppable");
+
+    let (after_rows, after_lineages) = engine.artifact_cache_held();
+    assert!(
+        after_rows < held_rows && after_lineages < held_lineages,
+        "the dropped layer's entries are gone from both caches, not left pinned for the life of \
+         the process"
+    );
+    assert_eq!(
+        served(&engine, "clusters/tree"),
+        Vec::new(),
+        "and the layer is gone from the response, which is the registry's doing and not the \
+         cache's"
+    );
+    assert_eq!(
+        served(&engine, "clusters/a"),
+        before_a,
+        "the layer beside it kept its own form: `forget` names one layer, it does not clear"
+    );
+    assert_eq!(
+        engine.artifact_cache_held(),
+        (after_rows, after_lineages),
+        "and serving `clusters/a` rebuilt nothing, so what survived the drop is what was held"
+    );
+}
+
 /// **A fold rebuilds every row form and only the lineages it moved**, which are two different
 /// answers to two different questions.
 ///
