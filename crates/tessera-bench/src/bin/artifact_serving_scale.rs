@@ -441,14 +441,44 @@ struct Phases {
     candidacy: f64,
     count: f64,
     containment: f64,
+    /// The frontier, resolved over the candidates this request produced.
+    ///
+    /// **Measured here rather than stitched in from `artifact_cut_cost`**, which is the same
+    /// arithmetic over a synthetic passing set. A request's cut is a function of what its own
+    /// verdict admitted, so the two stages belong on one fixture or the totals are an assembly
+    /// rather than a measurement.
+    cut: f64,
     candidates: usize,
     passing: usize,
 }
 
 impl Phases {
     fn total(&self) -> f64 {
-        self.candidacy + self.count + self.containment
+        self.candidacy + self.count + self.containment + self.cut
     }
+}
+
+/// **Everything a request reads that a request did not produce** — the build-time structures and
+/// the per-generation ones, gathered so a route's signature says what it *does* rather than what it
+/// happens to need.
+struct Held<'a> {
+    rows: &'a ArtifactRows,
+    index: &'a TileIndex,
+    contains: &'a ContainmentGroups,
+    lists: &'a ListColumn,
+    lineage: &'a tessera_engine::cut::Lineage,
+    row_count: u32,
+    artifacts: usize,
+}
+
+/// The frontier over one request's candidates, at the budget a client can draw.
+///
+/// A thousand is the order `annotation-representation.md` §2.0.0 puts a request's artifact ceiling
+/// at, and the order the cut probe uses.
+fn frontier(lineage: &tessera_engine::cut::Lineage, candidates: &[u32]) -> (f64, usize) {
+    let start = Instant::now();
+    let served = tessera_engine::cut::cut(lineage, candidates, Some(1_000), true);
+    (start.elapsed().as_secs_f64() * 1e6, served.len())
 }
 
 /// The containment test's verdict, called through the shipped entry point.
@@ -1220,15 +1250,14 @@ impl ContainmentGroups {
 ///
 /// The per-token structure is gone: what stands in its place is one union of a handful of
 /// build-time bitmaps, priced here as part of the request that uses it.
-fn grouped(
-    rows: &ArtifactRows,
-    index: &TileIndex,
-    contains: &ContainmentGroups,
-    holds: u32,
-    tiles: &Bitmap,
-    mask: &ComposedMask,
-    row_count: u32,
-) -> Phases {
+fn grouped(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phases {
+    let (rows, index, contains, lineage, row_count) = (
+        held.rows,
+        held.index,
+        held.contains,
+        held.lineage,
+        held.row_count,
+    );
     let viewport_rows = tiles.cardinality();
     let mut phases = Phases::default();
 
@@ -1285,7 +1314,9 @@ fn grouped(
     std::hint::black_box(total);
 
     phases.containment = 0.0;
-    phases.passing = candidates.len();
+    let (cut_us, served) = frontier(lineage, &candidates);
+    phases.cut = cut_us;
+    phases.passing = served;
     phases
 }
 
@@ -1304,15 +1335,14 @@ fn grouped(
 ///
 /// Exact, and trivially so: `rows ∩ (viewport ∩ M_auth) ≠ ∅` and `rows ∩ viewport ∩ M_auth ≠ ∅` are
 /// the same statement. What is bought is where the composition happens, not what it computes.
-fn hoisted(
-    rows: &ArtifactRows,
-    index: &TileIndex,
-    contains: &ContainmentGroups,
-    holds: u32,
-    tiles: &Bitmap,
-    mask: &ComposedMask,
-    row_count: u32,
-) -> Phases {
+fn hoisted(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phases {
+    let (rows, index, contains, lineage, row_count) = (
+        held.rows,
+        held.index,
+        held.contains,
+        held.lineage,
+        held.row_count,
+    );
     let viewport_rows = tiles.cardinality();
     let mut phases = Phases::default();
     let start = Instant::now();
@@ -1346,7 +1376,105 @@ fn hoisted(
     phases.count = start.elapsed().as_secs_f64() * 1e6;
     std::hint::black_box(total);
     phases.containment = 0.0;
-    phases.passing = candidates.len();
+    let (cut_us, served) = frontier(lineage, &candidates);
+    phases.cut = cut_us;
+    phases.passing = served;
+    phases
+}
+
+/// **The row-major layout for a layer that does *not* partition: a list per row.**
+///
+/// §5.1's label column needs each point to carry exactly one value. A per-analyst selection, a
+/// terms-as-artifacts layer or a multi-valued attribute predicate carries several or none, so the
+/// row-major form is `row → list of artifacts` rather than `row → artifact`. Everything else about
+/// it is the same: candidacy is one scan of `viewport ∩ M_auth` marking what it finds, so it costs
+/// **memberships in the viewport** rather than artifacts in the layer, and is flat in the artifact
+/// count.
+///
+/// **Not a new shape either.** `artifacts-from-points` already reads a list column — the artifacts a
+/// point belongs to — and converts it into artifact-major bitmaps on the way in. This is keeping it.
+///
+/// The storage question is different from the label column's and worth stating plainly: this is
+/// `Σ|membership|` entries rather than one per row, so a layer whose points each belong to fifty
+/// artifacts costs fifty times a label column. What it is being compared against is artifact-major
+/// Roaring at ~78.5 B **per container** on scattered membership, which is ~20× more for the same
+/// facts — so the inversion wins on space at every `k`, and loses to the label column only where a
+/// label column is possible at all.
+struct ListColumn {
+    /// `at[row]..at[row + 1]` indexes `of_row`.
+    at: Vec<u32>,
+    of_row: Vec<u32>,
+}
+
+impl ListColumn {
+    fn build(rows: &ArtifactRows, row_count: u32, artifacts: usize) -> Self {
+        let mut counts = vec![0u32; row_count as usize + 1];
+        for ordinal in 0..artifacts as u32 {
+            let Some(m) = rows.get(ordinal) else { continue };
+            for row in m.iter() {
+                counts[row as usize] += 1;
+            }
+        }
+        let mut at = vec![0u32; row_count as usize + 1];
+        let mut running = 0u32;
+        for (row, n) in counts.iter().take(row_count as usize).enumerate() {
+            at[row] = running;
+            running += n;
+        }
+        at[row_count as usize] = running;
+        let mut cursor = at.clone();
+        let mut of_row = vec![0u32; running as usize];
+        for ordinal in 0..artifacts as u32 {
+            let Some(m) = rows.get(ordinal) else { continue };
+            for row in m.iter() {
+                of_row[cursor[row as usize] as usize] = ordinal;
+                cursor[row as usize] += 1;
+            }
+        }
+        ListColumn { at, of_row }
+    }
+
+    /// Which artifacts have a visible member inside the viewport — every one of them, in one scan.
+    fn present(&self, tiles: &Bitmap, mask: &ComposedMask, artifacts: usize) -> Bitmap {
+        let here = mask.visible_rows(tiles);
+        let mut seen = vec![false; artifacts];
+        for row in here.iter() {
+            let (from, to) = (self.at[row as usize] as usize, self.at[row as usize + 1] as usize);
+            for &ordinal in &self.of_row[from..to] {
+                seen[ordinal as usize] = true;
+            }
+        }
+        let mut out = Bitmap::new();
+        for (ordinal, &hit) in seen.iter().enumerate() {
+            if hit {
+                out.add(ordinal as u32);
+            }
+        }
+        out.run_optimize();
+        out
+    }
+
+    fn resident_bytes(&self) -> u64 {
+        ((self.at.len() + self.of_row.len()) * std::mem::size_of::<u32>()) as u64
+    }
+}
+
+/// **Route I — the list column, for a layer that overlaps.**
+fn listed(held: &Held, holds: u32, tiles: &Bitmap, mask: &ComposedMask) -> Phases {
+    let (column, contains, lineage, artifacts) =
+        (held.lists, held.contains, held.lineage, held.artifacts);
+    let mut phases = Phases::default();
+    let start = Instant::now();
+    let mut passing = column.present(tiles, mask, artifacts);
+    passing.and_inplace(&contains.satisfied(holds));
+    let candidates: Vec<u32> = passing.iter().collect();
+    phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
+    phases.candidates = candidates.len();
+    phases.count = 0.0;
+    phases.containment = 0.0;
+    let (cut_us, served) = frontier(lineage, &candidates);
+    phases.cut = cut_us;
+    phases.passing = served;
     phases
 }
 
@@ -1464,6 +1592,14 @@ fn main() {
     }
 
     let t = Instant::now();
+    let lists = ListColumn::build(&row_forms, rows_n, artifacts);
+    eprintln!(
+        "# list column: {:.1} s to build, {:.0} MB resident",
+        t.elapsed().as_secs_f64(),
+        lists.resident_bytes() as f64 / 1e6
+    );
+
+    let t = Instant::now();
     let contains = ContainmentGroups::build(&row_forms, artifacts);
     eprintln!(
         "# containment groups: {} distinct, {:.1} s, {:.1} MB serialised",
@@ -1480,7 +1616,24 @@ fn main() {
         index.resident_bytes() as f64 / 1e6
     );
 
-    println!("arm,rows,artifacts,mask_pct,viewport_pct,depth,route,setup_ms,candidacy_us,count_us,containment_us,total_us,candidates,passing");
+    // **A three-way tree over the layer**, so the cut has a frontier to resolve rather than a flat
+    // level it short-circuits. Held once, as a generation object is: `Lineages` caches it in the
+    // engine now, and a request that rebuilt it would be timing a build rather than a cut.
+    let lineage = tessera_engine::cut::Lineage::new(
+        (0..artifacts as u32).map(|o| (o, (o > 0).then(|| (o - 1) / 3))),
+    );
+
+    let held = Held {
+        rows: &row_forms,
+        index: &index,
+        contains: &contains,
+        lists: &lists,
+        lineage: &lineage,
+        row_count: rows_n,
+        artifacts,
+    };
+
+    println!("arm,rows,artifacts,mask_pct,viewport_pct,depth,route,setup_ms,candidacy_us,count_us,containment_us,cut_us,total_us,candidates,served");
 
     // Whole signature groups, so the mask percentages are the ones a principal can actually have.
     for groups in [SIGNATURE_GROUPS, 3, 1] {
@@ -1521,19 +1674,38 @@ fn main() {
                     "grouped",
                     0.0,
                     Box::new(|| {
-                        grouped(&row_forms, &index, &contains, groups, &tiles, &m, rows_n)
+                        grouped(&held, groups, &tiles, &m)
                     }),
+                ),
+                (
+                    "listed",
+                    0.0,
+                    Box::new(|| listed(&held, groups, &tiles, &m)),
                 ),
                 (
                     "hoisted",
                     0.0,
                     Box::new(|| {
-                        hoisted(&row_forms, &index, &contains, groups, &tiles, &m, rows_n)
+                        hoisted(&held, groups, &tiles, &m)
                     }),
                 ),
             ];
 
             let mut routes = routes;
+            {
+                // **The row-major list answers candidacy by a different mechanism**, so the claim
+                // that it answers it identically is the one worth checking rather than describing.
+                let mut theirs: Vec<u32> = lists.present(&tiles, &m, artifacts).iter().collect();
+                let mut ours: Vec<u32> = (0..row_forms.len() as u32)
+                    .filter(|&o| row_forms.intersects(o, &tiles, &m))
+                    .collect();
+                theirs.sort_unstable();
+                ours.sort_unstable();
+                assert_eq!(
+                    ours, theirs,
+                    "the list column changed which artifacts are candidates"
+                );
+            }
             if let Some(c) = &column {
                 // **Asserted before it is timed.** The row-major route answers candidacy by a
                 // different mechanism entirely, so the claim that it answers it *identically* is
@@ -1574,11 +1746,12 @@ fn main() {
                     }
                 }
                 println!(
-                    "{},{rows_n},{artifacts},{mask_pct},{viewport_pct},{depth},{route},{setup_ms:.0},{:.0},{:.0},{:.0},{:.0},{},{}",
+                    "{},{rows_n},{artifacts},{mask_pct},{viewport_pct},{depth},{route},{setup_ms:.0},{:.0},{:.0},{:.0},{:.0},{:.0},{},{}",
                     arm.name(),
                     best.candidacy,
                     best.count,
                     best.containment,
+                    best.cut,
                     best_total,
                     best.candidates,
                     best.passing

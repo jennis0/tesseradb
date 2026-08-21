@@ -223,6 +223,38 @@ rule is *take the cheaper*, and both are exact.
 **Candidates and counts are asserted identical to the shipped loop's** — ordinal for ordinal and
 count for count, every artifact, before either route is timed.
 
+### And a list per row where the layer overlaps
+
+The label column above needs each point to carry exactly one value. A per-analyst selection, a
+terms-as-artifacts layer or a multi-valued predicate carries several or none, so the row-major form
+is `row → list of artifacts`. Everything else is the same, and `artifacts-from-points` already reads
+this shape — a list column naming the artifacts a point belongs to — before converting it into
+bitmaps.
+
+Measured over 10⁵ **scattered and overlapping** artifacts, 10⁷ points, against the best
+artifact-major route:
+
+| viewport | shipped | artifact-major, hoisted | **row-major list** |
+|---|---:|---:|---:|
+| whole map | 1 307 ms | **20.2 ms** | 75.7 ms |
+| 6.25% | 478 ms | 29.4 ms | **6.3 ms** |
+| 0.39% | 176 ms | 36.8 ms | **0.96 ms** |
+| 0.024% | 32.5 ms | 16.1 ms | **0.14 ms** |
+
+Candidates asserted identical to the shipped loop's before either is timed. The crossover is the
+same as the label column's and for the same reason — a row-major scan is cheapest where the viewport
+is small, and at whole-map zoom the extent test settles the layer without scanning anything.
+
+**Its cost is memberships in the viewport**, so it is flat in the artifact count and linear in `k`,
+the average artifacts a point belongs to: `O(k × visible rows)` at ~10 ns a row. That is the right
+invariant for a layer covering a corpus, where `k` is fixed and the artifact count is not. The arm
+above holds *members per artifact* fixed instead, so its totals grow with the artifact count — the
+fixture's choice, not the layout's.
+
+⊘ At 10⁹ points a 6.25% viewport is 6×10⁷ visible rows, so ~600 ms at that constant *(derived)*. The
+awkward band for this shape is therefore mid-zoom: narrow viewports are tens of milliseconds and
+whole-map is answered artifact-major.
+
 ### The part that is not about speed
 
 At the target the artifact-major form does not fit. From the residency campaign's measured 78.5 B

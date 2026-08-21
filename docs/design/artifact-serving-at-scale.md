@@ -411,55 +411,58 @@ the containment partition (~40 MB), the lineage with depth and child index (~200
 
 #### Clustered and regional — HDBSCAN, point-and-radius, boundaries, hierarchy levels
 
-| principal sees | whole map | 6.25% | 0.39% | 0.024% |
-|---|---:|---:|---:|---:|
-| everything | **35** | 68 | 44 | 23 |
-| 9.4% | 64 | 46 | 24 | 23 |
-| 3.1% | 56 | 43 | 24 | 23 |
-
-The verdict half of those is measured; the cut half is interpolated from the measured ladder against
-the candidate count each cell produces. **Everything is between 23 and 68 ms**, and it is the cut's
-sweep floor rather than the verdict that decides almost every cell — the verdict itself ranges from
-0.03 ms to 31.7.
-
-#### Scattered and partitioning — a single-valued attribute predicate
-
-Served row-major (§5.1), at ~4–5 ns per visible row of the viewport and **flat in the artifact
-count**. ⊘ Derived from that measured constant at 10⁹ points; the constant is measured at 10⁸.
+**Measured end to end on one fixture**, 10⁷ artifacts, treed, lineage held per generation, no
+per-session state — verdict, count and cut in one loop rather than assembled from two probes:
 
 | principal sees | whole map | 6.25% | 0.39% | 0.024% |
 |---|---:|---:|---:|---:|
-| everything | ~50 † | ~280 | ~18 | ~1 |
-| 9.4% | ~50 † | ~26 | ~2 | ~0.2 |
-| 3.1% | ~50 † | ~9 | ~1 | ~0.1 |
+| everything | **36.8** | 31.4 | 9.9 | 8.1 |
+| 9.4% | 60.3 | 14.7 | 8.5 | 8.1 |
+| 3.1% | 35.0 | 13.1 | 8.4 | **7.8** |
 
-† at whole-map zoom the extent test settles the layer without a scan, so this is the artifact-major
-route and the artifact count decides it, not the corpus. **Mid-zoom is this shape's worst case**,
-inverting the clustered one, because that is where the viewport is large in rows and small in
-settled blocks.
+**Everything is between 7.8 and 60 ms**, and the cut is the larger term in eleven of the twelve
+cells — 7.7 ms of floor at a 10⁷ level however few artifacts pass, rising to 56 ms where a million
+do. The verdict ranges from 0.05 ms to 34.
 
-#### Scattered and overlapping — per-analyst selections, terms-as-artifacts
+⊘ Measured at 10⁸ points. The design is flat in corpus size (§7, 10⁶ artifacts, 10⁸ → 10⁹, no
+movement), so these carry; the direct run at 10⁷ × 10⁹ needs ~41 GB against 47 and is the one
+measurement still owed.
 
-**Not servable at this scale, and no layout here changes that.** Every artifact touches every node,
-so none is ever settled and each pays a masked intersection: ~2.4 µs apiece, measured, which is
-**~24 s** at 10⁷. The wall is around **4×10⁵ artifacts** for a sub-second budget at 10⁹ points.
+#### Scattered — attribute predicates, per-analyst selections, terms-as-artifacts
 
-That is the ruling §9 asks for. It is not a gap in the design so much as a shape nothing can serve:
-a million arbitrary overlapping sets over a billion points, each spread across the whole map, is not
-a picture. Every real instance — an analyst's selection, a vocabulary term — is made by a person or a
-controlled list, and lands in the thousands, where the cost is 2.4–24 ms.
+**Served row-major** (§5.1 for a partitioning layer, a list per row where it overlaps), at ~10 ns per
+visible row and **flat in the artifact count**. Measured at 10⁵ overlapping artifacts over 10⁷
+points, against the best artifact-major route:
+
+| viewport | artifact-major | **row-major list** |
+|---|---:|---:|
+| whole map | **20.2 ms** | 75.7 ms |
+| 6.25% | 29.4 ms | **6.3 ms** |
+| 0.39% | 36.8 ms | **0.96 ms** |
+| 0.024% | 16.1 ms | **0.14 ms** |
+
+The two cross where they should: a row-major scan is cheapest where the viewport is small, and at
+whole-map zoom the extent test settles the layer without scanning anything. **So there is no shape
+left with no answer** — what changed between drafts is that the list column generalises §5.1 from
+partitioning layers to overlapping ones, and `artifacts-from-points` already reads it.
+
+⊘ **The awkward band is mid-zoom at the full corpus.** The scan costs `O(k × visible rows)`, so a
+6.25% viewport over 10⁹ points is 6×10⁷ rows ≈ **600 ms** *(derived from the measured constant)*.
+Narrow viewports are tens of milliseconds and whole-map is answered artifact-major; the middle is
+where this shape is dearest, inverting the clustered case.
 
 ### 7.3 What bounds the system now
 
-**The cut's sweep floor, at ~23 ms.** The downward walk (§6) applies only where more than half the
+**The cut, at 7.7 ms of floor and up to 56 ms.** The downward walk (§6) applies only where more than half the
 level passes, which after viewport filtering is the whole-map request alone; everywhere else the
 sweep runs and it is `O(level)` — 23 ms at a 10⁷ level even when two thousand artifacts pass.
 
-So the ordering has inverted twice over. The whole-corpus principal at whole-map zoom, which began
-this campaign as the worst request at ~1 190 ms, is now the **cheapest** at ~35 ms, because passing
+So the ordering has inverted. The whole-corpus principal at whole-map zoom, which began this
+campaign as the worst request at ~1 190 ms, is now among the cheapest at 36.8 ms, because passing
 everything is exactly what makes the containment groups and the downward walk collapse. What is
-expensive now is a **mid-zoom request for a broad principal** — 68 ms — where the viewport does not
-narrow much, the walk declines, and the sweep pays for a level the request barely touches.
+expensive now is a **whole-map request for a principal who sees most but not all** — 60.3 ms at a
+9.4% mask — where nearly a million artifacts pass, the walk declines because most of the level does
+not, and the sweep pays for a level the request barely serves from.
 
 ⊘ **The next reduction is the sweep's floor**, and it is bookkeeping rather than design: the sweep
 scans `0..span` to find the on-chain nodes, which could be collected as a list during the frontier
