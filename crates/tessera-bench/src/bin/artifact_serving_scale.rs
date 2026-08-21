@@ -1632,6 +1632,22 @@ fn main() {
     // **A three-way tree over the layer**, so the cut has a frontier to resolve rather than a flat
     // level it short-circuits. Held once, as a generation object is: `Lineages` caches it in the
     // engine now, and a request that rebuilt it would be timing a build rather than a cut.
+    //
+    // ⊘ **This tree is not a hierarchy, and every treed figure here is suspect because of it.** The
+    // parent of ordinal *o* is `(o - 1) / 3`, so the tree's shape is the ordinal space's and has no
+    // relation to the geometry — while each artifact's membership sits near its *own* ordinal.
+    // A real nested layer is the opposite: a parent's membership **contains** its children's, so a
+    // parent is in view whenever any child is, and the root is in view always.
+    //
+    // The consequence is measurable and was measured. At a three-quarter viewport the artifacts near
+    // ordinal zero — which here are the whole top of the tree — fall out of view, so no node above
+    // the cut passes, every lineage below is its own fallback, and the cut pays for a shape a real
+    // hierarchy cannot have. It is why the campaign's ridge at a three-quarter viewport is
+    // **unexplained rather than established**: part of it is this.
+    //
+    // Fixing it means assigning membership from the tree rather than the tree from the ordinals —
+    // a parent's rows being the union of its children's — which also changes what a level costs to
+    // store, since every level then covers the corpus.
     let lineage = tessera_engine::cut::Lineage::new(
         (0..artifacts as u32).map(|o| (o, (o > 0).then(|| (o - 1) / 3))),
     );

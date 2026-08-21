@@ -435,13 +435,24 @@ three-quarters and 1.2 million artifacts fall out of view — so nodes above the
 declines, and the sweep runs over 8.8 million passing: **133.7 ms**, fifty times as much. The verdict
 barely moves across that step, 108 → 99 ms.
 
-⊘ **That guard is the largest remaining item, and it is too strict.** It requires *every* node the
-walk sees to pass, so one failing artifact near the root sends a request that passes 88% of the layer
-back to the sweep. Handling a failing node locally — check its children; where one passes, nothing
-below it can be a fallback — would keep the walk on the whole top-left quadrant and take 232 ms to
-around 100, leaving the verdict as the bound. It needs a work-bounded descent for the case where a
-failing node's whole subtree fails, and a bail-out to the sweep when that descent runs long. Scoped,
-not built.
+⊘ **The ridge is not yet explained, and the guard is not the whole of it.** Relaxing the guard was
+built, tested against the reference over random trees with partial masks, and **measured worse** —
+272 ms against 232 at the peak — so it is reverted. Instrumenting it says why, and the answer is
+about the fixture rather than the algorithm:
+
+**the probe's treed layer is not a hierarchy.** The parent of ordinal *o* is `(o − 1) / 3`, so the
+tree's shape is the ordinal space's, while each artifact's membership sits near its *own* ordinal. A
+real nested layer is the opposite — a parent's membership **contains** its children's, so a parent is
+in view whenever any child is and the root is in view always. Here the artifacts near ordinal zero
+are the whole top of the tree, a three-quarter viewport drops them, and every lineage below becomes
+its own fallback: a shape a real hierarchy cannot produce. The relaxed walk then spends its work
+bound chasing fallbacks and hands the request back anyway, so it pays for both routes.
+
+**So every treed figure at a partial viewport in §7.2 is suspect**, and the ridge is part fixture. The
+measurement that settles it is a fixture whose membership comes from the tree rather than the tree
+from the ordinals — which also changes what a level costs to store, since every level of a nested
+layer then covers the corpus. That is the next measurement, and until it exists the guard should stay
+as it is: simple, and the better of the two on the evidence there is.
 
 #### Scattered — attribute predicates, per-analyst selections, terms-as-artifacts
 
