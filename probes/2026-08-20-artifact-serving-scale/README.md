@@ -300,6 +300,56 @@ pointer, and the bitmap's first container are three random accesses into three s
 purely per-artifact route over a scattered layer walls around 4×10⁶ artifacts rather than 4×10⁵.
 Beyond that the layout has to change, which is what the row-major section above is about.
 
+## A real hierarchy, where the membership comes from the tree
+
+Every arm above lays a tree over the ordinal space while giving each artifact a membership near its
+own ordinal, which makes the two unrelated — a viewport can drop the whole top of the tree and leave
+its leaves in view. **No hierarchy can do that**: a parent cluster contains its children, so a parent
+is in view whenever any child is and the root is in view always. The `nested` arm builds membership
+from the tree instead: the root owns the row space and each node splits its range among its
+children.
+
+**It is cheap to store, which is worth stating first.** Every level covers the corpus, so the layer's
+membership is `depth × rows` — but each node is a *contiguous range*, so it is one run whatever its
+size, and the whole thing is `depth × (rows / 65 536)` containers. Measured at **1.2 row blocks per
+artifact** over 10⁶ nodes on a 10⁹-row corpus.
+
+At 10⁶ artifacts over 10⁹ points, milliseconds, by principal coverage and viewport:
+
+| | 100% | 75% | 50% | 25% | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **100%** | 14.3 | 87.8 | 71.5 | 33.8 | 13.6 | 4.0 | 1.9 |
+| **75%** | 72.7 | **102.2** | 89.4 | 58.4 | 37.5 | 25.9 | 14.3 |
+| **50%** | 61.5 | 87.8 | 76.9 | 53.0 | 33.3 | 25.2 | 14.7 |
+| **25%** | 46.6 | 70.0 | 58.2 | 40.4 | 28.3 | 23.0 | 12.6 |
+| **9.4%** | 30.0 | 46.8 | 39.0 | 28.3 | 20.8 | 16.8 | 9.8 |
+| **3.1%** | 28.9 | 38.5 | 33.2 | 26.4 | 20.6 | 17.4 | 17.1 |
+
+**The cut stops being the problem**: 0.3–11.4 ms across the whole grid, against 176 ms on the
+ordinal-tree fixture. So the ridge that fixture showed was largely its own, and the downward walk's
+guard — which measured worse when relaxed — was being blamed for it.
+
+### What dominates instead: the masked count of a coarse node
+
+| count only | 100% | 75% | 50% | 25% | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| mask **100%** | 3.6 | 3.7 | 3.5 | 2.8 | 2.0 | 1.3 | 0.6 |
+| mask **75%** | **52.3** | 52.0 | 49.2 | 37.8 | 26.5 | 22.8 | 12.6 |
+| mask **50%** | 45.3 | 44.4 | 41.7 | 35.4 | 25.0 | 22.7 | 13.2 |
+
+**Flat across the viewport and fourteenfold worse the moment the mask is not everything.** Both
+follow from what it is: the count runs over the *served* set, which a budget bounds — but a shallow
+cut serves **coarse** nodes, and a coarse node's membership is most of the corpus. `and_cardinality`
+against a full mask is one run; against a fragmented one it is fifteen thousand containers, three
+times over for base, minus and plus.
+
+⊘ **Per-signature counts would remove it, and cheaply.** `|membership ∩ M_auth|` is
+`Σ over satisfied signatures of |membership ∩ sig|` — build-time, mask-independent, and exact once
+the overlay's small `minus`/`plus` are applied on top. It is only worth storing for the nodes where
+the count is dear, which are the coarse ones: the top nine levels of a 10⁶-node tree are ~10⁴ nodes,
+so ~1.3 MB at thirty-two signatures. Not measured, and its cost scales with the signature count
+rather than the artifact count, which is the thing to check before building it.
+
 ## What this does not measure, stated so it is not read as settled
 
 - **Not a real clustering.** The `runs` arm is a partition of the map into row-contiguous artifacts,

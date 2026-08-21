@@ -435,6 +435,9 @@ three-quarters and 1.2 million artifacts fall out of view — so nodes above the
 declines, and the sweep runs over 8.8 million passing: **133.7 ms**, fifty times as much. The verdict
 barely moves across that step, 108 → 99 ms.
 
+**The ridge was largely the fixture, and a real hierarchy moves the cost somewhere else** — see
+§7.4. What follows is the record of how that was found, kept because the reasoning was wrong twice.
+
 ⊘ **The ridge is not yet explained, and the guard is not the whole of it.** Relaxing the guard was
 built, tested against the reference over random trees with partial masks, and **measured worse** —
 272 ms against 232 at the peak — so it is reverted. Instrumenting it says why, and the answer is
@@ -489,6 +492,50 @@ call at ten million scattered artifacts.
 | containment partition | 40 MB |
 | list column *(scattered layers only)* | 4.4 GB |
 | **per session** | **nothing** |
+
+### 7.4 A real hierarchy, and where the cost actually is
+
+The fixture above lays a tree over the ordinal space while giving each artifact a membership near its
+own ordinal, so the two are unrelated — a viewport can drop the whole top of the tree and leave its
+leaves in view. **No hierarchy can do that**: a parent contains its children, so a parent is in view
+whenever any child is and the root is in view always. Building membership *from* the tree — the root
+owning the row space, each node splitting its range among its children — gives a different answer.
+
+**A hierarchy is cheap to store**, which is worth settling first: every level covers the corpus, so
+the layer holds `depth × rows` of membership — but each node is a **contiguous range**, hence one run
+whatever its size, so the whole layer is `depth × (rows / 65 536)` containers. Measured at **1.2 row
+blocks per artifact** over 10⁶ nodes on a 10⁹-row corpus. Nesting does not cost what its member count
+suggests.
+
+At 10⁶ artifacts over 10⁹ points, milliseconds:
+
+| principal \ viewport | 100% | 75% | 50% | 25% | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **100%** | 14.3 | 87.8 | 71.5 | 33.8 | 13.6 | 4.0 | 1.9 |
+| **75%** | 72.7 | **102.2** | 89.4 | 58.4 | 37.5 | 25.9 | 14.3 |
+| **50%** | 61.5 | 87.8 | 76.9 | 53.0 | 33.3 | 25.2 | 14.7 |
+| **25%** | 46.6 | 70.0 | 58.2 | 40.4 | 28.3 | 23.0 | 12.6 |
+| **9.4%** | 30.0 | 46.8 | 39.0 | 28.3 | 20.8 | 16.8 | 9.8 |
+| **3.1%** | 28.9 | 38.5 | 33.2 | 26.4 | 20.6 | 17.4 | 17.1 |
+
+**The cut stops being the problem** — 0.3 to 11.4 ms across the whole grid, against 176 ms on the
+ordinal-tree fixture. The ridge §7.2 reports was largely that fixture's own, and the downward walk's
+guard was being blamed for it.
+
+**What dominates instead is the masked count of a coarse node.** It runs 3.6 ms at a full mask and
+**52 ms at any mask below one**, flat across the viewport — and both follow from what it is. The
+count is taken over the *served* set, which the budget bounds; but a shallow cut serves **coarse**
+nodes, and a coarse node's membership is most of the corpus. Against a full mask that is one run;
+against a fragmented one it is fifteen thousand containers, three times over for base, minus and
+plus.
+
+⊘ **Per-signature counts would remove it, and cheaply.** `|membership ∩ M_auth|` is
+`Σ over satisfied signatures of |membership ∩ sig|` — build-time, mask-independent, and exact once
+the overlay's small `minus` and `plus` are applied over it. It is only worth storing where the count
+is dear, which is the coarse nodes: the top nine levels of a 10⁶-node tree are ~10⁴ nodes, so ~1.3 MB
+at thirty-two signatures. **Its cost scales with the signature count, not the artifact count**, which
+is the thing to check before building it — a vocabulary of a thousand distinct signatures would make
+it 40 GB at 10⁷ artifacts if stored for every node rather than the coarse ones.
 
 ### 7.3 What bounds the system now
 

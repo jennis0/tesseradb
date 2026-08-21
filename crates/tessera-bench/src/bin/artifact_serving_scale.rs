@@ -111,6 +111,7 @@ enum Arm {
     Regions,
     Scattered,
     Partition,
+    Nested,
 }
 
 impl Arm {
@@ -120,6 +121,7 @@ impl Arm {
             Arm::Regions => "regions",
             Arm::Scattered => "scattered",
             Arm::Partition => "partition",
+            Arm::Nested => "nested",
         }
     }
 
@@ -129,6 +131,7 @@ impl Arm {
             "regions" => Some(Arm::Regions),
             "scattered" => Some(Arm::Scattered),
             "partition" => Some(Arm::Partition),
+            "nested" => Some(Arm::Nested),
             _ => None,
         }
     }
@@ -321,6 +324,10 @@ fn membership_rows(
             bitmap.add_range(base..base.saturating_add(span).min(row_count));
             bitmap.run_optimize();
         }
+        Arm::Nested => {
+            // Filled by the caller from `nested_ranges`; this arm's membership is not a function of
+            // the artifact alone.
+        }
         Arm::Scattered => {
             // Uniform over the whole space. **No amount of spatial indexing helps this shape** —
             // it touches every node of the tree, so it is never inside one and never outside one.
@@ -348,6 +355,51 @@ fn membership_rows(
         }
     }
     bitmap
+}
+
+/// **A real nested hierarchy: the membership comes from the tree, not the tree from the ordinals.**
+///
+/// Every other arm gives an artifact a membership near its own ordinal and then lays a tree over the
+/// ordinal space, which makes the two unrelated — so a viewport can drop the whole top of the tree
+/// while leaving its leaves in view, and every lineage below becomes its own fallback. No hierarchy
+/// can do that. A parent cluster **contains** its children, so a parent is in view whenever any
+/// child is, and the root is in view always.
+///
+/// Here the root owns the whole row space and each node splits its range among its children, so a
+/// node's membership is its subtree's extent — contiguous in row space, which is what makes a
+/// hierarchy cheap to store despite every level covering the corpus: a node is one run whatever its
+/// size, so the whole layer is `depth × (rows / 65 536)` containers rather than one per member.
+///
+/// The `members` and `runs` knobs do not apply to this arm: what a node holds is decided by where it
+/// sits in the tree.
+fn nested_ranges(artifacts: usize, row_count: u32) -> Vec<(u32, u32)> {
+    let mut ranges = vec![(0u32, 0u32); artifacts];
+    if artifacts == 0 {
+        return ranges;
+    }
+    ranges[0] = (0, row_count);
+    for node in 0..artifacts {
+        let (lo, hi) = ranges[node];
+        if hi <= lo {
+            continue;
+        }
+        let kids: Vec<usize> = (1..=3)
+            .map(|k| 3 * node + k)
+            .filter(|&c| c < artifacts)
+            .collect();
+        if kids.is_empty() {
+            continue;
+        }
+        // Split the parent's extent among its children, so the union of the children is the parent
+        // exactly — which is the property the whole arm exists to have.
+        let width = (hi - lo) as u64;
+        for (i, &child) in kids.iter().enumerate() {
+            let from = lo + (width * i as u64 / kids.len() as u64) as u32;
+            let to = lo + (width * (i as u64 + 1) / kids.len() as u64) as u32;
+            ranges[child] = (from, to);
+        }
+    }
+    ranges
 }
 
 /// The entity set behind a row set — what the durable record actually carries.
@@ -1512,11 +1564,28 @@ fn main() {
     let group_size = rows_n / SIGNATURE_GROUPS;
     eprintln!("# row space: {:.1} s", t.elapsed().as_secs_f64());
 
+    // The tree's extents, where the arm takes its membership from the tree.
+    let nested = if arm == Arm::Nested {
+        nested_ranges(artifacts, rows_n)
+    } else {
+        Vec::new()
+    };
+
     let t = Instant::now();
     let mut row_span_total = 0u64;
     let records: Vec<ArtifactRecord> = (0..artifacts)
         .map(|i| {
-            let in_rows = membership_rows(arm, rows_n, i, artifacts, members, runs_per, &mut rng);
+            let in_rows = if arm == Arm::Nested {
+                let (lo, hi) = nested[i];
+                let mut b = Bitmap::new();
+                if hi > lo {
+                    b.add_range(lo..hi);
+                }
+                b.run_optimize();
+                b
+            } else {
+                membership_rows(arm, rows_n, i, artifacts, members, runs_per, &mut rng)
+            };
             row_span_total += in_rows.statistics().n_containers as u64;
             // One content, whose generating set is a handful of the artifact's own members: the
             // One content, whose generating set is a handful of the artifact's own members: the
