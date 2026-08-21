@@ -62,6 +62,38 @@ three coverages understated the worst request by 2.1× (owner). Sweep both axes 
 what is left needing a declared bound is a layer that is scattered **and** overlapping **and**
 numerous, which is always human- or vocabulary-made.
 
+### 0.1 What to do next, in order
+
+**Nothing here is blocking and nothing is half-done** — the branch is gate-green and every claim is
+either measured or marked. Take these in order; the reasons for the order matter more than the list.
+
+1. **Re-run the memo's §7.2 grid on the `nested` arm at 10⁷.** §7.2 is measured on a fixture whose
+   tree is unrelated to its geometry, and §7.3 explains why that is not a hierarchy — so a reader
+   currently has to hold both sections at once. One run collapses them. `--arm nested --only grouped`
+   over 10⁹ rows; the entity form is ~32 runs a node, so 10⁷ needs about 29 GB and may want the
+   artifact count dropped rather than the corpus.
+2. **Fix the global store version** (memo §8.1). Any artifact write invalidates every cached row form
+   in every view, and the rebuild is **300 s at 10⁷ over 10⁹**. Nothing above is worth building on a
+   cache that never survives a write, and the per-generation structures this design adds would
+   inherit the same fate.
+3. **Price per-signature counts for coarse nodes** (memo §7.3) — the hierarchy's dominant term, and
+   ~1.3 MB if stored only where the count is dear. **Check the storage against a real corpus's
+   signature distribution first**: it scales with the signature count, not the artifact count, and a
+   thousand signatures stored per node would be 40 GB at 10⁷.
+4. **Get the §9 ruling** — the row-major layouts dissolved most of it; what is left is whether a
+   layer that is scattered *and* overlapping *and* numerous carries a declared bound.
+5. **Then build into the serving path**, in this order: the containment partition (§4.2), the
+   hierarchical index and extents (§4.4), the row-major layouts (§5). Each is measured probe-side and
+   none is in `viewport.rs` yet.
+
+**Only the cut is built.** `crates/tessera-engine/src/cut.rs` and `Lineages` in `session.rs` are in
+the engine and gate-green; everything else lives in
+`crates/tessera-bench/src/bin/artifact_serving_scale.rs` and is a measurement, not an implementation.
+
+**Two habits this campaign paid for**, both in the probe's fixture section: the fixture is the
+experiment — six corrections were needed and every one moved a headline further than any option did
+— and a grid whose extremes are cheap says nothing about its interior.
+
 ## 1. Where the rest of the work stands
 
 **Nothing on this list is blocking.** §1.1 is Stage 6, whose implementation is now specified enough
