@@ -2217,6 +2217,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                lineages: Arc::clone(&self.lineages),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2273,6 +2274,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                lineages: Arc::clone(&self.lineages),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.

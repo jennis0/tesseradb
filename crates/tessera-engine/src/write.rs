@@ -2340,6 +2340,7 @@ impl WritePath {
                     generation,
                     row_projection_cache,
                     artifact_projections: flush.artifact_projections,
+                    lineages: flush.lineages,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -3246,6 +3247,9 @@ pub(crate) struct MaintenanceDeps {
     /// per-session value, so leaving it to the first request after the flip is a stall of tens of
     /// seconds for whoever arrives first.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The lineages, shared for the half of the same warm that is theirs — see
+    /// [`Executor::warm_artifact_caches`].
+    pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
@@ -4167,6 +4171,8 @@ struct Executor {
     /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
     /// [`MaintenanceDeps::artifact_projections`].
     artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The lineages, rebuilt beside them and for the same reason.
+    lineages: Arc<crate::cut::Lineages>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
@@ -5936,7 +5942,7 @@ impl Executor {
         // for; built before the store retires, every projection would be keyed to a store version
         // the retire is about to bump, and the whole warm would be discarded on the first request —
         // paying the stall it exists to prevent, having already paid for the warm.
-        self.warm_artifact_projections();
+        self.warm_artifact_caches();
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -9182,16 +9188,23 @@ impl Executor {
         Ok(entries)
     }
 
-    /// Rebuild every level's row-space membership against the live generation.
+    /// Rebuild every level's row-space membership, and every lineage this fold moved, against the
+    /// live generation.
     ///
     /// Called at the fold's own publication, on this thread, for the reason §5.0.3 gives: the
     /// alternative is not a cache miss but a stall, and it lands on a request rather than on
     /// maintenance. Cheap everywhere else — a deployment with no artifacts iterates nothing.
     ///
+    /// **The lineages are warmed here for the same reason and not the same extent.** A row form is
+    /// invalid at every level because the prefix renumbered row space; a lineage is invalid only
+    /// where this fold retired an artifact, because it holds ordinals. So this asks for all of
+    /// both and pays for one of each per level that moved — and what it is buying is the ~96 ms at
+    /// a level of ten million that would otherwise land on whichever request arrived first.
+    ///
     /// **Errors are impossible to have here and absences are not**: a view the generation does not
     /// carry is simply not warmed, and its first request builds what it needs, which is the same
     /// outcome this method exists to avoid but not a wrong one.
-    fn warm_artifact_projections(&self) {
+    fn warm_artifact_caches(&self) {
         let generation = self.generation.load_full();
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             store
@@ -9204,6 +9217,7 @@ impl Executor {
         }
         let started = std::time::Instant::now();
         let before_projections = self.artifact_projections.builds();
+        let before_lineages = self.lineages.builds();
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
@@ -9220,8 +9234,29 @@ impl Executor {
                 }
             }
         }
+        for (layer, level) in &levels {
+            self.live.with_artifacts(|store| {
+                self.lineages.get_or_build(
+                    layer,
+                    *level,
+                    store.level_version(layer, *level),
+                    || {
+                        crate::cut::Lineage::new(store.level(layer, *level).map(
+                            |(ordinal, record)| {
+                                let within = record
+                                    .parent
+                                    .filter(|parent| parent.level == *level)
+                                    .map(|parent| parent.ordinal);
+                                (ordinal, within)
+                            },
+                        ))
+                    },
+                )
+            });
+        }
         tracing::info!(
             projections = self.artifact_projections.builds() - before_projections,
+            lineages = self.lineages.builds() - before_lineages,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "the fold's artifact pass rebuilt every level's row form"
         );

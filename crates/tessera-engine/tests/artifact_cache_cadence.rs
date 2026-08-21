@@ -22,6 +22,7 @@ mod common;
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{ArtifactOut, Engine};
+use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
@@ -99,6 +100,9 @@ impl Fixture {
         source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 
+    fn member(&self, source_id: u64) -> EntityId {
+        self.members(source_id..source_id + 1)[0]
+    }
 }
 
 /// One node of a planted tree: a key, its parent's key, and the source ids it holds.
@@ -140,6 +144,28 @@ fn served(engine: &Engine, layer: &str) -> Vec<(String, u64)> {
         .collect();
     out.sort();
     out
+}
+
+/// Request a fold and block until it has published, asserting it was not discarded.
+fn fold(engine: &Engine) {
+    let before = engine.write_executor_stats();
+    engine.request_fold();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let now = engine.write_executor_stats();
+        assert_eq!(
+            now.fold_failures, before.fold_failures,
+            "the fold was discarded rather than published"
+        );
+        if now.folds > before.folds {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// **The headline: a write to one layer does not rebuild another layer's row form.**
@@ -327,5 +353,78 @@ fn a_publication_that_adds_an_edge_is_in_the_next_requests_cut() {
     assert!(
         engine.artifact_cache_builds().1 > warm,
         "which it could only do by rederiving the lineage the publication invalidated"
+    );
+}
+
+/// **A fold rebuilds every row form and only the lineages it moved**, which are two different
+/// answers to two different questions.
+///
+/// Row space renumbers globally at a fold, so every projection built over the old one names other
+/// people's documents and all of them go. A lineage holds *ordinals*, which a fold preserves — it
+/// writes a hole where it retired an artifact rather than closing the gap — so only a level this
+/// fold actually changed needs its lineage again.
+///
+/// The fold does both itself, on its own thread, rather than leaving the first request after the
+/// flip to absorb them.
+#[test]
+fn a_fold_rebuilds_every_row_form_and_only_the_lineages_it_moved() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(flat("clusters/a")).unwrap();
+    engine.register_layer(treed("clusters/tree")).unwrap();
+    publish(
+        &engine,
+        "clusters/a",
+        vec![IncomingArtifact::from_entities(
+            Some("a0".into()),
+            fx.members(0..100),
+        )],
+    );
+    publish(
+        &engine,
+        "clusters/tree",
+        vec![
+            node(&fx, "root", None, 500..800),
+            node(&fx, "left", Some("root"), 500..600),
+            node(&fx, "right", Some("root"), 600..700),
+        ],
+    );
+    let before_tree = served(&engine, "clusters/tree");
+    let (warm_rows, warm_lineages) = engine.artifact_cache_builds();
+
+    // A member of `clusters/a` alone: the tree's own levels are untouched by what this fold
+    // executes, which is what makes the two counters diverge.
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+
+    let (folded_rows, folded_lineages) = engine.artifact_cache_builds();
+    assert!(
+        folded_rows >= warm_rows + 2,
+        "every level's row form is rebuilt at the flip: row space renumbered under all of them"
+    );
+    assert_eq!(
+        folded_lineages,
+        warm_lineages + 1,
+        "one lineage — the level the fold changed. The tree's ordinals did not move, so neither \
+         did the lineage over them"
+    );
+
+    assert_eq!(
+        served(&engine, "clusters/a"),
+        vec![("a0".to_string(), 99)],
+        "the deleted member is gone from the count the fold executed it in"
+    );
+    assert_eq!(
+        served(&engine, "clusters/tree"),
+        before_tree,
+        "and the layer the fold did not touch serves exactly what it served"
+    );
+    assert_eq!(
+        engine.artifact_cache_builds(),
+        (folded_rows, folded_lineages),
+        "the fold warmed both, so the first request after the flip derives nothing — which is the \
+         stall it exists to keep off a request"
     );
 }
