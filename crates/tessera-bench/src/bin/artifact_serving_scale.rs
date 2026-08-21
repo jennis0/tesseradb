@@ -749,9 +749,19 @@ impl TileIndex {
 
     /// Whether this artifact's whole membership lies inside the viewport — the alignment-free
     /// settle test. See [`TileIndex::extent`].
-    fn inside(&self, ordinal: u32, tiles: &Bitmap) -> bool {
+    ///
+    /// `viewport_rows` is how many rows the viewport holds, computed once per request. **An
+    /// artifact spanning more rows than the viewport contains cannot be inside it**, and that is one
+    /// subtraction against a `contains_range` that would otherwise walk every container between the
+    /// two ends. It is the difference between a test that is cheap for compact artifacts and one
+    /// that is dear for exactly the scattered artifacts it can never settle: their extent is the
+    /// whole map, so the walk is the whole map, so the answer is *no* the expensive way.
+    fn inside(&self, ordinal: u32, tiles: &Bitmap, viewport_rows: u64) -> bool {
         let (lo, hi) = self.extent[ordinal as usize];
-        lo <= hi && tiles.contains_range(lo..=hi)
+        if lo > hi || (hi as u64 - lo as u64 + 1) > viewport_rows {
+            return false;
+        }
+        tiles.contains_range(lo..=hi)
     }
 
     fn resident_bytes(&self) -> u64 {
@@ -910,6 +920,7 @@ fn assert_same_answer(
     mask: &ComposedMask,
     row_count: u32,
 ) {
+    let viewport_rows = tiles.cardinality();
     let full: Vec<u32> = (0..rows.len() as u32)
         .filter(|&o| rows.intersects(o, tiles, mask))
         .collect();
@@ -931,7 +942,7 @@ fn assert_same_answer(
         .filter(|&o| rows.masked_count(o, mask) > 0)
         .collect();
     route_e.extend(open_set.iter().filter(|&o| {
-        if index.inside(o, tiles) {
+        if index.inside(o, tiles, viewport_rows) {
             rows.masked_count(o, mask) > 0
         } else {
             rows.intersects(o, tiles, mask)
@@ -971,6 +982,7 @@ fn settled(
     mask: &ComposedMask,
     row_count: u32,
 ) -> Phases {
+    let viewport_rows = tiles.cardinality();
     let mut phases = Phases::default();
 
     let start = Instant::now();
@@ -982,7 +994,7 @@ fn settled(
     // to give up on, and only what neither settles pays for the masked intersection.
     let edge: Vec<u32> = open
         .iter()
-        .filter(|&o| index.inside(o, tiles) || rows.intersects(o, tiles, mask))
+        .filter(|&o| index.inside(o, tiles, viewport_rows) || rows.intersects(o, tiles, mask))
         .collect();
     candidates.extend_from_slice(&edge);
     candidates.sort_unstable();
@@ -1217,6 +1229,7 @@ fn grouped(
     mask: &ComposedMask,
     row_count: u32,
 ) -> Phases {
+    let viewport_rows = tiles.cardinality();
     let mut phases = Phases::default();
 
     let start = Instant::now();
@@ -1232,7 +1245,7 @@ fn grouped(
         let mut o = open;
         o.and_inplace(&passes);
         for x in o.iter() {
-            if index.inside(x, tiles) || rows.intersects(x, tiles, mask) {
+            if index.inside(x, tiles, viewport_rows) || rows.intersects(x, tiles, mask) {
                 s.add(x);
             }
         }
@@ -1241,7 +1254,7 @@ fn grouped(
         let mut s: Bitmap = settled.iter().filter(|&o| contains.holds_for(o, holds)).collect();
         for x in open.iter() {
             if contains.holds_for(x, holds)
-                && (index.inside(x, tiles) || rows.intersects(x, tiles, mask))
+                && (index.inside(x, tiles, viewport_rows) || rows.intersects(x, tiles, mask))
             {
                 s.add(x);
             }
@@ -1271,6 +1284,67 @@ fn grouped(
     phases.count = start.elapsed().as_secs_f64() * 1e6;
     std::hint::black_box(total);
 
+    phases.containment = 0.0;
+    phases.passing = candidates.len();
+    phases
+}
+
+/// **Route H — the mask is composed with the viewport once, not once per artifact.**
+///
+/// `ArtifactRows::intersects` asks *does this artifact have a visible member in view* by
+/// materialising `membership ∩ viewport` and then putting that through the composed mask — three
+/// set operations and a heap allocation, **per artifact**. But `viewport ∩ M_auth` has no artifact
+/// in it. Composing it once per request leaves each artifact a single `Bitmap::intersect`, which is
+/// a boolean with an early exit: it stops at the first container that meets.
+///
+/// **The early exit is why this matters most for the shape it was worst for.** A scattered artifact
+/// has members everywhere, so it almost always *does* meet the viewport — 99.8% of them at a
+/// hundred members and a 6.25% viewport — and the test that was costing 2.4 µs was confirming a
+/// foregone conclusion the long way round. An early-exiting probe answers it at the first container.
+///
+/// Exact, and trivially so: `rows ∩ (viewport ∩ M_auth) ≠ ∅` and `rows ∩ viewport ∩ M_auth ≠ ∅` are
+/// the same statement. What is bought is where the composition happens, not what it computes.
+fn hoisted(
+    rows: &ArtifactRows,
+    index: &TileIndex,
+    contains: &ContainmentGroups,
+    holds: u32,
+    tiles: &Bitmap,
+    mask: &ComposedMask,
+    row_count: u32,
+) -> Phases {
+    let viewport_rows = tiles.cardinality();
+    let mut phases = Phases::default();
+    let start = Instant::now();
+    let (settled, open) = index.settled_and_open(tiles, row_count);
+    // The one composition. Its cost is the viewport's containers, not the population's.
+    let here = mask.visible_rows(tiles);
+    let mut passing: Bitmap = settled.iter().filter(|&o| contains.holds_for(o, holds)).collect();
+    for x in open.iter() {
+        if !contains.holds_for(x, holds) {
+            continue;
+        }
+        if index.inside(x, tiles, viewport_rows) {
+            passing.add(x);
+            continue;
+        }
+        if rows.get(x).is_some_and(|m| m.intersect(&here)) {
+            passing.add(x);
+        }
+    }
+    passing.run_optimize();
+    let candidates: Vec<u32> = passing.iter().collect();
+    phases.candidacy = start.elapsed().as_secs_f64() * 1e6;
+    phases.candidates = candidates.len();
+
+    let start = Instant::now();
+    let total: u64 = candidates
+        .iter()
+        .take(1000)
+        .map(|&o| rows.masked_count(o, mask))
+        .sum();
+    phases.count = start.elapsed().as_secs_f64() * 1e6;
+    std::hint::black_box(total);
     phases.containment = 0.0;
     phases.passing = candidates.len();
     phases
@@ -1448,6 +1522,13 @@ fn main() {
                     0.0,
                     Box::new(|| {
                         grouped(&row_forms, &index, &contains, groups, &tiles, &m, rows_n)
+                    }),
+                ),
+                (
+                    "hoisted",
+                    0.0,
+                    Box::new(|| {
+                        hoisted(&row_forms, &index, &contains, groups, &tiles, &m, rows_n)
                     }),
                 ),
             ];

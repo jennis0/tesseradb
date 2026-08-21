@@ -239,6 +239,35 @@ campaign saw directly, where the scattered arm at 10⁷ artifacts was OOM-killed
 row-major form is one `u32` per row whatever the artifact count, narrower at the `u8`/`u16` widths
 `configuration.md` already declares, and a mappable array rather than anonymous allocation.
 
+## Composing the mask with the viewport once instead of once per artifact
+
+`ArtifactRows::intersects` asks *does this artifact have a visible member in view* by materialising
+`membership ∩ viewport` and putting that through the composed mask — three set operations and a heap
+allocation, **per artifact**. But `viewport ∩ M_auth` has no artifact in it. Composed once per
+request, each artifact is left with a single `Bitmap::intersect`: a boolean with an early exit that
+stops at the first container that meets.
+
+**It matters most for the shape it was worst for.** A scattered artifact has members everywhere, so
+it almost always *does* meet the viewport — 99.8% of them at a hundred members and a 6.25% viewport
+— and the 2.4 µs test was confirming a foregone conclusion the long way round.
+
+Measured, 10⁵ scattered artifacts over 10⁸ points:
+
+| viewport | shipped | per-artifact composition | **hoisted** |
+|---|---:|---:|---:|
+| whole map | 1 307 ms | 20.9 ms | 20.8 ms |
+| 6.25% | 478 ms | 164 ms | **29.8 ms** |
+| 0.39% | 176 ms | 60.0 ms | **38.3 ms** |
+| 0.024% | 32.5 ms | 24.7 ms | **16.7 ms** |
+
+Exact, and trivially so: `rows ∩ (viewport ∩ M_auth) ≠ ∅` and `rows ∩ viewport ∩ M_auth ≠ ∅` are the
+same statement. What changes is where the composition happens.
+
+**What is left is ~250 ns an artifact of cache misses** — the containment byte, the row form's
+pointer, and the bitmap's first container are three random accesses into three structures — so a
+purely per-artifact route over a scattered layer walls around 4×10⁶ artifacts rather than 4×10⁵.
+Beyond that the layout has to change, which is what the row-major section above is about.
+
 ## What this does not measure, stated so it is not read as settled
 
 - **Not a real clustering.** The `runs` arm is a partition of the map into row-contiguous artifacts,
