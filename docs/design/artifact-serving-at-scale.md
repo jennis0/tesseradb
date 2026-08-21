@@ -174,7 +174,7 @@ one worth ruling on:
   ~10³ artifacts and the question does not arise. This changes what is *evaluated* and not what is
   served, but it reaches the request contract. ⊘ Not measured.
 
-### 4.3 Two things the construction needs to work at all
+### 4.4 Three things the construction needs to work at all
 
 - **A hierarchy, not a granularity.** A flat index at 65 536-row blocks is worth nothing at mid-zoom:
   the viewport is then made of tiles smaller than the block, so no block is ever fully covered and
@@ -436,7 +436,7 @@ declines, and the sweep runs over 8.8 million passing: **133.7 ms**, fifty times
 barely moves across that step, 108 → 99 ms.
 
 **The ridge was largely the fixture, and a real hierarchy moves the cost somewhere else** — see
-§7.4. What follows is the record of how that was found, kept because the reasoning was wrong twice.
+§7.3. What follows is the record of how that was found, kept because the reasoning was wrong twice.
 
 ⊘ **The ridge is not yet explained, and the guard is not the whole of it.** Relaxing the guard was
 built, tested against the reference over random trees with partial masks, and **measured worse** —
@@ -493,7 +493,7 @@ call at ten million scattered artifacts.
 | list column *(scattered layers only)* | 4.4 GB |
 | **per session** | **nothing** |
 
-### 7.4 A real hierarchy, and where the cost actually is
+### 7.3 A real hierarchy, and where the cost actually is
 
 The fixture above lays a tree over the ordinal space while giving each artifact a membership near its
 own ordinal, so the two are unrelated — a viewport can drop the whole top of the tree and leave its
@@ -537,23 +537,30 @@ at thirty-two signatures. **Its cost scales with the signature count, not the ar
 is the thing to check before building it — a vocabulary of a thousand distinct signatures would make
 it 40 GB at 10⁷ artifacts if stored for every node rather than the coarse ones.
 
-### 7.3 What bounds the system now
+### 7.4 What bounds the system now
 
-**The cut, at 7.7 ms of floor and up to 56 ms.** The downward walk (§6) applies only where more than half the
-level passes, which after viewport filtering is the whole-map request alone; everywhere else the
-sweep runs and it is `O(level)` — 23 ms at a 10⁷ level even when two thousand artifacts pass.
+**On a real hierarchy, the masked count of a coarse node** — 3.6 ms at a full mask and ~52 ms at any
+mask below one, flat across the viewport (§7.3). The cut, which two earlier revisions of this section
+named as the bound, is 0.3–11.4 ms there; what made it look expensive was a fixture whose tree was
+unrelated to its geometry.
 
-So the ordering has inverted. The whole-corpus principal at whole-map zoom, which began this
-campaign as the worst request at ~1 190 ms, is now among the cheapest at 36.8 ms, because passing
-everything is exactly what makes the containment groups and the downward walk collapse. What is
-expensive now is a **whole-map request for a principal who sees most but not all** — 60.3 ms at a
-9.4% mask — where nearly a million artifacts pass, the walk declines because most of the level does
-not, and the sweep pays for a level the request barely serves from.
+**On a flat layer, the cut's sweep floor** — ~8 ms at a 10⁷ level however few artifacts pass, because
+the sweep's side tables are ~100 MB of first touch per call. The downward walk applies only where
+most of the level passes.
 
-⊘ **The next reduction is the sweep's floor**, and it is bookkeeping rather than design: the sweep
-scans `0..span` to find the on-chain nodes, which could be collected as a list during the frontier
-climb it already performs. That would make it `O(passing)` and take the floor to single-digit
-milliseconds, putting every cell above under ~35 ms. Not attempted.
+**On a scattered layer, the row-major scan at mid-zoom** — `O(k × visible rows)` puts a 6.25%
+viewport over 10⁹ points at ~600 ms *(derived)*, which is the one cell of the whole campaign still
+over budget.
+
+⊘ **Three reductions are scoped and unbuilt**, in the order they are worth taking:
+
+- **Per-signature counts for coarse nodes** (§7.3) — removes the hierarchy's dominant term for
+  ~1.3 MB, and the thing to check first is how the storage scales with a real corpus's signature
+  count rather than the fixture's thirty-two.
+- **Scratch buffers for the sweep** — its floor is page faults, not work, confirmed at 769 475 minor
+  faults across the probe. This trades a pure function for reused state, so it wants a ruling.
+- **Handing the cut a bitmap** rather than a materialised slice, which also removes the ~240 MB of
+  `passing` tuples a wide request allocates and which appears in no figure here.
 
 ## 8. What this depends on, and is not yet true
 

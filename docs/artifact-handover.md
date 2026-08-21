@@ -14,50 +14,53 @@ own handover and is still accurate about its surface; this one does not repeat i
 [`design/artifact-serving-at-scale.md`](design/artifact-serving-at-scale.md) is an **options memo for
 owner decision**, backed by
 [`probes/2026-08-20-artifact-serving-scale/`](../probes/2026-08-20-artifact-serving-scale/README.md).
-One part of it is built and gate-green — the cut rewrite — because it was a data-structure choice
-rather than a design one. Everything else is measured and proposed.
+One part is built and gate-green — the cut rewrite — because it was a data-structure choice rather
+than a design one. Everything else is measured and proposed.
 
-**The target is met, and the worst case is a ridge rather than a corner.** At 10⁷ artifacts over 10⁹
-points the whole grid of six principal coverages by seven zooms runs **7.7–232 ms** (memo §7.2),
-against ~1 190 ms for one cell of it when this began. The peak is at a **full mask and a
-three-quarter viewport**, not at either extreme — an earlier table sampled 100%, 6.25%, 0.39% and
-0.024% on both axes, stepped over the peak, and understated the worst request by 2.1× (owner,
-2026-08-21). Sample both axes through their middles.
+**The target is met.** At 10⁷ artifacts over 10⁹ points a request costs tens of milliseconds where it
+cost ~1 190 ms when this began, and the memo's §7 carries the grid: six principal coverages by seven
+zooms, both axes swept through their middles.
 
-Five things a reader needs before opening it:
+Six things a reader needs before opening it.
 
 - **The request path is `O(artifacts)` four times and only one of the four has the request in it.**
-  That is the whole finding; the design is separating them by cadence — request, token, generation —
-  and giving each the layout that suits it.
-- **Cost should track what a viewer may see, and today it inverts.** At 10⁹ points a principal
-  seeing 9.4% of the corpus costs the shipped path 1 635 ms at whole-map zoom against 727 ms for one
-  seeing everything. The same two requests cost the design 0.49 ms and 13.5 ms.
-- **Locality decides the scale, not the artifact count.** A clustered layer reaches 10⁷; a
-  *scattered* one — attribute predicate, per-analyst selection, term-as-artifact — walls at ~2×10⁵
-  under the same structures, at 96.8 row blocks per artifact against 1.0. A **row-major** layout
-  removes that wall for anything that partitions, and at 10⁹ points it is the only layout that fits
-  in memory at all: 4 GB against 78.5 GB.
-- **The cut is built, and it is the one thing here that is finished.** 1 008 ms → **3.05 ms** at
-  10⁷ for the principal that bounds the system, by walking down from the roots instead of sweeping
-  the level: a budget settles on a shallow depth, so the answer lives in the top of the tree. It
-  declines and falls back to the sweep where a node above the cut fails, so a broad-but-fragmented
-  mask still pays ~60 ms. Serves exactly what it served before, checked against the reference
-  implementation over random trees, with a test asserting the walk is actually taken.
+  That is the whole finding; the design separates them by cadence — request, token, generation — and
+  gives each the layout that suits it.
 - **There is no per-token structure.** An earlier draft leaned on `architecture.md` §8.5's
-  servable-label set, cached per token; there are a great many tokens (owner), so that is the wrong
-  cadence however cheap one copy is. Containment does not need it: `G ⊆ M_auth` is a boolean
-  expression over **terms**, composable at build time, and artifacts sharing an expression share an
-  answer for every principal that will ever exist. Measured at parity with the per-token route and
-  ahead of it for narrow principals — 4.09 ms against 13.1 ms — for 40 MB of build-time state that
-  names nobody. The masked count is the one quantity that does not fully dissolve; §4.3 splits it.
-- **Two live defects gate the rest**, neither about scale: any artifact write invalidates every
-  cached row form in every view (138 s to rebuild at 10⁷), and `Lineage` is rebuilt per request from
-  something that depends on neither the mask nor the viewport. A third is a spec bug —
-  `architecture.md` §8.5's servable-label key carries the overlay version but nothing for the
-  artifact store, which is fail-open across a publication.
+  servable-label set, cached per token; there are a great many tokens (owner, 2026-08-21), so that is
+  the wrong cadence however cheap one copy is. Containment does not need it: `G ⊆ M_auth` is a
+  boolean expression over **terms**, composable at build time, so artifacts sharing an expression
+  share an answer for every principal that will ever exist. Measured at parity with the per-token
+  route, ahead of it for narrow principals — 4.09 ms against 13.1 — for 40 MB of state naming nobody.
+- **Cost should track what a viewer may see, and today it inverts.** At 10⁹ points a principal seeing
+  9.4% of the corpus costs the shipped path 1 635 ms at whole-map zoom against 727 ms for one seeing
+  everything. The same two requests cost the design 0.49 ms and 13.5 ms.
+- **Locality decides the scale, not the artifact count.** A clustered layer reaches 10⁷; a scattered
+  one walls at ~2×10⁵ under the same structures, at 96.8 row blocks per artifact against 1.0. A
+  **row-major** layout — a label per row where the layer partitions, a list per row where it overlaps
+  — removes that wall, and at 10⁹ points it is the only layout that fits at all: 4 GB against 78.5.
+- **The cut is built, and it is the one finished thing here.** 1 008 ms → **3.05 ms** at 10⁷, by
+  walking down from the roots instead of sweeping the level. Serves exactly what it served before,
+  checked against the reference implementation over random trees.
+- **On a real hierarchy the bound is the masked count of a coarse node**, not the cut — 3.6 ms at a
+  full mask and ~52 ms at any mask below one, flat across the viewport, because a shallow cut serves
+  coarse nodes and a coarse node's membership is most of the corpus. Per-signature counts for the
+  coarse nodes would remove it for ~1.3 MB; scoped, unbuilt, and the thing to check first is how that
+  scales with a real corpus's signature count.
 
-**One owner ruling is asked for**, §9 of the memo: whether a layer with no column and no locality
-carries a declared bound — refused, warned, or merely reported.
+**Two cautions about the numbers, both learned the hard way.**
+
+**The fixture is the experiment.** Six corrections were needed and every one moved a headline further
+than any option did — the last being that the treed arms' tree is unrelated to their geometry, which
+is not a hierarchy, and which made the cut look like the bound when it is 0.3–11.4 ms on one. The
+probe's fixture section lists all six; read it before trusting a figure.
+
+**A grid whose extremes are cheap says nothing about its interior.** Sampling four viewports and
+three coverages understated the worst request by 2.1× (owner). Sweep both axes through their middles.
+
+**One owner ruling is asked for**, §9 of the memo, and the row-major layouts mostly dissolved it:
+what is left needing a declared bound is a layer that is scattered **and** overlapping **and**
+numerous, which is always human- or vocabulary-made.
 
 ## 1. Where the rest of the work stands
 

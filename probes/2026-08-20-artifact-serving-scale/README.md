@@ -15,14 +15,24 @@ is not.
 ## The result
 
 **The shipped request path is `O(artifacts)` four times over, and none of the four has the request in
-it.** Replacing the population scan with a hierarchical row-range index over artifacts, and hoisting
-the mask-dependent half into the per-token structure `architecture.md` §8.5 already specifies, is
-**21× at the worst request shape and 100–3000× at ordinary ones** — single-threaded, with every
-verdict identical to the shipped loop's, asserted rather than argued.
+it.** Removing that is a hierarchical row-range index over artifacts for the viewport half and a
+**build-time partition over terms** for the mask half — **21× at the worst request shape and
+100–3000× at ordinary ones**, single-threaded, with every verdict identical to the shipped loop's,
+asserted rather than argued.
 
-**At 10⁷ artifacts over 10⁸ points**, single-threaded, best of three — the target's own population:
+**Read the sections in order, because three of them overturn earlier ones.** This file is the record
+of a campaign, not a summary of its conclusion, and the conclusions moved:
 
-| principal sees | viewport | shipped | **indexed + per-token** | |
+| what was concluded | what overturned it |
+|---|---|
+| the mask half wants `architecture.md` §8.5's per-token servable-label set | containment is a boolean expression over **terms**, so it is build-time and needs no per-token state at all — and there are many tokens |
+| the cut bounds the system at 176 ms | that was a fixture whose tree was unrelated to its geometry; on a real hierarchy the cut is 0.3–11.4 ms |
+| the worst request is a full mask at whole-map zoom | sampling four viewports missed a ridge at three-quarter zoom; and on a real hierarchy the worst term is the **masked count of a coarse node** |
+
+**At 10⁷ artifacts over 10⁸ points**, single-threaded, best of three — the verdict pass alone, which
+is what the first two sections are about:
+
+| principal sees | viewport | shipped | **indexed + hoisted** | |
 |---|---|---:|---:|---:|
 | everything | whole map | 2 875 ms | **131 ms** | 22× |
 | everything | 6.25% | 819 ms | **9.8 ms** | 84× |
@@ -31,48 +41,12 @@ verdict identical to the shipped loop's, asserted rather than argued.
 | 9.4% | whole map | 2 712 ms | **62.7 ms** | 43× |
 | 3.1% | whole map | 2 364 ms | **25.5 ms** | 93× |
 
-**At 10⁶**, where each artifact carries a hundred members rather than ten:
-
-| principal sees | viewport | shipped | **indexed + per-token** | |
-|---|---|---:|---:|---:|
-| everything | whole map | 479 ms | **12.9 ms** | 37× |
-| everything | 0.39% | 91.2 ms | **0.45 ms** | 205× |
-| 3.1% | whole map | 1 056 ms | **0.33 ms** | 3 200× |
-
-Two things in that table are worth more than the ratios.
-
-**Cost tracks containers touched on both sides, and the mask side can dominate.** At 10⁶ artifacts
-of a hundred members each the shipped path gets *slower* as the principal narrows — 479 ms at a full
+**Cost tracks containers touched on both sides, and the mask side can dominate.** At 10⁶ artifacts of
+a hundred members each the shipped path gets *slower* as the principal narrows — 479 ms at a full
 mask against 1 056 ms at 3.1% — because a narrow `M_auth` is a more fragmented row-space set and
-every one of the four passes walks it. It is not universal: at 10⁷ artifacts of ten members each the
-artifact side is one container whatever the mask does, and the sweep runs slightly *faster* as the
-mask narrows. What is universal is that the shipped path never gets cheaper **in proportion to what
-a viewer may see**. The routes here do — 22× at a full mask, 93× at 3.1% — because a narrower
-principal leaves fewer artifacts alive after the per-token pass.
-
-**The remaining worst case is a broad principal at whole-map zoom**, the one request where neither
-the viewport nor the mask removes anything: **131 ms at 10⁷ artifacts**.
-
-**And it is flat in the corpus size.** Ten times the points at a fixed artifact count moves nothing:
-
-| viewport | 10⁶ artifacts / 10⁸ points | / **10⁹ points** | shipped at 10⁹ |
-|---|---:|---:|---:|
-| whole map | 12.9 ms | **13.5 ms** | 727 ms |
-| 6.25% | 1.92 ms | **2.05 ms** | 148 ms |
-| 0.39% | 0.45 ms | **0.42 ms** | 101 ms |
-| 0.024% | 0.24 ms | **0.18 ms** | 94.8 ms |
-
-That is the property the whole construction is for: cost is a function of the artifacts and the
-viewport, not of the corpus beneath them. The shipped path is not flat in it — at 10⁹ points a
-principal seeing 9.4% of the corpus costs it **1 635 ms** at whole-map zoom against 727 ms for one
-seeing everything, and this design 0.49 ms against 13.5 ms.
-
-**One correction the 10⁹ tier forced, recorded because it was invisible below it.** The first walk
-built a `Bitmap` per node just to ask whether the viewport met it — a `malloc` on every node of
-every descent. At 10⁸ rows that cost nothing measurable; at 10⁹, where the hierarchy is two levels
-deeper and a narrow viewport descends all of it, it was **5×** (1.46 ms against 0.29 ms at a 0.024%
-viewport). `range_cardinality` answers both the disjoint and the covered question from one call and
-allocates nothing.
+every one of the four passes walks it. What is universal is that the shipped path never gets cheaper
+**in proportion to what a viewer may see**, and these routes do: 22× at a full mask, 93× at 3.1%,
+because a narrower principal leaves fewer artifacts alive after the term partition.
 
 ## What the four passes are
 
@@ -122,30 +96,49 @@ than no index — because at that zoom the viewport is made of tiles *smaller* t
 block is ever fully covered and nothing is ever settled. The tile-to-block relationship moves with
 the corpus, so a fixed block is right at one scale and wrong at every other.
 
-### The servable-label set — the mask half
+### The mask half — and why it is **not** a per-token cache
 
-`architecture.md` §8.5 already specifies it: *"the servable-label set (containment decisions), keyed
-by (auth-data hash, auth-plugin version, overlay version), invalidated by overlay change"*, and
-*"because containment binds to `M_auth` rather than `M_sel`, the servable-label set is computed once
-per token and reused across every keystroke."* **It is specified and unbuilt.** This probe measures
-what building it is worth.
+`architecture.md` §8.5 specifies a **servable-label set**: containment decisions held per token, keyed
+by *(auth-data hash, auth-plugin version, overlay version)*, *"computed once per token and reused
+across every keystroke."* This probe first measured what building it is worth, and then measured that
+it should not be built.
 
-Two quantities, neither with a viewport in it: the containment verdict `|G ∩ M| == |G|`, and the
-masked count `|membership ∩ M|`. Computing both once when the mask is composed turns passes 2 and 3
-from per-request into per-token, and the key is content-addressed on the *auth data* — so viewers
-holding the same grants share one copy rather than each building their own.
+**There are a great many tokens** (owner, 2026-08-21), so anything materialised per token over the
+artifact population is the wrong cadence however cheap one copy is. Containment does not need it, and
+`annotations.md` §4 says why:
+
+> what decides is **which** terms, never *how many* items — which is why terms are what make the test
+> tractable (**I5**)
+
+`G ⊆ M_auth` holds exactly when every member's visibility expression holds for the principal's terms,
+so it is `(⋀ vis(e))(T)` — a boolean expression with **nothing about the mask in it**. Composed once
+at build and interned, artifacts sharing an expression share an answer for every principal that will
+ever exist, and §7.8's per-term generating set keeps the number of distinct expressions the
+vocabulary's rather than the layer's.
+
+Measured at 10⁷ artifacts against the per-token route, full mask: **140.0 ms against 141.9** at
+whole-map zoom and 0.87 against 0.85 at a 0.39% viewport — parity, with 151 ms of per-session setup
+deleted. At a narrower principal it wins outright, **4.09 ms against 13.1**, because the groups a
+principal fails are never touched where the per-token pass had to evaluate every artifact once to
+discover that. 40 MB of build-time state that names no principal.
 
 **Filters compose with it for free**, and that is a property of the invariant rather than luck:
 `MaskedSet` is deliberately blind to any attribute filter (**I12** — a filter may move the frontier
 up, never down), so a viewer typing in a search box does not invalidate any of it.
 
-## The fixture, and three corrections it needed
+**What does not dissolve is the masked count.** Where a layer declares no existence criterion it is
+only the number *beside* a served artifact, so it is `O(budget)` — 22–205 µs against 596 ms. Where it
+declares one, or where the served artifacts are the coarse nodes of a hierarchy, it is the campaign's
+remaining cost; see the hierarchy section below.
+
+## The fixture, and the six corrections it needed
 
 Every number here comes from the structures the engine ships — a real `RowSpace`, records through
 `ArtifactRows::build`, `ArtifactRows::intersects`/`masked_count`/`satisfied_rank`, the same
 three-set composed-mask arithmetic `EffectiveMask` does, and viewports from the shipped
-`tiles_for_bbox`. Three earlier revisions measured a system nobody has, and each correction moved
-the headline by more than any option did:
+`tiles_for_bbox`. **Every one of these corrections moved a headline further than any option in this
+file did**, which is the note to take from the section: at this scale the fixture is the experiment,
+and a plausible one measures a system nobody has.
 
 - **Membership generated in entity space and permuted into row space.** Backwards. Entity ids are
   allocated in signature-then-Morton order and rows are Morton rank, so a spatially coherent cluster
@@ -163,6 +156,22 @@ the headline by more than any option did:
   a sample spanning 32 groups is served only to a principal holding all 32 — every arm below a full
   mask measured a layer that served nothing to anybody. §7.8's per-term generating set is what the
   design says to build, and with one the pass rate tracks the mask.
+- **Generating sets that could come out empty.** An empty set is *corpus-independent* and therefore
+  **vacuously contained**, so containment passed universally and every non-full mask was measuring a
+  property nobody had planted. It never touched the full-mask figures, where everything passes
+  either way, and it made the narrow-mask arms pessimistic rather than optimistic.
+- **A tree unrelated to the geometry.** The treed arms take `parent = (o − 1) / 3` while each
+  artifact's membership sits near its own ordinal, so the tree's shape is the ordinal space's. **No
+  hierarchy can be like that** — a parent contains its children, so a parent is in view whenever any
+  child is and the root is in view always. On that fixture a three-quarter viewport drops the whole
+  top of the tree and every lineage below becomes its own fallback; the cut then measures 176 ms
+  where a real hierarchy measures 0.3–11.4. The `nested` arm below is the correction, and it moved
+  the campaign's conclusion about **what bounds the system**, not merely a constant.
+
+**And one that is not the fixture's**: sampling four viewports and three principal coverages stepped
+over a ridge at three-quarter zoom and understated the worst request by **2.1×** (owner,
+2026-08-21). Both axes are swept through their middles now. A grid whose extremes are cheap is not
+evidence that its interior is.
 
 ## The shapes that have no locality, and where they wall
 
