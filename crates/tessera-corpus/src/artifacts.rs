@@ -42,7 +42,7 @@
 //! - **generating sets are subsets of membership**, about a hundred members each, because a
 //!   generating set naming a non-member is a different (and refused) thing.
 
-use crate::{keyed, mix64, salt, Corpus};
+use crate::{keyed, mix64, salt, Corpus, Grant};
 
 const SALT_A_INTERVAL: u64 = salt(b"art-ivl ");
 const SALT_A_LENGTH: u64 = salt(b"art-len ");
@@ -164,7 +164,11 @@ impl Corpus {
         let want = GENERATING_SET_TARGET.min(members.len() as u64) as usize;
         let mut set: Vec<u64> = (0..want as u64)
             .map(|j| {
-                let pick = keyed(self.seed(), SALT_A_GEN ^ layer_salt(layer, level), a ^ (j << 32));
+                let pick = keyed(
+                    self.seed(),
+                    SALT_A_GEN ^ layer_salt(layer, level),
+                    a ^ (j << 32),
+                );
                 members[(pick % members.len() as u64) as usize]
             })
             .collect();
@@ -180,10 +184,23 @@ impl Corpus {
         ArtifactShape {
             own_term: (cycle & 1 == 1).then(|| {
                 (keyed(self.seed(), SALT_A_GEN ^ layer_salt(layer, level), a)
-                    % u64::from(crate::TERM_SPACE)) as u32
+                    % u64::from(self.term_space())) as u32
             }),
             min_visible: (cycle & 2 == 2).then_some(4),
         }
+    }
+
+    /// The artifact census over this layer and level (`lib.rs`'s `bucket_census`): one O(*n*) pass
+    /// answering, per artifact, how many of its members `grant` sees. An artifact this grant sees
+    /// nothing of is absent, never a zero.
+    ///
+    /// This is what makes the flat arm checkable at 10⁹: `artifact_members` walked per artifact
+    /// would cost the same total work but scattered across `artifacts_in` calls instead of one
+    /// pass, and — the point that matters for the oracle — it would be a restatement of the
+    /// *forward* direction rather than an independent check of the *reverse* one. Both directions
+    /// must agree with what this emits, which is the whole of "nothing is missing or extra".
+    pub fn flat_artifact_census(&self, layer: u64, level: u32, grant: &Grant) -> Vec<(u64, u64)> {
+        self.bucket_census(grant, |e| self.artifacts_holding(layer, level, e))
     }
 
     /// The stride the intervals are anchored on.
@@ -213,7 +230,8 @@ impl Corpus {
         }
         // A keyed length between one and `MAX_SPILL + 1` strides: the spill is the overlap, and it
         // is bounded so the reverse direction stays a short walk.
-        let spill = keyed(self.seed(), SALT_A_LENGTH ^ layer_salt(layer, level), a) % (MAX_SPILL + 1);
+        let spill =
+            keyed(self.seed(), SALT_A_LENGTH ^ layer_salt(layer, level), a) % (MAX_SPILL + 1);
         let len = stride.saturating_mul(spill + 1);
         (lo, (lo + len).min(self.n()))
     }
@@ -258,7 +276,12 @@ impl Corpus {
 }
 
 /// One layer-and-level's key material, so two levels of one layer are as unrelated as two layers.
-fn layer_salt(layer: u64, level: u32) -> u64 {
+///
+/// `pub(crate)` because [`crate::partition`] and [`crate::boundary`] key their own artifact arms
+/// by the same `(layer, level)` pair and must be as unrelated from this one and each other as two
+/// layers are — a shared salt would let a partition artifact and a flat artifact land on the same
+/// key material by construction rather than by coincidence.
+pub(crate) fn layer_salt(layer: u64, level: u32) -> u64 {
     mix64(layer.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ u64::from(level))
 }
 
@@ -436,5 +459,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The census oracle agrees with the materialised relation, by brute force: for every
+    /// artifact, `flat_artifact_census`'s count is exactly the visible members `artifact_members`
+    /// names, and an artifact this grant sees nothing of is simply absent from the census.
+    #[test]
+    fn the_census_agrees_with_artifact_members_by_brute_force() {
+        let c = corpus(10_000);
+        let grant = crate::Grant::parse("0,1,2,3").unwrap();
+        let count = c.artifacts_in(6, 0);
+        let mut expected = std::collections::BTreeMap::new();
+        for a in 0..count {
+            let visible = c
+                .artifact_members(6, 0, a)
+                .into_iter()
+                .filter(|e| c.visible(*e, &grant))
+                .count() as u64;
+            if visible > 0 {
+                expected.insert(a, visible);
+            }
+        }
+        let census = c.flat_artifact_census(6, 0, &grant);
+        let got: std::collections::BTreeMap<u64, u64> = census.into_iter().collect();
+        assert_eq!(
+            got, expected,
+            "the census and the brute-force count disagree"
+        );
     }
 }

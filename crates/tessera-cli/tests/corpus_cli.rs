@@ -97,7 +97,11 @@ fn census_matches_the_library_census() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let mut got = Vec::new();
     for batch in decode_stream(&out.stdout) {
@@ -183,7 +187,9 @@ fn the_corpus_schema_parses_under_the_builds_parser() {
     // The declaration also has to *acquire*: the suite builds with `--view s0`, so the generator's
     // view name, its geometry source and its label relation must be the ones the build asks for.
     // Checked here rather than left to the suite, which cannot run without a corpus on disk.
-    let acquired = config.acquire("s0").expect("the corpus config acquires its own inputs");
+    let acquired = config
+        .acquire("s0")
+        .expect("the corpus config acquires its own inputs");
     assert_eq!(acquired.points, dir.path().join("points.parquet"));
     assert!(
         matches!(
@@ -193,14 +199,29 @@ fn the_corpus_schema_parses_under_the_builds_parser() {
         "{:?}",
         acquired.access
     );
-    assert_eq!(acquired.attribute_sources.len(), 1, "one file carries every declared column");
+    assert_eq!(
+        acquired.attribute_sources.len(),
+        1,
+        "one file carries every declared column"
+    );
     assert_eq!(
         acquired.attribute_sources[0].path,
         dir.path().join("points.parquet")
     );
     let schema = config.schema;
     let names: Vec<&str> = schema.attributes.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, ["fx_key", "weight", "seen_at", "bay", "tag", "blurb"]);
+    assert_eq!(
+        names,
+        [
+            "fx_key",
+            "weight",
+            "seen_at",
+            "bay",
+            "tag",
+            "blurb",
+            "partition"
+        ]
+    );
     let fx = &schema.attributes[0];
     assert!(fx.render, "the planted join column must be served");
 }

@@ -279,6 +279,77 @@ enum CorpusCommand {
         #[arg(long, value_parser = parse_extent, default_value = GRID_EXTENT)]
         extent: Bounds,
     },
+    /// Write a `tessera build`-able fixture to disk: `points.parquet`, `pairs.parquet`, the
+    /// `[[layer]]`-bearing declaration (`corpus-config.toml`), and the artifact scale campaign's
+    /// four fixture files — a flat (interval-plus-scatter) layer's roster and membership, the
+    /// partition arm's roster and its enumerated twin's membership, and the boundary arm's roster
+    /// (`artifact-delivery.md` §5.1, §5.4). `out` is created if it does not exist.
+    ///
+    /// Every file lands beside the declaration, because a `source` is a path relative to the
+    /// document that names it (`configuration.md` §3) — there is nothing to move independently.
+    Materialise {
+        /// The run's seed.
+        #[arg(long)]
+        seed: u64,
+        /// The corpus size — every file below is this scale's own (§5.4: a scale is a prefix
+        /// filter on entity id, so membership and generating sets are declared fresh at each size
+        /// rather than filtered from a larger run).
+        #[arg(long)]
+        n: u64,
+        /// Where to write the fixture.
+        #[arg(long)]
+        out: PathBuf,
+        /// Slots per term level, widening the term space from the default 1024
+        /// (`16 * terms_per_level`) — must be a nonzero power of two. `65536` reaches the
+        /// campaign's ~10⁶-term target.
+        #[arg(long)]
+        terms_per_level: Option<u32>,
+        /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
+        #[arg(long, value_parser = parse_extent, default_value = GRID_EXTENT)]
+        extent: Bounds,
+    },
+    /// The artifact census: expected masked count per artifact of one closed-form layer, for one
+    /// principal — an Arrow IPC stream on stdout, `(artifact, count)` ascending, non-empty
+    /// artifacts only (the campaign's oracle; `artifact-delivery.md` §5.1).
+    ///
+    /// One O(*n*) pass per call, on [`tessera_corpus::Corpus::bucket_census`]'s shared driver — the
+    /// same rule [`CorpusCommand::Census`] follows for tiles, extended to artifacts: an artifact
+    /// this grant sees nothing of is absent, never a zero-count row.
+    ArtifactCensus {
+        /// The run's seed.
+        #[arg(long)]
+        seed: u64,
+        /// The corpus size.
+        #[arg(long)]
+        n: u64,
+        /// Which closed-form layer to census: `flat` (the interval-plus-scatter arm),
+        /// `partition` (single-valued, whichever of its two `[[layer]]` forms — enumerated or
+        /// attribute-predicate — since both name one relation), `boundary` (the spatial arm's
+        /// authored tiles), or `treed` (the lineage arm — a node's count includes every
+        /// descendant's, root first).
+        #[arg(long)]
+        layer: ArtifactCensusLayer,
+        /// The principal's grant, in the mask catalogue's term-set encoding.
+        #[arg(long)]
+        grant: String,
+        /// Slots per term level, matching whatever `materialise --terms-per-level` this corpus
+        /// was written with — the grant is checked against the same term space.
+        #[arg(long)]
+        terms_per_level: Option<u32>,
+        /// Quantisation extent as `x_min,x_max,y_min,y_max` (contracts §2.5).
+        #[arg(long, value_parser = parse_extent, default_value = GRID_EXTENT)]
+        extent: Bounds,
+    },
+}
+
+/// [`CorpusCommand::ArtifactCensus`]'s `--layer` values — the four closed-form arms
+/// `tessera-corpus` states a census over.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ArtifactCensusLayer {
+    Flat,
+    Partition,
+    Boundary,
+    Treed,
 }
 
 fn parse_extent(raw: &str) -> Result<Bounds, String> {
@@ -730,7 +801,8 @@ fn load_deployment(
 ) -> Result<(PathBuf, tessera_server::config::Config), String> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let path = tessera_server::config::discover(explicit, &cwd).map_err(|e| e.to_string())?;
-    let config = tessera_server::config::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let config =
+        tessera_server::config::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok((path, config))
 }
 
@@ -757,8 +829,8 @@ fn resolve_declaration(
     let (deployment_path, deployment) = load_deployment(deployment)?;
     let schema_path = config.unwrap_or_else(|| deployment.schema_path.clone());
     let bindings = collect_bindings(file)?;
-    let config = tessera_build::config::Config::parse(&schema_path, &bindings)
-        .map_err(|e| e.to_string())?;
+    let config =
+        tessera_build::config::Config::parse(&schema_path, &bindings).map_err(|e| e.to_string())?;
     Ok(Declaration {
         deployment_path,
         deployment,
@@ -913,8 +985,10 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
                 "      gate '{}' | artifacts {} | members {}",
                 layer.visibility,
                 match &layer.artifact_visibility.field {
-                    Some(field) =>
-                        format!("carry their own in '{field}', else '{}'", layer.artifact_visibility.default),
+                    Some(field) => format!(
+                        "carry their own in '{field}', else '{}'",
+                        layer.artifact_visibility.default
+                    ),
                     None => format!("'{}'", layer.artifact_visibility.default),
                 },
                 match layer.require_member_visibility.as_str() {
@@ -1098,6 +1172,143 @@ fn corpus_census(seed: u64, n: u64, zoom: u8, grant: &str, extent: Bounds) -> Ex
     write_arrow_stdout(&schema, &batches, "corpus census")
 }
 
+/// A corpus at the default term space unless `terms_per_level` overrides it — the constructor
+/// [`CorpusCommand::Materialise`] and [`CorpusCommand::ArtifactCensus`] share.
+fn corpus_with_terms_per_level(
+    seed: u64,
+    n: u64,
+    extent: Bounds,
+    terms_per_level: Option<u32>,
+) -> Result<tessera_corpus::Corpus, String> {
+    match terms_per_level {
+        Some(width) => tessera_corpus::Corpus::with_terms_per_level(seed, n, extent, width),
+        None => tessera_corpus::Corpus::new(seed, n, extent),
+    }
+}
+
+/// `tessera corpus materialise` (`artifact-delivery.md` §5.1, §5.4): the generator's build inputs
+/// plus the artifact scale campaign's fixture, written to `out`.
+fn corpus_materialise(
+    seed: u64,
+    n: u64,
+    out: &Path,
+    terms_per_level: Option<u32>,
+    extent: Bounds,
+) -> ExitCode {
+    let corpus = match corpus_with_terms_per_level(seed, n, extent, terms_per_level) {
+        Ok(corpus) => corpus,
+        Err(e) => {
+            eprintln!("corpus materialise: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    if let Err(e) = std::fs::create_dir_all(out) {
+        eprintln!("corpus materialise: creating {}: {e}", out.display());
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = corpus.write_points_parquet(&out.join("points.parquet")) {
+        eprintln!("corpus materialise: writing points.parquet: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = corpus.write_pairs_parquet(&out.join("pairs.parquet")) {
+        eprintln!("corpus materialise: writing pairs.parquet: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = std::fs::write(out.join("corpus-config.toml"), corpus.config_toml()) {
+        eprintln!("corpus materialise: writing corpus-config.toml: {e}");
+        return ExitCode::FAILURE;
+    }
+    let counts = match corpus.write_artifact_fixtures(out) {
+        Ok(counts) => counts,
+        Err(e) => {
+            eprintln!("corpus materialise: writing the artifact fixture: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    println!(
+        "materialised {} (seed {seed}, n {n}, term space {}): {} flat artifacts / {} member \
+         rows, {} partition artifacts / {} member rows, {} boundary artifacts, {} treed \
+         artifacts / {} member rows",
+        out.display(),
+        corpus.term_space(),
+        counts.flat_artifacts,
+        counts.flat_member_rows,
+        counts.partition_artifacts,
+        counts.partition_member_rows,
+        counts.boundary_artifacts,
+        counts.treed_artifacts,
+        counts.treed_member_rows,
+    );
+    ExitCode::SUCCESS
+}
+
+/// `tessera corpus artifact-census` (`artifact-delivery.md` §5.1): the expected masked count per
+/// artifact of one closed-form layer, for one principal.
+fn corpus_artifact_census(
+    seed: u64,
+    n: u64,
+    layer: ArtifactCensusLayer,
+    grant: &str,
+    terms_per_level: Option<u32>,
+    extent: Bounds,
+) -> ExitCode {
+    use arrow::array::{ArrayRef, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
+
+    let corpus = match corpus_with_terms_per_level(seed, n, extent, terms_per_level) {
+        Ok(corpus) => corpus,
+        Err(e) => {
+            eprintln!("corpus artifact-census: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let grant = match tessera_corpus::Grant::parse_bounded(grant, corpus.term_space()) {
+        Ok(grant) => grant,
+        Err(e) => {
+            eprintln!("corpus artifact-census: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let counts = match layer {
+        ArtifactCensusLayer::Flat => corpus.flat_artifact_census(
+            tessera_corpus::materialise::FLAT_LAYER,
+            tessera_corpus::materialise::FIXTURE_LEVEL,
+            &grant,
+        ),
+        ArtifactCensusLayer::Partition => {
+            corpus.partition_artifact_census(tessera_corpus::materialise::PARTITION_LAYER, &grant)
+        }
+        ArtifactCensusLayer::Boundary => corpus.boundary_artifact_census(
+            tessera_corpus::materialise::BOUNDARY_LAYER,
+            tessera_corpus::materialise::FIXTURE_LEVEL,
+            &grant,
+        ),
+        ArtifactCensusLayer::Treed => {
+            corpus.treed_artifact_census(tessera_corpus::materialise::TREED_LAYER, &grant)
+        }
+    };
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("artifact", DataType::UInt64, false),
+        Field::new("count", DataType::UInt64, false),
+    ]));
+    let batches: Vec<RecordBatch> = counts
+        .chunks(1 << 16)
+        .map(|chunk| {
+            let artifacts = UInt64Array::from_iter_values(chunk.iter().map(|(a, _)| *a));
+            let totals = UInt64Array::from_iter_values(chunk.iter().map(|(_, count)| *count));
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(artifacts) as ArrayRef, Arc::new(totals)],
+            )
+            .expect("two columns of one chunk's length")
+        })
+        .collect();
+    write_arrow_stdout(&schema, &batches, "corpus artifact-census")
+}
+
 /// One Arrow IPC stream on stdout. An empty batch list still writes a valid stream carrying only
 /// the schema — "no tiles" must be distinguishable from "no output".
 fn write_arrow_stdout(
@@ -1196,9 +1407,10 @@ fn main() -> ExitCode {
             // **A build materialises one view.** With one declared, naming it is noise; with
             // several, choosing for the operator would publish a coordinate system nobody asked
             // for, so `sole_view` refuses and lists them.
-            let view_id = match view_id.map(Ok).unwrap_or_else(|| {
-                config.sole_view().map(str::to_string)
-            }) {
+            let view_id = match view_id
+                .map(Ok)
+                .unwrap_or_else(|| config.sole_view().map(str::to_string))
+            {
                 Ok(view_id) => view_id,
                 Err(e) => {
                     eprintln!("build refused: {e}");
@@ -1339,13 +1551,16 @@ fn main() -> ExitCode {
                         return ExitCode::FAILURE;
                     }
                     println!(
-                        "built {} ({}): {} items, {} terms, {} pairs, {} bytes on disk",
+                        "built {} ({}): {} items, {} terms, {} pairs, {} bytes on disk, {} \
+                         artifact(s) minted, {} unclustered member row(s)",
                         out.display(),
                         report.prefix,
                         report.items,
                         report.terms,
                         report.pairs,
-                        report.bundle_bytes
+                        report.bundle_bytes,
+                        report.minted_artifacts,
+                        report.unclustered_member_rows,
                     );
                     ExitCode::SUCCESS
                 }
@@ -1444,6 +1659,21 @@ fn main() -> ExitCode {
                 grant,
                 extent,
             } => corpus_census(seed, n, zoom, &grant, extent),
+            CorpusCommand::Materialise {
+                seed,
+                n,
+                out,
+                terms_per_level,
+                extent,
+            } => corpus_materialise(seed, n, &out, terms_per_level, extent),
+            CorpusCommand::ArtifactCensus {
+                seed,
+                n,
+                layer,
+                grant,
+                terms_per_level,
+                extent,
+            } => corpus_artifact_census(seed, n, layer, &grant, terms_per_level, extent),
         },
         Command::Check {
             deployment,
