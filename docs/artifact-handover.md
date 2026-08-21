@@ -25,11 +25,12 @@ The four things a reader needs before opening it:
   memory at all (4 GB against 78.5 GB).
 - **The request path is `O(artifacts)` four times and only one of the four has the request in it.**
   That is the whole finding; everything else follows from moving the other three off it.
-- **The verdict is no longer the largest term for one principal.** A viewer who can see the whole
-  corpus passes every artifact, so the cut is handed all 10⁷ and costs **~1 010 ms** on a treed
-  layer — seven times the pass the memo fixes. Measured 2026-08-21 by running `artifact_cut_cost` at
-  10⁷ for the first time. Every narrower principal stays cheap, and a flat layer is fine at any
-  width; the candidate fix is the same per-token treatment containment gets, and it is unmeasured.
+- **The cut was the largest term for one principal, and has been rewritten.** A viewer who can see
+  the whole corpus passes every artifact, so the cut is handed all 10⁷ — **1 008 ms** on a treed
+  layer, found by running `artifact_cut_cost` at 10⁷ for the first time, and now **188 ms** with
+  peak RSS down from 1 078 MB to 470 MB. It serves exactly what it served before, checked against
+  the reference implementation over random trees. This is the one part of the work that is built
+  rather than proposed: it was a data-structure choice, not a design one.
 - **Two live defects turned up, neither about scale.** Any artifact write invalidates every cached
   row form in every view (153 s to rebuild at 10⁷), and `Lineage::new` walks the whole store on
   every request. Both are ordinary work and neither touches an invariant.

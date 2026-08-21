@@ -36,10 +36,10 @@ the per-token pass has already removed most of the population:
 So the answer is **yes for artifacts that are somewhere, and conditionally for artifacts that are
 everywhere** — which is §4, and is the part that needs a ruling rather than an implementation.
 
-**These are verdict costs, not response costs, and for one principal the difference matters.** A
-viewer who can see the whole corpus passes every artifact, so the *cut* is then handed all 10⁷ and
-costs **~1 010 ms** on a treed layer — seven times the pass above it. §5.4 has the measurement and
-the candidate fix. Nothing else in this memo is the largest term in that request.
+**A viewer who can see the whole corpus passes every artifact**, so the *cut* is handed all 10⁷ —
+and that was **~1 010 ms** on a treed layer, seven times the pass above it. §5.4 has the
+measurement; the cut has since been rewritten to **188 ms**, which puts the whole request at
+~325 ms once the lineage is held per generation.
 
 **And it is flat in the corpus size**, which the ten-fold step from 10⁸ to 10⁹ points confirms
 directly at a fixed artifact count — the design's cost is a function of how many artifacts there are
@@ -372,16 +372,35 @@ where it had never been run:
 | **10⁷** | flat | 5.0 ms | 32.6 ms | 36.0 ms |
 | **10⁷** | **treed** | **44.9 ms** | **1 063 ms** | **1 008 ms** |
 
+**That has been fixed rather than left as an option**, because it was a data-structure choice and
+not a design one — the cut serves exactly what it served before, asserted by the reference
+implementation it is already checked against over random trees:
+
+| level | arm | lineage | cut, no budget | cut, budgeted |
+|---:|---|---:|---:|---:|
+| **10⁷** | **treed** | **87.0 ms** | **213.7 ms** | **188.0 ms** |
+
+**1 008 ms to 188 ms, and peak RSS 1 078 MB to 470 MB.** The plan held a lineage per frontier node —
+67 million entries, half a gigabyte, to answer for a few thousand. Each node is in fact the pick over
+one contiguous range of depths and never again, so the union across the lineages sharing it is an
+interval: three arrays in place of the lineages, and the budget search becomes a difference-array
+lookup rather than a cut built per candidate depth. Depth moved to `Lineage`, which is why that
+column rose as the cut fell — the work did not grow, it moved to the object that should be held per
+generation.
+
 So the whole-map request that §1 puts at 131 ms is, end to end on a treed layer:
 
-| | |
-|---|---:|
-| the verdict pass (§3) | ~135 ms |
-| the lineage build (§5.2 — per generation, not per request) | 45 ms |
-| **the cut** | **~1 010 ms** |
-| materialising `passing` (§5.4 below) | ⊘ unmeasured, ~240 MB |
+| | before | now |
+|---|---:|---:|
+| the verdict pass (§3) | ~135 ms | ~135 ms |
+| the lineage build (§5.2 — belongs per generation) | 45 ms | 87 ms |
+| **the cut** | **~1 010 ms** | **188 ms** |
+| materialising `passing` (§5.5) | ⊘ unmeasured, ~240 MB | unchanged |
 
-**The cut is seven times the pass this memo is about.** It is not a new fault and it does not
+**~325 ms per request once the lineage is held per generation, against ~1 190 ms.** What remains in
+the cut is nine memory-bound passes over the level with no dominant term, so the next real reduction
+is structural rather than local: hold the lineage per generation (§5.2), and hand the cut the
+passing set as the bitmap the routes in §3 already produce instead of a materialised slice (§5.5). It is not a new fault and it does not
 contradict the cut probe's own rule — ~100 ns per *passing* artifact — it is that rule at a passing
 count nothing had measured, and the probe's note that 10⁶ "is not an operating point this system
 serves" turns out to be false for exactly one principal: **the one who can see everything passes
@@ -389,13 +408,11 @@ everything.** Every narrower principal stays cheap for the same reason the rest 
 at a mask admitting 9.4% of the corpus, ~94 000 artifacts pass and the cut is ~10 ms. A **flat**
 layer is fine at any width: 36 ms at 10⁷.
 
-**The candidate fix is the one this memo already uses twice, and it is unmeasured.** The cut's
-answer at whole-map zoom is a function of the layer's tree and the passing set, and at whole-map
-zoom the passing set *is* the token's — no viewport in it. So the plan belongs beside the
-servable-label set, built once per grant set rather than once per request, with only the budget's
-bisection left live. What is not known is how `cut`'s a second divides between building the plan and
-serving a depth from it; the probe times them together. That split is the measurement to take before
-anyone builds this, and it is cheap to take.
+**The per-token option is still open on top of this.** The cut's answer at whole-map zoom is a
+function of the layer's tree and the passing set, and there the passing set *is* the token's — no
+viewport in it — so the plan could be held beside the servable-label set with only the budget's
+bisection left live. At 188 ms that is a smaller prize than it was at a second, and it costs a
+residency line per grant set; it is worth pricing rather than assuming.
 
 **5.5 What the request allocates after the verdict.**## 6. Three things a reader will ask that the numbers already answer
 

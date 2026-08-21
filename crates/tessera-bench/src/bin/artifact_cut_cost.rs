@@ -57,6 +57,38 @@
 //! count nothing had measured. Every narrower principal stays cheap for the same reason: at a mask
 //! admitting 9.4% of the corpus, ~94 000 artifacts pass and the cut is ~10 ms.
 //!
+//! # And then the plan was rewritten again — 2026-08-21
+//!
+//! | level | arm | lineage | cut, no budget | cut, budgeted |
+//! |---:|---|---:|---:|---:|
+//! | 10⁶ | flat | 0.581 ms | 2.684 ms | 2.641 ms |
+//! | 10⁶ | treed | 8.117 ms | 17.03 ms | 12.01 ms |
+//! | **10⁷** | flat | 6.051 ms | 28.27 ms | 28.23 ms |
+//! | **10⁷** | **treed** | **87.0 ms** | **213.7 ms** | **188.0 ms** |
+//!
+//! **1 008 ms to 188 ms on the budgeted path, and peak RSS from 1 078 MB to 470 MB.** Four changes,
+//! and the first two are where almost all of it is:
+//!
+//! - **The plan holds one depth interval per servable node, not a lineage per frontier node.** Each
+//!   node is the pick over one contiguous range of depths and never again, so the union across the
+//!   lineages sharing it is an interval. That replaced 67 million `(depth, ordinal)` entries — half
+//!   a gigabyte, to answer for a few thousand — with three arrays, and it made the budget search
+//!   free: every depth's served count falls out of a difference array, so the bisection evaluates
+//!   counts rather than building a cut per candidate depth.
+//! - **Before that, flattening the per-frontier-node `Vec`s into one buffer** was worth 975 → 440 ms
+//!   on its own. Four and a half million separate allocations, each growing through several
+//!   reallocations to hold a dozen entries.
+//! - **`on_chain` is `climbed ∪ passing`**, so the second climb over the spine went away: every
+//!   passing node is an ancestor-or-self of a head, and every ancestor of a head is an ancestor of
+//!   a passing node.
+//! - **The passing set is borrowed where it already arrives ascending**, which the serving path
+//!   always produces, rather than copied and sorted.
+//!
+//! **Depth moved to `Lineage`**, where the remaining ~40 ms of the lineage column now sits: depth is
+//! a property of the tree and not of the viewer, so a request that recomputes it is redoing
+//! generation work. That is why the lineage column rose as the cut column fell — the work did not
+//! grow, it moved to the object that should be held per generation rather than rebuilt per request.
+//!
 //! **The lineage build is 0.3–5.6 ns per artifact of the level** — memory-bandwidth work against a
 //! per-artifact candidacy test that does Roaring arithmetic, so the derivation is comfortably a
 //! fraction of the loop it rides on and the cache it replaces would not have paid for itself.
