@@ -132,6 +132,19 @@ fn main() {
         treed_arm(n);
     }
 
+    // **What a request actually hands the cut.** The arms above pass two thirds of the level, which
+    // is the whole-corpus principal at whole-map zoom — the worst case and not the common one. A
+    // viewport narrows the passing set long before the cut sees it, so the question this table
+    // answers is whether the cut's cost follows the *passing* count or the level's.
+    println!("\n# a 10^7 level, by how much of it passes\n");
+    println!(
+        "{:>12}  {:>10}  {:>12}  {:>12}",
+        "passing", "lineage", "cut(none)", "cut(budget)"
+    );
+    for &passing in &[2_837u32, 44_166, 705_662, 6_666_666] {
+        passing_arm(10_000_000, passing);
+    }
+
     println!(
         "\nlineage = building the level's parent map; cut = resolving the frontier and, where a \n\
          budget is given, bisecting over depths. ns/artifact is the lineage build over the level \n\
@@ -200,6 +213,37 @@ fn treed_arm(n: u32) {
     );
 
     report(n, "treed", build, unbudgeted, budgeted);
+}
+
+/// One `(level, passing)` point: the same balanced tree, with only the passing share moved.
+fn passing_arm(n: u32, want: u32) {
+    let pairs: Vec<(u32, Option<u32>)> = (0..n)
+        .map(|ordinal| (ordinal, (ordinal > 0).then(|| (ordinal - 1) / BRANCH)))
+        .collect();
+    // Spread over the level rather than taken from its head, so the passing set is not one subtree.
+    let step = (n / want.max(1)).max(1);
+    let passing: Vec<u32> = (0..n).step_by(step as usize).collect();
+
+    let start = Instant::now();
+    let lineage = Lineage::new(pairs.iter().copied());
+    let build = start.elapsed();
+
+    let start = Instant::now();
+    let full = cut(&lineage, &passing, None, PRUNE);
+    let unbudgeted = start.elapsed();
+
+    let start = Instant::now();
+    let narrow = cut(&lineage, &passing, Some(1_000), PRUNE);
+    let budgeted = start.elapsed();
+    assert!(narrow.len() <= full.len());
+
+    println!(
+        "{:>12}  {:>8.3}ms  {:>10.3}ms  {:>10.3}ms",
+        passing.len(),
+        build.as_secs_f64() * 1e3,
+        unbudgeted.as_secs_f64() * 1e3,
+        budgeted.as_secs_f64() * 1e3
+    );
 }
 
 fn report(

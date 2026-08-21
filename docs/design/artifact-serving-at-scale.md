@@ -325,6 +325,43 @@ ten times the points:
 design is flat in corpus size (10⁶ artifacts, 10⁸ → 10⁹ points, no movement) and linear in artifact
 count (13.5 ms at 10⁶ over 10⁹).
 
+### 7.1 What a request pays, stage by stage
+
+10⁷ artifacts, treed layer, full mask, single-threaded, no per-token state:
+
+| stage | whole map | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|
+| verdict — index walk, containment, viewport edge | 140 ms | 9.9 ms | 0.83 ms | 0.18 ms |
+| masked count, no criterion — `O(budget)` | 0.06 ms | 0.04 ms | 0.04 ms | 0.04 ms |
+| **lineage** | **~85 ms** | **~85 ms** | **~85 ms** | **~85 ms** |
+| **cut** | **254 ms** | **70 ms** | **35 ms** | **20 ms** |
+| total | **~480 ms** | **~165 ms** | **~121 ms** | **~105 ms** |
+
+**The verdict pass this memo is mostly about is now 0.2% of a narrow request.** Everything else is
+the lineage and the cut, and both are `O(level)` rather than `O(passing)` — measured by holding the
+level at 10⁷ and moving only the passing share:
+
+| passing | lineage | cut, budgeted |
+|---:|---:|---:|
+| 2 838 | 85 ms | **19.9 ms** |
+| 44 248 | 66 ms | 34.9 ms |
+| 714 286 | 91 ms | 70.5 ms |
+| 10 000 000 | 88 ms | 253.8 ms |
+
+So the cut has a **~20 ms floor at a level of ten million however few artifacts pass**, and the
+lineage is flat at ~85 ms. Two things follow, and they are the next work rather than open questions:
+
+- **The lineage is per-generation work done per request** (§8.2). Removing it takes the narrow
+  request from ~105 ms to ~20 ms and the wide one from ~480 to ~395 ms. It depends on neither the
+  mask nor the viewport, so this is bookkeeping, not design.
+- **The cut's floor is two full scans of the ordinal space** — building the depth buckets and the
+  intervals — plus ~70 MB of zeroed side tables. Iterating the on-chain nodes as a list rather than
+  scanning the span would make it `O(passing)`, which is what the ~20 ms at 2 838 passing says it is
+  not yet. ⊘ Not attempted.
+
+⊘ **Not in this table**: materialising `passing` (§8.4), the gather, the record-blob reads for
+supplied content, and the wire encoding.
+
 ## 8. What this depends on, and is not yet true
 
 Two live defects. Neither is about scale, and the design is worth little without them.
