@@ -108,4 +108,5 @@ paths = [
   "crates/tessera-server/tests/*",
   "crates/tessera-build/src/*",
   "crates/tessera-build/tests/*",
+  "crates/tessera-store/tests/*",
 ]
