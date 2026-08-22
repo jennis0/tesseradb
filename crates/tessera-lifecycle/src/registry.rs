@@ -570,7 +570,10 @@ impl LayerRegistry {
                     if !layer.declaration.depends_on.is_empty() {
                         return Err(RegistryError::MissingAttachment {
                             layer: layer_name.to_string(),
-                            key: artifact.key.clone().unwrap_or_else(|| "<no key>".to_string()),
+                            key: artifact
+                                .key
+                                .clone()
+                                .unwrap_or_else(|| "<no key>".to_string()),
                         });
                     }
                     return Ok(None);
@@ -682,14 +685,14 @@ impl LayerRegistry {
                             generated_from: serialise_members(&v.generated_from),
                         })
                         .collect(),
-                    attached_to: attachments[i].as_ref().map(|a| {
-                        crate::wal::PublishedAttachment {
+                    attached_to: attachments[i]
+                        .as_ref()
+                        .map(|a| crate::wal::PublishedAttachment {
                             layer: a.layer.clone(),
                             level: a.level,
                             ordinal: a.ordinal,
                             entity: a.entity,
-                        }
-                    }),
+                        }),
                     parent: parents[i],
                 }
             })
@@ -1119,6 +1122,20 @@ impl LayerRegistry {
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
+                        // **The registration's own record of the serving layout**: the declared pin
+                        // where there is one, artifact-major where there is not. A level with no
+                        // artifacts has no shape to observe — blocks per artifact and the artifact
+                        // count are both properties of where the data landed — so the automatic
+                        // pick has nothing to read here and takes the conservative answer, which is
+                        // the form every derived structure already exists for (decision 0094).
+                        //
+                        // **A fold re-evaluates it and writes the result into the manifest.** A
+                        // replay that re-applies this record over a seeded registry therefore
+                        // returns the level to artifact-major, which costs the fold's column its
+                        // adoption and nothing else: the membership extents are what a row form is
+                        // built from, they are written whatever the layout, and the two routes
+                        // answer identically.
+                        layouts: RegisteredLayer::initial_layouts(declaration),
                         declaration: (**declaration).clone(),
                         entity: *layer_entity,
                         runs: runs.clone(),
@@ -1140,7 +1157,10 @@ impl LayerRegistry {
             // invalidate every open session's resolution on every batch, which at a clustering's
             // publication rate is a re-resolve per request.
             WalRecord::ArtifactPublish {
-                layer, level, extend_runs, ..
+                layer,
+                level,
+                extend_runs,
+                ..
             } => {
                 if extend_runs.is_empty() {
                     return;
@@ -1276,6 +1296,7 @@ mod tests {
             content: Default::default(),
             depends_on: Vec::new(),
             levels: Vec::new(),
+            layout: None,
         }
     }
 
@@ -1303,7 +1324,11 @@ mod tests {
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
 
         let layer = reg.get("clusters/a").unwrap();
-        assert_eq!(layer.runs.len(), 1, "a level-less layer still holds level 0");
+        assert_eq!(
+            layer.runs.len(),
+            1,
+            "a level-less layer still holds level 0"
+        );
         assert_eq!(
             layer.runs[0].capacity(),
             tessera_types::layer::RESERVED_BLOCK
@@ -1323,13 +1348,21 @@ mod tests {
         // oracle over which names exist.
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
-        register(&mut reg, &mut alloc, gated("clusters/secret", "clearance:ts")).unwrap();
+        register(
+            &mut reg,
+            &mut alloc,
+            gated("clusters/secret", "clearance:ts"),
+        )
+        .unwrap();
         register(&mut reg, &mut alloc, declaration("clusters/open")).unwrap();
 
-        let resolved = reg.resolve_for(|t| t == TermId::new(7), |label| match label {
-            "clearance:ts" => Some(TermId::new(99)),
-            _ => None,
-        });
+        let resolved = reg.resolve_for(
+            |t| t == TermId::new(7),
+            |label| match label {
+                "clearance:ts" => Some(TermId::new(99)),
+                _ => None,
+            },
+        );
 
         assert!(resolved.contains("clusters/open"));
         assert!(!resolved.contains("clusters/secret"));
@@ -1338,10 +1371,13 @@ mod tests {
         assert_eq!(resolved.names().collect::<Vec<_>>(), vec!["clusters/open"]);
 
         // And with the term: the same layer resolves.
-        let cleared = reg.resolve_for(|t| t == TermId::new(7) || t == TermId::new(99), |label| match label {
-            "clearance:ts" => Some(TermId::new(99)),
-            _ => None,
-        });
+        let cleared = reg.resolve_for(
+            |t| t == TermId::new(7) || t == TermId::new(99),
+            |label| match label {
+                "clearance:ts" => Some(TermId::new(99)),
+                _ => None,
+            },
+        );
         assert!(cleared.contains("clusters/secret"));
     }
 
@@ -1420,7 +1456,9 @@ mod tests {
         // bookmark and suppression naming them.
         let mut live = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
-        let create = live.prepare_create(declaration("clusters/a"), &mut alloc).unwrap();
+        let create = live
+            .prepare_create(declaration("clusters/a"), &mut alloc)
+            .unwrap();
         let drop_b = {
             let mut r = LayerRegistry::new();
             let mut a = Allocator::new(0);
@@ -1639,7 +1677,10 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for ordinal in 0..3u32 {
             let record = store.get("clusters/a", 0, ordinal).unwrap();
-            assert_eq!(layer.runs[0].entity_of(ordinal as u64), Some(record.entity.raw()));
+            assert_eq!(
+                layer.runs[0].entity_of(ordinal as u64),
+                Some(record.entity.raw())
+            );
             assert!(seen.insert(record.entity));
             assert_ne!(record.entity, layer.entity);
         }
@@ -1823,7 +1864,10 @@ mod tests {
             replayed_store.get("clusters/a", 0, 0).map(|r| &r.members),
             store.get("clusters/a", 0, 0).map(|r| &r.members)
         );
-        assert_eq!(replayed_store.ordinal_of_key("clusters/a", 0, "c1"), Some(1));
+        assert_eq!(
+            replayed_store.ordinal_of_key("clusters/a", 0, "c1"),
+            Some(1)
+        );
         // And the pin comes back with it — the log may not be reclaimed past the publication.
         assert_eq!(replayed_store.oldest_wal_pos(), Some(900));
     }
@@ -1869,7 +1913,10 @@ mod tests {
         register(&mut reg, &mut alloc, declaration("b")).unwrap();
 
         // The second layer's *level* run took a block; its entity came from the block already held.
-        assert_eq!(alloc.low_water(), after_first - tessera_types::layer::RESERVED_BLOCK);
+        assert_eq!(
+            alloc.low_water(),
+            after_first - tessera_types::layer::RESERVED_BLOCK
+        );
         let a = reg.get("a").unwrap().entity.raw();
         let b = reg.get("b").unwrap().entity.raw();
         assert_eq!(b, a + 1);

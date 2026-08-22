@@ -399,6 +399,7 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
             content: Default::default(),
             depends_on: Vec::new(),
             levels: Vec::new(),
+            layout: None,
         })
         .expect("a layer registers against a bundle that already carries some");
     let online = artifact_entity(&engine, id);

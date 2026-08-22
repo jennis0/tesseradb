@@ -72,6 +72,91 @@ pub enum MembershipSource {
     Attribute(String),
 }
 
+/// How a level's membership is **stored and scanned** at serving time
+/// ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+///
+/// **Not a contract, and nothing on the wire names one.** Both forms answer identically — the same
+/// served set, the same counts, the same ranks and parents — so no request field selects one, no
+/// response reports one, and a fold may change one freely. What it decides is what a request
+/// *costs*: an artifact-major level is walked through the tile index and probed per artifact; a
+/// row-major level is one scan of `viewport ∩ M_auth` over a column addressed by **row**.
+///
+/// **Recorded per `(layer, level)`** on [`RegisteredLayer::layouts`], because the levels differ: a
+/// treed layer's coarse level holds ten thousand nodes and its leaf level ten million, and one
+/// record for the layer would average two different problems. The **pin** on
+/// [`LayerDeclaration::layout`] is per *layer*, because that is where a declaration lives.
+///
+/// **The label/list split follows from the membership**, not from a preference: a level whose
+/// memberships are disjoint has exactly one label per row, and one whose memberships overlap does
+/// not. A level pinned [`RowMajorLabel`](ServingLayout::RowMajorLabel) whose memberships turn out to
+/// overlap is composed **artifact-major**, loudly — see `tessera_engine::layout`.
+///
+/// ⊘ **`SpatialRanges` is not here.** The scale design's fourth layout — a declared shape decomposed
+/// to Morton ranges — is specified and unbuilt, and a variant nothing can produce would be a shape
+/// the manifest carries for a state no writer reaches. Pre-release there is nothing to preserve by
+/// reserving a discriminant ([decision 0048](../../../docs/decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)),
+/// so it is added when it is built.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServingLayout {
+    /// One row-space bitmap per artifact — what the engine has always built. Candidacy is the tile
+    /// index's walk, then the extent test, then the composed probe at the viewport's edge; the
+    /// count is `|membership ∩ M_auth|` per served artifact.
+    ///
+    /// **The default, and deliberately so.** It is the form every derived structure already exists
+    /// for, and the automatic pick is conservative in its direction (`tessera_engine::layout`).
+    #[default]
+    ArtifactMajor,
+    /// One artifact label per **row**, for a level whose memberships partition the corpus.
+    /// Candidacy is one scan of `viewport ∩ M_auth` marking labels; the count comes from the
+    /// per-`(session, layer)` masked-count histogram
+    /// ([decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+    /// one named exception).
+    RowMajorLabel,
+    /// A **list** of labels per row, for a level whose memberships overlap. The same scan and the
+    /// same histogram at a larger constant.
+    RowMajorList,
+}
+
+impl ServingLayout {
+    /// Whether this layout is scanned by row rather than probed by artifact — the one question the
+    /// serving path asks of it.
+    pub fn is_row_major(self) -> bool {
+        matches!(
+            self,
+            ServingLayout::RowMajorLabel | ServingLayout::RowMajorList
+        )
+    }
+
+    /// The word a `[[layer]]` block spells this layout with (`configuration.md` §1).
+    ///
+    /// **Three words for three variants**, rather than the two-word `row-major` family the selection
+    /// memo proposed: an operator pinning a level has a reason, and `column` against `list` is the
+    /// difference between *I assert this partitions* and *I assert it does not*. The first is
+    /// checkable at the fold and falls back loudly when it is wrong, which is what makes stating it
+    /// worth more than having it inferred.
+    pub fn pin_word(self) -> &'static str {
+        match self {
+            ServingLayout::ArtifactMajor => "rows",
+            ServingLayout::RowMajorLabel => "column",
+            ServingLayout::RowMajorList => "list",
+        }
+    }
+
+    /// The layout a `layout = "…"` key names, or `None` for a word outside the vocabulary.
+    pub fn parse_pin(word: &str) -> Option<Self> {
+        match word {
+            "rows" => Some(ServingLayout::ArtifactMajor),
+            "column" => Some(ServingLayout::RowMajorLabel),
+            "list" => Some(ServingLayout::RowMajorList),
+            _ => None,
+        }
+    }
+
+    /// Every word a `layout` key may carry.
+    pub const PIN_VOCABULARY: [&'static str; 3] = ["rows", "column", "list"];
+}
+
 /// Whether a key nothing declares is refused, or creates the object it names
 /// (`artifacts-from-points.md` §3, `per-point-attributes.md` §3.4).
 ///
@@ -459,6 +544,21 @@ pub struct LayerDeclaration {
     /// Empty for a treed or flat layer.
     #[serde(default)]
     pub levels: Vec<LevelDeclaration>,
+    /// **The layout pin**: serve every level of this layer in the named form, at the build and at
+    /// every fold after it. `None` — the automatic pick, which is the normal state.
+    ///
+    /// **`#[serde(default)]`, and that is not the register's exception being taken lightly.** The
+    /// two fields with no default are disclosure controls whose absent value would be a grant (C27,
+    /// C28). A layout is neither: both forms compute the same quantities from inside `M_auth`, no
+    /// request field names one and no response reports one, so a declaration that omits this is a
+    /// declaration that has no opinion about storage — which is a complete statement rather than an
+    /// unfilled one.
+    ///
+    /// **An override a fold could overturn is not an override** (decision 0094). A pinned layer is
+    /// rebuilt in its declared form at every fold, and the observations the automatic pick *would*
+    /// have read are recorded beside it so an operator can see what they were.
+    #[serde(default)]
+    pub layout: Option<ServingLayout>,
 }
 
 /// The width a reserved run is aligned and sized to: one Roaring container.
@@ -573,8 +673,16 @@ impl ReservedRuns {
     /// property; this asserts it rather than enforcing it, because a misaligned run here means the
     /// allocator is wrong and a silent fixup would hide that.
     pub fn push(&mut self, run: EntityRun) {
-        debug_assert_eq!(run.start % RESERVED_BLOCK, 0, "reserved runs are block-aligned");
-        debug_assert_eq!(run.len() % RESERVED_BLOCK, 0, "reserved runs are whole blocks");
+        debug_assert_eq!(
+            run.start % RESERVED_BLOCK,
+            0,
+            "reserved runs are block-aligned"
+        );
+        debug_assert_eq!(
+            run.len() % RESERVED_BLOCK,
+            0,
+            "reserved runs are whole blocks"
+        );
         self.runs.push(run);
     }
 }
@@ -596,6 +704,41 @@ pub struct RegisteredLayer {
     /// Bumped by any edit that changes who may reach this layer, so a session's cached resolution
     /// is invalidated rather than outliving the gate it was computed from.
     pub version: u64,
+    /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`] — decision 0094's
+    /// record.
+    ///
+    /// Set at registration from the pin, or [`ServingLayout::ArtifactMajor`] where there is none: a
+    /// level with no artifacts has no shape to observe, and the conservative pick is the form every
+    /// derived structure already exists for. **Re-evaluated inside every fold's artifact pass**,
+    /// before the registry snapshot the manifest is written from, so the record and the files the
+    /// same fold wrote cannot disagree.
+    ///
+    /// **A flip does not bump [`RegisteredLayer::version`]** (selection memo §5). That version gates
+    /// reachability and is a fail-closed guard against a reader holding a stale idea of a layer;
+    /// a layout is not a client-visible fact, so bumping it would make every session re-resolve a
+    /// layer for a change none of them can observe.
+    ///
+    /// Shorter than `runs` is read as [`ServingLayout::ArtifactMajor`] for the levels past its end
+    /// — see [`RegisteredLayer::layout_of`] — which is the fail-safe direction: the worst outcome
+    /// is a row-major column nothing adopts, and the level is served the way it always was.
+    pub layouts: Vec<ServingLayout>,
+}
+
+impl RegisteredLayer {
+    /// The layout recorded for one level. Absent is [`ServingLayout::ArtifactMajor`] — see
+    /// [`RegisteredLayer::layouts`].
+    pub fn layout_of(&self, level: u32) -> ServingLayout {
+        self.layouts
+            .get(level as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The record every level of a freshly registered layer starts at: the pin where there is one,
+    /// and artifact-major where there is not.
+    pub fn initial_layouts(declaration: &LayerDeclaration) -> Vec<ServingLayout> {
+        vec![declaration.layout.unwrap_or_default(); declaration.run_count()]
+    }
 }
 
 /// Why a declaration was refused. Every one of these is a fail-closed refusal at registration: the
@@ -629,6 +772,11 @@ pub enum DeclarationError {
     SelfDependency,
     /// The same view, level title or supplied-content name declared twice.
     Duplicate(String),
+    /// A row-major layout pinned on a layer whose membership is a **shape**. A spatial predicate
+    /// has no per-row source, and inverting its ranges into a column would materialise the very
+    /// membership the ranges exist to avoid — so the pin names a form this layer cannot be stored
+    /// in, and is refused rather than ignored (selection memo §4.1).
+    LayoutWithoutRowSource,
     /// A computed property outside [`ComputedProperty::VOCABULARY`].
     ///
     /// **Refused rather than ignored**, and that is a fail-closed choice rather than tidiness: a
@@ -674,6 +822,14 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::SelfDependency => {
                 write!(f, "a layer may not name itself in depends_on")
             }
+            DeclarationError::LayoutWithoutRowSource => write!(
+                f,
+                "a row-major layout ('column' or 'list') needs a per-row source, and \
+                 `membership = \"spatial\"` has none: a shape is decomposed to row ranges at \
+                 request time, and inverting those ranges into a column would materialise the \
+                 membership the ranges exist to avoid. Use `layout = \"rows\"`, or drop the key \
+                 and let the pick be automatic"
+            ),
             DeclarationError::Duplicate(what) => write!(f, "declared twice: {what}"),
             DeclarationError::UnknownComputed(name) => write!(
                 f,
@@ -742,6 +898,19 @@ impl LayerDeclaration {
             ) {
                 return Err(DeclarationError::ProportionalOnPredicate);
             }
+        }
+
+        // **The one layout combination that is refused at parse.** A shape has no per-row source,
+        // so the pin names a form this layer cannot be stored in at all. The other refusal the
+        // selection memo names — `column` on a level whose memberships overlap — is *not* checkable
+        // here: whether an attribute is single-valued is a property of the data rather than of the
+        // declaration. It is checked at the fold, where a double claim is observable, and the level
+        // falls back to artifact-major with a loud trace rather than composing a column whose
+        // labels would each be whichever artifact happened to write last.
+        if matches!(self.membership, MembershipSource::Spatial)
+            && self.layout.is_some_and(ServingLayout::is_row_major)
+        {
+            return Err(DeclarationError::LayoutWithoutRowSource);
         }
 
         let mut views: BTreeSet<&str> = BTreeSet::new();
@@ -886,10 +1055,12 @@ pub fn integer_key(value: i128) -> Option<String> {
 /// holds an interned address and the wire holds a key. The adjacency is the same rule either way,
 /// and it is the half most likely to drift if each wrote its own.
 pub fn parent_edges<T>(entries: &[Option<T>]) -> impl Iterator<Item = (&T, &T)> {
-    entries.windows(2).filter_map(|pair| match (&pair[0], &pair[1]) {
-        (Some(parent), Some(child)) => Some((parent, child)),
-        _ => None,
-    })
+    entries
+        .windows(2)
+        .filter_map(|pair| match (&pair[0], &pair[1]) {
+            (Some(parent), Some(child)) => Some((parent, child)),
+            _ => None,
+        })
 }
 
 #[cfg(test)]
@@ -920,7 +1091,68 @@ mod tests {
                     zoom: None,
                 })
                 .collect(),
+            layout: None,
         }
+    }
+
+    /// **The three words are three variants**, and a word outside them is not a layout.
+    #[test]
+    fn the_pin_vocabulary_round_trips_and_admits_nothing_else() {
+        for layout in [
+            ServingLayout::ArtifactMajor,
+            ServingLayout::RowMajorLabel,
+            ServingLayout::RowMajorList,
+        ] {
+            assert_eq!(ServingLayout::parse_pin(layout.pin_word()), Some(layout));
+            assert!(ServingLayout::PIN_VOCABULARY.contains(&layout.pin_word()));
+        }
+        assert_eq!(ServingLayout::parse_pin("row-major"), None);
+        assert_eq!(ServingLayout::parse_pin("artifact-major"), None);
+        assert_eq!(ServingLayout::parse_pin(""), None);
+        assert!(!ServingLayout::ArtifactMajor.is_row_major());
+        assert!(ServingLayout::RowMajorLabel.is_row_major());
+        assert!(ServingLayout::RowMajorList.is_row_major());
+    }
+
+    /// A shape has no per-row source, so a row-major pin names a form the layer cannot be stored in
+    /// — refused, rather than accepted and quietly served the other way.
+    #[test]
+    fn a_row_major_pin_on_a_shape_is_refused() {
+        for pin in [ServingLayout::RowMajorLabel, ServingLayout::RowMajorList] {
+            let mut d = decl(HierarchyKind::Flat, vec![]);
+            d.membership = MembershipSource::Spatial;
+            d.layout = Some(pin);
+            assert_eq!(d.validate(), Err(DeclarationError::LayoutWithoutRowSource));
+        }
+        // Artifact-major is always representable, on every membership source.
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.membership = MembershipSource::Spatial;
+        d.layout = Some(ServingLayout::ArtifactMajor);
+        assert!(d.validate().is_ok());
+        // And a column on an attribute predicate is accepted here — whether it *partitions* is a
+        // property of the data, checked at the fold.
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        d.membership = MembershipSource::Attribute("severity".into());
+        d.layout = Some(ServingLayout::RowMajorLabel);
+        assert!(d.validate().is_ok());
+    }
+
+    /// A layer with no pin records artifact-major for every level it declares — one entry per
+    /// level, and one for a layer that declares none.
+    #[test]
+    fn the_initial_record_is_one_entry_per_level() {
+        let flat = decl(HierarchyKind::Flat, vec![]);
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&flat),
+            vec![ServingLayout::ArtifactMajor]
+        );
+        let mut stacked = decl(HierarchyKind::Stacked, vec![0, 1, 2]);
+        stacked.layout = Some(ServingLayout::RowMajorList);
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&stacked),
+            vec![ServingLayout::RowMajorList; 3],
+            "a pin is per layer and reaches every level of it"
+        );
     }
 
     #[test]
@@ -936,7 +1168,9 @@ mod tests {
             decl(HierarchyKind::Stacked, vec![]).validate(),
             Err(DeclarationError::StackedWithoutLevels)
         );
-        assert!(decl(HierarchyKind::Stacked, vec![0, 1, 2]).validate().is_ok());
+        assert!(decl(HierarchyKind::Stacked, vec![0, 1, 2])
+            .validate()
+            .is_ok());
     }
 
     #[test]
@@ -1054,7 +1288,13 @@ mod tests {
         let runs = ReservedRuns::from_runs(vec![a, b]);
         assert_eq!(runs.capacity(), 3 * RESERVED_BLOCK);
 
-        for ordinal in [0, 1, RESERVED_BLOCK - 1, RESERVED_BLOCK, 3 * RESERVED_BLOCK - 1] {
+        for ordinal in [
+            0,
+            1,
+            RESERVED_BLOCK - 1,
+            RESERVED_BLOCK,
+            3 * RESERVED_BLOCK - 1,
+        ] {
             let entity = runs.entity_of(ordinal).expect("within capacity");
             assert_eq!(runs.ordinal_of(entity), Some(ordinal));
         }
@@ -1111,6 +1351,11 @@ mod tests {
              every field after it would decode from the wrong bytes"
         );
         assert!(object.contains_key("visibility"));
+        assert!(
+            object.contains_key("layout"),
+            "the layout pin is an Option like any other here — `#[serde(default)]` is fine and \
+             `skip_serializing_if` is not"
+        );
         assert!(object["artifact_visibility"]
             .as_object()
             .unwrap()
@@ -1139,8 +1384,15 @@ mod tests {
     fn a_list_means_what_the_declared_hierarchy_says_it_means() {
         let levelled = ListMeaning::of(HierarchyKind::Tiered, 3);
         assert_eq!(levelled.arity(), Some(3), "one entry per declared level");
-        assert_eq!(levelled.level_of(2), 2, "entry k is the artifact at level k");
-        assert!(levelled.declares_edges(), "tiered entries contain one another");
+        assert_eq!(
+            levelled.level_of(2),
+            2,
+            "entry k is the artifact at level k"
+        );
+        assert!(
+            levelled.declares_edges(),
+            "tiered entries contain one another"
+        );
 
         let stacked = ListMeaning::of(HierarchyKind::Stacked, 3);
         assert_eq!(stacked.arity(), Some(3));
@@ -1150,8 +1402,16 @@ mod tests {
         );
 
         let lineage = ListMeaning::of(HierarchyKind::Nested, 0);
-        assert_eq!(lineage.arity(), None, "a lineage is as deep as its own branch");
-        assert_eq!(lineage.level_of(2), 0, "a nested layer holds every artifact at level 0");
+        assert_eq!(
+            lineage.arity(),
+            None,
+            "a lineage is as deep as its own branch"
+        );
+        assert_eq!(
+            lineage.level_of(2),
+            0,
+            "a nested layer holds every artifact at level 0"
+        );
         assert!(lineage.declares_edges());
 
         let flat = ListMeaning::of(HierarchyKind::Flat, 0);

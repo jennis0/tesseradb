@@ -37,6 +37,7 @@ fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
     }
 }
 

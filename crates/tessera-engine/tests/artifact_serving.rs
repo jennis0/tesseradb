@@ -42,6 +42,7 @@ fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclar
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
     }
 }
 

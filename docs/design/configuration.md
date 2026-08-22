@@ -374,6 +374,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }` |
 | `value_set` | D `closed` | whether a member key the layer's artifacts do not declare is refused, or creates an artifact carrying nothing but its name ([`artifacts-from-points.md`](artifacts-from-points.md) §3). `closed` makes `artifacts` the roster; `open` makes it enrichment, so a cluster the points name and the table omits exists without a title, a cluster the table carries and no point names is an artifact with no members, and neither is an error. **It governs both entry points**: a build mints from a member source, and an ingest batch mints from a column named for the layer, at the close of the commit window that allocates the points. What `open` costs is that a mistyped key becomes a permanent object rather than a refusal — reported, at both entry points, and not bounded |
 | `hierarchy` | R | `{ kind = flat \| nested \| stacked \| tiered, prune_children = bool }` — see below |
+| `layout` | O | the **serving-layout pin**: `rows` (one row-space bitmap per artifact), `column` (one artifact label per row, for a level whose memberships partition the corpus) or `list` (a list of labels per row, where they overlap). Absent — the pick is automatic and re-evaluated at every compaction fold from the level's observed blocks-per-artifact and artifact count ([decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)). Present, it pins **every level of the layer**, at the build and at every fold after it, and a fold never overturns it. **Nothing on the wire names a layout** — both forms answer identically, so this is a latency choice and not a contract. A word outside the three is refused; `column` or `list` on `membership = "spatial"` is refused, a shape having no per-row source. ⊘ `column` on a level whose memberships turn out to **overlap** cannot be refused at parse — single-valuedness is a property of the data — so it is checked at the first fold, which composes the level artifact-major and says so in its trace rather than writing a column whose labels would each be whichever artifact wrote last |
 | `visibility` | R | an access label, or `public` |
 | `artifact_visibility` | R | `{ field, default }`; `default` may be `inherited` |
 | `require_member_visibility` | R | `all` \| `any` \| `{ fraction = p }` \| `{ count = n }` \| `none` |
@@ -1017,7 +1018,14 @@ for drill-down to return.
   an ingest that admitted what the build refuses being the fail-open half of one rule;
 - an access label spelled `inherited`, the one reserved word occupying a slot that otherwise takes
   a label (§5). `public` is **not** refused: it is a label (`per-point-attributes.md` §3.8), and `derived` and `none` sit
-  in slots that admit no label.
+  in slots that admit no label;
+- **a `layout` outside `rows`, `column` and `list`**, and a row-major one on `membership =
+  "spatial"`. The first is the surface's ordinary rule — a pin the build ignored would leave an
+  operator having declared a layout and got another — and the second names a form the layer cannot
+  be stored in, a shape having no per-row source and its ranges existing precisely so the
+  membership is never materialised. This is a **performance** knob and it still refuses rather than
+  ignoring, which is not a contradiction with SA §9's rule: what defaults is the *absence* of the
+  key, and an absent pin is a complete statement — *no opinion, pick automatically*.
 
 `index` on a **rendered** number or datetime is **admitted**, not refused: decision 0064's presence
 bitmap beside the hot column is what lets the row route tell an absence from a stored zero, and

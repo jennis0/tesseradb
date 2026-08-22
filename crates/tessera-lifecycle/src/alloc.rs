@@ -526,6 +526,7 @@ mod tests {
                 content: Default::default(),
                 depends_on: Vec::new(),
                 levels: Vec::new(),
+                layout: None,
             }),
             layer_entity: EntityId::new(entity),
             runs: vec![ReservedRuns::from_runs(vec![EntityRun {

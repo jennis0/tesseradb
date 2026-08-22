@@ -83,6 +83,7 @@ fn declaration(name: &str, value_set: ValueSet) -> LayerDeclaration {
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
     }
 }
 

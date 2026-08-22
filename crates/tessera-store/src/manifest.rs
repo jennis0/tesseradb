@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use tessera_spatial::tiler::ScalarType;
-use tessera_types::layer::RegisteredLayer;
+use tessera_types::layer::{RegisteredLayer, ServingLayout};
 use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
@@ -799,6 +799,40 @@ pub struct TileIndexExtent {
     pub level_version: u64,
 }
 
+/// One entry of `row_column_extents`: one `(view, layer, level)`'s fold-written **row-major**
+/// column — a label per row, or a list per row (`membership.rs` for the two formats).
+///
+/// **[`TileIndexExtent`]'s coordinate, with the layout tag beside it.** A column is addressed by
+/// row, so it answers for exactly the view whose row space it was written over, and the level's
+/// version is what says whether it still describes that level. Equality on both, never anything
+/// weaker: a stale column is **narrow** — a growth added rows it does not label — and an unlabelled
+/// row is one no artifact claims, so the artifact holding it silently stops being a candidate
+/// there.
+///
+/// **The tag is the fail-closed guard the selection memo §5 asks for**, and it is not compatibility
+/// machinery. The manifest states which form each level's file is in and each format carries a
+/// distinct magic, so a reader handed a file the manifest mis-describes refuses at the first bytes
+/// rather than decoding a list's offset table as a label column. A refusal here is a drop and a
+/// recomposition, exactly as an unreadable containment partition is — the level is served
+/// artifact-major, which is what every request did before this structure existed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RowColumnExtent {
+    /// Prefix-relative path of the packed column.
+    pub path: String,
+    /// The view whose row space this column is addressed in.
+    pub view: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when this column was written. **Also the adoption test.**
+    pub level_version: u64,
+    /// Which form the file is in — checked against the file's own magic at open.
+    ///
+    /// Never [`ServingLayout::ArtifactMajor`]: that layout has no column, so an entry claiming it
+    /// names a file no writer produces, and the reader refuses it.
+    pub layout: ServingLayout,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -904,6 +938,15 @@ pub struct SegmentsManifest {
     /// list that silently emptied itself would turn a fold's consolidation into a stall on
     /// whichever request arrived first, with nothing reporting a fault.
     pub tile_index_extents: Vec<TileIndexExtent>,
+    /// Every fold-written row-major column this partition holds — see [`RowColumnExtent`]. Empty
+    /// in a bundle that has never folded, and in one whose every level is artifact-major, which is
+    /// most of them.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument and with `tile_index_extents`'
+    /// consequence: an unadopted column is recomposed on first use and the answer is the same, but
+    /// a list that silently emptied itself would turn a fold's consolidation into a stall on
+    /// whichever request arrived first, with nothing reporting a fault.
+    pub row_column_extents: Vec<RowColumnExtent>,
     /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
     /// store as [`SegmentsManifest::record_extents`], listed separately.
     ///
@@ -1254,6 +1297,7 @@ mod tests {
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
             tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),

@@ -1814,6 +1814,7 @@ mod tests {
                         zoom: None,
                     },
                 ],
+                layout: None,
             }),
             layer_entity: EntityId::new(4_294_901_759),
             runs: vec![

@@ -221,6 +221,7 @@ fn flushed_bundle(root: &Path) {
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
+        row_column_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments,
         deltas: vec![delta_rel],

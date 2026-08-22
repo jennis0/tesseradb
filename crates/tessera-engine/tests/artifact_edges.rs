@@ -43,6 +43,7 @@ fn clusters(visibility: Option<&str>) -> LayerDeclaration {
         content: ContentDeclaration::default(),
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
     }
 }
 
@@ -71,6 +72,7 @@ fn labels() -> LayerDeclaration {
         },
         depends_on: vec![CLUSTERS.into()],
         levels: Vec::new(),
+        layout: None,
     }
 }
 

@@ -1255,6 +1255,7 @@ fn write_manifests(
         // request did before the structure existed.
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
+        row_column_extents: Vec::new(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
             view: args.view_id.clone(),

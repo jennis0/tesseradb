@@ -151,8 +151,8 @@ use tessera_spatial::{cell, Bounds};
 use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
-    LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, SuppliedContent,
-    SuppliedRequirement,
+    LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, ServingLayout,
+    SuppliedContent, SuppliedRequirement,
 };
 
 use crate::error::{BuildError, Result};
@@ -416,6 +416,10 @@ struct LayerBlock {
     value_set: Option<String>,
     #[serde(default)]
     hierarchy: Option<HierarchyBlock>,
+    /// `layout` — the serving-layout pin, `"rows"`, `"column"` or `"list"`. Absent, the pick is
+    /// automatic and re-evaluated at every fold (decision 0094).
+    #[serde(default)]
+    layout: Option<String>,
     #[serde(default)]
     visibility: Option<String>,
     #[serde(default)]
@@ -992,7 +996,8 @@ fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
     let table: ExtentTable = ExtentTable::deserialize(toml::Value::Table(table.clone()))
         .map_err(|e| declaration_error(format!("view '{view}': `extent`: {e}")))?;
 
-    let stated = table.min.is_some() || table.max.is_some() || table.x.is_some() || table.y.is_some();
+    let stated =
+        table.min.is_some() || table.max.is_some() || table.x.is_some() || table.y.is_some();
     if let Some(auto) = table.auto {
         if !auto {
             return Err(declaration_error(format!(
@@ -1299,8 +1304,7 @@ impl Config {
         let views = compile_views(&file.view, &sources, &defaults)?;
         let vocabularies = compile_vocabularies(&file.vocabulary, &sources)?;
         let attributes = compile_attributes(&file.attribute, &vocabularies)?;
-        let attribute_sources =
-            compile_attribute_sources(&file.attribute, &sources, &defaults)?;
+        let attribute_sources = compile_attribute_sources(&file.attribute, &sources, &defaults)?;
         let (layers, layer_sources, label_layers) =
             compile_layers(&file.layer, &views, &attributes, &sources)?;
 
@@ -1652,16 +1656,15 @@ impl Defaults {
             // took it.
             sources.path("[defaults]", source)?;
         }
-        let entity_id_field = match block.entity_id_field.as_deref() {
-            None => ENTITY_ID.to_string(),
-            Some(field) if field.trim().is_empty() => {
-                return Err(declaration_error(
+        let entity_id_field =
+            match block.entity_id_field.as_deref() {
+                None => ENTITY_ID.to_string(),
+                Some(field) if field.trim().is_empty() => return Err(declaration_error(
                     "[defaults]: `entity_id_field` is empty, so it names no column. Omit it to \
                      read the entity id under its own name, `entity_id`",
-                ))
-            }
-            Some(field) => field.to_string(),
-        };
+                )),
+                Some(field) => field.to_string(),
+            };
         Ok(Defaults {
             source: block.source.clone(),
             entity_id_field,
@@ -1786,7 +1789,9 @@ fn check_fields(
     let Some(map) = map else {
         let mut fields = Fields::canonical(object);
         if takes_entity_id && entity_id != ENTITY_ID {
-            fields.map.insert(ENTITY_ID.to_string(), entity_id.to_string());
+            fields
+                .map
+                .insert(ENTITY_ID.to_string(), entity_id.to_string());
         }
         return Ok(fields);
     };
@@ -1943,6 +1948,12 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
                 kind: Some("flat".to_string()),
                 prune_children: false,
             }),
+            // **Not supplied, and not inherited from the parent either.** The sugar carries no key
+            // the `[[layer]]` surface does not, and a layout pin is a statement about where *this*
+            // layer's data landed — a label layer's population is the parent's label count, which
+            // is a different shape from the parent's own membership. Absent, the pick is automatic,
+            // which is what a caller who wrote nothing asked for.
+            layout: None,
             visibility,
             artifact_visibility: Some(artifact_visibility),
             require_member_visibility: labels.require_member_visibility.clone(),
@@ -2149,9 +2160,7 @@ fn compile_views(
             )));
         }
         let labels = match &point.source {
-            Some(declared) => {
-                Some(sources.path(&format!("{object} point_visibility"), declared)?)
-            }
+            Some(declared) => Some(sources.path(&format!("{object} point_visibility"), declared)?),
             None => None,
         };
         let default = point.default.as_deref().ok_or_else(|| {
@@ -2871,7 +2880,11 @@ fn check_column_name(name: &str) -> Result<()> {
 /// and which layers the `[layer.labels]` sugar wrote, by parent — three parallel views of one pass,
 /// kept apart because a [`LayerDeclaration`] is exactly the control-plane payload and must carry
 /// neither of the others.
-type CompiledLayers = (Vec<LayerDeclaration>, Vec<LayerSources>, BTreeMap<String, String>);
+type CompiledLayers = (
+    Vec<LayerDeclaration>,
+    Vec<LayerSources>,
+    BTreeMap<String, String>,
+);
 
 fn compile_layers(
     declared: &[LayerBlock],
@@ -3045,12 +3058,7 @@ fn compile_layers(
             )));
         }
         let members_block = block.members.as_ref();
-        let named = |field: &str| {
-            block
-                .fields
-                .as_ref()
-                .is_some_and(|f| f.contains_key(field))
-        };
+        let named = |field: &str| block.fields.as_ref().is_some_and(|f| f.contains_key(field));
         // **A membership is included or excluded, never both.** The two are one field written two
         // ways — the entities in the set, or the entities out of it — so a row carrying each would
         // have two memberships, and every masked count and every criterion divides by one of them.
@@ -3128,7 +3136,10 @@ fn compile_layers(
                 ),
                 KnownField::asserted_by(
                     "parent",
-                    matches!(hierarchy.kind, HierarchyKind::Nested | HierarchyKind::Tiered),
+                    matches!(
+                        hierarchy.kind,
+                        HierarchyKind::Nested | HierarchyKind::Tiered
+                    ),
                     "`hierarchy.kind` is `flat` or `stacked`, neither of which has lineage in its \
                      edges",
                 ),
@@ -3228,6 +3239,26 @@ fn compile_layers(
             members,
         });
 
+        // **The layout pin, refused rather than ignored where the word is not one of the three.**
+        // An ignored pin is the silent case: the operator declared a layout, got another, and has
+        // nothing to look at (selection memo §4.1). The one *combination* refused here rather than
+        // in `validate` is a shape with a row-major pin, and that one is `validate`'s — see
+        // `DeclarationError::LayoutWithoutRowSource`.
+        let layout = match block.layout.as_deref() {
+            None => None,
+            Some(word) => Some(ServingLayout::parse_pin(word).ok_or_else(|| {
+                declaration_error(format!(
+                    "layer '{}': `layout = \"{word}\"` is not a layout. The words are {} — \
+                     `rows` is one row-space bitmap per artifact, `column` one artifact label per \
+                     row for a level whose memberships partition the corpus, and `list` a list of \
+                     labels per row for one whose memberships overlap. Omitting the key is the \
+                     normal state: the pick is then automatic and re-evaluated at every fold",
+                    block.name,
+                    ServingLayout::PIN_VOCABULARY.join(", ")
+                ))
+            })?),
+        };
+
         let declaration = LayerDeclaration {
             name: block.name.clone(),
             title: block.title.clone(),
@@ -3241,13 +3272,14 @@ fn compile_layers(
             content,
             depends_on: block.depends_on.clone(),
             levels: compile_levels(block)?,
+            layout,
         };
         // **One implementation of the rules, not two.** Everything `LayerRegistry::prepare_create`
         // would refuse is refused here too, by calling the same check — so a declaration refused
         // online is refused here with the same words, at parse, before a data file is opened.
-        declaration.validate().map_err(|e| {
-            declaration_error(format!("layer '{}': {e}", declaration.name))
-        })?;
+        declaration
+            .validate()
+            .map_err(|e| declaration_error(format!("layer '{}': {e}", declaration.name)))?;
         layers.push(declaration);
     }
     Ok((layers, per_layer, from_labels))
@@ -3513,14 +3545,15 @@ fn compile_criterion(
                         .as_integer()
                         .and_then(|n| u64::try_from(n).ok())
                         .filter(|n| *n >= 1);
-                    n.map(|n| Some(ExistenceCriterion::Count(n))).ok_or_else(|| {
-                        declaration_error(format!(
-                            "{what} '{object}': `require_member_visibility.count` must be an \
+                    n.map(|n| Some(ExistenceCriterion::Count(n)))
+                        .ok_or_else(|| {
+                            declaration_error(format!(
+                                "{what} '{object}': `require_member_visibility.count` must be an \
                              integer of at least 1. A count of zero is cleared by every masked \
                              count, so it declares a requirement and imposes none; write \
                              `require_member_visibility = \"none\"` to say there is no rule"
-                        ))
-                    })
+                            ))
+                        })
                 }
                 ["fraction"] => {
                     // The interval is half-open at zero for `count`'s reason, and closed at one
@@ -3529,14 +3562,15 @@ fn compile_criterion(
                     let p = table["fraction"]
                         .as_float()
                         .filter(|p| *p > 0.0 && *p <= 1.0);
-                    p.map(|p| Some(ExistenceCriterion::Fraction(p))).ok_or_else(|| {
-                        declaration_error(format!(
+                    p.map(|p| Some(ExistenceCriterion::Fraction(p)))
+                        .ok_or_else(|| {
+                            declaration_error(format!(
                             "{what} '{object}': `require_member_visibility.fraction` must be a \
                              float in (0, 1]. Zero is cleared by every masked count and declares \
                              nothing — write `require_member_visibility = \"none\"` for that — \
                              and a share above one can never be cleared"
                         ))
-                    })
+                        })
                 }
                 _ => Err(declaration_error(format!(
                     "{what} '{object}': `require_member_visibility` as a table takes exactly one \

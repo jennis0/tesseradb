@@ -160,7 +160,14 @@ fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
         "nonesuch = 1\n",
         "the document",
-        &["sources", "defaults", "view", "vocabulary", "attribute", "layer"],
+        &[
+            "sources",
+            "defaults",
+            "view",
+            "vocabulary",
+            "attribute",
+            "layer",
+        ],
     );
     expect_keys(
         "[defaults]\nnonesuch = 1\n",
@@ -236,6 +243,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "membership",
             "value_set",
             "hierarchy",
+            "layout",
             "visibility",
             "artifact_visibility",
             "require_member_visibility",
@@ -349,7 +357,8 @@ fn every_retired_key_is_refused_rather_than_aliased() {
         );
     }
     // And `[layer.content]`'s own retired spelling.
-    let text = "[[layer]]\nname = \"l\"\n[layer.content]\non_member_deletion = \"withdraw_content\"\n";
+    let text =
+        "[[layer]]\nname = \"l\"\n[layer.content]\non_member_deletion = \"withdraw_content\"\n";
     assert!(err(text).contains("on_member_deletion"), "{}", err(text));
     // `derived` was the computed list's name; the retired word is refused where the new one lives.
     let text = "[[layer]]\nname = \"l\"\n[layer.content]\nderived = [\"centroid\"]\n";
@@ -441,7 +450,10 @@ fn two_values_at_one_code_are_refused() {
 /// carried it.
 #[test]
 fn a_reserved_code_may_not_be_reassigned() {
-    let text = SEVERITY.replace("visibility = \"public\"", "visibility = \"public\"\nreserved = [2]");
+    let text = SEVERITY.replace(
+        "visibility = \"public\"",
+        "visibility = \"public\"\nreserved = [2]",
+    );
     assert!(err(&text).contains("reserved"), "{}", err(&text));
 }
 
@@ -477,7 +489,10 @@ fn a_vocabularys_visibility_admits_exactly_two_words() {
     );
 
     for word in ["ir:analyst", "per_viewer", "inherited", "none", "Public"] {
-        let text = SEVERITY.replace("visibility = \"public\"", &format!("visibility = \"{word}\""));
+        let text = SEVERITY.replace(
+            "visibility = \"public\"",
+            &format!("visibility = \"{word}\""),
+        );
         let message = err(&text);
         assert!(
             message.contains("neither \"public\" nor \"derived\""),
@@ -516,7 +531,11 @@ fn an_open_vocabulary_with_no_values_starts_empty() {
 /// A closed vocabulary mints nothing, so it must have no minter for a scan to reach.
 #[test]
 fn a_closed_vocabulary_has_no_minter() {
-    assert!(parse_str(SEVERITY).unwrap().schema.open_minters().is_empty());
+    assert!(parse_str(SEVERITY)
+        .unwrap()
+        .schema
+        .open_minters()
+        .is_empty());
 }
 
 /// **Two vocabulary blocks of one name.** Two code spaces read back under one name, and which one
@@ -610,8 +629,9 @@ fn index_is_accepted_on_every_declarable_type() {
 #[test]
 fn a_number_may_be_rendered_and_indexed_at_once() {
     for ty in ["bool", "i32", "f64", "timestamp_us"] {
-        let text =
-            format!("[[attribute]]\nname = \"measure\"\ntype = \"{ty}\"\nrender = true\nindex = true\n");
+        let text = format!(
+            "[[attribute]]\nname = \"measure\"\ntype = \"{ty}\"\nrender = true\nindex = true\n"
+        );
         let config =
             parse_str(&text).unwrap_or_else(|e| panic!("{ty} must render and filter: {e}"));
         assert!(config.schema.attributes[0].index, "{ty}");
@@ -695,9 +715,8 @@ fn a_text_column_resolves_its_analyser_and_refuses_an_unknown_one() {
         "the default resolves to a full identity, not to a bare name"
     );
 
-    let message = err(
-        "[[attribute]]\nname = \"abstract\"\ntype = \"text\"\nanalyser = \"standard\"\n",
-    );
+    let message =
+        err("[[attribute]]\nname = \"abstract\"\ntype = \"text\"\nanalyser = \"standard\"\n");
     assert!(
         message.contains("standard") && message.contains("unicode"),
         "the refusal must name what was asked for and what is available: {message}"
@@ -799,7 +818,10 @@ fn a_view_must_declare_its_point_visibility() {
         "",
     );
     let message = err(&text);
-    assert!(message.contains("`point_visibility` is required"), "{message}");
+    assert!(
+        message.contains("`point_visibility` is required"),
+        "{message}"
+    );
     assert!(message.contains("no default"), "{message}");
 
     let text = SEVERITY.replace(
@@ -889,7 +911,10 @@ fn a_view_must_declare_its_extent() {
     assert!(message.contains("no default"), "{message}");
     // Every refusal carries all four spellings: the author is choosing a shape, not fixing a typo.
     for spelling in ["\"auto\"", "margin", "min = -25.0", "x = [-18, 19]"] {
-        assert!(message.contains(spelling), "{spelling} missing from: {message}");
+        assert!(
+            message.contains(spelling),
+            "{spelling} missing from: {message}"
+        );
     }
 }
 
@@ -929,7 +954,10 @@ fn half_an_extent_is_refused_rather_than_completed() {
 
     // A negative margin shrinks the box inside the data and clamps what it excluded.
     let message = refused("extent = { auto = true, margin = -0.1 }");
-    assert!(message.contains("not a fraction of the data span"), "{message}");
+    assert!(
+        message.contains("not a fraction of the data span"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -967,7 +995,10 @@ fn a_layer_compiles_its_two_axes() {
 #[test]
 fn a_layer_declares_all_three_disclosure_controls() {
     for (line, expected) in [
-        ("visibility                = \"public\"\n", "`visibility` is required"),
+        (
+            "visibility                = \"public\"\n",
+            "`visibility` is required",
+        ),
         (
             "artifact_visibility       = { default = \"inherited\" }\n",
             "`artifact_visibility` is required",
@@ -995,14 +1026,20 @@ fn the_membership_requirement_has_five_settings() {
         ("\"any\"", Some(ExistenceCriterion::Count(1))),
         ("\"all\"", Some(ExistenceCriterion::Fraction(1.0))),
         ("{ count = 1000 }", Some(ExistenceCriterion::Count(1000))),
-        ("{ fraction = 0.1 }", Some(ExistenceCriterion::Fraction(0.1))),
+        (
+            "{ fraction = 0.1 }",
+            Some(ExistenceCriterion::Fraction(0.1)),
+        ),
     ] {
         let text = with_layer("").replace(
             "require_member_visibility = { fraction = 0.05 }",
             &format!("require_member_visibility = {written}"),
         );
         let config = parse_str(&text).unwrap_or_else(|e| panic!("{written}: {e}"));
-        assert_eq!(config.layers[0].require_member_visibility, expected, "{written}");
+        assert_eq!(
+            config.layers[0].require_member_visibility, expected,
+            "{written}"
+        );
     }
     let text = with_layer("").replace(
         "require_member_visibility = { fraction = 0.05 }",
@@ -1042,7 +1079,10 @@ fn a_closed_vocabulary_with_no_values_is_refused_in_every_spelling() {
     }
     // An open one is legal empty: its values arrive as they are minted.
     let text = SEVERITY
-        .replace("  [vocabulary.values]\n  low = 1\n  high = 2\n", "values = []\n")
+        .replace(
+            "  [vocabulary.values]\n  low = 1\n  high = 2\n",
+            "values = []\n",
+        )
         .replace("value_set  = \"closed\"", "value_set  = \"open\"");
     parse_str(&text).expect("an open vocabulary may start empty");
 }
@@ -1087,9 +1127,15 @@ fn a_threshold_that_cannot_fail_or_cannot_pass_is_refused() {
 /// saying *the container's gate is the whole of it* would be the same eight characters.
 #[test]
 fn an_access_label_may_not_be_spelled_inherited() {
-    let text = with_layer("").replace("visibility                = \"public\"", "visibility                = \"inherited\"");
+    let text = with_layer("").replace(
+        "visibility                = \"public\"",
+        "visibility                = \"inherited\"",
+    );
     let message = err(&text);
-    assert!(message.contains("may not be spelled `inherited`"), "{message}");
+    assert!(
+        message.contains("may not be spelled `inherited`"),
+        "{message}"
+    );
     assert!(
         message.contains("`public` is not reserved in this sense"),
         "the refusal must say why the other reserved word is fine: {message}"
@@ -1127,7 +1173,10 @@ fn public_is_a_label_and_is_never_refused() {
 /// were all withheld.
 #[test]
 fn a_layer_naming_an_undeclared_view_is_refused() {
-    let text = with_layer("").replace("views                     = [\"s0\"]", "views                     = [\"s7\"]");
+    let text = with_layer("").replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s7\"]",
+    );
     let message = err(&text);
     assert!(message.contains("s7"), "{message}");
     assert!(message.contains("Declared: s0"), "{message}");
@@ -1135,10 +1184,16 @@ fn a_layer_naming_an_undeclared_view_is_refused() {
 
 #[test]
 fn a_layer_declares_its_hierarchy_rather_than_having_it_inferred() {
-    let text = with_layer("").replace("hierarchy                 = { kind = \"flat\", prune_children = true }\n", "");
+    let text = with_layer("").replace(
+        "hierarchy                 = { kind = \"flat\", prune_children = true }\n",
+        "",
+    );
     let message = err(&text);
     assert!(message.contains("`hierarchy` is required"), "{message}");
-    assert!(message.contains("tiered"), "the four kinds must be named: {message}");
+    assert!(
+        message.contains("tiered"),
+        "the four kinds must be named: {message}"
+    );
 
     let text = with_layer("").replace("kind = \"flat\"", "kind = \"treed\"");
     assert!(err(&text).contains("none of"), "{}", err(&text));
@@ -1150,7 +1205,10 @@ fn a_layer_declares_its_hierarchy_rather_than_having_it_inferred() {
 fn the_levels_rule_follows_the_declared_kind() {
     let levels = "\n[[layer.levels]]\nlevel = 0\ntitle = \"countries\"\n";
     let nested = with_layer("").replace("kind = \"flat\"", "kind = \"nested\"");
-    assert!(parse_str(&nested).is_ok(), "a nested layer declares no levels");
+    assert!(
+        parse_str(&nested).is_ok(),
+        "a nested layer declares no levels"
+    );
     assert!(
         err(&format!("{nested}{levels}")).contains("declares no levels"),
         "{}",
@@ -1173,7 +1231,9 @@ fn the_levels_rule_follows_the_declared_kind() {
 #[test]
 fn a_level_declares_its_number_and_its_title() {
     let base = with_layer("").replace("kind = \"flat\"", "kind = \"stacked\"");
-    let message = err(&format!("{base}\n[[layer.levels]]\ntitle = \"countries\"\n"));
+    let message = err(&format!(
+        "{base}\n[[layer.levels]]\ntitle = \"countries\"\n"
+    ));
     assert!(message.contains("declares no `level` number"), "{message}");
     // A title is presentation metadata and optional everywhere in the surface: it discloses
     // nothing a name does not, and the name is already served, so absent is served as absent
@@ -1199,13 +1259,16 @@ fn supplied_content_declares_its_membership_requirement() {
     assert_eq!(content.ty, "text");
     assert!(content.require_member_visibility.requires_all_members());
 
-    let without =
-        "\n[[layer.content.supplied]]\nname = \"topic\"\ntype = \"text\"\n";
+    let without = "\n[[layer.content.supplied]]\nname = \"topic\"\ntype = \"text\"\n";
     let message = err(&with_layer(without));
-    assert!(message.contains("no `require_member_visibility`"), "{message}");
+    assert!(
+        message.contains("no `require_member_visibility`"),
+        "{message}"
+    );
     assert!(message.contains("C28"), "{message}");
 
-    let no_type = "\n[[layer.content.supplied]]\nname = \"topic\"\nrequire_member_visibility = \"all\"\n";
+    let no_type =
+        "\n[[layer.content.supplied]]\nname = \"topic\"\nrequire_member_visibility = \"all\"\n";
     assert!(
         err(&with_layer(no_type)).contains("declares no `type`"),
         "{}",
@@ -1238,7 +1301,10 @@ fn withdrawing_a_whole_artifact_is_refused_as_unbuilt() {
     );
     let message = err(&text);
     assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("annotation-write-cycle.md §6.1"), "{message}");
+    assert!(
+        message.contains("annotation-write-cycle.md §6.1"),
+        "{message}"
+    );
     assert!(
         message.contains("`false` is the default"),
         "the refusal must say what happens instead: {message}"
@@ -1262,11 +1328,11 @@ fn content_withdrawal_defaults_to_the_half_that_cannot_widen() {
     );
     let config = parse_str(&text).unwrap();
     assert!(!config.layers[0].content.withdraw_on_member_deletion);
-    assert!(parse_str(&with_layer(""))
-        .unwrap()
-        .layers[0]
-        .content
-        .withdraw_on_member_deletion);
+    assert!(
+        parse_str(&with_layer("")).unwrap().layers[0]
+            .content
+            .withdraw_on_member_deletion
+    );
 }
 
 /// `membership` at its three spellings, and the two ways of getting it wrong.
@@ -1278,13 +1344,20 @@ fn content_withdrawal_defaults_to_the_half_that_cannot_widen() {
 #[test]
 fn a_layer_declares_its_membership_source() {
     let text = with_layer("").replace("membership                = \"enumerated\"\n", "");
-    assert!(err(&text).contains("`membership` is required"), "{}", err(&text));
+    assert!(
+        err(&text).contains("`membership` is required"),
+        "{}",
+        err(&text)
+    );
     let text = with_layer("").replace("\"enumerated\"", "\"predicate\"");
     assert!(err(&text).contains("neither"), "{}", err(&text));
 
     let spatial = with_layer("")
         .replace("\"enumerated\"", "\"spatial\"")
-        .replace("require_member_visibility = { fraction = 0.05 }", "require_member_visibility = { count = 3 }");
+        .replace(
+            "require_member_visibility = { fraction = 0.05 }",
+            "require_member_visibility = { count = 3 }",
+        );
     assert_eq!(
         parse_str(&spatial).unwrap().layers[0].membership,
         MembershipSource::Spatial
@@ -1307,7 +1380,11 @@ fn a_layer_declares_its_membership_source() {
         err(&empty)
     );
     let two = spatial.replace("\"spatial\"", "{ attribute = \"a\", spatial = true }");
-    assert!(err(&two).contains("takes exactly `attribute`"), "{}", err(&two));
+    assert!(
+        err(&two).contains("takes exactly `attribute`"),
+        "{}",
+        err(&two)
+    );
 
     // A column nothing declares reads nothing, and the layer would publish empty memberships —
     // refused at the declaration, before a data file is opened, on the rule an attribute naming
@@ -1316,6 +1393,61 @@ fn a_layer_declares_its_membership_source() {
     let message = err(&absent);
     assert!(message.contains("names no declared attribute"), "{message}");
     assert!(message.contains("severity"), "{message}");
+}
+
+/// **The layout pin: three words, and a pin the build ignored would be the silent case.**
+///
+/// Absent is the normal state and compiles to `None` — the automatic pick, re-evaluated at every
+/// fold. A word outside the three is refused rather than reported as an unknown value, because a
+/// caller who wrote one is choosing a storage form and needs to be told which forms there are.
+#[test]
+fn a_layer_may_pin_its_serving_layout() {
+    assert_eq!(parse_str(&with_layer("")).unwrap().layers[0].layout, None);
+
+    for (word, expected) in [
+        ("rows", ServingLayout::ArtifactMajor),
+        ("column", ServingLayout::RowMajorLabel),
+        ("list", ServingLayout::RowMajorList),
+    ] {
+        let text = with_layer("").replace(
+            "membership                = \"enumerated\"\n",
+            &format!("membership                = \"enumerated\"\nlayout                    = \"{word}\"\n"),
+        );
+        assert_eq!(
+            parse_str(&text).unwrap().layers[0].layout,
+            Some(expected),
+            "layout = \"{word}\""
+        );
+    }
+
+    let bogus = with_layer("").replace(
+        "membership                = \"enumerated\"\n",
+        "membership                = \"enumerated\"\nlayout                    = \"row-major\"\n",
+    );
+    let message = err(&bogus);
+    assert!(message.contains("is not a layout"), "{message}");
+    assert!(message.contains("column"), "{message}");
+
+    // A shape has no per-row source, so a row-major pin names a form the layer cannot be stored in
+    // at all — refused here, by the same `validate` the online registration calls.
+    let spatial = with_layer("")
+        .replace("\"enumerated\"", "\"spatial\"")
+        .replace(
+            "require_member_visibility = { fraction = 0.05 }",
+            "require_member_visibility = { count = 3 }\nlayout                    = \"column\"",
+        );
+    assert!(
+        err(&spatial).contains("per-row source"),
+        "{}",
+        err(&spatial)
+    );
+
+    // Artifact-major is representable on every source, spatial included.
+    let pinned_rows = spatial.replace("\"column\"", "\"rows\"");
+    assert_eq!(
+        parse_str(&pinned_rows).unwrap().layers[0].layout,
+        Some(ServingLayout::ArtifactMajor)
+    );
 }
 
 /// A computed property outside the closed vocabulary is refused rather than ignored: an artifact
@@ -1404,8 +1536,14 @@ fn a_source_is_a_path_relative_to_the_declaring_file() {
     let config = parse_at(dir.path(), ACQUIRED, &HashMap::new())
         .expect("a declaration naming its own files needs no bindings");
     assert_eq!(config.attribute_sources.len(), 1);
-    assert_eq!(config.attribute_sources[0].path, dir.path().join("corpus.parquet"));
-    assert_eq!(config.views[0].source, Some(dir.path().join("geometry.parquet")));
+    assert_eq!(
+        config.attribute_sources[0].path,
+        dir.path().join("corpus.parquet")
+    );
+    assert_eq!(
+        config.views[0].source,
+        Some(dir.path().join("geometry.parquet"))
+    );
     assert_eq!(
         config.views[0].point_visibility.source,
         Some(dir.path().join("pairs.parquet"))
@@ -1441,7 +1579,10 @@ fn an_override_replaces_one_objects_source() {
         Some(PathBuf::from("/elsewhere/geometry.parquet"))
     );
     // Everything it did not name is still the declaration's own path.
-    assert_eq!(config.attribute_sources[0].path, dir.path().join("corpus.parquet"));
+    assert_eq!(
+        config.attribute_sources[0].path,
+        dir.path().join("corpus.parquet")
+    );
 }
 
 /// **An override that names nothing is a refusal**, listing the keys that exist. Without this the
@@ -1490,7 +1631,10 @@ fn an_override_is_never_a_fall_through_to_minting() {
 /// the message then comes from a Parquet reader instead of from the document.
 #[test]
 fn a_source_naming_no_key_is_refused_listing_the_names_that_exist() {
-    let text = ACQUIRED.replace("source           = \"geometry\"", "source           = \"geomtery\"");
+    let text = ACQUIRED.replace(
+        "source           = \"geometry\"",
+        "source           = \"geomtery\"",
+    );
     let message = bound_err(&text, &[]);
     assert!(message.contains("`source = \"geomtery\"`"), "{message}");
     assert!(message.contains("names no key in `[sources]`"), "{message}");
@@ -1499,7 +1643,10 @@ fn a_source_naming_no_key_is_refused_listing_the_names_that_exist() {
         "the refusal must list the names that exist: {message}"
     );
     // …and the same for a name that happens to look like the path it used to be.
-    let text = ACQUIRED.replace("source           = \"geometry\"", "source           = \"geometry.parquet\"");
+    let text = ACQUIRED.replace(
+        "source           = \"geometry\"",
+        "source           = \"geometry.parquet\"",
+    );
     let message = bound_err(&text, &[]);
     assert!(message.contains("names no key in `[sources]`"), "{message}");
 }
@@ -1508,11 +1655,20 @@ fn a_source_naming_no_key_is_refused_listing_the_names_that_exist() {
 /// names the source, which is the same rule at the one place it can now be stated.
 #[test]
 fn an_absolute_path_in_sources_names_the_override() {
-    let text = ACQUIRED.replace("pairs    = \"pairs.parquet\"", "pairs    = \"/mnt/staged/pairs.parquet\"");
+    let text = ACQUIRED.replace(
+        "pairs    = \"pairs.parquet\"",
+        "pairs    = \"/mnt/staged/pairs.parquet\"",
+    );
     let message = bound_err(&text, &[]);
-    assert!(message.contains("`[sources].pairs`") || message.contains("[sources].pairs"), "{message}");
+    assert!(
+        message.contains("`[sources].pairs`") || message.contains("[sources].pairs"),
+        "{message}"
+    );
     assert!(message.contains("is an absolute path"), "{message}");
-    assert!(message.contains("--file pairs=/mnt/staged/pairs.parquet"), "{message}");
+    assert!(
+        message.contains("--file pairs=/mnt/staged/pairs.parquet"),
+        "{message}"
+    );
 }
 
 /// **One override moves every reader of a source at once**, which is the whole reason the key is
@@ -1544,8 +1700,14 @@ fn defaults_reach_a_view_and_a_column_and_no_other_block() {
     let dir = tempfile::tempdir().expect("tempdir");
     let text = ACQUIRED.replace("source           = \"geometry\"\n", "");
     let config = parse_at(dir.path(), &text, &HashMap::new()).expect("a parse");
-    assert_eq!(config.views[0].source, Some(dir.path().join("corpus.parquet")));
-    assert_eq!(config.attribute_sources[0].path, dir.path().join("corpus.parquet"));
+    assert_eq!(
+        config.views[0].source,
+        Some(dir.path().join("corpus.parquet"))
+    );
+    assert_eq!(
+        config.attribute_sources[0].path,
+        dir.path().join("corpus.parquet")
+    );
 
     // A vocabulary with no source mints rather than reads, and the default does not make it read.
     let open = text.replace(
@@ -1559,7 +1721,13 @@ fn defaults_reach_a_view_and_a_column_and_no_other_block() {
     );
 
     // A layer with no source is declared and empty, and stays so.
-    let layered = format!("{text}{}", LAYER.replace("  [layer.content]\n  computed = [\"centroid\", \"box\"]\n", ""));
+    let layered = format!(
+        "{text}{}",
+        LAYER.replace(
+            "  [layer.content]\n  computed = [\"centroid\", \"box\"]\n",
+            ""
+        )
+    );
     let config = parse_at(dir.path(), &layered, &HashMap::new()).expect("a parse");
     assert!(
         config.layer_sources[0].artifacts.is_none(),
@@ -1583,11 +1751,17 @@ fn an_attribute_may_name_its_own_source_and_identity_column() {
     assert_eq!(config.attribute_sources[0].attributes, vec![0]);
     assert_eq!(config.attribute_sources[1].name, "other");
     assert_eq!(config.attribute_sources[1].attributes, vec![1]);
-    assert_eq!(config.attribute_sources[1].path, dir.path().join("other.parquet"));
+    assert_eq!(
+        config.attribute_sources[1].path,
+        dir.path().join("other.parquet")
+    );
     assert_eq!(config.attribute_sources[1].fields.of("entity_id"), "doc_id");
     // The first group joins on whatever this declaration spells identity, which is the canonical
     // name here because `[defaults]` says nothing else.
-    assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "entity_id");
+    assert_eq!(
+        config.attribute_sources[0].fields.of("entity_id"),
+        "entity_id"
+    );
 }
 
 /// **Columns sharing a source share a pass**, in declaration order — which is load-bearing, the
@@ -1614,7 +1788,10 @@ fn columns_sharing_a_source_share_one_pass() {
 /// that reads one may say otherwise.
 #[test]
 fn the_identity_column_defaults_once_and_each_reader_may_override_it() {
-    let text = ACQUIRED.replace("[defaults]\nsource = \"corpus\"", "[defaults]\nsource = \"corpus\"\nentity_id_field = \"id\"");
+    let text = ACQUIRED.replace(
+        "[defaults]\nsource = \"corpus\"",
+        "[defaults]\nsource = \"corpus\"\nentity_id_field = \"id\"",
+    );
     let config = bound_ok(&text, &[]);
     assert_eq!(config.views[0].fields.of("entity_id"), "id");
     assert_eq!(config.attribute_sources[0].fields.of("entity_id"), "id");
@@ -1642,7 +1819,10 @@ fn the_identity_column_defaults_once_and_each_reader_may_override_it() {
 /// block that took it.
 #[test]
 fn a_default_source_naming_no_key_is_refused() {
-    let text = ACQUIRED.replace("[defaults]\nsource = \"corpus\"", "[defaults]\nsource = \"corpsu\"");
+    let text = ACQUIRED.replace(
+        "[defaults]\nsource = \"corpus\"",
+        "[defaults]\nsource = \"corpsu\"",
+    );
     let message = bound_err(&text, &[]);
     assert!(message.contains("[defaults]"), "{message}");
     assert!(message.contains("names no key in `[sources]`"), "{message}");
@@ -1670,8 +1850,14 @@ fn a_field_map_may_not_name_a_field_the_object_does_not_have() {
     );
     let message = bound_err(&text, &[]);
     assert!(message.contains("`fields.nonesuch`"), "{message}");
-    assert!(message.contains("not one of this object's fields"), "{message}");
-    assert!(message.contains("entity_id"), "the refusal must list them: {message}");
+    assert!(
+        message.contains("not one of this object's fields"),
+        "{message}"
+    );
+    assert!(
+        message.contains("entity_id"),
+        "the refusal must list them: {message}"
+    );
 }
 
 /// A field the object never declared is refused, and the refusal names the key that *would*
@@ -1765,12 +1951,17 @@ fn a_layer_field_map_resolves_to_the_column_it_names() {
         "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { key = \"cluster_id\" }",
     );
     let config = bound_ok(&text, &[]);
-    let Some(crate::config::ArtifactSource::File { fields, .. }) = &config.layer_sources[0].artifacts
+    let Some(crate::config::ArtifactSource::File { fields, .. }) =
+        &config.layer_sources[0].artifacts
     else {
         panic!("the layer names a file");
     };
     assert_eq!(fields.of("key"), "cluster_id");
-    assert_eq!(fields.of("contents"), "contents", "an unmoved field keeps its own name");
+    assert_eq!(
+        fields.of("contents"),
+        "contents",
+        "an unmoved field keeps its own name"
+    );
 }
 
 /// **A membership is included or excluded, never both.** The two are one field written two ways,
@@ -1818,7 +2009,10 @@ fn an_inline_artifact_declaring_both_members_and_excluding_is_refused() {
         "views                     = [\"s0\"]\nartifacts                 = [{ key = \"c-0\", members = [1], excluding = [2] }]",
     );
     let message = bound_err(&text, &[]);
-    assert!(message.contains("two spellings of one membership"), "{message}");
+    assert!(
+        message.contains("two spellings of one membership"),
+        "{message}"
+    );
 }
 
 /// **A comma is an ordinary byte in an access label.** The build hands the plugin a term *list*,
@@ -1842,7 +2036,10 @@ fn a_point_label_comes_from_a_field_or_a_source_never_both() {
         "point_visibility = { source = \"pairs\", field = \"categories\", default = \"public\" }",
     );
     let message = bound_err(&text, &[]);
-    assert!(message.contains("both a `field` and a `source`"), "{message}");
+    assert!(
+        message.contains("both a `field` and a `source`"),
+        "{message}"
+    );
 }
 
 /// The two geometry shapes are mutually exclusive: a row carries coordinates or a code.
@@ -1871,7 +2068,10 @@ fn membership_is_a_list_field_or_a_source_never_both() {
         "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\nfields                    = { members = \"members\" }",
     );
     let message = bound_err(&text, &[]);
-    assert!(message.contains("membership is declared twice"), "{message}");
+    assert!(
+        message.contains("membership is declared twice"),
+        "{message}"
+    );
 }
 
 /// A member source with no roster would make every mistyped key its own artifact.
@@ -2129,7 +2329,10 @@ fn acquisition_names_the_files_this_build_reads() {
         "{:?}",
         acquired.access
     );
-    assert_eq!(acquired.attribute_sources[0].path, dir.path().join("corpus.parquet"));
+    assert_eq!(
+        acquired.attribute_sources[0].path,
+        dir.path().join("corpus.parquet")
+    );
     assert!(acquired.layers.is_empty());
     assert_eq!(
         acquired.extent,
@@ -2150,10 +2353,13 @@ fn a_layer_names_its_artifacts_and_its_members() {
             "views                     = [\"s0\"]\nsource                    = \"hdbscan\"",
         )
     );
-    let config = parse_at(dir.path(), &text, &HashMap::new())
-        .expect("the layer's two sources are declared");
+    let config =
+        parse_at(dir.path(), &text, &HashMap::new()).expect("the layer's two sources are declared");
     let acquired = config.acquire("s0").unwrap();
-    assert_eq!(artifact_path(&acquired.layers[0]), Some(dir.path().join("hdbscan.parquet")));
+    assert_eq!(
+        artifact_path(&acquired.layers[0]),
+        Some(dir.path().join("hdbscan.parquet"))
+    );
     assert_eq!(
         acquired.layers[0].members.as_ref().map(|m| m.path.clone()),
         Some(dir.path().join("hdbscan_members.parquet"))
@@ -2162,7 +2368,10 @@ fn a_layer_names_its_artifacts_and_its_members() {
     let config = parse_at(dir.path(), &text, &files(&["hdbscan_members"]))
         .expect("one source staged elsewhere");
     let acquired = config.acquire("s0").unwrap();
-    assert_eq!(artifact_path(&acquired.layers[0]), Some(dir.path().join("hdbscan.parquet")));
+    assert_eq!(
+        artifact_path(&acquired.layers[0]),
+        Some(dir.path().join("hdbscan.parquet"))
+    );
     assert_eq!(
         acquired.layers[0].members.as_ref().map(|m| m.path.clone()),
         Some(PathBuf::from("/elsewhere/hdbscan_members.parquet"))
@@ -2181,12 +2390,10 @@ fn artifact_path(layer: &crate::config::LayerSources) -> Option<PathBuf> {
 /// own, and there is no discriminator column for either to select on.
 #[test]
 fn two_layers_read_their_own_files() {
-    let second = LAYER
-        .replace("clusters/a", "clusters/b")
-        .replace(
-            "views                     = [\"s0\"]",
-            "views                     = [\"s0\"]\nsource                    = \"other\"",
-        );
+    let second = LAYER.replace("clusters/a", "clusters/b").replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nsource                    = \"other\"",
+    );
     let first = LAYER.replace(
         "views                     = [\"s0\"]",
         "views                     = [\"s0\"]\nsource                    = \"hdbscan\"",
@@ -2212,7 +2419,10 @@ fn a_build_refuses_a_view_the_config_does_not_declare() {
     let config = parse_bound(ACQUIRED, &HashMap::new()).unwrap();
     let message = format!("{}", config.acquire("s9").expect_err("expected a refusal"));
     assert!(message.contains("--view 's9'"), "{message}");
-    assert!(message.contains("s0"), "the refusal must list them: {message}");
+    assert!(
+        message.contains("s0"),
+        "the refusal must list them: {message}"
+    );
 }
 
 /// ⊘ A view declaring no source **and reaching no `[defaults].source`** is legal and means the
@@ -2224,7 +2434,10 @@ fn a_build_refuses_a_view_with_no_source() {
         .replace("[defaults]\nsource = \"corpus\"\n", "");
     let config = parse_bound(&text, &HashMap::new()).unwrap();
     let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
-    assert!(message.contains("`source` is required to build"), "{message}");
+    assert!(
+        message.contains("`source` is required to build"),
+        "{message}"
+    );
 }
 
 /// All three label routes acquire: a field of the view's own source, a separate exploded relation,
@@ -2273,7 +2486,10 @@ fn a_build_refuses_an_attribute_with_no_source() {
     );
     let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
     assert!(message.contains("name no `source`"), "{message}");
-    assert!(message.contains("severity"), "the refusal names the column: {message}");
+    assert!(
+        message.contains("severity"),
+        "the refusal names the column: {message}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2319,7 +2535,11 @@ fn layers_keep_their_declaration_order() {
                   require_member_visibility = \"none\"\ndepends_on                = [\"clusters/a\"]\n";
     let config = parse_str(&with_layer(second)).expect("two layers parse");
     assert_eq!(
-        config.layers.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+        config
+            .layers
+            .iter()
+            .map(|l| l.name.as_str())
+            .collect::<Vec<_>>(),
         ["clusters/a", "topics/x"]
     );
 }

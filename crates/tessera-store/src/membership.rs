@@ -850,6 +850,502 @@ impl TileIndexPack {
     }
 }
 
+// ---- the row-major columns ------------------------------------------------------------------
+//
+// Two more formats, in this module for [`ContainmentPack`]'s reason — per-generation artifact
+// structures written into the prefix at the fold, addressed by **row** rather than by ordinal, and
+// served mapped (the layout memo's constraint 13). Each gets its own magic and its own version, so
+// a reader handed one of the five where another belongs refuses instead of finding a plausible
+// header.
+//
+// ```text
+// label := magic "TSLB" | u16 version | u8 width | u8 reserved | u32 rows | u32 ordinals
+//          labels: width bytes x rows
+//
+// list  := magic "TSLL" | u16 version | u8 width | u8 reserved | u32 rows | u32 ordinals
+//                       | u32 entries
+//          at:     u32 LE x (rows + 1)   -- into `values`; at[0] == 0, ascending, at[rows] == entries
+//          values: width bytes x entries
+// ```
+//
+// # The width, and the sentinel that costs one value
+//
+// The label width is `u8`, `u16` or `u32`, chosen by the artifact count — `configuration.md` §1's
+// declared widths, applied to a column of ordinals rather than of values. **The all-ones value at
+// each width is [`ROW_COLUMN_HOLE`]**: a row belonging to no artifact, which is most rows of most
+// layers and is a state the format has to be able to say. So a width admits `2^bits − 1` ordinals
+// and not `2^bits`, and a level at exactly the boundary takes the next width up. That is a value
+// per column rather than a bit per row, which is the right side of the trade at four bytes a row.
+//
+// A **list** column needs no such sentinel: a row belonging to no artifact has an empty list, which
+// the offsets already express. Its width bounds the same thing for the same reason.
+//
+// # Fail-closed
+//
+// Bad magic, an unknown version, an unknown width, a length the header does not describe,
+// non-ascending offsets, or a label naming an ordinal the level does not hold all **refuse**. The
+// direction of the mistake is the tile index's: a column read short leaves every row past the
+// truncation belonging to nobody, so the artifacts holding those rows simply stop being candidates
+// — indistinguishable from artifacts that failed an existence criterion, with nothing downstream to
+// notice. A label read *wide* is worse still, since it would count one artifact's rows under
+// another's identity.
+
+/// The label of a row no artifact claims, at whatever width the column is in: **all ones**.
+/// Returned by [`LabelColumnPack::label`] as `u32::MAX` whatever the stored width, so a caller
+/// compares against one constant rather than against three.
+pub const ROW_COLUMN_HOLE: u32 = u32::MAX;
+
+const LABEL_MAGIC: &[u8; 4] = b"TSLB";
+const LIST_MAGIC: &[u8; 4] = b"TSLL";
+/// Bumped whenever the header or the label encoding changes. There is no compatibility to keep
+/// (decision 0048); the number exists so a stale local file is a loud refusal rather than a silent
+/// misread of which artifact a row belongs to.
+const ROW_COLUMN_VERSION: u16 = 1;
+const LABEL_HEADER_LEN: usize = 4 + 2 + 1 + 1 + 4 + 4;
+const LIST_HEADER_LEN: usize = 4 + 2 + 1 + 1 + 4 + 4 + 4;
+
+fn row_column_malformed(what: &str, detail: impl std::fmt::Display) -> StoreError {
+    StoreError::MalformedBundle {
+        detail: format!("row-major column {what}: {detail}"),
+    }
+}
+
+/// The narrowest width that can address `ordinals` artifacts **and** the hole sentinel.
+///
+/// `configuration.md` §1's `u8`/`u16`/`u32` discipline, applied to ordinals. One fewer value than
+/// the width holds, because the all-ones value is [`ROW_COLUMN_HOLE`].
+pub fn row_column_width(ordinals: u64) -> u8 {
+    if ordinals < u64::from(u8::MAX) {
+        1
+    } else if ordinals < u64::from(u16::MAX) {
+        2
+    } else {
+        4
+    }
+}
+
+/// The hole sentinel as it is stored at `width`.
+fn hole_at(width: u8) -> u32 {
+    match width {
+        1 => u32::from(u8::MAX),
+        2 => u32::from(u16::MAX),
+        _ => u32::MAX,
+    }
+}
+
+fn put_narrow(out: &mut Vec<u8>, width: u8, value: u32) {
+    match width {
+        1 => out.push(value as u8),
+        2 => out.extend_from_slice(&(value as u16).to_le_bytes()),
+        _ => out.extend_from_slice(&value.to_le_bytes()),
+    }
+}
+
+/// Serialise one `(view, layer, level)`'s label column: `labels[row]` is the ordinal that row
+/// belongs to, or [`ROW_COLUMN_HOLE`].
+///
+/// `ordinals` is how many ordinals the level holds, holes included — carried so a reader can refuse
+/// a label naming an artifact the level does not have, which is what a truncated identifier column
+/// would otherwise look like.
+///
+/// Returns the bytes rather than writing them, for [`pack`]'s reason: the caller owns the durability
+/// sequence.
+pub fn pack_label_column(ordinals: u32, labels: &[u32]) -> Vec<u8> {
+    let width = row_column_width(u64::from(ordinals));
+    let hole = hole_at(width);
+    let mut out = Vec::with_capacity(LABEL_HEADER_LEN + labels.len() * usize::from(width));
+    out.extend_from_slice(LABEL_MAGIC);
+    out.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
+    out.push(width);
+    out.push(0);
+    out.extend_from_slice(&(labels.len() as u32).to_le_bytes());
+    out.extend_from_slice(&ordinals.to_le_bytes());
+    for label in labels {
+        put_narrow(
+            &mut out,
+            width,
+            if *label == ROW_COLUMN_HOLE {
+                hole
+            } else {
+                *label
+            },
+        );
+    }
+    out
+}
+
+/// Serialise one `(view, layer, level)`'s list column: `at[row]..at[row + 1]` into `values`.
+pub fn pack_list_column(ordinals: u32, at: &[u32], values: &[u32]) -> Vec<u8> {
+    let width = row_column_width(u64::from(ordinals));
+    let rows = at.len().saturating_sub(1) as u32;
+    let mut out =
+        Vec::with_capacity(LIST_HEADER_LEN + at.len() * 4 + values.len() * usize::from(width));
+    out.extend_from_slice(LIST_MAGIC);
+    out.extend_from_slice(&ROW_COLUMN_VERSION.to_le_bytes());
+    out.push(width);
+    out.push(0);
+    out.extend_from_slice(&rows.to_le_bytes());
+    out.extend_from_slice(&ordinals.to_le_bytes());
+    out.extend_from_slice(&(values.len() as u32).to_le_bytes());
+    for offset in at {
+        out.extend_from_slice(&offset.to_le_bytes());
+    }
+    for value in values {
+        put_narrow(&mut out, width, *value);
+    }
+    out
+}
+
+/// One `(view, layer, level)`'s label column, framed and checked once at open.
+///
+/// **Mapped, not decoded** — [`ContainmentPack`]'s argument, and here it is the whole point of the
+/// layout: the row-major form is one narrow integer per row *whatever the artifact count*, and it
+/// exists because at 10⁹ rows the artifact-major form does not fit at all
+/// (`design/artifact-serving-at-scale.md` §5.1).
+pub struct LabelColumnPack {
+    bytes: ContainmentBytes,
+    width: u8,
+    rows: u32,
+    ordinals: u32,
+}
+
+impl std::fmt::Debug for LabelColumnPack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LabelColumnPack")
+            .field("rows", &self.rows)
+            .field("ordinals", &self.ordinals)
+            .field("width", &self.width)
+            .finish()
+    }
+}
+
+impl LabelColumnPack {
+    /// Open a fold-written label column, mapped in place.
+    pub fn open(path: &Path) -> Result<Self> {
+        // SAFETY: as [`MembershipPack::open`] — read-only, and nothing truncates a published
+        // prefix's files while a generation names them.
+        let map = map_read_only(path)?;
+        Self::frame(ContainmentBytes::Mapped(map), &path.display().to_string())
+    }
+
+    /// The same structure held in memory, checked by the same rules — the form a publication builds
+    /// before any fold has consolidated it.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Self::frame(ContainmentBytes::Owned(bytes), "(in memory)")
+    }
+
+    fn frame(bytes: ContainmentBytes, what: &str) -> Result<Self> {
+        let raw = bytes.as_slice();
+        if raw.len() < LABEL_HEADER_LEN {
+            return Err(row_column_malformed(
+                what,
+                format!(
+                    "{} bytes is shorter than the {LABEL_HEADER_LEN}-byte header",
+                    raw.len()
+                ),
+            ));
+        }
+        if &raw[0..4] != LABEL_MAGIC {
+            return Err(row_column_malformed(what, "magic is not TSLB"));
+        }
+        let version = u16::from_le_bytes([raw[4], raw[5]]);
+        if version != ROW_COLUMN_VERSION {
+            return Err(row_column_malformed(
+                what,
+                format!("version {version}, expected {ROW_COLUMN_VERSION}"),
+            ));
+        }
+        let width = raw[6];
+        if !matches!(width, 1 | 2 | 4) {
+            return Err(row_column_malformed(
+                what,
+                format!("label width {width}, expected 1, 2 or 4"),
+            ));
+        }
+        if raw[7] != 0 {
+            return Err(row_column_malformed(
+                what,
+                format!("reserved is {}, expected 0", raw[7]),
+            ));
+        }
+        let read = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        let rows = read(8);
+        let ordinals = read(12);
+        // **A narrow column cannot address a wide level**, and the check is one value tighter than
+        // the obvious one because the all-ones value is the hole.
+        if u64::from(ordinals) >= u64::from(hole_at(width)) {
+            return Err(row_column_malformed(
+                what,
+                format!("{ordinals} ordinals cannot be addressed at width {width}"),
+            ));
+        }
+        let total = LABEL_HEADER_LEN + rows as usize * usize::from(width);
+        if raw.len() != total {
+            return Err(row_column_malformed(
+                what,
+                format!(
+                    "{} bytes, but the header describes {total} — the file is truncated or was \
+                     written by a different packer",
+                    raw.len()
+                ),
+            ));
+        }
+        let pack = LabelColumnPack {
+            bytes,
+            width,
+            rows,
+            ordinals,
+        };
+        // One pass over the column, which is the pass the caller is about to make anyway to derive
+        // the declared sizes. A label naming an ordinal the level does not hold is what a truncated
+        // or foreign column looks like, and serving it would count one artifact's rows under
+        // another's identity.
+        for row in 0..rows as usize {
+            let label = pack.label(row);
+            if label != ROW_COLUMN_HOLE && label >= ordinals {
+                return Err(row_column_malformed(
+                    what,
+                    format!("row {row} is labelled {label} of {ordinals} ordinals"),
+                ));
+            }
+        }
+        Ok(pack)
+    }
+
+    /// How many rows this column covers.
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    /// How many ordinals the level holds, holes included.
+    pub fn ordinals(&self) -> u32 {
+        self.ordinals
+    }
+
+    /// Bytes per label — 1, 2 or 4.
+    pub fn width(&self) -> u8 {
+        self.width
+    }
+
+    /// The ordinal `row` belongs to, or [`ROW_COLUMN_HOLE`]. Infallible for `row < rows()`, which
+    /// [`Self::frame`] proved; a row past the column is a hole.
+    pub fn label(&self, row: usize) -> u32 {
+        if row >= self.rows as usize {
+            return ROW_COLUMN_HOLE;
+        }
+        let raw = self.bytes.as_slice();
+        let at = LABEL_HEADER_LEN + row * usize::from(self.width);
+        let value = match self.width {
+            1 => u32::from(raw[at]),
+            2 => u32::from(u16::from_le_bytes([raw[at], raw[at + 1]])),
+            _ => u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]),
+        };
+        if value == hole_at(self.width) {
+            ROW_COLUMN_HOLE
+        } else {
+            value
+        }
+    }
+
+    /// This column's bytes, exactly as they would be written — so the durable form and the
+    /// in-memory form cannot be produced by two different encoders.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+}
+
+/// One `(view, layer, level)`'s list column, framed and checked once at open. The label column's
+/// format where a row may belong to several artifacts — the same inversion at a larger constant
+/// (`design/artifact-serving-at-scale.md` §5.1).
+pub struct ListColumnPack {
+    bytes: ContainmentBytes,
+    width: u8,
+    rows: u32,
+    ordinals: u32,
+    entries: u32,
+    values_at: usize,
+}
+
+impl std::fmt::Debug for ListColumnPack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ListColumnPack")
+            .field("rows", &self.rows)
+            .field("ordinals", &self.ordinals)
+            .field("entries", &self.entries)
+            .field("width", &self.width)
+            .finish()
+    }
+}
+
+impl ListColumnPack {
+    /// Open a fold-written list column, mapped in place.
+    pub fn open(path: &Path) -> Result<Self> {
+        // SAFETY: as [`MembershipPack::open`].
+        let map = map_read_only(path)?;
+        Self::frame(ContainmentBytes::Mapped(map), &path.display().to_string())
+    }
+
+    /// The same structure held in memory, checked by the same rules.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Self::frame(ContainmentBytes::Owned(bytes), "(in memory)")
+    }
+
+    fn frame(bytes: ContainmentBytes, what: &str) -> Result<Self> {
+        let raw = bytes.as_slice();
+        if raw.len() < LIST_HEADER_LEN {
+            return Err(row_column_malformed(
+                what,
+                format!(
+                    "{} bytes is shorter than the {LIST_HEADER_LEN}-byte header",
+                    raw.len()
+                ),
+            ));
+        }
+        if &raw[0..4] != LIST_MAGIC {
+            return Err(row_column_malformed(what, "magic is not TSLL"));
+        }
+        let version = u16::from_le_bytes([raw[4], raw[5]]);
+        if version != ROW_COLUMN_VERSION {
+            return Err(row_column_malformed(
+                what,
+                format!("version {version}, expected {ROW_COLUMN_VERSION}"),
+            ));
+        }
+        let width = raw[6];
+        if !matches!(width, 1 | 2 | 4) {
+            return Err(row_column_malformed(
+                what,
+                format!("entry width {width}, expected 1, 2 or 4"),
+            ));
+        }
+        if raw[7] != 0 {
+            return Err(row_column_malformed(
+                what,
+                format!("reserved is {}, expected 0", raw[7]),
+            ));
+        }
+        let read = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        let rows = read(8);
+        let ordinals = read(12);
+        let entries = read(16);
+        if u64::from(ordinals) >= u64::from(hole_at(width)) {
+            return Err(row_column_malformed(
+                what,
+                format!("{ordinals} ordinals cannot be addressed at width {width}"),
+            ));
+        }
+        let values_at = LIST_HEADER_LEN + (rows as usize + 1) * 4;
+        let total = values_at + entries as usize * usize::from(width);
+        if raw.len() != total {
+            return Err(row_column_malformed(
+                what,
+                format!(
+                    "{} bytes, but the header describes {total} — the file is truncated or was \
+                     written by a different packer",
+                    raw.len()
+                ),
+            ));
+        }
+        let pack = ListColumnPack {
+            bytes,
+            width,
+            rows,
+            ordinals,
+            entries,
+            values_at,
+        };
+        if pack.at(0) != 0 || pack.at(rows as usize) != entries {
+            return Err(row_column_malformed(
+                what,
+                "the row offsets do not span exactly the value column",
+            ));
+        }
+        for row in 0..rows as usize {
+            if pack.at(row) > pack.at(row + 1) {
+                return Err(row_column_malformed(
+                    what,
+                    format!("row offset {row} goes backwards"),
+                ));
+            }
+        }
+        for i in 0..entries as usize {
+            if pack.value(i) >= ordinals {
+                return Err(row_column_malformed(
+                    what,
+                    format!("entry {i} names ordinal {} of {ordinals}", pack.value(i)),
+                ));
+            }
+        }
+        Ok(pack)
+    }
+
+    pub fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    pub fn ordinals(&self) -> u32 {
+        self.ordinals
+    }
+
+    pub fn entries(&self) -> u32 {
+        self.entries
+    }
+
+    pub fn width(&self) -> u8 {
+        self.width
+    }
+
+    /// Where `row`'s list begins in the value column. Infallible for `row <= rows()`.
+    pub fn at(&self, row: usize) -> u32 {
+        let raw = self.bytes.as_slice();
+        let at = LIST_HEADER_LEN + row * 4;
+        u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]])
+    }
+
+    /// One entry of the value column.
+    pub fn value(&self, index: usize) -> u32 {
+        let raw = self.bytes.as_slice();
+        let at = self.values_at + index * usize::from(self.width);
+        match self.width {
+            1 => u32::from(raw[at]),
+            2 => u32::from(u16::from_le_bytes([raw[at], raw[at + 1]])),
+            _ => u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]),
+        }
+    }
+
+    /// The ordinals `row` belongs to. Empty for a row no artifact claims, and for a row past the
+    /// column.
+    pub fn list(&self, row: usize) -> impl Iterator<Item = u32> + '_ {
+        let (lo, hi) = if row < self.rows as usize {
+            (self.at(row) as usize, self.at(row + 1) as usize)
+        } else {
+            (0, 0)
+        };
+        (lo..hi).map(move |i| self.value(i))
+    }
+
+    /// This column's bytes, exactly as they would be written.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+}
+
+/// The read-only mapping the two row-major columns open with — one function rather than a third
+/// and fourth copy of the same safety argument: the file is opened read-only and the mapping is
+/// never written through, and nothing truncates a published prefix's files while a generation names
+/// them.
+fn map_read_only(path: &Path) -> Result<Mmap> {
+    let file = File::open(path).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    // SAFETY: see this function's doc.
+    unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1114,5 +1610,143 @@ mod tests {
         let at = TILE_INDEX_HEADER_LEN + 3 * 8 + 4;
         past_the_end[at..at + 4].copy_from_slice(&9_999u32.to_le_bytes());
         assert!(TileIndexPack::from_bytes(past_the_end).is_err());
+    }
+
+    // ---- the row-major columns ----------------------------------------------------------------
+
+    /// **The width is chosen by the artifact count, one value tighter than the obvious rule**,
+    /// because the all-ones value at each width is the hole.
+    #[test]
+    fn the_width_leaves_room_for_the_hole() {
+        assert_eq!(row_column_width(0), 1);
+        assert_eq!(row_column_width(254), 1);
+        // 255 ordinals would need the value 254 *and* 255-as-hole, so it moves up.
+        assert_eq!(row_column_width(255), 2);
+        assert_eq!(row_column_width(65_534), 2);
+        assert_eq!(row_column_width(65_535), 4);
+        assert_eq!(row_column_width(10_000_000), 4);
+    }
+
+    /// **A mapped file and the same bytes in memory are read by one reader**, and the hole survives
+    /// the round trip at every width — a row belonging to no artifact is most rows of most layers,
+    /// and a reader that lost the distinction would count them against ordinal 0.
+    #[test]
+    fn a_label_column_round_trips_at_every_width() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (ordinals, width) in [(3u32, 1u8), (300, 2), (70_000, 4)] {
+            let labels = vec![0, ROW_COLUMN_HOLE, ordinals - 1, 1, ROW_COLUMN_HOLE];
+            let bytes = pack_label_column(ordinals, &labels);
+            let path = write(tmp.path(), &format!("labels{width}.tslb"), &bytes);
+            let mapped = LabelColumnPack::open(&path).unwrap();
+            let owned = LabelColumnPack::from_bytes(bytes.clone()).unwrap();
+            for pack in [&mapped, &owned] {
+                assert_eq!(pack.width(), width);
+                assert_eq!(pack.rows(), 5);
+                assert_eq!(pack.ordinals(), ordinals);
+                for (row, expected) in labels.iter().enumerate() {
+                    assert_eq!(pack.label(row), *expected, "row {row} at width {width}");
+                }
+                // A row past the column is a hole, not a panic and not ordinal 0.
+                assert_eq!(pack.label(5), ROW_COLUMN_HOLE);
+            }
+            assert_eq!(mapped.as_bytes(), owned.as_bytes());
+        }
+    }
+
+    /// The list form, with an empty list beside a multi-entry one — the two states the label form
+    /// cannot express, and the whole reason it exists.
+    #[test]
+    fn a_list_column_round_trips_with_empty_and_shared_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        // row 0 -> {0, 2}, row 1 -> {}, row 2 -> {1}, row 3 -> {}
+        let at = vec![0u32, 2, 2, 3, 3];
+        let values = vec![0u32, 2, 1];
+        let bytes = pack_list_column(3, &at, &values);
+        let path = write(tmp.path(), "lists.tsll", &bytes);
+        let mapped = ListColumnPack::open(&path).unwrap();
+        let owned = ListColumnPack::from_bytes(bytes.clone()).unwrap();
+        for pack in [&mapped, &owned] {
+            assert_eq!(pack.rows(), 4);
+            assert_eq!(pack.ordinals(), 3);
+            assert_eq!(pack.entries(), 3);
+            assert_eq!(pack.list(0).collect::<Vec<_>>(), vec![0, 2]);
+            assert!(pack.list(1).next().is_none());
+            assert_eq!(pack.list(2).collect::<Vec<_>>(), vec![1]);
+            assert!(pack.list(3).next().is_none());
+            assert!(
+                pack.list(9).next().is_none(),
+                "a row past the column is empty"
+            );
+        }
+        assert_eq!(mapped.as_bytes(), owned.as_bytes());
+    }
+
+    /// Every framing fault refuses. A column read short leaves rows belonging to nobody, so the
+    /// artifacts holding them stop being candidates with nothing reporting a fault; a label read
+    /// wide counts one artifact's rows under another's identity.
+    #[test]
+    fn a_torn_or_foreign_row_column_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = pack_label_column(300, &[0, ROW_COLUMN_HOLE, 299, 1]);
+
+        let mut wrong_magic = good.clone();
+        wrong_magic[0] = b'X';
+        assert!(LabelColumnPack::from_bytes(wrong_magic).is_err());
+
+        // The neighbouring formats offered where this one belongs, in both directions: the distinct
+        // magics are what make each a refusal rather than a header that happens to parse.
+        assert!(LabelColumnPack::from_bytes(tile_index_bytes()).is_err());
+        assert!(LabelColumnPack::from_bytes(containment_bytes(4)).is_err());
+        assert!(LabelColumnPack::from_bytes(pack(0, &[vec![7u8; 8]])).is_err());
+        assert!(ListColumnPack::from_bytes(good.clone()).is_err());
+        assert!(LabelColumnPack::from_bytes(pack_list_column(2, &[0, 1], &[0])).is_err());
+        assert!(TileIndexPack::from_bytes(good.clone()).is_err());
+        assert!(ContainmentPack::from_bytes(good.clone()).is_err());
+
+        let mut future = good.clone();
+        future[4] = 99;
+        assert!(LabelColumnPack::from_bytes(future).is_err());
+
+        let mut odd_width = good.clone();
+        odd_width[6] = 3;
+        assert!(LabelColumnPack::from_bytes(odd_width).is_err());
+
+        let mut reserved = good.clone();
+        reserved[7] = 1;
+        assert!(LabelColumnPack::from_bytes(reserved).is_err());
+
+        let mut truncated = good.clone();
+        truncated.truncate(good.len() - 2);
+        let path = write(tmp.path(), "short.tslb", &truncated);
+        assert!(LabelColumnPack::open(&path).is_err());
+
+        // A label naming an ordinal the level does not hold — what a truncated identifier column
+        // read as a valid one looks like from the other side.
+        let mut wild = good.clone();
+        let at = LABEL_HEADER_LEN;
+        wild[at..at + 2].copy_from_slice(&999u16.to_le_bytes());
+        assert!(LabelColumnPack::from_bytes(wild).is_err());
+
+        // A width that cannot address the level it claims: 255 ordinals at width 1 leaves no value
+        // for the hole, so a hole would read as ordinal 255.
+        let mut narrow = good.clone();
+        narrow[6] = 1;
+        assert!(LabelColumnPack::from_bytes(narrow).is_err());
+
+        // And the list form's own faults.
+        let list = pack_list_column(3, &[0, 2, 2, 3, 3], &[0, 2, 1]);
+        let mut backwards = list.clone();
+        let at = LIST_HEADER_LEN + 4;
+        backwards[at..at + 4].copy_from_slice(&3u32.to_le_bytes());
+        assert!(ListColumnPack::from_bytes(backwards).is_err());
+
+        let mut wild_entry = list.clone();
+        let at = LIST_HEADER_LEN + 5 * 4;
+        wild_entry[at] = 9;
+        assert!(ListColumnPack::from_bytes(wild_entry).is_err());
+
+        let mut short_list = list.clone();
+        short_list.truncate(list.len() - 1);
+        assert!(ListColumnPack::from_bytes(short_list).is_err());
     }
 }
