@@ -9710,12 +9710,15 @@ impl Executor {
     /// **A pin is read, never re-derived**, and it reaches here as `declaration.layout` — see
     /// [`crate::layout::choose`].
     ///
-    /// ⊘ **What this adds to the fold's artifact pass is unpriced** (selection memo §9's constraint
-    /// 9), and it is a whole extra projection of one view: `RowSpace::project_base` per record, the
-    /// same call the row form and the tile index each already make. Coarsely measured on the
-    /// engine's own fold fixtures it is not separable from the pass's noise; at the campaign's 10⁷
-    /// artifacts it is a third pass over the 376 s §8.1 prices one at, and that figure is modelled
-    /// rather than measured.
+    /// **What this adds to the fold's artifact pass, coarsely measured** (selection memo §9's
+    /// constraint 9): on this crate's largest fixture — 700 000 rows, 1 100 artifacts of a hundred
+    /// members each, `tests/artifact_layout_flip.rs` — the pass runs at **2.5 s** with the
+    /// re-evaluation and the column write removed and **3.1 s** with them, so the layout machinery
+    /// is about **0.6 s, a quarter of the pass**. One debug-build run on one fixture: an order of
+    /// magnitude rather than a measurement, and it is what it is because this is a whole extra
+    /// projection of one view — `RowSpace::project_base` per record, the same call the row form and
+    /// the tile index each already make. ⊘ At the campaign's 10⁷ artifacts it is a third pass over
+    /// the 376 s §8.1 prices one at, which is modelled rather than measured.
     fn choose_layouts(
         &self,
         spaces: &[(String, tessera_store::RowSpace)],

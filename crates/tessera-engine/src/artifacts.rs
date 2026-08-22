@@ -919,6 +919,12 @@ pub struct ArtifactProjections {
     /// operator asked for. Counted per build rather than per request, and it names no artifact and
     /// no principal.
     fallbacks: std::sync::atomic::AtomicU64,
+    /// How many row-major columns this **composed** from a level's row form rather than claiming
+    /// from the prefix — [`Self::columns_adopted`]'s other half, read the same way. A deployment
+    /// that folded and restarted should see this at zero and the adopted gauge at the number of
+    /// row-major levels it holds; seeing the reverse says every coordinate was rejected, which is
+    /// correct and is the expensive answer.
+    columns_composed: std::sync::atomic::AtomicU64,
 }
 
 impl ArtifactProjections {
@@ -956,6 +962,12 @@ impl ArtifactProjections {
     /// See [`Self::fallbacks`].
     pub fn layout_fallbacks(&self) -> u64 {
         self.fallbacks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// See [`Self::columns_composed`].
+    pub fn columns_composed(&self) -> u64 {
+        self.columns_composed
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Take the fold-written partitions this prefix's manifests name, for every level whose
@@ -1420,7 +1432,13 @@ impl ArtifactProjections {
                 return Some(Arc::new(claimed));
             }
         }
-        RowColumn::compose(rows.membership(), rows.index().row_count(), layout).map(Arc::new)
+        let composed =
+            RowColumn::compose(rows.membership(), rows.index().row_count(), layout).map(Arc::new);
+        if composed.is_some() {
+            self.columns_composed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        composed
     }
 
     /// Take the fold-written column for this `(view, layer, level)` if one was adopted and its

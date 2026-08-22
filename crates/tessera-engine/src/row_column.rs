@@ -52,6 +52,14 @@ use tessera_store::permutation::RowSpace;
 use tessera_types::layer::ServingLayout;
 
 use crate::artifacts::MembershipRows;
+
+/// One walk of a level's live artifacts, handing each ordinal its **projected** rows.
+///
+/// **A callback rather than an iterator**, because the caller has to be able to run it more than
+/// once: a list column is an offset table sized by one pass and filled by a second, and the fold's
+/// walk holds one membership at a time rather than the level's. An iterator would have to be
+/// re-created, which is what this type is.
+type LevelWalk<'a> = &'a dyn Fn(&mut dyn FnMut(u32, &Bitmap));
 use crate::compose::WholeMask;
 
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
@@ -322,7 +330,7 @@ impl RowColumn {
         ordinals: u32,
         row_count: u32,
         layout: ServingLayout,
-        each: &dyn Fn(&mut dyn FnMut(u32, &Bitmap)),
+        each: LevelWalk<'_>,
     ) -> Option<Self> {
         let bytes = match layout {
             ServingLayout::ArtifactMajor => return None,

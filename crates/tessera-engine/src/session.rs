@@ -1723,6 +1723,25 @@ impl Engine {
         self.artifact_projections.columns_adopted()
     }
 
+    /// How many row-major columns were composed from a level's row form rather than claimed — see
+    /// [`crate::artifacts::ArtifactProjections::columns_composed`].
+    pub fn columns_composed(&self) -> u64 {
+        self.artifact_projections.columns_composed()
+    }
+
+    /// The serving layout recorded for one `(layer, level)`, or `None` where no such layer is
+    /// registered. Operator plane only: it names no artifact and no principal, and nothing on the
+    /// wire carries it.
+    pub fn recorded_layout(
+        &self,
+        layer: &str,
+        level: u32,
+    ) -> Option<tessera_types::layer::ServingLayout> {
+        self.write
+            .registered_layer(layer)
+            .map(|registered| registered.layout_of(level))
+    }
+
     /// Bound both caches, and the only route by which the two config keys reach them.
     ///
     /// **Not an `EngineConfig` field, deliberately** *(and this cost a design revision)*.
