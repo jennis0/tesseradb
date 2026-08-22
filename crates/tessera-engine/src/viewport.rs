@@ -3109,6 +3109,7 @@ impl Engine {
             denied,
         );
 
+        let source = generation.partition_source();
         let rows = self.write.with_artifacts(|store| {
             self.artifact_projections.get_or_build(
                 &generation.prefix,
@@ -3117,8 +3118,13 @@ impl Engine {
                 level,
                 store,
                 &view_data.row_space,
+                Some(&source),
             )
         });
+        // The same containment answers the viewport builds, from the same partition: an identifier
+        // route that resolved containment by a different arm would be a second ranking nobody
+        // wrote.
+        let containment = rows.partition().map(|p| p.answers(&session.satisfied));
         let ctx = DependencyContext {
             generation: &generation,
             satisfied: &session.satisfied,
@@ -3136,6 +3142,7 @@ impl Engine {
             rows: &rows,
             mask: &mask,
             dependency_served: &dependency_served,
+            containment,
         };
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
         // `artifact_visibility` names a field withholds here as it does on the viewport, which is
@@ -3348,11 +3355,13 @@ impl Engine {
                 attachment.level,
                 store,
                 &ctx.view_data.row_space,
+                Some(&ctx.generation.partition_source()),
             )
         });
         let nested = |a: &tessera_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
         };
+        let containment = rows.partition().map(|p| p.answers(ctx.satisfied));
         crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &ctx.generation.overlay,
@@ -3361,6 +3370,7 @@ impl Engine {
             rows: &rows,
             mask: ctx.mask,
             dependency_served: &nested,
+            containment,
         }
         // ⊘ Per-artifact terms arrive with content, so the target's own label is `None` here
         // exactly as it is on the two serving routes — the same fail-closed answer reached by the
@@ -3444,6 +3454,9 @@ impl Engine {
         }
 
         let shard = generation.bundle.manifest.identity.shard_id;
+        // Built once for the whole response: the postings and the manifest's plugin are the
+        // generation's, not the layer's, and the gate they carry is one decision per request.
+        let source = generation.partition_source();
 
         // **The layers this response walks**, which is what makes the dependent drop below
         // decidable. A target missing from a response that never looked at its layer was not
@@ -3497,8 +3510,10 @@ impl Engine {
                         level,
                         store,
                         &view_data.row_space,
+                        Some(&source),
                     )
                 });
+                let containment = rows.partition().map(|p| p.answers(&session.satisfied));
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
@@ -3507,6 +3522,7 @@ impl Engine {
                     rows: &rows,
                     mask,
                     dependency_served: &dependency_served,
+                    containment,
                 };
                 // **Every candidate is tested before any is cut**, and the two passes are separate
                 // for a reason that is not performance: the verdict is a per-artifact question

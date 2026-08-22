@@ -831,6 +831,24 @@ impl Engine {
             )));
         }
 
+        // **The containment partition's gate, announced where the plugin is** (see
+        // `crate::containment`). The partition answers `G ⊆ M_auth` from term signatures, which is
+        // sound exactly when authorisation is signature-shaped — true of the builtin plugin by
+        // construction and unverifiable for any other. Under a foreign plugin nothing is built and
+        // containment stays on the masked-count route, which asks `M_auth` itself. That is
+        // fail-closed and correct, and it is also invisible from a response, so it is said here.
+        if !crate::containment::signature_shaped(&served_hash) {
+            tracing::warn!(
+                data_plugin_hash = %served_hash,
+                "this bundle is served by a plugin other than the builtin, so the containment \
+                 partition is not built: the expression it interns is over term signatures, which \
+                 is sound only where an entity's visibility is decided by its own term set, and a \
+                 foreign plugin's rule cannot be shown to be. Containment is answered per artifact \
+                 per request against the composed mask instead — the same answer, at the cost the \
+                 partition exists to remove"
+            );
+        }
+
         let current = read_current(bundle_root)?;
         let prefix = current.prefix.clone();
         let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
@@ -2348,6 +2366,18 @@ impl Engine {
     /// only — counts of structures, naming no artifact, no layer and no principal.
     pub fn artifact_cache_held(&self) -> (usize, usize) {
         (self.artifact_projections.held(), self.lineages.held())
+    }
+
+    /// How many of this engine's artifact row-form builds also composed a containment partition
+    /// (`crate::containment`).
+    ///
+    /// **Beside [`Engine::artifact_cache_builds`] because the interesting number is the ratio.**
+    /// Under the builtin plugin the two move together; under any other one this stays at zero
+    /// while the other climbs, and containment is on the masked-count route everywhere. That is a
+    /// deliberate, fail-closed state rather than a fault, and an operator has no other way to see
+    /// it. Operator plane only — it names no artifact, no layer and no principal.
+    pub fn artifact_containment_partitions(&self) -> u64 {
+        self.artifact_projections.partitions()
     }
 
     /// The last compaction fold's per-pass wall clock and resident set — empty before the first

@@ -79,6 +79,7 @@ use tessera_types::{EntityId, TermId};
 use tessera_store::permutation::RowSpace;
 
 use crate::compose::MaskedSet;
+use crate::containment::{ContainmentAnswers, ContainmentPartition, PartitionSource};
 
 /// One level's per-ordinal facts that **no row space is involved in**: the attachment edge, the
 /// parent edge, and each content's declared generating-set size.
@@ -154,6 +155,12 @@ pub struct MembershipRows {
 pub struct ArtifactRows {
     records: ArtifactRecords,
     membership: MembershipRows,
+    /// The containment partition, where this level has one.
+    ///
+    /// `None` under any plugin but the builtin — see [`crate::containment`], whose gate is settled
+    /// fail-closed — and containment then stays on the masked-count route, which asks `M_auth`
+    /// itself and so cannot depend on the shape of the rule that produced it.
+    partition: Option<ContainmentPartition>,
 }
 
 /// The containment test's three outcomes.
@@ -309,7 +316,19 @@ impl ArtifactRows {
         ArtifactRows {
             records,
             membership,
+            partition: None,
         }
+    }
+
+    /// Attach the containment partition composed for the same level at the same level version.
+    ///
+    /// Separate from [`Self::build`] because the two read different things — this one reads the
+    /// postings, which no row form needs — and because a caller that cannot supply a partition
+    /// (a foreign plugin, or a probe measuring the masked-count route) must be able to build the
+    /// form without one.
+    pub fn with_partition(mut self, partition: Option<ContainmentPartition>) -> Self {
+        self.partition = partition;
+        self
     }
 
     /// The entity-space half.
@@ -320,6 +339,11 @@ impl ArtifactRows {
     /// The row-space half.
     pub fn membership(&self) -> &MembershipRows {
         &self.membership
+    }
+
+    /// This level's containment partition, if it has one.
+    pub fn partition(&self) -> Option<&ContainmentPartition> {
+        self.partition.as_ref()
     }
 
     /// What the artifact at `ordinal` hangs from, if it hangs from anything.
@@ -424,6 +448,58 @@ impl ArtifactRows {
         }
         Containment::Unsatisfied
     }
+
+    /// [`Self::satisfied_rank`] answered from the containment partition instead of from the mask —
+    /// the fast arm, and `None` where the partition cannot answer and the caller must fall back.
+    ///
+    /// **The same three tests in the same order, and the first and third are unchanged.**
+    /// Projection loss is a per-view property of the artifact and stays on the row form; the
+    /// **middle** test — *does this viewer hold every member* — is what moves from a mask
+    /// intersection to a lookup; and the deny correction is asked of the mask, live, exactly where
+    /// the expression would otherwise have passed. A rank that fails any of the three falls
+    /// through to the next one, which is what the masked-count route does with a rank whose count
+    /// came back short, for whichever of the three reasons it was.
+    ///
+    /// **`None` is not an answer**, and the distinction is the whole of the fallback's safety: a
+    /// partition that does not cover this ordinal, or whose ranks disagree with the row form's,
+    /// sends the caller to the route that asks `M_auth` itself rather than answering from a
+    /// structure that does not describe the artifact in front of it.
+    pub fn satisfied_rank_via(
+        &self,
+        ordinal: u32,
+        answers: &ContainmentAnswers<'_>,
+        mask: &impl MaskedSet,
+        layer_declares_content: bool,
+    ) -> Option<Containment> {
+        if !answers.covers(ordinal) {
+            return None;
+        }
+        let declared = self.records.declared(ordinal);
+        let generating = self.membership.generating(ordinal);
+        if declared.is_empty() {
+            return Some(if layer_declares_content {
+                Containment::Unsatisfied
+            } else {
+                Containment::NothingToContain
+            });
+        }
+        for (i, (rows, declared)) in generating.iter().zip(declared).enumerate() {
+            if rows.cardinality() != *declared {
+                continue;
+            }
+            if !answers.satisfies(ordinal, i)? {
+                continue;
+            }
+            // **The acceptance test.** The expression says the viewer's terms reach every member;
+            // a deletion or a suppression removes one whatever the terms say, and this is where
+            // that is asked — live, of the mask this request composed.
+            if mask.withholds_any(rows) {
+                continue;
+            }
+            return Some(Containment::Satisfied(i as u32));
+        }
+        Some(Containment::Unsatisfied)
+    }
 }
 
 /// What a cached [`ArtifactRows`] was built from. **Every term is a reason the projection would be
@@ -479,8 +555,13 @@ pub struct ArtifactProjections {
     /// How many forms this has built since the engine opened. **The cadence, counted** — what
     /// §8.1 is about is not the cost of one build but how many a write provokes, and that is a
     /// number nothing reported until the grain changed. Read by the fold's own log line and by
-    /// [`crate::Engine::artifact_projection_builds`].
+    /// [`crate::Engine::artifact_cache_builds`].
     builds: std::sync::atomic::AtomicU64,
+    /// How many of those builds also composed a containment partition. **The gate, counted** —
+    /// under a foreign plugin this stays at zero while `builds` climbs, which is what makes *the
+    /// partition declined everywhere* distinguishable from *the partition was never asked for*.
+    /// Operator plane only; it names no artifact and no principal.
+    partitions: std::sync::atomic::AtomicU64,
 }
 
 impl ArtifactProjections {
@@ -491,6 +572,11 @@ impl ArtifactProjections {
     /// See [`Self::builds`].
     pub fn builds(&self) -> u64 {
         self.builds.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// See [`Self::partitions`].
+    pub fn partitions(&self) -> u64 {
+        self.partitions.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// How many forms are held. Operator plane only, beside [`Self::builds`] — a count of
@@ -527,6 +613,11 @@ impl ArtifactProjections {
     /// other layer's requests behind it. Two threads racing the same key both build and the last
     /// one wins; they build from the same level version over the same row space, so the two
     /// results are equal and the waste is one projection, not a wrong answer.
+    // Eight, and every one is a thing a level's derived form is *of*: where it came from (prefix,
+    // view, layer, level), what it is built from (the store, the row space), and what the
+    // containment partition needs beside them. Bundling them would name the same eight things one
+    // call earlier — the argument `serve_artifacts` already makes for its nine.
+    #[allow(clippy::too_many_arguments)]
     pub fn get_or_build(
         &self,
         prefix: &str,
@@ -535,6 +626,7 @@ impl ArtifactProjections {
         level: u32,
         store: &ArtifactStore,
         space: &RowSpace,
+        source: Option<&PartitionSource<'_>>,
     ) -> Arc<ArtifactRows> {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
@@ -554,7 +646,41 @@ impl ArtifactProjections {
             }
         }
 
-        let rows = Arc::new(ArtifactRows::build(store.level(layer, level), space));
+        // **Both derivations, and the partition, from one borrow of the store at one level
+        // version.** The row form, the records and the containment partition describe the same
+        // population, and a growth landing between two reads leaves one of them describing a set
+        // the others no longer have — the hazard
+        // `2026-08-21-artifact-layout-selection.md` §9's first constraint names.
+        //
+        // **A partition that fails to compose is an absence, not an error.** The only failure is
+        // an unreadable postings file, and the answer to that is the masked-count route, which
+        // reads no postings and is what every request took before this structure existed. Logged
+        // rather than returned, because the caller's alternative would be to fail a request over a
+        // derivation that has a correct fallback.
+        let partition = source
+            .filter(|source| source.signature_shaped())
+            .and_then(|source| {
+                match ContainmentPartition::compose(store, layer, level, source.postings) {
+                    Ok(partition) => Some(partition),
+                    Err(error) => {
+                        tracing::warn!(
+                            layer = %layer,
+                            level,
+                            %error,
+                            "the containment partition could not be composed from the postings; \
+                             containment stays on the masked-count route for this level"
+                        );
+                        None
+                    }
+                }
+            });
+        if partition.is_some() {
+            self.partitions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        let rows = Arc::new(
+            ArtifactRows::build(store.level(layer, level), space).with_partition(partition),
+        );
         self.builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.cached
@@ -651,6 +777,14 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     pub dependency_served: &'a dyn Fn(&Attachment) -> bool,
     /// The viewer's **composed** mask — see [`MaskedSet`] for why the type forbids anything else.
     pub mask: &'a M,
+    /// This principal's answers over the level's containment partition, where the level has one.
+    ///
+    /// **A fast arm, never a second rule.** `None` puts every artifact on the masked-count route,
+    /// which is what a foreign plugin gets and what the probe measures; `Some` answers the same
+    /// question from terms and asks the mask only for the deny correction
+    /// ([`crate::containment`]). The two must agree rank for rank, and
+    /// `tests/artifact_containment.rs` is where that is asserted rather than assumed.
+    pub containment: Option<ContainmentAnswers<'a>>,
 }
 
 impl<M: MaskedSet> ArtifactView<'_, M> {
@@ -725,17 +859,32 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         // 6. Containment, last: the first content whose generating set this viewer holds
         //    **entirely**. A viewer satisfying none receives no artifact — not the artifact with
         //    its description missing, which is the in-between state decision 0076 forbids.
-        let rank = match self.rows.satisfied_rank(
-            ordinal,
-            self.mask,
-            !self.declaration.content.supplied.is_empty(),
-        ) {
+        let rank = match self.containment(ordinal) {
             Containment::NothingToContain => None,
             Containment::Satisfied(i) => Some(i),
             Containment::Unsatisfied => return ArtifactVerdict::Absent(Withheld::Containment),
         };
 
         ArtifactVerdict::Serve { masked_count, rank }
+    }
+
+    /// Containment, by the partition where there is one and by the mask where there is not.
+    ///
+    /// **One call site, so the two arms cannot be reached by different routes.** Which arm answers
+    /// is a property of the level and of the bundle's plugin; it is never a property of the
+    /// viewer, and no caller chooses.
+    fn containment(&self, ordinal: u32) -> Containment {
+        let declares_content = !self.declaration.content.supplied.is_empty();
+        if let Some(answers) = &self.containment {
+            if let Some(containment) =
+                self.rows
+                    .satisfied_rank_via(ordinal, answers, self.mask, declares_content)
+            {
+                return containment;
+            }
+        }
+        self.rows
+            .satisfied_rank(ordinal, self.mask, declares_content)
     }
 
     /// The artifact's full membership size, in **row** terms.
@@ -794,6 +943,7 @@ mod tests {
                 parents: vec![None; sets.len()],
                 declared: vec![Vec::new(); sets.len()],
             },
+            partition: None,
             membership: MembershipRows {
                 rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
                 generating: vec![Vec::new(); sets.len()],
@@ -824,6 +974,7 @@ mod tests {
                 parents: vec![None],
                 declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
             },
+            partition: None,
             membership: MembershipRows {
                 rows: vec![Some(Bitmap::of(members))],
                 generating: vec![contents.iter().map(|(set, _)| Bitmap::of(set)).collect()],
@@ -861,6 +1012,7 @@ mod tests {
                 rows: &self.rows,
                 mask: &self.mask,
                 dependency_served: &dependency_served,
+                containment: None,
             }
         }
     }
@@ -1061,6 +1213,7 @@ mod tests {
             rows: &rows,
             mask: &all,
             dependency_served: &dependency_served,
+            containment: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1081,6 +1234,7 @@ mod tests {
             rows: &rows,
             mask: &nearly,
             dependency_served: &dependency_served,
+            containment: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1109,6 +1263,7 @@ mod tests {
                 rows: &rows,
                 mask,
                 dependency_served: &dependency_served,
+                containment: None,
             }
             .verdict(EntityId::new(999), 0, None)
         };
@@ -1152,6 +1307,7 @@ mod tests {
             rows: &rows,
             mask: &everything,
             dependency_served: &dependency_served,
+            containment: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1181,6 +1337,7 @@ mod tests {
                 parents: vec![None],
                 declared: vec![Vec::new()],
             },
+            partition: None,
             membership: MembershipRows {
                 rows: vec![Some(Bitmap::of(members))],
                 generating: vec![Vec::new()],
@@ -1208,6 +1365,7 @@ mod tests {
                 rows: &rows,
                 mask: &mask,
                 dependency_served: prerequisite,
+                containment: None,
             }
             .verdict(LABEL_ENTITY, 0, None)
         };
@@ -1242,6 +1400,7 @@ mod tests {
                 rows: &rows,
                 mask: &mask,
                 dependency_served: &dependency_served,
+                containment: None,
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Verdict)
@@ -1265,6 +1424,7 @@ mod tests {
                 rows: &rows,
                 mask: &mask,
                 dependency_served: &dependency_absent,
+                containment: None,
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Attachment)
@@ -1290,6 +1450,7 @@ mod tests {
             rows: &rows,
             mask: &mask,
             dependency_served: &never,
+            containment: None,
         }
         .verdict(EntityId::new(999), 0, None)
         .is_served());
@@ -1307,6 +1468,190 @@ mod tests {
                 masked_count: 3,
                 rank: None
             }
+        );
+    }
+
+    // ---- the containment partition's arm -----------------------------------------------------
+
+    /// A mask that can tell *absent* from *withheld*, which a bare `Bitmap` cannot.
+    ///
+    /// The predicate's fast arm asks two different questions of the mask — is this row visible,
+    /// and is it **denied** — and only the composed mask distinguishes them in a release build.
+    /// This is the test-only stand-in, and the two sets are given separately so a case can put a
+    /// row in neither, in one, or in both.
+    struct WithheldMask {
+        visible: Bitmap,
+        withheld: Bitmap,
+    }
+
+    impl MaskedSet for WithheldMask {
+        fn count_intersection(&self, set: &Bitmap) -> u64 {
+            self.visible.and(set).andnot(&self.withheld).cardinality()
+        }
+
+        fn intersects_set(&self, set: &Bitmap) -> bool {
+            !self.visible.and(set).andnot(&self.withheld).is_empty()
+        }
+
+        fn visible_rows(&self, set: &Bitmap) -> Bitmap {
+            self.visible.and(set).andnot(&self.withheld)
+        }
+
+        fn withholds_any(&self, set: &Bitmap) -> bool {
+            self.withheld.intersect(set)
+        }
+    }
+
+    /// A partition over one artifact's ranked contents, built from the clauses a test names
+    /// directly rather than from postings — these cases are about the predicate's arm, and
+    /// composing signatures would test the inversion instead.
+    fn partition_of(clauses_per_rank: &[&[&[u32]]]) -> ContainmentPartition {
+        ContainmentPartition::of_clauses(&[clauses_per_rank])
+    }
+
+    fn satisfied_terms(terms: &[u32]) -> FxHashSet<TermId> {
+        terms.iter().map(|t| TermId::new(*t)).collect()
+    }
+
+    /// **The two arms return the same rank**, on the case the design turns on: a viewer failing
+    /// the full sample and satisfying the narrow one. The partition answers from terms, the
+    /// masked-count route from `M_auth`, and a disagreement would mean one of them is serving
+    /// content on a set the other says the viewer does not hold.
+    #[test]
+    fn the_partition_and_the_mask_agree_on_the_served_rank() {
+        // Rank 0 is generated from rows 1..=4, whose entities carry terms 7 and 8; rank 1 from
+        // rows 1..=2, term 7 alone.
+        let rows = rows_with_contents(&[1, 2, 3, 4], &[(&[1, 2, 3, 4], 4), (&[1, 2], 2)])
+            .with_partition(Some(partition_of(&[&[&[7], &[8]], &[&[7]]])));
+        let partition = rows.partition().expect("the fixture attached one");
+
+        for (held, visible, expected) in [
+            (&[7u32, 8u32][..], &[1u32, 2, 3, 4][..], Some(0u32)),
+            (&[7], &[1, 2], Some(1)),
+            (&[8], &[3, 4], None),
+        ] {
+            let mask = WithheldMask {
+                visible: Bitmap::of(visible),
+                withheld: Bitmap::new(),
+            };
+            let held = satisfied_terms(held);
+            let answers = partition.answers(&held);
+            let expected = match expected {
+                Some(rank) => Containment::Satisfied(rank),
+                None => Containment::Unsatisfied,
+            };
+            assert_eq!(
+                rows.satisfied_rank(0, &mask, true),
+                expected,
+                "the masked-count route disagrees with the case's own arithmetic"
+            );
+            assert_eq!(
+                rows.satisfied_rank_via(0, &answers, &mask, true),
+                Some(expected),
+                "the partition's arm disagrees with the masked-count route"
+            );
+        }
+    }
+
+    /// **The deny correction is the acceptance test, not a refinement.** The expression says the
+    /// viewer's terms reach every member of rank 0's generating set — and one of those members is
+    /// suppressed, so the artifact is served rank 1 instead. Without the correction the partition
+    /// serves content generated from a document the viewer may no longer see, which is the
+    /// fail-open the write cycle exists to prevent.
+    #[test]
+    fn a_denied_member_of_the_generating_set_fails_containment_through_the_partition() {
+        let rows = rows_with_contents(&[1, 2, 3, 4], &[(&[1, 2, 3, 4], 4), (&[1, 2], 2)])
+            .with_partition(Some(partition_of(&[&[&[7]], &[&[7]]])));
+        let partition = rows.partition().unwrap();
+        let held = satisfied_terms(&[7]);
+        let answers = partition.answers(&held);
+
+        // Nothing denied: the caller's first choice.
+        let open = WithheldMask {
+            visible: Bitmap::of(&[1, 2, 3, 4]),
+            withheld: Bitmap::new(),
+        };
+        assert_eq!(
+            rows.satisfied_rank_via(0, &answers, &open, true),
+            Some(Containment::Satisfied(0))
+        );
+
+        // Row 4 suppressed — a member of rank 0's set and of nothing else.
+        let denied = WithheldMask {
+            visible: Bitmap::of(&[1, 2, 3, 4]),
+            withheld: Bitmap::of(&[4]),
+        };
+        assert_eq!(
+            rows.satisfied_rank_via(0, &answers, &denied, true),
+            Some(Containment::Satisfied(1)),
+            "the expression still holds and the member is gone, so the next rank answers"
+        );
+        assert_eq!(
+            rows.satisfied_rank(0, &denied, true),
+            Containment::Satisfied(1),
+            "and the masked-count route says the same, which is what makes it a correction \
+             rather than a second rule"
+        );
+
+        // And with the narrow set denied too there is nothing left to serve.
+        let all_denied = WithheldMask {
+            visible: Bitmap::of(&[1, 2, 3, 4]),
+            withheld: Bitmap::of(&[1, 4]),
+        };
+        assert_eq!(
+            rows.satisfied_rank_via(0, &answers, &all_denied, true),
+            Some(Containment::Unsatisfied)
+        );
+        assert_eq!(
+            rows.satisfied_rank(0, &all_denied, true),
+            Containment::Unsatisfied
+        );
+    }
+
+    /// **Projection loss is not in the expression and must not be lost with it.** A generating set
+    /// that lost a member on the way into row space can never be contained, however completely the
+    /// viewer's terms cover what survived — the partition's arm checks it first, exactly as the
+    /// masked-count route does.
+    #[test]
+    fn the_partition_still_refuses_a_set_that_did_not_survive_projection() {
+        // Two rows survived; the caller published four.
+        let rows = rows_with_contents(&[1, 2, 3], &[(&[1, 2], 4)])
+            .with_partition(Some(partition_of(&[&[&[7]]])));
+        let partition = rows.partition().unwrap();
+        let held = satisfied_terms(&[7]);
+        let answers = partition.answers(&held);
+        let everything = WithheldMask {
+            visible: Bitmap::from_range(0..1000),
+            withheld: Bitmap::new(),
+        };
+        assert_eq!(
+            rows.satisfied_rank_via(0, &answers, &everything, true),
+            Some(Containment::Unsatisfied),
+            "a viewer who can see every row there is must still not be served a set that lost \
+             members on the way into row space"
+        );
+    }
+
+    /// A partition that does not cover the ordinal in front of it declines rather than answering,
+    /// and the caller falls back to the route that asks `M_auth` itself. **`None` is not a
+    /// verdict** — collapsing it to `Unsatisfied` would withhold every artifact past a partition
+    /// that was one ordinal short.
+    #[test]
+    fn a_partition_that_does_not_cover_the_ordinal_declines() {
+        let rows = rows_of(&[&[1, 2], &[3, 4]])
+            .with_partition(Some(ContainmentPartition::of_clauses(&[&[]])));
+        let partition = rows.partition().unwrap();
+        let held = satisfied_terms(&[7]);
+        let answers = partition.answers(&held);
+        let mask = WithheldMask {
+            visible: Bitmap::of(&[1, 2, 3, 4]),
+            withheld: Bitmap::new(),
+        };
+        assert!(answers.covers(0));
+        assert_eq!(
+            rows.satisfied_rank_via(1, &answers, &mask, true),
+            None,
+            "the second ordinal is past the partition, so it has no answer to give"
         );
     }
 }

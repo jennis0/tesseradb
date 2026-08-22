@@ -9244,6 +9244,7 @@ impl Executor {
                             *level,
                             store,
                             &view_data.row_space,
+                            Some(&generation.partition_source()),
                         )
                     });
                 }

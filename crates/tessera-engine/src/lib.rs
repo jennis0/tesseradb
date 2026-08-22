@@ -13,6 +13,7 @@ mod categories;
 mod coalesce;
 mod compact;
 pub mod compose;
+pub mod containment;
 pub mod cut;
 pub mod derived;
 pub mod filter;
@@ -79,7 +80,7 @@ pub use tessera_store::manifest::DeclaredScalar;
 // The ingest handler resolves category keys to codes and must name the reserved *absent* code and
 // the binding view to do it. Re-exported for the same layering reason as `DeclaredScalar`.
 pub use tessera_store::manifest::{
-    Visibility, ManifestVocabulary, ManifestVocabularyValue, VocabularyKind,
+    ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyKind,
 };
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
@@ -243,6 +244,17 @@ impl Generation {
     /// the cache it keys cannot disagree.
     pub(crate) fn bundle_identity(&self) -> [u8; 32] {
         self.fragments.bundle_identity()
+    }
+
+    /// What a containment partition is composed from, for this generation — the base postings and
+    /// the manifest's declared plugin, taken together so the gate cannot be applied to one
+    /// generation's postings on another generation's manifest
+    /// (see [`crate::containment::PartitionSource`]).
+    pub(crate) fn partition_source(&self) -> crate::containment::PartitionSource<'_> {
+        crate::containment::PartitionSource {
+            postings: &self.postings,
+            data_plugin_hash: &self.bundle.manifest.data_plugin_hash,
+        }
     }
 }
 

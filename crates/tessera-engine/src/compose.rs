@@ -228,7 +228,10 @@ pub enum FilterRows {
     /// emptiness means nothing at all.
     ///
     /// `domain` is ascending, disjoint and maximally merged — [`Self::covers`] binary-searches it.
-    Viewport { rows: Bitmap, domain: Vec<Range<u32>> },
+    Viewport {
+        rows: Bitmap,
+        domain: Vec<Range<u32>>,
+    },
 }
 
 impl FilterRows {
@@ -335,6 +338,23 @@ pub trait MaskedSet {
     /// Materialising is the cost derived content opts into: O(visible members), against the count's
     /// O(containers touched). That asymmetry is why the vocabulary is declared per layer.
     fn visible_rows(&self, set: &Bitmap) -> Bitmap;
+
+    /// Whether any row of `set` is **withheld** from this viewer — denied by the overlay, or
+    /// failing the buffer's own verdict — as against merely sitting outside their fragment.
+    ///
+    /// **The containment partition's acceptance test, and the reason it is on this trait**
+    /// (`crate::containment`). A partition answers `G ⊆ M_auth` from terms alone, which a deletion
+    /// or a suppression does not touch; consulted on its own it is fail-open for exactly the case
+    /// the write cycle exists to make safe. Asking here is what keeps the correction live — this
+    /// mask was composed from `Generation::denied`, which the deny lane re-derives at the
+    /// acknowledgement and, on an unsuppress, **re-derives rather than subtracts**, so
+    /// `delete → suppress → unsuppress` leaves the entity deleted.
+    ///
+    /// **The `∩ base` clamp is why the narrower set is the exact one.** `minus` holds only denied
+    /// rows that were in the fragment to begin with, and the partition consults this only where
+    /// its expression already put every member of the set inside the fragment — so a denied member
+    /// the clamp drops is one the expression had already rejected.
+    fn withholds_any(&self, set: &Bitmap) -> bool;
 }
 
 impl MaskedSet for EffectiveMask {
@@ -375,6 +395,10 @@ impl MaskedSet for EffectiveMask {
         visible.or_inplace(&self.plus.and(set));
         visible
     }
+
+    fn withholds_any(&self, set: &Bitmap) -> bool {
+        self.minus.intersect(set)
+    }
 }
 
 /// A mask with no denials — **test-only**, so that no release build can put an uncomposed set where
@@ -392,6 +416,12 @@ impl MaskedSet for Bitmap {
     fn visible_rows(&self, set: &Bitmap) -> Bitmap {
         self.and(set)
     }
+
+    /// A bare bitmap carries no overlay, so nothing is withheld as against absent. A test needing
+    /// the deny arm builds a mask that has one — see `artifacts`' `WithheldMask`.
+    fn withholds_any(&self, _set: &Bitmap) -> bool {
+        false
+    }
 }
 
 impl EffectiveMask {
@@ -403,7 +433,6 @@ impl EffectiveMask {
         self.filter = Some(rows);
         self
     }
-
 
     /// `base.range_cardinality(r) − |minus ∩ r| + |plus ∩ r|` — see this module's doc for why the
     /// two clamps in [`compose`] make this arithmetic exact rather than merely approximate.
@@ -520,7 +549,11 @@ impl EffectiveMask {
     ///
     pub fn contains_row(&self, row: u32) -> bool {
         self.debug_assert_in_domain(&(row..row + 1));
-        if self.filter.as_ref().is_some_and(|f| !f.rows().contains(row)) {
+        if self
+            .filter
+            .as_ref()
+            .is_some_and(|f| !f.rows().contains(row))
+        {
             return false;
         }
         if self.minus.contains(row) {
@@ -739,10 +772,7 @@ pub(crate) fn derive_denied(overlay: &Overlay, bundle: &Bundle) -> DenyMask {
         for (view, view_data) in &partition.views {
             // Every view gets an entry, empty or not: a missing one must mean "the mask and the
             // bundle disagree", never "nothing is denied here".
-            out.insert(
-                view.clone(),
-                denied_rows_of(overlay, &view_data.row_space),
-            );
+            out.insert(view.clone(), denied_rows_of(overlay, &view_data.row_space));
         }
     }
     out

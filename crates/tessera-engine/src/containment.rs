@@ -1,0 +1,743 @@
+//! The containment partition: `G ⊆ M_auth` answered from terms, once for every principal there
+//! will ever be.
+//!
+//! # What it replaces, and why the replacement is exact
+//!
+//! Containment is the question *does this viewer hold every member of this content's generating
+//! set*. [`crate::artifacts::ArtifactRows::satisfied_rank`] answers it by intersecting the
+//! projected set with the composed mask, per artifact, per request. `annotations.md` §4 says why
+//! that is more work than the question needs:
+//!
+//! > what decides is **which** terms, never *how many* items
+//!
+//! An entity is in `M_auth` exactly when one of its own terms is one the principal satisfies, so
+//!
+//! ```text
+//! G ⊆ M_auth   ⟺   ⋀ over e in G of ( ⋁ over t in signature(e) of satisfied(t) )
+//! ```
+//!
+//! — a conjunction of disjunctions over term ids, **with nothing about the mask in it**. Composed
+//! once where row forms are built, canonicalised and interned, it is shared by every artifact that
+//! draws its generating set from the same signatures and by every token that will ever ask
+//! (`design/artifact-serving-at-scale.md` §4.2).
+//!
+//! **The equivalence is between two whole tests, not two halves**, and it holds in three parts:
+//!
+//! 1. **Projection loss is checked first and is not in the expression.** A generating set holding a
+//!    member this view has not folded in projects to fewer rows than the record declares, and can
+//!    never be contained — see [`crate::artifacts::ArtifactRecords`]. That test is per view, so it
+//!    stays on the row form; the expression is view-independent and says nothing about it. Every
+//!    member of a set that clears it has a base row.
+//! 2. **The fragment is exactly the terms.** `M_auth`'s base is `⋃ postings(t)` over the satisfied
+//!    terms, so a base-row entity is in it precisely when its signature meets the principal's
+//!    term set. Delta tiers are deliberately not read here: a tier carries the postings of
+//!    **flushed** entities, which own extent rows and never base rows, so restricted to the base
+//!    rows a generating set projects to they contribute nothing at all.
+//! 3. **The deny correction is the acceptance test, not a refinement** (`design/artifact-serving-at-scale.md`
+//!    §4.2; the review's finding 2). A deletion or a suppression removes a member from `M_auth`
+//!    whatever the terms say, so an expression consulted alone is **fail-open for exactly the case
+//!    the write cycle exists to make safe**. It is answered live per request, from the same
+//!    `minus` the composed mask carries — see [`crate::compose::MaskedSet::withholds_any`] — which
+//!    is re-derived at the deny's acknowledgement and, on an unsuppress, **re-derived rather than
+//!    subtracted**, so `delete → suppress → unsuppress` leaves the entity deleted.
+//!
+//! ⊘ **The Σ|G| inverted index is deferred and this is the reason.** §4.2 proposes an
+//! entity → artifacts index so a deny can correct the partition at the acknowledgement; it is in
+//! tension with `annotation-write-cycle.md` §4.5, whose whole content is that the deny lane does
+//! no artifact work, and reconciling the two is not this stage's. Evaluating the correction live
+//! per **served candidate** is correct without it and is viewport-bounded: it costs one bitmap
+//! intersection over a generating set, for the artifacts a viewport actually reaches.
+//!
+//! # Where it is sound, and where it is not built
+//!
+//! The expression is over **term signatures**, which is sound exactly when authorisation is
+//! signature-shaped: an entity is visible iff its own term set meets the principal's. That is true
+//! of the builtin plugin by construction — `build_fragment` unions postings over the satisfied
+//! terms and does nothing else — and **unverifiable for a foreign one**, which is
+//! `2026-08-21-artifact-layout-selection.md` §9's constraint 10 and reaches **I5** and **I6**. A
+//! plugin whose answer depends on something other than the satisfied term set breaks the
+//! equivalence the whole structure rests on, and no plugin exists to test it against.
+//!
+//! Settled fail-closed: **under any plugin but the builtin the partition is not built at all**,
+//! and containment stays on the masked-count route, which asks `M_auth` itself and so cannot
+//! depend on the shape of the rule that produced it. [`signature_shaped`] is the gate,
+//! `Engine::open` says so in the log, and the flag is read where the partition is built rather
+//! than cached, so a generation carrying a different manifest cannot inherit a decision made for
+//! an earlier one.
+//!
+//! # What is canonical, and what is not
+//!
+//! Two expressions are equal when their canonical encodings are equal: each clause's terms sorted
+//! ascending and deduplicated, the clauses sorted and deduplicated. That is a **syntactic**
+//! canonicalisation. Absorption is not applied — a clause that is a superset of another is
+//! implied by it and could be dropped — because it costs O(clauses²) at composition and buys only
+//! sharing, never correctness: two expressions that fail to intern together give the same answer
+//! twice rather than a wrong answer once.
+//!
+//! An **empty clause** is an entity in no posting at all: unsatisfiable, and it makes the whole
+//! expression unsatisfiable, which is the fail-closed reading and matches what the masked-count
+//! route does with a member no term reaches. An expression with **no clauses** is an empty
+//! generating set — `annotations.md`'s corpus-independent content — and is satisfied by everyone,
+//! which is what `ContentSet::generated_from` documents an empty set to mean.
+
+use std::cell::RefCell;
+use std::io;
+
+use croaring::Bitmap;
+use rustc_hash::{FxHashMap, FxHashSet};
+
+use tessera_authz::postings::{PostingRef, PostingsReader};
+use tessera_lifecycle::membership::ArtifactStore;
+use tessera_plugin::Plugin;
+use tessera_types::TermId;
+
+/// Whether a bundle's declared data plugin is the builtin one, and so whether authorisation is
+/// signature-shaped for the purposes above.
+///
+/// **The manifest's hash is the right thing to read**, not the served plugin's, because
+/// `Engine::open` already refuses a bundle whose manifest disagrees with the plugin serving it:
+/// the two are equal by the time anything here runs, and the manifest is what a partition build
+/// has to hand.
+pub fn signature_shaped(manifest_data_plugin_hash: &str) -> bool {
+    manifest_data_plugin_hash == tessera_plugin::Passthrough::new().data_plugin_hash()
+}
+
+/// What composing a partition needs from the generation, with its gate attached.
+///
+/// **The gate travels with the inputs rather than being applied at the call sites**, of which
+/// there are four. A decision taken separately in four places is one that drifts in one of them,
+/// and the one it drifts in serves containment answers under a plugin whose rule nobody checked.
+pub struct PartitionSource<'a> {
+    /// The base postings — the build's `terms/postings.arrow`, which no flush rewrites.
+    pub postings: &'a PostingsReader,
+    /// The bundle manifest's declared data plugin. `Engine::open` has already refused a bundle
+    /// whose manifest disagrees with the plugin serving it, so this is both.
+    pub data_plugin_hash: &'a str,
+}
+
+impl PartitionSource<'_> {
+    pub fn signature_shaped(&self) -> bool {
+        signature_shaped(self.data_plugin_hash)
+    }
+}
+
+/// Every entity's term signature, for the entities one level's generating sets name.
+///
+/// **Built by one pass over the postings, not one probe per entity.** The inverse direction —
+/// entity to terms — is not stored anywhere, so the only route is to walk each term's posting and
+/// intersect it with the entities wanted. Done per entity that would be `O(terms)` each; done once
+/// for the whole level it is `O(terms)` in total, which is why this is a level-scale object and
+/// not a lookup.
+struct SignatureIndex {
+    /// `entity → its term ids, ascending`. Absent means *no term reaches this entity*, which is a
+    /// real and fail-closed answer rather than a missing one.
+    by_entity: FxHashMap<u32, Vec<u32>>,
+}
+
+impl SignatureIndex {
+    fn build(wanted: &Bitmap, postings: &PostingsReader) -> io::Result<Self> {
+        let mut by_entity: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
+        if wanted.is_empty() {
+            return Ok(SignatureIndex { by_entity });
+        }
+        for term in 0..postings.term_count() {
+            let Some(posting) = postings.posting_at(term)? else {
+                continue;
+            };
+            match posting {
+                // Ascending `u32` little-endian, so the walk is the decode. Tested against
+                // `wanted` one at a time because the array form is the *small* terms, and
+                // materialising a bitmap to intersect would cost more than the probe.
+                PostingRef::Array(bytes) => {
+                    for chunk in bytes.chunks_exact(4) {
+                        let entity = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        if wanted.contains(entity) {
+                            by_entity.entry(entity).or_default().push(term);
+                        }
+                    }
+                }
+                // The intersection first: a large term's posting may be the whole corpus, and
+                // `and` is O(containers touched) against a generating-set union that is not.
+                PostingRef::Roaring(view) => {
+                    for entity in view.and(wanted).iter() {
+                        by_entity.entry(entity).or_default().push(term);
+                    }
+                }
+            }
+        }
+        // Terms are walked in ascending ordinal, so every signature is already ascending and
+        // duplicate-free — a term's posting names an entity at most once. Asserted rather than
+        // sorted: re-sorting would hide a postings file that had stopped being a set.
+        debug_assert!(by_entity
+            .values()
+            .all(|sig| sig.windows(2).all(|w| w[0] < w[1])));
+        Ok(SignatureIndex { by_entity })
+    }
+
+    fn signature(&self, entity: u32) -> &[u32] {
+        self.by_entity
+            .get(&entity)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+}
+
+/// The distinct canonical expressions of one level, interned.
+///
+/// Stored as one flat word array so that the durable form is the in-memory form: each expression
+/// is `nclauses, (len, terms…)*`, and an id is an index into [`Self::at`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExpressionTable {
+    words: Vec<u32>,
+    /// `at[e]..at[e + 1]` is expression `e`'s words. Carries the trailing sentinel, so the last
+    /// expression needs no special case — the case a reader gets wrong.
+    at: Vec<u32>,
+}
+
+impl ExpressionTable {
+    /// How many distinct expressions this level composed to. **The census's number**
+    /// (`design/artifact-serving-at-scale.md` §4.2): the vocabulary's under per-term authoring, the
+    /// population's when generating sets are drawn across a real signature distribution, and it is
+    /// what [`ContainmentPartition::answers`] switches on.
+    pub fn len(&self) -> usize {
+        self.at.len().saturating_sub(1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The words of expression `id`.
+    fn expression(&self, id: u32) -> &[u32] {
+        let lo = self.at[id as usize] as usize;
+        let hi = self.at[id as usize + 1] as usize;
+        &self.words[lo..hi]
+    }
+
+    /// Whether `satisfied` meets every clause.
+    ///
+    /// **No early exit on a clause the viewer nearly holds**, in the same spirit as
+    /// `satisfied_rank`'s: the loop stops at the first clause that fails, which is a fact about the
+    /// artifact's own composition and not about how close the viewer came — a viewer failing on the
+    /// first member and one failing on the last take the same number of clause tests up to the
+    /// artifact's own shape, and the expression is shared by every principal that reaches it.
+    fn satisfied_by(&self, id: u32, satisfied: &FxHashSet<TermId>) -> bool {
+        let words = self.expression(id);
+        let mut at = 1;
+        for _ in 0..words[0] {
+            let len = words[at] as usize;
+            let clause = &words[at + 1..at + 1 + len];
+            if !clause.iter().any(|t| satisfied.contains(&TermId::new(*t))) {
+                return false;
+            }
+            at += 1 + len;
+        }
+        true
+    }
+
+    /// The raw words and offsets, for the durable form.
+    pub fn parts(&self) -> (&[u32], &[u32]) {
+        (&self.words, &self.at)
+    }
+
+    /// Rebuild from a durable form's two arrays, checking the framing rather than trusting it.
+    ///
+    /// Every refusal here is a refusal rather than a truncation, for the reason
+    /// `tessera_store::membership`'s is: an expression that came back short is a containment answer
+    /// that is *wrong in the permissive direction* for whichever clause went missing, and nothing
+    /// downstream would report a fault.
+    pub fn from_parts(words: Vec<u32>, at: Vec<u32>) -> Option<Self> {
+        if at.is_empty() || at[0] != 0 || *at.last()? as usize != words.len() {
+            return None;
+        }
+        if at.windows(2).any(|w| w[0] > w[1]) {
+            return None;
+        }
+        let table = ExpressionTable { words, at };
+        for id in 0..table.len() {
+            let words = table.expression(id as u32);
+            let mut at = 1;
+            if words.is_empty() {
+                return None;
+            }
+            for _ in 0..words[0] {
+                let len = *words.get(at)? as usize;
+                at = at.checked_add(1)?.checked_add(len)?;
+                if at > words.len() {
+                    return None;
+                }
+            }
+            if at != words.len() {
+                return None;
+            }
+        }
+        Some(table)
+    }
+}
+
+/// Interning state, alive only while a level is being composed.
+#[derive(Default)]
+struct Interner {
+    table: ExpressionTable,
+    seen: FxHashMap<Vec<u32>, u32>,
+}
+
+impl Interner {
+    fn intern(&mut self, canonical: Vec<u32>) -> u32 {
+        if let Some(id) = self.seen.get(&canonical) {
+            return *id;
+        }
+        let id = self.table.len() as u32;
+        if self.table.at.is_empty() {
+            self.table.at.push(0);
+        }
+        self.table.words.extend_from_slice(&canonical);
+        self.table.at.push(self.table.words.len() as u32);
+        self.seen.insert(canonical, id);
+        id
+    }
+}
+
+/// One expression identifier per `(artifact, rank)`.
+///
+/// **`u16` with a checked promotion to `u32`, never a byte and never a truncation**
+/// (`2026-08-21-artifact-layout-selection.md` §9, constraint 4). The census measures ~10⁶ distinct
+/// expressions on a real signature distribution, so the narrow width is a saving on the layers
+/// that share and not an assumption about layers in general; the promotion is what stops the
+/// saving becoming a wrong answer. A truncated identifier does not fail — it names a *different*
+/// expression, which is a containment verdict for another artifact's generating set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum IdColumn {
+    Narrow(Vec<u16>),
+    Wide(Vec<u32>),
+}
+
+impl Default for IdColumn {
+    fn default() -> Self {
+        IdColumn::Narrow(Vec::new())
+    }
+}
+
+impl IdColumn {
+    fn push(&mut self, id: u32) {
+        if let IdColumn::Narrow(narrow) = self {
+            match u16::try_from(id) {
+                Ok(narrow_id) => {
+                    narrow.push(narrow_id);
+                    return;
+                }
+                Err(_) => {
+                    *self = IdColumn::Wide(narrow.iter().map(|id| u32::from(*id)).collect());
+                }
+            }
+        }
+        match self {
+            IdColumn::Wide(wide) => wide.push(id),
+            IdColumn::Narrow(_) => unreachable!("promoted above"),
+        }
+    }
+
+    fn get(&self, index: usize) -> u32 {
+        match self {
+            IdColumn::Narrow(narrow) => u32::from(narrow[index]),
+            IdColumn::Wide(wide) => wide[index],
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            IdColumn::Narrow(narrow) => narrow.len(),
+            IdColumn::Wide(wide) => wide.len(),
+        }
+    }
+
+    /// Bytes per identifier, for the durable form's header and for a residency line.
+    pub(crate) fn width(&self) -> u8 {
+        match self {
+            IdColumn::Narrow(_) => 2,
+            IdColumn::Wide(_) => 4,
+        }
+    }
+}
+
+/// One level's containment partition: an interned expression per `(artifact, rank)`.
+///
+/// **Keyed by nothing about a principal**, which is the property that does not depend on how many
+/// expressions there turn out to be: one copy serves every token there will ever be, where the
+/// per-token structure `decision 0093` deletes would have cost 99–343 ms of setup and ~4 MB each.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ContainmentPartition {
+    table: ExpressionTable,
+    /// `at[o]..at[o + 1]` indexes [`Self::ids`] for ordinal `o`. Dense over the level's ordinals,
+    /// with the trailing sentinel; a **hole** has an empty range, exactly as an artifact with no
+    /// contents does — the two are told apart by the layer's declaration in
+    /// `ArtifactRows::satisfied_rank` and never here.
+    at: Vec<u32>,
+    ids: IdColumn,
+}
+
+impl ContainmentPartition {
+    /// Compose one `(layer, level)`'s partition against the base postings.
+    ///
+    /// **Two walks of the level under one borrow of the store**, which is the one-snapshot rule
+    /// (`2026-08-21-artifact-layout-selection.md` §9, constraint 1): the first collects the
+    /// entities the generating sets name so the signature pass knows what to look for, the second
+    /// composes. A growth landing between them would leave the expression describing a set the
+    /// membership no longer has, so both come from the same `&ArtifactStore`.
+    pub fn compose(
+        store: &ArtifactStore,
+        layer: &str,
+        level: u32,
+        postings: &PostingsReader,
+    ) -> io::Result<Self> {
+        let mut wanted = Bitmap::new();
+        for (_, record) in store.level(layer, level) {
+            for content in &record.contents {
+                wanted.or_inplace(&content.generated_from);
+            }
+        }
+        let signatures = SignatureIndex::build(&wanted, postings)?;
+
+        let mut interner = Interner::default();
+        let mut at: Vec<u32> = vec![0];
+        let mut ids = IdColumn::default();
+        for (ordinal, record) in store.level(layer, level) {
+            let idx = ordinal as usize;
+            // A level is dense over its ordinals and this walk is in ordinal order, but a hole
+            // between two artifacts yields no record at all — so the offsets are carried forward
+            // to the ordinal being written rather than pushed once per record.
+            while at.len() <= idx {
+                at.push(ids.len() as u32);
+            }
+            for content in &record.contents {
+                ids.push(interner.intern(canonicalise(&content.generated_from, &signatures)));
+            }
+            at.push(ids.len() as u32);
+        }
+        Ok(ContainmentPartition {
+            table: interner.table,
+            at,
+            ids,
+        })
+    }
+
+    /// The distinct expressions this level composed to.
+    pub fn expressions(&self) -> &ExpressionTable {
+        &self.table
+    }
+
+    /// How many `(artifact, rank)` pairs the column holds.
+    pub fn pairs(&self) -> usize {
+        self.ids.len()
+    }
+
+    /// Bytes per identifier — 2 until the expression count passes `u16::MAX`, then 4.
+    pub fn id_width(&self) -> u8 {
+        self.ids.width()
+    }
+
+    /// How many ordinals this partition covers, holes included.
+    pub fn len(&self) -> usize {
+        self.at.len().saturating_sub(1)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The identifier at `(ordinal, rank)`, or `None` where the partition has no entry — a hole,
+    /// an ordinal past the level, or a rank past the artifact's contents.
+    fn id_at(&self, ordinal: u32, rank: usize) -> Option<u32> {
+        let lo = *self.at.get(ordinal as usize)? as usize;
+        let hi = *self.at.get(ordinal as usize + 1)? as usize;
+        let index = lo.checked_add(rank)?;
+        (index < hi).then(|| self.ids.get(index))
+    }
+
+    /// This principal's answers over the whole level, ready to be asked per candidate.
+    pub fn answers<'a>(&'a self, satisfied: &'a FxHashSet<TermId>) -> ContainmentAnswers<'a> {
+        let memo = if self.table.len() <= dense_limit(self.pairs()) {
+            // **The union route, in the form this stage can take.** With few distinct expressions
+            // the whole table is cheaper to settle once than to memoise: every candidate that
+            // arrives finds its answer already there, and nothing is allocated per ask.
+            Memo::Dense(
+                (0..self.table.len() as u32)
+                    .map(|id| self.table.satisfied_by(id, satisfied))
+                    .collect(),
+            )
+        } else {
+            // **Per-candidate evaluation, memoised, which is the route the census says carries the
+            // real corpus.** Where the expression count approaches the artifact count, settling the
+            // table is the whole-population work the partition exists to avoid; asking on demand is
+            // bounded by the viewport, and the memo makes a repeated expression free without
+            // making an untouched one cost anything.
+            Memo::Sparse(RefCell::new(FxHashMap::default()))
+        };
+        ContainmentAnswers {
+            partition: self,
+            satisfied,
+            memo,
+        }
+    }
+}
+
+#[cfg(test)]
+impl ContainmentPartition {
+    /// A partition over clauses named directly: ordinals, then ranks, then clauses, then terms.
+    ///
+    /// **Test-only, and it exists so a predicate case is about the predicate.** Composing from
+    /// postings would put the signature inversion inside every assertion about which rank is
+    /// served; the inversion has its own cases, and `tests/artifact_containment.rs` drives both
+    /// together against the masked-count route.
+    pub(crate) fn of_clauses(ordinals: &[&[&[&[u32]]]]) -> Self {
+        let mut interner = Interner::default();
+        let mut at = vec![0u32];
+        let mut ids = IdColumn::default();
+        for ranks in ordinals {
+            for clauses in *ranks {
+                ids.push(interner.intern(encode(clauses.to_vec())));
+            }
+            at.push(ids.len() as u32);
+        }
+        ContainmentPartition {
+            table: interner.table,
+            at,
+            ids,
+        }
+    }
+}
+
+/// The width at which settling the whole expression table stops being the cheaper route.
+///
+/// **A choice with a measurement's shape behind it and not a ruling.** The probe switches its own
+/// two routes at `settled + open > max(rows / 64, 4096)`
+/// (`design/artifact-serving-at-scale.md` §4.2), and the quantity it is comparing is the same one:
+/// how much of the population a request is about to touch, against how much a whole-population
+/// pass would cost. Here the population is the level's `(artifact, rank)` pairs, because that is
+/// what a request may walk, and the floor keeps a small level on the dense route where the
+/// allocation is nothing. It appears in no design document, and a build that picks a different
+/// constant measures a different system — recorded at
+/// `2026-08-21-artifact-layout-selection.md` §9, constraint 5.
+fn dense_limit(pairs: usize) -> usize {
+    (pairs / 64).max(4096)
+}
+
+enum Memo {
+    /// Every expression settled up front.
+    Dense(Vec<bool>),
+    /// Settled on first ask. `RefCell` because the predicate takes `&self` — one request, one
+    /// thread, and the borrow never spans a call out.
+    Sparse(RefCell<FxHashMap<u32, bool>>),
+}
+
+/// One principal's view of one level's partition.
+pub struct ContainmentAnswers<'a> {
+    partition: &'a ContainmentPartition,
+    satisfied: &'a FxHashSet<TermId>,
+    memo: Memo,
+}
+
+impl ContainmentAnswers<'_> {
+    /// Whether this principal satisfies the expression at `(ordinal, rank)`.
+    ///
+    /// `None` where the partition has no entry there, which is what puts the caller back on the
+    /// masked-count route rather than answering from a structure that does not cover the case.
+    pub fn satisfies(&self, ordinal: u32, rank: usize) -> Option<bool> {
+        let id = self.partition.id_at(ordinal, rank)?;
+        Some(match &self.memo {
+            Memo::Dense(settled) => settled[id as usize],
+            Memo::Sparse(memo) => {
+                if let Some(answer) = memo.borrow().get(&id) {
+                    return Some(*answer);
+                }
+                let answer = self.partition.table.satisfied_by(id, self.satisfied);
+                memo.borrow_mut().insert(id, answer);
+                answer
+            }
+        })
+    }
+
+    /// Whether this level's partition covers `ordinal` at all.
+    pub fn covers(&self, ordinal: u32) -> bool {
+        (ordinal as usize) < self.partition.len()
+    }
+
+    /// Whether the whole expression table was settled up front — the two faces, observable so a
+    /// test can assert which one a level took. Operator- and test-facing only; it names no
+    /// principal and no artifact.
+    pub fn settled_eagerly(&self) -> bool {
+        matches!(self.memo, Memo::Dense(_))
+    }
+}
+
+/// One generating set's canonical expression: the distinct signatures of its members, each sorted,
+/// the set of them sorted.
+///
+/// Encoded as `nclauses, (len, terms…)*` — the form the table stores and the durable file writes,
+/// so the canonical key and the stored expression are the same bytes and cannot drift.
+fn canonicalise(generated_from: &Bitmap, signatures: &SignatureIndex) -> Vec<u32> {
+    encode(
+        generated_from
+            .iter()
+            .map(|entity| signatures.signature(entity))
+            .collect(),
+    )
+}
+
+/// The canonical encoding of a clause list — sorted and deduplicated, then framed. One function so
+/// the interning key and the stored expression cannot be produced by two different rules.
+fn encode(mut clauses: Vec<&[u32]>) -> Vec<u32> {
+    clauses.sort_unstable();
+    clauses.dedup();
+    let mut words = Vec::with_capacity(1 + clauses.len() * 2);
+    words.push(clauses.len() as u32);
+    for clause in clauses {
+        words.push(clause.len() as u32);
+        words.extend_from_slice(clause);
+    }
+    words
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_of(sets: &[&[&[u32]]]) -> (ExpressionTable, Vec<u32>) {
+        let mut interner = Interner::default();
+        let ids = sets
+            .iter()
+            .map(|clauses| interner.intern(encode(clauses.to_vec())))
+            .collect();
+        (interner.table, ids)
+    }
+
+    fn satisfied(terms: &[u32]) -> FxHashSet<TermId> {
+        terms.iter().map(|t| TermId::new(*t)).collect()
+    }
+
+    /// The whole of the expression's semantics in one case: **every** clause must be met, and one
+    /// term anywhere in a clause meets it. A viewer holding most of a generating set's signatures
+    /// and missing one is not contained — which is `satisfied_rank`'s rule, restated in terms.
+    #[test]
+    fn a_conjunction_of_disjunctions_and_not_a_coverage_fraction() {
+        let (table, ids) = table_of(&[&[&[1, 2], &[3]]]);
+        assert!(table.satisfied_by(ids[0], &satisfied(&[1, 3])));
+        assert!(table.satisfied_by(ids[0], &satisfied(&[2, 3])));
+        // Holds one clause entirely and every term of a dozen others: still not contained.
+        assert!(!table.satisfied_by(ids[0], &satisfied(&[1, 2, 4, 5, 6, 7, 8, 9])));
+        assert!(!table.satisfied_by(ids[0], &satisfied(&[3])));
+    }
+
+    /// An empty clause is a member no term reaches, and it makes the expression unsatisfiable for
+    /// everybody — the fail-closed direction, and the same answer the masked-count route gives a
+    /// member outside every posting.
+    #[test]
+    fn a_member_no_term_reaches_contains_nobody() {
+        let (table, ids) = table_of(&[&[&[1], &[]]]);
+        assert!(!table.satisfied_by(ids[0], &satisfied(&[1])));
+        assert!(!table.satisfied_by(ids[0], &satisfied(&[0, 1, 2, 3, 4, 5])));
+    }
+
+    /// No clauses at all is an **empty generating set** — corpus-independent content — and it is
+    /// satisfied by everyone, including a principal holding nothing. Collapsing this with the case
+    /// above would withhold every corpus-independent label from every viewer.
+    #[test]
+    fn an_empty_generating_set_contains_everyone() {
+        let (table, ids) = table_of(&[&[]]);
+        assert!(table.satisfied_by(ids[0], &satisfied(&[])));
+    }
+
+    /// Interning is by canonical form, so two generating sets drawn from the same signatures share
+    /// one identifier however differently they were written down — which is the whole of the
+    /// sharing the design counts on where a layer is authored per term.
+    #[test]
+    fn the_same_expression_written_two_ways_interns_once() {
+        let (table, ids) = table_of(&[&[&[1, 2], &[3]], &[&[3], &[1, 2]], &[&[3], &[3], &[1, 2]]]);
+        assert_eq!(ids[0], ids[1], "clause order is not part of the identity");
+        assert_eq!(ids[0], ids[2], "nor is a repeated clause");
+        assert_eq!(table.len(), 1);
+    }
+
+    /// **A `u16` column that would truncate is promoted rather than wrapped.** The failure this
+    /// forbids is silent: a wrapped identifier names a *different* expression, so an artifact is
+    /// served on another artifact's containment answer.
+    #[test]
+    fn the_identifier_column_promotes_rather_than_truncating() {
+        let mut ids = IdColumn::default();
+        for id in 0..=u16::MAX as u32 {
+            ids.push(id);
+        }
+        assert_eq!(ids.width(), 2);
+        ids.push(u16::MAX as u32 + 1);
+        assert_eq!(ids.width(), 4, "the column widened rather than wrapping");
+        assert_eq!(ids.get(0), 0);
+        assert_eq!(ids.get(u16::MAX as usize), u16::MAX as u32);
+        assert_eq!(ids.get(u16::MAX as usize + 1), u16::MAX as u32 + 1);
+    }
+
+    /// The durable form's framing is checked rather than trusted: a table whose offsets do not
+    /// describe its words refuses, because what it would otherwise decode to is a *shorter*
+    /// expression — fewer clauses to meet, which is containment in the permissive direction.
+    #[test]
+    fn a_table_whose_framing_disagrees_with_its_words_refuses() {
+        let (table, _) = table_of(&[&[&[1, 2], &[3]]]);
+        let (words, at) = table.parts();
+        assert_eq!(
+            ExpressionTable::from_parts(words.to_vec(), at.to_vec()).as_ref(),
+            Some(&table)
+        );
+        // A clause length reaching past the expression's own words.
+        let mut torn = words.to_vec();
+        torn[1] = 99;
+        assert!(ExpressionTable::from_parts(torn, at.to_vec()).is_none());
+        // Offsets that stop short of the words they frame.
+        let mut short = at.to_vec();
+        *short.last_mut().unwrap() -= 1;
+        assert!(ExpressionTable::from_parts(words.to_vec(), short).is_none());
+        // And a clause count that does not account for every word.
+        let mut miscounted = words.to_vec();
+        miscounted[0] = 1;
+        assert!(ExpressionTable::from_parts(miscounted, at.to_vec()).is_none());
+    }
+
+    /// The two faces answer identically; only the work differs. A level whose expressions are few
+    /// settles the table, one whose expressions approach its pairs settles them on demand — and a
+    /// route that disagreed with the other would be two transcriptions of one rule.
+    #[test]
+    fn both_faces_give_the_same_answer() {
+        assert_eq!(dense_limit(0), 4096);
+        assert_eq!(dense_limit(1_000_000), 15_625);
+        let (table, ids) = table_of(&[&[&[1]], &[&[2]], &[&[1], &[2]]]);
+        let partition = ContainmentPartition {
+            table,
+            at: vec![0, 1, 2, 3],
+            ids: {
+                let mut column = IdColumn::default();
+                for id in &ids {
+                    column.push(*id);
+                }
+                column
+            },
+        };
+        let held = satisfied(&[1]);
+        let dense = partition.answers(&held);
+        assert!(dense.settled_eagerly());
+        let sparse = ContainmentAnswers {
+            partition: &partition,
+            satisfied: &held,
+            memo: Memo::Sparse(RefCell::new(FxHashMap::default())),
+        };
+        for ordinal in 0..3u32 {
+            assert_eq!(
+                dense.satisfies(ordinal, 0),
+                sparse.satisfies(ordinal, 0),
+                "the two faces disagree at ordinal {ordinal}"
+            );
+        }
+        assert_eq!(dense.satisfies(0, 0), Some(true));
+        assert_eq!(dense.satisfies(1, 0), Some(false));
+        assert_eq!(dense.satisfies(2, 0), Some(false));
+        assert_eq!(dense.satisfies(0, 1), None, "no second rank to answer for");
+        assert_eq!(dense.satisfies(9, 0), None, "past the level");
+    }
+}
