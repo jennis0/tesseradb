@@ -597,6 +597,12 @@ pub struct ArtifactProjections {
     /// level builds a second row form and reuses the one partition, which is the whole point of
     /// [`Self::partitions_held`]. Operator plane only; it names no artifact and no principal.
     partitions: std::sync::atomic::AtomicU64,
+    /// How many partitions this **adopted** from the prefix at open rather than composing — the
+    /// other half of the same gauge. A deployment that folded and restarted should see this at the
+    /// number of levels it holds and [`Self::partitions`] at zero; seeing it at zero and the other
+    /// climbing says every coordinate was rejected, which is correct but is the expensive answer
+    /// and an operator has no other way to notice it.
+    adopted: std::sync::atomic::AtomicU64,
 }
 
 impl ArtifactProjections {
@@ -612,6 +618,81 @@ impl ArtifactProjections {
     /// See [`Self::partitions`].
     pub fn partitions(&self) -> u64 {
         self.partitions.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// See [`Self::adopted`].
+    pub fn adopted(&self) -> u64 {
+        self.adopted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Take the fold-written partitions this prefix's manifests name, for every level whose
+    /// coordinate still holds.
+    ///
+    /// **The coordinate is the whole rule and there is no weaker form of it.** A partition is a
+    /// pure function of a level's records and the prefix's postings, so an entry describes the
+    /// level at exactly one version; this adopts it where the level it seeded — after the manifest
+    /// *and* after everything the WAL replayed over it — is at that same version, and drops it
+    /// otherwise. Growth shrinks nothing and publication only adds, so a stale partition answers
+    /// containment for a generating set that has since grown, and growth makes containment
+    /// **harder** — the stale answer is the permissive one, on the one test **I3** exists to make
+    /// conservative.
+    ///
+    /// **Every failure is a drop, not an error.** A file that will not map, a file whose framing
+    /// refuses, a coordinate that has moved: each means *recompose this level on first use*, which
+    /// is the answer every request took before the fold wrote anything. Refusing to open the
+    /// engine over a derived structure that has a correct fallback would be a refusal outside the
+    /// disclosure surface.
+    pub fn adopt_all(
+        &self,
+        prefix_dir: &std::path::Path,
+        prefix: &str,
+        extents: &[tessera_store::manifest::ContainmentExtent],
+        store: &ArtifactStore,
+    ) {
+        for extent in extents {
+            let level_version = store.level_version(&extent.layer, extent.level);
+            if level_version != extent.level_version {
+                tracing::info!(
+                    layer = %extent.layer,
+                    level = extent.level,
+                    composed_at = extent.level_version,
+                    now = level_version,
+                    "a fold-written containment partition is not adopted: the level has moved                      since it was composed, so it is recomposed on first use"
+                );
+                continue;
+            }
+            let path = prefix_dir.join(&extent.path);
+            let partition = match ContainmentPartition::open(&path) {
+                Ok(partition) => partition,
+                Err(error) => {
+                    // Loud, because this one is a fault rather than a cadence: the manifest names
+                    // a file the prefix should hold and it did not open.
+                    tracing::error!(
+                        layer = %extent.layer,
+                        level = extent.level,
+                        path = %extent.path,
+                        %error,
+                        "ALARM: a containment partition named by the manifest would not open;                          containment is correct and the level recomposes on first use"
+                    );
+                    continue;
+                }
+            };
+            self.adopted
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.partitions_held
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (extent.layer.clone(), extent.level),
+                    (
+                        PartitionKey {
+                            prefix: prefix.to_string(),
+                            level_version,
+                        },
+                        partition,
+                    ),
+                );
+        }
     }
 
     /// How many forms are held. Operator plane only, beside [`Self::builds`] — a count of

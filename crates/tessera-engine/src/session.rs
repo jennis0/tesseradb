@@ -998,6 +998,18 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.membership_extents.iter().cloned())
             .collect();
+        // The two lists that make a level's derived structures placeable across a restart, unioned
+        // on the same argument.
+        let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.level_versions.iter().cloned())
+            .collect();
+        let manifest_containment_extents: Vec<tessera_store::manifest::ContainmentExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.containment_extents.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -1012,6 +1024,7 @@ impl Engine {
                 layers: &manifest_layers,
                 tombstones: &manifest_layer_tombstones,
                 membership_extents: &manifest_membership_extents,
+                level_versions: &manifest_level_versions,
                 prefix_dir: prefix_dir.clone(),
             },
             &dict,
@@ -1136,6 +1149,21 @@ impl Engine {
         // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
         // after `open`, having validated the figure; every other embedder (tests, benches,
         // examples) gets unbounded caches, which is what a read-only embedder wants.
+        // **The fold's containment partitions, adopted where their coordinate still holds.**
+        // Placed here rather than inside `reconstruct` because it is the last step of open that
+        // depends on the store: the level versions it compares against are the seeded ones *plus*
+        // whatever the WAL replayed over them, so it has to run after both. A partition whose
+        // coordinate does not match is dropped and the level recomposes on first use — see
+        // [`crate::artifacts::ArtifactProjections::adopt`], and note that the direction of the
+        // mistake this forbids is permissive.
+        let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new());
+        artifact_projections.adopt_all(
+            &prefix_dir,
+            generation.load().prefix.as_str(),
+            &manifest_containment_extents,
+            &write_state.artifacts,
+        );
+
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
@@ -1153,7 +1181,7 @@ impl Engine {
             // after `open`, having validated the figure; every other embedder (tests, benches,
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
-            artifact_projections: Arc::new(crate::artifacts::ArtifactProjections::new()),
+            artifact_projections: Arc::clone(&artifact_projections),
             lineages: Arc::new(crate::cut::Lineages::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
@@ -2379,6 +2407,17 @@ impl Engine {
     /// no principal.
     pub fn artifact_containment_partitions(&self) -> u64 {
         self.artifact_projections.partitions()
+    }
+
+    /// How many containment partitions this engine **adopted** from the prefix at open rather than
+    /// composing (`crate::containment`).
+    ///
+    /// The other half of [`Engine::artifact_containment_partitions`]: a deployment that folded and
+    /// then restarted should see this at the number of levels it holds and that one at zero. Both
+    /// at zero with row forms being built is a foreign plugin; this at zero and that one climbing
+    /// is every coordinate rejected — correct, and the expensive answer. Operator plane only.
+    pub fn artifact_containment_partitions_adopted(&self) -> u64 {
+        self.artifact_projections.adopted()
     }
 
     /// The last compaction fold's per-pass wall clock and resident set — empty before the first

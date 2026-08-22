@@ -4,10 +4,10 @@
 //! `row_of` loop, and `tile_ranges` against a linear scan of the morton array. Then corrupt
 //! one byte of `columns.arrow` and confirm `open_bundle` fails closed with a digest error.
 
-use tessera_plugin::Plugin;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use tessera_plugin::Plugin;
 
 use croaring::Bitmap;
 use sha2::{Digest, Sha256};
@@ -117,6 +117,8 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             view: "main".to_string(),

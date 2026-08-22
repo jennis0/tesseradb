@@ -711,7 +711,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     validate_args(args)?;
 
     // ---- 1. read inputs --------------------------------------------------------------
-    let mut points = input::read_points(&args.points, &args.point_fields, &args.extent, args.limit)?;
+    let mut points =
+        input::read_points(&args.points, &args.point_fields, &args.extent, args.limit)?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
             "no points selected — a bundle with no items has no expressible entity range".into(),
@@ -1248,6 +1249,11 @@ fn write_manifests(
         // a running node, and a build produces a bundle rather than editing one.
         layer_tombstones: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
+        level_versions: published_layers.level_versions.clone(),
+        // ⊘ Empty out of a build — see `PublishedLayers::level_versions`. The first fold writes
+        // them; until then every level composes its partition on first use, which is what every
+        // request did before the structure existed.
+        containment_extents: Vec::new(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
             view: args.view_id.clone(),
@@ -1470,8 +1476,7 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
             // bundle as "not a bijection" (the false refusal §18 obligation 10 names). Built as
             // a row-indexed array (rather than just a count) so the identity check below can
             // reuse it instead of inverting the row space a second time.
-            view
-                .row_space
+            view.row_space
                 .base()
                 .validate_rows(view.row_space.base_rows())?;
             let entity_bound = view
@@ -1931,7 +1936,9 @@ mod tests {
     fn a_tiny_well_framed_corpus_earns_no_warning() {
         let o = Occupancy::of_sorted_codes(0..10u32);
         assert_eq!(o.warning("s0"), None);
-        assert!(o.report("s0").contains("10 point(s) landed in 10 distinct cell(s)"));
+        assert!(o
+            .report("s0")
+            .contains("10 point(s) landed in 10 distinct cell(s)"));
     }
 
     /// The threshold is a ratio, so it fires at the same proportion at any scale — and the raw
@@ -1939,18 +1946,31 @@ mod tests {
     /// as a tenth of the points having a position of their own, which is how it is reported.
     #[test]
     fn the_warning_fires_on_the_ratio_not_the_size() {
-        let just_under = Occupancy { points: 99, cells: 10 };
-        let just_over = Occupancy { points: 100, cells: 10 };
+        let just_under = Occupancy {
+            points: 99,
+            cells: 10,
+        };
+        let just_over = Occupancy {
+            points: 100,
+            cells: 10,
+        };
         assert_eq!(just_under.warning("s0"), None);
-        assert!(just_under.report("s0").contains("10.1% of them have a position of their own"));
-        let warning = just_over.warning("s0").expect("10 points per cell is the threshold");
+        assert!(just_under
+            .report("s0")
+            .contains("10.1% of them have a position of their own"));
+        let warning = just_over
+            .warning("s0")
+            .expect("10 points per cell is the threshold");
         assert!(warning.contains("RESOLUTION LOST"), "{warning}");
         assert!(
             warning.contains("stored at the same position and cannot be told apart"),
             "{warning}"
         );
         // The same ratio a thousand times larger says the same thing.
-        let big = Occupancy { points: 100_000, cells: 10_000 };
+        let big = Occupancy {
+            points: 100_000,
+            cells: 10_000,
+        };
         assert!(big.warning("s0").is_some());
     }
 

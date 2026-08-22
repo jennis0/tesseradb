@@ -68,9 +68,7 @@ use tessera_lifecycle::membership::{
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
 use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::{
-    parent_edges, LayerDeclaration, ListMeaning, ValueSet,
-};
+use tessera_types::layer::{parent_edges, LayerDeclaration, ListMeaning, ValueSet};
 use tessera_types::EntityId;
 
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
@@ -219,6 +217,22 @@ pub struct PublishedLayers {
     /// registration is handed ids a live layer already holds (decision 0074).
     pub low_water: u64,
     pub membership_extents: Vec<MembershipExtent>,
+    /// Every `(layer, level)`'s artifact-write counter as this build leaves it.
+    ///
+    /// **Emitted rather than left empty, and the difference is not cosmetic.** A level absent from
+    /// the list is a level whose version is *unknown* to the reader that opens the bundle, which
+    /// is not the same as zero (`manifest::LevelVersion`) — and a build that published artifacts
+    /// and said nothing about their versions would make the first restart's coordinates
+    /// unrelatable to the ones the build's own store held.
+    ///
+    /// ⊘ **The build writes no containment partition**, so `containment_extents` is empty in a
+    /// bundle straight out of `tessera build` and the first fold is what fills it. Composing one
+    /// here would put `tessera_engine::containment` on a build-side dependency edge that
+    /// `check-layers.sh` refuses; nothing about containment behaves differently, because a level
+    /// with no partition composes one on first use. What differs is acquisition, which
+    /// [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)
+    /// puts outside its rule.
+    pub level_versions: Vec<tessera_store::manifest::LevelVersion>,
     pub artifact_record_extents: Vec<RecordExtent>,
     /// Every file written here, for `MANIFEST.files` — an undigested file is one a torn write
     /// cannot be attributed to.
@@ -238,6 +252,7 @@ impl Default for PublishedLayers {
             split_coverage: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
             artifact_record_extents: Vec::new(),
             paths: Vec::new(),
             unclustered: Vec::new(),
@@ -271,8 +286,8 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
                 input.name
             )));
         };
-        let enumerated = declaration.membership
-            == tessera_types::layer::MembershipSource::Enumerated;
+        let enumerated =
+            declaration.membership == tessera_types::layer::MembershipSource::Enumerated;
         match &input.artifacts {
             Some(ArtifactSource::File { path, fields }) => {
                 read_artifacts(&input.name, path, fields, enumerated, &mut plan)?
@@ -694,7 +709,8 @@ fn resolve_member(
                 if value_set == ValueSet::Closed {
                     return Err(undeclared_key(path, &address));
                 }
-                plan.artifacts.insert(address.clone(), PlannedArtifact::default());
+                plan.artifacts
+                    .insert(address.clone(), PlannedArtifact::default());
             }
             Some(Member::Named(address))
         }
@@ -919,12 +935,7 @@ pub fn publish(
     let mut order: Vec<(&str, u32)> = Vec::with_capacity(batched.len());
     for declaration in &plan.declarations {
         let name = declaration.name.as_str();
-        order.extend(
-            batched
-                .keys()
-                .filter(|(layer, _)| *layer == name)
-                .copied(),
-        );
+        order.extend(batched.keys().filter(|(layer, _)| *layer == name).copied());
     }
 
     for address in order {
@@ -969,6 +980,16 @@ pub fn publish(
         minted: plan.minted.clone(),
         ..PublishedLayers::default()
     };
+    published.level_versions = store
+        .level_versions()
+        .map(
+            |(layer, level, version)| tessera_store::manifest::LevelVersion {
+                layer: layer.to_string(),
+                level,
+                version,
+            },
+        )
+        .collect();
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     Ok(published)
@@ -1058,9 +1079,10 @@ fn verify_hierarchies(
         let Some(parent_key) = artifact.parent_key.as_deref() else {
             continue;
         };
-        let kind = kind_of.get(layer.as_str()).copied().unwrap_or(
-            tessera_types::layer::HierarchyKind::Flat,
-        );
+        let kind = kind_of
+            .get(layer.as_str())
+            .copied()
+            .unwrap_or(tessera_types::layer::HierarchyKind::Flat);
         let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
         if !cross_level && !matches!(kind, tessera_types::layer::HierarchyKind::Nested) {
             return Err(BuildError::Invalid(format!(
@@ -1142,8 +1164,7 @@ fn verify_hierarchies(
         // **A set per parent, not a scan per member.** The membership test is the inner loop of
         // both checks below, and a linear `contains` over a parent holding the whole corpus makes
         // this pass quadratic in the level's largest artifact.
-        let held: std::collections::HashSet<u64> =
-            parent.members.iter().map(|e| e.raw()).collect();
+        let held: std::collections::HashSet<u64> = parent.members.iter().map(|e| e.raw()).collect();
         let mut covered: std::collections::HashSet<u64> =
             std::collections::HashSet::with_capacity(held.len());
 
@@ -1356,7 +1377,10 @@ fn write_membership_extents(
     if ready.is_empty() {
         return Ok(());
     }
-    let dir = prefix_dir.join("partitions").join(partition).join("members");
+    let dir = prefix_dir
+        .join("partitions")
+        .join(partition)
+        .join("members");
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
     for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
         // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
@@ -1530,7 +1554,11 @@ fn optional<'a>(
     }
 }
 
-fn typed<'a, T: 'static>(path: &Path, array: &'a std::sync::Arc<dyn Array>, name: &str) -> Result<&'a T> {
+fn typed<'a, T: 'static>(
+    path: &Path,
+    array: &'a std::sync::Arc<dyn Array>,
+    name: &str,
+) -> Result<&'a T> {
     array.as_any().downcast_ref::<T>().ok_or_else(|| {
         BuildError::Invalid(format!(
             "{}: column {name} is {:?}, which this reader cannot take",
@@ -1647,13 +1675,16 @@ fn u64s_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<Vec
         return Ok(Vec::new());
     }
     let values = column.value(row);
-    let ids = values.as_any().downcast_ref::<UInt64Array>().ok_or_else(|| {
-        BuildError::Invalid(format!(
+    let ids = values
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
             "{}: the membership of {key} is a list of {:?}, and this reader takes a list of uint64",
             path.display(),
             values.data_type()
         ))
-    })?;
+        })?;
     (0..ids.len())
         .map(|i| {
             if ids.is_null(i) {
@@ -1683,14 +1714,17 @@ fn ranked_at(
         return Ok(Vec::new());
     }
     let entries = column.value(row);
-    let entries = entries.as_any().downcast_ref::<ListArray>().ok_or_else(|| {
-        BuildError::Invalid(format!(
+    let entries = entries
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
             "{}: the contents of {key} are a list of {:?}, and this reader takes a list of lists \
              of utf8 — one entry per rank, each carrying a value per supplied kind",
             path.display(),
             entries.data_type()
         ))
-    })?;
+        })?;
     (0..entries.len())
         .map(|rank| {
             if entries.is_null(rank) {
@@ -1720,13 +1754,16 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
         return Ok(Vec::new());
     }
     let values = column.value(row);
-    let strings = values.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-        BuildError::Invalid(format!(
-            "{}: the values of {key} are a list of {:?}, and this reader takes a list of utf8",
-            path.display(),
-            values.data_type()
-        ))
-    })?;
+    let strings = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "{}: the values of {key} are a list of {:?}, and this reader takes a list of utf8",
+                path.display(),
+                values.data_type()
+            ))
+        })?;
     (0..strings.len())
         .map(|i| {
             if strings.is_null(i) {
@@ -1848,7 +1885,12 @@ fn key_column<'a>(
     canonical: &str,
 ) -> Result<KeyColumn<'a>> {
     let name = fields.of(canonical);
-    scalar_key_column(path, required(path, batch, fields, canonical)?, name, "column")
+    scalar_key_column(
+        path,
+        required(path, batch, fields, canonical)?,
+        name,
+        "column",
+    )
 }
 
 /// One array read as a key column — the member source's own, or the elements of its list.
@@ -2129,5 +2171,9 @@ fn address(
             path.display()
         )));
     };
-    Ok((layer.to_string(), level.map_or(0, |c| number_at(c, row)), key))
+    Ok((
+        layer.to_string(),
+        level.map_or(0, |c| number_at(c, row)),
+        key,
+    ))
 }

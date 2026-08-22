@@ -343,9 +343,9 @@ mod tests {
     use std::sync::Arc;
 
     use tessera_lifecycle::{IngestBuffer, Overlay};
+    use tessera_plugin::Plugin;
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
-    use tessera_plugin::Plugin;
 
     use super::*;
 
@@ -481,6 +481,8 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),

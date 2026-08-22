@@ -17,8 +17,8 @@ mod common;
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{ArtifactOut, Engine};
-use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::membership::IncomingContent;
+use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
     ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
@@ -35,7 +35,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         // **No criterion**, deliberately: these cases are about what the membership *is* after a
         // fold, and a criterion would turn a wrong count into an absence, which is a weaker
         // assertion than a wrong number.
@@ -99,6 +99,22 @@ impl Fixture {
         self.root.join(&engine.generation().prefix)
     }
 
+    /// The containment partitions the fold wrote into the prefix now being served.
+    fn containment_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
+        let dir = self
+            .live_prefix(engine)
+            .join("partitions")
+            .join("default")
+            .join("containment");
+        std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "tscp"))
+            .collect()
+    }
+
     fn membership_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
         let dir = self
             .live_prefix(engine)
@@ -130,7 +146,11 @@ fn artifacts_of(engine: &Engine) -> Vec<ArtifactOut> {
 /// membership's own size and any movement in it is the pass's doing.
 fn count(engine: &Engine) -> u64 {
     let artifacts = artifacts_of(engine);
-    assert_eq!(artifacts.len(), 1, "the fixture publishes exactly one artifact");
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "the fixture publishes exactly one artifact"
+    );
     artifacts[0].masked_count
 }
 
@@ -169,7 +189,11 @@ fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {
 }
 
 /// Publish one artifact over `sources` and wait for it to be durable.
-fn publish(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) -> tessera_types::TesseraId {
+fn publish(
+    fx: &Fixture,
+    engine: &Engine,
+    sources: std::ops::Range<u64>,
+) -> tessera_types::TesseraId {
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -295,6 +319,154 @@ fn what_the_fold_retired_is_gone_from_the_prefix_a_restart_opens() {
         count(&engine),
         299,
         "and it came back without the member the fold retired"
+    );
+}
+
+// ---- the containment partition, across a restart -----------------------------------------------
+
+/// Run ticks until the log has rotated far enough that a restart replays nothing — which is what
+/// releases the artifact pins the fold has just cleared. Two, for `artifact_interleavings`'
+/// reason: the first seals the member the publication is in, the second reclaims it.
+fn rotate(engine: &Engine) {
+    for _ in 0..2 {
+        let before = engine.write_executor_stats().ticks;
+        engine.request_flush();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while engine.write_executor_stats().ticks <= before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the tick that rotates the log never ran"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+}
+
+/// **The fold writes a containment partition and a restart takes it up.** The alternative is not a
+/// wrong answer — a level with no partition composes one on first use — it is the whole
+/// consolidation the fold exists to do, landing on whichever request arrives first instead.
+///
+/// The adoption test is the coordinate and nothing weaker: the level version the manifest recorded
+/// against the file, against the version the restart's own store arrives at. This case is the one
+/// where they agree.
+#[test]
+fn the_fold_writes_a_containment_partition_a_restart_adopts() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        fold(&engine);
+        assert_eq!(
+            fx.containment_files(&engine).len(),
+            1,
+            "one partition per level, under the prefix the fold published"
+        );
+        rotate(&engine);
+    }
+
+    let engine = fx.open();
+    assert_eq!(
+        engine.artifact_containment_partitions_adopted(),
+        1,
+        "the coordinate held, so the partition was mapped rather than recomposed"
+    );
+    // And it is the partition the level actually serves from: a request that composed one would
+    // move the other gauge.
+    assert_eq!(count(&engine), 300);
+    assert_eq!(
+        engine.artifact_containment_partitions(),
+        0,
+        "nothing was composed, so the adopted partition is what answered"
+    );
+}
+
+/// **A growth after the fold moves the level past the coordinate, and the partition is dropped.**
+///
+/// This is the direction that matters. A growth adds members to a generating set, which makes
+/// containment *harder*; a reader that adopted the fold's partition anyway would answer the
+/// **easier** question — the permissive one — on the test **I3** exists to make conservative. So
+/// the rule is equality and nothing weaker, and this is the case that proves it is.
+#[test]
+fn a_growth_after_the_fold_leaves_the_partition_unadopted() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        // Resolved before the fold: the external-id map is read from the prefix the fold is about
+        // to reclaim.
+        let joining = fx.members(300..320);
+        fold(&engine);
+        assert_eq!(fx.containment_files(&engine).len(), 1);
+        // The level moves under the file the fold just named.
+        engine
+            .grow_memberships(
+                "clusters/a".into(),
+                0,
+                vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                    "c0".into(),
+                    joining,
+                )],
+            )
+            .expect("the growth is accepted");
+        rotate(&engine);
+        assert_eq!(
+            count(&engine),
+            320,
+            "the growth is in force before the restart"
+        );
+    }
+
+    let engine = fx.open();
+    assert_eq!(
+        engine.artifact_containment_partitions_adopted(),
+        0,
+        "the level moved after the partition was composed, so it must not be adopted"
+    );
+    assert_eq!(
+        count(&engine),
+        320,
+        "and the grown membership is what is served"
+    );
+    assert_eq!(
+        engine.artifact_containment_partitions(),
+        1,
+        "the level recomposed on first use, which is the whole of the fallback"
+    );
+}
+
+/// **A fold that retires a member states nothing about that level and names no partition for it.**
+///
+/// The fold writes its manifest *before* it retires, because a retirement is irreversible and a
+/// manifest that would not commit must leave it undone. So at the moment the manifest is written
+/// the store still holds the pre-retirement records while the prefix already holds the
+/// post-retirement ones — and under `WithdrawContent` the retirement drops a content whole, which
+/// **shifts the ranks**. A partition adopted at the wrong rank answers containment with another
+/// content's generating set, which is not conservative in any direction anyone chose.
+///
+/// So the level is left out of both lists, and it recomposes on first use.
+#[test]
+fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+    assert!(
+        fx.containment_files(&engine).is_empty(),
+        "the fold retired a member of this level, so it wrote no partition for it"
+    );
+    rotate(&engine);
+    drop(engine);
+
+    let engine = fx.open();
+    assert_eq!(engine.artifact_containment_partitions_adopted(), 0);
+    assert_eq!(count(&engine), 299, "and the retired member is gone");
+    assert_eq!(
+        engine.artifact_containment_partitions(),
+        1,
+        "the level recomposed on first use"
     );
 }
 
@@ -493,7 +665,11 @@ fn a_merge_that_renumbers_extent_rows_disturbs_no_artifacts_count() {
 /// A layer carrying corpus-derived content under the given deletion declaration.
 fn content_layer(on_deletion: bool) -> LayerDeclaration {
     let mut d = declaration("clusters/a");
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }];
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        name: "topic".into(),
+        ty: "text".into(),
+        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+    }];
     d.content.withdraw_on_member_deletion = on_deletion;
     d
 }
@@ -529,13 +705,13 @@ fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
     let fx = fixture();
     {
         let engine = fx.open();
-        engine
-            .register_layer(content_layer(
-                true,
-            ))
-            .unwrap();
+        engine.register_layer(content_layer(true)).unwrap();
         publish_described(&fx, &engine);
-        assert_eq!(artifacts_of(&engine).len(), 1, "served with its description");
+        assert_eq!(
+            artifacts_of(&engine).len(),
+            1,
+            "served with its description"
+        );
 
         // Inside the generating sample, so containment fails for everyone from the ack.
         engine
@@ -569,11 +745,7 @@ fn a_strict_layer_withdraws_the_content_at_the_fold_and_the_artifact_with_it() {
 fn a_permissive_layer_shrinks_the_generating_set_at_the_fold_and_serves_again() {
     let fx = fixture();
     let engine = fx.open();
-    engine
-        .register_layer(content_layer(
-            false,
-        ))
-        .unwrap();
+    engine.register_layer(content_layer(false)).unwrap();
     publish_described(&fx, &engine);
 
     engine
@@ -656,11 +828,7 @@ fn publication_refuses_a_deleted_member_and_accepts_a_suppressed_one() {
 fn publication_refuses_a_generating_set_naming_a_deleted_document() {
     let fx = fixture();
     let engine = fx.open();
-    engine
-        .register_layer(content_layer(
-            true,
-        ))
-        .unwrap();
+    engine.register_layer(content_layer(true)).unwrap();
     engine
         .accept_change(fx.member(7), ChangeOp::Delete)
         .expect("the delete is accepted");
@@ -688,10 +856,7 @@ fn publication_refuses_a_generating_set_naming_a_deleted_document() {
 
 /// The report the fold wrote for the prefix it published, as the operator would read it off disk.
 fn report_on_disk(fx: &Fixture, prefix: &str) -> serde_json::Value {
-    let path = fx
-        .root
-        .join("reports")
-        .join(format!("fold-{prefix}.json"));
+    let path = fx.root.join("reports").join(format!("fold-{prefix}.json"));
     let bytes = std::fs::read(&path)
         .unwrap_or_else(|e| panic!("the fold must have written {}: {e}", path.display()));
     serde_json::from_slice(&bytes).expect("the report is JSON")
@@ -705,7 +870,11 @@ fn the_fold_reports_what_its_deletions_took_from_every_artifact_that_held_them()
     let fx = fixture();
     let engine = fx.open();
     let mut layer = declaration("clusters/a");
-    layer.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }];
+    layer.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        name: "topic".into(),
+        ty: "text".into(),
+        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+    }];
     engine.register_layer(layer).unwrap();
     engine
         .publish_artifacts(
@@ -788,7 +957,10 @@ fn a_later_fold_does_not_reclaim_an_earlier_folds_report() {
         .expect("the delete is accepted");
     fold(&engine);
     let first = engine.generation().prefix.clone();
-    assert_eq!(report_on_disk(&fx, &first)["degraded"][0]["members_lost"], 1);
+    assert_eq!(
+        report_on_disk(&fx, &first)["degraded"][0]["members_lost"],
+        1
+    );
 
     fold(&engine);
 
@@ -851,7 +1023,11 @@ fn a_fold_whose_report_cannot_be_written_is_discarded_and_retires_nothing() {
 /// withholding below comes from the arm under test rather than from an access label.
 fn labels_over(target: &str) -> LayerDeclaration {
     let mut d = declaration("topics/x");
-    d.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited }];
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        name: "topic".into(),
+        ty: "text".into(),
+        require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited,
+    }];
     d.depends_on = vec![target.into()];
     d
 }
@@ -892,7 +1068,11 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
     fold(&engine);
 
     assert_eq!(artifacts_of(&engine).len(), 2, "and still hidden after it");
-    assert_eq!(engine.published_artifacts(), 2, "the level holds two records");
+    assert_eq!(
+        engine.published_artifacts(),
+        2,
+        "the level holds two records"
+    );
     let survivor = engine
         .locate_artifact(last_before)
         .expect("the survivor still has an address");
@@ -904,9 +1084,7 @@ fn a_deleted_artifact_leaves_the_level_at_the_fold_and_its_ordinal_stays_a_hole(
     // The **address** still resolves, because it is the layer's reserved run that answers it and a
     // run is not per artifact. What is gone is the record at that ordinal, which is the hole.
     assert_eq!(
-        engine
-            .locate_artifact(deleted)
-            .and_then(|at| at.key),
+        engine.locate_artifact(deleted).and_then(|at| at.key),
         None,
         "and the deleted artifact's slot holds nothing"
     );
@@ -954,7 +1132,10 @@ fn deleting_the_last_artifact_of_a_level_does_not_hand_its_identity_to_the_next_
         .publish_artifacts(
             "clusters/a".into(),
             0,
-            vec![IncomingArtifact::from_entities(Some("c2".into()), later_members)],
+            vec![IncomingArtifact::from_entities(
+                Some("c2".into()),
+                later_members,
+            )],
         )
         .unwrap();
     let fresh = artifact_entity(&engine, ids[0]);
@@ -1080,7 +1261,11 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     {
         let engine = fx.open();
         let mut layer = declaration("topics/a");
-        layer.content.supplied = vec![tessera_types::layer::SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }];
+        layer.content.supplied = vec![tessera_types::layer::SuppliedContent {
+            name: "topic".into(),
+            ty: "text".into(),
+            require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+        }];
         engine.register_layer(layer).unwrap();
         engine
             .publish_artifacts(
@@ -1109,7 +1294,11 @@ fn supplied_content_survives_the_fold_and_the_restart_after_it() {
     // blob the fold carried forward.
     let engine = fx.open();
     let served = artifacts_of(&engine);
-    assert_eq!(served.len(), 1, "the artifact is served rather than withheld");
+    assert_eq!(
+        served.len(),
+        1,
+        "the artifact is served rather than withheld"
+    );
     assert_eq!(served[0].content, vec!["a label from the whole sample"]);
 }
 
@@ -1199,7 +1388,10 @@ fn deleting_a_cluster_deletes_its_labels_and_they_retire_at_the_same_fold() {
     );
     assert_eq!(engine.published_artifacts(), 0);
     assert!(
-        engine.locate_artifact(cluster_entity).and_then(|at| at.key).is_none(),
+        engine
+            .locate_artifact(cluster_entity)
+            .and_then(|at| at.key)
+            .is_none(),
         "and the cluster's own slot is a hole, as it was before this rule existed"
     );
 }

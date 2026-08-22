@@ -218,6 +218,8 @@ fn flushed_bundle(root: &Path) {
         layers: seg0.layers.clone(),
         layer_tombstones: seg0.layer_tombstones.clone(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments,
         deltas: vec![delta_rel],
@@ -263,7 +265,11 @@ fn refresh_digest(root: &Path, rel: &str) {
         serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
     if segments["files"].get(rel).is_some() {
         segments["files"][rel] = digest;
-        fs::write(&segments_path, serde_json::to_vec_pretty(&segments).unwrap()).unwrap();
+        fs::write(
+            &segments_path,
+            serde_json::to_vec_pretty(&segments).unwrap(),
+        )
+        .unwrap();
         return;
     }
 
@@ -358,8 +364,8 @@ fn the_fixture_carries_a_key_bound_in_two_runs() {
 // defect. A checker nobody has seen fail is a checker nobody knows works.
 
 fn expect_refusal(root: &Path, needle: &str) {
-    let err = verify_deep(root, &VerifyOpts::default())
-        .expect_err("the damaged bundle must be refused");
+    let err =
+        verify_deep(root, &VerifyOpts::default()).expect_err("the damaged bundle must be refused");
     let message = err.to_string();
     assert!(
         message.contains(needle),
@@ -378,8 +384,7 @@ fn a_segment_whose_column_is_one_row_short_is_refused() {
     let rel = "partitions/default/views/s0/segments/flush-1/columns.arrow";
     let path = root.join("v00000").join(rel);
 
-    let reader =
-        arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
     let schema = reader.schema();
     let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
     assert_eq!(batches.len(), 1);
@@ -407,7 +412,10 @@ fn a_segment_whose_morton_column_is_out_of_order_is_refused() {
     let mut bytes = fs::read(&path).unwrap();
     assert_eq!(bytes.len(), 8, "two rows, one u32 code each");
     let (first, second) = bytes.split_at_mut(4);
-    assert_ne!(first, second, "the fixture's codes must differ for the swap to damage");
+    assert_ne!(
+        first, second,
+        "the fixture's codes must differ for the swap to damage"
+    );
     first.swap_with_slice(second);
     fs::write(&path, &bytes).unwrap();
     refresh_digest(&root, rel);
@@ -532,7 +540,11 @@ fn a_dict_extent_with_a_miscounted_declaration_is_refused() {
         serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
     let declared = segments["dict_extents"][0]["records"].as_u64().unwrap();
     segments["dict_extents"][0]["records"] = serde_json::json!(declared + 1);
-    fs::write(&segments_path, serde_json::to_vec_pretty(&segments).unwrap()).unwrap();
+    fs::write(
+        &segments_path,
+        serde_json::to_vec_pretty(&segments).unwrap(),
+    )
+    .unwrap();
 
     expect_refusal(&root, "positional");
 }
@@ -547,7 +559,8 @@ fn a_pairs_file_missing_a_base_pair_is_refused() {
     let rel = "partitions/default/terms/pairs.parquet";
     let path = root.join("v00000").join(rel);
 
-    let mut per_term = read_base_postings(&root.join("v00000/partitions/default/terms/postings.arrow"));
+    let mut per_term =
+        read_base_postings(&root.join("v00000/partitions/default/terms/postings.arrow"));
     let with_rows = per_term
         .iter()
         .position(|entities| !entities.is_empty())
@@ -586,14 +599,12 @@ fn a_source_binding_request_is_refused_until_the_contract_carries_the_field() {
 fn read_base_postings(path: &Path) -> Vec<Vec<u32>> {
     let reader = tessera_authz::PostingsReader::open(path, false).unwrap();
     (0..reader.term_count())
-        .map(|t| {
-            match reader.posting_at(t).unwrap().unwrap() {
-                tessera_authz::PostingRef::Array(bytes) => bytes
-                    .chunks_exact(4)
-                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                    .collect(),
-                tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
-            }
+        .map(|t| match reader.posting_at(t).unwrap().unwrap() {
+            tessera_authz::PostingRef::Array(bytes) => bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+            tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
         })
         .collect()
 }
@@ -617,5 +628,9 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
         .push(serde_json::json!({ "path": rel, "records": 1 }));
     segments["files"][&rel] =
         serde_json::json!({ "size": record.len(), "sha256": hex_sha256(record) });
-    fs::write(&segments_path, serde_json::to_vec_pretty(&segments).unwrap()).unwrap();
+    fs::write(
+        &segments_path,
+        serde_json::to_vec_pretty(&segments).unwrap(),
+    )
+    .unwrap();
 }

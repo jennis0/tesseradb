@@ -816,6 +816,70 @@ impl ArtifactStore {
         *self.versions.entry((layer.to_string(), level)).or_insert(0) += 1;
     }
 
+    /// Set one level's version to what the manifest that published it recorded. **Open only.**
+    ///
+    /// **This is the one route that may move a version backwards, and it is safe for exactly one
+    /// reason: nothing has been derived yet.** [`Self::versions`] is monotone in a running process
+    /// because a version that went backwards would make a cached form built over the *old*
+    /// artifacts compare equal to the new level. At open there is no such form — the store is being
+    /// built. Without it a restart starts every level at zero however many publications the
+    /// manifest carries, so no coordinate written before the restart could be compared with one
+    /// after it, and every derived structure the prefix holds would be rejected on every open.
+    ///
+    /// Called after the level's records are seeded and **before** the WAL is replayed. Seeding
+    /// itself does not move a version — [`Self::seed`] goes through [`Self::put`], which writes a
+    /// slot and counts nothing — but replay does, through `apply`, so a record the log carries past
+    /// the manifest moves the version off the published value. That is exactly the signal a reader
+    /// deciding whether to adopt a derived structure needs (`manifest::ContainmentExtent`).
+    pub fn seed_level_version(&mut self, layer: &str, level: u32, version: u64) {
+        self.versions.insert((layer.to_string(), level), version);
+    }
+
+    /// Every level [`Self::retire`] would move, given the same `retired` set — the read-only twin
+    /// of its `changed`, and it lives beside it so the two are read together.
+    ///
+    /// **Conservative where it is not exact.** A level is reported whenever anything about it
+    /// *could* change: an artifact whose own entity is retired, a membership that loses a bit, or a
+    /// generating set that loses a member — which is what both deletion policies key on. Reporting
+    /// a level that would not in fact have moved costs a derived structure that is recomposed;
+    /// missing one that would have moved is a structure adopted against records it does not
+    /// describe, and that is the direction this must not fail in.
+    ///
+    /// **Why a publication needs it at all.** A fold writes its manifest *before* it retires — the
+    /// retirement is not reversible and a manifest that would not commit must leave it undone — so
+    /// the version this store reports at that moment is the pre-retirement one while the records
+    /// the manifest names are the post-retirement ones. For a level the retirement moves, those two
+    /// facts do not belong in one manifest, so neither is stated: see `write.rs`'s
+    /// `artifact_coordinates`.
+    pub fn levels_moved_by(&self, retired: &Bitmap) -> Vec<(String, u32)> {
+        if retired.is_empty() {
+            return Vec::new();
+        }
+        let mut moved = Vec::new();
+        for ((layer, level), slots) in &self.levels {
+            let touched = slots.iter().flatten().any(|record| {
+                retired.contains(record.entity.raw() as u32)
+                    || record.members.and_cardinality(retired) != 0
+                    || record
+                        .contents
+                        .iter()
+                        .any(|content| content.generated_from.and_cardinality(retired) != 0)
+            });
+            if touched {
+                moved.push((layer.clone(), *level));
+            }
+        }
+        moved
+    }
+
+    /// Every level this store holds a version for, as `(layer, level, version)` — what a
+    /// publication records in `manifest::SegmentsManifest::level_versions`.
+    pub fn level_versions(&self) -> impl Iterator<Item = (&str, u32, u64)> {
+        self.versions
+            .iter()
+            .map(|((layer, level), version)| (layer.as_str(), *level, *version))
+    }
+
     /// Every level's artifacts that are **not yet in a manifest**, as
     /// `(layer, level, ordinal_lo, blobs)` ready to pack — see [`encode_record`].
     ///

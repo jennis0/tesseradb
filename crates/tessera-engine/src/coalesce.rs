@@ -280,9 +280,11 @@ pub(crate) fn plan_coalesce(
     // consecutive entries of the live list, lands in place, and the merge is an
     // ordinal-preserving concatenation (contracts §2.4; decision 0042).
     if let Some((_base, promoted)) = manifest.dict_extents.split_first() {
-        if let Some(window) = select_window(promoted, policy.width, policy, |extent: &DictExtent| {
-            Some(size_of(&extent.path))
-        }) {
+        if let Some(window) =
+            select_window(promoted, policy.width, policy, |extent: &DictExtent| {
+                Some(size_of(&extent.path))
+            })
+        {
             plan.dicts = manifest.dict_extents[window.start + 1..window.end + 1].to_vec();
         }
     }
@@ -784,11 +786,13 @@ pub(crate) fn execute_coalesce(
             .iter()
             .zip(postings.iter())
             .zip(presences.iter())
-            .map(|((dict, postings), present)| tessera_filter_write::TextLayerRef {
-                dict,
-                postings,
-                present: Some(present),
-            })
+            .map(
+                |((dict, postings), present)| tessera_filter_write::TextLayerRef {
+                    dict,
+                    postings,
+                    present: Some(present),
+                },
+            )
             .collect();
 
         let extent = TextExtent {
@@ -823,10 +827,14 @@ pub(crate) fn execute_coalesce(
         // Reopened before the manifest can name it, the record axis's posture: the two halves are
         // checked against each other here, so a merge defect refuses the pass rather than
         // publishing a layer whose ordinals name the wrong words on every later `match`.
-        let reopened_dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read)
-            .map_err(|e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")))?;
+        let reopened_dict =
+            tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read).map_err(
+                |e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")),
+            )?;
         let reopened_postings = tessera_filter::ColumnPostings::open(&postings_path, false)
-            .map_err(|e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")))?;
+            .map_err(|e| {
+                CoalesceFailed(format!("the coalesced text extent does not reopen: {e}"))
+            })?;
         if reopened_dict.len() != reopened_postings.record_count() {
             return Err(CoalesceFailed(format!(
                 "the coalesced text extent for '{}' holds {} terms and {} postings records",
@@ -1130,6 +1138,8 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),

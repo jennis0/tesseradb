@@ -8,10 +8,10 @@
 //! code in the others. That is what the allow below is for, and it is scoped to this fixture.
 #![allow(dead_code)]
 
-use tessera_plugin::Plugin;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use tessera_plugin::Plugin;
 
 use sha2::{Digest, Sha256};
 
@@ -105,6 +105,8 @@ pub fn build_bundle(root: &Path, n: u64) {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             view: VIEW.to_string(),

@@ -1955,7 +1955,68 @@ pub(crate) struct ManifestSeed<'a> {
     /// Every published membership extent, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
     pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
+    /// Every `(layer, level)`'s artifact-write counter as of the publication, across every
+    /// partition's manifest.
+    ///
+    /// **Seeded after the records and before the replay**, which is what makes a coordinate
+    /// written before a restart comparable with one after it: seeding a level's records bumps its
+    /// version once per record, so without this a level comes back at its record count rather than
+    /// at the number the publication recorded — and every derived structure keyed on the version
+    /// would be rejected on every restart. See `ArtifactStore::seed_level_version`.
+    pub level_versions: &'a [tessera_store::manifest::LevelVersion],
     pub prefix_dir: std::path::PathBuf,
+}
+
+/// The two artifact coordinates a manifest carries: every level's version, and the containment
+/// partitions whose composed-at version is still that version.
+///
+/// **Filtered, so the invariant is true by construction rather than checked at open**: every entry
+/// a manifest names is one whose coordinate equals the version list beside it, so a manifest never
+/// names a partition that has already been invalidated. An entry whose level has moved is dropped
+/// here rather than carried and rejected later — carrying it would leave the prefix naming a file
+/// nothing could ever adopt, which reads as a partition that exists.
+///
+/// `pending_retirement` is the levels this publication is *about to* change and has not yet —
+/// which is the fold's own seam, since it writes its manifest before it retires (a retirement is
+/// irreversible and a manifest that would not commit must leave it undone). For those levels the
+/// version this store reports is the pre-retirement one while the records the manifest names are
+/// the post-retirement ones, so **neither the version nor any partition is stated**: a level absent
+/// from the list is one whose version this manifest does not claim, which
+/// [`tessera_store::manifest::LevelVersion`] makes a real state rather than a defaulted zero.
+/// Every other publication passes an empty slice, having nothing pending.
+fn artifact_coordinates(
+    store: &ArtifactStore,
+    held: &[tessera_store::manifest::ContainmentExtent],
+    pending_retirement: &[(String, u32)],
+) -> (
+    Vec<tessera_store::manifest::LevelVersion>,
+    Vec<tessera_store::manifest::ContainmentExtent>,
+) {
+    let pending = |layer: &str, level: u32| {
+        pending_retirement
+            .iter()
+            .any(|(l, v)| l == layer && *v == level)
+    };
+    let versions: Vec<tessera_store::manifest::LevelVersion> = store
+        .level_versions()
+        .filter(|(layer, level, _)| !pending(layer, *level))
+        .map(
+            |(layer, level, version)| tessera_store::manifest::LevelVersion {
+                layer: layer.to_string(),
+                level,
+                version,
+            },
+        )
+        .collect();
+    let still_true = held
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    (versions, still_true)
 }
 
 impl WritePath {
@@ -2118,6 +2179,14 @@ impl WritePath {
                 extent.level,
                 extent.ordinal_lo.saturating_add(extent.count),
             );
+        }
+        // **The published version, before replay puts anything over it.** Every level the manifest
+        // names gets the counter the publication recorded, replacing whatever the seeding above
+        // bumped it to; the replay below then moves it for every record the log carries past that
+        // publication, which is exactly the signal a reader deciding whether to adopt a derived
+        // structure needs (`ArtifactStore::seed_level_version`).
+        for version in seed.level_versions {
+            artifacts.seed_level_version(&version.layer, version.level, version.version);
         }
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             undecodable += artifacts.apply(record, *position);
@@ -2320,6 +2389,16 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.membership_extents.iter().cloned())
             .collect();
+        // The containment partitions the last fold wrote, seeded identically: a publication clones
+        // a stale manifest, so the list has to be held here rather than re-read from it.
+        let seeded_containment_extents: Vec<tessera_store::manifest::ContainmentExtent> =
+            generation
+                .load()
+                .bundle
+                .partitions
+                .values()
+                .flat_map(|p| p.manifest.containment_extents.iter().cloned())
+                .collect();
         // The content half, seeded identically and for the identical reason.
         let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
             .load()
@@ -2386,6 +2465,7 @@ impl WritePath {
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
                     membership_extents: seeded_membership_extents,
+                    containment_extents: seeded_containment_extents,
                     artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
@@ -3623,6 +3703,8 @@ mod vocabulary_extensions_tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -4353,6 +4435,15 @@ struct Executor {
     /// The deny list solves the identical problem by writing complete state from the live overlay;
     /// this is that posture for a list the overlay does not hold.
     membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
+    /// Every containment partition the current prefix holds — one per `(layer, level)` the last
+    /// fold wrote one for. **Held rather than read from the manifest**, for
+    /// [`Executor::membership_extents`]' reason: a publication clones a stale manifest.
+    ///
+    /// **What reaches a manifest is this list filtered**, at every commit, to the entries the
+    /// store's level versions still make adoptable ([`artifact_coordinates`]) — so a manifest never
+    /// names a partition that has already been invalidated, whatever this list happens to hold. The
+    /// fold replaces it wholesale, its paths being relative to the prefix the fold publishes.
+    containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
     /// Every artifact **content** extent this node has published, complete current state, held for
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
@@ -4809,7 +4900,9 @@ impl Executor {
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
-            &manifest,
+            &mut manifest,
+            &self.containment_extents,
+            &[],
         ) {
             self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
@@ -5497,6 +5590,27 @@ impl Executor {
             }
         };
 
+        // **The containment partitions, in the same pass and against the prefix just written.**
+        // They are derived, so an empty list is a cost and not a fault — see
+        // `write_containment_partitions`.
+        // **The levels this fold is about to change and has not yet.** `repack_all` above wrote the
+        // post-retirement records into the prefix while the store still holds the pre-retirement
+        // ones, so a partition composed from the store would describe a level the prefix does not
+        // contain — under `WithdrawContent` a content is dropped whole, which *shifts the ranks*,
+        // and a partition read at the wrong rank is a containment answer for another content's
+        // generating set. Those levels get no partition and no stated version; they recompose on
+        // first use, which is what every request did before this structure existed.
+        let pending_retirement = self
+            .live
+            .with_artifacts(|store| store.levels_moved_by(&executed));
+        let containment = self.write_containment_partitions(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &live.bundle.manifest.data_plugin_hash,
+            &pending_retirement,
+        );
+
         // ---- step 3b: the report, before anything retires ---------------------------------------
         //
         // **A deletion is not retired before the caller has been told what it degraded**
@@ -5577,6 +5691,12 @@ impl Executor {
             // files this prefix contains. The content extents beside it are carried by link, their
             // bytes being the same inodes under a second name.
             membership_extents: repacked.clone(),
+            // **Stamped by `commit_side_manifest`, from the store and the list above.** Placed
+            // here as the empty pair the assembly needs and replaced at the commit, so the version
+            // list and the partitions beside it come from one borrow rather than from two points
+            // in the fold's flight.
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -5795,7 +5915,9 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
-            &segments_manifest,
+            &mut segments_manifest,
+            &containment,
+            &pending_retirement,
         ) {
             discard(&format!(
                 "its SEGMENTS-{manifest_n}.json would not commit ({e})"
@@ -5851,6 +5973,10 @@ impl Executor {
         // records as the only copy.
         self.live.mark_growth_packed();
         self.membership_extents = repacked;
+        // The partitions this fold wrote replace whatever the previous prefix held: their paths are
+        // prefix-relative and the fold publishes a new prefix, so the old entries name files this
+        // prefix does not contain.
+        self.containment_extents = segments_manifest.containment_extents.clone();
         *lock_recover(&self.health.last_fold_report) = degraded;
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
@@ -6264,7 +6390,9 @@ impl Executor {
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
-            &manifest,
+            &mut manifest,
+            &self.containment_extents,
+            &[],
         ) {
             self.health
                 .coalesce_failures
@@ -7321,14 +7449,34 @@ impl Executor {
     /// (see [`crate::geometry::check_manifest_publishable`] for what is compared and why). A
     /// refusal leaves each caller its usual failure posture: nothing written, files orphaned,
     /// the next tick re-plans.
+    ///
+    /// **The artifact coordinates are stamped here rather than by each caller**, which is the same
+    /// argument the watermark check above rests on: every publication converges on this function,
+    /// and a level's version list assembled at five call sites is one that goes stale at whichever
+    /// of them nobody thought about. `containment` is the partition list the caller wants named —
+    /// the fold's freshly written one, everyone else's held one — and what lands in the manifest is
+    /// that list filtered to the entries the store's versions still make adoptable
+    /// ([`artifact_coordinates`]). Read `next.containment_extents` back after a success to keep the
+    /// held list in step.
+    // Seven, plus the manifest being written. Every one of them is a thing this publication *is* —
+    // where it goes, what it replaces, and the two artifact coordinates it has to stamp. Bundling
+    // them would name the same eight things one call earlier.
+    #[allow(clippy::too_many_arguments)]
     fn commit_side_manifest(
         &self,
         live_manifest: &tessera_store::manifest::SegmentsManifest,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
-        next: &tessera_store::manifest::SegmentsManifest,
+        next: &mut tessera_store::manifest::SegmentsManifest,
+        containment: &[tessera_store::manifest::ContainmentExtent],
+        pending_retirement: &[(String, u32)],
     ) -> Result<(), ManifestCommitRefused> {
+        let (level_versions, containment_extents) = self
+            .live
+            .with_artifacts(|store| artifact_coordinates(store, containment, pending_retirement));
+        next.level_versions = level_versions;
+        next.containment_extents = containment_extents;
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
@@ -8963,7 +9111,9 @@ impl Executor {
                 &self.prefix_dir(&live),
                 partition,
                 n,
-                &manifest,
+                &mut manifest,
+                &self.containment_extents,
+                &[],
             ) {
                 tracing::error!(
                     error = %e,
@@ -9201,6 +9351,128 @@ impl Executor {
         }
         tessera_store::fsync_dir(&dir)?;
         Ok(entries)
+    }
+
+    /// Compose and write this prefix's containment partitions, one file per `(layer, level)`.
+    ///
+    /// **Against the prefix being published, not the one being left.** A fold rewrites the term
+    /// index, so a partition composed from the old postings would name a table the new prefix's
+    /// entities are not in. The new file is on disk by the time this runs — compaction's pass 2
+    /// writes it — so the reader is opened over the prefix this is writing into.
+    ///
+    /// **Inside the artifact pass, before the registry snapshot the manifest is written from**
+    /// (`2026-08-21-artifact-layout-selection.md` §5): the coordinate each entry carries is the
+    /// level version at the moment it was composed, and the version list beside it comes from the
+    /// same borrow, so the two cannot disagree about a publication landing between them.
+    ///
+    /// **Every failure is an empty list, not a discarded fold.** A partition is derived — the level
+    /// recomposes it on first use — so refusing to publish over one would be a refusal outside the
+    /// disclosure surface, and the thing being refused has a correct fallback.
+    fn write_containment_partitions(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        data_plugin_hash: &str,
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<tessera_store::manifest::ContainmentExtent> {
+        // The gate: under any plugin but the builtin the partition is not sound at all, so nothing
+        // is composed and nothing is written (`crate::containment`).
+        if !crate::containment::signature_shaped(data_plugin_hash) {
+            return Vec::new();
+        }
+        let postings_path = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("terms")
+            .join("postings.arrow");
+        let postings = match tessera_authz::PostingsReader::open(&postings_path, true) {
+            Ok(postings) => postings,
+            Err(error) => {
+                tracing::warn!(
+                    path = %postings_path.display(),
+                    %error,
+                    "the fold could not read the prefix it just wrote to compose containment                      partitions; every level recomposes on first use"
+                );
+                return Vec::new();
+            }
+        };
+
+        // Composed under one borrow with the versions they are composed at, and written outside it:
+        // composing is the dear part and needs the store, writing a file does not.
+        let composed: Vec<(String, u32, u64, Vec<u8>)> = self.live.with_artifacts(|store| {
+            let levels: Vec<(String, u32)> = store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .collect();
+            levels
+                .into_iter()
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .filter_map(|(layer, level)| {
+                    let version = store.level_version(&layer, level);
+                    match crate::containment::ContainmentPartition::compose(
+                        store, &layer, level, &postings,
+                    ) {
+                        Ok(partition) => {
+                            Some((layer, level, version, partition.as_bytes().to_vec()))
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                layer = %layer,
+                                level,
+                                %error,
+                                "a containment partition would not compose at the fold; that level                                  recomposes on first use"
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect()
+        });
+        if composed.is_empty() {
+            return Vec::new();
+        }
+
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("containment");
+        if let Err(source) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), %source, "the containment directory would not be created");
+            return Vec::new();
+        }
+        let mut entries = Vec::with_capacity(composed.len());
+        for (index, (layer, level, version, bytes)) in composed.into_iter().enumerate() {
+            // The naming rule the membership extents follow: a layer name is path-shaped and never
+            // reaches a filename; the publication that introduced the file does.
+            let name = format!("containment-{n:06}-{index:03}.tscp");
+            if let Err(error) = tessera_store::write_and_fsync(&dir.join(&name), &bytes) {
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    %error,
+                    "a containment partition would not be written; that level recomposes on first                      use"
+                );
+                continue;
+            }
+            entries.push(tessera_store::manifest::ContainmentExtent {
+                path: format!("partitions/{partition}/containment/{name}"),
+                layer,
+                level,
+                level_version: version,
+            });
+        }
+        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
+        // whose name was never written — the rule every other publication here follows.
+        if let Err(error) = tessera_store::fsync_dir(&dir) {
+            tracing::warn!(%error, "the containment directory would not be fsynced; its partitions are dropped");
+            return Vec::new();
+        }
+        entries
     }
 
     /// Rebuild every level's row-space membership, and every lineage this fold moved, against the
@@ -9542,7 +9814,9 @@ impl Executor {
             &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,
-            &manifest,
+            &mut manifest,
+            &self.containment_extents,
+            &[],
         ) {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(

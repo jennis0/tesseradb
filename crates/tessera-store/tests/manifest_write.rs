@@ -8,10 +8,10 @@
 //! result with the real reader — never a hand-parsed assertion of either file's shape, matching
 //! `bundle_read.rs`'s own voice.
 
-use tessera_plugin::Plugin;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use tessera_plugin::Plugin;
 
 use sha2::{Digest, Sha256};
 
@@ -114,6 +114,8 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             view: "main".to_string(),
@@ -309,6 +311,8 @@ fn manifest_fixture() -> SegmentsManifest {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),

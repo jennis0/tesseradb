@@ -459,6 +459,141 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
     }
 }
 
+/// **The adoption rule, both directions.** A fold-written partition is taken only where the level
+/// it seeded is at exactly the version the file was composed at — and dropped, so the level
+/// recomposes, at any other version.
+///
+/// The direction that matters is the second. A level moves by publication and by growth, and both
+/// only *add*: a growth adds members to a generating set, which makes containment **harder**, so a
+/// reader that adopted a partition composed before it would answer the easier question. That is
+/// the permissive direction on the one test **I3** exists to make conservative, which is why the
+/// rule is equality and why nothing weaker is acceptable — a `>=`, a "close enough", or a check
+/// only on the layer's name would each admit exactly that.
+#[test]
+fn a_partition_is_adopted_at_its_own_coordinate_and_at_no_other() {
+    let fx = build_fixture();
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("partitions/default/containment")).unwrap();
+    let rel = "partitions/default/containment/containment-000001-000.tscp";
+    std::fs::write(tmp.path().join(rel), fx.partition().as_bytes()).unwrap();
+
+    // A coordinate that is a number rather than a zero, so *moved down* is expressible as well as
+    // *moved up*: a level's version is a counter of writes, and a reader must not treat "lower"
+    // as "older and therefore safe".
+    let mut store = fx.store.clone();
+    store.seed_level_version(LAYER, 0, 7);
+    let composed_at = store.level_version(LAYER, 0);
+    assert_eq!(composed_at, 7);
+    let entry = |version: u64| tessera_store::manifest::ContainmentExtent {
+        path: rel.to_string(),
+        layer: LAYER.to_string(),
+        level: 0,
+        level_version: version,
+    };
+    let source = PartitionSource {
+        postings: &fx.postings,
+        data_plugin_hash: &tessera_plugin::Plugin::data_plugin_hash(
+            &tessera_plugin::Passthrough::new(),
+        ),
+    };
+
+    // The coordinate holds: mapped, and the level's first request composes nothing.
+    let projections = ArtifactProjections::new();
+    projections.adopt_all(tmp.path(), "v00000", &[entry(composed_at)], &store);
+    assert_eq!(projections.adopted(), 1);
+    let rows = projections.get_or_build(
+        "v00000",
+        "s0",
+        LAYER,
+        0,
+        &store,
+        &fx.row_space,
+        Some(&source),
+    );
+    assert!(rows.partition().is_some());
+    assert_eq!(
+        projections.partitions(),
+        0,
+        "the adopted partition answered, so nothing was composed"
+    );
+
+    // The level has moved since: dropped, and the level recomposes on first use.
+    for moved in [composed_at + 1, composed_at.saturating_sub(1)] {
+        let projections = ArtifactProjections::new();
+        projections.adopt_all(tmp.path(), "v00000", &[entry(moved)], &store);
+        assert_eq!(
+            projections.adopted(),
+            0,
+            "a partition composed at {moved} must not answer for a level at {composed_at}"
+        );
+        let rows = projections.get_or_build(
+            "v00000",
+            "s0",
+            LAYER,
+            0,
+            &store,
+            &fx.row_space,
+            Some(&source),
+        );
+        assert!(rows.partition().is_some());
+        assert_eq!(projections.partitions(), 1, "the level recomposed instead");
+    }
+
+    // And a file the manifest names that is not there is an absence, not a refusal to open: the
+    // level recomposes, which is what every request did before the fold wrote anything.
+    let projections = ArtifactProjections::new();
+    let mut missing = entry(composed_at);
+    missing.path = "partitions/default/containment/gone.tscp".to_string();
+    projections.adopt_all(tmp.path(), "v00000", &[missing], &store);
+    assert_eq!(projections.adopted(), 0);
+}
+
+/// A prefix other than the one being served does not answer, whatever the coordinate says. Row
+/// space renumbers wholesale at a fold, and a partition is composed against a prefix's postings —
+/// so a partition held for one prefix must not be reused under another.
+#[test]
+fn an_adopted_partition_does_not_answer_under_another_prefix() {
+    let fx = build_fixture();
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("partitions/default/containment")).unwrap();
+    let rel = "partitions/default/containment/p.tscp";
+    std::fs::write(tmp.path().join(rel), fx.partition().as_bytes()).unwrap();
+
+    let projections = ArtifactProjections::new();
+    projections.adopt_all(
+        tmp.path(),
+        "v00000",
+        &[tessera_store::manifest::ContainmentExtent {
+            path: rel.to_string(),
+            layer: LAYER.to_string(),
+            level: 0,
+            level_version: fx.store.level_version(LAYER, 0),
+        }],
+        &fx.store,
+    );
+    assert_eq!(projections.adopted(), 1);
+    let source = PartitionSource {
+        postings: &fx.postings,
+        data_plugin_hash: &tessera_plugin::Plugin::data_plugin_hash(
+            &tessera_plugin::Passthrough::new(),
+        ),
+    };
+    let _ = projections.get_or_build(
+        "v00001",
+        "s0",
+        LAYER,
+        0,
+        &fx.store,
+        &fx.row_space,
+        Some(&source),
+    );
+    assert_eq!(
+        projections.partitions(),
+        1,
+        "the adopted partition belongs to v00000 and must not answer for v00001"
+    );
+}
+
 /// The composition reads the postings and nothing else, so the expression it interns is the
 /// entity's **own** term set — checked against the fixture's generator for a handful of ordinals,
 /// because a signature inversion that silently returned the empty set would make every expression

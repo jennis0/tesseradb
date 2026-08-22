@@ -4,11 +4,11 @@
 //! statistics match what was constructed — including the bbox drilldown, whose region excludes
 //! exactly one designed cell.
 
-use tessera_plugin::Plugin;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use tessera_plugin::Plugin;
 
 use sha2::{Digest, Sha256};
 
@@ -112,6 +112,8 @@ fn build_bundle(root: &Path) {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             view: "main".to_string(),

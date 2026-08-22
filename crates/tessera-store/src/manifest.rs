@@ -719,6 +719,58 @@ pub struct MembershipExtent {
     pub count: u32,
 }
 
+/// One `(layer, level)`'s artifact-write counter, as of the publication this manifest describes.
+///
+/// **The counter is what a derived structure is valid *for*, and until now it lived only in
+/// memory.** `ArtifactStore` counts the writes that have landed on each level, and everything
+/// derived from a level — its row-space projection, its lineage, its containment partition — is
+/// correct only for the version it was derived from. A restart rebuilt the store from these
+/// manifests and started every level's counter at whatever the seeding happened to produce, so a
+/// coordinate recorded before the restart could not be compared with one after it.
+///
+/// **Per `(layer, level)` and not one counter for the store**, for `ArtifactStore::versions`' own
+/// reason: a store-wide counter makes one publication anywhere invalidate every level's derived
+/// form everywhere (`design/artifact-serving-at-scale.md` §8.1).
+///
+/// A level present in `membership_extents` and absent here is a level whose version is unknown,
+/// which is not the same as zero — see [`SegmentsManifest::level_versions`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LevelVersion {
+    pub layer: String,
+    pub level: u32,
+    /// How many artifact writes had landed on this level when this manifest was written.
+    pub version: u64,
+}
+
+/// One entry of `containment_extents`: one level's fold-written containment partition
+/// (`tessera_engine::containment`, and `membership.rs` for the format).
+///
+/// **The coordinate is the whole of the adoption rule.** The partition is a pure function of a
+/// level's records and the prefix's postings, so a file describes the level *at one version*; a
+/// reader adopts it only where the level it seeds is at exactly that version, and recomposes
+/// otherwise. Never a weaker match. Growth shrinks nothing and publication only adds, so a stale
+/// partition answers containment for a generating set that has since grown — and growth makes
+/// containment **harder**, which makes the stale answer the permissive one on the one test
+/// **I3** exists to make conservative.
+///
+/// **One file per level, not per publication**, which is the difference from [`MembershipExtent`]:
+/// a membership extent covers the ordinals one publication appended and a reader unions them, where
+/// a partition covers the whole level and is replaced wholesale. That follows from what it is —
+/// interning is over the level's whole population, so an expression identifier means nothing
+/// outside the table it was interned into.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainmentExtent {
+    /// Prefix-relative path of the packed partition.
+    pub path: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when this partition was composed. **Also the adoption test**: a reader
+    /// takes the file only where the level it seeded is at exactly this version.
+    pub level_version: u64,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -797,6 +849,25 @@ pub struct SegmentsManifest {
     /// exactly what a lost list looks like, and the artifacts are then served as absent with nothing
     /// anywhere reporting a fault.
     pub membership_extents: Vec<MembershipExtent>,
+    /// Every `(layer, level)`'s artifact-write counter as of this publication — see
+    /// [`LevelVersion`].
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument and with the same shape of
+    /// consequence: an absent list and a lost list are indistinguishable under a default, and a
+    /// lost one restarts every level at zero — which is a coordinate a derived structure written
+    /// under the *old* numbering could compare equal to. A manifest omitting it is malformed, not
+    /// version-free.
+    pub level_versions: Vec<LevelVersion>,
+    /// Every fold-written containment partition this partition holds — see [`ContainmentExtent`].
+    /// Empty in a bundle that has never folded, and in one served by a plugin other than the
+    /// builtin.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument. The consequence of a lost list is
+    /// milder than that field's — a partition that is not adopted is recomposed on first use, and
+    /// the answer is the same — but *indistinguishable from an empty one* is the property the rule
+    /// is about, and a list that silently emptied itself would turn a fold's consolidation into a
+    /// stall on whichever request arrived first, with nothing reporting a fault.
+    pub containment_extents: Vec<ContainmentExtent>,
     /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
     /// store as [`SegmentsManifest::record_extents`], listed separately.
     ///
@@ -1144,6 +1215,8 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
