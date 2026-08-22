@@ -115,6 +115,23 @@ impl Fixture {
             .collect()
     }
 
+    /// The tile-index extent columns the fold wrote into the prefix now being served — one per
+    /// `(view, layer, level)`, because an extent is a pair of rows and a row space is per view.
+    fn tile_index_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
+        let dir = self
+            .live_prefix(engine)
+            .join("partitions")
+            .join("default")
+            .join("tile-index");
+        std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "tsti"))
+            .collect()
+    }
+
     fn membership_files(&self, engine: &Engine) -> Vec<std::path::PathBuf> {
         let dir = self
             .live_prefix(engine)
@@ -468,6 +485,108 @@ fn a_fold_that_retires_a_member_names_no_partition_for_that_level() {
         1,
         "the level recomposed on first use"
     );
+}
+
+// ---- the tile index, across a restart ----------------------------------------------------------
+
+/// **The fold writes a tile index and a restart maps it.** The consolidation is what the layout
+/// memo's constraint 13 asks for: at ten million artifacts a level's extent column is eighty
+/// megabytes, and page cache is reclaimable where an anonymous allocation is an OOM.
+///
+/// The adoption test is the coordinate and nothing weaker — prefix, view and the level version the
+/// manifest recorded against the file. This case is the one where they all agree.
+#[test]
+fn the_fold_writes_a_tile_index_a_restart_adopts() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        fold(&engine);
+        assert_eq!(
+            fx.tile_index_files(&engine).len(),
+            1,
+            "one column per (view, layer, level), under the prefix the fold published"
+        );
+        rotate(&engine);
+    }
+
+    let engine = fx.open();
+    // The first request for the level claims it; before that nothing has asked.
+    assert_eq!(count(&engine), 300);
+    assert_eq!(
+        engine.artifact_tile_indexes_adopted(),
+        1,
+        "the coordinate held, so the column was mapped rather than derived"
+    );
+}
+
+/// **A growth after the fold moves the level past the coordinate, and the column is dropped.**
+///
+/// This is the direction that matters, and it is the mirror image of the containment partition's. A
+/// growth adds members, so the fold's extents are **narrow**: an artifact that has grown past its
+/// node would be found in no node the viewport touches and served to nobody, and one settled on a
+/// narrow extent would have its probe taken against `viewport ∩ M_auth` on a claim — that its
+/// membership is inside the viewport — which the growth made false. So the rule is equality.
+#[test]
+fn a_growth_after_the_fold_leaves_the_tile_index_unadopted() {
+    let fx = fixture();
+    {
+        let engine = fx.open();
+        publish(&fx, &engine, 0..300);
+        // Resolved before the fold: the external-id map is read from the prefix the fold is about
+        // to reclaim.
+        let joining = fx.members(300..320);
+        fold(&engine);
+        assert_eq!(fx.tile_index_files(&engine).len(), 1);
+        engine
+            .grow_memberships(
+                "clusters/a".into(),
+                0,
+                vec![tessera_lifecycle::IncomingGrowth::from_entities(
+                    "c0".into(),
+                    joining,
+                )],
+            )
+            .expect("the growth is accepted");
+        rotate(&engine);
+    }
+
+    let engine = fx.open();
+    assert_eq!(
+        count(&engine),
+        320,
+        "the grown membership is what is served"
+    );
+    assert_eq!(
+        engine.artifact_tile_indexes_adopted(),
+        0,
+        "the level moved after the column was projected, so it must not be claimed"
+    );
+}
+
+/// A fold that retires a member states nothing about that level and names no column for it — the
+/// same omission `a_fold_that_retires_a_member_names_no_partition_for_that_level` describes, and
+/// for the same reason: the manifest is written before the retirement, so the store and the prefix
+/// disagree about the level for exactly that window.
+#[test]
+fn a_fold_that_retires_a_member_names_no_tile_index_for_that_level() {
+    let fx = fixture();
+    let engine = fx.open();
+    publish(&fx, &engine, 0..300);
+    engine
+        .accept_change(fx.member(7), ChangeOp::Delete)
+        .expect("the delete is accepted");
+    fold(&engine);
+    assert!(
+        fx.tile_index_files(&engine).is_empty(),
+        "the fold retired a member of this level, so it wrote no column for it"
+    );
+    rotate(&engine);
+    drop(engine);
+
+    let engine = fx.open();
+    assert_eq!(count(&engine), 299, "and the retired member is gone");
+    assert_eq!(engine.artifact_tile_indexes_adopted(), 0);
 }
 
 /// A second fold over an already-folded prefix is the case that catches a rewrite which reads its

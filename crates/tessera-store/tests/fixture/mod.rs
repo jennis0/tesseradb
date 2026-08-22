@@ -107,6 +107,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
             view: VIEW.to_string(),

@@ -1010,6 +1010,11 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.containment_extents.iter().cloned())
             .collect();
+        let manifest_tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.tile_index_extents.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -1161,6 +1166,16 @@ impl Engine {
             &prefix_dir,
             generation.load().prefix.as_str(),
             &manifest_containment_extents,
+            &write_state.artifacts,
+        );
+        // **And the tile indexes beside them, at the same point and under the same rule** — the
+        // level versions have to be the seeded ones plus the replay, and the direction of a
+        // mistaken adoption is the mirror image of the partition's: a stale index is *narrow*, and
+        // a narrow extent settles an artifact whose membership is not inside the viewport.
+        artifact_projections.adopt_indexes(
+            &prefix_dir,
+            generation.load().prefix.as_str(),
+            &manifest_tile_index_extents,
             &write_state.artifacts,
         );
 
@@ -2418,6 +2433,18 @@ impl Engine {
     /// is every coordinate rejected — correct, and the expensive answer. Operator plane only.
     pub fn artifact_containment_partitions_adopted(&self) -> u64 {
         self.artifact_projections.adopted()
+    }
+
+    /// How many fold-written tile indexes this engine **claimed** from the prefix rather than
+    /// deriving (`crate::tile_index`).
+    ///
+    /// Read beside [`Engine::artifact_cache_builds`]'s first number, which counts the row forms
+    /// those indexes belong to: the two equal on a deployment that folded and restarted, and this
+    /// one at zero says every coordinate was rejected or every level was published since the fold —
+    /// correct, and the expensive answer. Operator plane only; it names no artifact, no layer and
+    /// no principal.
+    pub fn artifact_tile_indexes_adopted(&self) -> u64 {
+        self.artifact_projections.indexes_adopted()
     }
 
     /// The last compaction fold's per-pass wall clock and resident set — empty before the first

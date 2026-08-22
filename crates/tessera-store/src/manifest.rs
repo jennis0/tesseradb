@@ -771,6 +771,34 @@ pub struct ContainmentExtent {
     pub level_version: u64,
 }
 
+/// One entry of `tile_index_extents`: one `(view, layer, level)`'s fold-written per-artifact
+/// extents, over which `tessera_engine::tile_index` folds the hierarchical row-range index
+/// (`membership.rs` for the format).
+///
+/// **The coordinate is [`ContainmentExtent`]'s rule with a view on it**, and the view is the whole
+/// of the difference. A containment expression names entities' terms, so no row space is involved
+/// in it and one file answers for every view of a level. An extent is a pair of **rows**, so it
+/// answers for exactly the view whose row space it was projected through — and a level's row form
+/// is per view for the same reason. A file adopted under another view would settle artifacts
+/// against ranges that name other documents.
+///
+/// The version half is the same rule and the same direction of mistake: a growth adds members, so
+/// a stale extent is **narrow**, and a narrow extent settles an artifact whose membership reaches
+/// outside the viewport — which turns the design's collapse (`membership ⊆ viewport`, so one probe
+/// answers both questions) into a claim that is no longer true. Equality, never anything weaker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TileIndexExtent {
+    /// Prefix-relative path of the packed extent column.
+    pub path: String,
+    /// The view whose row space these extents are in.
+    pub view: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when this column was projected. **Also the adoption test.**
+    pub level_version: u64,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -868,6 +896,14 @@ pub struct SegmentsManifest {
     /// is about, and a list that silently emptied itself would turn a fold's consolidation into a
     /// stall on whichever request arrived first, with nothing reporting a fault.
     pub containment_extents: Vec<ContainmentExtent>,
+    /// Every fold-written tile-index extent column this partition holds — see [`TileIndexExtent`].
+    /// Empty in a bundle that has never folded.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument and with `containment_extents`'
+    /// consequence: an unadopted column is refolded on first use and the answer is the same, but a
+    /// list that silently emptied itself would turn a fold's consolidation into a stall on
+    /// whichever request arrived first, with nothing reporting a fault.
+    pub tile_index_extents: Vec<TileIndexExtent>,
     /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
     /// store as [`SegmentsManifest::record_extents`], listed separately.
     ///
@@ -1217,6 +1253,7 @@ mod tests {
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),

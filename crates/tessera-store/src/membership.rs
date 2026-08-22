@@ -615,6 +615,241 @@ impl ContainmentPack {
     }
 }
 
+// A third format, in this module for [`ContainmentPack`]'s reason — a per-generation artifact
+// structure written into the prefix at the fold, addressed by dense ordinal, and served **mapped**
+// (the layout memo's constraint 13). Its own magic and its own version, so a reader handed one of
+// the three where another belongs refuses instead of finding a plausible header.
+//
+// ```text
+// header := magic "TSTI" | u16 version | u16 reserved | u32 ordinals | u32 row_count
+// spans  := u32 LE min, u32 LE max, per ordinal
+// ```
+//
+// **What this file holds is the extents, and the node hierarchy above them is derived at open.**
+// `design/artifact-serving-at-scale.md` §3 sizes the two halves apart: 80 MB of extents at 10⁷
+// artifacts against 4.2 MB of index. The extents are the half that scales with the population and
+// the half worth mapping; the tree is a pure function of them — an artifact's node is the finest
+// whose block holds both ends of its span — so writing it would be writing a derivation of the
+// bytes beside it, and a second thing that could disagree with them. `tessera_engine::tile_index`
+// folds it up in one pass over this column, which is the same pass that validates the column.
+//
+// # The two sentinels, and why they are not one
+//
+// A span is `min <= max` where the artifact has rows. Where it has none there are **two** states
+// and they are different facts (the layout memo's constraint 3):
+//
+// - [`TILE_INDEX_HOLE`] — no artifact at this ordinal. A fold executed a deletion and the slot is
+//   held open because an ordinal is identity.
+// - [`TILE_INDEX_EMPTY`] — a live artifact whose membership projects to nothing in this view: every
+//   member is awaiting a fold. It is absent from every viewport and **still an artifact**, served
+//   by the identifier route exactly as it was.
+//
+// Neither is ever a candidate, so collapsing them costs nothing *today* — and that is exactly why
+// the distinction has to be in the format rather than in a comment: a reader that could not tell
+// them apart would have no way to answer "is this ordinal an artifact" from the column, and the
+// first caller that needed to would get the permissive answer for a hole.
+
+const TILE_INDEX_MAGIC: &[u8; 4] = b"TSTI";
+/// Bumped whenever the header or the span encoding changes. There is no compatibility to keep
+/// (decision 0048); the number exists so a stale local file is a loud refusal rather than a silent
+/// misread of which artifacts a viewport reaches.
+const TILE_INDEX_VERSION: u16 = 1;
+const TILE_INDEX_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4;
+
+/// The span of an ordinal that holds no artifact at all. See the module's note on the two
+/// sentinels.
+pub const TILE_INDEX_HOLE: (u32, u32) = (u32::MAX, 0);
+/// The span of a live artifact whose membership projects to nothing in this view.
+pub const TILE_INDEX_EMPTY: (u32, u32) = (u32::MAX, 1);
+
+fn tile_index_malformed(what: &str, detail: impl std::fmt::Display) -> StoreError {
+    StoreError::MalformedBundle {
+        detail: format!("tile index {what}: {detail}"),
+    }
+}
+
+/// Serialise one `(view, layer, level)`'s per-artifact extents.
+///
+/// `row_count` is the view's row space at composition; the header carries it so the hierarchy the
+/// reader folds up has the same shape the writer's did, and so a span reaching past it is a
+/// refusal rather than a node nobody walks.
+///
+/// Returns the bytes rather than writing them, for [`pack`]'s reason: the caller owns the
+/// durability sequence.
+pub fn pack_tile_index(row_count: u32, spans: &[(u32, u32)]) -> Vec<u8> {
+    // Never below the highest row a span names, so the framing check below is a check on the file
+    // rather than on the row space that produced it — a caller passing a base row count that a
+    // projection has legitimately reached is not a malformed bundle.
+    let row_count = spans
+        .iter()
+        .filter(|(lo, hi)| lo <= hi)
+        .map(|(_, hi)| hi.saturating_add(1))
+        .max()
+        .unwrap_or(0)
+        .max(row_count);
+    let mut out = Vec::with_capacity(TILE_INDEX_HEADER_LEN + spans.len() * 8);
+    out.extend_from_slice(TILE_INDEX_MAGIC);
+    out.extend_from_slice(&TILE_INDEX_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(spans.len() as u32).to_le_bytes());
+    out.extend_from_slice(&row_count.to_le_bytes());
+    for (lo, hi) in spans {
+        out.extend_from_slice(&lo.to_le_bytes());
+        out.extend_from_slice(&hi.to_le_bytes());
+    }
+    out
+}
+
+/// One `(view, layer, level)`'s per-artifact extents, framed and checked once at open.
+///
+/// **Mapped, not decoded** — [`ContainmentPack`]'s argument, and here the figure is larger: 80 MB
+/// per level at ten million artifacts, against 4.2 MB for the hierarchy folded over it.
+pub struct TileIndexPack {
+    bytes: ContainmentBytes,
+    ordinals: u32,
+    row_count: u32,
+}
+
+impl std::fmt::Debug for TileIndexPack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TileIndexPack")
+            .field("ordinals", &self.ordinals)
+            .field("row_count", &self.row_count)
+            .finish()
+    }
+}
+
+impl TileIndexPack {
+    /// Open a fold-written index, mapped in place.
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        // SAFETY: as [`MembershipPack::open`] — read-only, and nothing truncates a published
+        // prefix's files while a generation names them.
+        let map = unsafe { Mmap::map(&file) }.map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        Self::frame(ContainmentBytes::Mapped(map), &path.display().to_string())
+    }
+
+    /// The same structure held in memory, checked by the same rules — the form a publication
+    /// builds before any fold has consolidated it.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Self::frame(ContainmentBytes::Owned(bytes), "(in memory)")
+    }
+
+    /// Every check refuses rather than truncating, and the direction of the mistake is what makes
+    /// that the only option: a column read short leaves every ordinal past the truncation absent
+    /// from the walk, so the artifacts simply stop being served — indistinguishable from artifacts
+    /// that failed an existence criterion, with nothing downstream to notice. A span read *wide*
+    /// is the other direction and costs a probe, not an answer; both are refused here because a
+    /// file that can be wrong in one direction is not trustworthy in the other.
+    fn frame(bytes: ContainmentBytes, what: &str) -> Result<Self> {
+        let raw = bytes.as_slice();
+        if raw.len() < TILE_INDEX_HEADER_LEN {
+            return Err(tile_index_malformed(
+                what,
+                format!(
+                    "{} bytes is shorter than the {TILE_INDEX_HEADER_LEN}-byte header",
+                    raw.len()
+                ),
+            ));
+        }
+        if &raw[0..4] != TILE_INDEX_MAGIC {
+            return Err(tile_index_malformed(what, "magic is not TSTI"));
+        }
+        let version = u16::from_le_bytes([raw[4], raw[5]]);
+        if version != TILE_INDEX_VERSION {
+            return Err(tile_index_malformed(
+                what,
+                format!("version {version}, expected {TILE_INDEX_VERSION}"),
+            ));
+        }
+        let reserved = u16::from_le_bytes([raw[6], raw[7]]);
+        if reserved != 0 {
+            return Err(tile_index_malformed(
+                what,
+                format!("reserved is {reserved}, expected 0"),
+            ));
+        }
+        let read = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        let ordinals = read(8);
+        let row_count = read(12);
+        let total = TILE_INDEX_HEADER_LEN + ordinals as usize * 8;
+        if raw.len() != total {
+            return Err(tile_index_malformed(
+                what,
+                format!(
+                    "{} bytes, but the header describes {total} — the file is truncated or was \
+                     written by a different packer",
+                    raw.len()
+                ),
+            ));
+        }
+        let pack = TileIndexPack {
+            bytes,
+            ordinals,
+            row_count,
+        };
+        // One pass over the column, which is the pass the caller is about to make anyway to fold
+        // the hierarchy up. A span that is neither a sentinel nor a range inside the row space is
+        // a file this packer did not write.
+        for ordinal in 0..ordinals as usize {
+            let span = pack.span(ordinal);
+            if span == TILE_INDEX_HOLE || span == TILE_INDEX_EMPTY {
+                continue;
+            }
+            let (lo, hi) = span;
+            if lo > hi {
+                return Err(tile_index_malformed(
+                    what,
+                    format!("the span at ordinal {ordinal} is {lo}..={hi}, which is neither a range nor a sentinel"),
+                ));
+            }
+            if hi >= row_count {
+                return Err(tile_index_malformed(
+                    what,
+                    format!(
+                        "the span at ordinal {ordinal} reaches row {hi} of a {row_count}-row space"
+                    ),
+                ));
+            }
+        }
+        Ok(pack)
+    }
+
+    /// How many ordinals this index covers, holes included.
+    pub fn ordinals(&self) -> u32 {
+        self.ordinals
+    }
+
+    /// The row space this index was folded over.
+    pub fn row_count(&self) -> u32 {
+        self.row_count
+    }
+
+    /// The `(min_row, max_row)` at `ordinal`, or one of the two sentinels. Infallible for
+    /// `ordinal < ordinals()`, which [`Self::frame`] proved.
+    pub fn span(&self, ordinal: usize) -> (u32, u32) {
+        let at = TILE_INDEX_HEADER_LEN + ordinal * 8;
+        (self.u32_at(at), self.u32_at(at + 4))
+    }
+
+    /// This index's bytes, exactly as they would be written — so the durable form and the
+    /// in-memory form cannot be produced by two different encoders.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.bytes.as_slice()
+    }
+
+    fn u32_at(&self, at: usize) -> u32 {
+        let raw = self.bytes.as_slice();
+        u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,5 +1027,92 @@ mod tests {
         bytes[at..at + 8].copy_from_slice(&999u64.to_le_bytes());
         let path = write(tmp.path(), "backwards.tsmb", &bytes);
         assert!(MembershipPack::open(&path).is_err());
+    }
+
+    // ---- the tile index's extent column -------------------------------------------------------
+
+    fn tile_index_bytes() -> Vec<u8> {
+        pack_tile_index(
+            4_096,
+            &[(0, 1_023), TILE_INDEX_HOLE, TILE_INDEX_EMPTY, (7, 4_095)],
+        )
+    }
+
+    /// **A mapped file and the same bytes in memory are read by one reader**, and the two sentinels
+    /// survive the round trip as different facts — which is the whole reason there are two of them.
+    #[test]
+    fn a_tile_index_round_trips_and_keeps_its_two_sentinels_apart() {
+        let bytes = tile_index_bytes();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write(tmp.path(), "index.tsti", &bytes);
+        let mapped = TileIndexPack::open(&path).unwrap();
+        let owned = TileIndexPack::from_bytes(bytes.clone()).unwrap();
+        for pack in [&mapped, &owned] {
+            assert_eq!(pack.ordinals(), 4);
+            assert_eq!(pack.row_count(), 4_096);
+            assert_eq!(pack.span(0), (0, 1_023));
+            assert_eq!(pack.span(1), TILE_INDEX_HOLE);
+            assert_eq!(pack.span(2), TILE_INDEX_EMPTY);
+            assert_ne!(pack.span(1), pack.span(2));
+            assert_eq!(pack.span(3), (7, 4_095));
+        }
+        assert_eq!(mapped.as_bytes(), owned.as_bytes());
+    }
+
+    /// The header's row count is never below the highest row a span names, so the framing check is
+    /// a check on the *file* rather than on the row space that produced it.
+    #[test]
+    fn the_row_count_covers_every_span_the_column_holds() {
+        let pack = TileIndexPack::from_bytes(pack_tile_index(10, &[(0, 5_000)])).unwrap();
+        assert_eq!(pack.row_count(), 5_001);
+        // And an empty level keeps the row count it was handed.
+        let empty = TileIndexPack::from_bytes(pack_tile_index(64, &[])).unwrap();
+        assert_eq!((empty.ordinals(), empty.row_count()), (0, 64));
+    }
+
+    /// Every framing fault refuses. A column read short leaves every ordinal past the truncation
+    /// out of the walk, so those artifacts stop being served with nothing reporting a fault.
+    #[test]
+    fn a_torn_or_foreign_tile_index_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let good = tile_index_bytes();
+
+        let mut wrong_magic = good.clone();
+        wrong_magic[0] = b'X';
+        assert!(TileIndexPack::from_bytes(wrong_magic).is_err());
+
+        // The two neighbouring formats offered where this one belongs: the distinct magic is what
+        // makes each a refusal rather than a header that happens to parse.
+        assert!(TileIndexPack::from_bytes(pack(0, &[vec![7u8; 8]])).is_err());
+        assert!(TileIndexPack::from_bytes(containment_bytes(4)).is_err());
+        assert!(ContainmentPack::from_bytes(good.clone()).is_err());
+
+        let mut future = good.clone();
+        future[4] = 99;
+        assert!(TileIndexPack::from_bytes(future).is_err());
+
+        let mut reserved = good.clone();
+        reserved[6] = 1;
+        assert!(TileIndexPack::from_bytes(reserved).is_err());
+
+        let mut truncated = good.clone();
+        truncated.truncate(good.len() - 8);
+        let path = write(tmp.path(), "short.tsti", &truncated);
+        assert!(TileIndexPack::open(&path).is_err());
+
+        // A span that runs backwards without being either sentinel — a wrong answer in both
+        // directions at once, since neither end of it addresses anything.
+        let mut backwards = good.clone();
+        let at = TILE_INDEX_HEADER_LEN;
+        backwards[at..at + 4].copy_from_slice(&900u32.to_le_bytes());
+        backwards[at + 4..at + 8].copy_from_slice(&8u32.to_le_bytes());
+        assert!(TileIndexPack::from_bytes(backwards).is_err());
+
+        // A span reaching past the row space the header declares: the node hierarchy folded over
+        // it would have levels no walk visits, so the artifact would be silently unreachable.
+        let mut past_the_end = good.clone();
+        let at = TILE_INDEX_HEADER_LEN + 3 * 8 + 4;
+        past_the_end[at..at + 4].copy_from_slice(&9_999u32.to_le_bytes());
+        assert!(TileIndexPack::from_bytes(past_the_end).is_err());
     }
 }

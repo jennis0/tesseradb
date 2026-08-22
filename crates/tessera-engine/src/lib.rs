@@ -24,6 +24,7 @@ mod refresh;
 pub mod select;
 pub mod session;
 mod single_flight;
+pub mod tile_index;
 pub mod timing;
 pub mod viewport;
 mod write;
@@ -278,6 +279,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         membership_extents: Vec::new(),
         level_versions: Vec::new(),
         containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),

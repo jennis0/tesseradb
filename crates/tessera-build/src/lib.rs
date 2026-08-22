@@ -1254,6 +1254,7 @@ fn write_manifests(
         // them; until then every level composes its partition on first use, which is what every
         // request did before the structure existed.
         containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
             view: args.view_id.clone(),

@@ -80,6 +80,7 @@ use tessera_store::permutation::RowSpace;
 
 use crate::compose::MaskedSet;
 use crate::containment::{ContainmentAnswers, ContainmentPartition, PartitionSource};
+use crate::tile_index::TileIndex;
 
 /// One level's per-ordinal facts that **no row space is involved in**: the attachment edge, the
 /// parent edge, and each content's declared generating-set size.
@@ -146,15 +147,22 @@ pub struct MembershipRows {
 
 /// One level's row form and the records beside it, under one validity key.
 ///
-/// **One snapshot.** Both halves are built from a single borrow of the [`ArtifactStore`] at a
-/// single level version, so a write landing between two reads cannot leave the records describing
-/// one population and the projection another — the failure mode `2026-08-21-artifact-layout-selection.md`
-/// §9's first constraint names, where a membership that grew between the two reads leaves a
-/// stale-narrow derived structure beside it.
+/// **One snapshot, and it is the whole family rather than two halves.** The records, the
+/// projection, the tile index over it and the containment partition are all built from a single
+/// borrow of the [`ArtifactStore`] at a single level version, so a write landing between two reads
+/// cannot leave one of them describing a population the others no longer have —
+/// `2026-08-21-artifact-layout-selection.md` §9's first constraint. The failure it names is
+/// specific: a membership that **grew** between two reads leaves the extent beside it narrow, and a
+/// narrow extent settles an artifact whose members reach outside the viewport, which is exactly the
+/// case the settled half's collapse is not true for.
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactRows {
     records: ArtifactRecords,
     membership: MembershipRows,
+    /// The hierarchical row-range index and the per-artifact extents — always present, because the
+    /// walk is how candidacy is answered rather than an optimisation over answering it another
+    /// way. A level with no artifacts has an empty one.
+    index: TileIndex,
     /// The containment partition, where this level has one.
     ///
     /// `None` under any plugin but the builtin — see [`crate::containment`], whose gate is settled
@@ -282,6 +290,17 @@ impl MembershipRows {
         self.rows.get(ordinal as usize).and_then(Option::as_ref)
     }
 
+    /// A row form given directly — **test-only**, so that no release build can put a membership
+    /// where a projection belongs. [`crate::tile_index`]'s own cases are about the hierarchy over a
+    /// row form, and projecting through a permutation would test the projection instead.
+    #[cfg(test)]
+    pub(crate) fn of_rows(rows: Vec<Option<Bitmap>>) -> Self {
+        MembershipRows {
+            generating: vec![Vec::new(); rows.len()],
+            rows,
+        }
+    }
+
     /// The projected generating sets, per rank. Parallel to [`ArtifactRecords::declared`].
     fn generating(&self, ordinal: u32) -> &[Bitmap] {
         self.generating
@@ -301,10 +320,27 @@ impl MembershipRows {
 }
 
 impl ArtifactRows {
-    /// Build both halves from one walk of one level, at one level version.
+    /// Build every half from one walk of one level, at one level version — deriving the index over
+    /// the projection this walk just produced.
     pub fn build<'a>(
         artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
         space: &RowSpace,
+    ) -> Self {
+        Self::build_over(artifacts, space, None)
+    }
+
+    /// The same walk, offered a fold-written index to adopt instead of deriving one.
+    ///
+    /// **The offer is refused where the two do not describe the same population.** The adoption
+    /// coordinate — prefix, view and level version — is what makes an offered index the index *of*
+    /// this level, and the ordinal count is the one consequence of that a caller can check for
+    /// nothing. A shorter column would leave every ordinal past its end out of every walk, so the
+    /// artifacts simply stop being served, which is indistinguishable from artifacts that failed a
+    /// criterion. Deriving instead costs one pass and is always right.
+    pub fn build_over<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+        adopted: Option<TileIndex>,
     ) -> Self {
         let mut records = ArtifactRecords::default();
         let mut membership = MembershipRows::default();
@@ -313,9 +349,23 @@ impl ArtifactRows {
             records.put(idx, record);
             membership.put(idx, record, space);
         }
+        let index = match adopted {
+            Some(index) if index.len() == membership.len() => index,
+            Some(index) => {
+                tracing::warn!(
+                    adopted_ordinals = index.len(),
+                    level_ordinals = membership.len(),
+                    "a fold-written tile index covers a different ordinal range from the level it \
+                     was offered for; it is dropped and the level's index is derived"
+                );
+                TileIndex::build(&membership, space.base_rows())
+            }
+            None => TileIndex::build(&membership, space.base_rows()),
+        };
         ArtifactRows {
             records,
             membership,
+            index,
             partition: None,
         }
     }
@@ -339,6 +389,11 @@ impl ArtifactRows {
     /// The row-space half.
     pub fn membership(&self) -> &MembershipRows {
         &self.membership
+    }
+
+    /// This level's tile index — the walk that decides which artifacts a viewport asks about.
+    pub fn index(&self) -> &TileIndex {
+        &self.index
     }
 
     /// This level's containment partition, if it has one.
@@ -391,6 +446,67 @@ impl ArtifactRows {
         // artifact the viewer is not looking at.
         let in_tiles = rows.and(tile_rows);
         !in_tiles.is_empty() && mask.intersects_set(&in_tiles)
+    }
+
+    /// The same question against a **hoisted** `viewport ∩ M_auth`: one early-exiting
+    /// `Bitmap::intersect`, which stops at the first container that meets.
+    ///
+    /// **The same answer as [`Self::intersects`], reached with the composition paid once for the
+    /// request instead of once per artifact** — which is what
+    /// `design/artifact-serving-at-scale.md` §7.1 measures as load-bearing rather than an
+    /// optimisation: at 10⁷ artifacts the same structures without the hoisting cost 3.3 s at the
+    /// whole map against 553 ms.
+    ///
+    /// **And where the artifact is settled it is exact for a second question.** Where
+    /// `membership ⊆ viewport`, `membership ∩ (viewport ∩ M_auth)` and `membership ∩ M_auth` are
+    /// the same set, so this probe answers `masked_count > 0` — the layer-wide question a criterion
+    /// reads — as well as the request's. That collapse is what containment inside a covered node
+    /// buys: not a test skipped, but one probe answering both (§4.1).
+    ///
+    /// **`here` must come from the composed mask** and from nothing else — see
+    /// [`MaskedSet::visible_rows`], which is the only way to obtain one.
+    pub fn intersects_visible(&self, ordinal: u32, here: &Bitmap) -> bool {
+        self.get(ordinal).is_some_and(|rows| rows.intersect(here))
+    }
+
+    /// **Candidacy, on whichever of the three routes the walk's classification makes cheapest** —
+    /// and every one of them is a masked probe (`design/artifact-serving-at-scale.md` §4 steps 2
+    /// and 3).
+    ///
+    /// - **settled** — the walk took a node the viewport covers entirely, so
+    ///   `membership ⊆ viewport` and [`Self::intersects_visible`] against the hoisted
+    ///   `viewport ∩ M_auth` is exact for the mask-shaped question as well as this one.
+    /// - **open, and inside its extent** — the same collapse, reached by the alignment-free test
+    ///   rather than by the node an artifact straddling a boundary was promoted out of.
+    /// - **everything else, the `everywhere` set included** — [`Self::intersects`], which narrows
+    ///   to the viewport first and asks the mask second.
+    ///
+    /// **The three agree, always**, because all three ask whether
+    /// `membership ∩ viewport ∩ M_auth` is non-empty; what the geometry chooses is the route, never
+    /// the answer (§4.1). `tests/artifact_tile_index.rs` asserts that against the sweep this
+    /// replaced, ordinal for ordinal.
+    ///
+    /// ⊘ **An earlier revision of the design let the settled case skip the probe on containment
+    /// alone**, and that was fail-open: an artifact all of whose members lie outside `M_auth` would
+    /// have been served, disclosing that a grouping exists where the viewer can see nothing of it
+    /// (the review's finding 1). Nothing here returns a verdict — [`ArtifactView::verdict`] still
+    /// runs for every candidate this admits.
+    pub fn candidate_in(
+        &self,
+        ordinal: u32,
+        candidates: &crate::tile_index::Candidates,
+        viewport: &crate::tile_index::Viewport<'_>,
+        mask: &impl MaskedSet,
+    ) -> bool {
+        if candidates.is_settled(ordinal)
+            || self
+                .index
+                .inside(ordinal, viewport.rows(), viewport.cardinality())
+        {
+            self.intersects_visible(ordinal, viewport.here())
+        } else {
+            self.intersects(ordinal, viewport.rows(), mask)
+        }
     }
 
     /// The rank of the first content this viewer is served — the containment test
@@ -570,6 +686,24 @@ struct PartitionKey {
     level_version: u64,
 }
 
+/// `(view, layer, level)` — what one fold-written tile index is *for*.
+///
+/// **The view is here and not in [`PartitionAddress`]**, and that is the whole difference between
+/// the two structures: a containment expression names entities' terms, so no row space is involved
+/// in it and one file answers for every view; an extent is a pair of **rows**, so it answers for
+/// exactly the view it was projected through.
+type IndexAddress = (String, String, u32);
+
+/// What an adopted [`TileIndex`] was projected under — the same two validity terms
+/// [`PartitionKey`] carries, and for the same reasons. The prefix fixes the base row space (a fold
+/// renumbers it wholesale; a flush and a merge leave it alone, which is why the segments version is
+/// not a term — [`ProjectionKey`] argues it); the level's version fixes the memberships.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct IndexKey {
+    prefix: String,
+    level_version: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct ArtifactProjections {
     cached: Mutex<BTreeMap<LevelAddress, (ProjectionKey, Arc<ArtifactRows>)>>,
@@ -585,6 +719,15 @@ pub struct ArtifactProjections {
     /// the way into *this* view's row space can never be contained, and that question is asked of
     /// the row form at serving time.
     partitions_held: Mutex<BTreeMap<PartitionAddress, (PartitionKey, ContainmentPartition)>>,
+    /// The fold-written tile indexes adopted at open, waiting for the level's first request to
+    /// claim one.
+    ///
+    /// **Claimed once and then dropped**, which is the difference from the map above it. A
+    /// containment partition is *held* because two views of a level share it and a row form does
+    /// not; an index belongs to one view, so once that view's row form has taken it there is
+    /// nothing left for a second reader — and keeping a second `Arc` to eighty megabytes per level
+    /// for the process's life is the retention bug `forget` exists to fix, one map along.
+    indexes_held: Mutex<BTreeMap<IndexAddress, (IndexKey, TileIndex)>>,
     /// How many forms this has built since the engine opened. **The cadence, counted** — what
     /// §8.1 is about is not the cost of one build but how many a write provokes, and that is a
     /// number nothing reported until the grain changed. Read by the fold's own log line and by
@@ -603,6 +746,11 @@ pub struct ArtifactProjections {
     /// climbing says every coordinate was rejected, which is correct but is the expensive answer
     /// and an operator has no other way to notice it.
     adopted: std::sync::atomic::AtomicU64,
+    /// How many fold-written tile indexes this **claimed** from the prefix rather than deriving —
+    /// the same pair of gauges one structure along, and read the same way. Counted at the claim
+    /// rather than at the adoption, because an entry the manifest named and no request ever asked
+    /// for saved nothing.
+    indexes_adopted: std::sync::atomic::AtomicU64,
 }
 
 impl ArtifactProjections {
@@ -623,6 +771,12 @@ impl ArtifactProjections {
     /// See [`Self::adopted`].
     pub fn adopted(&self) -> u64 {
         self.adopted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// See [`Self::indexes_adopted`].
+    pub fn indexes_adopted(&self) -> u64 {
+        self.indexes_adopted
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Take the fold-written partitions this prefix's manifests name, for every level whose
@@ -695,6 +849,77 @@ impl ArtifactProjections {
         }
     }
 
+    /// Take the fold-written tile indexes this prefix's manifests name, for every
+    /// `(view, layer, level)` whose coordinate still holds.
+    ///
+    /// **[`Self::adopt_all`]'s rule with a view on it, and the direction of the mistake is the
+    /// mirror image.** A stale containment partition answers containment for a generating set that
+    /// has since grown, which is the permissive direction. A stale index is **narrow**: a growth
+    /// added members the extents do not reach, so an artifact is settled whose membership is not
+    /// inside the viewport at all — and a settled artifact's probe is taken against
+    /// `viewport ∩ M_auth` on the strength of `membership ⊆ viewport`, which is then false. The
+    /// answer that comes back is about the members in view rather than all of them, which is a
+    /// *different question* silently substituted for the one a criterion reads. Equality, and the
+    /// view compared too.
+    ///
+    /// **Every failure is a drop, not an error**, for [`Self::adopt_all`]'s reason: an index that
+    /// is not adopted is derived on first use, which is what every request did before the fold
+    /// wrote anything.
+    pub fn adopt_indexes(
+        &self,
+        prefix_dir: &std::path::Path,
+        prefix: &str,
+        extents: &[tessera_store::manifest::TileIndexExtent],
+        store: &ArtifactStore,
+    ) {
+        for extent in extents {
+            let level_version = store.level_version(&extent.layer, extent.level);
+            if level_version != extent.level_version {
+                tracing::info!(
+                    layer = %extent.layer,
+                    level = extent.level,
+                    view = %extent.view,
+                    projected_at = extent.level_version,
+                    now = level_version,
+                    "a fold-written tile index is not adopted: the level has moved since it was \
+                     projected, so its extents are derived on first use"
+                );
+                continue;
+            }
+            let path = prefix_dir.join(&extent.path);
+            let index = match TileIndex::open(&path) {
+                Ok(index) => index,
+                Err(error) => {
+                    // Loud, because this one is a fault rather than a cadence: the manifest names
+                    // a file the prefix should hold and it did not open.
+                    tracing::error!(
+                        layer = %extent.layer,
+                        level = extent.level,
+                        view = %extent.view,
+                        path = %extent.path,
+                        %error,
+                        "ALARM: a tile index named by the manifest would not open; candidacy is \
+                         correct and the level's index is derived on first use"
+                    );
+                    continue;
+                }
+            };
+            self.indexes_held
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (extent.view.clone(), extent.layer.clone(), extent.level),
+                    (
+                        IndexKey {
+                            prefix: prefix.to_string(),
+                            level_version,
+                        },
+                        index,
+                    ),
+                );
+        }
+    }
+
     /// How many forms are held. Operator plane only, beside [`Self::builds`] — a count of
     /// structures, naming no artifact and no principal.
     pub fn held(&self) -> usize {
@@ -720,6 +945,12 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(held, _), _| held != layer);
+        // **All three maps, for the same reason.** An unclaimed index is eighty megabytes per level
+        // at the campaign's target, pinned by nothing else once the layer is gone.
+        self.indexes_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, _), _| held != layer);
     }
 
     /// This level's row form for the generation `store` is in, building it if what is held is
@@ -782,8 +1013,25 @@ impl ArtifactProjections {
         let partition = source
             .filter(|source| source.signature_shaped())
             .and_then(|source| self.partition_for(prefix, layer, level, store, source));
+        let adopted = self.claim_index(prefix, view, layer, level, key.level_version);
+        let from_prefix = adopted.is_some();
         let rows = Arc::new(
-            ArtifactRows::build(store.level(layer, level), space).with_partition(partition),
+            ArtifactRows::build_over(store.level(layer, level), space, adopted)
+                .with_partition(partition),
+        );
+        // **The `everywhere` set, reported where the form is built.** It is the number that says a
+        // layer is *scattered* — every artifact of one lands here at every size measured (§5) — and
+        // so the number that predicts a whole-map request paying the full masked probe for the
+        // population rather than for the viewport's perimeter. Per generation move, not per
+        // request; it names no artifact and no principal.
+        tracing::info!(
+            layer = %layer,
+            level,
+            view = %view,
+            ordinals = rows.index().len(),
+            everywhere = rows.index().everywhere(),
+            adopted = from_prefix,
+            "a level's row form and tile index are built"
         );
         self.builds
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -792,6 +1040,36 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .insert(map_key, (key, Arc::clone(&rows)));
         rows
+    }
+
+    /// Take the fold-written index for this `(view, layer, level)` if one was adopted and its
+    /// coordinate is still the one being built at.
+    ///
+    /// **Removed rather than borrowed.** An index belongs to one view's row form; once that form
+    /// has it there is no second reader, and leaving the entry behind would hold a second copy of
+    /// the level's extents for the process's life. A caller that finds nothing derives, which is
+    /// the same answer at the cost the fold was trying to save.
+    fn claim_index(
+        &self,
+        prefix: &str,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+    ) -> Option<TileIndex> {
+        let map_key = (view.to_string(), layer.to_string(), level);
+        let mut held = self.indexes_held.lock().unwrap_or_else(|e| e.into_inner());
+        let (key, _) = held.get(&map_key)?;
+        if key.prefix != prefix || key.level_version != level_version {
+            // The coordinate has moved under the entry, so nothing will ever claim it. Dropped
+            // here rather than left: what makes it stale is what makes it dead weight.
+            held.remove(&map_key);
+            return None;
+        }
+        let (_, index) = held.remove(&map_key)?;
+        self.indexes_adopted
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Some(index)
     }
 
     /// This level's containment partition for the generation `store` is in, composing it if what
@@ -1107,17 +1385,28 @@ mod tests {
     /// Row-space memberships without a `RowSpace` to project through — these tests are about the
     /// predicate, and building a permutation would test the projection instead.
     fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
-        ArtifactRows {
-            records: ArtifactRecords {
+        assembled(
+            ArtifactRecords {
                 attachments: vec![None; sets.len()],
                 parents: vec![None; sets.len()],
                 declared: vec![Vec::new(); sets.len()],
             },
-            partition: None,
-            membership: MembershipRows {
+            MembershipRows {
                 rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
                 generating: vec![Vec::new(); sets.len()],
             },
+        )
+    }
+
+    /// The two halves plus the index derived over them — the shape [`ArtifactRows::build`] produces
+    /// from a store, assembled by hand for the cases that are about the predicate.
+    fn assembled(records: ArtifactRecords, membership: MembershipRows) -> ArtifactRows {
+        let index = TileIndex::build(&membership, 0);
+        ArtifactRows {
+            records,
+            membership,
+            index,
+            partition: None,
         }
     }
 
@@ -1138,18 +1427,17 @@ mod tests {
     /// declared size separate so a test can build the *lossy projection* case, where row space
     /// holds fewer members than the entity-space set the caller published.
     fn rows_with_contents(members: &[u32], contents: &[(&[u32], u64)]) -> ArtifactRows {
-        ArtifactRows {
-            records: ArtifactRecords {
+        assembled(
+            ArtifactRecords {
                 attachments: vec![None],
                 parents: vec![None],
                 declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
             },
-            partition: None,
-            membership: MembershipRows {
+            MembershipRows {
                 rows: vec![Some(Bitmap::of(members))],
                 generating: vec![contents.iter().map(|(set, _)| Bitmap::of(set)).collect()],
             },
-        }
+        )
     }
 
     struct Fixture {
@@ -1503,8 +1791,8 @@ mod tests {
 
     /// One label, attached to a cluster in another layer.
     fn attached_rows(members: &[u32]) -> ArtifactRows {
-        ArtifactRows {
-            records: ArtifactRecords {
+        assembled(
+            ArtifactRecords {
                 attachments: vec![Some(Attachment {
                     layer: CLUSTERS.to_string(),
                     level: 0,
@@ -1514,12 +1802,11 @@ mod tests {
                 parents: vec![None],
                 declared: vec![Vec::new()],
             },
-            partition: None,
-            membership: MembershipRows {
+            MembershipRows {
                 rows: vec![Some(Bitmap::of(members))],
                 generating: vec![Vec::new()],
             },
-        }
+        )
     }
 
     /// **The whole of rule 2 at this level**: a label whose cluster is not served to this viewer is

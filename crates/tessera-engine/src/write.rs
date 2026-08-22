@@ -1987,10 +1987,12 @@ pub(crate) struct ManifestSeed<'a> {
 fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::ContainmentExtent],
+    held_indexes: &[tessera_store::manifest::TileIndexExtent],
     pending_retirement: &[(String, u32)],
 ) -> (
     Vec<tessera_store::manifest::LevelVersion>,
     Vec<tessera_store::manifest::ContainmentExtent>,
+    Vec<tessera_store::manifest::TileIndexExtent>,
 ) {
     let pending = |layer: &str, level: u32| {
         pending_retirement
@@ -2016,7 +2018,18 @@ fn artifact_coordinates(
         })
         .cloned()
         .collect();
-    (versions, still_true)
+    // The tile indexes take the same filter and for the same reason. The view an entry carries is
+    // not part of it: a view is an address, not a validity term — a level's version is what says
+    // whether the extents projected through *any* row space still describe it.
+    let indexes_still_true = held_indexes
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    (versions, still_true, indexes_still_true)
 }
 
 impl WritePath {
@@ -2399,6 +2412,14 @@ impl WritePath {
                 .values()
                 .flat_map(|p| p.manifest.containment_extents.iter().cloned())
                 .collect();
+        // The tile indexes the last fold wrote, seeded identically and for the identical reason.
+        let seeded_tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.tile_index_extents.iter().cloned())
+            .collect();
         // The content half, seeded identically and for the identical reason.
         let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
             .load()
@@ -2466,6 +2487,7 @@ impl WritePath {
                     superseded_sidecars: Vec::new(),
                     membership_extents: seeded_membership_extents,
                     containment_extents: seeded_containment_extents,
+                    tile_index_extents: seeded_tile_index_extents,
                     artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
@@ -3705,6 +3727,7 @@ mod vocabulary_extensions_tests {
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -4444,6 +4467,12 @@ struct Executor {
     /// names a partition that has already been invalidated, whatever this list happens to hold. The
     /// fold replaces it wholesale, its paths being relative to the prefix the fold publishes.
     containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
+    /// Every tile-index extent column the current prefix holds — one per `(view, layer, level)` the
+    /// last fold wrote one for. Held, filtered and replaced exactly as
+    /// [`Executor::containment_extents`] is, and by the same code
+    /// ([`artifact_coordinates`]); the only difference is that a view is part of the address,
+    /// because an extent is a pair of rows and a row space is per view.
+    tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
     /// Every artifact **content** extent this node has published, complete current state, held for
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
@@ -4902,6 +4931,7 @@ impl Executor {
             manifest_n,
             &mut manifest,
             &self.containment_extents,
+            &self.tile_index_extents,
             &[],
         ) {
             self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
@@ -5610,6 +5640,21 @@ impl Executor {
             &live.bundle.manifest.data_plugin_hash,
             &pending_retirement,
         );
+        // **The tile indexes, in the same pass and omitting the same levels.** Their extents are
+        // rows, so they are per view and are projected against the base permutation this fold just
+        // wrote — the one the new prefix's row space will be built over.
+        let index_views: Vec<(String, u32)> = completed
+            .segments
+            .iter()
+            .map(|segment| (segment.view.clone(), segment.row_count))
+            .collect();
+        let tile_indexes = self.write_tile_indexes(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &index_views,
+            &pending_retirement,
+        );
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
         //
@@ -5697,6 +5742,7 @@ impl Executor {
             // in the fold's flight.
             level_versions: Vec::new(),
             containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -5917,6 +5963,7 @@ impl Executor {
             manifest_n,
             &mut segments_manifest,
             &containment,
+            &tile_indexes,
             &pending_retirement,
         ) {
             discard(&format!(
@@ -5977,6 +6024,7 @@ impl Executor {
         // prefix-relative and the fold publishes a new prefix, so the old entries name files this
         // prefix does not contain.
         self.containment_extents = segments_manifest.containment_extents.clone();
+        self.tile_index_extents = segments_manifest.tile_index_extents.clone();
         *lock_recover(&self.health.last_fold_report) = degraded;
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
@@ -6392,6 +6440,7 @@ impl Executor {
             manifest_n,
             &mut manifest,
             &self.containment_extents,
+            &self.tile_index_extents,
             &[],
         ) {
             self.health
@@ -7453,14 +7502,14 @@ impl Executor {
     /// **The artifact coordinates are stamped here rather than by each caller**, which is the same
     /// argument the watermark check above rests on: every publication converges on this function,
     /// and a level's version list assembled at five call sites is one that goes stale at whichever
-    /// of them nobody thought about. `containment` is the partition list the caller wants named —
-    /// the fold's freshly written one, everyone else's held one — and what lands in the manifest is
-    /// that list filtered to the entries the store's versions still make adoptable
-    /// ([`artifact_coordinates`]). Read `next.containment_extents` back after a success to keep the
-    /// held list in step.
-    // Seven, plus the manifest being written. Every one of them is a thing this publication *is* —
-    // where it goes, what it replaces, and the two artifact coordinates it has to stamp. Bundling
-    // them would name the same eight things one call earlier.
+    /// of them nobody thought about. `containment` and `tile_indexes` are the derived-structure
+    /// lists the caller wants named — the fold's freshly written ones, everyone else's held ones —
+    /// and what lands in the manifest is each list filtered to the entries the store's versions
+    /// still make adoptable ([`artifact_coordinates`]). Read `next.containment_extents` and
+    /// `next.tile_index_extents` back after a success to keep the held lists in step.
+    // Eight, plus the manifest being written. Every one of them is a thing this publication *is* —
+    // where it goes, what it replaces, and the three artifact coordinates it has to stamp.
+    // Bundling them would name the same nine things one call earlier.
     #[allow(clippy::too_many_arguments)]
     fn commit_side_manifest(
         &self,
@@ -7470,13 +7519,16 @@ impl Executor {
         n: u64,
         next: &mut tessera_store::manifest::SegmentsManifest,
         containment: &[tessera_store::manifest::ContainmentExtent],
+        tile_indexes: &[tessera_store::manifest::TileIndexExtent],
         pending_retirement: &[(String, u32)],
     ) -> Result<(), ManifestCommitRefused> {
-        let (level_versions, containment_extents) = self
-            .live
-            .with_artifacts(|store| artifact_coordinates(store, containment, pending_retirement));
+        let (level_versions, containment_extents, tile_index_extents) =
+            self.live.with_artifacts(|store| {
+                artifact_coordinates(store, containment, tile_indexes, pending_retirement)
+            });
         next.level_versions = level_versions;
         next.containment_extents = containment_extents;
+        next.tile_index_extents = tile_index_extents;
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
@@ -9113,6 +9165,7 @@ impl Executor {
                 n,
                 &mut manifest,
                 &self.containment_extents,
+                &self.tile_index_extents,
                 &[],
             ) {
                 tracing::error!(
@@ -9475,6 +9528,151 @@ impl Executor {
         entries
     }
 
+    /// Project and write this prefix's tile-index extent columns, one file per
+    /// `(view, layer, level)`.
+    ///
+    /// **Against the prefix being published, and against its base permutation.** A fold renumbers
+    /// row space wholesale, so an extent projected through the old one names other people's
+    /// documents. Pass 3 has already written the new `permutation.bin` for each view, so the row
+    /// space is opened over what this fold is publishing — base only, with no extents, which is
+    /// exactly what the row form holds ([`tessera_store::RowSpace::project_base`]) and therefore
+    /// what its extents are computed over. A flush landing during the flight appends rows above the
+    /// base and moves none of these.
+    ///
+    /// **Inside the artifact pass, before the registry snapshot**, and omitting the levels a
+    /// retirement is about to move — [`Executor::write_containment_partitions`] argues both, and
+    /// the argument is the same one: the coordinate an entry carries and the version list beside it
+    /// come from the same borrow, and a level whose records the prefix already holds in
+    /// post-retirement form is not the level the store would project.
+    ///
+    /// ⊘ **What this adds to the fold's artifact pass is unpriced**
+    /// (`2026-08-21-artifact-layout-selection.md` §9's constraint 9), and it is not small: an extent
+    /// is `minimum` and `maximum` over the same `project_base` the row form is built from, so this
+    /// is a **second** pass of the projection §8.1 measures at 376 s over 10⁷ artifacts — paid here
+    /// so that `warm_artifact_caches` below claims the column instead of deriving one, and so that a
+    /// restart maps it rather than deriving it. The same function rather than a cheaper min/max walk
+    /// deliberately: it is what the row form is built with, so the column written here and the
+    /// column derived from that form are equal by construction rather than by an argument, and
+    /// `tests/artifact_tile_index.rs` asserts them byte for byte.
+    ///
+    /// What it does **not** add is residency: [`crate::tile_index::TileIndex::project`] holds one
+    /// membership at a time, so this pass is eight bytes an artifact where the row form it is
+    /// deriving the same extents from would be gigabytes — and the fold runs before the flip, with
+    /// the outgoing generation's forms still resident.
+    ///
+    /// **Every failure is an empty list, not a discarded fold** — the index is derived, so refusing
+    /// to publish over one would be a refusal outside the disclosure surface.
+    fn write_tile_indexes(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        views: &[(String, u32)],
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<tessera_store::manifest::TileIndexExtent> {
+        let mut spaces: Vec<(String, tessera_store::RowSpace)> = Vec::new();
+        for (view, row_count) in views {
+            let path = prefix_dir
+                .join("partitions")
+                .join(partition)
+                .join("views")
+                .join(view)
+                .join("permutation.bin");
+            match tessera_store::Permutation::load(&path) {
+                Ok(permutation) => spaces.push((
+                    view.clone(),
+                    tessera_store::RowSpace::new(std::sync::Arc::new(permutation), *row_count),
+                )),
+                Err(error) => tracing::warn!(
+                    view = %view,
+                    path = %path.display(),
+                    %error,
+                    "the fold could not read the permutation it just wrote, so this view's tile \
+                     indexes are derived on first use"
+                ),
+            }
+        }
+        if spaces.is_empty() {
+            return Vec::new();
+        }
+
+        // Projected under one borrow with the versions they are projected at, and written outside
+        // it: projecting is the dear part and needs the store, writing a file does not.
+        let projected: Vec<(String, String, u32, u64, Vec<u8>)> =
+            self.live.with_artifacts(|store| {
+                let levels: Vec<(String, u32)> = store
+                    .levels_and_extents()
+                    .map(|(layer, level, _)| (layer.to_string(), level))
+                    .filter(|(layer, level)| {
+                        !pending_retirement
+                            .iter()
+                            .any(|(l, v)| l == layer && v == level)
+                    })
+                    .collect();
+                let mut out = Vec::with_capacity(levels.len() * spaces.len());
+                for (layer, level) in &levels {
+                    let version = store.level_version(layer, *level);
+                    for (view, space) in &spaces {
+                        let index = crate::tile_index::TileIndex::project(
+                            store.level(layer, *level),
+                            space,
+                        );
+                        out.push((
+                            view.clone(),
+                            layer.clone(),
+                            *level,
+                            version,
+                            index.as_bytes().to_vec(),
+                        ));
+                    }
+                }
+                out
+            });
+        if projected.is_empty() {
+            return Vec::new();
+        }
+
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("tile-index");
+        if let Err(source) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), %source, "the tile-index directory would not be created");
+            return Vec::new();
+        }
+        let mut entries = Vec::with_capacity(projected.len());
+        for (index, (view, layer, level, version, bytes)) in projected.into_iter().enumerate() {
+            // The naming rule the membership extents follow: a layer name and a view id are
+            // caller-shaped and never reach a filename; the publication that introduced the file
+            // does.
+            let name = format!("tile-index-{n:06}-{index:03}.tsti");
+            if let Err(error) = tessera_store::write_and_fsync(&dir.join(&name), &bytes) {
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    %error,
+                    "a tile index would not be written; that level's index is derived on first use"
+                );
+                continue;
+            }
+            entries.push(tessera_store::manifest::TileIndexExtent {
+                path: format!("partitions/{partition}/tile-index/{name}"),
+                view,
+                layer,
+                level,
+                level_version: version,
+            });
+        }
+        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
+        // whose name was never written — the rule every other publication here follows.
+        if let Err(error) = tessera_store::fsync_dir(&dir) {
+            tracing::warn!(%error, "the tile-index directory would not be fsynced; its columns are dropped");
+            return Vec::new();
+        }
+        entries
+    }
+
     /// Rebuild every level's row-space membership, and every lineage this fold moved, against the
     /// live generation.
     ///
@@ -9816,6 +10014,7 @@ impl Executor {
             manifest_n,
             &mut manifest,
             &self.containment_extents,
+            &self.tile_index_extents,
             &[],
         ) {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);

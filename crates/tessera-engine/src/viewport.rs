@@ -3476,6 +3476,11 @@ impl Engine {
         if tile_rows.is_empty() {
             return Ok(Vec::new());
         }
+        // **The one composition, hoisted out of every layer and every artifact**
+        // (`design/artifact-serving-at-scale.md` §4 step 2, and `crate::tile_index::Viewport`).
+        // Built once per request: it is the same set for every layer in the response, and its cost
+        // is the viewport's containers rather than the population's.
+        let viewport = crate::tile_index::Viewport::compose(&tile_rows, mask);
 
         let shard = generation.bundle.manifest.identity.shard_id;
         // Built once for the whole response: the postings and the manifest's plugin are the
@@ -3554,8 +3559,19 @@ impl Engine {
                 // with no lineage input (decision 0080), and a loop that decided *and* pruned in
                 // one step would have the shape that lets a node's neighbours reach its verdict.
                 let mut passing = Vec::new();
-                for ordinal in 0..rows.len() as u32 {
-                    if !rows.intersects(ordinal, &tile_rows, mask) {
+                // **The walk replaces the sweep over every ordinal.** Cost is the viewport's
+                // perimeter in the hierarchy rather than the level's population: an artifact in no
+                // node the viewport touches has no member there, so it cannot have a *visible* one
+                // and skipping it withholds nothing (`crate::tile_index`, and §4.1 on why this is a
+                // candidate generator and never an answer). Holes and artifacts whose membership
+                // projects to nothing are in no node either, so neither reaches the predicate here
+                // — and both remain live on the identifier route, which walks no index.
+                let candidates = rows.index().candidates(&tile_rows);
+                for ordinal in candidates.iter() {
+                    // **Every candidate pays a masked probe**, on whichever of the three routes the
+                    // classification makes cheapest — see `ArtifactRows::candidate_in`, which is
+                    // the one place the choice is made and the one the differential drives.
+                    if !rows.candidate_in(ordinal, &candidates, &viewport, mask) {
                         continue;
                     }
                     let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
