@@ -1080,11 +1080,17 @@ pub struct ArtifactProjections {
     /// operator asked for. Counted per build rather than per request, and it names no artifact and
     /// no principal.
     fallbacks: std::sync::atomic::AtomicU64,
-    /// How many row-major columns this **composed** from a level's row form rather than claiming
-    /// from the prefix — [`Self::columns_adopted`]'s other half, read the same way. A deployment
-    /// that folded and restarted should see this at zero and the adopted gauge at the number of
-    /// row-major levels it holds; seeing the reverse says every coordinate was rejected, which is
-    /// correct and is the expensive answer.
+    /// How many row-major columns this **composed** rather than claiming from the prefix —
+    /// [`Self::columns_adopted`]'s other half, read the same way. A deployment that folded and
+    /// restarted should see this at zero and the adopted gauge at the number of row-major levels it
+    /// holds; seeing the reverse says every coordinate was rejected, which is correct and is the
+    /// expensive answer.
+    ///
+    /// **A predicate level's base column counts here too, and never has an adopted twin**: its
+    /// labels come from the value column the predicate names rather than from a stored membership,
+    /// so the fold writes no file for it and there is nothing for a reader to claim. Such a level
+    /// contributes one composition per prefix per view, not one per flush — the base is cached in
+    /// [`Self::predicate_bases`] and the tail above it is what the geometry moves.
     columns_composed: std::sync::atomic::AtomicU64,
 }
 
