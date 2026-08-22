@@ -101,7 +101,13 @@ fn with_layer(extra: &str) -> String {
 /// line is left as `"enumerated"` for the caller to substitute, so every case below differs from
 /// its neighbours in exactly the membership.
 fn predicate_fixture() -> String {
+    // The predicate reads the entity-addressed value column `index = true` writes, so the fixture's
+    // category column carries one here.
     with_layer("")
+        .replace(
+            "type       = \"category\"\nvocabulary = \"severity\"",
+            "type       = \"category\"\nindex      = true\nvocabulary = \"severity\"",
+        )
         .replace(
             "require_member_visibility = { fraction = 0.05 }",
             "require_member_visibility = { count = 3 }",

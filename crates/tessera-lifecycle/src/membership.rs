@@ -80,6 +80,48 @@ pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 /// **Members are entities, resolved at admission.** A caller names them by `tessera_id` and the
 /// control plane inverts them once, at the boundary, exactly as `/control/changes` does — so no
 /// blinded identifier reaches durable state, where a key rotation would silently redirect it (I10).
+/// An artifact's declared bounding box — the whole of a spatial layer's membership, before it is
+/// covered by tiles.
+///
+/// **The box is content and the tiles are the membership** (ruling R3). What is stored is the box,
+/// because it is what the author wrote and what a client is shown; what a request counts is the
+/// depth-`d` Morton tiles covering it, resolved against the generation's own segments. Storing the
+/// tiles instead would freeze the decomposition against a depth the declaration could later change,
+/// and storing the *rows* would freeze it against a geometry the next flush moves.
+///
+/// **Four `f64`s and no ordering guarantee at this type**: the box is checked where it is published
+/// (`LayerRegistry::prepare_artifacts`), so a reader here holds a box that already validated.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bbox {
+    pub min_x: f64,
+    pub min_y: f64,
+    pub max_x: f64,
+    pub max_y: f64,
+}
+
+impl Bbox {
+    /// The four values in the order a declaration writes them, or `None` where the box is not one
+    /// this crate will store: a non-finite bound, or a maximum below its minimum.
+    ///
+    /// **Refused rather than normalised.** A box written `[max, min]` is a transposition, and
+    /// swapping it silently would serve a membership the author did not write — the covering tiles
+    /// of the corrected box, over a region they may not have meant to name at all.
+    pub fn new(min_x: f64, min_y: f64, max_x: f64, max_y: f64) -> Option<Self> {
+        let finite = [min_x, min_y, max_x, max_y].iter().all(|v| v.is_finite());
+        (finite && max_x >= min_x && max_y >= min_y).then_some(Bbox {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+        })
+    }
+
+    /// `[min_x, min_y, max_x, max_y]` — the spelling a declaration and the WAL both use.
+    pub fn as_array(&self) -> [f64; 4] {
+        [self.min_x, self.min_y, self.max_x, self.max_y]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct IncomingArtifact {
     /// The caller's own name for this artifact. **Effectively mandatory for a layer another
@@ -110,6 +152,10 @@ pub struct IncomingArtifact {
     /// knowing what will later point at it. Two spellings of one edge is one more place for them
     /// to disagree.
     pub parent_key: Option<String>,
+    /// The artifact's bounding box — required on a layer whose `shape` declares one, refused on
+    /// every other kind. It **is** the membership: `members` stays empty on such a layer, because
+    /// the tiles covering this box decide who belongs at request time.
+    pub shape: Option<Bbox>,
 }
 
 /// The target of an attachment, as a caller names it.
@@ -173,6 +219,7 @@ impl IncomingArtifact {
             contents: Vec::new(),
             attached_to: None,
             parent_key: None,
+            shape: None,
         }
     }
 
@@ -380,6 +427,20 @@ impl ArtifactRecord {
 #[derive(Debug, Clone, Default)]
 pub struct ArtifactStore {
     levels: BTreeMap<(String, u32), Vec<Option<ArtifactRecord>>>,
+    /// Per `(layer, level)`, each ordinal's declared bounding box — the membership of a layer whose
+    /// `shape` declares one, and `None` everywhere else.
+    ///
+    /// **Beside the records rather than inside them, on [`ArtifactRecords`]' own split**
+    /// (`tessera_engine::artifacts`): the two halves are read at different cadences. A record is
+    /// dereferenced on every verdict; a box is read **once per level per generation**, by the pass
+    /// that decomposes it into row ranges, and never by a verdict at all. Keeping it out of the
+    /// record keeps the type every serving path walks the same shape it was.
+    ///
+    /// **Written wherever a record is, in [`ArtifactStore::put`], so the two cannot come apart.**
+    /// There is no route that sets one without the other, and a level's vectors are grown together;
+    /// a box for an ordinal with no record would be a membership rule for an artifact that does not
+    /// exist, and a record with no box on a shape layer is refused at publication.
+    shapes: BTreeMap<(String, u32), Vec<Option<Bbox>>>,
     /// `(layer, level, key) → ordinal`. **An index, not a second copy of the truth**: it
     /// exists so a batch of ten thousand artifacts can be checked for duplicate keys in
     /// `O(n log n)` rather than rescanning the level per artifact, which is `O(n²)` and reachable
@@ -434,9 +495,20 @@ impl ArtifactStore {
         Self::default()
     }
 
-    /// Insert or replace one artifact. Growing the level's vector to fit is what makes a
-    /// publication that arrives out of ordinal order land correctly.
-    pub fn put(&mut self, layer: &str, level: u32, ordinal: u32, record: ArtifactRecord) {
+    /// Insert or replace one artifact, and the bounding box it declared if its layer declares a
+    /// shape. Growing the level's vectors to fit is what makes a publication that arrives out of
+    /// ordinal order land correctly.
+    ///
+    /// **One call sets both halves** — see [`ArtifactStore::shapes`] for why the box is beside the
+    /// record rather than in it, and why there is no route that writes one without the other.
+    pub fn put(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        record: ArtifactRecord,
+        shape: Option<Bbox>,
+    ) {
         if let Some(key) = &record.key {
             self.keys
                 .insert((layer.to_string(), level, key.clone()), ordinal);
@@ -467,6 +539,21 @@ impl ArtifactStore {
                 entry.push(dependent);
             }
         }
+        let boxes = self.shapes.entry((layer.to_string(), level)).or_default();
+        if boxes.len() <= idx {
+            boxes.resize(idx + 1, None);
+        }
+        boxes[idx] = shape;
+    }
+
+    /// The bounding box the artifact at `ordinal` declared, or `None` where it declared none —
+    /// which is every artifact of every layer whose membership is not a shape.
+    pub fn shape_of(&self, layer: &str, level: u32, ordinal: u32) -> Option<Bbox> {
+        self.shapes
+            .get(&(layer.to_string(), level))
+            .and_then(|boxes| boxes.get(ordinal as usize))
+            .copied()
+            .flatten()
     }
 
     /// Drop one record's outgoing dependency edge from the index.
@@ -623,6 +710,9 @@ impl ArtifactStore {
                 refused += 1;
                 continue;
             };
+            let shape = published
+                .shape
+                .and_then(|b| Bbox::new(b[0], b[1], b[2], b[3]));
             self.put(
                 layer,
                 level,
@@ -640,6 +730,7 @@ impl ArtifactStore {
                     }),
                     parent: published.parent,
                 },
+                shape,
             );
         }
         self.oldest_wal_pos = Some(match self.oldest_wal_pos {
@@ -905,7 +996,13 @@ impl ArtifactStore {
             }
             let blobs: Vec<Vec<u8>> = tail
                 .iter()
-                .map(|slot| encode_record(slot.as_ref().expect("checked dense just above")))
+                .enumerate()
+                .map(|(i, slot)| {
+                    encode_record(
+                        slot.as_ref().expect("checked dense just above"),
+                        self.shape_of(layer, *level, (from + i) as u32),
+                    )
+                })
                 .collect();
             ready.push((layer.clone(), *level, from as u32, blobs));
         }
@@ -1037,7 +1134,8 @@ impl ArtifactStore {
             let on_deletion = policy(layer);
             let blobs: Vec<Vec<u8>> = slots
                 .iter()
-                .map(|slot| {
+                .enumerate()
+                .map(|(ordinal, slot)| {
                     // **An empty blob is a hole, and a hole is a real state** — an artifact this
                     // fold retired, or one whose publication is still in flight. It has to be
                     // *written* rather than packed around: an ordinal is identity, so closing a gap
@@ -1055,13 +1153,18 @@ impl ArtifactStore {
                     if retired.contains(record.entity.raw() as u32) {
                         return Vec::new();
                     }
+                    // **The box survives a fold unchanged**, and that is what makes a shape
+                    // layer's membership fold-invariant: a box is geometry, not rows, so nothing
+                    // the fold renumbers reaches it. What a deletion removes from such a layer is
+                    // the *point*, which leaves the mask — the artifact's rule is untouched.
+                    let shape = self.shape_of(layer, *level, ordinal as u32);
                     if retired.is_empty() {
-                        return encode_record(record);
+                        return encode_record(record, shape);
                     }
                     let mut record = record.clone();
                     record.members.andnot_inplace(retired);
                     let _ = apply_deletion_policy(&mut record, retired, on_deletion);
-                    encode_record(&record)
+                    encode_record(&record, shape)
                 })
                 .collect();
             ready.push((layer.clone(), *level, 0, blobs));
@@ -1287,8 +1390,15 @@ impl ArtifactStore {
         *entry = (*entry).max(len);
     }
 
-    pub fn seed(&mut self, layer: &str, level: u32, ordinal: u32, record: ArtifactRecord) {
-        self.put(layer, level, ordinal, record);
+    pub fn seed(
+        &mut self,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        record: ArtifactRecord,
+        shape: Option<Bbox>,
+    ) {
+        self.put(layer, level, ordinal, record, shape);
         let entry = self
             .published_through
             .entry((layer.to_string(), level))
@@ -1320,10 +1430,16 @@ impl ArtifactStore {
 ///             | u32 LE members_len | membership bytes (portable Roaring)
 ///             | content*
 ///             | attachment
+///             | parent
+///             | shape
 /// content    := u32 LE set_len | generating-set bytes (portable Roaring)
 /// attachment := u8 0                                     -- unattached
 ///             | u8 1 | u16 LE layer_len | layer bytes (UTF-8)
 ///                    | u32 LE level | u32 LE ordinal | u64 LE target entity
+/// parent     := u8 0                                     -- a root
+///             | u8 1 | u32 LE level | u32 LE ordinal
+/// shape      := u8 0                                     -- no declared box
+///             | u8 1 | f64 LE min_x | f64 LE min_y | f64 LE max_x | f64 LE max_y
 /// ```
 ///
 /// **The attachment is stored and not re-derived**, on the reason [`Attachment`] gives: it is a
@@ -1344,7 +1460,7 @@ impl ArtifactStore {
 /// `tessera-store` holds this as an opaque blob and addresses it by ordinal. **That split is the
 /// layering**: the store owns which bytes belong to which artifact, this crate owns what the bytes
 /// mean, and the bitmap library stays on one side of the boundary.
-pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
+pub fn encode_record(record: &ArtifactRecord, shape: Option<Bbox>) -> Vec<u8> {
     let key = record.key.as_deref().unwrap_or_default().as_bytes();
     let members = serialise_members(&record.members);
     let sets: Vec<Vec<u8>> = record
@@ -1408,6 +1524,20 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
             out.extend_from_slice(&parent.ordinal.to_le_bytes());
         }
     }
+    // **The box, on the same discriminant rule** — and here the fail-closed reading is the loud
+    // one. A spatial artifact restored *without* its box has no membership rule at all, so it
+    // counts zero for every viewer and is absent under any criterion; the decoder refuses such a
+    // blob rather than restoring a shapeless artifact, which is what makes the absence a fault
+    // somebody sees instead of a boundary that quietly stopped holding anything.
+    match shape {
+        None => out.push(0),
+        Some(box_) => {
+            out.push(1);
+            for value in box_.as_array() {
+                out.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+    }
     out
 }
 
@@ -1417,7 +1547,7 @@ pub fn encode_record(record: &ArtifactRecord) -> Vec<u8> {
 /// key was lost is one no edge can name, and an artifact whose membership decoded short is one with
 /// a low masked count for every viewer — which the existence criterion renders as *absent*, with no
 /// error anywhere to notice. Both must be a decode failure the caller alarms on.
-pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
+pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<(ArtifactRecord, Option<Bbox>)> {
     let mut at = 0usize;
     let mut take = |n: usize| -> Option<&[u8]> {
         let end = at.checked_add(n)?;
@@ -1479,20 +1609,37 @@ pub fn decode_record(entity: EntityId, blob: &[u8]) -> Option<ArtifactRecord> {
         }),
         _ => return None,
     };
+    // **The box goes through [`Bbox::new`] rather than being assembled from the bytes**, so a blob
+    // carrying an inverted or non-finite box is a decode failure and not an artifact whose
+    // membership is a region nobody wrote. One constructor, at both ends.
+    let shape = match take(1)?[0] {
+        0 => None,
+        1 => {
+            let mut values = [0f64; 4];
+            for value in values.iter_mut() {
+                *value = f64::from_le_bytes(take(8)?.try_into().ok()?);
+            }
+            Some(Bbox::new(values[0], values[1], values[2], values[3])?)
+        }
+        _ => return None,
+    };
     // **Trailing bytes are a decode failure**, not slack to ignore: a blob longer than its own
     // structure means the writer and this reader disagree about the format, and the half that
     // decoded cleanly is the more dangerous outcome of the two.
     if at != blob.len() {
         return None;
     }
-    Some(ArtifactRecord {
-        entity,
-        key,
-        members,
-        contents,
-        attached_to,
-        parent,
-    })
+    Some((
+        ArtifactRecord {
+            entity,
+            key,
+            members,
+            contents,
+            attached_to,
+            parent,
+        },
+        shape,
+    ))
 }
 
 /// Serialise a membership for the WAL, in CRoaring's portable form.
@@ -1576,11 +1723,11 @@ mod tests {
     #[test]
     fn a_cascade_follows_the_whole_chain_and_never_returns_a_root() {
         let mut store = ArtifactStore::new();
-        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]));
-        store.put("clusters/a", 0, 1, record(101, &[4]));
-        store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0));
-        store.put("topics/x", 0, 1, attached(201, 101, "clusters/a", 1));
-        store.put("glosses/y", 0, 0, attached(300, 200, "topics/x", 0));
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+        store.put("clusters/a", 0, 1, record(101, &[4]), None);
+        store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0), None);
+        store.put("topics/x", 0, 1, attached(201, 101, "clusters/a", 1), None);
+        store.put("glosses/y", 0, 0, attached(300, 200, "topics/x", 0), None);
 
         assert_eq!(
             store.cascade_from(&[EntityId::new(100)]),
@@ -1603,8 +1750,8 @@ mod tests {
     #[test]
     fn retiring_an_artifact_takes_its_dependency_edges_with_it() {
         let mut store = ArtifactStore::new();
-        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]));
-        store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0));
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+        store.put("topics/x", 0, 0, attached(200, 100, "clusters/a", 0), None);
         store.retire(&Bitmap::of(&[200]), &|_| false);
         assert!(
             store.cascade_from(&[EntityId::new(100)]).is_empty(),
@@ -1617,7 +1764,7 @@ mod tests {
         // A publication that skips an ordinal — one artifact still in flight, or one a fold has
         // removed — must leave a hole that answers `None`, not a panic and not a neighbour.
         let mut store = ArtifactStore::new();
-        store.put("clusters/a", 0, 5, record(100, &[1, 2, 3]));
+        store.put("clusters/a", 0, 5, record(100, &[1, 2, 3]), None);
         assert!(store.get("clusters/a", 0, 5).is_some());
         assert!(store.get("clusters/a", 0, 0).is_none());
         assert!(store.get("clusters/a", 0, 9).is_none());
@@ -1638,9 +1785,9 @@ mod tests {
     #[test]
     fn dropping_a_layer_takes_its_artifacts_with_it() {
         let mut store = ArtifactStore::new();
-        store.put("clusters/a", 0, 0, record(100, &[1]));
-        store.put("clusters/a", 1, 0, record(101, &[2]));
-        store.put("clusters/b", 0, 0, record(102, &[3]));
+        store.put("clusters/a", 0, 0, record(100, &[1]), None);
+        store.put("clusters/a", 1, 0, record(101, &[2]), None);
+        store.put("clusters/b", 0, 0, record(102, &[3]), None);
         assert_eq!(store.total(), 3);
 
         store.remove_layer("clusters/a");
@@ -1714,19 +1861,41 @@ mod tests {
             entity: EntityId::new(4_294_901_759),
         });
 
-        let blob = encode_record(&r);
-        let back = decode_record(r.entity, &blob).expect("a whole blob decodes");
+        let shape = Bbox::new(-1.5, 0.0, 2.5, 4.0);
+        let blob = encode_record(&r, shape);
+        let (back, back_shape) = decode_record(r.entity, &blob).expect("a whole blob decodes");
         assert_eq!(back.attached_to, r.attached_to);
         assert_eq!(back.key, r.key);
+        assert_eq!(
+            back_shape, shape,
+            "the box is the membership of a shape layer"
+        );
 
-        // An unattached artifact round-trips too, carrying its one absence byte — *unattached* and
-        // *this reader could not tell* must not encode the same.
+        // An unattached artifact with no box round-trips too, each carrying its own absence byte —
+        // *unattached* and *this reader could not tell* must not encode the same, and neither must
+        // *no box* and *a box this reader could not read*.
         let mut plain = r.clone();
         plain.attached_to = None;
-        let plain_blob = encode_record(&plain);
-        let restored = decode_record(plain.entity, &plain_blob).unwrap();
+        let plain_blob = encode_record(&plain, None);
+        let (restored, restored_shape) = decode_record(plain.entity, &plain_blob).unwrap();
         assert_eq!(restored.attached_to, None);
         assert_eq!(restored.members, plain.members);
+        assert_eq!(restored_shape, None);
+
+        // **An inverted box is a decode failure, not a swapped one.** The blob is written by hand
+        // here because `Bbox::new` refuses to build one — which is the point: the only way such a
+        // blob exists is a writer that did not go through the constructor, and the reader must not
+        // accept what the writer could not have produced.
+        let mut inverted = encode_record(&plain, None);
+        inverted.pop();
+        inverted.push(1);
+        for value in [5.0f64, 0.0, 1.0, 4.0] {
+            inverted.extend_from_slice(&value.to_le_bytes());
+        }
+        assert!(
+            decode_record(plain.entity, &inverted).is_none(),
+            "a box whose maximum is below its minimum names a region nobody wrote"
+        );
 
         // Every truncation from the end of the contents onwards refuses. The one that matters is
         // the shortest: it is byte-for-byte the unattached artifact's blob without its absence
@@ -1772,6 +1941,7 @@ mod tests {
                 contents: Vec::new(),
                 attached_to: None,
                 parent: None,
+                shape: None,
             }],
         }
     }
@@ -1934,9 +2104,9 @@ mod tests {
         // The `layer` iterator walks a range of a BTreeMap keyed by `(name, level)`, so a
         // neighbouring name that sorts adjacently must not be picked up.
         let mut store = ArtifactStore::new();
-        store.put("clusters/a", 0, 0, record(100, &[1]));
-        store.put("clusters/a-suffix", 0, 0, record(101, &[2]));
-        store.put("clusters/b", 0, 0, record(102, &[3]));
+        store.put("clusters/a", 0, 0, record(100, &[1]), None);
+        store.put("clusters/a-suffix", 0, 0, record(101, &[2]), None);
+        store.put("clusters/b", 0, 0, record(102, &[3]), None);
         assert_eq!(store.layer("clusters/a").count(), 1);
         assert_eq!(store.layer("clusters/a-suffix").count(), 1);
     }

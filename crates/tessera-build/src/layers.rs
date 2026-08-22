@@ -56,14 +56,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
-    StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, FixedSizeListArray, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    ListArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
 use tessera_lifecycle::membership::{
-    ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
+    ArtifactStore, Bbox, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
@@ -83,6 +83,9 @@ struct PlannedArtifact {
     attached_to: Option<IncomingAttachment>,
     /// Parent artifact in a hierarchy, named by the parent's own key.
     parent_key: Option<String>,
+    /// The artifact's declared bounding box, on a layer whose `shape` declares one — which *is* its
+    /// membership there, so `membership` stays empty beside it.
+    shape: Option<Bbox>,
 }
 
 /// How a source spelled one artifact's membership.
@@ -126,6 +129,7 @@ struct ResolvedArtifact {
     contents: Vec<IncomingContent>,
     attached_to: Option<IncomingAttachment>,
     parent_key: Option<String>,
+    shape: Option<Bbox>,
 }
 
 /// What the build reads: declarations, and the artifacts to publish into them.
@@ -388,6 +392,12 @@ fn read_artifacts(
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
         let parent = optional_utf8(path, &batch, fields, "parent")?;
+        let bounds = [
+            optional_f64(path, &batch, fields, "min_x")?,
+            optional_f64(path, &batch, fields, "min_y")?,
+            optional_f64(path, &batch, fields, "max_x")?,
+            optional_f64(path, &batch, fields, "max_y")?,
+        ];
 
         // **A stored membership on a layer whose members are computed is a refusal**, not a
         // column read anyway: `membership` decides what a write invalidates, and a spatial or
@@ -473,6 +483,7 @@ fn read_artifacts(
                     },
                     attached_to: attachment,
                     parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
+                    shape: bbox_at(path, &bounds, row, &address.2)?,
                 },
             );
         }
@@ -530,10 +541,40 @@ fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Re
                     .collect(),
                 attached_to,
                 parent_key: row.parent.clone(),
+                shape: inline_bbox(layer, &row.key, row.bbox.as_deref())?,
             },
         );
     }
     Ok(())
+}
+
+/// `bbox = [min_x, min_y, max_x, max_y]` on an inline artifact.
+///
+/// **Four values in a stated order, and a transposition is a refusal rather than a correction.**
+/// Swapping an inverted box silently would publish a membership the author did not write — the
+/// tiles covering the corrected box, over a region they may not have meant to name at all — so the
+/// constructor that refuses it is the one the WAL decode also goes through.
+fn inline_bbox(layer: &str, key: &str, bbox: Option<&[f64]>) -> Result<Option<Bbox>> {
+    let Some(values) = bbox else {
+        return Ok(None);
+    };
+    let [min_x, min_y, max_x, max_y] = values else {
+        return Err(BuildError::Invalid(format!(
+            "layer '{layer}': artifact {key} declares a `bbox` of {} value(s); it is exactly four \
+             — [min_x, min_y, max_x, max_y]",
+            values.len()
+        )));
+    };
+    Bbox::new(*min_x, *min_y, *max_x, *max_y)
+        .map(Some)
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "layer '{layer}': artifact {key} declares `bbox = [{min_x}, {min_y}, {max_x}, \
+                 {max_y}]`, which is not a box this build will store — every bound must be finite \
+                 and each maximum at or above its minimum. A transposed box is refused rather than \
+                 swapped: correcting it would publish a membership over a region nobody wrote"
+            ))
+        })
 }
 
 /// One row per `(artifact, entity)`: the memberships, and the generating sets beside them.
@@ -872,6 +913,7 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 /// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
 /// the point region's mark — passed so the allocator refuses rather than letting the two regions
 /// meet unnoticed.
+#[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &LayerPlan,
     resolve: &dyn Fn(u64) -> Option<u64>,
@@ -879,6 +921,7 @@ pub fn publish(
     prefix_dir: &Path,
     partition: &str,
     view: &str,
+    derived: &BTreeMap<String, Vec<String>>,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
     let mut alloc = Allocator::new(high_water);
@@ -904,6 +947,34 @@ pub fn publish(
     }
 
     verify_dependencies(plan)?;
+
+    // **A predicate layer's artifacts are minted from its own column, before anything else is
+    // published** (`design/artifact-serving-at-scale.md` §5.1). The keys arrive already in
+    // value-code order, which is what makes an ordinal a function of the *value* rather than of
+    // when the build happened to see it — the same determinism rule the key ordering below gives
+    // an enumerated layer, read over the vocabulary instead of over a file.
+    //
+    // ⊘ A predicate layer sits at level 0 and nowhere else: `LayerDeclaration::validate` refuses it
+    // levels, because the rule produces one artifact per value at one resolution.
+    for declaration in &plan.declarations {
+        let Some(keys) = derived.get(&declaration.name) else {
+            continue;
+        };
+        if keys.is_empty() {
+            continue;
+        }
+        let record = registry
+            .prepare_derive(&declaration.name, 0, keys, &store, &mut alloc)
+            .map_err(|e| BuildError::Invalid(format!("deriving into {}: {e}", declaration.name)))?;
+        registry.apply(&record);
+        let refused = store.apply(&record, 0);
+        if refused > 0 {
+            return Err(BuildError::Invalid(format!(
+                "{refused} derived artifact(s) of {} did not survive their own encoding",
+                declaration.name
+            )));
+        }
+    }
 
     // **Every membership is materialised here, before anything else looks at one.** A membership
     // declared by exclusion is complemented against the entity space this build assigned, once, so
@@ -993,6 +1064,84 @@ pub fn publish(
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     Ok(published)
+}
+
+/// **The artifacts a `membership = { attribute = f }` layer holds**, keyed by layer name — one per
+/// distinct value the column carries, in value-code order.
+///
+/// **The values are the roster, and the roster is what the column turned out to hold.** A predicate
+/// layer publishes nothing, so its artifacts have to come from somewhere: they are the values, and
+/// a value exists because a point carries it. That makes this a scan of the column rather than a
+/// read of the declaration — an authored vocabulary value no point carries mints no artifact here,
+/// exactly as an ingested value that has never appeared mints none until it does.
+///
+/// **Value-code order, so an ordinal is a function of the value.** Entity ids follow ordinals and
+/// ordinals are identity, so an assignment that depended on which entity the scan met first would
+/// move every artifact of the layer when a row moved in the input file. Ascending code is the same
+/// stability rule `(layer, level, key)` order gives an enumerated layer's publication.
+///
+/// `codes_of` is *the distinct codes present in the attribute at this index*, which the two builds
+/// answer from different structures — one holds typed entity columns and the other a scalar vector
+/// per item — and which is the only thing about them this rule depends on.
+pub fn predicate_artifact_keys(
+    layers: &[LayerDeclaration],
+    schema: &crate::config::Schema,
+    minters: &std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    codes_of: &dyn Fn(usize) -> std::collections::BTreeSet<u32>,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    use tessera_types::layer::{attribute_value_key, MembershipSource};
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for declaration in layers {
+        let MembershipSource::Attribute(field) = &declaration.membership else {
+            continue;
+        };
+        // The config refuses a membership naming a column no `[[attribute]]` declares, so reaching
+        // here with one is a declaration that never validated rather than reachable input.
+        let index = schema
+            .attributes
+            .iter()
+            .position(|a| &a.name == field)
+            .ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "layer '{}': `membership = {{ attribute = \"{field}\" }}` names no declared \
+                     attribute",
+                    declaration.name
+                ))
+            })?;
+        let attribute = &schema.attributes[index];
+        // `code → key`, from the declaration's own bindings **and** from whatever this run minted
+        // into them: an open vocabulary's newest values live in the minter and its authored ones
+        // do not, and an artifact named by a code where a key exists would be a second name for a
+        // value the ingest route already knows by its key.
+        let mut key_of_code: BTreeMap<u32, &str> = BTreeMap::new();
+        if let Some(name) = &attribute.vocabulary {
+            if let Some(vocabulary) = schema.vocabularies.get(name) {
+                for (key, code) in &vocabulary.codes {
+                    key_of_code.insert(*code, key.as_str());
+                }
+            }
+            if let Some(minter) = minters.get(name) {
+                for (key, code) in minter.bindings() {
+                    key_of_code.insert(code, key);
+                }
+            }
+        }
+        let mut codes = codes_of(index);
+        // **Code 0 is a category code space's reserved *absent* sentinel** and is never bound to a
+        // key, so it names no value and no artifact. A plain integer column has no such
+        // reservation and 0 is an ordinary value there.
+        if attribute.vocabulary.is_some() {
+            codes.remove(&tessera_store::vocabulary::ABSENT_CODE);
+        }
+        out.insert(
+            declaration.name.clone(),
+            codes
+                .iter()
+                .map(|code| attribute_value_key(*code, key_of_code.get(code).copied()))
+                .collect(),
+        );
+    }
+    Ok(out)
 }
 
 /// Every artifact of a layer that declares a dependency must declare one, into a layer that
@@ -1332,6 +1481,7 @@ fn resolve_artifact(
         contents,
         attached_to: artifact.attached_to.clone(),
         parent_key: artifact.parent_key.clone(),
+        shape: artifact.shape,
     })
 }
 
@@ -1352,6 +1502,7 @@ fn incoming_artifact(key: &str, artifact: &ResolvedArtifact) -> IncomingArtifact
         ),
     };
     result.parent_key = artifact.parent_key.clone();
+    result.shape = artifact.shape;
     result
 }
 
@@ -1647,6 +1798,62 @@ fn optional_ranked_values<'a>(
     canonical: &str,
 ) -> Result<Option<&'a ListArray>> {
     optional_list(path, batch, fields, canonical)
+}
+
+/// One bound of an artifact's bounding box, under the canonical name the `fields` map may move.
+///
+/// `Float64Array` only, and a `Float32` column is a refusal rather than a widening: a box read at
+/// single precision covers different tiles at the deep end of the Morton space from the one the
+/// author wrote, and the tiles *are* the membership.
+fn optional_f64<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<Option<&'a Float64Array>> {
+    match optional(path, batch, fields, canonical)? {
+        None => Ok(None),
+        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
+    }
+}
+
+/// The four bounds on one artifact row, or `None` where the row declares none.
+///
+/// **All four or none**, and a row carrying some is a refusal: a box assembled from two present
+/// bounds and two defaults is a region nobody wrote, and on a spatial layer that region *is* the
+/// membership.
+fn bbox_at(
+    path: &Path,
+    columns: &[Option<&Float64Array>; 4],
+    row: usize,
+    key: &str,
+) -> Result<Option<Bbox>> {
+    let present: Vec<Option<f64>> = columns
+        .iter()
+        .map(|column| column.filter(|c| !c.is_null(row)).map(|c| c.value(row)))
+        .collect();
+    if present.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [Some(min_x), Some(min_y), Some(max_x), Some(max_y)] = present[..] else {
+        return Err(BuildError::Invalid(format!(
+            "{}: artifact {key} declares some of min_x/min_y/max_x/max_y and not all four. A box \
+             assembled from the ones that are there is a region nobody wrote, and on a layer whose \
+             `shape` declares one that region is the membership",
+            path.display()
+        )));
+    };
+    Bbox::new(min_x, min_y, max_x, max_y)
+        .map(Some)
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "{}: artifact {key} declares the box [{min_x}, {min_y}, {max_x}, {max_y}], which \
+                 is not one this build will store — every bound must be finite and each maximum at \
+                 or above its minimum. A transposed box is refused rather than swapped: correcting \
+                 it would publish a membership over a region nobody wrote",
+                path.display()
+            ))
+        })
 }
 
 fn value_at(column: &StringArray, row: usize) -> Option<String> {

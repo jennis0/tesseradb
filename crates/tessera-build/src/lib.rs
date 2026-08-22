@@ -1121,6 +1121,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &args.out.join(PREFIX),
                 PHASH,
                 &args.view_id,
+                // The linear build holds its values on the items rather than in typed entity
+                // columns, which is the only thing about the two builds this rule sees.
+                &crate::layers::predicate_artifact_keys(
+                    &args.layers,
+                    &args.schema,
+                    &minters,
+                    &|index| {
+                        crate::pipeline::distinct_codes(
+                            tiler_items.iter().map(|item| item.scalars[index].clone()),
+                        )
+                    },
+                )?,
             )?
         }
     };

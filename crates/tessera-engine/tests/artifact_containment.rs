@@ -158,6 +158,7 @@ fn build_fixture_n(artifacts: u32) -> Fixture {
                 attached_to: None,
                 parent: None,
             },
+            None,
         );
     }
 

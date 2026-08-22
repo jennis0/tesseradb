@@ -2206,7 +2206,9 @@ impl WritePath {
                     continue;
                 };
                 match tessera_lifecycle::membership::decode_record(entity, blob) {
-                    Some(record) => artifacts.seed(&extent.layer, extent.level, ordinal, record),
+                    Some((record, shape)) => {
+                        artifacts.seed(&extent.layer, extent.level, ordinal, record, shape)
+                    }
                     None => undecodable += 1,
                 }
             }
@@ -8061,6 +8063,10 @@ impl Executor {
                         parent_key: parents
                             .get(&((*layer).to_string(), *level, (*key).to_string()))
                             .cloned(),
+                        // A layer declaring a `shape` publishes boxes an author wrote, so a point
+                        // naming a key on such a layer has nothing to mint one from — the layer is
+                        // a predicate and `resolve_or_mint` refuses the key at admission.
+                        shape: None,
                     })
                     .collect();
                 // **One level up and no further.** Entry *k* of a list is the parent of entry

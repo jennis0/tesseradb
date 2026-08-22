@@ -415,6 +415,15 @@ pub struct PublishedArtifact {
     /// key, and replay applies the address that was decided rather than re-resolving a key
     /// whose target may since have been dropped.
     pub attached_to: Option<PublishedAttachment>,
+    /// The artifact's declared bounding box, `[min_x, min_y, max_x, max_y]`, on a layer whose
+    /// `shape` declares one.
+    ///
+    /// **An array rather than the typed `Bbox`**, so the durable shape is four numbers in a stated
+    /// order and the type's own refusals — non-finite, inverted — stay where publication makes
+    /// them. A record replayed from here is checked again by the same constructor, so a log that
+    /// somehow carried an inverted box restores an artifact with no shape rather than one whose
+    /// membership is a region nobody wrote.
+    pub shape: Option<[f64; 4]>,
     /// This artifact's parent in its layer's hierarchy — resolved from the key the caller named,
     /// on `attached_to`'s argument.
     ///
@@ -1880,6 +1889,7 @@ mod tests {
                     contents: Vec::new(),
                     attached_to: None,
                     parent: None,
+                    shape: None,
                 },
                 // An artifact whose members have all been deleted is a real state, and an
                 // absent `key` is the other optional field — both under postcard, which
@@ -1912,6 +1922,10 @@ mod tests {
                         level: 2,
                         ordinal: 65_535,
                     }),
+                    // The fifth optional field, and the last one — set here so the round-trip
+                    // covers a record carrying every optional at once, which is the arrangement a
+                    // positional decoder misreads first.
+                    shape: Some([-1.5, 0.0, 2.5, 4.0]),
                 },
             ],
         };

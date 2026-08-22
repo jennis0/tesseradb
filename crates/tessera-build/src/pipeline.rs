@@ -847,22 +847,28 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 Ok(())
             })
         };
-        input::scan_points(&args.points, &args.point_fields, &args.extent, args.limit, |point| {
-            chunk.push((point.source_id, (point.qx, point.qy)));
-            if chunk.len() == JOIN_CHUNK_ROWS {
-                if let Err(e) = resolve(
-                    &mut chunk,
-                    x_of_ordinal,
-                    y_of_ordinal,
-                    &mut points_seen,
-                    &mut geom_anchor,
-                ) {
-                    failure = Some(e);
-                    return ControlFlow::Break(());
+        input::scan_points(
+            &args.points,
+            &args.point_fields,
+            &args.extent,
+            args.limit,
+            |point| {
+                chunk.push((point.source_id, (point.qx, point.qy)));
+                if chunk.len() == JOIN_CHUNK_ROWS {
+                    if let Err(e) = resolve(
+                        &mut chunk,
+                        x_of_ordinal,
+                        y_of_ordinal,
+                        &mut points_seen,
+                        &mut geom_anchor,
+                    ) {
+                        failure = Some(e);
+                        return ControlFlow::Break(());
+                    }
                 }
-            }
-            ControlFlow::Continue(())
-        })?;
+                ControlFlow::Continue(())
+            },
+        )?;
         if let Some(error) = failure {
             return Err(error);
         }
@@ -978,9 +984,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 // half is the code `morton_of` would give for the same point, so entity order and
                 // row order agree about what is nearby. Computed rather than stored: a third
                 // mapped array would cost 4 B/item to save one interleave per item.
-                morton: split32(x_of_ordinal[ordinal as usize], y_of_ordinal[ordinal as usize])
-                    .0
-                    .raw(),
+                morton: split32(
+                    x_of_ordinal[ordinal as usize],
+                    y_of_ordinal[ordinal as usize],
+                )
+                .0
+                .raw(),
                 ordinal: ordinal as u32,
             });
         }
@@ -1280,6 +1289,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 &args.out.join(crate::PREFIX),
                 crate::PHASH,
                 &args.view_id,
+                &crate::layers::predicate_artifact_keys(
+                    &args.layers,
+                    &args.schema,
+                    &minters,
+                    &|index| distinct_codes(attributes_by_entity[index].iter()),
+                )?,
             )?
         }
     };
@@ -1772,8 +1787,7 @@ fn read_one_attribute_source(
         args.limit,
         |source_id, values| {
             let pos = chunk.len();
-            for ((column, value), attribute) in
-                staged.iter_mut().zip(values).zip(attributes.iter())
+            for ((column, value), attribute) in staged.iter_mut().zip(values).zip(attributes.iter())
             {
                 if let Err(e) = column.set(pos, value.clone(), &attribute.name) {
                     mistyped.get_or_insert_with(|| e.to_string());
@@ -2651,7 +2665,9 @@ struct AttributeTail {
 /// to.
 /// Takes presence per row rather than the values themselves: the entity-major columns are typed
 /// now (see [`EntityColumn`]), so absence is a bit beside the value and never a variant of it.
-pub(crate) fn render_presence_of(present_per_row: impl IntoIterator<Item = bool>) -> Option<Bitmap> {
+pub(crate) fn render_presence_of(
+    present_per_row: impl IntoIterator<Item = bool>,
+) -> Option<Bitmap> {
     let mut present = Bitmap::new();
     let mut any_absent = false;
     for (row, is_present) in present_per_row.into_iter().enumerate() {
@@ -2678,18 +2694,30 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
         None if args.limit.is_none() => input::count_point_rows(&args.points)? as usize,
         None => {
             let mut count = 0usize;
-            input::scan_points(&args.points, &args.point_fields, &args.extent, args.limit, |_| {
-                count += 1;
-                ControlFlow::Continue(())
-            })?;
+            input::scan_points(
+                &args.points,
+                &args.point_fields,
+                &args.extent,
+                args.limit,
+                |_| {
+                    count += 1;
+                    ControlFlow::Continue(())
+                },
+            )?;
             count
         }
     };
     let mut ids = Vec::with_capacity(count);
-    input::scan_points(&args.points, &args.point_fields, &args.extent, args.limit, |point| {
-        ids.push(point.source_id);
-        ControlFlow::Continue(())
-    })?;
+    input::scan_points(
+        &args.points,
+        &args.point_fields,
+        &args.extent,
+        args.limit,
+        |point| {
+            ids.push(point.source_id);
+            ControlFlow::Continue(())
+        },
+    )?;
     Ok(ids)
 }
 
@@ -3041,6 +3069,29 @@ fn refine_group(
     }
 }
 
+/// The distinct category-width codes a column of values carries — the input
+/// [`crate::layers::predicate_artifact_keys`] reads a predicate layer's roster out of.
+///
+/// **Absence is not a value**, so a point with no value for the column is in none of the layer's
+/// artifacts, exactly as a member row with a null key is in none of an enumerated layer's. A value
+/// of any other width contributes nothing either: `compile_membership` refuses such a column at the
+/// declaration, so one reaching here is a schema that never validated rather than a value to guess
+/// at.
+pub(crate) fn distinct_codes(
+    values: impl Iterator<Item = ScalarValue>,
+) -> std::collections::BTreeSet<u32> {
+    let mut codes = std::collections::BTreeSet::new();
+    for value in values {
+        match value {
+            ScalarValue::U8(v) => codes.insert(u32::from(v)),
+            ScalarValue::U16(v) => codes.insert(u32::from(v)),
+            ScalarValue::U32(v) => codes.insert(v),
+            _ => false,
+        };
+    }
+    codes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3143,8 +3194,10 @@ mod tests {
             vocabularies: vocabularies_at(crate::config::Visibility::Derived),
         };
         let only_category =
-            [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                .expect("typed column")];
+            [
+                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+                    .expect("typed column"),
+            ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
@@ -3157,8 +3210,10 @@ mod tests {
             vocabularies: vocabularies_at(crate::config::Visibility::Public),
         };
         let only_category =
-            [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                .expect("typed column")];
+            [
+                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+                    .expect("typed column"),
+            ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage writes");
         assert!(
@@ -3194,8 +3249,7 @@ mod tests {
         // heavily enough to cross the Roaring threshold and code 0 (absent) carried too.
         let values = EntityColumn::from_values(
             ScalarType::U32,
-            (0..5_000u32)
-            .map(|e| {
+            (0..5_000u32).map(|e| {
                 ScalarValue::U32(match e % 7 {
                     0 => tessera_store::vocabulary::ABSENT_CODE,
                     1 => 3_999_999_999,

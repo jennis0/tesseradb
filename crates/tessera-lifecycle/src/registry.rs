@@ -59,6 +59,12 @@ pub enum RegistryError {
     NoSuchLevel { layer: String, level: u32 },
     /// Artifacts were offered to a layer whose membership is evaluated rather than enumerated.
     NotEnumerated { layer: String },
+    /// A caller asked for artifacts to be *derived* into a layer whose artifacts are its own to
+    /// name — the mirror of [`RegistryError::NotEnumerated`], and a defect rather than caller input.
+    NotDerived { layer: String },
+    /// An artifact's declared box and its layer's `shape` do not agree — one without the other, or
+    /// a stored membership beside a live rule.
+    Shape { layer: String, detail: String },
     /// This level already holds an artifact under that key, or the batch repeats it.
     DuplicateKey { layer: String, key: String },
     /// The batch's supplied content does not match what the layer declares.
@@ -187,6 +193,15 @@ impl std::fmt::Display for RegistryError {
             RegistryError::NoSuchLevel { layer, level } => {
                 write!(f, "{layer} declares no level {level}")
             }
+            RegistryError::Shape { layer, detail } => {
+                write!(f, "layer '{layer}': {detail}")
+            }
+            RegistryError::NotDerived { layer } => write!(
+                f,
+                "layer '{layer}' does not take derived artifacts: its membership is a stored set \
+                 or a shape, so its artifacts are the caller's to publish rather than identities a \
+                 rule produces"
+            ),
             RegistryError::NotEnumerated { layer } => write!(
                 f,
                 "{layer} derives its membership from a predicate, so it cannot be published into: \
@@ -461,15 +476,108 @@ impl LayerRegistry {
             .layers
             .get(layer_name)
             .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
-
-        // A spatial or attribute layer's membership is *evaluated*, never enumerated — publishing
-        // one would install a frozen answer beside a live predicate, and the two would diverge at
-        // the first ingest. Refused at the boundary rather than reconciled later.
-        if layer.declaration.membership != MembershipSource::Enumerated {
+        // **An attribute layer's membership is *evaluated*, never enumerated** — publishing one
+        // would install a frozen answer beside a live predicate, and the two would diverge at the
+        // first ingest. Refused at the boundary rather than reconciled later.
+        //
+        // **A spatial layer is not refused here, and the difference is where the shape comes
+        // from.** Its artifacts *are* published — a roster of boxes an author wrote — and what is
+        // never stored is their membership, which the shape decides at request time. So the
+        // refusal below is the same rule in both cases (*a stored answer may not sit beside a live
+        // rule*) and only the attribute kind has an answer to store.
+        if matches!(layer.declaration.membership, MembershipSource::Attribute(_)) {
             return Err(RegistryError::NotEnumerated {
                 layer: layer_name.to_string(),
             });
         }
+        self.prepare_artifacts(layer_name, level, incoming, store, alloc, pending)
+    }
+
+    /// **Mint the artifacts a predicate's own rule names** — the values an attribute column
+    /// carries, one artifact per distinct value, keyed by the value's spelling.
+    ///
+    /// **The rule is the membership, so this is the only route into such a layer.**
+    /// [`prepare_publish`] refuses an attribute layer because a caller's stored answer would sit
+    /// beside a live predicate and diverge from it at the first ingest; what arrives here is not an
+    /// answer but the *identities* the rule produces, which have to exist somewhere for a
+    /// suppression to land on and for an edge to name. Each carries its key and nothing else: no
+    /// membership (the column is the membership), no content, no attachment and no parent, each of
+    /// which `LayerDeclaration::validate` already refuses such a layer from declaring.
+    ///
+    /// **Suppression-blindness carries over unchanged**, because the duplicate-key check
+    /// [`prepare_artifacts`] makes reads [`ArtifactStore::ordinal_of_key`] — the store's key index,
+    /// which loses a key at exactly one event, the fold retiring the artifact's own entity. A
+    /// suppressed value's key therefore still resolves, is refused as a duplicate, and never mints a
+    /// second unsuppressed artifact (§5's third ruling, stated in full on [`resolve_or_mint`]). A
+    /// *deleted* value's key does mint again, and the new artifact is a new object with a new
+    /// entity — which is what a deletion means.
+    ///
+    /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    /// [`prepare_artifacts`]: LayerRegistry::prepare_artifacts
+    /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
+    pub fn prepare_derive(
+        &self,
+        layer_name: &str,
+        level: u32,
+        keys: &[String],
+        store: &ArtifactStore,
+        alloc: &mut Allocator,
+    ) -> Result<WalRecord, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        // The mirror of [`prepare_publish`]'s refusal, and it exists for the same reason read the
+        // other way: an enumerated layer's artifacts are the caller's to name, so minting one from
+        // a rule would be the service inventing an identity nobody published.
+        if !matches!(layer.declaration.membership, MembershipSource::Attribute(_)) {
+            return Err(RegistryError::NotDerived {
+                layer: layer_name.to_string(),
+            });
+        }
+        let incoming: Vec<IncomingArtifact> = keys
+            .iter()
+            .map(|key| IncomingArtifact {
+                key: Some(key.clone()),
+                members: croaring::Bitmap::new(),
+                contents: Vec::new(),
+                attached_to: None,
+                parent_key: None,
+                shape: None,
+            })
+            .collect();
+        self.prepare_artifacts(
+            layer_name,
+            level,
+            &incoming,
+            store,
+            alloc,
+            &crate::no_pending,
+        )
+    }
+
+    /// The allocation and validation both entry points share — everything [`prepare_publish`] does
+    /// once the membership source has been checked.
+    ///
+    /// **One body, so a rule cannot hold at one entry point and not the other.** The two callers
+    /// differ in exactly which memberships they admit; the duplicate-key rule, the content rules,
+    /// the attachment resolution, the parent resolution and the reservation growth are one
+    /// implementation.
+    ///
+    /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    fn prepare_artifacts(
+        &self,
+        layer_name: &str,
+        level: u32,
+        incoming: &[IncomingArtifact],
+        store: &ArtifactStore,
+        alloc: &mut Allocator,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+    ) -> Result<WalRecord, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
         let runs = layer
             .runs
             .get(level as usize)
@@ -551,6 +659,54 @@ impl LayerRegistry {
                          satisfied by everyone"
                     ));
                 }
+            }
+        }
+
+        // **A declared shape and a declared membership are the same statement**, so an artifact
+        // must carry exactly the one its layer names. Both halves are refusals rather than
+        // tolerated absences: an artifact of a shape layer with no box has no membership rule at
+        // all — it counts zero for every viewer and is absent under any criterion, which no client
+        // can tell from an artifact whose members are simply invisible to them — and a box on a
+        // layer that declares no shape is a region nothing evaluates, which would read on
+        // `/v1/meta` as geometry the service holds and does not.
+        let declares_shape = layer.declaration.shape.is_some();
+        for (i, artifact) in incoming.iter().enumerate() {
+            match (declares_shape, &artifact.shape) {
+                (true, None) => {
+                    return Err(RegistryError::Shape {
+                        layer: layer_name.to_string(),
+                        detail: format!(
+                            "artifact {i} of this batch carries no bounding box, and this layer's \
+                             `shape` declares one. The box is the whole of such an artifact's \
+                             membership, so one published without it would count zero for every \
+                             viewer"
+                        ),
+                    })
+                }
+                (false, Some(_)) => {
+                    return Err(RegistryError::Shape {
+                        layer: layer_name.to_string(),
+                        detail: format!(
+                            "artifact {i} of this batch carries a bounding box, and this layer \
+                             declares no `shape`. Its members come from the stored set its \
+                             membership names, so a box beside them is a region nothing evaluates"
+                        ),
+                    })
+                }
+                _ => {}
+            }
+            // A shape layer stores no membership: the tiles covering the box decide who belongs, at
+            // request time. A set beside it would be a frozen answer next to a live rule — the same
+            // thing `prepare_publish` refuses an attribute layer for.
+            if declares_shape && !artifact.members.is_empty() {
+                return Err(RegistryError::Shape {
+                    layer: layer_name.to_string(),
+                    detail: format!(
+                        "artifact {i} of this batch carries a stored membership, and this layer's \
+                         members come from its shape at request time — a set stored beside a live \
+                         rule is a frozen answer that diverges from it at the first ingest"
+                    ),
+                });
             }
         }
 
@@ -694,6 +850,7 @@ impl LayerRegistry {
                             entity: a.entity,
                         }),
                     parent: parents[i],
+                    shape: artifact.shape.map(|b| b.as_array()),
                 }
             })
             .collect();
@@ -1570,6 +1727,7 @@ mod tests {
             contents: Vec::new(),
             attached_to: None,
             parent_key: None,
+            shape: None,
         }
     }
 
@@ -1822,17 +1980,22 @@ mod tests {
         assert_eq!(store.next_ordinal("clusters/a", 0), 1);
     }
 
+    /// **The two routes into a layer are exclusive, and which one a layer takes is its membership.**
+    ///
+    /// An attribute layer's members are evaluated, so an enumerated set beside them is a frozen
+    /// answer that diverges from the predicate at the first ingest — publication is refused and the
+    /// values are *derived* instead. An enumerated layer is the mirror: its artifacts are the
+    /// caller's to name, so deriving one would be the service inventing an identity nobody
+    /// published.
     #[test]
-    fn a_predicate_layer_cannot_be_published_into() {
-        // Its membership is evaluated, so an enumerated set beside it is a frozen answer that
-        // diverges from the predicate at the first ingest.
+    fn a_predicate_layer_is_derived_into_and_never_published_into() {
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let mut alloc = Allocator::new(0);
-        let mut spatial = declaration("regions/uk");
-        spatial.membership = MembershipSource::Spatial;
-        spatial.require_member_visibility = Some(ExistenceCriterion::Count(25));
-        register(&mut reg, &mut alloc, spatial).unwrap();
+        let mut predicate = declaration("regions/uk");
+        predicate.membership = MembershipSource::Attribute("severity".into());
+        predicate.require_member_visibility = Some(ExistenceCriterion::Count(25));
+        register(&mut reg, &mut alloc, predicate).unwrap();
 
         assert_eq!(
             publish(
@@ -1846,6 +2009,43 @@ mod tests {
                 layer: "regions/uk".into()
             })
         );
+
+        // The route that *is* open: the values, minted with their keys and nothing else.
+        let record = reg
+            .prepare_derive(
+                "regions/uk",
+                0,
+                &["high".to_string(), "low".to_string()],
+                &store,
+                &mut alloc,
+            )
+            .expect("a predicate layer's values are derived into it");
+        reg.apply(&record);
+        assert_eq!(store.apply(&record, 0), 0);
+        let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
+            unreachable!()
+        };
+        assert_eq!(artifacts.len(), 2);
+        for artifact in artifacts {
+            assert!(artifact.contents.is_empty(), "a derived artifact has none");
+            assert!(artifact.attached_to.is_none());
+            assert!(artifact.parent.is_none());
+            assert!(artifact.shape.is_none());
+        }
+        assert_eq!(store.ordinal_of_key("regions/uk", 0, "high"), Some(0));
+        assert_eq!(store.ordinal_of_key("regions/uk", 0, "low"), Some(1));
+
+        // **A key the level already holds never mints a second artifact**, which is what keeps a
+        // suppressed value from being re-minted unsuppressed: the check reads the store's key
+        // index, and a suppression touches no stored structure at all.
+        assert_eq!(
+            reg.prepare_derive("regions/uk", 0, &["high".to_string()], &store, &mut alloc),
+            Err(RegistryError::DuplicateKey {
+                layer: "regions/uk".into(),
+                key: "high".into(),
+            })
+        );
+
         // And a level the layer never declared is a refusal too, not an implicit creation.
         assert_eq!(
             reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc, &no_pending),
@@ -1857,6 +2057,13 @@ mod tests {
             Err(RegistryError::NoSuchLevel {
                 layer: "clusters/a".into(),
                 level: 3
+            })
+        );
+        // The mirror refusal: an enumerated layer's artifacts are the caller's to name.
+        assert_eq!(
+            reg.prepare_derive("clusters/a", 0, &["v".to_string()], &store, &mut alloc),
+            Err(RegistryError::NotDerived {
+                layer: "clusters/a".into()
             })
         );
     }

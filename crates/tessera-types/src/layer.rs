@@ -632,6 +632,25 @@ pub enum ShapeKind {
     Bbox,
 }
 
+/// **The artifact key a `membership = { attribute = f }` layer mints for one value of `f`.**
+///
+/// One rule read twice. A **category**'s value has a key the author wrote — `finance`, `amber` —
+/// and that key is what the value *is*, so it is what the artifact is named; a **plain** integer
+/// column has no vocabulary and its value is the number, so the key is that number's canonical
+/// decimal spelling. Passing the vocabulary's key or `None` is therefore not a choice at the call
+/// site: it is whether the column has a vocabulary.
+///
+/// **Canonical decimal, so a key is a function of the value and not of who spelled it.** The two
+/// entry points mint from different places — a build from the column it has just read, an ingest
+/// from the row that has just arrived — and a key that could be written two ways would let one of
+/// them mint a second artifact for a value the other already named.
+pub fn attribute_value_key(code: u32, vocabulary_key: Option<&str>) -> String {
+    match vocabulary_key {
+        Some(key) => key.to_string(),
+        None => code.to_string(),
+    }
+}
+
 /// The deepest Morton decomposition a `membership = { spatial = … }` layer may declare.
 ///
 /// **Sixteen, because that is where the code space ends.** A Morton code interleaves two 16-bit

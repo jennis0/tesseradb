@@ -171,6 +171,7 @@ fn build_fixture(shape: Shape) -> Fixture {
                 attached_to: None,
                 parent: *parent,
             },
+            None,
         );
     }
 
@@ -530,7 +531,7 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
         was < grown_lo,
         "the growth must land outside the old extent"
     );
-    fx.store.put(LAYER, 0, ordinal, record);
+    fx.store.put(LAYER, 0, ordinal, record, None);
 
     let membership = fx.membership();
     let tiles = rows_of(&[grown_lo..=UNIVERSE - 1]);
@@ -787,6 +788,7 @@ fn an_index_over_another_population_is_refused_and_the_level_derives_its_own() {
                 attached_to: None,
                 parent: None,
             },
+            None,
         );
     }
     let short = TileIndex::build(

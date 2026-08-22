@@ -3383,7 +3383,7 @@ fn compile_membership(block: &LayerBlock, attributes: &[Attribute]) -> Result<Me
             // declares is a predicate with nothing to read, and every artifact on that layer would
             // have an empty membership: served, counted at zero, and indistinguishable from a
             // layer whose artifacts were all withheld.
-            if !attributes.iter().any(|a| a.name == field) {
+            let Some(attribute) = attributes.iter().find(|a| a.name == field) else {
                 return Err(declaration_error(format!(
                     "layer '{}': `membership = {{ attribute = \"{field}\" }}` names no declared \
                      attribute. Declared: {}. A membership over a column nothing declares reads \
@@ -3395,6 +3395,40 @@ fn compile_membership(block: &LayerBlock, attributes: &[Attribute]) -> Result<Me
                     } else {
                         names(attributes.iter().map(|a| a.name.as_str()))
                     }
+                )));
+            };
+            // **The membership *is* the column, so the column has to be one that partitions**
+            // (`design/artifact-serving-at-scale.md` §5.1). Every point carries exactly one value
+            // of a single-valued category-width column, which is what makes one label per row the
+            // whole membership. The three refusals below are the three ways that stops being true,
+            // and each is ⊘ scope rather than a defect:
+            //
+            // - **not indexed**: the values live in the render table or nowhere, and the predicate
+            //   reads the entity-addressed `ValueColumn` an `index = true` column writes;
+            // - **not a category width**: a `u64`, a float or a string has no code a label column
+            //   can hold, and `ValueColumn::value_of` answers `u32::MAX` for one rather than the
+            //   value — a membership every artifact would share;
+            // - **`keyword` or `text`**: their ordinals are per *layer* of the index, so merging
+            //   them across a base and its extents needs each layer's own dictionary, and a
+            //   `text` column is not single-valued at all.
+            if !attribute.index {
+                return Err(declaration_error(format!(
+                    "layer '{}': `membership = {{ attribute = \"{field}\" }}` names a column that \
+                     is not indexed. The predicate reads the entity-addressed value column that \
+                     `index = true` writes, and without one there is nothing for it to evaluate",
+                    block.name
+                )));
+            }
+            if !attribute.ty.is_category_width() {
+                return Err(declaration_error(format!(
+                    "layer '{}': `membership = {{ attribute = \"{field}\" }}` names a `{}` \
+                     column. ⊘ An attribute membership is a predicate over a **single-valued \
+                     category-width** column — `u8`, `u16` or `u32`, with or without a vocabulary \
+                     — because such a column partitions the corpus: every point carries exactly \
+                     one value, so the values are the artifacts and one label per row is the whole \
+                     membership. A wider or non-integer column has no code to label a row with",
+                    block.name,
+                    attribute.ty.arrow_type_name()
                 )));
             }
             Ok(MembershipSource::Attribute(field.to_string()))
