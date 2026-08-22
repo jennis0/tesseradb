@@ -553,18 +553,45 @@ struct ProjectionKey {
 /// [`ProjectionKey`] that says when it stops being valid.
 type LevelAddress = (String, String, u32);
 
+/// `(prefix, layer, level)` — what one cached partition is *for*. No view, because the expression
+/// is over terms and no row space is involved in it.
+type PartitionAddress = (String, String, u32);
+
+/// What a cached [`ContainmentPartition`] was composed from. The view is deliberately absent — see
+/// [`ArtifactProjections::partitions_held`] — so the terms are the prefix, which fixes the
+/// postings, and the level's version, which fixes the records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PartitionKey {
+    prefix: String,
+    level_version: u64,
+}
+
 #[derive(Debug, Default)]
 pub struct ArtifactProjections {
     cached: Mutex<BTreeMap<LevelAddress, (ProjectionKey, Arc<ArtifactRows>)>>,
+    /// The containment partitions, keyed **without the view**.
+    ///
+    /// **The expression is view-independent, and composing it is not cheap.** It names entities'
+    /// terms, so two views of the same level compose the same table — but composing it walks every
+    /// term's posting once (`crate::containment`), which at the demo corpus's 54,794 signatures is
+    /// the dear half of a level's build. Held here, a second view of a level pays nothing for it.
+    ///
+    /// **What stays per view is the projection-loss test**, and that is why this cache can be
+    /// narrower than the one above rather than replacing it: a generating set that lost a member on
+    /// the way into *this* view's row space can never be contained, and that question is asked of
+    /// the row form at serving time.
+    partitions_held: Mutex<BTreeMap<PartitionAddress, (PartitionKey, ContainmentPartition)>>,
     /// How many forms this has built since the engine opened. **The cadence, counted** — what
     /// §8.1 is about is not the cost of one build but how many a write provokes, and that is a
     /// number nothing reported until the grain changed. Read by the fold's own log line and by
     /// [`crate::Engine::artifact_cache_builds`].
     builds: std::sync::atomic::AtomicU64,
-    /// How many of those builds also composed a containment partition. **The gate, counted** —
-    /// under a foreign plugin this stays at zero while `builds` climbs, which is what makes *the
-    /// partition declined everywhere* distinguishable from *the partition was never asked for*.
-    /// Operator plane only; it names no artifact and no principal.
+    /// How many containment partitions this has **composed** since the engine opened. **The gate,
+    /// counted** — under a foreign plugin it stays at zero while `builds` climbs, which is what
+    /// makes *the partition declined everywhere* distinguishable from *the partition was never
+    /// asked for*. It is not `builds`' twin even under the builtin plugin: a second view of a
+    /// level builds a second row form and reuses the one partition, which is the whole point of
+    /// [`Self::partitions_held`]. Operator plane only; it names no artifact and no principal.
     partitions: std::sync::atomic::AtomicU64,
 }
 
@@ -599,6 +626,12 @@ impl ArtifactProjections {
     /// `(view, layer, level)` triples a process had *ever* seen rather than the number it holds.
     pub fn forget(&self, layer: &str) {
         self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, _), _| held != layer);
+        // **Both maps, or the second one is the retention bug the first one fixed.** A partition is
+        // megabytes at the campaign's target and is pinned by nothing else once the layer is gone.
+        self.partitions_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, _), _| held != layer);
@@ -663,25 +696,7 @@ impl ArtifactProjections {
         // derivation that has a correct fallback.
         let partition = source
             .filter(|source| source.signature_shaped())
-            .and_then(|source| {
-                match ContainmentPartition::compose(store, layer, level, source.postings) {
-                    Ok(partition) => Some(partition),
-                    Err(error) => {
-                        tracing::warn!(
-                            layer = %layer,
-                            level,
-                            %error,
-                            "the containment partition could not be composed from the postings; \
-                             containment stays on the masked-count route for this level"
-                        );
-                        None
-                    }
-                }
-            });
-        if partition.is_some() {
-            self.partitions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+            .and_then(|source| self.partition_for(prefix, layer, level, store, source));
         let rows = Arc::new(
             ArtifactRows::build(store.level(layer, level), space).with_partition(partition),
         );
@@ -692,6 +707,59 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .insert(map_key, (key, Arc::clone(&rows)));
         rows
+    }
+
+    /// This level's containment partition for the generation `store` is in, composing it if what
+    /// is held is stale.
+    ///
+    /// **A partition that fails to compose is an absence, not an error.** The only failure is an
+    /// unreadable postings file, and the answer to that is the masked-count route, which reads no
+    /// postings and is what every request took before this structure existed. Logged rather than
+    /// returned, because the caller's alternative would be to fail a request over a derivation
+    /// that has a correct fallback.
+    fn partition_for(
+        &self,
+        prefix: &str,
+        layer: &str,
+        level: u32,
+        store: &ArtifactStore,
+        source: &PartitionSource<'_>,
+    ) -> Option<ContainmentPartition> {
+        let key = PartitionKey {
+            prefix: prefix.to_string(),
+            level_version: store.level_version(layer, level),
+        };
+        let map_key = (prefix.to_string(), layer.to_string(), level);
+        if let Some((held, partition)) = self
+            .partitions_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&map_key)
+        {
+            if *held == key {
+                return Some(partition.clone());
+            }
+        }
+        let partition = match ContainmentPartition::compose(store, layer, level, source.postings) {
+            Ok(partition) => partition,
+            Err(error) => {
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    %error,
+                    "the containment partition could not be composed from the postings; \
+                     containment stays on the masked-count route for this level"
+                );
+                return None;
+            }
+        };
+        self.partitions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.partitions_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(map_key, (key, partition.clone()));
+        Some(partition)
     }
 }
 

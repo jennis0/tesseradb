@@ -3127,8 +3127,10 @@ impl Engine {
         });
         // The same containment answers the viewport builds, from the same partition: an identifier
         // route that resolved containment by a different arm would be a second ranking nobody
-        // wrote.
-        let containment = rows.partition().map(|p| p.answers(&session.satisfied));
+        // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
+        let containment = rows
+            .partition()
+            .map(|p| p.answer_for_one(&session.satisfied));
         let ctx = DependencyContext {
             generation: &generation,
             satisfied: &session.satisfied,
@@ -3367,7 +3369,10 @@ impl Engine {
         let nested = |a: &tessera_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
         };
-        let containment = rows.partition().map(|p| p.answers(ctx.satisfied));
+        // **Lazily, and this one is load-bearing rather than tidy.** The prerequisite runs once per
+        // attached candidate, so settling a level's whole expression table here would turn a
+        // per-artifact question into whole-population work per artifact.
+        let containment = rows.partition().map(|p| p.answer_for_one(ctx.satisfied));
         crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &ctx.generation.overlay,

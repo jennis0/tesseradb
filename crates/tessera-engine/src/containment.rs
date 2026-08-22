@@ -408,6 +408,24 @@ impl ContainmentPartition {
         true
     }
 
+    /// This principal's answers for a **single** artifact — always the lazy face.
+    ///
+    /// **The switch below is about how much of a level a request is going to walk, and these
+    /// callers walk one ordinal.** The drill-down route resolves one identifier and the dependency
+    /// prerequisite resolves one target, so settling the whole expression table would be
+    /// whole-population work for one answer — and the dependency route runs *per attached
+    /// candidate*, which would make it whole-population work per artifact.
+    pub fn answer_for_one<'a>(
+        &'a self,
+        satisfied: &'a FxHashSet<TermId>,
+    ) -> ContainmentAnswers<'a> {
+        ContainmentAnswers {
+            partition: self,
+            satisfied,
+            memo: Memo::Sparse(RefCell::new(FxHashMap::default())),
+        }
+    }
+
     /// This principal's answers over the whole level, ready to be asked per candidate.
     pub fn answers<'a>(&'a self, satisfied: &'a FxHashSet<TermId>) -> ContainmentAnswers<'a> {
         let memo = if self.expressions() <= dense_limit(self.pairs()) {

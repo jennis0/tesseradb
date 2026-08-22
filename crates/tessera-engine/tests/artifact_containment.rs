@@ -421,6 +421,27 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
     assert!(rows.partition().is_some());
     assert_eq!(projections.partitions(), 1);
 
+    // **A second view of the same level composes nothing.** The expression is over term
+    // signatures, which no row space is involved in, so the dear half of a level's build — one
+    // pass over every term's posting — is paid once however many views carry the layer. What is
+    // per view is the projection-loss test, and that stays on the row form.
+    let second = projections.get_or_build(
+        "v00000",
+        "s1",
+        LAYER,
+        0,
+        &fx.store,
+        &fx.row_space,
+        Some(&native),
+    );
+    assert!(second.partition().is_some());
+    assert_eq!(projections.builds(), 2, "two views, two row forms");
+    assert_eq!(
+        projections.partitions(),
+        1,
+        "and one partition between them"
+    );
+
     // And the served rank is the same either way, which is the property that makes the gate a
     // cost decision rather than a disclosure one.
     let plain = fx.rows();

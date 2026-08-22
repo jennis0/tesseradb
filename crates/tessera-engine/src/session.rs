@@ -2368,14 +2368,15 @@ impl Engine {
         (self.artifact_projections.held(), self.lineages.held())
     }
 
-    /// How many of this engine's artifact row-form builds also composed a containment partition
-    /// (`crate::containment`).
+    /// How many containment partitions this engine has composed (`crate::containment`).
     ///
     /// **Beside [`Engine::artifact_cache_builds`] because the interesting number is the ratio.**
-    /// Under the builtin plugin the two move together; under any other one this stays at zero
-    /// while the other climbs, and containment is on the masked-count route everywhere. That is a
-    /// deliberate, fail-closed state rather than a fault, and an operator has no other way to see
-    /// it. Operator plane only — it names no artifact, no layer and no principal.
+    /// Under any plugin but the builtin this stays at zero while row forms keep being built, and
+    /// containment is on the masked-count route everywhere: a deliberate, fail-closed state rather
+    /// than a fault, and an operator has no other way to see it. It also stays below the row-form
+    /// count where a bundle carries several views, because the expression is view-independent and
+    /// is composed once for all of them. Operator plane only — it names no artifact, no layer and
+    /// no principal.
     pub fn artifact_containment_partitions(&self) -> u64 {
         self.artifact_projections.partitions()
     }
