@@ -97,6 +97,7 @@ point cache and the server density raster — could not sensibly share a design.
 |---|---|---|---|---|---|---|
 | S1 | Mask fragment *(exists)* | server | canonical grant set | `fragment_cache_bytes` | LRU | content-addressed; never |
 | S2 | Row projection *(exists)* | server | (token, view, segments_version) | `row_projection_cache_bytes` | LRU + `prune_generation` | every geometry publication rotates the key; the superseded entry stays servable across a flush, never across a merge (write-path §4.6) |
+| S2b | Artifact masked-count histogram *(exists)* | server | (token, view, layer, level, level_version, segments_version, overlay_version, fragment identity) | `masked_count_cache_bytes` | LRU, removal-only | row-major levels only — [decision 0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s one named exception; a deny rotates `overlay_version` so a suppression is unreachable at the next request, and an unsuppress re-derives |
 | S3 | Density raster | server | (grant set, view, content version, depth) | new knob, ~512 MB | LRU | content version; rebuild async, serve stale-marked |
 | S4 | Overview / bootstrap answers | server | (grant set, view, content version, view, k) | new knob | LRU | content version |
 | S5 | Adapter tiles *(class b only)* | server, in boundary | (grant set, overlay version, segments_version, view, view-key nonce, z/x/y, k, encoding) | new knob, 1–2 GB | LRU + single-flight | content version; view-key-scoped URL self-busts browser copies |

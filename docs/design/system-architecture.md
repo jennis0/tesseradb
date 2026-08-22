@@ -553,6 +553,7 @@ single_flight_wait_ms = 6000          # waiting for a build already running (§6
 # caches and pins
 row_projection_cache_bytes = 2_147_483_648
 fragment_cache_bytes = 1_073_741_824
+masked_count_cache_bytes = 268_435_456
 expected_concurrent_sessions = 8
 pin_ttl_secs = 300
 pins_per_session_max = 4
