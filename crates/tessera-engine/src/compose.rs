@@ -340,6 +340,63 @@ pub trait MaskedSet {
     fn visible_rows(&self, set: &Bitmap) -> Bitmap;
 }
 
+/// The **whole** composed mask, materialised — every row this viewer may see, in this view's row
+/// space.
+///
+/// **One caller, and it is the row-major count** ([`crate::row_column::RowColumn::histogram`]). A
+/// row-major level has no per-artifact membership to intersect, so its only route to
+/// `|membership ∩ M_auth|` is a walk of the mask reading off which artifact each visible row belongs
+/// to — the one place [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+/// admits a structure sized by the artifact population per session, and it is admitted because there
+/// is no other route.
+///
+/// **Its own trait rather than a third method on [`MaskedSet`]**, for a reason that is about the
+/// question rather than about tidiness: `MaskedSet` is *the questions an artifact's membership asks
+/// of a viewer's mask* — both its methods take the membership as an argument — and this asks nothing
+/// about any artifact. Keeping it separate also keeps the probe that measures the routes
+/// (`tessera-bench`) implementing exactly the trait the per-artifact routes need.
+///
+/// **The safety property is the same one and it is unchanged**: the one production implementor is
+/// [`EffectiveMask`], so a whole-mask walk cannot be taken against the pre-overlay projection, which
+/// strictly contains `M_auth` after any accepted delete. The [`Bitmap`] implementor below is
+/// test-only.
+pub trait WholeMask {
+    /// See the trait's doc.
+    ///
+    /// **Filter-blind, exactly as [`MaskedSet::count_intersection`] is.** The count beside an
+    /// artifact is what the *principal* may see, not what their current search box admits;
+    /// anchoring it on a filtered set would make an artifact's existence criterion a function of the
+    /// filter, which is **I12**'s forbidden direction. `visible_all().and_cardinality(set)` and
+    /// `count_intersection(set)` are therefore the same number by construction, which the test
+    /// beside the implementation asserts rather than assumes.
+    ///
+    /// O(containers in the projection) and a full copy of it — hundreds of megabytes at the
+    /// campaign's target, which is why the histogram it feeds is built once per session per
+    /// generation and cached, never per request.
+    fn visible_all(&self) -> Bitmap;
+}
+
+impl WholeMask for EffectiveMask {
+    /// `(base − minus) ∪ plus` — the same three terms in the same order the count takes, with no
+    /// `set` to narrow by. `minus ⊆ base` and `plus ∩ base = ∅` hold structurally ([`compose`]
+    /// asserts them), so every row appears once and the cardinality of what comes back is
+    /// [`EffectiveMask::visible_total`] exactly.
+    fn visible_all(&self) -> Bitmap {
+        let mut visible = self.base.bitmap().clone();
+        visible.andnot_inplace(&self.minus);
+        visible.or_inplace(&self.plus);
+        visible
+    }
+}
+
+/// A mask with no denials — **test-only**, for [`MaskedSet`]'s reason.
+#[cfg(test)]
+impl WholeMask for Bitmap {
+    fn visible_all(&self) -> Bitmap {
+        self.clone()
+    }
+}
+
 impl MaskedSet for EffectiveMask {
     /// **The same term-by-term arithmetic as [`EffectiveMask::count_range`]**, and exact for the
     /// same reason: `minus ⊆ base` and `plus ∩ base = ∅` are the structural invariants [`compose`]

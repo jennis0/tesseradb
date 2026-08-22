@@ -1606,6 +1606,21 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
+    /// Record one level's re-evaluated serving layout, returning whether it **moved**.
+    ///
+    /// **Under the registry's own lock and before the snapshot**, which is the whole of the
+    /// ordering the selection memo §5 requires: the manifest is written from
+    /// [`LiveState::registry_for_publication`], so a layout recorded after that snapshot would
+    /// reach neither the files nor the record.
+    fn record_layout(
+        &self,
+        layer: &str,
+        level: u32,
+        layout: tessera_types::layer::ServingLayout,
+    ) -> bool {
+        lock_recover(&self.registry).set_layout(layer, level, layout)
+    }
+
     fn registry_for_publication(
         &self,
     ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
@@ -1988,11 +2003,13 @@ fn artifact_coordinates(
     store: &ArtifactStore,
     held: &[tessera_store::manifest::ContainmentExtent],
     held_indexes: &[tessera_store::manifest::TileIndexExtent],
+    held_columns: &[tessera_store::manifest::RowColumnExtent],
     pending_retirement: &[(String, u32)],
 ) -> (
     Vec<tessera_store::manifest::LevelVersion>,
     Vec<tessera_store::manifest::ContainmentExtent>,
     Vec<tessera_store::manifest::TileIndexExtent>,
+    Vec<tessera_store::manifest::RowColumnExtent>,
 ) {
     let pending = |layer: &str, level: u32| {
         pending_retirement
@@ -2029,7 +2046,18 @@ fn artifact_coordinates(
         })
         .cloned()
         .collect();
-    (versions, still_true, indexes_still_true)
+    // The row-major columns take the same filter, and the layout tag each carries is not part of
+    // it: a tag says which *form* the file is in, and what decides whether it still describes the
+    // level is the version, exactly as it is for an extent column.
+    let columns_still_true = held_columns
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    (versions, still_true, indexes_still_true, columns_still_true)
 }
 
 impl WritePath {
@@ -2420,6 +2448,15 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.tile_index_extents.iter().cloned())
             .collect();
+        // The row-major columns the last fold wrote, seeded identically and for the identical
+        // reason.
+        let seeded_row_column_extents: Vec<tessera_store::manifest::RowColumnExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
+            .collect();
         // The content half, seeded identically and for the identical reason.
         let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
             .load()
@@ -2488,6 +2525,7 @@ impl WritePath {
                     membership_extents: seeded_membership_extents,
                     containment_extents: seeded_containment_extents,
                     tile_index_extents: seeded_tile_index_extents,
+                    row_column_extents: seeded_row_column_extents,
                     artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
@@ -4474,6 +4512,12 @@ struct Executor {
     /// ([`artifact_coordinates`]); the only difference is that a view is part of the address,
     /// because an extent is a pair of rows and a row space is per view.
     tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
+    /// Every row-major column the current prefix holds — one per `(view, layer, level)` the last
+    /// fold wrote one for. Held, filtered and replaced exactly as
+    /// [`Executor::tile_index_extents`] is, and by the same code ([`artifact_coordinates`]); the
+    /// only difference is the layout tag each entry carries, which says which form the file is in
+    /// and is checked against the file's own magic at open.
+    row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
     /// Every artifact **content** extent this node has published, complete current state, held for
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
@@ -4933,6 +4977,7 @@ impl Executor {
             &mut manifest,
             &self.containment_extents,
             &self.tile_index_extents,
+            &self.row_column_extents,
             &[],
         ) {
             self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
@@ -5641,19 +5686,49 @@ impl Executor {
             &live.bundle.manifest.data_plugin_hash,
             &pending_retirement,
         );
-        // **The tile indexes, in the same pass and omitting the same levels.** Their extents are
-        // rows, so they are per view and are projected against the base permutation this fold just
-        // wrote — the one the new prefix's row space will be built over.
+        // **The row spaces every derived structure below is computed over**, opened once: base
+        // only, against the permutations this fold just wrote.
         let index_views: Vec<(String, u32)> = completed
             .segments
             .iter()
             .map(|segment| (segment.view.clone(), segment.row_count))
             .collect();
+        let spaces = self.fold_row_spaces(&to_prefix_dir, &plan.partition, &index_views);
+        // **The layout re-evaluation, here and not later** (selection memo §5). The fold writes the
+        // membership files first and snapshots the registry after, so a choice taken after the
+        // snapshot would reach neither the files nor the manifest — and the fold would publish a
+        // level in the old layout with a record claiming the new one. Taken before either.
+        //
+        // **A flip drops the level's held forms explicitly.** The cached row form is
+        // replace-on-mismatch and this fold moves the prefix, so it would go anyway; the *held*
+        // tile index and column would not, because a level that flipped is never asked for its old
+        // form again and nothing would ever claim the entry.
+        let layouts = self.choose_layouts(&spaces, &pending_retirement);
+        for (layer, level, chosen) in &layouts {
+            if self.live.record_layout(layer, *level, *chosen) {
+                self.artifact_projections.forget_level(layer, *level);
+            }
+        }
+        // **The tile indexes, in the same pass and omitting the same levels** — and omitting the
+        // levels now recorded row-major, which have nothing to index. Their extents are rows, so
+        // they are per view and are projected against the base permutation this fold just wrote.
         let tile_indexes = self.write_tile_indexes(
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
-            &index_views,
+            &spaces,
+            &layouts,
+            &pending_retirement,
+        );
+        // **And the columns for the levels that do**, in the same pass and under the same
+        // omissions. A level whose column will not compose gets no entry, and is served
+        // artifact-major.
+        let row_columns = self.write_row_columns(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &spaces,
+            &layouts,
             &pending_retirement,
         );
 
@@ -5966,6 +6041,7 @@ impl Executor {
             &mut segments_manifest,
             &containment,
             &tile_indexes,
+            &row_columns,
             &pending_retirement,
         ) {
             discard(&format!(
@@ -6027,6 +6103,7 @@ impl Executor {
         // prefix does not contain.
         self.containment_extents = segments_manifest.containment_extents.clone();
         self.tile_index_extents = segments_manifest.tile_index_extents.clone();
+        self.row_column_extents = segments_manifest.row_column_extents.clone();
         *lock_recover(&self.health.last_fold_report) = degraded;
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
@@ -6443,6 +6520,7 @@ impl Executor {
             &mut manifest,
             &self.containment_extents,
             &self.tile_index_extents,
+            &self.row_column_extents,
             &[],
         ) {
             self.health
@@ -7522,15 +7600,23 @@ impl Executor {
         next: &mut tessera_store::manifest::SegmentsManifest,
         containment: &[tessera_store::manifest::ContainmentExtent],
         tile_indexes: &[tessera_store::manifest::TileIndexExtent],
+        row_columns: &[tessera_store::manifest::RowColumnExtent],
         pending_retirement: &[(String, u32)],
     ) -> Result<(), ManifestCommitRefused> {
-        let (level_versions, containment_extents, tile_index_extents) =
+        let (level_versions, containment_extents, tile_index_extents, row_column_extents) =
             self.live.with_artifacts(|store| {
-                artifact_coordinates(store, containment, tile_indexes, pending_retirement)
+                artifact_coordinates(
+                    store,
+                    containment,
+                    tile_indexes,
+                    row_columns,
+                    pending_retirement,
+                )
             });
         next.level_versions = level_versions;
         next.containment_extents = containment_extents;
         next.tile_index_extents = tile_index_extents;
+        next.row_column_extents = row_column_extents;
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
@@ -9168,6 +9254,7 @@ impl Executor {
                 &mut manifest,
                 &self.containment_extents,
                 &self.tile_index_extents,
+                &self.row_column_extents,
                 &[],
             ) {
                 tracing::error!(
@@ -9564,14 +9651,22 @@ impl Executor {
     ///
     /// **Every failure is an empty list, not a discarded fold** — the index is derived, so refusing
     /// to publish over one would be a refusal outside the disclosure surface.
-    fn write_tile_indexes(
+    /// The base row space of every view this fold just wrote, opened once for the whole artifact
+    /// pass.
+    ///
+    /// **Against the prefix being published, and base only** — with no extents, which is exactly
+    /// what a row form holds ([`tessera_store::RowSpace::project_base`]) and therefore what every
+    /// structure derived from one is computed over. A flush landing during the flight appends rows
+    /// above the base and moves none of these.
+    ///
+    /// A view whose permutation will not load is simply absent: its structures are derived on first
+    /// use, which is what every request did before the fold wrote anything.
+    fn fold_row_spaces(
         &self,
         prefix_dir: &std::path::Path,
         partition: &str,
-        n: u64,
         views: &[(String, u32)],
-        pending_retirement: &[(String, u32)],
-    ) -> Vec<tessera_store::manifest::TileIndexExtent> {
+    ) -> Vec<(String, tessera_store::RowSpace)> {
         let mut spaces: Vec<(String, tessera_store::RowSpace)> = Vec::new();
         for (view, row_count) in views {
             let path = prefix_dir
@@ -9589,11 +9684,223 @@ impl Executor {
                     view = %view,
                     path = %path.display(),
                     %error,
-                    "the fold could not read the permutation it just wrote, so this view's tile \
-                     indexes are derived on first use"
+                    "the fold could not read the permutation it just wrote, so this view's derived \
+                     artifact structures are built on first use"
                 ),
             }
         }
+        spaces
+    }
+
+    /// **The fold's layout re-evaluation** — decision 0094's step 4, taken inside the artifact pass
+    /// and before a derived byte is written.
+    ///
+    /// The observations it reads are **post-retirement**: `repack_all` above has already written
+    /// the surviving memberships into the prefix, and this reads the store, so a level the fold
+    /// retired most of is observed as the level it is about to become. That is exactly the case the
+    /// re-evaluation exists for.
+    ///
+    /// **The record is per `(layer, level)` and the observation is per view**, which is a
+    /// mismatch the levels themselves create: a layer drawn in two views has two row spaces and so
+    /// two localities. The shape is taken in the **first** view the fold wrote, deterministically,
+    /// because the record has one slot and a level is one level however many views draw it. Where
+    /// two views disagree sharply the pick follows the first and the other view's column is written
+    /// in that layout, which is correct and may be slower than that view would have chosen.
+    ///
+    /// **A pin is read, never re-derived**, and it reaches here as `declaration.layout` — see
+    /// [`crate::layout::choose`].
+    ///
+    /// ⊘ **What this adds to the fold's artifact pass is unpriced** (selection memo §9's constraint
+    /// 9), and it is a whole extra projection of one view: `RowSpace::project_base` per record, the
+    /// same call the row form and the tile index each already make. Coarsely measured on the
+    /// engine's own fold fixtures it is not separable from the pass's noise; at the campaign's 10⁷
+    /// artifacts it is a third pass over the 376 s §8.1 prices one at, and that figure is modelled
+    /// rather than measured.
+    fn choose_layouts(
+        &self,
+        spaces: &[(String, tessera_store::RowSpace)],
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<(String, u32, tessera_types::layer::ServingLayout)> {
+        let Some((_, space)) = spaces.first() else {
+            return Vec::new();
+        };
+        let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
+            store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .collect()
+        });
+        let mut out = Vec::with_capacity(levels.len());
+        for (layer, level) in levels {
+            let Some(registered) = self.live.registered_layer(&layer) else {
+                continue;
+            };
+            let shape = self.live.with_artifacts(|store| {
+                crate::artifacts::MembershipRows::build(store.level(&layer, level), space).shape()
+            });
+            let chosen = crate::layout::choose(
+                &registered.declaration.membership,
+                registered.declaration.layout,
+                shape,
+            );
+            tracing::info!(
+                layer = %layer,
+                level,
+                artifacts = shape.artifacts,
+                blocks_per_artifact = shape.blocks_per_artifact,
+                partitions = shape.partitions,
+                pinned = ?registered.declaration.layout,
+                was = ?registered.layout_of(level),
+                now = ?chosen,
+                "the fold re-evaluated a level's serving layout"
+            );
+            out.push((layer, level, chosen));
+        }
+        out
+    }
+
+    /// Write this prefix's row-major columns, one file per `(view, layer, level)` whose chosen
+    /// layout has one.
+    ///
+    /// **A level whose label column will not compose gets no file**, and the manifest then names
+    /// none for it — so the level is served artifact-major on the reader's side, loudly
+    /// (`ArtifactProjections::get_or_build`). That is the fold-time half of the refusal the
+    /// declaration could not make: whether an attribute is single-valued is a property of the data.
+    ///
+    /// **Every failure is an empty entry, not a discarded fold** — a column is derived, and the
+    /// artifact-major route answers every question it would have.
+    #[allow(clippy::too_many_arguments)]
+    fn write_row_columns(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        spaces: &[(String, tessera_store::RowSpace)],
+        layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<tessera_store::manifest::RowColumnExtent> {
+        let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
+            .iter()
+            .filter(|(layer, level, layout)| {
+                layout.is_row_major()
+                    && !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+            })
+            .cloned()
+            .collect();
+        if wanted.is_empty() || spaces.is_empty() {
+            return Vec::new();
+        }
+
+        // Projected under one borrow with the versions they are written at, and serialised outside
+        // it, exactly as the tile indexes are.
+        let written: Vec<(
+            String,
+            String,
+            u32,
+            u64,
+            tessera_types::layer::ServingLayout,
+            Vec<u8>,
+        )> = self.live.with_artifacts(|store| {
+            let mut out = Vec::with_capacity(wanted.len() * spaces.len());
+            for (layer, level, layout) in &wanted {
+                let version = store.level_version(layer, *level);
+                let ordinals = store.level(layer, *level).count() as u32;
+                for (view, space) in spaces {
+                    let column =
+                        crate::row_column::RowColumn::project(ordinals, space, *layout, || {
+                            store.level(layer, *level)
+                        });
+                    match column {
+                        Some(column) => out.push((
+                            view.clone(),
+                            layer.clone(),
+                            *level,
+                            version,
+                            *layout,
+                            column.as_bytes().to_vec(),
+                        )),
+                        None => tracing::warn!(
+                            layer = %layer,
+                            level,
+                            view = %view,
+                            layout = ?layout,
+                            "a row-major column would not compose at the fold — this level's \
+                             memberships do not partition — so it is served artifact-major. \
+                             Every answer is unchanged; the layout is not"
+                        ),
+                    }
+                }
+            }
+            out
+        });
+        if written.is_empty() {
+            return Vec::new();
+        }
+
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("row-column");
+        if let Err(source) = std::fs::create_dir_all(&dir) {
+            tracing::warn!(path = %dir.display(), %source, "the row-column directory would not be created");
+            return Vec::new();
+        }
+        let mut entries = Vec::with_capacity(written.len());
+        for (index, (view, layer, level, version, layout, bytes)) in written.into_iter().enumerate()
+        {
+            // The naming rule the membership extents follow: a layer name and a view id are
+            // caller-shaped and never reach a filename; the publication that introduced the file
+            // does. The extension names the form, so a directory listing says which is which.
+            let extension = match layout {
+                tessera_types::layer::ServingLayout::RowMajorList => "tsll",
+                _ => "tslb",
+            };
+            let name = format!("row-column-{n:06}-{index:03}.{extension}");
+            if let Err(error) = tessera_store::write_and_fsync(&dir.join(&name), &bytes) {
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    %error,
+                    "a row-major column would not be written; that level is composed on first use"
+                );
+                continue;
+            }
+            entries.push(tessera_store::manifest::RowColumnExtent {
+                path: format!("partitions/{partition}/row-column/{name}"),
+                view,
+                layer,
+                level,
+                level_version: version,
+                layout,
+            });
+        }
+        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
+        // whose name was never written — the rule every other publication here follows.
+        if let Err(error) = tessera_store::fsync_dir(&dir) {
+            tracing::warn!(%error, "the row-column directory would not be fsynced; its columns are dropped");
+            return Vec::new();
+        }
+        entries
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_tile_indexes(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        spaces: &[(String, tessera_store::RowSpace)],
+        layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<tessera_store::manifest::TileIndexExtent> {
         if spaces.is_empty() {
             return Vec::new();
         }
@@ -9610,11 +9917,21 @@ impl Executor {
                             .iter()
                             .any(|(l, v)| l == layer && v == level)
                     })
+                    // **A row-major level has nothing to index** (selection memo §1): its candidacy
+                    // is a scan of `viewport ∩ M_auth`, which the viewport already bounds. Writing
+                    // one would be writing a file no reader on that route opens — and a level that
+                    // falls back derives its index on first use, which is the same answer at the
+                    // cost this pass was trying to save.
+                    .filter(|(layer, level)| {
+                        !layouts
+                            .iter()
+                            .any(|(l, v, layout)| l == layer && v == level && layout.is_row_major())
+                    })
                     .collect();
                 let mut out = Vec::with_capacity(levels.len() * spaces.len());
                 for (layer, level) in &levels {
                     let version = store.level_version(layer, *level);
-                    for (view, space) in &spaces {
+                    for (view, space) in spaces {
                         let index = crate::tile_index::TileIndex::project(
                             store.level(layer, *level),
                             space,
@@ -9708,6 +10025,13 @@ impl Executor {
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
+                    // The layout the fold has just recorded, so the warm builds the form the next
+                    // request will ask for rather than one it would immediately replace.
+                    let layout = self
+                        .live
+                        .registered_layer(layer)
+                        .map(|registered| registered.layout_of(*level))
+                        .unwrap_or_default();
                     self.live.with_artifacts(|store| {
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
@@ -9717,6 +10041,7 @@ impl Executor {
                             store,
                             &view_data.row_space,
                             Some(&generation.partition_source()),
+                            layout,
                         )
                     });
                 }
@@ -10017,6 +10342,7 @@ impl Executor {
             &mut manifest,
             &self.containment_extents,
             &self.tile_index_extents,
+            &self.row_column_extents,
             &[],
         ) {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);

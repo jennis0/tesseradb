@@ -1097,6 +1097,44 @@ impl LayerRegistry {
         self.tombstones.extend(tombstones.iter().cloned());
     }
 
+    /// Record one level's serving layout — the fold's re-evaluation, and the only thing that ever
+    /// changes it after a registration
+    /// ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+    ///
+    /// **Not a WAL record and not a version bump.** A layout is a latency choice that puts nothing
+    /// on the wire: both forms answer identically, so bumping [`RegisteredLayer::version`] would
+    /// make every session re-resolve a layer for a change none of them can observe, and a WAL
+    /// record would make a replay able to change one. Its durable home is the manifest the same
+    /// fold writes — which is why this must be called **before** [`LayerRegistry::snapshot`], and
+    /// why a replay that re-applies a `LayerCreate` over a seeded registry returns the level to its
+    /// declared pin or to artifact-major. That costs the fold's column its adoption and nothing
+    /// else: both routes answer identically, and the membership extents a row form is built from
+    /// are written whatever the layout.
+    ///
+    /// Returns whether the record **moved**, which is what tells the caller a flip happened: a
+    /// flipped level's cached forms in the old layout are never asked for again, so something has
+    /// to drop them explicitly (selection memo §5).
+    pub fn set_layout(
+        &mut self,
+        layer: &str,
+        level: u32,
+        layout: tessera_types::layer::ServingLayout,
+    ) -> bool {
+        let Some(registered) = self.layers.get_mut(layer) else {
+            return false;
+        };
+        // Dense over the levels the layer declares — a record shorter than `runs` reads as
+        // artifact-major for the levels past its end, and this is where it stops being short.
+        if registered.layouts.len() <= level as usize {
+            registered
+                .layouts
+                .resize(level as usize + 1, Default::default());
+        }
+        let moved = registered.layouts[level as usize] != layout;
+        registered.layouts[level as usize] = layout;
+        moved
+    }
+
     /// This registry as a manifest carries it: every live layer, and every name ever dropped.
     pub fn snapshot(&self) -> (Vec<RegisteredLayer>, Vec<String>) {
         (

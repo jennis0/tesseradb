@@ -73,13 +73,15 @@ use rustc_hash::FxHashSet;
 use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment};
 use tessera_lifecycle::wal::ParentRef;
 use tessera_lifecycle::Overlay;
-use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
+use tessera_types::layer::{ExistenceCriterion, LayerDeclaration, ServingLayout};
 use tessera_types::{EntityId, TermId};
 
 use tessera_store::permutation::RowSpace;
 
 use crate::compose::MaskedSet;
 use crate::containment::{ContainmentAnswers, ContainmentPartition, PartitionSource};
+use crate::histogram::MaskedCounts;
+use crate::row_column::RowColumn;
 use crate::tile_index::TileIndex;
 
 /// One level's per-ordinal facts that **no row space is involved in**: the attachment edge, the
@@ -169,6 +171,55 @@ pub struct ArtifactRows {
     /// fail-closed — and containment then stays on the masked-count route, which asks `M_auth`
     /// itself and so cannot depend on the shape of the rule that produced it.
     partition: Option<ContainmentPartition>,
+    /// **Which form this level is served in**, and the row-addressed column where that form has one
+    /// (decision 0094).
+    ///
+    /// The two travel together and are set together, because the second is what makes the first
+    /// true: a level *recorded* row-major whose column would not compose — its memberships turned
+    /// out to overlap, or its file would not open — is **served** artifact-major, and this field
+    /// says so. Nothing downstream ever has to ask whether the column matching the layout is
+    /// present.
+    layout: ServingLayout,
+    column: Option<Arc<RowColumn>>,
+}
+
+/// What one viewport's narrowing produced, on whichever route the level's layout takes.
+///
+/// **Neither variant is a verdict**, and that is the property both halves share:
+/// [`ArtifactView::verdict`] runs for every ordinal either of them hands back.
+pub enum Candidacy {
+    /// The artifact-major route: the tile index's walk, with the settled half carried so a probe can
+    /// be exact for the mask-shaped question too.
+    Indexed(crate::tile_index::Candidates),
+    /// The row-major route: one scan of `viewport ∩ M_auth` marking labels.
+    ///
+    /// **Every ordinal here has already paid its masked probe**, because the scan was over the
+    /// visible rows: a row in `viewport ∩ M_auth` is visible by construction, so the artifact
+    /// labelling it has a visible member in view. That is the same question the artifact-major
+    /// route reaches through the walk and a per-candidate probe, answered once for the whole level.
+    Scanned(Bitmap),
+}
+
+impl Candidacy {
+    /// Every candidate ordinal, **ascending** — the order the cut downstream is entitled to, and
+    /// which both routes produce because both are backed by a bitmap.
+    pub fn iter(&self) -> Box<dyn Iterator<Item = u32> + '_> {
+        match self {
+            Candidacy::Indexed(candidates) => Box::new(candidates.iter()),
+            Candidacy::Scanned(rows) => Box::new(rows.iter()),
+        }
+    }
+
+    pub fn len(&self) -> u64 {
+        match self {
+            Candidacy::Indexed(candidates) => candidates.len(),
+            Candidacy::Scanned(rows) => rows.cardinality(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// The containment test's three outcomes.
@@ -317,6 +368,54 @@ impl MembershipRows {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+
+    /// **The shape the automatic layout pick reads** — decision 0092's (c), observed over the form
+    /// rather than declared.
+    ///
+    /// Holes and artifacts whose membership projects to nothing are not counted: a retired slot is
+    /// not an artifact, and counting it would keep an emptied level looking populous and make its
+    /// mean locality look better than it is.
+    ///
+    /// `blocks` is Roaring **containers touched**, which is the measured cost model — bitmap
+    /// operations cost O(containers touched) rather than O(cardinality) — and so the number that
+    /// says whether a level has row-space locality at all.
+    pub fn shape(&self) -> crate::layout::LevelShape {
+        let mut artifacts = 0u64;
+        let mut blocks = 0u64;
+        let mut partitions = true;
+        let mut claimed = Bitmap::new();
+        for ordinal in 0..self.len() as u32 {
+            let Some(rows) = self.get(ordinal) else {
+                continue;
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            artifacts += 1;
+            blocks += rows.statistics().n_containers as u64;
+            // **Whether the memberships are disjoint decides the label/list split**, and it is
+            // observed here rather than declared: single-valuedness is a property of the data. The
+            // running union stops being kept the moment an overlap is found, so a layer that
+            // plainly overlaps pays one intersection rather than a second copy of itself.
+            if partitions {
+                if claimed.intersect(rows) {
+                    partitions = false;
+                    claimed = Bitmap::new();
+                } else {
+                    claimed.or_inplace(rows);
+                }
+            }
+        }
+        crate::layout::LevelShape {
+            artifacts,
+            blocks_per_artifact: if artifacts == 0 {
+                0.0
+            } else {
+                blocks as f64 / artifacts as f64
+            },
+            partitions,
+        }
+    }
 }
 
 impl ArtifactRows {
@@ -367,6 +466,48 @@ impl ArtifactRows {
             membership,
             index,
             partition: None,
+            layout: ServingLayout::ArtifactMajor,
+            column: None,
+        }
+    }
+
+    /// Serve this level row-major, from `column`.
+    ///
+    /// **`None` puts the level back on the artifact-major route and records that**, which is the one
+    /// place the *recorded* layout and the *served* one are allowed to differ: a level whose
+    /// memberships turned out to overlap, or whose fold-written file would not open, has no column
+    /// to scan, and the row form beside it answers every question the column would have. The trace
+    /// is at the call site, where the reason is known.
+    pub fn with_column(mut self, column: Option<Arc<RowColumn>>) -> Self {
+        self.layout = column
+            .as_ref()
+            .map(|column| column.layout())
+            .unwrap_or(ServingLayout::ArtifactMajor);
+        self.column = column;
+        self
+    }
+
+    /// Which form this level is **served** in — see [`ArtifactRows::with_column`] on why that is not
+    /// always the form the manifest records.
+    pub fn layout(&self) -> ServingLayout {
+        self.layout
+    }
+
+    /// This level's row-addressed column, where it has one.
+    pub fn column(&self) -> Option<&RowColumn> {
+        self.column.as_deref()
+    }
+
+    /// **Candidacy for one viewport, on whichever route this level's layout takes.**
+    ///
+    /// The two answer the same question — *which artifacts could have a member this viewer can see
+    /// inside the viewport* — and the layout decides only which structure is walked to reach it.
+    /// `tests/artifact_row_major.rs` asserts the two agree ordinal for ordinal over a generated
+    /// corpus, which is this stage's spine.
+    pub fn candidacy(&self, viewport: &crate::tile_index::Viewport<'_>) -> Candidacy {
+        match &self.column {
+            Some(column) => Candidacy::Scanned(column.candidates(viewport.here())),
+            None => Candidacy::Indexed(self.index.candidates(viewport.rows())),
         }
     }
 
@@ -491,13 +632,20 @@ impl ArtifactRows {
     /// have been served, disclosing that a grouping exists where the viewer can see nothing of it
     /// (the review's finding 1). Nothing here returns a verdict — [`ArtifactView::verdict`] still
     /// runs for every candidate this admits.
+    /// **On a row-major level there is a fourth route, and it is no route at all**: the scan was
+    /// over `viewport ∩ M_auth`, so an ordinal it returned has a visible member in view by
+    /// construction and there is nothing left to ask. That is the same collapse the settled case
+    /// rests on, reached for the whole level in one pass rather than per artifact.
     pub fn candidate_in(
         &self,
         ordinal: u32,
-        candidates: &crate::tile_index::Candidates,
+        candidates: &Candidacy,
         viewport: &crate::tile_index::Viewport<'_>,
         mask: &impl MaskedSet,
     ) -> bool {
+        let Candidacy::Indexed(candidates) = candidates else {
+            return true;
+        };
         if candidates.is_settled(ordinal)
             || self
                 .index
@@ -728,6 +876,15 @@ pub struct ArtifactProjections {
     /// nothing left for a second reader — and keeping a second `Arc` to eighty megabytes per level
     /// for the process's life is the retention bug `forget` exists to fix, one map along.
     indexes_held: Mutex<BTreeMap<IndexAddress, (IndexKey, TileIndex)>>,
+    /// The fold-written row-major columns adopted at open, waiting for the level's first request to
+    /// claim one.
+    ///
+    /// **[`Self::indexes_held`]'s map, one structure along**, with the same address and the same two
+    /// validity terms: a column is addressed by **row**, so it answers for exactly the view whose
+    /// row space it was written over, and the level's version is what says whether it still
+    /// describes that level. Claimed once and then dropped, because a column belongs to one view's
+    /// row form.
+    columns_held: Mutex<BTreeMap<IndexAddress, (IndexKey, RowColumn)>>,
     /// How many forms this has built since the engine opened. **The cadence, counted** — what
     /// §8.1 is about is not the cost of one build but how many a write provokes, and that is a
     /// number nothing reported until the grain changed. Read by the fold's own log line and by
@@ -751,6 +908,17 @@ pub struct ArtifactProjections {
     /// rather than at the adoption, because an entry the manifest named and no request ever asked
     /// for saved nothing.
     indexes_adopted: std::sync::atomic::AtomicU64,
+    /// How many fold-written row-major columns this **claimed** from the prefix rather than
+    /// composing — the same pair of gauges one structure along, and read the same way.
+    columns_adopted: std::sync::atomic::AtomicU64,
+    /// How many levels were **recorded** row-major and are being **served** artifact-major: their
+    /// memberships turned out to overlap, or the fold's file would not open.
+    ///
+    /// **The number that says a pin is wrong**, and an operator has no other way to see it: both
+    /// layouts answer identically, so a level that fell back is correct and merely slower than the
+    /// operator asked for. Counted per build rather than per request, and it names no artifact and
+    /// no principal.
+    fallbacks: std::sync::atomic::AtomicU64,
 }
 
 impl ArtifactProjections {
@@ -777,6 +945,17 @@ impl ArtifactProjections {
     pub fn indexes_adopted(&self) -> u64 {
         self.indexes_adopted
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// See [`Self::columns_adopted`].
+    pub fn columns_adopted(&self) -> u64 {
+        self.columns_adopted
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// See [`Self::fallbacks`].
+    pub fn layout_fallbacks(&self) -> u64 {
+        self.fallbacks.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Take the fold-written partitions this prefix's manifests name, for every level whose
@@ -920,6 +1099,74 @@ impl ArtifactProjections {
         }
     }
 
+    /// Take the fold-written row-major columns this prefix's manifests name, for every
+    /// `(view, layer, level)` whose coordinate still holds.
+    ///
+    /// **[`Self::adopt_indexes`]' rule, and the direction of a stale one is the same: narrow.** A
+    /// growth adds rows the column does not label, and an unlabelled row is one no artifact claims
+    /// — so the artifact holding it silently stops being a candidate there, and its masked count
+    /// comes back short. Equality on the version, and the view compared too.
+    ///
+    /// **The manifest's layout tag is checked against the file's own magic** rather than trusted
+    /// over it (selection memo §5): a mis-described file refuses at the first bytes, which lands
+    /// here as a drop and a recomposition rather than as a misread column.
+    pub fn adopt_columns(
+        &self,
+        prefix_dir: &std::path::Path,
+        prefix: &str,
+        extents: &[tessera_store::manifest::RowColumnExtent],
+        store: &ArtifactStore,
+    ) {
+        for extent in extents {
+            let level_version = store.level_version(&extent.layer, extent.level);
+            if level_version != extent.level_version {
+                tracing::info!(
+                    layer = %extent.layer,
+                    level = extent.level,
+                    view = %extent.view,
+                    written_at = extent.level_version,
+                    now = level_version,
+                    "a fold-written row-major column is not adopted: the level has moved since it \
+                     was written, so it is recomposed on first use"
+                );
+                continue;
+            }
+            let path = prefix_dir.join(&extent.path);
+            let column = match RowColumn::open(&path, extent.layout) {
+                Ok(column) => column,
+                Err(error) => {
+                    // Loud, because this one is a fault rather than a cadence: the manifest names a
+                    // file the prefix should hold, in a form it claims to be in, and it did not
+                    // open as that form.
+                    tracing::error!(
+                        layer = %extent.layer,
+                        level = extent.level,
+                        view = %extent.view,
+                        path = %extent.path,
+                        layout = ?extent.layout,
+                        %error,
+                        "ALARM: a row-major column named by the manifest would not open as the \
+                         form the manifest names; the level is recomposed on first use"
+                    );
+                    continue;
+                }
+            };
+            self.columns_held
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(
+                    (extent.view.clone(), extent.layer.clone(), extent.level),
+                    (
+                        IndexKey {
+                            prefix: prefix.to_string(),
+                            level_version,
+                        },
+                        column,
+                    ),
+                );
+        }
+    }
+
     /// How many forms are held. Operator plane only, beside [`Self::builds`] — a count of
     /// structures, naming no artifact and no principal.
     pub fn held(&self) -> usize {
@@ -951,6 +1198,42 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, _), _| held != layer);
+        // **All four, and this one is the largest of them at 10⁹ rows**: a label column is four
+        // bytes a row whatever the artifact count, which is the whole reason the layout exists.
+        self.columns_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, _), _| held != layer);
+    }
+
+    /// Drop everything held for one `(layer, level)`, in every view — **what a layout flip needs**.
+    ///
+    /// The cached row form is replace-on-mismatch, so a fold's new prefix would replace it at the
+    /// level's next request anyway. The *held adoption maps* are the problem the memo names
+    /// (selection memo §5): a level that flipped to row-major is never asked for its tile index
+    /// again, so nothing ever claims that entry and the last generation's copy is pinned for the
+    /// process's life — eighty megabytes per level at the campaign's target, and four bytes a row
+    /// for the column in the other direction.
+    ///
+    /// **Removal only**, so it cannot widen anything: its worst outcome is one level rebuilding
+    /// what it would have adopted.
+    pub fn forget_level(&self, layer: &str, level: u32) {
+        self.cached
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+        self.partitions_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(held, held_level), _| held != layer || *held_level != level);
+        self.indexes_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+        self.columns_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
     }
 
     /// This level's row form for the generation `store` is in, building it if what is held is
@@ -966,10 +1249,11 @@ impl ArtifactProjections {
     /// other layer's requests behind it. Two threads racing the same key both build and the last
     /// one wins; they build from the same level version over the same row space, so the two
     /// results are equal and the waste is one projection, not a wrong answer.
-    // Eight, and every one is a thing a level's derived form is *of*: where it came from (prefix,
-    // view, layer, level), what it is built from (the store, the row space), and what the
-    // containment partition needs beside them. Bundling them would name the same eight things one
-    // call earlier — the argument `serve_artifacts` already makes for its nine.
+    // Nine, and every one is a thing a level's derived form is *of*: where it came from (prefix,
+    // view, layer, level), what it is built from (the store, the row space), which form it is
+    // served in, and what the containment partition needs beside them. Bundling them would name
+    // the same nine things one call earlier — the argument `serve_artifacts` already makes for its
+    // own.
     #[allow(clippy::too_many_arguments)]
     pub fn get_or_build(
         &self,
@@ -980,6 +1264,7 @@ impl ArtifactProjections {
         store: &ArtifactStore,
         space: &RowSpace,
         source: Option<&PartitionSource<'_>>,
+        layout: ServingLayout,
     ) -> Arc<ArtifactRows> {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
@@ -1015,15 +1300,45 @@ impl ArtifactProjections {
             .and_then(|source| self.partition_for(prefix, layer, level, store, source));
         let adopted = self.claim_index(prefix, view, layer, level, key.level_version);
         let from_prefix = adopted.is_some();
-        let rows = Arc::new(
-            ArtifactRows::build_over(store.level(layer, level), space, adopted)
-                .with_partition(partition),
+        let built = ArtifactRows::build_over(store.level(layer, level), space, adopted)
+            .with_partition(partition);
+        // **The column, claimed from the prefix or composed from the form just built** — and the
+        // one place the recorded layout and the served one may differ. A level recorded row-major
+        // whose memberships turn out to overlap has no label column to compose, and the fallback is
+        // the artifact-major route, which is correct and merely slower than the record asked for.
+        let column = self.column_for(
+            prefix,
+            view,
+            layer,
+            level,
+            key.level_version,
+            layout,
+            &built,
         );
+        let from_column = column.is_some();
+        let rows = Arc::new(built.with_column(column));
+        if layout.is_row_major() && !from_column {
+            self.fallbacks
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                layer = %layer,
+                level,
+                view = %view,
+                recorded = ?layout,
+                "this level is recorded row-major and has no column to scan, so it is served \
+                 artifact-major: its memberships do not partition, or the fold's file would not \
+                 open. Every answer is unchanged; the layout is not"
+            );
+        }
         // **The `everywhere` set, reported where the form is built.** It is the number that says a
         // layer is *scattered* — every artifact of one lands here at every size measured (§5) — and
         // so the number that predicts a whole-map request paying the full masked probe for the
         // population rather than for the viewport's perimeter. Per generation move, not per
         // request; it names no artifact and no principal.
+        //
+        // **`blocks_per_artifact` beside it is decision 0092's (c)** — the figure the automatic
+        // layout pick reads, so an operator can see what the choice was made from. It is the mean
+        // over the form just built, which is the same walk the report at publication makes.
         tracing::info!(
             layer = %layer,
             level,
@@ -1031,6 +1346,8 @@ impl ArtifactProjections {
             ordinals = rows.index().len(),
             everywhere = rows.index().everywhere(),
             adopted = from_prefix,
+            layout = ?rows.layout(),
+            blocks_per_artifact = rows.membership().shape().blocks_per_artifact,
             "a level's row form and tile index are built"
         );
         self.builds
@@ -1070,6 +1387,64 @@ impl ArtifactProjections {
         self.indexes_adopted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(index)
+    }
+
+    /// This level's row-major column, claimed from the prefix where the fold wrote one at this
+    /// coordinate and composed from `rows` where it did not.
+    ///
+    /// `None` where the level is artifact-major — which has no column — and where a label column
+    /// declined to compose because the memberships do not partition. Both are absences rather than
+    /// errors: the artifact-major route answers every question the column would have.
+    #[allow(clippy::too_many_arguments)]
+    fn column_for(
+        &self,
+        prefix: &str,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+        layout: ServingLayout,
+        rows: &ArtifactRows,
+    ) -> Option<Arc<RowColumn>> {
+        if !layout.is_row_major() {
+            return None;
+        }
+        if let Some(claimed) = self.claim_column(prefix, view, layer, level, level_version) {
+            // **The adopted form has to be the recorded one.** A file adopted under one tag and
+            // recorded under another would serve a list where a label column belongs — the
+            // manifest's own claim, which `RowColumn::open` already checked against the magic. This
+            // is the second half of it, against the record the fold wrote beside the file.
+            if claimed.layout() == layout {
+                self.columns_adopted
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Some(Arc::new(claimed));
+            }
+        }
+        RowColumn::compose(rows.membership(), rows.index().row_count(), layout).map(Arc::new)
+    }
+
+    /// Take the fold-written column for this `(view, layer, level)` if one was adopted and its
+    /// coordinate is still the one being built at.
+    ///
+    /// **Removed rather than borrowed**, for [`Self::claim_index`]'s reason: a column belongs to one
+    /// view's row form, and leaving the entry behind would hold a second copy of four bytes a row
+    /// for the process's life.
+    fn claim_column(
+        &self,
+        prefix: &str,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+    ) -> Option<RowColumn> {
+        let map_key = (view.to_string(), layer.to_string(), level);
+        let mut held = self.columns_held.lock().unwrap_or_else(|e| e.into_inner());
+        let (key, _) = held.get(&map_key)?;
+        if key.prefix != prefix || key.level_version != level_version {
+            held.remove(&map_key);
+            return None;
+        }
+        held.remove(&map_key).map(|(_, column)| column)
     }
 
     /// This level's containment partition for the generation `store` is in, composing it if what
@@ -1233,6 +1608,19 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     /// ([`crate::containment`]). The two must agree rank for rank, and
     /// `tests/artifact_containment.rs` is where that is asserted rather than assumed.
     pub containment: Option<ContainmentAnswers<'a>>,
+    /// This session's masked counts over the level, where the level is served row-major —
+    /// [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+    /// one named exception, held per `(session, layer)` and byte-budgeted (`crate::histogram`).
+    ///
+    /// **`None` on an artifact-major level, and that is not a fallback**: such a level answers
+    /// `|membership ∩ M_auth|` one artifact at a time, so a request's budget bounds the work and
+    /// there is nothing for a per-session structure to buy.
+    ///
+    /// ⊘ **`None` on a row-major level is answered from the row form**, which is correct here only
+    /// because this stage still builds it (`crate::row_column`'s module doc). When it stops being
+    /// built, this stops being optional — and the assertion that the two agree is what a change
+    /// making it mandatory would be checked against.
+    pub counts: Option<Arc<MaskedCounts>>,
 }
 
 impl<M: MaskedSet> ArtifactView<'_, M> {
@@ -1286,7 +1674,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
 
         // 5. The existence criterion, against the **live** masked count. The same number is
         //    returned to the caller, so the tested quantity and the served quantity cannot drift.
-        let masked_count = self.rows.masked_count(ordinal, self.mask);
+        let masked_count = self.masked_count(ordinal);
         if let Some(criterion) = self.declaration.require_member_visibility {
             let clears = match criterion {
                 ExistenceCriterion::Count(n) => masked_count >= n,
@@ -1335,6 +1723,22 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
             .satisfied_rank(ordinal, self.mask, declares_content)
     }
 
+    /// The masked count, from whichever structure this level's layout puts it in.
+    ///
+    /// **One quantity either way, and it is the number served as well as the number tested.** An
+    /// artifact-major level intersects the artifact's own membership with the composed mask; a
+    /// row-major level has no per-artifact membership to intersect, and takes the count from the
+    /// per-`(session, layer)` histogram — the same walk of the same mask, done once for the level
+    /// rather than once per artifact. `tests/artifact_row_major.rs` asserts they agree.
+    fn masked_count(&self, ordinal: u32) -> u64 {
+        if self.rows.layout().is_row_major() {
+            if let Some(counts) = &self.counts {
+                return counts.get(ordinal);
+            }
+        }
+        self.rows.masked_count(ordinal, self.mask)
+    }
+
     /// The artifact's full membership size, in **row** terms.
     ///
     /// The proportional criterion's denominator, and the one place it is read. Taken from the row
@@ -1342,7 +1746,15 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     /// projection: a member whose row still sits in an unfolded flush extent contributes to
     /// neither, which understates the ratio — fail-closed, and the same posture the write cycle
     /// takes for an unrebuilt member.
+    ///
+    /// **On a row-major level it comes from the column instead**, which is §10's answer to the same
+    /// question in the same row space: an artifact's declared size is how many rows carry its
+    /// label. The two are equal by construction — both count the artifact's projected rows — which
+    /// is what lets the criterion behave identically under either layout.
     fn declared_size(&self, ordinal: u32) -> u64 {
+        if let Some(column) = self.rows.column() {
+            return column.declared_size(ordinal);
+        }
         self.rows.get(ordinal).map(Bitmap::cardinality).unwrap_or(0)
     }
 }
@@ -1408,6 +1820,8 @@ mod tests {
             membership,
             index,
             partition: None,
+            layout: ServingLayout::ArtifactMajor,
+            column: None,
         }
     }
 
@@ -1475,6 +1889,7 @@ mod tests {
                 dependency_served: &dependency_served,
                 containment: None,
                 denied: &self.denied,
+                counts: None,
             }
         }
     }
@@ -1677,6 +2092,7 @@ mod tests {
             dependency_served: &dependency_served,
             containment: None,
             denied: &Bitmap::new(),
+            counts: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1699,6 +2115,7 @@ mod tests {
             dependency_served: &dependency_served,
             containment: None,
             denied: &Bitmap::new(),
+            counts: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1729,6 +2146,7 @@ mod tests {
                 dependency_served: &dependency_served,
                 containment: None,
                 denied: &Bitmap::new(),
+                counts: None,
             }
             .verdict(EntityId::new(999), 0, None)
         };
@@ -1774,6 +2192,7 @@ mod tests {
             dependency_served: &dependency_served,
             containment: None,
             denied: &Bitmap::new(),
+            counts: None,
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1832,6 +2251,7 @@ mod tests {
                 dependency_served: prerequisite,
                 containment: None,
                 denied: &Bitmap::new(),
+                counts: None,
             }
             .verdict(LABEL_ENTITY, 0, None)
         };
@@ -1868,6 +2288,7 @@ mod tests {
                 dependency_served: &dependency_served,
                 containment: None,
                 denied: &Bitmap::new(),
+                counts: None,
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Verdict)
@@ -1893,6 +2314,7 @@ mod tests {
                 dependency_served: &dependency_absent,
                 containment: None,
                 denied: &Bitmap::new(),
+                counts: None,
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Attachment)
@@ -1920,6 +2342,7 @@ mod tests {
             dependency_served: &never,
             containment: None,
             denied: &Bitmap::new(),
+            counts: None,
         }
         .verdict(EntityId::new(999), 0, None)
         .is_served());

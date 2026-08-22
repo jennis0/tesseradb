@@ -276,6 +276,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         config.row_projection_cache_bytes,
         config.fragment_cache_bytes,
     );
+    // The third bound, and its own setter for the reason `Engine::set_masked_count_cache_bytes`
+    // gives: it exists for a deployment that has a row-major layer at all, which is a property of
+    // the corpus rather than of the box.
+    engine.set_masked_count_cache_bytes(config.masked_count_cache_bytes);
     // `single_flight_wait_ms`' consumer — how long a request parks on another request's
     // row-projection build before it is shed (decision 0058).
     engine.set_single_flight_wait_ms(config.single_flight_wait_ms);
@@ -352,7 +356,9 @@ pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
     let Prepared { state, config } = prepared;
 
     // `prepare` refused a deployment declaring no addresses, so these are present by construction.
-    let viewer_addr = config.viewer_addr.expect("prepare() refuses a serve with no viewer address");
+    let viewer_addr = config
+        .viewer_addr
+        .expect("prepare() refuses a serve with no viewer address");
     let session_addr = config
         .session_addr
         .expect("prepare() refuses a serve with no session address");

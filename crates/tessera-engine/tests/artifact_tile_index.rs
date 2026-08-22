@@ -375,7 +375,14 @@ fn walk(
     mask: &EffectiveMask,
 ) -> (Served, u64) {
     let viewport = Viewport::compose(tiles, mask);
-    let candidates = rows.index().candidates(tiles);
+    // `ArtifactRows::candidacy`, which is what `serve_artifacts` calls — so this drives the route
+    // choice as well as the classification. These fixtures are all artifact-major, so the walk is
+    // the route taken and the node count is real.
+    let candidates = rows.candidacy(&viewport);
+    let tessera_engine::artifacts::Candidacy::Indexed(walked) = &candidates else {
+        panic!("an artifact-major level is answered by the walk");
+    };
+    let nodes_visited = walked.nodes_visited();
     let mut out = Served::new();
     for ordinal in candidates.iter() {
         if !rows.candidate_in(ordinal, &candidates, &viewport, mask) {
@@ -388,7 +395,7 @@ fn walk(
             out.push((ordinal, masked_count, rank));
         }
     }
-    (out, candidates.nodes_visited())
+    (out, nodes_visited)
 }
 
 /// The overlay in the three shapes that behave differently: a plain suppression, a deletion, and
@@ -449,6 +456,7 @@ fn differential(fx: &Fixture, rows: &ArtifactRows) -> usize {
                 mask: &mask,
                 denied: &denied,
                 containment: None,
+                counts: None,
             };
             for (name, ranges) in viewports() {
                 let tiles = rows_of(&ranges);
@@ -558,7 +566,16 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
     // And what a request gets is the second arm, because the growth moved the level's version and
     // the whole family is rebuilt under one key.
     let projections = ArtifactProjections::new();
-    let before = projections.get_or_build("v0", "s0", LAYER, 0, &fx.store, &fx.row_space, None);
+    let before = projections.get_or_build(
+        "v0",
+        "s0",
+        LAYER,
+        0,
+        &fx.store,
+        &fx.row_space,
+        None,
+        tessera_types::layer::ServingLayout::ArtifactMajor,
+    );
     assert!(before
         .index()
         .candidates(&tiles)
@@ -614,6 +631,7 @@ fn a_hole_is_absent_and_an_empty_projection_is_a_live_artifact() {
         mask: &mask,
         denied: &denied,
         containment: None,
+        counts: None,
     };
     let entity = fx.entity_of(empty).expect("the artifact is live");
     assert!(
@@ -660,7 +678,16 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // The coordinate holds: claimed, and the level's first request derives nothing.
     let projections = ArtifactProjections::new();
     projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
-    let rows = projections.get_or_build("v00000", "s0", LAYER, 0, &store, &fx.row_space, None);
+    let rows = projections.get_or_build(
+        "v00000",
+        "s0",
+        LAYER,
+        0,
+        &store,
+        &fx.row_space,
+        None,
+        tessera_types::layer::ServingLayout::ArtifactMajor,
+    );
     assert_eq!(projections.indexes_adopted(), 1);
     assert_eq!(rows.index().len(), fx.ordinals as usize);
 
@@ -668,7 +695,16 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     for moved in [projected_at + 1, projected_at - 1] {
         let projections = ArtifactProjections::new();
         projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", moved)], &store);
-        let _ = projections.get_or_build("v00000", "s0", LAYER, 0, &store, &fx.row_space, None);
+        let _ = projections.get_or_build(
+            "v00000",
+            "s0",
+            LAYER,
+            0,
+            &store,
+            &fx.row_space,
+            None,
+            tessera_types::layer::ServingLayout::ArtifactMajor,
+        );
         assert_eq!(
             projections.indexes_adopted(),
             0,
@@ -680,14 +716,32 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     // not be claimed under another.
     let projections = ArtifactProjections::new();
     projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
-    let _ = projections.get_or_build("v00001", "s0", LAYER, 0, &store, &fx.row_space, None);
+    let _ = projections.get_or_build(
+        "v00001",
+        "s0",
+        LAYER,
+        0,
+        &store,
+        &fx.row_space,
+        None,
+        tessera_types::layer::ServingLayout::ArtifactMajor,
+    );
     assert_eq!(projections.indexes_adopted(), 0);
 
     // **Another view, which is the term a containment partition does not carry.** An extent is a
     // pair of rows, so a column belongs to exactly the row space it was projected through.
     let projections = ArtifactProjections::new();
     projections.adopt_indexes(tmp.path(), "v00000", &[entry("s0", projected_at)], &store);
-    let _ = projections.get_or_build("v00000", "s1", LAYER, 0, &store, &fx.row_space, None);
+    let _ = projections.get_or_build(
+        "v00000",
+        "s1",
+        LAYER,
+        0,
+        &store,
+        &fx.row_space,
+        None,
+        tessera_types::layer::ServingLayout::ArtifactMajor,
+    );
     assert_eq!(projections.indexes_adopted(), 0);
 
     // A file the manifest names that is not there is an absence, not a refusal: the level derives
@@ -696,7 +750,16 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
     let mut missing = entry("s0", projected_at);
     missing.path = "partitions/default/tile-index/gone.tsti".to_string();
     projections.adopt_indexes(tmp.path(), "v00000", &[missing], &store);
-    let _ = projections.get_or_build("v00000", "s0", LAYER, 0, &store, &fx.row_space, None);
+    let _ = projections.get_or_build(
+        "v00000",
+        "s0",
+        LAYER,
+        0,
+        &store,
+        &fx.row_space,
+        None,
+        tessera_types::layer::ServingLayout::ArtifactMajor,
+    );
     assert_eq!(projections.indexes_adopted(), 0);
 }
 
@@ -786,6 +849,7 @@ fn a_narrow_viewport_walks_the_perimeter_rather_than_the_level() {
         mask: &mask,
         denied: &denied,
         containment: None,
+        counts: None,
     };
 
     let population = rows.len() as u64;

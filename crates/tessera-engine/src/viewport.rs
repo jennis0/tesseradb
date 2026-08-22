@@ -1521,6 +1521,9 @@ impl Engine {
             self.session_geometry(session, &generation, view, view_data, &cancel, &mut probe)?;
         // Minted here, from the geometry that actually resolved — see `view_coordinates`.
         let coordinates = self.view_coordinates(&generation, &geometry, view);
+        // The same rule one structure along: the masked-count cache's key names the fragment this
+        // request composes against, which under stale-serve is the entry's and not the newest one.
+        let mask_identity = self.mask_identity(session, &generation, &geometry);
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
@@ -1995,6 +1998,7 @@ impl Engine {
             &mask,
             req_layers,
             artifact_budget,
+            mask_identity,
         )?;
         if !artifacts.is_empty() {
             sink.artifacts(&artifacts)
@@ -2982,6 +2986,10 @@ struct DependencyContext<'a> {
     /// verdict, so it must be reached with the same inputs.
     denied: &'a croaring::Bitmap,
     reachable: &'a tessera_lifecycle::ResolvedLayers,
+    /// What this request's composed mask *is* — the masked-count cache's key, carried here for
+    /// `mask`'s reason: a dependency's verdict is the same verdict, and on a row-major target it
+    /// reads the same histogram.
+    mask_identity: crate::histogram::MaskIdentity,
 }
 
 const PER_TILE_CROSSING_RATIO: u64 = 3;
@@ -3018,6 +3026,58 @@ fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Ve
 }
 
 impl Engine {
+    /// What this request's composed mask is, for the masked-count cache's key.
+    ///
+    /// **Taken from the geometry that actually resolved**, never from the live generation's idea of
+    /// it: a session may be served a one-generation-stale projection (decision 0044), so the
+    /// fragment a request composes against is the entry's and not the newest one there is. A key
+    /// naming the wrong fragment would file one visible set's counts under another's.
+    fn mask_identity(
+        &self,
+        session: &Session,
+        generation: &crate::Generation,
+        geometry: &crate::cache::SessionGeometry,
+    ) -> crate::histogram::MaskIdentity {
+        crate::histogram::MaskIdentity {
+            token_id: session.token_id,
+            segments_version: generation.segments_version,
+            overlay_version: generation.overlay_version,
+            fragment_identity: geometry.fragment.identity,
+            fragment_watermark: geometry.fragment.watermark,
+        }
+    }
+
+    /// This level's masked counts, where the level is served row-major and so has no other route to
+    /// them.
+    ///
+    /// **`None` on an artifact-major level, and that is not a fallback**: such a level counts one
+    /// artifact at a time against the composed mask, which a request's budget bounds.
+    ///
+    /// **Built lazily, on the first request that needs it** — a whole walk of the mask, which is the
+    /// 0.85–1.7 s at 10⁷ artifacts decision 0093 prices. A cold drill-down on a row-major level
+    /// therefore pays the level's whole histogram to answer about one artifact, which is stated here
+    /// rather than discovered: the column has no per-artifact route to a masked count, so the choice
+    /// is between this and re-scanning the mask for every drill-down.
+    #[allow(clippy::too_many_arguments)]
+    fn masked_counts(
+        &self,
+        identity: &crate::histogram::MaskIdentity,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+        rows: &crate::artifacts::ArtifactRows,
+        mask: &crate::compose::EffectiveMask,
+    ) -> Option<Arc<crate::histogram::MaskedCounts>> {
+        let column = rows.column()?;
+        Some(
+            self.masked_counts
+                .get_or_build(identity.key(view, layer, level, level_version), || {
+                    crate::histogram::MaskedCounts::new(column.histogram(mask))
+                }),
+        )
+    }
+
     /// Drill down on one artifact by the identifier a response handed out.
     ///
     /// **The same predicate the viewport calls, and that is the whole design of this method.** An
@@ -3114,17 +3174,34 @@ impl Engine {
         );
 
         let source = generation.partition_source();
-        let rows = self.write.with_artifacts(|store| {
-            self.artifact_projections.get_or_build(
-                &generation.prefix,
-                view,
-                &name,
-                level,
-                store,
-                &view_data.row_space,
-                Some(&source),
+        let recorded = layer.layout_of(level);
+        let (rows, level_version) = self.write.with_artifacts(|store| {
+            (
+                self.artifact_projections.get_or_build(
+                    &generation.prefix,
+                    view,
+                    &name,
+                    level,
+                    store,
+                    &view_data.row_space,
+                    Some(&source),
+                    recorded,
+                ),
+                store.level_version(&name, level),
             )
         });
+        let mask_identity = self.mask_identity(session, &generation, &geometry);
+        // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
+        // the column has no per-artifact route to a masked count — see `Engine::masked_counts`.
+        let counts = self.masked_counts(
+            &mask_identity,
+            view,
+            &name,
+            level,
+            level_version,
+            &rows,
+            &mask,
+        );
         // The same containment answers the viewport builds, from the same partition: an identifier
         // route that resolved containment by a different arm would be a second ranking nobody
         // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
@@ -3139,6 +3216,7 @@ impl Engine {
             mask: &mask,
             denied,
             reachable: &reachable,
+            mask_identity,
         };
         let dependency_served = self.dependency_gate(&ctx);
         let artifact_view = crate::artifacts::ArtifactView {
@@ -3151,6 +3229,7 @@ impl Engine {
             dependency_served: &dependency_served,
             containment,
             denied,
+            counts,
         };
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
         // `artifact_visibility` names a field withholds here as it does on the viewport, which is
@@ -3355,17 +3434,34 @@ impl Engine {
         let Some(entity) = record.filter(|entity| *entity == attachment.entity) else {
             return false;
         };
-        let rows = self.write.with_artifacts(|store| {
-            self.artifact_projections.get_or_build(
-                &ctx.generation.prefix,
-                ctx.view,
-                &attachment.layer,
-                attachment.level,
-                store,
-                &ctx.view_data.row_space,
-                Some(&ctx.generation.partition_source()),
+        let recorded = layer.layout_of(attachment.level);
+        let (rows, level_version) = self.write.with_artifacts(|store| {
+            (
+                self.artifact_projections.get_or_build(
+                    &ctx.generation.prefix,
+                    ctx.view,
+                    &attachment.layer,
+                    attachment.level,
+                    store,
+                    &ctx.view_data.row_space,
+                    Some(&ctx.generation.partition_source()),
+                    recorded,
+                ),
+                store.level_version(&attachment.layer, attachment.level),
             )
         });
+        // The target's own count, from whichever structure its layout puts it in — the same
+        // histogram the viewport would read, under the same key, so a dependency answered here and
+        // the target answered directly cannot disagree.
+        let counts = self.masked_counts(
+            &ctx.mask_identity,
+            ctx.view,
+            &attachment.layer,
+            attachment.level,
+            level_version,
+            &rows,
+            ctx.mask,
+        );
         let nested = |a: &tessera_lifecycle::membership::Attachment| {
             self.dependency_served(ctx, a, depth - 1)
         };
@@ -3383,6 +3479,7 @@ impl Engine {
             dependency_served: &nested,
             containment,
             denied: ctx.denied,
+            counts,
         }
         // ⊘ Per-artifact terms arrive with content, so the target's own label is `None` here
         // exactly as it is on the two serving routes — the same fail-closed answer reached by the
@@ -3414,6 +3511,7 @@ impl Engine {
         mask: &crate::compose::EffectiveMask,
         requested: Option<&[&str]>,
         artifact_budget: Option<u32>,
+        mask_identity: crate::histogram::MaskIdentity,
     ) -> Result<Vec<ArtifactOut>> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
@@ -3456,6 +3554,7 @@ impl Engine {
             mask,
             denied,
             reachable: &reachable,
+            mask_identity,
         };
         let dependency_served = self.dependency_gate(&ctx);
 
@@ -3531,17 +3630,36 @@ impl Engine {
 
             for (level, runs) in layer.runs.iter().enumerate() {
                 let level = level as u32;
-                let rows = self.write.with_artifacts(|store| {
-                    self.artifact_projections.get_or_build(
-                        &generation.prefix,
-                        view,
-                        &name,
-                        level,
-                        store,
-                        &view_data.row_space,
-                        Some(&source),
+                let recorded = layer.layout_of(level);
+                let (rows, level_version) = self.write.with_artifacts(|store| {
+                    (
+                        self.artifact_projections.get_or_build(
+                            &generation.prefix,
+                            view,
+                            &name,
+                            level,
+                            store,
+                            &view_data.row_space,
+                            Some(&source),
+                            recorded,
+                        ),
+                        store.level_version(&name, level),
                     )
                 });
+                // **The count's route, decided by the level's layout and by nothing about the
+                // request.** An artifact-major level counts per served artifact; a row-major one has
+                // no per-artifact membership to intersect and reads the histogram, which is built
+                // once per session per generation and cached under a key that moves with every
+                // accepted deny (`crate::histogram`).
+                let counts = self.masked_counts(
+                    &mask_identity,
+                    view,
+                    &name,
+                    level,
+                    level_version,
+                    &rows,
+                    mask,
+                );
                 let containment = rows.partition().map(|p| p.answers(&session.satisfied));
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
@@ -3553,6 +3671,7 @@ impl Engine {
                     dependency_served: &dependency_served,
                     containment,
                     denied,
+                    counts,
                 };
                 // **Every candidate is tested before any is cut**, and the two passes are separate
                 // for a reason that is not performance: the verdict is a per-artifact question
@@ -3566,7 +3685,12 @@ impl Engine {
                 // candidate generator and never an answer). Holes and artifacts whose membership
                 // projects to nothing are in no node either, so neither reaches the predicate here
                 // — and both remain live on the identifier route, which walks no index.
-                let candidates = rows.index().candidates(&tile_rows);
+                //
+                // **Or the scan, where the level is served row-major**: one pass over
+                // `viewport ∩ M_auth` marking labels, which answers the same question at a cost in
+                // *points* rather than in artifacts (`ArtifactRows::candidacy`). Which route is
+                // taken is a property of the level and never of the request.
+                let candidates = rows.candidacy(&viewport);
                 for ordinal in candidates.iter() {
                     // **Every candidate pays a masked probe**, on whichever of the three routes the
                     // classification makes cheapest — see `ArtifactRows::candidate_in`, which is

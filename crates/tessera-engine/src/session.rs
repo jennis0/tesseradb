@@ -611,6 +611,15 @@ pub struct Engine {
     /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
     /// published), and they move on different events.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The masked-count histograms of the levels served **row-major**, per `(session, layer,
+    /// level)` — [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+    /// one named exception, byte-budgeted exactly as the row-projection cache is.
+    ///
+    /// **Beside the projections rather than inside them, because the cadences differ**: a row form
+    /// is per deployment and moves when a level is published, and this is per *session* and moves
+    /// when the principal's mask does — which includes every accepted deny. Empty for a deployment
+    /// with no row-major level, which is most of them.
+    pub(crate) masked_counts: Arc<crate::histogram::MaskedCountCache>,
     /// One lineage per `(layer, level)` — see [`crate::cut::Lineages`]. Keyed per *deployment* like
     /// the projections beside it, and on the store's version alone, because a level's parent
     /// pointers are the same whichever view is served.
@@ -1015,6 +1024,11 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.tile_index_extents.iter().cloned())
             .collect();
+        let manifest_row_column_extents: Vec<tessera_store::manifest::RowColumnExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.row_column_extents.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -1178,6 +1192,16 @@ impl Engine {
             &manifest_tile_index_extents,
             &write_state.artifacts,
         );
+        // **And the row-major columns, at the same point and under the same rule.** A stale column
+        // is narrow in the same way an index is: a growth added rows it does not label, and an
+        // unlabelled row is one no artifact claims — so the artifact holding it stops being a
+        // candidate there and its masked count comes back short.
+        artifact_projections.adopt_columns(
+            &prefix_dir,
+            generation.load().prefix.as_str(),
+            &manifest_row_column_extents,
+            &write_state.artifacts,
+        );
 
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
@@ -1197,6 +1221,7 @@ impl Engine {
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
             artifact_projections: Arc::clone(&artifact_projections),
+            masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
@@ -1674,7 +1699,28 @@ impl Engine {
     /// `revoke_prunes_the_token` asserts on. See `RowProjectionCache::prune_token` for why this is
     /// memory hygiene rather than a disclosure control, and for the cost of the pass.
     pub fn prune_token(&self, token_id: u64) -> usize {
+        // **Both per-session caches**, and the second one is not optional hygiene at the campaign's
+        // target: a masked-count histogram is ~4 B per artifact, 40 MB at 10⁷, and a revoked
+        // session's is pinned by nothing else.
+        self.masked_counts.prune_token(token_id);
         self.row_projection_cache.prune_token(token_id)
+    }
+
+    /// The masked-count cache's gauges — see [`crate::histogram::MaskedCountStats`]. Operator plane
+    /// only; a count of structures, naming no artifact and no principal.
+    pub fn masked_count_cache_stats(&self) -> crate::histogram::MaskedCountStats {
+        self.masked_counts.stats()
+    }
+
+    /// How many levels are recorded row-major and served artifact-major — see
+    /// [`crate::artifacts::ArtifactProjections::layout_fallbacks`].
+    pub fn layout_fallbacks(&self) -> u64 {
+        self.artifact_projections.layout_fallbacks()
+    }
+
+    /// How many fold-written row-major columns were claimed rather than composed.
+    pub fn columns_adopted(&self) -> u64 {
+        self.artifact_projections.columns_adopted()
     }
 
     /// Bound both caches, and the only route by which the two config keys reach them.
@@ -1699,6 +1745,17 @@ impl Engine {
             .load()
             .fragments
             .set_memory_bound(fragment_bytes);
+    }
+
+    /// Bound the masked-count cache (`serve.masked_count_cache_bytes`).
+    ///
+    /// **Its own setter rather than a third argument to [`Self::set_cache_bounds`]**, because the
+    /// two callers are different: every embedder calls that one through `tessera_server::prepare`,
+    /// and this key exists for a deployment that has a row-major layer at all — which is a property
+    /// of the corpus rather than of the box. An embedder that never calls it gets an unbounded
+    /// cache, which is what a read-only embedder over a small corpus wants.
+    pub fn set_masked_count_cache_bytes(&self, bytes: u64) {
+        self.masked_counts.set_bound_bytes(bytes);
     }
 
     /// How long a request parks on another request's in-flight row-projection build before it is

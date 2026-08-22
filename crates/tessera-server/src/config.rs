@@ -867,6 +867,8 @@ struct RawServe {
     #[serde(default)]
     row_projection_cache_bytes: Option<u64>,
     #[serde(default)]
+    masked_count_cache_bytes: Option<u64>,
+    #[serde(default)]
     fragment_cache_bytes: Option<u64>,
     #[serde(default)]
     expected_concurrent_sessions: Option<usize>,
@@ -1073,6 +1075,9 @@ pub struct Config {
     /// [`MEASURED_PROJECTION_BYTES_AT_1E9`] for the per-entry size the startup validation weighs it
     /// against.
     pub row_projection_cache_bytes: u64,
+    /// Byte bound on the masked-count cache — the per-`(session, layer, level)` histograms a
+    /// **row-major** layer's counts come from. See [`DEFAULT_MASKED_COUNT_CACHE_BYTES`].
+    pub masked_count_cache_bytes: u64,
     /// Byte bound on the *in-memory* fragment tier. See [`DEFAULT_FRAGMENT_CACHE_BYTES`]. The
     /// `.frag` sidecar tier is untouched by it.
     pub fragment_cache_bytes: u64,
@@ -1738,6 +1743,30 @@ pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 /// entry-count effects, and at this bound either one alone still fits.
 const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
+/// Byte bound on the masked-count cache — the histograms a **row-major** layer's counts come from
+/// ([decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+/// one named exception, `tessera_engine::histogram`).
+///
+/// **256 MiB, and the arithmetic is the decision's own.** An entry is ~4 B per artifact — 4 MB at
+/// 10⁶ artifacts and 40 MB at 10⁷ — per `(session, layer, level)`. At the 10⁶ figure this admits
+/// ~64 entries, which is [`DEFAULT_EXPECTED_CONCURRENT_SESSIONS`]'s eight sessions over eight
+/// row-major levels; at 10⁷ it is six, and a deployment there should raise it.
+///
+/// **An eighth of [`DEFAULT_ROW_PROJECTION_CACHE_BYTES`], deliberately, and the asymmetry is not a
+/// margin.** A projection miss is a *measured* 1 277 ms rebuild that every request for that session
+/// then waits on; a histogram miss is one walk of a mask that is already resident, and it is paid by
+/// the levels that are row-major — which is a property of the corpus, and is **none of them** in a
+/// deployment that has never flipped one. Sizing this like its sibling would reserve gigabytes
+/// against a structure most deployments never build one of.
+///
+/// **It is not covered by [`crate::validate_cache_bounds`]**, and that is the same judgement: the
+/// relation that validation enforces is `bound >= expected_concurrent_sessions x per_entry`, and
+/// `per_entry` here is the *artifact count of a row-major level*, which the config cannot know and
+/// which is zero for most deployments. An under-sized bound costs a rebuilt histogram per request,
+/// which is slow rather than a 429 storm — so it is reported by the cache's own gauges rather than
+/// refused at startup.
+const DEFAULT_MASKED_COUNT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Byte bound on the **in-memory** fragment tier. The digest-verified `.frag` sidecar
 /// tier is untouched by it.
 ///
@@ -2333,6 +2362,14 @@ fn parse(text: &str) -> Result<Config> {
          returns ProjectionBuilding to every racer that presents as a permanent 429 storm with \
          cores pegged on rebuilds, not as a slower server",
     )?;
+    let masked_count_cache_bytes = non_zero_u64(
+        "serve.masked_count_cache_bytes",
+        raw.serve
+            .masked_count_cache_bytes
+            .unwrap_or(DEFAULT_MASKED_COUNT_CACHE_BYTES),
+        "a cache that admits nothing rebuilds a whole level's masked counts on every request that \
+         reaches a row-major layer, which is a walk of the session's entire mask per request",
+    )?;
     let fragment_cache_bytes = non_zero_u64(
         "serve.fragment_cache_bytes",
         raw.serve
@@ -2476,6 +2513,7 @@ fn parse(text: &str) -> Result<Config> {
         compaction,
         flush_max_age_secs,
         row_projection_cache_bytes,
+        masked_count_cache_bytes,
         fragment_cache_bytes,
         expected_concurrent_sessions,
     })
@@ -3383,13 +3421,14 @@ compaction_after_deletions = 9000
         ];
         let serve_keys = [
             "row_projection_cache_bytes",
+            "masked_count_cache_bytes",
             "fragment_cache_bytes",
             "expected_concurrent_sessions",
         ];
         assert_eq!(
             ingest_keys.len() + serve_keys.len(),
-            11,
-            "there are eleven write-path and admission knobs; this table must cover all of them"
+            12,
+            "there are twelve write-path and admission knobs; this table must cover all of them"
         );
 
         for key in ingest_keys {
