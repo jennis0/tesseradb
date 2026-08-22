@@ -553,9 +553,13 @@ struct ProjectionKey {
 /// [`ProjectionKey`] that says when it stops being valid.
 type LevelAddress = (String, String, u32);
 
-/// `(prefix, layer, level)` — what one cached partition is *for*. No view, because the expression
-/// is over terms and no row space is involved in it.
-type PartitionAddress = (String, String, u32);
+/// `(layer, level)` — what one cached partition is *for*.
+///
+/// **No view**, because the expression is over terms and no row space is involved in it; and **no
+/// prefix**, for the reason [`LevelAddress`] carries none: the prefix is a *validity* term, so
+/// putting it in the address would leave every fold's entries behind for the process's life
+/// instead of replacing them.
+type PartitionAddress = (String, u32);
 
 /// What a cached [`ContainmentPartition`] was composed from. The view is deliberately absent — see
 /// [`ArtifactProjections::partitions_held`] — so the terms are the prefix, which fixes the
@@ -634,7 +638,7 @@ impl ArtifactProjections {
         self.partitions_held
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|(_, held, _), _| held != layer);
+            .retain(|(held, _), _| held != layer);
     }
 
     /// This level's row form for the generation `store` is in, building it if what is held is
@@ -729,7 +733,7 @@ impl ArtifactProjections {
             prefix: prefix.to_string(),
             level_version: store.level_version(layer, level),
         };
-        let map_key = (prefix.to_string(), layer.to_string(), level);
+        let map_key = (layer.to_string(), level);
         if let Some((held, partition)) = self
             .partitions_held
             .lock()
