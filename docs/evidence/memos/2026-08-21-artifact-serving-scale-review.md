@@ -189,3 +189,27 @@ Attacked and not broken, recorded so it is not re-attacked:
    assertions sampled rather than exhaustive.
 6. **The build costs nothing has priced**: the containment partition, and what the index, the extents
    and the partition add to the fold's artifact pass.
+
+## 7. What the re-measurement answered (2026-08-22)
+
+The corrected campaign ran the day after this review; the design memo's §7 carries the tables and
+the probe README the run record. Against the six items above, in order:
+
+1. **Run, and the review's prediction held**: the omitted masked probe was ~17× the reported figure
+   at the 10⁸/10⁷ whole-map cell (31.7 → 553 ms), the design still beats the shipped loop 10–25×,
+   and the one-core budget holds at every measured cell. Reverting the fix made the extended
+   assertion fail on artifacts served with no visible member — the assertion has teeth.
+2. **Counted, and it is the campaign's largest finding**: 32 distinct expressions under per-term
+   authoring, **29,175 / 329,080 / ~10⁶ at drawn |G| = 1 / 2 / ≥ 4** against the real
+   54,794-signature distribution — the partition's sharing exists only under the authoring
+   mitigation, and the fallback is per-candidate evaluation, viewport-bounded.
+3. **The 10⁶-artifact grid ran at full coverage** (131 ms whole-map, flat from 10⁸); **the
+   10⁷-artifact cell is a negative result on 47 GB** — swap exhausted, no phase progress in three
+   hours — and is carried as modelled until a larger box runs it.
+4. **Swept at 2/4/6/8 blocks**: 61 → 111 → 159 ms and then an anomalous 51 ms at eight, fixture
+   stats verified consistent — the threshold stays ⊘ behind a queued targeted re-run.
+5. **Completed**: no serving-speed wall to 10⁵ scattered artifacts (hoisted 45–108 ms); residency,
+   not speed, carries row-major at 10⁹.
+6. **Priced**: partition build 12 s and 73 MB serialised at 2×10⁷ (artifact, rank) pairs on the
+   fixture's 32 expressions; the per-token comparison recorded with its setup (99–343 ms per token
+   at 10⁶ artifacts) and residency (~4–40 MB per token).

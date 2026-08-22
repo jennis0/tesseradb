@@ -297,3 +297,24 @@ things the implementation must not be free to decide differently.
     against the overlay per request or applied synchronously with the acknowledgement; the inverted
     entity→artifacts index it needs is sized by `Σ|G|` and contradicts `annotation-write-cycle.md`
     §4.5's *"the deny lane does no artifact work"*. Reconciling those two is work, not a detail.
+13. **The per-generation family is fold-written and served mapped** (owner steer, 2026-08-22, after
+    the 10⁹/10⁷ cell exhausted the box). The row forms, the tile index, the extents, the containment
+    partition, the lineage and the row-major columns are written into the prefix at the fold and
+    opened in place — mapped, never deserialised into anonymous memory — reserving anonymous
+    residency for the overlay-adjacent corrections, which are small by construction. The residency
+    campaign already priced the direction: serialised is 15.2 B per container against 94 resident,
+    and page cache is reclaimable where anonymous pages are an OOM. This is a requirement of the
+    build wave, not an optimisation after it; it is also what makes the unmeasured 10⁹/10⁷ cell
+    plausibly measurable on 47 GB.
+14. **Two client interaction models, chosen per layer size, with no new serving mode** (owner steer,
+    2026-08-22). A small layer is fetched whole — a whole-map, no-viewport request once per
+    (session, generation), client-cached, so panning costs the server nothing; the measured
+    whole-map cells are its price (milliseconds at 10³–10⁵ artifacts, 131 ms at 10⁶ over 10⁹
+    points), and the state lives client-side, which is 0093's shape with the residency moved off
+    the server. A large layer is fetched as the budgeted coarse cut at whole map — pan-stable,
+    cacheable — and refined per viewport on zoom. Both are existing requests; the two gaps are ⊘ a
+    size-class hint in the layer list so a client can choose (meta deliberately carries no artifact
+    cardinality — needs an owner ruling and a register row, though a corpus-wide count is
+    principal-identical) and ⊘ the version coordinate on the artifacts frame a client cache must
+    key on (credential + version, never loosely). The caching policy itself lands with the client
+    epic's tiers.

@@ -7,6 +7,13 @@
 record is [`artifact-delivery.md`](../../artifact-delivery.md), restaged in the same change that
 lands this memo; where the two disagree, the delivery record wins.
 
+**Where it has got to (2026-08-22):** tracks 1–4 are landed and merged (the review dispositioned,
+the cadence fixes, the interleaving battery, the generator's arm), the integrated gate reads 1 855
+passed / 0 failed / 11 ignored, and track 7's corrected re-measurement is complete — the design
+memo's §7 carries the measured tables, with two negative results (the 10⁹/10⁷ cell on 47 GB; the
+blocks = 8 anomaly) and the expression census recorded. What remains is the serving-path build
+(track 5), the spatial route (6), and the campaign proper (8–9).
+
 ## What this is
 
 The scale investigation ended with a measured design and three owner rulings. This memo turns it
@@ -100,7 +107,7 @@ suppressions, and generating sets that lost members in projection — are correc
 that a layout flip is invisible to every client; and the five questions the selection memo's §8
 names against itself.
 
-### 2 — Cache cadence *(in flight)*
+### 2 — Cache cadence *(landed 2026-08-21, merged)*
 
 The two live defects in the memo's §8, neither about scale and both fatal to everything above them.
 
@@ -117,7 +124,7 @@ The two live defects in the memo's §8, neither about scale and both fatal to ev
 **Must prove:** a write to one layer leaves another layer's row forms intact; a second request in
 one generation does not rebuild the lineage; the cut's warm column is what a request actually pays.
 
-### 3 — The write-path interleaving battery *(in flight)*
+### 3 — The write-path interleaving battery *(landed 2026-08-21, merged)*
 
 A new test file. **Zero tests construct these interleavings today**, and track 5 moves the write
 paths. The mid-window arm applies immediately, so deterministic orderings need in-process sequencing
@@ -134,7 +141,7 @@ case — a build's artifact publish riding the same window as point admission
 **Must prove:** every ordering has one correct outcome and the code produces it; nothing here
 depends on wall-clock timing to reproduce.
 
-### 4 — The generator's artifact arm reaches disk *(in flight)*
+### 4 — The generator's artifact arm reaches disk *(landed 2026-08-21, merged)*
 
 Generator-first rather than replica-carried, for this campaign only: closed form in both directions
 buys census verification at sizes where no expectation can be stored. Replica-carried artifact tiers
