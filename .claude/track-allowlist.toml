@@ -19,9 +19,14 @@
 # decisions and the normative designs change only through the owner; scripts are the checks
 # themselves. `manifest.rs` stays frozen this wave — the route-recording work that will need it
 # is not yet dispatched, and unfreezing happens with that dispatch, recorded here.
+# `crates/tessera-store/src/manifest.rs` came OFF the freeze 2026-08-22 (controller): the serving
+# track's durable containment coordinate is a manifest field, and the freeze's own precedent —
+# tessera-spatial coming off when the keyword family needed it — says a stale freeze is worse than
+# none. Note `check-track-allowlist.sh --selftest` predates this campaign's tracks and fails on 20
+# of 38 cases independently of this change; the script is itself frozen, so its selftest is stale
+# by design until the owner sweeps it.
 [frozen]
 paths = [
-  "crates/tessera-store/src/manifest.rs",
   "crates/tessera-authz/*",
   "crates/tessera-wire/*",
   "crates/tessera-plugin/*",
@@ -90,4 +95,25 @@ paths = [
 paths = [
   "crates/tessera-bench/*",
   "probes/2026-08-20-artifact-serving-scale/*",
+]
+
+# Wave 3 — the serving-path build (controller, 2026-08-22): the design's structures reach the
+# engine, in the plan's serialised order. `crates/tessera-store/src/manifest.rs` comes OFF the
+# freeze for this track and this track alone: the layout tag on `MembershipExtent` is the review's
+# finding 5 fix, and a stale freeze refusing it would be worse than none. `docs/decisions/*` and
+# the normative designs stay the owner's.
+[track.serving]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-lifecycle/src/*",
+  "crates/tessera-store/src/membership.rs",
+  "crates/tessera-store/src/manifest.rs",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-build/src/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-store/tests/*",
+  "docs/design/configuration.md",
+  "docs/design/contracts.md",
 ]
