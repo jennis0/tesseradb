@@ -1,7 +1,8 @@
 # Handover — artifact work, after the scale investigation
 
-**Date:** 2026-08-21 · **Status:** Stage 5 closed, the conformance suite green, Stage 6's cost
-discussion held and measured — and **Stage 8's scale question now measured rather than assumed**.
+**Date:** 2026-08-22 · **Status:** Stage 5 closed, the conformance suite green, Stage 6's cost
+discussion held and measured — and **Stage 8's scale question measured, reviewed, and re-measured on
+the corrected probe**.
 Branch `artifacts/scale` (off `artifacts/stage-4`).
 
 **Read [`artifact-delivery.md`](artifact-delivery.md) first** — it is the status record for all
@@ -17,9 +18,12 @@ owner decision**, backed by
 One part is built and gate-green — the cut rewrite — because it was a data-structure choice rather
 than a design one. Everything else is measured and proposed.
 
-**The target is met.** At 10⁷ artifacts over 10⁹ points a request costs tens of milliseconds where it
-cost ~1 190 ms when this began, and the memo's §7 carries the grid: six principal coverages by seven
-zooms, both axes swept through their middles.
+**The target's two axes are met one at a time.** At 10⁷ artifacts over 10⁸ points the whole grid of
+principals by zooms runs 8.4–905 ms, and at 10⁶ artifacts over 10⁹ points 0.75–209 ms — both inside
+the one-core one-second budget, against seconds per request for the shipped path. The corner where
+both axes are large, 10⁷ artifacts over 10⁹ points, **exhausted this box and is modelled rather than
+measured**. The memo's §7 carries the grids: six principal coverages by seven zooms, both axes swept
+through their middles, medians of three runs.
 
 Six things a reader needs before opening it.
 
@@ -30,26 +34,31 @@ Six things a reader needs before opening it.
   servable-label set, cached per token; there are a great many tokens (owner, 2026-08-21), so that is
   the wrong cadence however cheap one copy is. Containment does not need it: `G ⊆ M_auth` is a
   boolean expression over **terms**, composable at build time, so artifacts sharing an expression
-  share an answer for every principal that will ever exist. Measured at parity with the per-token
-  route, ahead of it for narrow principals — 4.09 ms against 13.1 — for 40 MB of state naming nobody.
-- **Cost should track what a viewer may see, and today it inverts.** At 10⁹ points a principal seeing
-  9.4% of the corpus costs the shipped path 1 635 ms at whole-map zoom against 727 ms for one seeing
-  everything. ⊘ The pair once quoted here for the design — 0.49 ms and 13.5 ms — is **withdrawn**: it
-  was measured on the per-token route 0093 deletes, setup excluded. The direction holds on §7.2's
-  grid; the pair does not.
-- **Locality decides the scale, not the artifact count.** A clustered layer reaches 10⁷; a scattered
-  one walls at ~2×10⁵ under the same structures, at 96.8 row blocks per artifact against 1.0. A
-  **row-major** layout — a label per row where the layer partitions, a list per row where it overlaps
-  — removes that wall, and at 10⁹ points it is the only layout that fits at all: 4 GB against 78.5.
+  share an answer for every principal that will ever exist. The per-token route is genuinely faster
+  per request — 12.4 ms against 134 at 10⁶ artifacts — and costs 99–343 ms of setup per token per
+  generation, 0.85–1.7 s at 10⁷, so thousands of near-unique tokens are gigabytes resident and minutes
+  of rebuild at every generation move. That is the ruling's price, measured.
+- **Cost should track what a viewer may see, and today it inverts.** At 10⁶ artifacts the shipped
+  path's *worst* request is its narrowest viewer — 4 443 ms at a 3.1% mask against 1 349 ms at a full
+  one — because a narrow `M_auth` is a more fragmented row-space set. The design's route inverts it
+  back: 36.8 ms and 132 ms at the same two cells, and sub-millisecond as the narrow viewer's viewport
+  closes.
+- **Locality decides the layout, and residency decides it rather than speed.** A scattered layer has
+  no row-space locality at all — every artifact is too wide for any node of the index — but on the
+  corrected routes there is **no serving-speed wall up to the 10⁵ artifacts measured**, which
+  supersedes the ~2×10⁵ wall this section used to report. What forces a **row-major** layout, a label
+  per row where the layer partitions and a list per row where it overlaps, is that at 10⁹ points the
+  artifact-major form does not fit: 4 GB against 78.5.
 - **The cut is built, and it is the one finished thing here.** 1 008 ms → **3.05 ms** at 10⁷, by
   walking down from the roots instead of sweeping the level. Serves exactly what it served before,
   checked against the reference implementation over random trees.
-- **On a real hierarchy the bound is the masked count of a coarse node**, not the cut — 3.6 ms at a
-  full mask and **20–52 ms below one, falling ~4× as the viewport narrows, measured at 10⁶ nodes
-  only**, because a shallow cut serves coarse nodes and a coarse node's membership is most of the
-  corpus. Per-signature counts for the coarse nodes would remove it for ~1.3 MB; scoped, unbuilt, and
-  the thing to check first is how that scales with a real corpus's signature count — the fixture's
-  thirty-two against the demo corpus's 54,791.
+- **What bounds a request is masked candidacy**, at every scale measured — 549 ms of the 553 a
+  whole-map request costs at 10⁷ artifacts, and 242 of 307 at the nested arm's worst cell over 10⁹
+  points. It is the test §4 requires and cannot be removed; what the design bounds is which artifacts
+  pay it. On a real hierarchy the coarse node's masked count is second — 4.4 ms at a full mask, 49.5 ms
+  below one, falling ~4× as the viewport narrows, measured at 10⁶ nodes — and per-signature counts
+  would remove it for ~1.3 MB, scoped and unbuilt, with the storage to check against the census's
+  54,794 signatures rather than the fixture's thirty-two.
 
 **Two cautions about the numbers, both learned the hard way.**
 
@@ -61,13 +70,21 @@ probe's fixture section lists all six; read it before trusting a figure.
 **A grid whose extremes are cheap says nothing about its interior.** Sampling four viewports and
 three coverages understated the worst request by 2.1× (owner). Sweep both axes through their middles.
 
-**The review has run, and it moved two things in the design** (2026-08-21;
-[the record](evidence/memos/2026-08-21-artifact-serving-scale-review.md)). Two fail-opens in the
-unbuilt design — the settled half tested containment where it needed the mask, and the containment
-partition's deny correction is its acceptance test rather than a refinement — are amended in place.
-**Every grid in the memo's §7 is superseded pending re-measurement**, because the probe's routes
-shared the first of those two; the ratios are the shape of the answer and not its value. Read the
-review record before quoting a figure from this section.
+**The review has run, its two fail-opens are amended, and the re-measurement it required is
+complete** (review 2026-08-21, [the record](evidence/memos/2026-08-21-artifact-serving-scale-review.md);
+re-measurement 2026-08-22, in the memo's §7). Two headline sentences. **The omitted masked work was
+real**: the whole-map cell at 10⁷ artifacts over 10⁸ points read 31.7 ms on the routes that skipped
+it and reads **553 ms** with it, of which candidacy is 549. **The conclusion survives the
+correction**: the design runs 10–25× ahead of the per-artifact loop, holds the one-core one-second
+budget at every measured cell, and inverts the cost so that narrow principals are the cheap ones.
+
+**And the campaign's largest design finding came out of the re-measurement rather than the review.**
+The expression census counts 32 distinct containment expressions under `annotations.md` §8.1's
+per-term authoring, and **one expression per artifact** for generating sets drawn across the demo
+corpus's real 54,794-signature distribution. So the containment partition's wide-viewport union route
+exists only for per-term-authored generating sets; for drawn sets containment degrades to a
+per-candidate evaluation, which the viewport bounds — cheap at narrow zooms, and a cost the build
+wave has to price at wide ones.
 
 **The memo's §9 ruling is taken** (2026-08-21): every build reports blocks per artifact, the
 row-major layouts are used wherever the layer partitions, and **there is no declared bound at all** —
@@ -86,17 +103,20 @@ either measured or marked. Take these in order; the reasons for the order matter
 [`2026-08-21-artifact-scale-plan.md`](evidence/memos/2026-08-21-artifact-scale-plan.md), which
 carries the tracks, what each must prove, and the campaign matrix.
 
-1. **Re-run the memo's §7.2 grid on the `nested` arm at 10⁷.** §7.2 is measured on a fixture whose
-   tree is unrelated to its geometry, and §7.3 explains why that is not a hierarchy — so a reader
-   currently has to hold both sections at once. One run collapses them. `--arm nested --only grouped`
-   over 10⁹ rows; the entity form is ~32 runs a node, so 10⁷ needs about 29 GB and may want the
-   artifact count dropped rather than the corpus.
+1. ✔ **The re-measurement is done** (2026-08-22) — the corrected routes, a decorrelated fixture, and
+   medians of three runs, with the `nested` arm measured at 10⁶ nodes over both 10⁸ and 10⁹ points so
+   §7's grids and the hierarchy section no longer have to be held at once. **Three things it leaves
+   open, and each needs a machine or a run rather than a decision**: 10⁷ artifacts over 10⁹ points
+   exhausted this 47 GB box and is modelled, the `nested` arm has never run at 10⁷, and the layout
+   sweep's blocks = 8 point breaks the trend with no fixture explanation — so a targeted re-run of
+   blocks 6/8/10/12 comes before any threshold is quoted.
 2. **Fix the global store version** (memo §8.1) — **in flight** on `artifacts/cache-cadence`, with
    §8.2's per-generation lineage. Any artifact write invalidates every cached row form in every
    view, and the rebuild is **300 s at 10⁷ over 10⁹**. Nothing above is worth building on a cache
    that never survives a write, and the per-generation structures this design adds would inherit the
    same fate.
-3. **Price per-signature counts for coarse nodes** (memo §7.3) — the hierarchy's dominant term, and
+3. **Price per-signature counts for coarse nodes** (memo §7.3) — the hierarchy's second term after
+   candidacy, and
    ~1.3 MB if stored only where the count is dear. **Check the storage against a real corpus's
    signature distribution first**: it scales with the signature count, not the artifact count, and a
    thousand signatures stored per node would be 40 GB at 10⁷.
