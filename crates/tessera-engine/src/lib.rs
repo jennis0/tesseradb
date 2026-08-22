@@ -22,6 +22,7 @@ mod geometry;
 pub mod histogram;
 pub mod layout;
 mod merge;
+pub mod ranges;
 mod refresh;
 pub mod row_column;
 pub mod select;

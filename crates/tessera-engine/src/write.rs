@@ -1606,6 +1606,33 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
+    /// Every `membership = { attribute = f }` layer, with the declared-scalar index of `f` and the
+    /// vocabulary that column's values are named by — `(layer, index, vocabulary)`.
+    ///
+    /// **A layer whose column this bundle does not declare is skipped**, which mints nothing: such
+    /// a declaration is refused at registration, so an absence here is one that never validated and
+    /// the fail-closed reading is that the layer holds no values.
+    ///
+    /// `column_of` is the caller's — the manifest's `declared_scalars` is a generation's, and this
+    /// holds the registry rather than a generation.
+    fn predicate_columns(
+        &self,
+        column_of: impl Fn(&str) -> Option<(usize, Option<String>)>,
+    ) -> Vec<(String, usize, Option<String>)> {
+        let registry = lock_recover(&self.registry);
+        registry
+            .iter()
+            .filter_map(|(name, registered)| {
+                let tessera_types::layer::MembershipSource::Attribute(field) =
+                    &registered.declaration.membership
+                else {
+                    return None;
+                };
+                column_of(field).map(|(index, vocabulary)| (name.to_string(), index, vocabulary))
+            })
+            .collect()
+    }
+
     /// Record one level's re-evaluated serving layout, returning whether it **moved**.
     ///
     /// **Under the registry's own lock and before the snapshot**, which is the whole of the
@@ -3578,6 +3605,20 @@ pub(crate) fn record_schema_of(
 ///
 /// `is_category_width` (checked at schema parse) admits `u8`/`u16`/`u32` only, so the fallthrough is
 /// `u32` — the widest, which cannot truncate a code the other two could hold.
+/// The category-width code a row's scalar carries, or `None` where it carries none.
+///
+/// **The three category widths and nothing else** — `tessera_spatial::ScalarType::is_category_width`
+/// is what the declaration is checked against, so a wider or non-integer column never names a
+/// predicate layer and a value of one reaching here is a schema that never validated.
+fn scalar_code(scalar: &WalScalar) -> Option<u32> {
+    match scalar {
+        WalScalar::U8(v) => Some(u32::from(*v)),
+        WalScalar::U16(v) => Some(u32::from(*v)),
+        WalScalar::U32(v) => Some(*v),
+        _ => None,
+    }
+}
+
 fn code_at_declared_width(width: ScalarType, code: u32) -> WalScalar {
     match width {
         ScalarType::U8 => WalScalar::U8(code as u8),
@@ -7969,6 +8010,105 @@ impl Executor {
         resolved
     }
 
+    /// **The artifacts this window's *values* named and nothing holds** — one per
+    /// `membership = { attribute = f }` layer whose column carried a value the level has no
+    /// artifact for.
+    ///
+    /// **A value exists because a point carries it**, at both entry points: a build mints from the
+    /// column it has just read, and an ingest mints from the rows that have just arrived. The two
+    /// use the same rule for the key (`tessera_types::layer::attribute_value_key`), which is what
+    /// makes them agree about which artifact a value names — a key that could be written two ways
+    /// would let one route mint a second artifact for a value the other already named.
+    ///
+    /// **After the vocabulary mint, and that ordering is load-bearing.** A novel category key is a
+    /// string in the row until the pass above draws it a code; reading the row before that would
+    /// name the artifact after a code nobody had assigned yet.
+    ///
+    /// **Suppression-blindness carries over unchanged.** The lookup is
+    /// [`ArtifactStore::ordinal_of_key`] — the store's key index, which loses a key at exactly one
+    /// event, the fold retiring the artifact's own entity. A *suppressed* value's key therefore
+    /// still resolves and mints nothing, so a suppression cannot be defeated by ingesting a point
+    /// carrying the value; a *deleted* one does mint again, and the new artifact is a new object
+    /// with a new entity, which is what a deletion means.
+    ///
+    /// **Publication into such a layer stays refused** — this is not that route. What is created
+    /// here is an identity the rule produces, carrying its key and nothing else, on
+    /// `LayerRegistry::prepare_derive`'s own contract.
+    fn derive_records(
+        &mut self,
+        closed: &[tessera_lifecycle::ClosedEntry<Responder>],
+        vocabularies: &Vocabularies,
+    ) -> Result<Vec<WalRecord>, String> {
+        use tessera_types::layer::attribute_value_key;
+
+        // Which declared scalar each predicate layer reads, resolved once. A layer naming a column
+        // this bundle does not declare is refused at registration, so an absence here is a
+        // declaration that never validated — skipped rather than guessed at, which mints nothing.
+        let generation = self.generation.load();
+        let declared = &generation.bundle.manifest.declared_scalars;
+        let predicates: Vec<(String, usize, Option<String>)> =
+            self.live.predicate_columns(|field| {
+                let index = declared.iter().position(|scalar| scalar.name == field)?;
+                Some((index, declared[index].vocabulary.clone()))
+            });
+        if predicates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut records = Vec::new();
+        for (layer, index, vocabulary) in predicates {
+            // `code → key`, for the values this window actually carried. Walked from the live
+            // bindings rather than inverted per row: a vocabulary is a map from key to code, so a
+            // per-row reverse lookup would rebuild this per point.
+            let mut key_of_code: std::collections::BTreeMap<u32, String> = Default::default();
+            if let Some(name) = &vocabulary {
+                if let Some(minter) = vocabularies.get(name) {
+                    for (key, code) in minter.bindings() {
+                        key_of_code.insert(code, key.to_string());
+                    }
+                }
+            }
+            let mut wanted: std::collections::BTreeSet<String> = Default::default();
+            for entry in closed {
+                for row in entry.rows() {
+                    let Some(code) = row.scalars.get(index).and_then(scalar_code) else {
+                        continue;
+                    };
+                    // Code 0 is a category code space's reserved *absent* sentinel and names no
+                    // value; a plain integer column has no such reservation.
+                    if vocabulary.is_some() && code == tessera_store::vocabulary::ABSENT_CODE {
+                        continue;
+                    }
+                    wanted.insert(attribute_value_key(
+                        code,
+                        key_of_code.get(&code).map(String::as_str),
+                    ));
+                }
+            }
+            if wanted.is_empty() {
+                continue;
+            }
+            let prepared = self.live.with_publication_state(|registry, store, alloc| {
+                let fresh: Vec<String> = wanted
+                    .iter()
+                    .filter(|key| store.ordinal_of_key(&layer, 0, key).is_none())
+                    .cloned()
+                    .collect();
+                if fresh.is_empty() {
+                    return Ok(None);
+                }
+                registry
+                    .prepare_derive(&layer, 0, &fresh, store, alloc)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            })?;
+            if let Some(record) = prepared {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
     /// Prepare the publications that create every artifact this window's rows named and nothing
     /// holds — see [`mint_plan`] for what is minted and why it is minted here.
     ///
@@ -8258,13 +8398,24 @@ impl Executor {
         // `Executor::mint_records`. Prepared before anything is appended, on `prepare_publish`'s own
         // rule that every check runs before the first allocation, so a refusal spends nothing. A
         // failure past that point has spent reserved ids, exactly as a failed window's rows have.
-        let (mint_records, minted_per_entry) = match self.mint_records(&mut closed) {
+        let (mut mint_records, minted_per_entry) = match self.mint_records(&mut closed) {
             Ok(minted) => minted,
             Err(detail) => {
                 self.fail_window_layer(closed, detail, entries, started);
                 return;
             }
         };
+        // **The artifacts this window's *values* named**, one per attribute-predicate layer whose
+        // column carried a value nothing holds — see `Executor::derive_records`. It runs after the
+        // vocabulary mint above, because a novel category key is a code only once that pass has
+        // drawn it, and the key an artifact is named by is the value's key.
+        match self.derive_records(&closed, &vocabularies) {
+            Ok(records) => mint_records.extend(records),
+            Err(detail) => {
+                self.fail_window_layer(closed, detail, entries, started);
+                return;
+            }
+        }
 
         // One record per entry — batch identity is preserved through the window, which is what a
         // joined retry is answered off — appended in entries order, which is also apply order.
@@ -10037,6 +10188,25 @@ impl Executor {
                         .registered_layer(layer)
                         .map(|registered| registered.layout_of(*level))
                         .unwrap_or_default();
+                    // ⊘ **A predicate level is not warmed here**, and skipping it is the honest
+                    // answer rather than a gap: its membership is evaluated against the geometry,
+                    // so a form built now is filed under this fold's `segments_version` and the
+                    // first flush after it rebuilds anyway. The pieces a rule needs — the column's
+                    // value layers, the view's quantisation, the segment list — are the request
+                    // path's, and reaching for them here would be a second place the membership is
+                    // assembled. What such a level pays instead is one derivation on the first
+                    // request after the fold, which is what every level paid before this warm
+                    // existed.
+                    let predicate_backed =
+                        self.live.registered_layer(layer).is_some_and(|registered| {
+                            !matches!(
+                                registered.declaration.membership,
+                                tessera_types::layer::MembershipSource::Enumerated
+                            )
+                        });
+                    if predicate_backed {
+                        continue;
+                    }
                     self.live.with_artifacts(|store| {
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
@@ -10047,6 +10217,8 @@ impl Executor {
                             &view_data.row_space,
                             Some(&generation.partition_source()),
                             layout,
+                            None,
+                            generation.segments_version,
                         )
                     });
                 }

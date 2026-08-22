@@ -547,6 +547,43 @@ impl Default for FilterColumns {
     }
 }
 
+/// One indexed column's value layers, base first — a **read** view over what
+/// [`FilterColumns::value_layers`] holds.
+///
+/// **The split into base and extents is the whole reason this type exists.** An artifact layer's
+/// row-addressed membership is written over the *base* row space and survives a flush because an
+/// append moves no bit it holds (`RowSpace::project_base`); the entities a flush published since sit
+/// above that base and are exactly the ones the **extent** layers hold values for. So a reader that
+/// wants both halves has to be able to ask for each, and one that asks for all of them at once —
+/// which is what a fold's rewrite wants — takes both.
+///
+/// **Disjoint in entity space by I9**, so no entity has a value in two layers and the order they
+/// are visited decides nothing — which is what makes the base/extent split a partition of the
+/// column rather than a filter over it.
+#[derive(Clone, Copy)]
+pub struct ValueLayers<'a> {
+    layers: &'a [Layer],
+}
+
+impl<'a> ValueLayers<'a> {
+    /// The build's own column — the one whose entities the base row space covers. `None` where the
+    /// column arrived entirely in flush extents, which is a column declared after the build.
+    pub fn base(&self) -> Option<&'a ValueColumn> {
+        self.layers
+            .iter()
+            .find(|layer| layer.values_rel.is_none())
+            .map(|layer| layer.values.as_ref())
+    }
+
+    /// The flush extents, oldest first — the entities published since the base was written.
+    pub fn extents(&self) -> impl Iterator<Item = &'a ValueColumn> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.values_rel.is_some())
+            .map(|layer| layer.values.as_ref())
+    }
+}
+
 /// A stack of zero layers — what a schema with no blob-resident column and no extents owns.
 /// Infallible: `RecordStack::open` touches no file when given nothing to open.
 fn empty_record_stack() -> RecordStack {
@@ -951,7 +988,7 @@ impl std::fmt::Display for FilterError {
                     columns.join(", ")
                 ),
             },
-            FilterError::NegationWithoutPresence { column, family } =>  write!(
+            FilterError::NegationWithoutPresence { column, family } => write!(
                 f,
                 "a 'none_of' names column '{column}', which is a {family} column and stores no \
                  per-item value to be present or absent — its index is the words its documents \
@@ -1126,7 +1163,7 @@ impl FilterColumns {
     /// which are the request path's. A `bool` here cannot express it, so the rule is enforced by the
     /// signature rather than by a comment asking the next caller to remember it.
     #[allow(clippy::too_many_arguments)] // One argument per artefact class the manifest names;
-    // bundling them into a struct would be a second shape to keep in step with the manifest.
+                                         // bundling them into a struct would be a second shape to keep in step with the manifest.
     pub fn open(
         prefix_dir: &Path,
         partition: &str,
@@ -1219,22 +1256,21 @@ impl FilterColumns {
                         ),
                     )
                 })?;
-                let analyser = tessera_analyse::analyser(
-                    identity.split('/').next().unwrap_or_default(),
-                )
-                .filter(|a| a.identity() == identity)
-                .map(Arc::new)
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
+                let analyser =
+                    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+                        .filter(|a| a.identity() == identity)
+                        .map(Arc::new)
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
                             "column '{}' was indexed by analyser '{identity}', which this binary \
                              does not carry. Its terms cannot be reproduced, so every `match` over \
                              it would answer from a different segmentation",
                             scalar.name
                         ),
-                    )
-                })?;
+                            )
+                        })?;
                 columns.insert(
                     scalar.name.clone(),
                     Layers {
@@ -1857,6 +1893,19 @@ impl FilterColumns {
         Ok(out)
     }
 
+    /// **One indexed column's value layers, for a reader that wants the values themselves rather
+    /// than a predicate over them** — the attribute-predicate membership, which *is* the column
+    /// (`design/artifact-serving-at-scale.md` §5.1).
+    ///
+    /// `None` where the column is not held here at all, which is every undeclared name and every
+    /// column with no entity-space storage. A caller that finds none serves the layer with no
+    /// column, which is the fail-closed answer: no artifact of it is a candidate anywhere.
+    pub(crate) fn value_layers(&self, column: &str) -> Option<ValueLayers<'_>> {
+        self.columns.get(column).map(|layers| ValueLayers {
+            layers: &layers.layers,
+        })
+    }
+
     /// The membership question `/v1/categories` asks of a `derived` column: which of this
     /// column's values does at least one entity in `candidate` carry (per-point-attributes §3.3)?
     ///
@@ -2142,10 +2191,8 @@ impl FilterColumns {
             let Ok(Some(fields)) = self.records.fields_of(entity) else {
                 continue;
             };
-            let Some(RecordValue::Utf8(prose)) = fields
-                .into_iter()
-                .find(|f| f.tag == tag)
-                .map(|f| f.value)
+            let Some(RecordValue::Utf8(prose)) =
+                fields.into_iter().find(|f| f.tag == tag).map(|f| f.value)
             else {
                 continue;
             };
@@ -2500,10 +2547,10 @@ fn text_match(
     // narrow token by token without a second dictionary pass.
     let mut ordinals: Vec<Option<u32>> = Vec::with_capacity(tokens.len());
     for token in tokens {
-        ordinals.push(
-            dict.resolve(token)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
-        );
+        ordinals
+            .push(dict.resolve(token).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+            })?);
     }
 
     // ---- plain `match`: one running set, narrowed token by token ------------------------------
@@ -2686,12 +2733,12 @@ fn contains_route(candidate_entities: u64, dictionary_keys: u64) -> ContainsRout
 /// `contains` against one keyword layer, by whichever route [`contains_route`] names.
 ///
 /// **The routes are benched against each other and against the flat `utf8` scan they replaced**,
-    /// in the one window where both formats existed
-    /// ([the fence](../../../docs/evidence/memos/2026-08-13-utf8-retirement-fence.md)) and again
-    /// after both routes were repaired
-    /// ([the recovery](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)). The
-    /// crossover's constants above are calibration; either route answers correctly whichever is
-    /// chosen.
+/// in the one window where both formats existed
+/// ([the fence](../../../docs/evidence/memos/2026-08-13-utf8-retirement-fence.md)) and again
+/// after both routes were repaired
+/// ([the recovery](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)). The
+/// crossover's constants above are calibration; either route answers correctly whichever is
+/// chosen.
 fn keyword_contains(
     values: &ValueColumn,
     dict: &SortedDict,
@@ -3036,7 +3083,10 @@ mod phrase_tests {
     fn the_degenerate_shapes_are_decided_before_the_walk() {
         assert!(!contains_phrase(&t("one two"), &t("one two three")));
         assert!(!contains_phrase(&[], &t("anything")));
-        assert!(!contains_phrase(&t("a document"), &[]), "an empty phrase is not everywhere");
+        assert!(
+            !contains_phrase(&t("a document"), &[]),
+            "an empty phrase is not everywhere"
+        );
         assert!(!contains_phrase(&[], &[]));
     }
 }
@@ -3730,21 +3780,37 @@ mod keyword_tests {
     /// price.
     #[test]
     fn the_two_contains_routes_traverse_alike() {
-        let d = dict(&["arxiv/0001", "arxiv/1001", "bio/0001", "cs/0003", "math/0001"]);
+        let d = dict(&[
+            "arxiv/0001",
+            "arxiv/1001",
+            "bio/0001",
+            "cs/0003",
+            "math/0001",
+        ]);
         let entities = [1u32, 2, 5, 9, 40, 41, 100_000];
         let ordinals = [0u32, 3, 1, 4, 2, 0, 3];
         let values = partial(&entities, &ordinals);
         let mut compared = 0;
-        for candidate in [set(&entities), set(&[1, 41, 100_000]), set(&[5]), set(&[7, 8])] {
+        for candidate in [
+            set(&entities),
+            set(&[1, 41, 100_000]),
+            set(&[5]),
+            set(&[7, 8]),
+        ] {
             for needle in ["0001", "arxiv", "zzz", "/", "math/0001", ""] {
                 let _ = take_scan_work();
                 let broad = contains_broad(&values, &d, needle, &candidate).unwrap();
                 let broad_work = take_scan_work();
                 let narrow = contains_narrow(&values, &d, needle, &candidate).unwrap();
                 let narrow_work = take_scan_work();
-                assert_eq!(members(&broad), members(&narrow), "{needle:?} answers differ");
                 assert_eq!(
-                    broad_work, narrow_work,
+                    members(&broad),
+                    members(&narrow),
+                    "{needle:?} answers differ"
+                );
+                assert_eq!(
+                    broad_work,
+                    narrow_work,
                     "{needle:?} over {:?}: the routes traversed differently",
                     members(&candidate)
                 );

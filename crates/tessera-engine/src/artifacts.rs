@@ -181,6 +181,13 @@ pub struct ArtifactRows {
     /// present.
     layout: ServingLayout,
     column: Option<Arc<RowColumn>>,
+    /// **A spatial level's membership**, where this level has one: the declared shapes decomposed
+    /// into row ranges against this generation's segments (`crate::ranges`).
+    ///
+    /// `None` on every other layout, and its presence is what makes a level's answers come from the
+    /// ranges rather than from the row form — which for such a level holds nothing, its artifacts
+    /// carrying a box instead of a stored membership.
+    ranges: Option<Arc<crate::ranges::RangeSets>>,
 }
 
 /// What one viewport's narrowing produced, on whichever route the level's layout takes.
@@ -197,6 +204,11 @@ pub enum Candidacy {
     /// visible rows: a row in `viewport ∩ M_auth` is visible by construction, so the artifact
     /// labelling it has a visible member in view. That is the same question the artifact-major
     /// route reaches through the walk and a per-candidate probe, answered once for the whole level.
+    ///
+    /// **A spatial level's ranges arrive here too**, and for the identical reason: `candidates`
+    /// asks each range whether `viewport ∩ M_auth` holds anything in it, so an ordinal that comes
+    /// back has a visible member in view by construction. What differs is only what was walked —
+    /// labels per row against ranges per artifact — never the question or the answer.
     Scanned(Bitmap),
 }
 
@@ -500,6 +512,7 @@ impl ArtifactRows {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
+            ranges: None,
         }
     }
 
@@ -517,6 +530,26 @@ impl ArtifactRows {
             .unwrap_or(ServingLayout::ArtifactMajor);
         self.column = column;
         self
+    }
+
+    /// Serve this level from `ranges` — a spatial level's membership, re-derived per generation.
+    ///
+    /// **`None` leaves the level on the artifact-major route over an empty row form**, which serves
+    /// nothing: a shape layer stores no membership, so a level whose ranges could not be built has
+    /// no members anywhere. That is the fail-closed direction and the same one a row-major level's
+    /// missing column takes.
+    pub fn with_ranges(mut self, ranges: Option<Arc<crate::ranges::RangeSets>>) -> Self {
+        self.layout = match &ranges {
+            Some(_) => ServingLayout::SpatialRanges,
+            None => ServingLayout::ArtifactMajor,
+        };
+        self.ranges = ranges;
+        self
+    }
+
+    /// This level's row ranges, where its membership is a shape.
+    pub fn ranges(&self) -> Option<&crate::ranges::RangeSets> {
+        self.ranges.as_deref()
     }
 
     /// Which form this level is **served** in — see [`ArtifactRows::with_column`] on why that is not
@@ -537,6 +570,12 @@ impl ArtifactRows {
     /// `tests/artifact_row_major.rs` asserts the two agree ordinal for ordinal over a generated
     /// corpus, which is this stage's spine.
     pub fn candidacy(&self, viewport: &crate::tile_index::Viewport<'_>) -> Candidacy {
+        // **Three routes and one question.** The ranges arm and the column arm both answer against
+        // `viewport ∩ M_auth` and are therefore exact for the masked question as well; the indexed
+        // arm is a candidate generator and every ordinal it returns still pays a probe.
+        if let Some(ranges) = &self.ranges {
+            return Candidacy::Scanned(ranges.candidates(viewport.here()));
+        }
         match &self.column {
             Some(column) => Candidacy::Scanned(column.candidates(viewport.here())),
             None => Candidacy::Indexed(self.index.candidates(viewport.rows())),
@@ -827,11 +866,93 @@ impl ArtifactRows {
 /// every flush — tens of seconds per level at 10⁷ artifacts, paid by whichever request arrived
 /// next, for a set of bits that did not move. The one operation that *does* renumber the base is
 /// the fold, and a fold publishes a new prefix.
+/// What a cached [`ArtifactRows`] was built from. **Every term is a reason the projection would be
+/// wrong**, and a mismatch on any of them rebuilds:
+///
+/// - the **prefix**, because a fold renumbers the base row space wholesale, so a projection built
+///   over the old one names other people's documents;
+/// - the **view**, because row space is per view;
+/// - the **level's version**, because a publication adds memberships the projection has never
+///   seen — and a cached projection that silently omitted them would serve a level with its
+///   newest clusters absent, indistinguishable from clusters that failed their criterion.
+///
+/// **The level's version and not the store's**, which is what this carried until the scale
+/// campaign measured the difference (`design/artifact-serving-at-scale.md` §8.1): a store-wide
+/// counter makes one suppression, one growth or one publication *anywhere* invalidate every
+/// level's form in every view — 138 s of rebuild at 10⁷ artifacts over 10⁹ rows, so under any
+/// read-write load the cache never survives to be used. The narrower key is sound because the
+/// build reads exactly two things: the records of one `(layer, level)`, which is what that level's
+/// version counts, and the view's row space, which is fixed by the two terms above it.
+///
+/// **The segments version is deliberately not a term, and that is what the base-row rule buys.**
+/// A flush and a merge both move it, and both leave every bit of this projection correct: the form
+/// holds base rows only ([`RowSpace::project_base`]), an append adds none of them and a merge
+/// renumbers only the extent rows above them. Keying on it instead would rebuild every level on
+/// every flush — tens of seconds per level at 10⁷ artifacts, paid by whichever request arrived
+/// next, for a set of bits that did not move. The one operation that *does* renumber the base is
+/// the fold, and a fold publishes a new prefix.
+/// **Where a predicate level's membership comes from**, resolved against this generation — the
+/// pieces [`ArtifactProjections::get_or_build`] needs and cannot reach itself.
+///
+/// **`None` is an enumerated level**, and that is not a fallback: such a level's membership is
+/// stored, so there is no rule to evaluate and nothing here to supply.
+pub enum PredicateSource<'a> {
+    /// `membership = { attribute = f }` — the indexed column `f`, addressed by entity.
+    Attribute(AttributeSource<'a>),
+    /// `membership = "spatial"` — the declared boxes, and the geometry they are covered against.
+    Spatial(SpatialSource<'a>),
+}
+
+/// The indexed column an attribute layer's predicate reads, and the rule that turns one of its
+/// values into one of the layer's artifacts.
+pub struct AttributeSource<'a> {
+    /// The column's value layers, base first (`crate::filter::ValueLayers`). The **base** answers
+    /// for the rows the row space's base covers; the **extents** answer for everything a flush has
+    /// published since, which is what makes an ingested point count on the next request.
+    pub values: crate::filter::ValueLayers<'a>,
+    /// The code an artifact's key stands for — a vocabulary binding where the column has one, and
+    /// the key's own decimal spelling where it has not.
+    ///
+    /// **The inverse of the rule the mint uses** (`tessera_types::layer::attribute_value_key`), and
+    /// it is a closure rather than a map because the two callers hold different things: the build
+    /// holds a schema and the serving path holds a live generation's bindings.
+    pub code_of_key: &'a dyn Fn(&str) -> Option<u32>,
+}
+
+/// The declared shapes a spatial layer's membership is drawn from, and what they are drawn against.
+pub struct SpatialSource<'a> {
+    /// The Morton depth the layer declares. **Part of the membership**, not a tuning key.
+    pub depth: u8,
+    /// The view's extent — the frame the boxes are quantised in. A box quantised against a
+    /// different extent covers different tiles, which is why this comes from the view rather than
+    /// from the request.
+    pub extent: tessera_spatial::Bounds,
+    /// This generation's segments and their row bases, base first. **Every segment**, which is what
+    /// makes the ranges fresh by construction: a flush publishes one, the next request resolves the
+    /// same box against a list that now includes it, and the points in it count.
+    pub segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ProjectionKey {
     prefix: String,
     view: String,
     level_version: u64,
+    /// **The geometry a *predicate* level's membership was evaluated against, and `0` for every
+    /// other level.**
+    ///
+    /// A stored membership is base-row-addressed and survives a flush, which is what
+    /// [`RowSpace::project_base`] buys and why `segments_version` is deliberately not a term above.
+    /// A predicate's membership is not stored: an attribute layer's live tail covers the rows a
+    /// flush appended, and a shape's ranges are resolved against the segment list itself. Both move
+    /// when the geometry does, so both are rebuilt then — which is the whole of *never stale*, and
+    /// the cost of it is that a predicate level's form is derived once per flush rather than once
+    /// per fold.
+    ///
+    /// **Zero rather than an `Option`**, because a level either has a rule to evaluate or it does
+    /// not: an enumerated level filed under a geometry would rebuild on every flush for a set of
+    /// bits that did not move.
+    live: u64,
 }
 
 /// One row-space projection per `(view, layer, level)`, rebuilt when its [`ProjectionKey`] moves.
@@ -917,6 +1038,14 @@ pub struct ArtifactProjections {
     /// describes that level. Claimed once and then dropped, because a column belongs to one view's
     /// row form.
     columns_held: Mutex<BTreeMap<IndexAddress, (IndexKey, RowColumn)>>,
+    /// The **base** half of an attribute predicate's row column, per `(view, layer, level)`.
+    ///
+    /// **Held rather than claimed**, which is the difference from [`Self::columns_held`]: a
+    /// fold-written column is taken once and dropped, because the form that took it holds the only
+    /// copy. A predicate's base is taken again at *every flush* — the form above it is rebuilt when
+    /// the geometry moves and the base is not — so it stays here, replaced when its coordinate
+    /// moves, and `with_tail` shares it rather than copying four bytes a row per flush.
+    predicate_bases: Mutex<BTreeMap<IndexAddress, (IndexKey, Arc<RowColumn>)>>,
     /// How many forms this has built since the engine opened. **The cadence, counted** — what
     /// §8.1 is about is not the cost of one build but how many a write provokes, and that is a
     /// number nothing reported until the grain changed. Read by the fold's own log line and by
@@ -1248,6 +1377,12 @@ impl ArtifactProjections {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, _), _| held != layer);
+        // **All five**, and this one is held rather than claimed, so nothing else would ever remove
+        // it: a predicate layer's base column is four bytes a row and is pinned by this map alone.
+        self.predicate_bases
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, _), _| held != layer);
     }
 
     /// Drop everything held for one `(layer, level)`, in every view — **what a layout flip needs**.
@@ -1275,6 +1410,10 @@ impl ArtifactProjections {
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, held_level), _| held != layer || *held_level != level);
         self.columns_held
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|(_, held, held_level), _| held != layer || *held_level != level);
+        self.predicate_bases
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|(_, held, held_level), _| held != layer || *held_level != level);
@@ -1309,11 +1448,19 @@ impl ArtifactProjections {
         space: &RowSpace,
         source: Option<&PartitionSource<'_>>,
         layout: ServingLayout,
+        predicate: Option<&PredicateSource<'_>>,
+        segments_version: u64,
     ) -> Arc<ArtifactRows> {
         let key = ProjectionKey {
             prefix: prefix.to_string(),
             view: view.to_string(),
             level_version: store.level_version(layer, level),
+            // See [`ProjectionKey::live`]: a rule is evaluated against the geometry, a stored
+            // membership is not.
+            live: match predicate {
+                Some(_) => segments_version,
+                None => 0,
+            },
         };
         let map_key = (view.to_string(), layer.to_string(), level);
 
@@ -1350,15 +1497,63 @@ impl ArtifactProjections {
         // one place the recorded layout and the served one may differ. A level recorded row-major
         // whose memberships turn out to overlap has no label column to compose, and the fallback is
         // the artifact-major route, which is correct and merely slower than the record asked for.
-        let column = self.column_for(
-            prefix,
-            view,
-            layer,
-            level,
-            key.level_version,
-            layout,
-            &built,
-        );
+        // **A spatial level's membership is not a column and not a bitmap** — it is the declared
+        // boxes, covered at the declared depth, resolved against this generation's segments. Built
+        // here rather than claimed from the prefix because there is nothing durable to claim: the
+        // ranges are a function of the geometry, so a fold-written copy would be stale at the first
+        // flush and the derivation is what makes the membership never stale.
+        if let Some(PredicateSource::Spatial(spatial)) = predicate {
+            let ordinals = store.level(layer, level).map(|(o, _)| o).max();
+            let count = ordinals.map_or(0, |max| max + 1);
+            let ranges = crate::ranges::RangeSets::build(
+                (0..count).map(|ordinal| store.shape_of(layer, level, ordinal)),
+                spatial.depth,
+                &spatial.extent,
+                spatial.segments,
+            );
+            tracing::info!(
+                layer = %layer,
+                level,
+                view = %view,
+                ordinals = ranges.len(),
+                ranges_per_artifact = ranges.ranges_per_artifact(),
+                depth = spatial.depth,
+                layout = ?ServingLayout::SpatialRanges,
+                "a spatial level's ranges are derived from its declared shapes"
+            );
+            let rows = Arc::new(built.with_ranges(Some(Arc::new(ranges))));
+            self.builds
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.cached
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(map_key, (key, Arc::clone(&rows)));
+            return rows;
+        }
+        let column = match predicate {
+            // **The membership *is* the column** (§5.1): the labels come from the value column the
+            // predicate names rather than from any stored membership, and the level's own records
+            // supply only the ordinal each value's artifact sits at.
+            Some(PredicateSource::Attribute(attribute)) => self.attribute_column(
+                prefix,
+                view,
+                layer,
+                level,
+                key.level_version,
+                store,
+                space,
+                attribute,
+            ),
+            _ => self.column_for(
+                prefix,
+                view,
+                layer,
+                level,
+                key.level_version,
+                layout,
+                &built,
+            ),
+        };
         let from_column = column.is_some();
         let rows = Arc::new(built.with_column(column));
         if layout.is_row_major() && !from_column {
@@ -1431,6 +1626,135 @@ impl ArtifactProjections {
         self.indexes_adopted
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Some(index)
+    }
+
+    /// **An attribute predicate's row column: the value column, permuted through this view's row
+    /// space** (`design/artifact-serving-at-scale.md` §5.1).
+    ///
+    /// The base and the tail are built and cached separately, because they move on different
+    /// cadences and only one of them is expensive:
+    ///
+    /// - the **base** covers `[0, base_rows)` and is a function of the prefix and the level's
+    ///   version, so it survives every flush and is rebuilt only by a fold or a mint. It is four
+    ///   bytes a row — 4 GB at 10⁹ — and rebuilding it per flush is exactly the cost
+    ///   `RowSpace::project_base` exists to avoid;
+    /// - the **tail** covers the rows a flush appended and is rebuilt whenever the geometry moves,
+    ///   which is what makes a point ingested with value *v* count on the next request. It is
+    ///   bounded by the flushed tail, which the merge ladder bounds and the fold resets.
+    ///
+    /// **`None` where the column is not held at all**, which is the fail-closed answer: no artifact
+    /// of the layer is then a candidate anywhere, rather than every artifact being one.
+    ///
+    /// **An entity with no value is in no artifact.** A row whose entity carries nothing, and one
+    /// whose value names no artifact of this level — a code minted after this level's records were
+    /// written, or one whose artifact a fold has retired — is a hole, which contributes to nobody's
+    /// count. That is the same answer a member row with a null key gets on an enumerated layer.
+    #[allow(clippy::too_many_arguments)]
+    fn attribute_column(
+        &self,
+        prefix: &str,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+        store: &ArtifactStore,
+        space: &RowSpace,
+        source: &AttributeSource<'_>,
+    ) -> Option<Arc<RowColumn>> {
+        // `code → ordinal`, from the level's own records: the key an artifact carries is the value
+        // it stands for, and `code_of_key` is the inverse of the rule the mint used to write it.
+        // A key that does not resolve is skipped rather than guessed at — its rows then belong to
+        // nobody, which understates and never over-states.
+        let mut ordinal_of_code: std::collections::BTreeMap<u32, u32> =
+            std::collections::BTreeMap::new();
+        let mut ordinals = 0u32;
+        for (ordinal, record) in store.level(layer, level) {
+            ordinals = ordinals.max(ordinal + 1);
+            if let Some(code) = record.key.as_deref().and_then(source.code_of_key) {
+                ordinal_of_code.insert(code, ordinal);
+            }
+        }
+
+        let base_rows = space.base_rows();
+        let map_key = (view.to_string(), layer.to_string(), level);
+        let base_key = IndexKey {
+            prefix: prefix.to_string(),
+            level_version,
+        };
+        let held = {
+            let bases = self
+                .predicate_bases
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            bases
+                .get(&map_key)
+                .filter(|(key, _)| *key == base_key)
+                .map(|(_, column)| Arc::clone(column))
+        };
+        let base = match held {
+            Some(base) => base,
+            None => {
+                let mut labels =
+                    vec![tessera_store::membership::ROW_COLUMN_HOLE; base_rows as usize];
+                if let Some(values) = source.values.base() {
+                    for entity in values.present().iter() {
+                        let Some(row) =
+                            space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+                        else {
+                            continue;
+                        };
+                        if row.raw() >= base_rows {
+                            continue;
+                        }
+                        if let Some(ordinal) = values
+                            .value_of(entity)
+                            .and_then(|code| ordinal_of_code.get(&code.raw()))
+                        {
+                            labels[row.raw() as usize] = *ordinal;
+                        }
+                    }
+                }
+                let base = Arc::new(RowColumn::from_labels(ordinals, &labels));
+                self.columns_composed
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.predicate_bases
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(map_key, (base_key, Arc::clone(&base)));
+                base
+            }
+        };
+
+        // The live half: the rows a flush has appended since the base was written. Empty where
+        // nothing has flushed, in which case the base is served as it stands.
+        let tail_rows = space.total_rows().saturating_sub(u64::from(base_rows));
+        if tail_rows == 0 {
+            return Some(base);
+        }
+        let mut tail = vec![tessera_store::membership::ROW_COLUMN_HOLE; tail_rows as usize];
+        for values in source.values.extents() {
+            for entity in values.present().iter() {
+                let Some(row) = space.row_of(tessera_types::EntityId::new(u64::from(entity)))
+                else {
+                    continue;
+                };
+                let Some(at) = row.raw().checked_sub(base_rows) else {
+                    continue;
+                };
+                if at as usize >= tail.len() {
+                    continue;
+                }
+                if let Some(ordinal) = values
+                    .value_of(entity)
+                    .and_then(|code| ordinal_of_code.get(&code.raw()))
+                {
+                    tail[at as usize] = *ordinal;
+                }
+            }
+        }
+        Some(Arc::new(base.with_tail(
+            crate::row_column::TailLabels::new(base_rows, tail),
+        )))
     }
 
     /// This level's row-major column, claimed from the prefix where the fold wrote one at this
@@ -1781,6 +2105,12 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     /// per-`(session, layer)` histogram — the same walk of the same mask, done once for the level
     /// rather than once per artifact. `tests/artifact_row_major.rs` asserts they agree.
     fn masked_count(&self, ordinal: u32) -> u64 {
+        // **A spatial level has no membership to intersect and no histogram to read**: its members
+        // are contiguous row ranges, so the count is a sum of masked range cardinalities — the same
+        // quantity, from the structure that holds it.
+        if let Some(ranges) = self.rows.ranges() {
+            return ranges.masked_count(ordinal, self.mask);
+        }
         if self.rows.layout().is_row_major() {
             if let Some(counts) = &self.counts {
                 return counts.get(ordinal);
@@ -1802,6 +2132,9 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     /// label. The two are equal by construction — both count the artifact's projected rows — which
     /// is what lets the criterion behave identically under either layout.
     fn declared_size(&self, ordinal: u32) -> u64 {
+        if let Some(ranges) = self.rows.ranges() {
+            return ranges.declared_size(ordinal);
+        }
         if let Some(column) = self.rows.column() {
             return column.declared_size(ordinal);
         }
@@ -1873,6 +2206,7 @@ mod tests {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
+            ranges: None,
         }
     }
 

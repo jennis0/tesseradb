@@ -338,6 +338,26 @@ pub trait MaskedSet {
     /// Materialising is the cost derived content opts into: O(visible members), against the count's
     /// O(containers touched). That asymmetry is why the vocabulary is declared per layer.
     fn visible_rows(&self, set: &Bitmap) -> Bitmap;
+
+    /// `|[r.start, r.end) ∩ mask|` — the masked count of a contiguous **row range**.
+    ///
+    /// **The one question a range-shaped membership asks**, and it is on this trait rather than
+    /// beside it for [`MaskedSet`]'s own reason: a spatial level's membership is a set of ranges,
+    /// so this *is* asking the mask about an artifact's membership, one contiguous piece at a time.
+    /// A caller that summed `count_intersection` over materialised ranges would get the same number
+    /// and pay a bitmap per range to do it.
+    ///
+    /// **Filter-blind, exactly as [`MaskedSet::count_intersection`] is** — the count beside an
+    /// artifact is what the principal may see, not what their search box admits (**I12**).
+    ///
+    /// **The default is the general answer and the production one is the cheap answer.** Any mask
+    /// can answer this by materialising the range and intersecting; [`EffectiveMask`] overrides it
+    /// with the same three-term arithmetic its other counts take, which is O(containers touched)
+    /// and allocates nothing. Both compute the same number from inside `M_auth`, which is what
+    /// makes the default safe rather than merely convenient.
+    fn count_range(&self, r: Range<u32>) -> u64 {
+        self.count_intersection(&Bitmap::from_range(r))
+    }
 }
 
 /// The **whole** composed mask, materialised — every row this viewer may see, in this view's row
@@ -434,6 +454,12 @@ impl MaskedSet for EffectiveMask {
         visible.andnot_inplace(&self.minus);
         visible.or_inplace(&self.plus.and(set));
         visible
+    }
+
+    /// [`EffectiveMask::count_range`] under the trait — one implementation, so a range counted
+    /// through the predicate and one counted directly cannot disagree.
+    fn count_range(&self, r: Range<u32>) -> u64 {
+        EffectiveMask::count_range(self, r)
     }
 }
 

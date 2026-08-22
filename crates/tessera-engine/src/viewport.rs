@@ -3025,6 +3025,79 @@ fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Ve
     merged
 }
 
+/// **The vocabulary a predicate column's values are named by**, or `None` where the column has
+/// none — in which case an artifact's key is the value's own canonical decimal spelling
+/// (`tessera_types::layer::attribute_value_key`).
+///
+/// `None` also for a layer whose membership is not an attribute predicate at all, which is what
+/// makes the closure built from this total: it answers *no code* for every key of such a layer, and
+/// no such layer is ever asked.
+fn predicate_vocabulary<'a>(
+    generation: &'a crate::Generation,
+    declaration: &tessera_types::layer::LayerDeclaration,
+) -> Option<&'a tessera_store::vocabulary::VocabularyMinter> {
+    let tessera_types::layer::MembershipSource::Attribute(field) = &declaration.membership else {
+        return None;
+    };
+    let name = generation
+        .bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .find(|scalar| &scalar.name == field)?
+        .vocabulary
+        .as_deref()?;
+    generation.vocabularies.get(name)
+}
+
+/// **Where a predicate layer's membership comes from, for one request against one generation.**
+///
+/// `None` for an enumerated layer, and for a predicate layer whose rule cannot be evaluated at all
+/// — a column this generation does not hold, or a spatial layer that declares no shape. Both are
+/// the fail-closed answer: such a level is served with no membership, so none of its artifacts is a
+/// candidate anywhere, rather than every artifact being one.
+fn predicate_source<'a>(
+    declaration: &tessera_types::layer::LayerDeclaration,
+    generation: &'a crate::Generation,
+    segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
+    code_of_key: &'a dyn Fn(&str) -> Option<u32>,
+) -> Option<crate::artifacts::PredicateSource<'a>> {
+    match &declaration.membership {
+        tessera_types::layer::MembershipSource::Enumerated => None,
+        tessera_types::layer::MembershipSource::Attribute(field) => {
+            let values = generation.filter_columns.value_layers(field)?;
+            Some(crate::artifacts::PredicateSource::Attribute(
+                crate::artifacts::AttributeSource {
+                    values,
+                    code_of_key,
+                },
+            ))
+        }
+        // ⊘ A spatial layer with no `shape` holds no artifacts and has no ranges to serve — the
+        // state this surface has always had, and the one the generator's boundary fixture is in.
+        tessera_types::layer::MembershipSource::Spatial => {
+            let shape = declaration.shape?;
+            // **The build's own quantisation frame, not the request's.** A box covered against a
+            // different extent quantises to different cells and so to different tiles — a different
+            // membership — which is why this comes from the manifest that the geometry was written
+            // under rather than from anything a viewer sends.
+            let q = &generation.bundle.manifest.quantisation;
+            Some(crate::artifacts::PredicateSource::Spatial(
+                crate::artifacts::SpatialSource {
+                    depth: shape.depth,
+                    extent: Bounds {
+                        x_min: q.x_min,
+                        x_max: q.x_max,
+                        y_min: q.y_min,
+                        y_max: q.y_max,
+                    },
+                    segments,
+                },
+            ))
+        }
+    }
+}
+
 impl Engine {
     /// What this request's composed mask is, for the masked-count cache's key.
     ///
@@ -3175,6 +3248,16 @@ impl Engine {
 
         let source = generation.partition_source();
         let recorded = layer.layout_of(level);
+        // The predicate's own inputs, resolved once for this identifier — the same rule the
+        // viewport resolves per layer, from the same generation, so an artifact reached by
+        // identifier and one reached by viewport cannot be evaluated against different memberships.
+        let segments = segments_with_row_bases(view, view_data)?;
+        let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
+        let code_of_key = |key: &str| match vocabulary {
+            Some(vocabulary) => vocabulary.code_of(key),
+            None => key.parse::<u32>().ok(),
+        };
+        let predicate = predicate_source(&layer.declaration, &generation, &segments, &code_of_key);
         let (rows, level_version) = self.write.with_artifacts(|store| {
             (
                 self.artifact_projections.get_or_build(
@@ -3186,6 +3269,8 @@ impl Engine {
                     &view_data.row_space,
                     Some(&source),
                     recorded,
+                    predicate.as_ref(),
+                    generation.segments_version,
                 ),
                 store.level_version(&name, level),
             )
@@ -3435,6 +3520,18 @@ impl Engine {
             return false;
         };
         let recorded = layer.layout_of(attachment.level);
+        // The target's own membership, evaluated the same way its own serving route would — a
+        // dependency answered from a different rule would be a second membership nobody wrote.
+        let Ok(segments) = segments_with_row_bases(ctx.view, ctx.view_data) else {
+            return false;
+        };
+        let vocabulary = predicate_vocabulary(ctx.generation, &layer.declaration);
+        let code_of_key = |key: &str| match vocabulary {
+            Some(vocabulary) => vocabulary.code_of(key),
+            None => key.parse::<u32>().ok(),
+        };
+        let predicate =
+            predicate_source(&layer.declaration, ctx.generation, &segments, &code_of_key);
         let (rows, level_version) = self.write.with_artifacts(|store| {
             (
                 self.artifact_projections.get_or_build(
@@ -3446,6 +3543,8 @@ impl Engine {
                     &ctx.view_data.row_space,
                     Some(&ctx.generation.partition_source()),
                     recorded,
+                    predicate.as_ref(),
+                    ctx.generation.segments_version,
                 ),
                 store.level_version(&attachment.layer, attachment.level),
             )
@@ -3564,6 +3663,10 @@ impl Engine {
         // which rows a request covers.
         let segments = segments_with_row_bases(view, view_data)?;
         let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
+        // The same list a shape's ranges are resolved against — built once for the response, and
+        // deliberately the same one the viewport's own tiles resolve through, so a membership and a
+        // viewport that overlap on the map overlap in row space.
+        let segments_for_shapes = segments.clone();
         // Built once per request rather than per layer: it is the same view's segment list for
         // every artifact in the response, and a layer declaring no derived content never asks it
         // anything.
@@ -3628,6 +3731,21 @@ impl Engine {
                 .filter_map(|name| crate::derived::ComputedProperty::parse(name))
                 .collect();
 
+            // **The predicate's inputs, resolved once per layer rather than per level**: the
+            // membership is the layer's, and every level of a predicate layer reads the same
+            // column or the same declared depth. A layer with a stored membership resolves nothing.
+            let vocabulary = predicate_vocabulary(generation, &layer.declaration);
+            let code_of_key = |key: &str| match vocabulary {
+                Some(vocabulary) => vocabulary.code_of(key),
+                None => key.parse::<u32>().ok(),
+            };
+            let predicate = predicate_source(
+                &layer.declaration,
+                generation,
+                &segments_for_shapes,
+                &code_of_key,
+            );
+
             for (level, runs) in layer.runs.iter().enumerate() {
                 let level = level as u32;
                 let recorded = layer.layout_of(level);
@@ -3642,6 +3760,8 @@ impl Engine {
                             &view_data.row_space,
                             Some(&source),
                             recorded,
+                            predicate.as_ref(),
+                            generation.segments_version,
                         ),
                         store.level_version(&name, level),
                     )

@@ -42,6 +42,8 @@
 //! is a function of the bytes beside it rather than a second thing that could disagree with them.
 //! That is [`crate::tile_index`]'s rule for the node hierarchy, one structure along.
 
+use std::sync::Arc;
+
 use croaring::Bitmap;
 
 use tessera_lifecycle::membership::ArtifactRecord;
@@ -65,10 +67,57 @@ use crate::compose::WholeMask;
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
 /// where a publication built it.
 pub struct RowColumn {
-    pack: Pack,
+    /// **Shared, because a live tail is attached by deriving a second column over the same base.**
+    /// A predicate level's base is a function of the prefix and the level's version; its tail moves
+    /// at every flush. Copying four bytes a row per flush is what this `Arc` exists to avoid — at
+    /// 10⁹ rows the base is the 4 GB the layout was chosen for.
+    pack: Arc<Pack>,
     /// Per ordinal, how many **rows** carry this artifact's label — the unmasked membership size in
-    /// this view's row space. Derived at open; see the module doc.
+    /// this view's row space, base and tail together. Derived at open; see the module doc.
     declared: Vec<u32>,
+    /// The base's own half of `declared`, kept so [`RowColumn::with_tail`] can add a tail's counts
+    /// without re-walking four bytes a row.
+    base_declared: Arc<Vec<u32>>,
+    /// **The rows above the base a fold has not yet absorbed**, where this column has any.
+    tail: Option<TailLabels>,
+}
+
+/// The labels of the rows **above** a column's base — the flushed tail.
+///
+/// **A second dense array rather than a wider base**, and the cadence is the whole reason. A base
+/// column is a function of the prefix and the level's version, so it survives every flush; the tail
+/// is a function of the geometry and is rebuilt whenever `segments_version` moves. Widening the
+/// base instead would rebuild four bytes a row at every flush — the cost `RowSpace::project_base`
+/// exists to avoid, arriving through the other door.
+///
+/// ⊘ **Bounded by the flushed tail**, which the merge ladder bounds and the fold resets. Nothing
+/// here bounds it independently: a deployment that never folds accumulates rows above its base
+/// whatever this structure does, and the tail is one `u32` per such row.
+pub struct TailLabels {
+    /// The first row this covers — the base's row count.
+    row_base: u32,
+    /// One label per row of `[row_base, row_base + labels.len())`, [`ROW_COLUMN_HOLE`] where no
+    /// artifact claims the row.
+    labels: Vec<u32>,
+}
+
+impl TailLabels {
+    /// A tail over `[row_base, row_base + labels.len())`.
+    pub fn new(row_base: u32, labels: Vec<u32>) -> Self {
+        TailLabels { row_base, labels }
+    }
+
+    /// The label at an absolute row, or [`ROW_COLUMN_HOLE`] where the row is outside this tail.
+    fn label(&self, row: u32) -> u32 {
+        row.checked_sub(self.row_base)
+            .and_then(|at| self.labels.get(at as usize).copied())
+            .unwrap_or(ROW_COLUMN_HOLE)
+    }
+
+    /// One past the last row this covers.
+    fn row_end(&self) -> u32 {
+        self.row_base.saturating_add(self.labels.len() as u32)
+    }
 }
 
 enum Pack {
@@ -166,9 +215,50 @@ impl RowColumn {
         Ok(Self::over(pack))
     }
 
+    /// **A label column over `labels`, addressed by row** — what a *predicate* level's membership
+    /// is, built from the value column the layer names rather than from any stored membership.
+    ///
+    /// **The label form only**, because a single-valued column partitions by construction: every
+    /// row carries one value, so the double claim [`Self::compose`] has to guard against cannot
+    /// arise here. A row no artifact claims carries [`ROW_COLUMN_HOLE`], which is what a point with
+    /// no value for the column has.
+    pub fn from_labels(ordinals: u32, labels: &[u32]) -> Self {
+        let bytes = pack_label_column(ordinals, labels);
+        Self::over(Pack::Label(
+            LabelColumnPack::from_bytes(bytes)
+                .expect("a column this crate just packed frames by construction"),
+        ))
+    }
+
+    /// This column with `tail` attached — the rows above its base that a fold has not yet absorbed.
+    ///
+    /// **The base is shared, not copied.** A predicate level's base is valid for a whole prefix and
+    /// its tail moves at every flush, so the flush pays one walk of the tail rather than a second
+    /// copy of four bytes a row.
+    ///
+    /// ⊘ **The label form only.** A list column's tail would be an offset table continuing the
+    /// base's, and no predicate produces one — the two row-major forms a *stored* membership takes
+    /// are written whole by the fold and have no live half.
+    pub fn with_tail(&self, tail: TailLabels) -> Self {
+        let mut declared = self.base_declared.as_ref().clone();
+        for label in &tail.labels {
+            if *label != ROW_COLUMN_HOLE {
+                if let Some(count) = declared.get_mut(*label as usize) {
+                    *count += 1;
+                }
+            }
+        }
+        RowColumn {
+            pack: Arc::clone(&self.pack),
+            declared,
+            base_declared: Arc::clone(&self.base_declared),
+            tail: Some(tail),
+        }
+    }
+
     /// Which form this is.
     pub fn layout(&self) -> ServingLayout {
-        match self.pack {
+        match *self.pack {
             Pack::Label(_) => ServingLayout::RowMajorLabel,
             Pack::List(_) => ServingLayout::RowMajorList,
         }
@@ -183,9 +273,21 @@ impl RowColumn {
         self.declared.is_empty()
     }
 
-    /// The row space this column was addressed in.
+    /// The row space this column was addressed in — the base, plus the tail where it has one.
     pub fn row_count(&self) -> u32 {
-        match &self.pack {
+        let base = match &*self.pack {
+            Pack::Label(pack) => pack.rows(),
+            Pack::List(pack) => pack.rows(),
+        };
+        match &self.tail {
+            Some(tail) => tail.row_end().max(base),
+            None => base,
+        }
+    }
+
+    /// The base's row count alone — where the durable half ends and the live one begins.
+    pub fn base_rows(&self) -> u32 {
+        match &*self.pack {
             Pack::Label(pack) => pack.rows(),
             Pack::List(pack) => pack.rows(),
         }
@@ -223,10 +325,19 @@ impl RowColumn {
     /// length of the call.
     pub fn candidates(&self, here: &Bitmap) -> Bitmap {
         let mut seen = vec![false; self.len()];
-        match &self.pack {
+        let base_rows = self.base_rows();
+        match &*self.pack {
             Pack::Label(pack) => {
                 for row in here.iter() {
-                    let label = pack.label(row as usize);
+                    // **The tail answers for the rows above the base**, which is what makes a
+                    // point ingested since the last fold a candidate on the next request: its row
+                    // is above the base, so the packed column does not label it and the live half
+                    // does.
+                    let label = if row < base_rows {
+                        pack.label(row as usize)
+                    } else {
+                        self.tail.as_ref().map_or(ROW_COLUMN_HOLE, |t| t.label(row))
+                    };
                     if label != ROW_COLUMN_HOLE {
                         seen[label as usize] = true;
                     }
@@ -234,6 +345,9 @@ impl RowColumn {
             }
             Pack::List(pack) => {
                 for row in here.iter() {
+                    if row >= base_rows {
+                        continue;
+                    }
                     for ordinal in pack.list(row as usize) {
                         seen[ordinal as usize] = true;
                     }
@@ -270,10 +384,20 @@ impl RowColumn {
     pub fn histogram(&self, mask: &impl WholeMask) -> Vec<u32> {
         let mut counts = vec![0u32; self.len()];
         let visible = mask.visible_all();
-        match &self.pack {
+        let base_rows = self.base_rows();
+        match &*self.pack {
             Pack::Label(pack) => {
                 for row in visible.iter() {
-                    let label = pack.label(row as usize);
+                    // **The freshness edge, and it is one comparison.** A point ingested since the
+                    // last fold has a row above the base, so its artifact's count rises here on the
+                    // next request with nothing rebuilt but this session's own histogram — which
+                    // was going to be rebuilt anyway, the key carrying `segments_version`
+                    // (`crate::histogram`).
+                    let label = if row < base_rows {
+                        pack.label(row as usize)
+                    } else {
+                        self.tail.as_ref().map_or(ROW_COLUMN_HOLE, |t| t.label(row))
+                    };
                     if label != ROW_COLUMN_HOLE {
                         counts[label as usize] += 1;
                     }
@@ -281,6 +405,9 @@ impl RowColumn {
             }
             Pack::List(pack) => {
                 for row in visible.iter() {
+                    if row >= base_rows {
+                        continue;
+                    }
                     for ordinal in pack.list(row as usize) {
                         counts[ordinal as usize] += 1;
                     }
@@ -291,8 +418,12 @@ impl RowColumn {
     }
 
     /// The durable bytes — what the fold writes into the prefix.
+    ///
+    /// **The base alone**, and that is the same rule the layout rests on: a fold renumbers the base
+    /// row space and publishes a new prefix, so the tail it would have written is exactly the part
+    /// that fold has just absorbed.
     pub fn as_bytes(&self) -> &[u8] {
-        match &self.pack {
+        match &*self.pack {
             Pack::Label(pack) => pack.as_bytes(),
             Pack::List(pack) => pack.as_bytes(),
         }
@@ -322,7 +453,12 @@ impl RowColumn {
                 }
             }
         }
-        RowColumn { pack, declared }
+        RowColumn {
+            pack: Arc::new(pack),
+            base_declared: Arc::new(declared.clone()),
+            declared,
+            tail: None,
+        }
     }
 
     /// The two builders, sharing one walk protocol: `each` calls `visit` once per live artifact with

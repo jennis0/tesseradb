@@ -577,6 +577,8 @@ fn a_growth_between_two_reads_would_leave_the_extent_narrow() {
         &fx.row_space,
         None,
         tessera_types::layer::ServingLayout::ArtifactMajor,
+        None,
+        0,
     );
     assert!(before
         .index()
@@ -689,6 +691,8 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &fx.row_space,
         None,
         tessera_types::layer::ServingLayout::ArtifactMajor,
+        None,
+        0,
     );
     assert_eq!(projections.indexes_adopted(), 1);
     assert_eq!(rows.index().len(), fx.ordinals as usize);
@@ -706,6 +710,8 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
             &fx.row_space,
             None,
             tessera_types::layer::ServingLayout::ArtifactMajor,
+            None,
+            0,
         );
         assert_eq!(
             projections.indexes_adopted(),
@@ -727,6 +733,8 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &fx.row_space,
         None,
         tessera_types::layer::ServingLayout::ArtifactMajor,
+        None,
+        0,
     );
     assert_eq!(projections.indexes_adopted(), 0);
 
@@ -743,6 +751,8 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &fx.row_space,
         None,
         tessera_types::layer::ServingLayout::ArtifactMajor,
+        None,
+        0,
     );
     assert_eq!(projections.indexes_adopted(), 0);
 
@@ -761,6 +771,8 @@ fn a_tile_index_is_claimed_at_its_own_coordinate_and_at_no_other() {
         &fx.row_space,
         None,
         tessera_types::layer::ServingLayout::ArtifactMajor,
+        None,
+        0,
     );
     assert_eq!(projections.indexes_adopted(), 0);
 }
