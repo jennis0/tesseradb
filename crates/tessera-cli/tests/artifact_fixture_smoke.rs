@@ -119,8 +119,7 @@ fn a_generator_corpus_with_every_artifact_arm_builds() {
     assert!(
         output.status.success(),
         "the build refused a declaration carrying an enumerated layer, a partition-attribute \
-         predicate and a spatial predicate, which today it must only accept:\nstdout:\n{stdout}\n\
-         stderr:\n{stderr}"
+         predicate and a spatial predicate:\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
     // Nothing was minted and nothing was left unclustered: both rosters are closed and complete,
@@ -137,8 +136,10 @@ fn a_generator_corpus_with_every_artifact_arm_builds() {
         "a member row named no artifact, which a closed roster should never produce:\n{stdout}"
     );
 
-    // All three enumerated layers actually published: one member-store file each, and none for
-    // the two predicate layers, which serve nothing today.
+    // One member-store file per layer that holds artifacts: the three enumerated ones (flat,
+    // partition-enumerated, treed) and the **attribute predicate**, whose artifacts are the
+    // `partition` column's distinct values, minted from the column at the build. ⊘ The spatial
+    // layer declares no `[layer.shape]`, so it holds nothing and writes none.
     let members_dir = dir.path().join("bundle/v00000/partitions/default/members");
     let published: Vec<_> = std::fs::read_dir(&members_dir)
         .unwrap_or_else(|e| panic!("{}: {e}", members_dir.display()))
@@ -146,9 +147,9 @@ fn a_generator_corpus_with_every_artifact_arm_builds() {
         .collect();
     assert_eq!(
         published.len(),
-        3,
-        "expected one member-store file per enumerated layer (flat, partition-enumerated, \
-         treed), got {published:?}"
+        4,
+        "expected one member-store file per layer holding artifacts — flat, \
+         partition-enumerated, treed and partition-attribute — got {published:?}"
     );
     for path in &published {
         let bytes = std::fs::metadata(path).unwrap().len();
