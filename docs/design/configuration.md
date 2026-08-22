@@ -1012,7 +1012,29 @@ for drill-down to return.
   gives the table — `{ attribute = "<field>" }` — rather than reporting an unknown value. **A
   `membership` naming a column no `[[attribute]]` block declares** is refused with it, at parse and
   before a data file is opened, on the rule an undeclared vocabulary reference already follows:
-  a predicate with nothing to read publishes every artifact on the layer with an empty membership;
+  a predicate with nothing to read publishes every artifact on the layer with an empty membership.
+  **A column that is not indexed, or is not `u8`/`u16`/`u32`**, is refused with it: the predicate
+  reads the entity-addressed value column `index = true` writes, and only a single-valued
+  category-width column partitions — which is what makes one label per row the whole membership.
+  ⊘ A `keyword` or `text` column is refused by the same rule, its ordinals being per index layer;
+- **what a predicate layer may not declare** — `content` (supplied or computed), `depends_on`,
+  `levels`, a hierarchy other than `flat`, `artifact_visibility.field`, and any `layout`. Its
+  artifacts are derived from the rule and carry their key and nothing else, so each of these would
+  register a layer that is reachable and serves nothing, which no client can tell from a layer whose
+  artifacts were all withheld. ⊘ The computed one is scope rather than principle: a property is a
+  function of `membership ∩ M_auth`, and reaching one artifact's membership on such a level costs a
+  scan of the whole column;
+- **`[layer.shape]` on a layer whose `membership` is not `spatial`** — the members come from the
+  stored set or the predicate the membership names, so a box beside them decides nothing — and a
+  `shape.depth` outside `1..=16`, which is where the Morton code space ends. There is no default:
+  the depth *is* the membership. A `shape.kind` other than `bbox` is refused rather than covered
+  approximately, an approximate cover being a membership *wider* than the declaration;
+- **an artifact's `bbox` and its layer's `shape` written apart** — a box on a layer that declares no
+  shape is a region nothing evaluates; an artifact with no box on a layer that does has no
+  membership rule at all, so it would count zero for every viewer. A **transposed** box (a maximum
+  below its minimum) or a non-finite bound is refused rather than corrected: swapping it would
+  publish a membership over a region nobody wrote. A `min_x`/`min_y`/`max_x`/`max_y` set with some
+  of the four present is the same refusal;
 - **an artifact declaring no attachment in a layer that declares `depends_on`**, and one attaching
   into a layer that layer did not name. A dependent is served only where what it depends on is
   served ([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)),
@@ -1021,13 +1043,14 @@ for drill-down to return.
 - an access label spelled `inherited`, the one reserved word occupying a slot that otherwise takes
   a label (§5). `public` is **not** refused: it is a label (`per-point-attributes.md` §3.8), and `derived` and `none` sit
   in slots that admit no label;
-- **a `layout` outside `rows`, `column` and `list`**, and a row-major one on `membership =
-  "spatial"`. The first is the surface's ordinary rule — a pin the build ignored would leave an
-  operator having declared a layout and got another — and the second names a form the layer cannot
-  be stored in, a shape having no per-row source and its ranges existing precisely so the
-  membership is never materialised. This is a **performance** knob and it still refuses rather than
-  ignoring, which is not a contradiction with SA §9's rule: what defaults is the *absence* of the
-  key, and an absent pin is a complete statement — *no opinion, pick automatically*.
+- **a `layout` outside `rows`, `column` and `list`**, and **any** pin on a predicate membership.
+  The first is the surface's ordinary rule — a pin the build ignored would leave an operator having
+  declared a layout and got another — and the second names a form the layer cannot be stored in: a
+  shape's members are row ranges recomputed per request and a single-valued attribute's members
+  *are* the column, so neither has a second form for a pin to select between. This is a
+  **performance** knob and it still refuses rather than ignoring, which is not a contradiction with
+  SA §9's rule: what defaults is the *absence* of the key, and an absent pin is a complete statement
+  — *no opinion, pick automatically*.
 
 `index` on a **rendered** number or datetime is **admitted**, not refused: decision 0064's presence
 bitmap beside the hot column is what lets the row route tell an absence from a stored zero, and
