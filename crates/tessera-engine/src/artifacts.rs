@@ -369,16 +369,48 @@ impl MembershipRows {
         self.rows.is_empty()
     }
 
-    /// **The shape the automatic layout pick reads** — decision 0092's (c), observed over the form
-    /// rather than declared.
+    /// **Blocks per artifact** — decision 0092's (c), observed over the form rather than declared,
+    /// and the number the automatic layout pick's threshold is expressed in.
+    ///
+    /// `blocks` is Roaring **containers touched**, which is the measured cost model — bitmap
+    /// operations cost O(containers touched) rather than O(cardinality) — and so the number that
+    /// says whether a level has row-space locality at all: 1.0 for a clustering, 96.8 for a
+    /// scattered predicate (`design/artifact-serving-at-scale.md` §5).
     ///
     /// Holes and artifacts whose membership projects to nothing are not counted: a retired slot is
     /// not an artifact, and counting it would keep an emptied level looking populous and make its
     /// mean locality look better than it is.
     ///
-    /// `blocks` is Roaring **containers touched**, which is the measured cost model — bitmap
-    /// operations cost O(containers touched) rather than O(cardinality) — and so the number that
-    /// says whether a level has row-space locality at all.
+    /// **Separate from [`Self::shape`], which is the same walk plus the disjointness observation.**
+    /// This one is reported at every form build, so it may not allocate a second copy of the level;
+    /// that one runs once per fold, where it can.
+    pub fn blocks_per_artifact(&self) -> f64 {
+        let mut artifacts = 0u64;
+        let mut blocks = 0u64;
+        for ordinal in 0..self.len() as u32 {
+            let Some(rows) = self.get(ordinal) else {
+                continue;
+            };
+            if rows.is_empty() {
+                continue;
+            }
+            artifacts += 1;
+            blocks += rows.statistics().n_containers as u64;
+        }
+        if artifacts == 0 {
+            0.0
+        } else {
+            blocks as f64 / artifacts as f64
+        }
+    }
+
+    /// **The shape the automatic layout pick reads** — [`Self::blocks_per_artifact`] with the
+    /// artifact count and the disjointness observation beside it.
+    ///
+    /// **Called once per level per fold**, which is what makes the running union affordable:
+    /// whether the memberships are disjoint decides the label/list split and is a property of the
+    /// data rather than of the declaration, so there is no cheaper way to learn it than to look.
+    /// The union stops being kept the moment an overlap is found.
     pub fn shape(&self) -> crate::layout::LevelShape {
         let mut artifacts = 0u64;
         let mut blocks = 0u64;
@@ -1359,7 +1391,7 @@ impl ArtifactProjections {
             everywhere = rows.index().everywhere(),
             adopted = from_prefix,
             layout = ?rows.layout(),
-            blocks_per_artifact = rows.membership().shape().blocks_per_artifact,
+            blocks_per_artifact = rows.membership().blocks_per_artifact(),
             "a level's row form and tile index are built"
         );
         self.builds
