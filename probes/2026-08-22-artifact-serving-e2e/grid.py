@@ -65,11 +65,14 @@ def main() -> None:
             for layer in args.layers:
                 for vp in C.viewports():
                     samples = []
+                    server_us: list[int] = []
+                    stream_us: list[int] = []
+                    serialise_ns: list[int] = []
                     cold = None
                     served = 0
                     body = 0
                     for i in range(args.iterations + 1):
-                        seconds, body, artifacts, _trailer = C.viewport_request(
+                        seconds, body, artifacts, trailer = C.viewport_request(
                             server, token, vp, [layer], k=args.k
                         )
                         served = len(artifacts)
@@ -77,6 +80,9 @@ def main() -> None:
                             cold = seconds
                         else:
                             samples.append(seconds)
+                            server_us.append(trailer.get("server_us") or 0)
+                            stream_us.append(trailer.get("stream_us") or 0)
+                            serialise_ns.append(trailer.get("arrow_serialise_ns") or 0)
                     rows.append({
                         "principal": principal,
                         "principal_terms": spec["terms"],
@@ -94,12 +100,18 @@ def main() -> None:
                         "min_ms": round(min(samples) * 1000, 3),
                         "max_ms": round(max(samples) * 1000, 3),
                         "iterations": len(samples),
+                        # The server's own decomposition of the figure above.
+                        "server_p50_ms": round(statistics.median(server_us) / 1000, 3),
+                        "stream_p50_ms": round(statistics.median(stream_us) / 1000, 3),
+                        "serialise_p50_ms": round(statistics.median(serialise_ns) / 1e6, 3),
                         "rss_bytes": server.rss_bytes(),
                     })
                     print(
                         f"{layer:38s} {principal:>12s} {vp.name:>8s}  "
                         f"cold {cold * 1000:8.1f}  p50 {rows[-1]['p50_ms']:8.1f}  "
-                        f"p99 {rows[-1]['p99_ms']:8.1f}  n={served}"
+                        f"p99 {rows[-1]['p99_ms']:8.1f}  "
+                        f"srv {rows[-1]['server_p50_ms']:8.1f}  "
+                        f"enc {rows[-1]['serialise_p50_ms']:6.1f}  n={served}"
                     )
         final_rss = server.rss_bytes()
         status = server.status()

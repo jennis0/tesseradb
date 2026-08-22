@@ -60,6 +60,9 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
+# `artifact_campaign_load` encodes `auth_data` the way a client does — the same version
+# `tessera-server` decodes it with.
+base64 = "0.22"
 # `artifact_serving_scale` prices the serving loop over the pool the engine already uses:
 # the shipped loop is sequential and the machine has twelve cores, so the constant factor is
 # measured before anything structural is proposed.

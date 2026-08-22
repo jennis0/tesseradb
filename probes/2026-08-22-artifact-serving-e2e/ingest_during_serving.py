@@ -105,7 +105,9 @@ def main() -> None:
                 step += 1
                 writing = ingesting.is_set()
                 try:
-                    seconds, _b, _a, _t = C.viewport_request(server, token, vp, [args.layer])
+                    seconds, _b, _a, _t = C.viewport_request(
+                            server, token, vp, [args.layer], decode=False
+                        )
                     with lock:
                         (loaded if writing else quiet).append(seconds)
                 except Exception as exc:

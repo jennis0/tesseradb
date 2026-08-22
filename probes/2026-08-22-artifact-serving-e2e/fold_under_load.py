@@ -115,7 +115,9 @@ def main() -> None:
                 step += 1
                 at = time.monotonic() - t0
                 try:
-                    seconds, _b, _a, _t = C.viewport_request(server, token, vp, [args.layer])
+                    seconds, _b, _a, _t = C.viewport_request(
+                            server, token, vp, [args.layer], decode=False
+                        )
                     with lock:
                         samples.append((at, seconds))
                 except Exception as exc:

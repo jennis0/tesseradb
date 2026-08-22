@@ -22,9 +22,36 @@ SEED = 20_260_822
 TERMS_PER_LEVEL = 65_536
 
 
-def assemble_config(fixture: Path) -> Path:
+#: The design-ceiling layer: an attribute predicate over `weight`.
+#:
+#: **This is how the campaign reaches 10⁷ artifacts, and it is not a trick.** The generator scales
+#: every closed-form arm at one artifact per hundred points, so 10⁷ artifacts would want 10⁹ points
+#: and that tier does not fit on this box (the README's disk arithmetic). `weight` is a `u32` drawn
+#: from a keyed mix, so at 10⁷ rows it carries very nearly 10⁷ distinct values — and an attribute
+#: layer mints one artifact per distinct value. One layer, ten million artifacts, over a corpus a
+#: hundred times smaller than the one that would otherwise be needed.
+#:
+#: It has **no census**: nothing in `tessera-corpus` states this relation, so the ceiling probe
+#: reports latency and residency and claims nothing about correctness. That is why it is a separate
+#: build rather than a sixth layer on the tier bundles — a layer with no oracle should not sit
+#: beside five that have one.
+CEILING_LAYER_TOML = """
+# The design-ceiling probe (campaign README §7): an attribute predicate over a keyed `u32`, which
+# at 10^7 rows has very nearly 10^7 distinct values and therefore very nearly 10^7 artifacts.
+[[layer]]
+name                      = "campaign/ceiling"
+views                     = ["s0"]
+membership                = { attribute = "weight" }
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+"""
+
+
+def assemble_config(fixture: Path, ceiling: bool = False) -> Path:
     """The campaign's declaration: the generator's own, plus the spatial layer whose boxes
-    `artifact_campaign_fixture` authored.
+    `artifact_campaign_fixture` authored, and optionally the design-ceiling layer.
 
     Appended rather than rewritten — the generator's five `[[layer]]` blocks are the fixture, and
     the sixth exists only because the spatial arm's roster carries prefixes and no geometry.
@@ -32,7 +59,7 @@ def assemble_config(fixture: Path) -> Path:
     base = (fixture / "corpus-config.toml").read_text()
     extra = (fixture / "boundary-layer.toml").read_text()
     out = fixture / "campaign-config.toml"
-    out.write_text(base + "\n" + extra)
+    out.write_text(base + "\n" + extra + (CEILING_LAYER_TOML if ceiling else ""))
     return out
 
 
@@ -43,6 +70,11 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--terms-per-level", type=int, default=TERMS_PER_LEVEL)
     ap.add_argument("--keep-inputs", action="store_true")
+    ap.add_argument(
+        "--ceiling",
+        action="store_true",
+        help="add the design-ceiling layer — an attribute predicate over `weight`, ~10^7 artifacts",
+    )
     ap.add_argument(
         "--no-measure",
         action="store_true",
@@ -82,7 +114,7 @@ def main() -> None:
     report["fixture"] = json.loads((work / "fixture" / "fixture.json").read_text())
     report["fixture"].pop("grants", None)  # the grants live in their own file; they are large
 
-    assemble_config(work / "fixture")
+    assemble_config(work / "fixture", ceiling=args.ceiling)
     C.require_disk(work)
     ports = (C.free_port(), C.free_port(), C.free_port())
     C.write_deployment(work, ports)

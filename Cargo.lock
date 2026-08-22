@@ -2395,6 +2395,7 @@ name = "tessera-bench"
 version = "0.1.0"
 dependencies = [
  "arrow",
+ "base64",
  "clap",
  "croaring",
  "libc",

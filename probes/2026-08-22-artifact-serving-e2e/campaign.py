@@ -257,6 +257,24 @@ class Server:
         except (FileNotFoundError, ProcessLookupError, IndexError):
             return 0
 
+    def cpu_seconds(self) -> float:
+        """The server's cumulative user + system CPU, from `/proc`.
+
+        **This is what separates core-bound from lock-bound**, and nothing else in this harness
+        can. A throughput that stops rising with concurrency has two very different causes: every
+        core already busy, or one request in service at a time. CPU-seconds per request tells them
+        apart — near the core count means the first, near one means the second.
+        """
+        if self.proc is None:
+            return 0.0
+        try:
+            with open(f"/proc/{self.proc.pid}/stat") as f:
+                fields = f.read().rsplit(") ", 1)[1].split()
+            ticks = os.sysconf("SC_CLK_TCK")
+            return (int(fields[11]) + int(fields[12])) / ticks
+        except (FileNotFoundError, ProcessLookupError, IndexError, ValueError):
+            return 0.0
+
     def status(self) -> dict:
         r = requests.get(
             f"{self.control_base}/control/status",
@@ -335,12 +353,22 @@ def viewport_request(
     k: int = 0,
     artifact_budget: int | None = None,
     timeout: float = 900.0,
+    decode: bool = True,
 ) -> tuple[float, int, list, dict]:
     """One `/v1/viewport`. Returns `(seconds, body_bytes, artifacts, trailer)`.
 
     `k = 0` asks for no points: the campaign measures the **artifact** channel, and a wide viewport
     that also gathered a million points would report the gather's cost as the artifact route's.
     Where the point channel is wanted it is asked for explicitly.
+
+    **`decode = False` on every load arm, and that is a correctness requirement of the
+    measurement.** `decode_frames` builds one Python `Artifact` tuple per served artifact; a
+    whole-map response at the 10⁷ tier carries a hundred thousand of them in an eleven-megabyte
+    body, and under the GIL a hundred and twenty-eight decoding threads are a harness bottleneck
+    long before the server is one. The first concurrency sweep of this campaign measured exactly
+    that — 4.5 requests a second with 1.6 of twelve cores busy on the server — and the numbers it
+    produced were the driver's, not the engine's. Correctness arms decode, because they must; load
+    arms read the body, time it, and throw it away.
     """
     body = {"view": "s0", "zoom": vp.zoom, "bbox": vp.bbox, "k": k}
     if layers is not None:
@@ -358,7 +386,17 @@ def viewport_request(
     elapsed = time.monotonic() - started
     if r.status_code != 200:
         raise RuntimeError(f"/v1/viewport {r.status_code}: {raw[:500]!r}")
+    if not decode:
+        return elapsed, len(raw), [], {"server_us": int(r.headers.get("x-tessera-server-us", 0) or 0)}
     _tiles, _points, _sub, artifacts, trailer = decode_frames(raw)
+    # The server's own two clocks, so a client-side figure can be decomposed rather than argued
+    # about: `x-tessera-server-us` is post-admission to first-flush-ready, the trailer's
+    # `stream_us` is the whole stream, and `arrow_serialise_ns` is what the encoding cost inside
+    # it. At a hundred thousand artifacts the body is eleven megabytes, and a latency that did not
+    # say how much of itself was encoding would not be comparable with a probe that encoded
+    # nothing.
+    trailer = dict(trailer or {})
+    trailer["server_us"] = int(r.headers.get("x-tessera-server-us", 0) or 0)
     return elapsed, len(raw), artifacts or [], trailer
 
 
