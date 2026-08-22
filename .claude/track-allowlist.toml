@@ -19,9 +19,14 @@
 # decisions and the normative designs change only through the owner; scripts are the checks
 # themselves. `manifest.rs` stays frozen this wave — the route-recording work that will need it
 # is not yet dispatched, and unfreezing happens with that dispatch, recorded here.
+# `crates/tessera-store/src/manifest.rs` came OFF the freeze 2026-08-22 (controller): the serving
+# track's durable containment coordinate is a manifest field, and the freeze's own precedent —
+# tessera-spatial coming off when the keyword family needed it — says a stale freeze is worse than
+# none. Note `check-track-allowlist.sh --selftest` predates this campaign's tracks and fails on 20
+# of 38 cases independently of this change; the script is itself frozen, so its selftest is stale
+# by design until the owner sweeps it.
 [frozen]
 paths = [
-  "crates/tessera-store/src/manifest.rs",
   "crates/tessera-authz/*",
   "crates/tessera-wire/*",
   "crates/tessera-plugin/*",
