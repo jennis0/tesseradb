@@ -32,7 +32,7 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -46,6 +46,7 @@ fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 
@@ -256,7 +257,9 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
 fn a_layer_declaring_no_derived_content_serves_none() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(declaration("clusters/a", &[])).unwrap();
+    engine
+        .register_layer(declaration("clusters/a", &[]))
+        .unwrap();
     publish(&engine, "clusters/a", &fx, 0..300);
 
     let served = artifacts_of(&engine, &full_coverage_credential());
@@ -351,11 +354,7 @@ fn label_layer(name: &str, requires_all_members: bool) -> LayerDeclaration {
     d
 }
 
-fn content(
-    text: &str,
-    fx: &Fixture,
-    generated_from: impl Iterator<Item = u64>,
-) -> IncomingContent {
+fn content(text: &str, fx: &Fixture, generated_from: impl Iterator<Item = u64>) -> IncomingContent {
     IncomingContent::new(vec![text.to_string()], fx.members(generated_from))
 }
 
@@ -366,7 +365,9 @@ fn content(
 fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(label_layer("topics/a", true)).unwrap();
+    engine
+        .register_layer(label_layer("topics/a", true))
+        .unwrap();
 
     // Generated from a sample holding documents the narrow principal cannot see: the fixture gives
     // term 1 to every third source id, so 0..30 holds twenty it cannot.
@@ -400,7 +401,9 @@ fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
 fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(label_layer("topics/a", true)).unwrap();
+    engine
+        .register_layer(label_layer("topics/a", true))
+        .unwrap();
 
     let narrow_sample: Vec<u64> = (0..30)
         .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
@@ -535,7 +538,9 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
     let fx = fixture();
     {
         let engine = fx.open();
-        engine.register_layer(label_layer("topics/a", true)).unwrap();
+        engine
+            .register_layer(label_layer("topics/a", true))
+            .unwrap();
         engine
             .publish_artifacts(
                 "topics/a".into(),
@@ -588,7 +593,9 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
 fn content_that_disagrees_with_the_declaration_is_refused() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(label_layer("topics/a", true)).unwrap();
+    engine
+        .register_layer(label_layer("topics/a", true))
+        .unwrap();
     engine
         .register_layer(declaration("clusters/plain", &[]))
         .unwrap();

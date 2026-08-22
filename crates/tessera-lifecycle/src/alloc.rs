@@ -517,7 +517,7 @@ mod tests {
                 membership: MembershipSource::Enumerated,
                 value_set: Default::default(),
                 visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+                artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
                 require_member_visibility: None,
                 hierarchy: Hierarchy {
                     kind: HierarchyKind::Flat,
@@ -527,6 +527,7 @@ mod tests {
                 depends_on: Vec::new(),
                 levels: Vec::new(),
                 layout: None,
+                shape: None,
             }),
             layer_entity: EntityId::new(entity),
             runs: vec![ReservedRuns::from_runs(vec![EntityRun {
@@ -544,10 +545,7 @@ mod tests {
         assert_eq!(low_water_from(&[]), ROWLESS_CEILING);
 
         let a = layer_create(ROWLESS_CEILING - 1, ROWLESS_CEILING - RESERVED_BLOCK);
-        let b = layer_create(
-            ROWLESS_CEILING - 2,
-            ROWLESS_CEILING - 3 * RESERVED_BLOCK,
-        );
+        let b = layer_create(ROWLESS_CEILING - 2, ROWLESS_CEILING - 3 * RESERVED_BLOCK);
         assert_eq!(
             low_water_from(&[a.clone(), b.clone()]),
             ROWLESS_CEILING - 3 * RESERVED_BLOCK,
@@ -555,7 +553,10 @@ mod tests {
         );
         // Order-independent, like its upward mirror: a later, higher record must not pull the mark
         // back up.
-        assert_eq!(low_water_from(&[b, a.clone()]), ROWLESS_CEILING - 3 * RESERVED_BLOCK);
+        assert_eq!(
+            low_water_from(&[b, a.clone()]),
+            ROWLESS_CEILING - 3 * RESERVED_BLOCK
+        );
 
         // A drop does not raise it. The name is tombstoned and the ids stay spent (decision 0072
         // is settled and unbuilt), so raising the mark would reissue exactly the ids whose

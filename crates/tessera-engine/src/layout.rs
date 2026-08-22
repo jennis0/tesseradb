@@ -25,7 +25,7 @@
 //! **low end of the measured scattered band** rather than in the middle of the unmeasured gap, and
 //! every flip it makes is inside territory a measurement covers.
 
-use tessera_types::layer::{MembershipSource, ServingLayout};
+use tessera_types::layer::{LayerDeclaration, MembershipSource, ServingLayout};
 
 /// ⊘ **Provisional: blocks per artifact at or above which a level is served row-major.**
 ///
@@ -99,16 +99,23 @@ impl LevelShape {
 /// memberships are disjoint is checked where the column is built, and a double claim declines the
 /// column and leaves the level artifact-major with a loud trace — so the fallback is one decision at
 /// one place rather than a rule this function and the builder would each have to hold.
-pub fn choose(
-    source: &MembershipSource,
-    pin: Option<ServingLayout>,
-    shape: LevelShape,
-) -> ServingLayout {
-    // ⊘ `SpatialRanges` is specified and unbuilt, so a shape is served the one form it has.
-    if matches!(source, MembershipSource::Spatial) {
-        return ServingLayout::ArtifactMajor;
+pub fn choose(declaration: &LayerDeclaration, shape: LevelShape) -> ServingLayout {
+    // **A predicate's form follows from its membership and is never re-derived.** A shape's
+    // members are row ranges recomputed per request; a single-valued attribute's members *are* the
+    // column, one label per row. Neither has a second form to be chosen between, which is why
+    // `LayerDeclaration::validate` refuses a pin on either and why the fold's re-evaluation reaches
+    // here and leaves both alone.
+    //
+    // ⊘ A spatial layer that declares no `shape` has no ranges to serve and holds no artifacts, so
+    // it falls through to the ordinary pick and lands artifact-major over an empty level.
+    match declaration.membership {
+        MembershipSource::Spatial if declaration.shape.is_some() => {
+            return ServingLayout::SpatialRanges
+        }
+        MembershipSource::Attribute(_) => return ServingLayout::RowMajorLabel,
+        MembershipSource::Spatial | MembershipSource::Enumerated => {}
     }
-    if let Some(pinned) = pin {
+    if let Some(pinned) = declaration.layout {
         return pinned;
     }
     let row_major = shape.artifacts >= ROW_MAJOR_MIN_ARTIFACTS
@@ -129,6 +136,10 @@ pub fn choose(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tessera_types::layer::{
+        ArtifactVisibility, ContentDeclaration, Hierarchy, HierarchyKind, ShapeDeclaration,
+        ShapeKind,
+    };
 
     fn shape(artifacts: u64, blocks: f64, partitions: bool) -> LevelShape {
         LevelShape {
@@ -138,17 +149,39 @@ mod tests {
         }
     }
 
+    fn declaration(membership: MembershipSource, pin: Option<ServingLayout>) -> LayerDeclaration {
+        LayerDeclaration {
+            name: "clusters/x".into(),
+            title: None,
+            views: vec!["s0".into()],
+            membership,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: ArtifactVisibility::inherited(),
+            require_member_visibility: None,
+            hierarchy: Hierarchy {
+                kind: HierarchyKind::Flat,
+                prune_children: false,
+            },
+            content: ContentDeclaration::default(),
+            depends_on: Vec::new(),
+            levels: Vec::new(),
+            layout: pin,
+            shape: None,
+        }
+    }
+
     /// **The pick is conservative in the direction of what is built today.** The clustered and
     /// regional bands the campaign measured — 1.0 and 1.0–1.6 blocks per artifact — stay
     /// artifact-major at every population, and so does the whole unmeasured gap below the
     /// threshold.
     #[test]
     fn locality_keeps_a_clustered_or_regional_level_artifact_major() {
-        let enumerated = MembershipSource::Enumerated;
+        let enumerated = declaration(MembershipSource::Enumerated, None);
         for blocks in [1.0, 1.6, 2.0, 8.0, 9.9] {
             for artifacts in [10, 1_000, 10_000_000] {
                 assert_eq!(
-                    choose(&enumerated, None, shape(artifacts, blocks, true)),
+                    choose(&enumerated, shape(artifacts, blocks, true)),
                     ServingLayout::ArtifactMajor,
                     "{blocks} blocks per artifact over {artifacts} artifacts"
                 );
@@ -160,18 +193,18 @@ mod tests {
     /// from whether the memberships are disjoint rather than from any number.
     #[test]
     fn a_scattered_level_flips_and_the_split_follows_the_membership() {
-        let enumerated = MembershipSource::Enumerated;
+        let enumerated = declaration(MembershipSource::Enumerated, None);
         assert_eq!(
-            choose(&enumerated, None, shape(10_000, 96.8, true)),
+            choose(&enumerated, shape(10_000, 96.8, true)),
             ServingLayout::RowMajorLabel
         );
         assert_eq!(
-            choose(&enumerated, None, shape(10_000, 96.8, false)),
+            choose(&enumerated, shape(10_000, 96.8, false)),
             ServingLayout::RowMajorList
         );
         // The count tiebreak: the same locality under a thousand artifacts buys nothing measurable.
         assert_eq!(
-            choose(&enumerated, None, shape(999, 96.8, true)),
+            choose(&enumerated, shape(999, 96.8, true)),
             ServingLayout::ArtifactMajor
         );
     }
@@ -180,38 +213,58 @@ mod tests {
     /// rule would have left alone in either direction.
     #[test]
     fn a_pin_is_read_and_never_re_derived() {
-        let attribute = MembershipSource::Attribute("severity".into());
         for observed in [shape(1, 1.0, true), shape(10_000_000, 96.8, false)] {
-            assert_eq!(
-                choose(&attribute, Some(ServingLayout::RowMajorLabel), observed),
-                ServingLayout::RowMajorLabel
-            );
-            assert_eq!(
-                choose(&attribute, Some(ServingLayout::ArtifactMajor), observed),
-                ServingLayout::ArtifactMajor
-            );
-            assert_eq!(
-                choose(&attribute, Some(ServingLayout::RowMajorList), observed),
-                ServingLayout::RowMajorList
-            );
+            for pinned in [
+                ServingLayout::RowMajorLabel,
+                ServingLayout::ArtifactMajor,
+                ServingLayout::RowMajorList,
+            ] {
+                assert_eq!(
+                    choose(
+                        &declaration(MembershipSource::Enumerated, Some(pinned)),
+                        observed
+                    ),
+                    pinned
+                );
+            }
         }
     }
 
-    /// A shape has no per-row source, so it has one layout whatever anyone declares — and a pin that
-    /// says otherwise never validated.
+    /// **A predicate level has exactly one layout**, whatever anyone declares and whatever the
+    /// observations say — and a pin that says otherwise never validated.
     #[test]
-    fn a_spatial_level_has_one_layout() {
-        let spatial = MembershipSource::Spatial;
+    fn a_predicate_level_has_one_layout() {
+        let mut spatial = declaration(MembershipSource::Spatial, None);
+        spatial.shape = Some(ShapeDeclaration {
+            kind: ShapeKind::Bbox,
+            depth: 6,
+        });
+        let attribute = declaration(MembershipSource::Attribute("severity".into()), None);
+        for observed in [shape(1, 1.0, true), shape(10_000_000, 96.8, false)] {
+            assert_eq!(choose(&spatial, observed), ServingLayout::SpatialRanges);
+            assert_eq!(choose(&attribute, observed), ServingLayout::RowMajorLabel);
+            for pin in [
+                ServingLayout::ArtifactMajor,
+                ServingLayout::RowMajorLabel,
+                ServingLayout::RowMajorList,
+            ] {
+                let mut pinned = spatial.clone();
+                pinned.layout = Some(pin);
+                assert_eq!(choose(&pinned, observed), ServingLayout::SpatialRanges);
+                let mut pinned = attribute.clone();
+                pinned.layout = Some(pin);
+                assert_eq!(choose(&pinned, observed), ServingLayout::RowMajorLabel);
+            }
+        }
+    }
+
+    /// ⊘ A spatial layer that declares no shape holds no artifacts, so it takes the ordinary pick
+    /// over an empty level rather than claiming a form it has nothing to serve in.
+    #[test]
+    fn a_spatial_level_with_no_shape_is_artifact_major() {
+        let spatial = declaration(MembershipSource::Spatial, None);
         assert_eq!(
-            choose(&spatial, None, shape(10_000_000, 96.8, true)),
-            ServingLayout::ArtifactMajor
-        );
-        assert_eq!(
-            choose(
-                &spatial,
-                Some(ServingLayout::RowMajorLabel),
-                shape(10, 1.0, true)
-            ),
+            choose(&spatial, LevelShape::empty()),
             ServingLayout::ArtifactMajor
         );
     }
@@ -221,7 +274,10 @@ mod tests {
     #[test]
     fn an_empty_level_is_artifact_major() {
         assert_eq!(
-            choose(&MembershipSource::Enumerated, None, LevelShape::empty()),
+            choose(
+                &declaration(MembershipSource::Enumerated, None),
+                LevelShape::empty()
+            ),
             ServingLayout::ArtifactMajor
         );
     }

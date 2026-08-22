@@ -200,7 +200,10 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
         .expect("the fixture config parses");
     write_clusters(&tmp.path().join("clusters.parquet"));
     topics(&tmp.path().join("topics.parquet"));
-    write_members(&tmp.path().join("clusters_members.parquet"), &cluster_members());
+    write_members(
+        &tmp.path().join("clusters_members.parquet"),
+        &cluster_members(),
+    );
     write_members(&tmp.path().join("topics_members.parquet"), &topic_members());
 
     let args = BuildArgs {
@@ -286,7 +289,9 @@ fn a_built_layer_serves_with_masked_counts_and_contained_content() {
     // description — the one generated from exactly what this principal can see.
     let narrow = artifacts_of(&engine, &subset_credential());
     let narrow_cluster = of_layer(&narrow, CLUSTERS);
-    let visible = MEMBERS.filter(|m| terms_of(*m).contains(&SUBSET_TERM)).count() as u64;
+    let visible = MEMBERS
+        .filter(|m| terms_of(*m).contains(&SUBSET_TERM))
+        .count() as u64;
     assert_eq!(narrow_cluster[0].masked_count, visible);
     assert_ne!(narrow_cluster[0].masked_count, cluster[0].masked_count);
     assert_eq!(
@@ -305,14 +310,20 @@ fn a_built_edge_withholds_its_label_when_the_cluster_is_suppressed() {
     let label_id = of_layer(&served, LABELS)[0].tessera_id;
     let cluster_id = of_layer(&served, CLUSTERS)[0].tessera_id;
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    assert!(engine.artifact(&session, label_id, None, "s0").unwrap().is_some());
+    assert!(engine
+        .artifact(&session, label_id, None, "s0")
+        .unwrap()
+        .is_some());
 
     engine
         .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Suppress)
         .unwrap();
 
     let after = artifacts_of(&engine, &full_coverage_credential());
-    assert!(of_layer(&after, LABELS).is_empty(), "the label goes with its cluster");
+    assert!(
+        of_layer(&after, LABELS).is_empty(),
+        "the label goes with its cluster"
+    );
     assert!(engine
         .artifact(&session, label_id, None, "s0")
         .unwrap()
@@ -349,10 +360,7 @@ fn a_built_bundle_takes_an_online_publication_beside_its_own() {
     // Reopened: the built cluster, the built label and the online cluster all serve.
     let engine = fx.open();
     let served = artifacts_of(&engine, &full_coverage_credential());
-    let keys: Vec<&str> = served
-        .iter()
-        .filter_map(|a| a.key.as_deref())
-        .collect();
+    let keys: Vec<&str> = served.iter().filter_map(|a| a.key.as_deref()).collect();
     for expected in ["c-0000", "l-0000", "c-online"] {
         assert!(keys.contains(&expected), "{expected} missing from {keys:?}");
     }
@@ -400,6 +408,7 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
             depends_on: Vec::new(),
             levels: Vec::new(),
             layout: None,
+            shape: None,
         })
         .expect("a layer registers against a bundle that already carries some");
     let online = artifact_entity(&engine, id);
@@ -417,7 +426,10 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
         .map(|l| l.declaration.name)
         .collect();
     for expected in [CLUSTERS, LABELS, "clusters/online"] {
-        assert!(names.iter().any(|n| n == expected), "{expected} missing from {names:?}");
+        assert!(
+            names.iter().any(|n| n == expected),
+            "{expected} missing from {names:?}"
+        );
     }
 }
 

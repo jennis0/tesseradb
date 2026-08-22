@@ -56,6 +56,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 
@@ -154,7 +155,11 @@ fn wait_for_publication(fx: &Fixture, engine: &Engine, files: usize) {
 }
 
 /// Publish one artifact over `sources` and wait for it to be durable in an extent.
-fn publish(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) -> tessera_types::TesseraId {
+fn publish(
+    fx: &Fixture,
+    engine: &Engine,
+    sources: std::ops::Range<u64>,
+) -> tessera_types::TesseraId {
     engine.register_layer(declaration("clusters/a")).unwrap();
     let ids = engine
         .publish_artifacts(
@@ -176,7 +181,10 @@ fn grow(fx: &Fixture, engine: &Engine, sources: std::ops::Range<u64>) {
         .grow_memberships(
             "clusters/a".into(),
             0,
-            vec![IncomingGrowth::from_entities("c0".into(), fx.members(sources))],
+            vec![IncomingGrowth::from_entities(
+                "c0".into(),
+                fx.members(sources),
+            )],
         )
         .expect("points joining an artifact that exists is an ordinary write");
 }
@@ -242,7 +250,12 @@ fn remove_the_whole_log(fx: &Fixture) {
 /// The log's surviving members, oldest first — `wal-000000.log`, `wal-000001.log`, …
 fn wal_members(fx: &Fixture) -> Vec<String> {
     let dir = fx.wal.parent().expect("the log has a directory");
-    let stem = fx.wal.file_stem().expect("the log has a stem").to_string_lossy().to_string();
+    let stem = fx
+        .wal
+        .file_stem()
+        .expect("the log has a stem")
+        .to_string_lossy()
+        .to_string();
     let mut found: Vec<String> = std::fs::read_dir(dir)
         .expect("the log's directory exists")
         .flatten()
@@ -574,12 +587,7 @@ fn open_declaration(name: &str) -> LayerDeclaration {
 /// One ingest batch of one point, carrying the artifacts that point belongs to — what
 /// `/control/ingest`'s membership column decodes to, taken here at the engine boundary so the
 /// restart is a real reopen of a real log.
-fn ingest_naming(
-    engine: &Engine,
-    batch: &str,
-    layer: &str,
-    key: &str,
-) -> u64 {
+fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
     let descriptors = vec![b"0".to_vec()];
     let mut hash = [0u8; 32];
     for (slot, byte) in hash.iter_mut().zip(batch.as_bytes()) {
@@ -624,14 +632,19 @@ fn an_artifact_a_batch_minted_survives_a_restart() {
     let fx = fixture();
     {
         let engine = fx.open();
-        engine.register_layer(open_declaration("clusters/a")).unwrap();
+        engine
+            .register_layer(open_declaration("clusters/a"))
+            .unwrap();
         assert_eq!(
             ingest_naming(&engine, "b1", "clusters/a", "made-by-a-point"),
             1,
             "the key named no artifact, so it created one"
         );
         // A second batch under the same key creates nothing and joins what the first made.
-        assert_eq!(ingest_naming(&engine, "b2", "clusters/a", "made-by-a-point"), 0);
+        assert_eq!(
+            ingest_naming(&engine, "b2", "clusters/a", "made-by-a-point"),
+            0
+        );
         assert_eq!(engine.published_artifacts(), 1, "one key, one artifact");
         // Deliberately **not** folded: the record is in the log and nowhere else, which is the
         // state the restart below has to recover from.
@@ -666,7 +679,9 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
     let fx = fixture();
     {
         let engine = fx.open();
-        engine.register_layer(open_declaration("clusters/a")).unwrap();
+        engine
+            .register_layer(open_declaration("clusters/a"))
+            .unwrap();
         assert_eq!(ingest_naming(&engine, "b1", "clusters/a", "c9"), 1);
         flush(&engine);
         fold(&engine);
@@ -675,7 +690,11 @@ fn a_minted_artifact_survives_the_fold_that_rewrites_its_level() {
 
     let engine = fx.open();
     let artifacts = artifacts_of(&engine);
-    assert_eq!(artifacts.len(), 1, "the fold carried it into the new prefix");
+    assert_eq!(
+        artifacts.len(),
+        1,
+        "the fold carried it into the new prefix"
+    );
     assert_eq!(artifacts[0].key.as_deref(), Some("c9"));
     assert_eq!(artifacts[0].masked_count, 1);
 }
@@ -717,7 +736,10 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
         .expect_err("a closed layer's roster is its artifacts")
         .to_string();
     assert!(refused.contains("never-declared"), "{refused}");
-    assert!(refused.contains("value_set"), "and says what would admit it: {refused}");
+    assert!(
+        refused.contains("value_set"),
+        "and says what would admit it: {refused}"
+    );
     assert_eq!(
         engine.allocator_high_water(),
         before,

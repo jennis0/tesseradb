@@ -1790,7 +1790,9 @@ mod tests {
                 membership: MembershipSource::Spatial,
                 value_set: Default::default(),
                 visibility: Some("public".into()),
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::carried("visibility"),
+                artifact_visibility: tessera_types::layer::ArtifactVisibility::carried(
+                    "visibility",
+                ),
                 require_member_visibility: Some(ExistenceCriterion::Count(25)),
                 hierarchy: Hierarchy {
                     kind: HierarchyKind::Stacked,
@@ -1798,7 +1800,12 @@ mod tests {
                 },
                 content: ContentDeclaration {
                     computed: vec!["centroid".into()],
-                    supplied: vec![SuppliedContent { name: "polygon".into(), ty: "polygon".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::Inherited }],
+                    supplied: vec![SuppliedContent {
+                        name: "polygon".into(),
+                        ty: "polygon".into(),
+                        require_member_visibility:
+                            tessera_types::layer::SuppliedRequirement::Inherited,
+                    }],
                     withdraw_on_member_deletion: true,
                 },
                 depends_on: vec!["clusters/hdbscan-2026-08".into()],
@@ -1815,6 +1822,7 @@ mod tests {
                     },
                 ],
                 layout: None,
+                shape: None,
             }),
             layer_entity: EntityId::new(4_294_901_759),
             runs: vec![
@@ -1900,7 +1908,10 @@ mod tests {
                     // attachment, which is where the two can be told apart, and with a **level
                     // that is not this artifact's own**: a cross-level parent is the shape whose
                     // two words could be read in either order without either looking wrong.
-                    parent: Some(ParentRef { level: 2, ordinal: 65_535 }),
+                    parent: Some(ParentRef {
+                        level: 2,
+                        ordinal: 65_535,
+                    }),
                 },
             ],
         };

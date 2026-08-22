@@ -26,7 +26,9 @@ use std::path::Path;
 
 use serde::Serialize;
 use serde_json::json;
-use tessera_types::layer::{ExistenceCriterion, MemberDefault, MembershipSource, SuppliedRequirement};
+use tessera_types::layer::{
+    ExistenceCriterion, MemberDefault, MembershipSource, ShapeKind, SuppliedRequirement,
+};
 
 use crate::config::{Config, ValueSet};
 use crate::error::Result;
@@ -149,10 +151,7 @@ impl Disclosure {
             .iter()
             .map(|view| ViewDisclosure {
                 name: view.name.clone(),
-                labels_from: match (
-                    &view.point_visibility.field,
-                    &view.point_visibility.source,
-                ) {
+                labels_from: match (&view.point_visibility.field, &view.point_visibility.source) {
                     (_, Some(_)) => "relation",
                     (Some(_), None) => "field",
                     (None, None) => "default_only",
@@ -224,7 +223,21 @@ impl Disclosure {
                 depends_on: layer.depends_on.clone(),
                 membership: match &layer.membership {
                     MembershipSource::Enumerated => "enumerated".to_string(),
-                    MembershipSource::Spatial => "spatial".to_string(),
+                    // **The shape's depth is disclosed with the kind**, because it *is* the
+                    // membership: a box covered by depth-`d` tiles holds different points at a
+                    // different `d`, so a report naming the kind alone would say less than the
+                    // declaration does. ⊘ A spatial layer that declares no shape holds no
+                    // artifacts, and says so here rather than reading as one that does.
+                    MembershipSource::Spatial => match &layer.shape {
+                        Some(shape) => format!(
+                            "spatial:{}:depth={}",
+                            match shape.kind {
+                                ShapeKind::Bbox => "bbox",
+                            },
+                            shape.depth
+                        ),
+                        None => "spatial:no-shape".to_string(),
+                    },
                     MembershipSource::Attribute(field) => format!("attribute:{field}"),
                 },
                 content: ContentDisclosure {

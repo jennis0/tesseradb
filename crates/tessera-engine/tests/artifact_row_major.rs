@@ -95,6 +95,7 @@ fn declaration(
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout,
+        shape: None,
     }
 }
 

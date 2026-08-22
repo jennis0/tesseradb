@@ -1842,6 +1842,7 @@ mod tests {
             depends_on: Vec::new(),
             levels: Vec::new(),
             layout: None,
+            shape: None,
         }
     }
 

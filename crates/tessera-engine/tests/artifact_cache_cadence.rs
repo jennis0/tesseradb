@@ -55,6 +55,7 @@ fn declaration(name: &str, kind: HierarchyKind) -> LayerDeclaration {
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 

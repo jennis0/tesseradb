@@ -27,7 +27,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(2)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -41,6 +41,7 @@ fn declaration(name: &str) -> LayerDeclaration {
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 
@@ -76,9 +77,7 @@ impl Fixture {
     /// its members to.
     fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
         let map = source_to_new_map(&self.root, "v00000");
-        source_ids
-            .map(|s| EntityId::new(map[&s]))
-            .collect()
+        source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
 }
 
@@ -279,7 +278,10 @@ fn remove_the_whole_log(fx: &Fixture) {
     let dir = fx.wal.parent().expect("the log has a directory");
     let stem = fx.wal.file_stem().expect("the log has a stem").to_owned();
     let mut removed = 0usize;
-    for entry in std::fs::read_dir(dir).expect("the log's directory exists").flatten() {
+    for entry in std::fs::read_dir(dir)
+        .expect("the log's directory exists")
+        .flatten()
+    {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if name.starts_with(&format!("{}-", stem.to_string_lossy())) {
@@ -287,12 +289,20 @@ fn remove_the_whole_log(fx: &Fixture) {
             removed += 1;
         }
     }
-    assert!(removed > 0, "no log member was found to delete — the test would prove nothing");
+    assert!(
+        removed > 0,
+        "no log member was found to delete — the test would prove nothing"
+    );
 }
 
 /// Wait for the executor's drain close to publish the memberships, and return the extent files.
 fn published_extents(fx: &Fixture) -> Vec<std::path::PathBuf> {
-    let dir = fx.root.join("v00000").join("partitions").join("default").join("members");
+    let dir = fx
+        .root
+        .join("v00000")
+        .join("partitions")
+        .join("default")
+        .join("members");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
         let found: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
@@ -336,7 +346,11 @@ fn a_published_membership_survives_the_loss_of_the_whole_log() {
                 ],
             )
             .unwrap();
-        assert_eq!(published_extents(&fx).len(), 1, "one file per level per publication");
+        assert_eq!(
+            published_extents(&fx).len(),
+            1,
+            "one file per level per publication"
+        );
         ids
     };
 
@@ -370,23 +384,38 @@ fn a_later_publication_appends_an_extent_and_the_two_union_at_open() {
         let engine = fx.open();
         engine.register_layer(declaration("clusters/a")).unwrap();
         engine
-            .publish_artifacts("clusters/a".into(), 0, vec![artifact("c0", fx.members(0..40))])
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![artifact("c0", fx.members(0..40))],
+            )
             .unwrap();
         assert_eq!(published_extents(&fx).len(), 1);
 
         engine
-            .publish_artifacts("clusters/a".into(), 0, vec![artifact("c1", fx.members(40..90))])
+            .publish_artifacts(
+                "clusters/a".into(),
+                0,
+                vec![artifact("c1", fx.members(40..90))],
+            )
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while published_extents(&fx).len() < 2 {
-            assert!(std::time::Instant::now() < deadline, "the second extent never appeared");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the second extent never appeared"
+            );
             std::thread::yield_now();
         }
     }
 
     remove_the_whole_log(&fx);
     let engine = fx.open();
-    assert_eq!(engine.published_artifacts(), 2, "both extents were unioned at open");
+    assert_eq!(
+        engine.published_artifacts(),
+        2,
+        "both extents were unioned at open"
+    );
 }
 
 /// An artifact takes an entity precisely so `/control/changes` works on it unchanged — the same

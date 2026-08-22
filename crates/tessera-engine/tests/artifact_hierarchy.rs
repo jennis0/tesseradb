@@ -53,7 +53,7 @@ fn declaration(
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
@@ -67,6 +67,7 @@ fn declaration(
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 
@@ -128,10 +129,7 @@ fn artifacts_of(engine: &Engine, credential: &[u8], budget: Option<u32>) -> Vec<
 }
 
 fn keys(artifacts: &[ArtifactOut]) -> Vec<String> {
-    let mut names: Vec<String> = artifacts
-        .iter()
-        .filter_map(|a| a.key.clone())
-        .collect();
+    let mut names: Vec<String> = artifacts.iter().filter_map(|a| a.key.clone()).collect();
     names.sort();
     names
 }
@@ -189,7 +187,10 @@ fn under_a_proportional_criterion_a_passing_child_sits_beneath_a_failing_parent(
     // therefore has to come from the memberships being different sizes relative to what the
     // viewer can see, which is what the child's narrow, fully visible membership supplies.
     let parent_sources: Vec<u64> = (0..300).collect();
-    let child_sources: Vec<u64> = (0..300).filter(|s| terms_of(*s).contains(&SUBSET_TERM)).take(20).collect();
+    let child_sources: Vec<u64> = (0..300)
+        .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
+        .take(20)
+        .collect();
 
     let parent_visible = parent_sources
         .iter()
@@ -235,7 +236,12 @@ fn under_a_proportional_criterion_a_passing_child_sits_beneath_a_failing_parent(
         .publish_artifacts(
             "clusters/alone".into(),
             0,
-            vec![node(&fx, "parent-alone", None, parent_sources.iter().copied())],
+            vec![node(
+                &fx,
+                "parent-alone",
+                None,
+                parent_sources.iter().copied(),
+            )],
         )
         .unwrap();
 
@@ -329,10 +335,7 @@ fn two_budgets_agree_on_every_artifact_both_return() {
     for shallow in &cuts {
         for deep in &cuts {
             for a in shallow {
-                let Some(b) = deep
-                    .iter()
-                    .find(|other| other.tessera_id == a.tessera_id)
-                else {
+                let Some(b) = deep.iter().find(|other| other.tessera_id == a.tessera_id) else {
                     continue;
                 };
                 assert_eq!(
@@ -635,7 +638,9 @@ fn levelled_artifacts_of(
 fn a_budget_is_inert_on_a_tiered_layer() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
+    engine
+        .register_layer(tiered("admin/boundaries", 2))
+        .unwrap();
     engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -655,13 +660,23 @@ fn a_budget_is_inert_on_a_tiered_layer() {
         .unwrap();
 
     let credential = full_coverage_credential();
-    let whole = keys(&levelled_artifacts_of(&engine, &credential, None, "admin/boundaries"));
+    let whole = keys(&levelled_artifacts_of(
+        &engine,
+        &credential,
+        None,
+        "admin/boundaries",
+    ));
     assert_eq!(whole, vec!["country", "state-a", "state-b"]);
 
     // A budget of one would have climbed a tree to its root. Here there is nothing to climb: the
     // levels are the resolution, and the response is unchanged.
     assert_eq!(
-        keys(&levelled_artifacts_of(&engine, &credential, Some(1), "admin/boundaries")),
+        keys(&levelled_artifacts_of(
+            &engine,
+            &credential,
+            Some(1),
+            "admin/boundaries"
+        )),
         whole,
         "a budget has no depth to trade on a levelled layer, so it takes nothing"
     );
@@ -673,7 +688,9 @@ fn a_budget_is_inert_on_a_tiered_layer() {
 fn a_tiered_parents_count_is_its_own() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
+    engine
+        .register_layer(tiered("admin/boundaries", 2))
+        .unwrap();
     engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -712,7 +729,9 @@ fn a_tiered_parents_count_is_its_own() {
 fn a_tiered_edge_within_one_level_is_refused_at_publish() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
+    engine
+        .register_layer(tiered("admin/boundaries", 2))
+        .unwrap();
     let err = engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -739,7 +758,9 @@ fn a_tiered_edge_within_one_level_is_refused_at_publish() {
 fn a_served_artifact_names_its_parent_when_the_parent_is_also_served() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(tiered("admin/boundaries", 2)).unwrap();
+    engine
+        .register_layer(tiered("admin/boundaries", 2))
+        .unwrap();
     engine
         .publish_artifacts(
             "admin/boundaries".into(),
@@ -815,7 +836,12 @@ fn a_withheld_parent_is_named_no_differently_from_a_root() {
         .publish_artifacts(
             "admin/boundaries".into(),
             1,
-            vec![node(&fx, "state", Some("country"), child_sources.iter().copied())],
+            vec![node(
+                &fx,
+                "state",
+                Some("country"),
+                child_sources.iter().copied(),
+            )],
         )
         .unwrap();
 
@@ -900,7 +926,8 @@ fn a_levelled_layer_may_carry_one_key_at_two_levels() {
         )
         .expect("a level-1 artifact may name the level-0 artifact of the same key");
 
-    let served = levelled_artifacts_of(&engine, &full_coverage_credential(), None, "taxonomy/arxiv");
+    let served =
+        levelled_artifacts_of(&engine, &full_coverage_credential(), None, "taxonomy/arxiv");
     assert_eq!(served.len(), 2, "both levels are served");
     let child = served
         .iter()
@@ -910,7 +937,10 @@ fn a_levelled_layer_may_carry_one_key_at_two_levels() {
         .iter()
         .find(|a| a.tessera_id == child.parent_id.unwrap())
         .expect("and the parent is in the response");
-    assert_ne!(child.tessera_id, parent.tessera_id, "two artifacts, one name");
+    assert_ne!(
+        child.tessera_id, parent.tessera_id,
+        "two artifacts, one name"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

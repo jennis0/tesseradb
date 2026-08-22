@@ -9746,11 +9746,7 @@ impl Executor {
             let shape = self.live.with_artifacts(|store| {
                 crate::artifacts::MembershipRows::build(store.level(&layer, level), space).shape()
             });
-            let chosen = crate::layout::choose(
-                &registered.declaration.membership,
-                registered.declaration.layout,
-                shape,
-            );
+            let chosen = crate::layout::choose(&registered.declaration, shape);
             tracing::info!(
                 layer = %layer,
                 level,

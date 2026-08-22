@@ -62,6 +62,7 @@ fn declaration() -> LayerDeclaration {
         levels: Vec::new(),
         // **No pin.** The whole point is that the fold's own observation moves the record.
         layout: None,
+        shape: None,
     }
 }
 

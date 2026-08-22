@@ -34,7 +34,7 @@ fn clusters(visibility: Option<&str>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: visibility.map(str::to_string),
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -44,6 +44,7 @@ fn clusters(visibility: Option<&str>) -> LayerDeclaration {
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 
@@ -59,7 +60,7 @@ fn labels() -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: None,
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
@@ -67,12 +68,17 @@ fn labels() -> LayerDeclaration {
         },
         content: ContentDeclaration {
             computed: Vec::new(),
-            supplied: vec![SuppliedContent { name: "topic".into(), ty: "text".into(), require_member_visibility: tessera_types::layer::SuppliedRequirement::All }],
+            supplied: vec![SuppliedContent {
+                name: "topic".into(),
+                ty: "text".into(),
+                require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+            }],
             withdraw_on_member_deletion: true,
         },
         depends_on: vec![CLUSTERS.into()],
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 
@@ -135,10 +141,7 @@ fn publish_a_cluster_and_its_label(engine: &Engine, fx: &Fixture) {
                 // here is that a principal who is served *some* content is still refused the
                 // whole artifact once its cluster goes.
                 vec![
-                    IncomingContent::new(
-                        vec!["shipping and logistics".into()],
-                        fx.members(0..150),
-                    ),
+                    IncomingContent::new(vec!["shipping and logistics".into()], fx.members(0..150)),
                     IncomingContent::new(
                         vec!["logistics".into()],
                         fx.members((0..150).filter(|s| terms_of(*s).contains(&SUBSET_TERM))),
@@ -232,7 +235,10 @@ fn suppressing_a_cluster_stops_its_labels_serving_on_a_held_identifier_too() {
     engine
         .accept_change(artifact_entity(&engine, cluster_id), ChangeOp::Unsuppress)
         .unwrap();
-    assert_eq!(labels_in(&artifacts_of(&engine, &full_coverage_credential())).len(), 1);
+    assert_eq!(
+        labels_in(&artifacts_of(&engine, &full_coverage_credential())).len(),
+        1
+    );
     assert!(reachable_by_identifier(
         &engine,
         &full_coverage_credential(),
@@ -366,10 +372,7 @@ fn an_edge_needs_a_target_that_exists_and_a_dependency_that_was_declared() {
     let err = engine
         .publish_artifacts(LABELS.into(), 0, label("c0"))
         .expect_err("a target exists before the edge into it");
-    assert!(
-        format!("{err}").contains("holds no such artifact"),
-        "{err}"
-    );
+    assert!(format!("{err}").contains("holds no such artifact"), "{err}");
 
     engine
         .publish_artifacts(
@@ -458,9 +461,17 @@ fn a_label_is_absent_where_its_cluster_is_below_its_own_bar_for_this_principal()
     cluster_and_label(&engine, &fx, "c0", 0..150);
 
     let broad = artifacts_of(&engine, &full_coverage_credential());
-    assert_eq!(labels_in(&broad).len(), 1, "the label serves where its cluster does");
+    assert_eq!(
+        labels_in(&broad).len(),
+        1,
+        "the label serves where its cluster does"
+    );
     let label_id = labels_in(&broad)[0].tessera_id;
-    assert_eq!(broad.len(), 2, "the cluster and its label, and nothing else");
+    assert_eq!(
+        broad.len(),
+        2,
+        "the cluster and its label, and nothing else"
+    );
 
     let narrow = artifacts_of(&engine, &subset_credential());
     assert!(

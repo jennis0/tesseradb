@@ -95,6 +95,20 @@ fn with_layer(extra: &str) -> String {
     format!("{SEVERITY}{LAYER}{extra}")
 }
 
+/// [`LAYER`] with the two things a **predicate** layer may not declare taken out: the proportional
+/// criterion, whose denominator is ⊘ unruled over a rule-defined membership, and the computed
+/// content, which needs one artifact's own membership and has no cheap route to it. The membership
+/// line is left as `"enumerated"` for the caller to substitute, so every case below differs from
+/// its neighbours in exactly the membership.
+fn predicate_fixture() -> String {
+    with_layer("")
+        .replace(
+            "require_member_visibility = { fraction = 0.05 }",
+            "require_member_visibility = { count = 3 }",
+        )
+        .replace("  computed = [\"centroid\", \"box\"]\n", "")
+}
+
 /// `base` with `line` added to its first `[[attribute]]` table.
 ///
 /// **Inserted at a structural landmark, not by matching a formatted line.** A case that built its
@@ -253,6 +267,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "content",
             "members",
             "labels",
+            "shape",
         ],
     );
     expect_keys(
@@ -263,12 +278,18 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "level",
             "members",
             "excluding",
+            "bbox",
             "contents",
             "parent",
             "attached_layer",
             "attached_level",
             "attached_key",
         ],
+    );
+    expect_keys(
+        "[[layer]]\nname = \"l\"\n[layer.shape]\nnonesuch = 1\n",
+        "[layer.shape]",
+        &["kind", "depth"],
     );
     expect_keys(
         "[[layer]]\nname = \"l\"\nhierarchy = { nonesuch = 1 }\n",
@@ -1335,12 +1356,14 @@ fn content_withdrawal_defaults_to_the_half_that_cannot_widen() {
     );
 }
 
-/// `membership` at its three spellings, and the two ways of getting it wrong.
+/// `membership` at its three spellings, and the ways of getting each wrong.
 ///
-/// **The table is not decoration.** An attribute membership is a predicate over one value column,
-/// and which column is part of the declaration — so the bare word `"attribute"`, which was the
-/// spelling before the field had a home, is refused with the table to write instead rather than
-/// as an unknown word (decision 0048: replaced, not aliased).
+/// **Neither table is decoration.** An attribute membership is a predicate over one value column
+/// and which column is part of the declaration; a spatial membership is a box covered by tiles of a
+/// declared depth, and *the depth is the membership* — a box covered at depth 4 and the same box at
+/// depth 8 hold different points. So both bare words, each of which was a spelling before its value
+/// had a home, are refused with the table to write instead rather than as unknown words
+/// (decision 0048: replaced, not aliased).
 #[test]
 fn a_layer_declares_its_membership_source() {
     let text = with_layer("").replace("membership                = \"enumerated\"\n", "");
@@ -1352,34 +1375,35 @@ fn a_layer_declares_its_membership_source() {
     let text = with_layer("").replace("\"enumerated\"", "\"predicate\"");
     assert!(err(&text).contains("neither"), "{}", err(&text));
 
-    let spatial = with_layer("")
-        .replace("\"enumerated\"", "\"spatial\"")
-        .replace(
-            "require_member_visibility = { fraction = 0.05 }",
-            "require_member_visibility = { count = 3 }",
-        );
+    let predicate = predicate_fixture();
+
+    let spatial = predicate.replace("\"enumerated\"", "\"spatial\"");
     assert_eq!(
         parse_str(&spatial).unwrap().layers[0].membership,
         MembershipSource::Spatial
     );
+    // ⊘ And with no `[layer.shape]` it carries none — the state this surface has always had, a
+    // layer declared for a shape it does not yet hold.
+    assert_eq!(parse_str(&spatial).unwrap().layers[0].shape, None);
 
-    let attribute = spatial.replace("\"spatial\"", "{ attribute = \"severity\" }");
+    let attribute = predicate.replace("\"enumerated\"", "{ attribute = \"severity\" }");
     assert_eq!(
         parse_str(&attribute).unwrap().layers[0].membership,
         MembershipSource::Attribute("severity".to_string())
     );
 
-    // The retired bare word, named rather than reported as an unknown value: a caller who wrote it
-    // is looking for a column to name, not for a fourth kind of membership.
-    let bare = spatial.replace("\"spatial\"", "\"attribute\"");
+    // The two retired bare words, each named rather than reported as an unknown value: a caller who
+    // wrote one is looking for the value it now carries, not for a fourth kind of membership.
+    let bare = predicate.replace("\"enumerated\"", "\"attribute\"");
     assert!(err(&bare).contains("names no column"), "{}", err(&bare));
-    let empty = spatial.replace("\"spatial\"", "{ attribute = \"\" }");
+
+    let empty = predicate.replace("\"enumerated\"", "{ attribute = \"\" }");
     assert!(
         err(&empty).contains("must name the value column"),
         "{}",
         err(&empty)
     );
-    let two = spatial.replace("\"spatial\"", "{ attribute = \"a\", spatial = true }");
+    let two = predicate.replace("\"enumerated\"", "{ attribute = \"a\", listed = true }");
     assert!(
         err(&two).contains("takes exactly `attribute`"),
         "{}",
@@ -1389,7 +1413,7 @@ fn a_layer_declares_its_membership_source() {
     // A column nothing declares reads nothing, and the layer would publish empty memberships —
     // refused at the declaration, before a data file is opened, on the rule an attribute naming
     // an undeclared vocabulary already follows.
-    let absent = spatial.replace("\"spatial\"", "{ attribute = \"nonesuch\" }");
+    let absent = predicate.replace("\"enumerated\"", "{ attribute = \"nonesuch\" }");
     let message = err(&absent);
     assert!(message.contains("names no declared attribute"), "{message}");
     assert!(message.contains("severity"), "{message}");
@@ -1428,25 +1452,99 @@ fn a_layer_may_pin_its_serving_layout() {
     assert!(message.contains("is not a layout"), "{message}");
     assert!(message.contains("column"), "{message}");
 
-    // A shape has no per-row source, so a row-major pin names a form the layer cannot be stored in
-    // at all — refused here, by the same `validate` the online registration calls.
-    let spatial = with_layer("")
-        .replace("\"enumerated\"", "\"spatial\"")
-        .replace(
-            "require_member_visibility = { fraction = 0.05 }",
-            "require_member_visibility = { count = 3 }\nlayout                    = \"column\"",
+    // **A predicate layer's form follows from its membership, so every pin is refused** — refused
+    // here, by the same `validate` the online registration calls.
+    for word in ServingLayout::PIN_VOCABULARY {
+        let spatial = predicate_fixture().replace(
+            "membership                = \"enumerated\"\n",
+            &format!(
+                "membership                = \"spatial\"\nlayout                    = \"{word}\"\n"
+            ),
         );
-    assert!(
-        err(&spatial).contains("per-row source"),
-        "{}",
-        err(&spatial)
+        assert!(
+            err(&spatial).contains("per-row source"),
+            "{}",
+            err(&spatial)
+        );
+        let attribute = predicate_fixture().replace(
+            "membership                = \"enumerated\"\n",
+            &format!(
+                "membership                = {{ attribute = \"severity\" }}\nlayout                    = \"{word}\"\n"
+            ),
+        );
+        assert!(
+            err(&attribute).contains("a layout pin"),
+            "{}",
+            err(&attribute)
+        );
+    }
+}
+
+/// `[layer.shape]` — what a spatial layer's artifacts are shaped like, and how deep they are drawn.
+///
+/// **The depth is the membership rather than a tuning key**, so there is no value for it to default
+/// to and none outside the Morton code space to accept — a box covered at depth 4 and the same box
+/// at depth 8 hold different points.
+#[test]
+fn a_spatial_layer_declares_its_shape_and_its_depth() {
+    // The block is appended, because `[layer.shape]` is a sub-table of the `[[layer]]` above it and
+    // a TOML sub-table header ends the key section it follows.
+    let spatial = |body: &str| {
+        format!(
+            "{}{body}",
+            predicate_fixture().replace(
+                "membership                = \"enumerated\"",
+                "membership                = \"spatial\"",
+            )
+        )
+    };
+
+    let declared = spatial("\n  [layer.shape]\n  kind = \"bbox\"\n  depth = 6\n");
+    assert_eq!(
+        parse_str(&declared).unwrap().layers[0].shape,
+        Some(ShapeDeclaration {
+            kind: ShapeKind::Bbox,
+            depth: 6
+        })
+    );
+    // One kind, so spelling it is a courtesy rather than a choice.
+    let implied = spatial("\n  [layer.shape]\n  depth = 6\n");
+    assert_eq!(
+        parse_str(&implied).unwrap().layers[0].shape,
+        Some(ShapeDeclaration {
+            kind: ShapeKind::Bbox,
+            depth: 6
+        })
     );
 
-    // Artifact-major is representable on every source, spatial included.
-    let pinned_rows = spatial.replace("\"column\"", "\"rows\"");
-    assert_eq!(
-        parse_str(&pinned_rows).unwrap().layers[0].layout,
-        Some(ServingLayout::ArtifactMajor)
+    for body in [
+        "\n  [layer.shape]\n  kind = \"bbox\"\n",
+        "\n  [layer.shape]\n  depth = 0\n",
+        "\n  [layer.shape]\n  depth = 17\n",
+    ] {
+        let text = spatial(body);
+        assert!(
+            err(&text).contains("must be an integer between 1 and 16"),
+            "{}",
+            err(&text)
+        );
+    }
+
+    // ⊘ A polygon is refused rather than covered approximately: the tiles that cover a shape *are*
+    // its membership, so an approximate cover is a membership wider than the declaration.
+    let polygon = spatial("\n  [layer.shape]\n  kind = \"polygon\"\n  depth = 6\n");
+    assert!(
+        err(&polygon).contains("is not \"bbox\""),
+        "{}",
+        err(&polygon)
+    );
+
+    // A shape beside a membership that reads none is a rule nothing evaluates.
+    let enumerated = format!("{}\n  [layer.shape]\n  depth = 6\n", predicate_fixture());
+    assert!(
+        err(&enumerated).contains("is a rule nothing evaluates"),
+        "{}",
+        err(&enumerated)
     );
 }
 

@@ -152,7 +152,7 @@ use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
     LayerDeclaration, LevelDeclaration, MemberDefault, MembershipSource, ServingLayout,
-    SuppliedContent, SuppliedRequirement,
+    ShapeDeclaration, ShapeKind, SuppliedContent, SuppliedRequirement,
 };
 
 use crate::error::{BuildError, Result};
@@ -434,6 +434,25 @@ struct LayerBlock {
     levels: Vec<LevelBlock>,
     #[serde(default)]
     content: Option<ContentBlock>,
+    /// `[layer.shape]` — what a `membership = "spatial"` layer's artifacts are shaped like, and
+    /// how deep the tiles that cover them are drawn ([`compile_shape`]).
+    #[serde(default)]
+    shape: Option<ShapeBlock>,
+}
+
+/// `[layer.shape]` as written. Both keys are optional *here* and neither is optional in the
+/// compiled form: absence is what makes the message name the key rather than reporting *no variant
+/// matched*, which is the same reason `membership` is held as a `toml::Value`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShapeBlock {
+    /// ⊘ `"bbox"`, and absent means `"bbox"` — one kind, so a spelling is a courtesy rather than a
+    /// choice, and any other word is refused.
+    #[serde(default)]
+    kind: Option<String>,
+    /// The Morton depth the shape is covered at. **Required**, because it is the membership.
+    #[serde(default)]
+    depth: Option<i64>,
 }
 
 /// One artifact written into the document itself — `artifacts = [{ key = …, contents = [ … ] }]`.
@@ -461,6 +480,10 @@ pub struct InlineArtifact {
     /// The ranked contents, best first: one entry per rank, each a value per supplied kind.
     #[serde(default)]
     pub contents: Vec<Vec<String>>,
+    /// The artifact's bounding box, `[min_x, min_y, max_x, max_y]` — the shape a
+    /// `membership = "spatial"` layer's membership is drawn from, and refused on every other kind.
+    #[serde(default)]
+    pub bbox: Option<Vec<f64>>,
     /// The parent artifact in a hierarchy, by its key.
     #[serde(default)]
     pub parent: Option<String>,
@@ -1960,6 +1983,8 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
             withdraw_on_member_deletion: None,
             depends_on: vec![parent.name.clone()],
             levels: Vec::new(),
+            // A label layer's members are its own rows; there is no shape in the sugar's key set.
+            shape: None,
             content: Some(ContentBlock {
                 computed: Vec::new(),
                 supplied: vec![SuppliedBlock {
@@ -3259,6 +3284,7 @@ fn compile_layers(
             })?),
         };
 
+        let shape = compile_shape(block, &membership)?;
         let declaration = LayerDeclaration {
             name: block.name.clone(),
             title: block.title.clone(),
@@ -3273,6 +3299,7 @@ fn compile_layers(
             depends_on: block.depends_on.clone(),
             levels: compile_levels(block)?,
             layout,
+            shape,
         };
         // **One implementation of the rules, not two.** Everything `LayerRegistry::prepare_create`
         // would refuse is refused here too, by calling the same check — so a declaration refused
@@ -3291,11 +3318,12 @@ fn compile_layers(
 /// predicate over a value column, and *which* column is part of the declaration. Spelled as a
 /// bare word it would be a membership rule with nothing to evaluate, so the field rides the value
 /// that asserts there is one — the same shape `point_visibility = { field }` takes, and the same
-/// reason.
+/// reason. A **spatial** membership carries its shape and depth in [`compile_shape`]'s own block
+/// rather than here, because those are per-artifact facts and this field is not.
 fn compile_membership(block: &LayerBlock, attributes: &[Attribute]) -> Result<MembershipSource> {
     let spellings = "\n  \
          membership = \"enumerated\"              # a stored set per artifact\n  \
-         membership = \"spatial\"                 # a shape, decomposed at request time\n  \
+         membership = \"spatial\"                 # a shape per artifact, from [layer.shape]\n  \
          membership = { attribute = \"severity\" }  # a predicate over that value column";
     let Some(value) = &block.membership else {
         return Err(declaration_error(format!(
@@ -3377,6 +3405,72 @@ fn compile_membership(block: &LayerBlock, attributes: &[Attribute]) -> Result<Me
             block.name
         ))),
     }
+}
+
+/// `[layer.shape]` — what a spatial layer's artifacts are shaped like, and how deep the tiles that
+/// cover them are drawn.
+///
+/// **The depth is the membership rather than a tuning key** (ruling R3: the ranges *are* the
+/// membership, and the polygon is content). A box covered by depth-4 tiles and the same box covered
+/// at depth 8 hold different points, so there is no value for it to default to and none outside the
+/// code space to accept.
+///
+/// ⊘ **`kind = "bbox"` is the whole vocabulary.** Each artifact carries `min_x`, `min_y`, `max_x`,
+/// `max_y` on its own row; a polygon, a radius or a multi-part shape is refused here rather than
+/// covered approximately, an approximate cover being a membership *wider* than the declaration.
+///
+/// A layer with no block at all is the state this surface has always had — declared for a shape it
+/// does not yet carry, holding nothing, because publication into it is refused. That stays
+/// expressible; what is refused is declaring artifacts for such a layer, which
+/// [`compile_layers`] does where it can see both.
+fn compile_shape(
+    block: &LayerBlock,
+    membership: &MembershipSource,
+) -> Result<Option<ShapeDeclaration>> {
+    let Some(declared) = &block.shape else {
+        return Ok(None);
+    };
+    if *membership != MembershipSource::Spatial {
+        return Err(declaration_error(format!(
+            "layer '{}': `[layer.shape]` is declared and `membership` is not \"spatial\", so the \
+             shape is a rule nothing evaluates — the members come from the stored set or the \
+             predicate the membership names, and the box beside them would decide nothing",
+            block.name
+        )));
+    }
+    let kind = match declared.kind.as_deref() {
+        None | Some("bbox") => ShapeKind::Bbox,
+        Some(other) => {
+            return Err(declaration_error(format!(
+                "layer '{}': `shape.kind = \"{other}\"` is not \"bbox\", which is the only shape \
+                 decoded. ⊘ A polygon or a radius is refused here rather than covered \
+                 approximately: the tiles that cover a shape *are* its membership, so an \
+                 approximate cover is a membership wider than the declaration",
+                block.name
+            )))
+        }
+    };
+    let depth = declared
+        .depth
+        .filter(|d| *d > 0 && *d <= i64::from(tessera_types::layer::MAX_SHAPE_DEPTH))
+        .ok_or_else(|| {
+            declaration_error(format!(
+                "layer '{}': `shape.depth` is {}, and it must be an integer between 1 and {}. It \
+                 is the membership rather than a tuning key — a box covered by depth-`d` tiles \
+                 holds different points at a different `d` — so there is no value for it to \
+                 default to",
+                block.name,
+                match declared.depth {
+                    Some(d) => d.to_string(),
+                    None => "absent".to_string(),
+                },
+                tessera_types::layer::MAX_SHAPE_DEPTH
+            ))
+        })?;
+    Ok(Some(ShapeDeclaration {
+        kind,
+        depth: depth as u8,
+    }))
 }
 
 fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {

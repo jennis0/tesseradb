@@ -24,7 +24,7 @@ fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
         membership: MembershipSource::Enumerated,
         value_set: Default::default(),
         visibility: visibility.map(str::to_string),
-            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         require_member_visibility: Some(ExistenceCriterion::Count(50)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
@@ -38,6 +38,7 @@ fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
         depends_on: Vec::new(),
         levels: Vec::new(),
         layout: None,
+        shape: None,
     }
 }
 

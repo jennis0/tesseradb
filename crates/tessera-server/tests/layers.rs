@@ -115,7 +115,10 @@ async fn the_meta_layer_list_is_filtered_per_principal() {
         .collect();
     assert_eq!(
         narrow,
-        vec!["clusters/open".to_string(), "clusters/restricted".to_string()],
+        vec![
+            "clusters/open".to_string(),
+            "clusters/restricted".to_string()
+        ],
         "a `public` layer is reachable by every principal — the gate narrows, it never widens, so \
          holding term 1 adds the restricted layer rather than exchanging one for the other"
     );
@@ -144,7 +147,13 @@ async fn a_published_layer_carries_its_declaration_and_never_its_cardinality() {
     // **C8.** A count of artifacts in a layer is a corpus-wide count over objects this principal
     // may not individually see. It is the obvious field to add, which is why its absence is
     // asserted rather than assumed.
-    for forbidden in ["artifact_count", "artifacts", "cardinality", "count", "size"] {
+    for forbidden in [
+        "artifact_count",
+        "artifacts",
+        "cardinality",
+        "count",
+        "size",
+    ] {
         assert!(
             !object.contains_key(forbidden),
             "the artifact cardinality must never be published (C8): {layer}"
@@ -357,10 +366,15 @@ async fn publishing_into_a_layer_that_does_not_take_artifacts_is_a_422_that_says
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
 
-    let mut spatial = declaration("regions/uk", None);
-    spatial["membership"] = json!("spatial");
-    spatial["require_member_visibility"] = json!({ "count": 25 });
-    assert_eq!(register(&server, spatial).await.0, 201);
+    // A predicate layer's artifacts are derived from a rule, so it declares none of the things a
+    // published artifact carries beside its membership: no computed content, a flat hierarchy.
+    let mut predicate = declaration("regions/uk", None);
+    predicate["membership"] = json!({ "attribute": "severity" });
+    predicate["require_member_visibility"] = json!({ "count": 25 });
+    predicate["hierarchy"] = json!({ "kind": "flat", "prune_children": false });
+    predicate["content"] =
+        json!({ "computed": [], "supplied": [], "withdraw_on_member_deletion": true });
+    assert_eq!(register(&server, predicate).await.0, 201);
 
     let (status, body) = publish(
         &server,
@@ -467,7 +481,9 @@ async fn the_artifacts_frame_carries_a_masked_count_and_no_unmasked_quantity() {
 async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
-    assert!(viewport_artifacts(&server, &["0"], json!({})).await.is_none());
+    assert!(viewport_artifacts(&server, &["0"], json!({}))
+        .await
+        .is_none());
 
     let mut d = declaration("clusters/a", None);
     d["require_member_visibility"] = serde_json::Value::Null;
@@ -481,7 +497,9 @@ async fn a_response_with_no_artifacts_carries_no_artifacts_frame() {
         }),
     )
     .await;
-    assert!(viewport_artifacts(&server, &["0"], json!({})).await.is_some());
+    assert!(viewport_artifacts(&server, &["0"], json!({}))
+        .await
+        .is_some());
 
     // A request naming no layer asks nothing and is answered with nothing — and costs no frame.
     assert!(viewport_artifacts(&server, &["0"], json!({ "layers": [] }))
@@ -519,7 +537,9 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     )
     .await;
 
-    let unbudgeted = viewport_artifacts(&server, &["0"], json!({})).await.unwrap();
+    let unbudgeted = viewport_artifacts(&server, &["0"], json!({}))
+        .await
+        .unwrap();
     assert_eq!(unbudgeted.len(), 3);
     let budgeted = viewport_artifacts(&server, &["0"], json!({ "artifact_budget": 1 }))
         .await
@@ -531,11 +551,7 @@ async fn the_artifact_budget_is_accepted_and_never_met_by_sampling() {
     );
 }
 
-async fn drill(
-    server: &TestServer,
-    terms: &[&str],
-    tessera_id: &str,
-) -> (u16, serde_json::Value) {
+async fn drill(server: &TestServer, terms: &[&str], tessera_id: &str) -> (u16, serde_json::Value) {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
     let resp = server
@@ -575,7 +591,9 @@ async fn drilling_down_on_an_artifact_agrees_with_the_viewport_and_withholds_ide
     .await;
     assert_eq!(status, 201);
 
-    let served = viewport_artifacts(&server, &["0"], json!({})).await.unwrap();
+    let served = viewport_artifacts(&server, &["0"], json!({}))
+        .await
+        .unwrap();
     assert_eq!(served.len(), 1);
     let id = served[0].tessera_id.to_string();
 
@@ -665,8 +683,12 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     .await;
     assert_eq!(status, 201, "{body}");
 
-    let broad = viewport_artifacts(&server, &["0"], json!({})).await.unwrap();
-    let narrow = viewport_artifacts(&server, &["1"], json!({})).await.unwrap();
+    let broad = viewport_artifacts(&server, &["0"], json!({}))
+        .await
+        .unwrap();
+    let narrow = viewport_artifacts(&server, &["1"], json!({}))
+        .await
+        .unwrap();
 
     // The layer declares `centroid` and `hull`, so both arrive and `box` does not.
     let (b, n) = (&broad[0], &narrow[0]);

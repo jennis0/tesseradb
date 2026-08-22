@@ -152,12 +152,13 @@ impl RowColumn {
         let pack = match expected {
             ServingLayout::RowMajorLabel => Pack::Label(LabelColumnPack::open(path)?),
             ServingLayout::RowMajorList => Pack::List(ListColumnPack::open(path)?),
-            ServingLayout::ArtifactMajor => {
+            ServingLayout::ArtifactMajor | ServingLayout::SpatialRanges => {
                 return Err(tessera_store::StoreError::MalformedBundle {
                     detail: format!(
-                        "row-major column {}: the manifest tags it artifact-major, which has no \
-                         column — the entry names a file no writer produces",
-                        path.display()
+                        "row-major column {}: the manifest tags it {}, which has no column — the \
+                         entry names a file no writer produces",
+                        path.display(),
+                        expected.pin_word()
                     ),
                 })
             }
@@ -333,7 +334,7 @@ impl RowColumn {
         each: LevelWalk<'_>,
     ) -> Option<Self> {
         let bytes = match layout {
-            ServingLayout::ArtifactMajor => return None,
+            ServingLayout::ArtifactMajor | ServingLayout::SpatialRanges => return None,
             ServingLayout::RowMajorLabel => {
                 let mut labels = vec![ROW_COLUMN_HOLE; row_count as usize];
                 let mut overlapped = false;
