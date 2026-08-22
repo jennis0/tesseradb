@@ -721,7 +721,7 @@ design, `fields` locating what is declared rather than asserting it (§8).
 | File | Written by | Holds |
 |---|---|---|
 | `containment.json` | the build | edges whose child holds a member its parent does not, and the splits that lose the most |
-| `disclosure.json` | the build, and `tessera check` computes the same document | every layer's `visibility` and `require_member_visibility`, every vocabulary's `visibility` and `value_set`, every attribute's placement, each view's point-label default, and which layers `[layer.labels]` wrote and for whom |
+| `disclosure.json` | the build, and `tessera check` computes the same document | every layer's `visibility`, `require_member_visibility` and **`membership`** — the last spelled `enumerated`, `attribute:<field>` or `spatial:<kind>:depth=<d>`, because a predicate *is* who belongs and a shape's depth decides which points its box holds — every vocabulary's `visibility` and `value_set`, every attribute's placement, each view's point-label default, and which layers `[layer.labels]` wrote and for whom |
 
 **`disclosure.json` exists for the diff.** The controls it records are individually small and
 collectively the whole of who may see what, and a reviewer's real question — *which disclosure

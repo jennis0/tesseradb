@@ -9947,6 +9947,21 @@ impl Executor {
                     && !pending_retirement
                         .iter()
                         .any(|(l, v)| l == layer && v == level)
+                    // **A predicate level's column is not this fold's to write**, and the reason is
+                    // what it is a column *of*: an attribute layer's labels come from the value
+                    // column the predicate names, and this pass composes from the level's stored
+                    // memberships — which such a level has none of. Composing anyway would write a
+                    // file of nothing but holes, name it in the manifest, and leave the reader
+                    // adopting a column no request will ever claim.
+                    && self
+                        .live
+                        .registered_layer(layer)
+                        .is_some_and(|registered| {
+                            matches!(
+                                registered.declaration.membership,
+                                tessera_types::layer::MembershipSource::Enumerated
+                            )
+                        })
             })
             .cloned()
             .collect();

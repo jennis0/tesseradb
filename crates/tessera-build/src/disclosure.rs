@@ -108,7 +108,17 @@ pub struct LayerDisclosure {
     /// so adding an edge narrows this layer and removing one widens it — neither visible in this
     /// layer's own gate.
     pub depends_on: Vec<String>,
-    /// `enumerated`, `spatial`, or the value column an attribute membership is a predicate over.
+    /// What decides who belongs, in one string a reviewer can diff:
+    ///
+    /// - `enumerated` — a stored set per artifact;
+    /// - `attribute:<field>` — a predicate over that value column, whose distinct values are the
+    ///   layer's artifacts;
+    /// - `spatial:<kind>:depth=<d>` — each artifact's own shape, covered by depth-`d` tiles.
+    ///
+    /// **The depth is here because it *is* the membership** (ruling R3): a box covered at depth 4
+    /// and the same box at depth 8 hold different points, so a report naming the kind alone would
+    /// say less about who may see what than the declaration does. ⊘ `spatial:no-shape` is a layer
+    /// declared for a shape it does not carry, which holds no artifacts.
     pub membership: String,
     pub content: ContentDisclosure,
 }

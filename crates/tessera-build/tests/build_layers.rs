@@ -319,11 +319,18 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
 
 /// Parse the fixture config and run the build over it — the two halves the CLI does in order, so a
 /// declaration refusal and a build refusal reach a test as the same `Result`.
-fn run(inputs: &Inputs, out: &Path) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
+fn run(
+    inputs: &Inputs,
+    out: &Path,
+) -> Result<tessera_build::BuildReport, tessera_build::BuildError> {
     let config = tessera_build::config::Config::parse(&inputs.config, &Default::default())?;
     let mut args = args(inputs, out);
     args.layers = config.layers;
     args.layer_inputs = config.layer_sources;
+    // The attribute sources the schema binds — empty for the fixtures that declare no column, and
+    // the points file for the predicate cases, which read one.
+    args.attribute_sources =
+        tessera_build::config::AttributeSource::over(inputs.points.clone(), &config.schema);
     args.schema = config.schema;
     build(&args)
 }
@@ -380,7 +387,11 @@ fn a_build_registers_its_layers_and_publishes_their_artifacts() {
     assert_eq!(extents, vec![("clusters/a", 2), ("topics/x", 1)]);
     assert_eq!(manifest.artifact_record_extents.len(), 1);
     assert_eq!(
-        manifest.membership_extents.iter().map(|e| e.ordinal_lo).max(),
+        manifest
+            .membership_extents
+            .iter()
+            .map(|e| e.ordinal_lo)
+            .max(),
         Some(0),
         "a build publishes each level once, from ordinal zero"
     );
@@ -418,7 +429,11 @@ fn both_build_paths_place_the_same_layers_on_the_same_entities() {
     for extent in &a.membership_extents {
         let one = std::fs::read(streamed.join("v00000").join(&extent.path)).unwrap();
         let other = std::fs::read(linear.join("v00000").join(&extent.path)).unwrap();
-        assert_eq!(one, other, "the packed memberships of {} differ", extent.layer);
+        assert_eq!(
+            one, other,
+            "the packed memberships of {} differ",
+            extent.layer
+        );
     }
     assert_eq!(a.artifact_record_extents, b.artifact_record_extents);
     for extent in &a.artifact_record_extents {
@@ -515,7 +530,11 @@ fn a_label_layer_sorting_before_its_target_still_publishes() {
     // `annotations/…` sorts before `clusters/…`, which is the case an alphabetical publication
     // order would refuse with "holds no such artifact" for a target that is plainly there.
     let renamed = |text: &str| text.replace("topics/x", "annotations/topics");
-    std::fs::write(&inputs.config, renamed(&format!("{VIEW_TOML}{LAYERS_TOML}"))).unwrap();
+    std::fs::write(
+        &inputs.config,
+        renamed(&format!("{VIEW_TOML}{LAYERS_TOML}")),
+    )
+    .unwrap();
 
     let out = inputs.dir.join("bundle");
     run(&inputs, &out).expect("declaration order is what decides, not the layer's name");
@@ -682,7 +701,11 @@ fn containment_report(root: &Path) -> serde_json::Value {
 #[test]
 fn a_tree_whose_children_sit_inside_their_parents_reports_nothing() {
     let (result, out, _tmp) = treed_build(
-        &[("t-root", None), ("t-a", Some("t-root")), ("t-b", Some("t-root"))],
+        &[
+            ("t-root", None),
+            ("t-a", Some("t-root")),
+            ("t-b", Some("t-root")),
+        ],
         &[
             ("t-root", (0..30).collect()),
             ("t-a", (0..10).collect()),
@@ -691,7 +714,10 @@ fn a_tree_whose_children_sit_inside_their_parents_reports_nothing() {
     );
     result.expect("a well-formed hierarchy builds");
     assert_eq!(
-        containment_report(&out)["violations"].as_array().unwrap().len(),
+        containment_report(&out)["violations"]
+            .as_array()
+            .unwrap()
+            .len(),
         0,
         "stray members in the parent are the normal case, not a violation"
     );
@@ -731,7 +757,11 @@ fn a_child_escaping_its_parent_is_reported_by_name() {
 #[test]
 fn a_split_that_loses_members_is_named_with_its_stray_count() {
     let (result, out, _tmp) = treed_build(
-        &[("t-root", None), ("t-a", Some("t-root")), ("t-b", Some("t-root"))],
+        &[
+            ("t-root", None),
+            ("t-a", Some("t-root")),
+            ("t-b", Some("t-root")),
+        ],
         &[
             ("t-root", (0..30).collect()),
             ("t-a", (0..10).collect()),
@@ -759,7 +789,11 @@ fn a_split_that_loses_members_is_named_with_its_stray_count() {
 #[test]
 fn a_covering_split_reports_no_stray() {
     let (result, out, _tmp) = treed_build(
-        &[("t-root", None), ("t-a", Some("t-root")), ("t-b", Some("t-root"))],
+        &[
+            ("t-root", None),
+            ("t-a", Some("t-root")),
+            ("t-b", Some("t-root")),
+        ],
         &[
             ("t-root", (0..20).collect()),
             ("t-a", (0..10).collect()),
@@ -776,10 +810,8 @@ fn a_covering_split_reports_no_stray() {
 /// is nothing to publish — a refusal, unlike an uncontained edge.
 #[test]
 fn a_parent_key_with_no_artifact_behind_it_is_refused() {
-    let (result, _out, _tmp) = treed_build(
-        &[("t-a", Some("t-nobody"))],
-        &[("t-a", (0..10).collect())],
-    );
+    let (result, _out, _tmp) =
+        treed_build(&[("t-a", Some("t-nobody"))], &[("t-a", (0..10).collect())]);
     let err = result.expect_err("a parent that does not exist is a refusal");
     assert!(format!("{err}").contains("t-nobody"), "{err}");
 }
@@ -944,7 +976,10 @@ fn edges_on_a_layer_declaring_no_lineage_are_refused() {
     );
     write_levelled_members(
         &inputs.at("admin_members.parquet"),
-        &[(0, "country", (0..20).collect()), (1, "state-a", (0..10).collect())],
+        &[
+            (0, "country", (0..20).collect()),
+            (1, "state-a", (0..10).collect()),
+        ],
     );
     let out = inputs.dir.join("bundle");
     let err = run(&inputs, &out).expect_err("a stacked layer has no lineage");
@@ -1002,7 +1037,10 @@ fn refuse_spelling(layers: &str, write_sources: impl FnOnce(&Inputs)) -> String 
     std::fs::write(&inputs.config, format!("{VIEW_TOML}{layers}")).unwrap();
     write_sources(&inputs);
     let out = inputs.dir.join("spelled");
-    format!("{}", run(&inputs, &out).expect_err("the spelling is refused"))
+    format!(
+        "{}",
+        run(&inputs, &out).expect_err("the spelling is refused")
+    )
 }
 
 /// Every file of two bundles, compared byte for byte — `MANIFEST.json` with its wall-clock
@@ -1011,11 +1049,7 @@ fn refuse_spelling(layers: &str, write_sources: impl FnOnce(&Inputs)) -> String 
 /// membership that differed by one entity fails here.
 fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
     fn collect(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
-        fn walk(
-            root: &Path,
-            dir: &Path,
-            out: &mut std::collections::BTreeMap<String, Vec<u8>>,
-        ) {
+        fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, Vec<u8>>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
                 if path.is_dir() {
@@ -1058,9 +1092,16 @@ fn assert_bundles_identical(left: &Path, right: &Path, what: &str) {
         if name == "CURRENT" {
             continue;
         }
-        assert_eq!(left_bytes, right_bytes, "{what}: {name} is not byte-identical");
+        assert_eq!(
+            left_bytes, right_bytes,
+            "{what}: {name} is not byte-identical"
+        );
     }
-    assert!(a.len() > 6, "{what}: expected a full bundle, found {}", a.len());
+    assert!(
+        a.len() > 6,
+        "{what}: expected a full bundle, found {}",
+        a.len()
+    );
 }
 
 /// The artifact row carrying its own membership as a list.
@@ -1076,7 +1117,7 @@ fn write_curated_column(path: &Path, column: &str, artifacts: &[(&str, Vec<u64>)
             DataType::List(Arc::new(Field::new("item", DataType::UInt64, true))),
             true,
         ),
-        ]));
+    ]));
     let mut lists = ListBuilder::new(arrow::array::UInt64Builder::new());
     for (_, members) in artifacts {
         for &m in members {
@@ -1117,9 +1158,7 @@ fn an_inline_layer_and_a_sourced_layer_build_the_same_bundle() {
         "{CURATED_LAYER}artifacts = [{}]\n",
         CURATED
             .iter()
-            .map(|(key, members)| format!(
-                "{{ key = \"{key}\", members = {members:?} }}"
-            ))
+            .map(|(key, members)| format!("{{ key = \"{key}\", members = {members:?} }}"))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -1590,7 +1629,11 @@ fn a_cluster_column_on_the_points_is_a_member_source() {
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
         write_cluster_members(&inputs.at("cluster_members.parquet"), &clusters);
     });
-    assert_bundles_identical(&from_points, &from_table, "a point column against a member table");
+    assert_bundles_identical(
+        &from_points,
+        &from_table,
+        "a point column against a member table",
+    );
 }
 
 /// **§2's two reader changes, against the member table they must agree with.** Cluster ids are
@@ -1623,7 +1666,11 @@ fn an_integer_cluster_column_skips_its_noise_and_matches_a_member_table() {
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
         write_cluster_members(&inputs.at("cluster_members.parquet"), &clusters);
     });
-    assert_bundles_identical(&from_points, &from_table, "an integer column against a member table");
+    assert_bundles_identical(
+        &from_points,
+        &from_table,
+        "an integer column against a member table",
+    );
 }
 
 /// **`3` and `"3"` name one artifact.** The roster is text and the points are integers, which is
@@ -1641,7 +1688,11 @@ fn an_integer_key_and_its_decimal_spelling_are_one_artifact() {
         write_clustered_points(&inputs.points, &clusters, true);
         write_cluster_roster(&inputs.at("roster.parquet"), &[0, 1, 2]);
     });
-    assert_bundles_identical(&from_integers, &from_text, "an integer key against its spelling");
+    assert_bundles_identical(
+        &from_integers,
+        &from_text,
+        "an integer key against its spelling",
+    );
 }
 
 /// **A key the artifacts omit is still a refusal by default.** `value_set` defaults to `closed`,
@@ -1667,9 +1718,7 @@ fn a_closed_layer_still_refuses_a_cluster_no_artifact_declares() {
 #[test]
 fn an_open_layer_mints_the_clusters_its_points_name() {
     let clusters = every_point_clustered();
-    let layer = format!(
-        "{CURATED_LAYER}value_set = \"open\"\nsource = \"roster\"\n{FROM_POINTS}"
-    );
+    let layer = format!("{CURATED_LAYER}value_set = \"open\"\nsource = \"roster\"\n{FROM_POINTS}");
     let (out, _tmp, report) = build_spelling_reported(&layer, |inputs| {
         write_clustered_points(&inputs.points, &clusters, false);
         // The table knows about cluster 0 and about a cluster 9 that no point is in; the points
@@ -1682,7 +1731,11 @@ fn an_open_layer_mints_the_clusters_its_points_name() {
         .iter()
         .map(|e| e.count)
         .collect();
-    assert_eq!(counts, vec![4], "clusters 0, 1 and 2 from the points, and 9 from the table");
+    assert_eq!(
+        counts,
+        vec![4],
+        "clusters 0, 1 and 2 from the points, and 9 from the table"
+    );
     // **What was created is reported**, because it cannot be undone: 1 and 2 are the two the table
     // never declared, and a build that minted every key would be a typo in the column rather than
     // enrichment the operator left out. The wire says the same number for an ingest batch.
@@ -1906,8 +1959,12 @@ fn a_list_on_a_flat_layer_is_multi_membership_and_matches_a_member_table() {
     // is the case a scalar column cannot express at all.
     let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
         .map(|e| {
-            let mut of: Vec<Option<i64>> = (1..4i64).filter(|d| e as i64 % d == 0).collect::<Vec<_>>()
-                .into_iter().map(Some).collect();
+            let mut of: Vec<Option<i64>> = (1..4i64)
+                .filter(|d| e as i64 % d == 0)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(Some)
+                .collect();
             if of.is_empty() {
                 of.push(None);
             }
@@ -1924,7 +1981,10 @@ fn a_list_on_a_flat_layer_is_multi_membership_and_matches_a_member_table() {
     let mut by_key: std::collections::BTreeMap<String, Vec<u64>> = Default::default();
     for (entity, of) in lists.iter().enumerate() {
         for key in of.iter().flatten() {
-            by_key.entry(key.to_string()).or_default().push(entity as u64);
+            by_key
+                .entry(key.to_string())
+                .or_default()
+                .push(entity as u64);
         }
     }
     let from_table = format!("{CURATED_LAYER}value_set = \"open\"\n{FROM_TREE_TABLES}");
@@ -1939,7 +1999,11 @@ fn a_list_on_a_flat_layer_is_multi_membership_and_matches_a_member_table() {
         write_treed_members(&inputs.at("tree_members.parquet"), &membership);
     });
 
-    assert_bundles_identical(&from_points, &from_table, "a flat list against a member table");
+    assert_bundles_identical(
+        &from_points,
+        &from_table,
+        "a flat list against a member table",
+    );
 }
 
 /// **The headline for §4: a lineage column and an artifact table with a `parent` column build the
@@ -1953,7 +2017,10 @@ fn a_list_on_a_flat_layer_is_multi_membership_and_matches_a_member_table() {
 #[test]
 fn a_lineage_column_and_an_edged_artifact_table_build_the_same_bundle() {
     let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(lineage_of).collect();
-    let from_points = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_kind("nested"));
+    let from_points = format!(
+        "{}value_set = \"open\"\n{FROM_LINEAGE}",
+        layer_of_kind("nested")
+    );
     let (from_points, _a) = build_spelling(&from_points, |inputs| {
         write_listed_points(&inputs.points, &lists, false, None);
     });
@@ -2010,8 +2077,9 @@ fn a_levelled_column_and_a_levelled_member_table_build_the_same_bundle() {
         write_listed_points(&inputs.points, &lists, false, Some(3));
     });
 
-    let (from_tables, _b) =
-        build_spelling(&layer.replace("{members}", FROM_LEVELLED_TABLES), |inputs| {
+    let (from_tables, _b) = build_spelling(
+        &layer.replace("{members}", FROM_LEVELLED_TABLES),
+        |inputs| {
             write_listed_points(&inputs.points, &lists, false, Some(3));
             write_edged_artifacts(
                 &inputs.at("admin.parquet"),
@@ -2041,7 +2109,8 @@ fn a_levelled_column_and_a_levelled_member_table_build_the_same_bundle() {
                 ));
             }
             write_levelled_members(&inputs.at("admin_members.parquet"), &membership);
-        });
+        },
+    );
     assert_bundles_identical(
         &from_points,
         &from_tables,
@@ -2057,7 +2126,10 @@ fn a_child_named_under_two_parents_is_refused_naming_both() {
     let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS)
         .map(|e| vec![Some(if e % 2 == 0 { 900 } else { 901 }), Some(950)])
         .collect();
-    let layer = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_kind("nested"));
+    let layer = format!(
+        "{}value_set = \"open\"\n{FROM_LINEAGE}",
+        layer_of_kind("nested")
+    );
     let message = refuse_spelling(&layer, |inputs| {
         write_listed_points(&inputs.points, &lists, false, None);
     });
@@ -2097,7 +2169,10 @@ fn a_variable_length_list_against_a_tiered_layer_is_refused() {
 #[test]
 fn a_fixed_length_list_against_a_nested_layer_is_refused() {
     let lists: Vec<Vec<Option<i64>>> = (0..N_ITEMS).map(lineage_of).collect();
-    let layer = format!("{}value_set = \"open\"\n{FROM_LINEAGE}", layer_of_kind("nested"));
+    let layer = format!(
+        "{}value_set = \"open\"\n{FROM_LINEAGE}",
+        layer_of_kind("nested")
+    );
     let message = refuse_spelling(&layer, |inputs| {
         write_listed_points(&inputs.points, &lists, false, Some(3));
     });
@@ -2149,8 +2224,9 @@ fn null_and_noise_entries_place_a_point_at_the_levels_it_named() {
         "a row whose every entry is noise is one row in no artifact"
     );
 
-    let (from_tables, _b) =
-        build_spelling(&layer.replace("{members}", FROM_LEVELLED_TABLES), |inputs| {
+    let (from_tables, _b) = build_spelling(
+        &layer.replace("{members}", FROM_LEVELLED_TABLES),
+        |inputs| {
             write_listed_points(&inputs.points, &lists, false, None);
             write_edged_artifacts(
                 &inputs.at("admin.parquet"),
@@ -2172,7 +2248,8 @@ fn null_and_noise_entries_place_a_point_at_the_levels_it_named() {
                     (2, "400", (230..240).collect()),
                 ],
             );
-        });
+        },
+    );
     assert_bundles_identical(
         &from_points,
         &from_tables,
@@ -2210,7 +2287,253 @@ fn an_open_layer_mints_the_interior_parents_a_lineage_names() {
     // them: a parent nothing hangs from is not a split.
     assert_eq!(containment_report(&out)["splits"]["total"], 4);
     assert_eq!(
-        containment_report(&out)["violations"].as_array().unwrap().len(),
+        containment_report(&out)["violations"]
+            .as_array()
+            .unwrap()
+            .len(),
         0
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Predicate layers: the artifacts a rule names, and the shape a box names
+// ---------------------------------------------------------------------------------------------
+
+/// A declaration with one predicate layer, over a points file carrying a `band` column.
+fn predicate_toml(layer: &str) -> String {
+    format!(
+        r#"
+[sources]
+points = "points.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "s0"
+extent           = {{ min = 0.0, max = 1000.0 }}
+point_visibility = {{ default = "public" }}
+
+[[attribute]]
+name  = "band"
+type  = "u32"
+index = true
+
+{layer}
+"#
+    )
+}
+
+/// The points file the predicate cases read: geometry, and a `band` value per point.
+///
+/// **Five values over 250 points**, and every point carries one — a single-valued column
+/// partitions, which is what makes one label per row the whole membership.
+fn write_banded_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("band", DataType::UInt32, false),
+    ]));
+    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let bands: Vec<u32> = ids.iter().map(|e| (e % 5) as u32 * 10).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(UInt32Array::from(bands)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+fn predicate_inputs(layer: &str) -> Inputs {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let config = dir.join("config.toml");
+    write_banded_points(&points);
+    write_pairs(&pairs);
+    std::fs::write(&config, predicate_toml(layer)).unwrap();
+    Inputs {
+        _tmp: tmp,
+        points,
+        pairs,
+        config,
+        dir,
+    }
+}
+
+const BAND_LAYER: &str = r#"
+[[layer]]
+name                      = "bands/by-value"
+views                     = ["s0"]
+membership                = { attribute = "band" }
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+"#;
+
+/// **A predicate layer's artifacts are its column's distinct values**, minted by the build from the
+/// column it has just read — one per value, keyed by the value's own decimal spelling, in
+/// value-code order so an ordinal is a function of the value and not of the file's row order.
+#[test]
+fn a_build_mints_an_attribute_predicates_artifacts_from_its_column() {
+    let inputs = predicate_inputs(BAND_LAYER);
+    let out = inputs.at("bundle");
+    let report = run(&inputs, &out).expect("a predicate layer builds");
+    assert!(report.items > 0);
+
+    let manifest = manifest_of(&out);
+    let layer = manifest
+        .layers
+        .iter()
+        .find(|l| l.declaration.name == "bands/by-value")
+        .expect("the predicate layer is registered");
+    // **The recorded form is the form the request will take**, not the default: the membership *is*
+    // the column, so one label per row is the only form it has.
+    assert_eq!(
+        layer.layout_of(0),
+        tessera_types::layer::ServingLayout::RowMajorLabel
+    );
+    let version = manifest
+        .level_versions
+        .iter()
+        .find(|v| v.layer == "bands/by-value" && v.level == 0)
+        .expect("the level's version reaches the manifest");
+    assert_eq!(
+        version.version, 1,
+        "the values were minted in one publication"
+    );
+    assert_eq!(
+        manifest
+            .membership_extents
+            .iter()
+            .filter(|e| e.layer == "bands/by-value")
+            .count(),
+        1,
+        "a predicate layer's records are durable like any other's"
+    );
+}
+
+/// The membership string `reports/disclosure.json` carries for one layer of a declaration.
+fn disclosed_membership(config: &Path, layer: &str) -> String {
+    let config = tessera_build::config::Config::parse(config, &Default::default())
+        .expect("the fixture's declaration parses");
+    let disclosure = tessera_build::disclosure::Disclosure::of(&config);
+    let json = serde_json::to_value(&disclosure).unwrap();
+    json["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == layer)
+        .unwrap_or_else(|| panic!("{layer} is not in the report"))["membership"]
+        .as_str()
+        .expect("a membership is a string")
+        .to_string()
+}
+
+/// **The disclosure report names the rule, because the rule is who belongs.**
+#[test]
+fn the_disclosure_report_names_a_predicates_membership() {
+    let inputs = predicate_inputs(BAND_LAYER);
+    assert_eq!(
+        disclosed_membership(&inputs.config, "bands/by-value"),
+        "attribute:band"
+    );
+}
+
+const SHAPE_LAYER: &str = r#"
+[[layer]]
+name                      = "regions/boxes"
+views                     = ["s0"]
+membership                = "spatial"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+artifacts = [
+  { key = "west", bbox = [0.0, 0.0, 400.0, 1000.0] },
+  { key = "east", bbox = [600.0, 0.0, 1000.0, 1000.0] },
+]
+
+  [layer.shape]
+  kind  = "bbox"
+  depth = 4
+"#;
+
+/// **A shape layer publishes boxes and stores no membership**, and the report says which shape at
+/// which depth — because a box covered at another depth holds other points.
+#[test]
+fn a_build_publishes_a_shape_layers_boxes_and_discloses_the_depth() {
+    let inputs = predicate_inputs(SHAPE_LAYER);
+    let out = inputs.at("bundle");
+    run(&inputs, &out).expect("a shape layer builds");
+
+    let manifest = manifest_of(&out);
+    let layer = manifest
+        .layers
+        .iter()
+        .find(|l| l.declaration.name == "regions/boxes")
+        .expect("the shape layer is registered");
+    assert_eq!(
+        layer.layout_of(0),
+        tessera_types::layer::ServingLayout::SpatialRanges
+    );
+
+    assert_eq!(
+        disclosed_membership(&inputs.config, "regions/boxes"),
+        "spatial:bbox:depth=4",
+        "a report naming the kind alone would say less than the declaration does"
+    );
+}
+
+/// **An artifact's box and its layer's shape are one statement**, so each half without the other is
+/// a refusal: a box on a layer that declares no shape is a region nothing evaluates, and an
+/// artifact with no box on a layer that does has no membership rule at all.
+#[test]
+fn a_box_and_a_shape_declaration_are_refused_apart() {
+    let missing = SHAPE_LAYER.replace(
+        "  { key = \"west\", bbox = [0.0, 0.0, 400.0, 1000.0] },",
+        "  { key = \"west\" },",
+    );
+    let inputs = predicate_inputs(&missing);
+    let out = inputs.at("bundle");
+    let message = run(&inputs, &out)
+        .expect_err("an artifact with no box is refused")
+        .to_string();
+    assert!(message.contains("carries no bounding box"), "{message}");
+
+    let stray = LAYERS_TOML.replace(
+        "name = \"clusters/a\"",
+        "name = \"clusters/a\"\nartifacts = [{ key = \"c0\", bbox = [0.0, 0.0, 1.0, 1.0] }]",
+    );
+    let inputs = predicate_inputs(&stray);
+    let out = inputs.at("bundle");
+    assert!(
+        run(&inputs, &out).is_err(),
+        "a box on a layer that declares no shape was accepted"
+    );
+
+    // A transposed box is refused rather than swapped: correcting it would publish a membership
+    // over a region nobody wrote.
+    let inverted = SHAPE_LAYER.replace("[0.0, 0.0, 400.0, 1000.0]", "[400.0, 0.0, 0.0, 1000.0]");
+    let inputs = predicate_inputs(&inverted);
+    let out = inputs.at("bundle");
+    let message = run(&inputs, &out)
+        .expect_err("an inverted box is refused")
+        .to_string();
+    assert!(
+        message.contains("not a box this build will store"),
+        "{message}"
     );
 }
