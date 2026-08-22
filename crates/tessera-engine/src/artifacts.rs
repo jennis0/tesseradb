@@ -71,6 +71,7 @@ use croaring::Bitmap;
 use rustc_hash::FxHashSet;
 
 use tessera_lifecycle::membership::{ArtifactRecord, ArtifactStore, Attachment};
+use tessera_lifecycle::wal::ParentRef;
 use tessera_lifecycle::Overlay;
 use tessera_types::layer::{ExistenceCriterion, LayerDeclaration};
 use tessera_types::{EntityId, TermId};
@@ -79,35 +80,80 @@ use tessera_store::permutation::RowSpace;
 
 use crate::compose::MaskedSet;
 
+/// One level's per-ordinal facts that **no row space is involved in**: the attachment edge, the
+/// parent edge, and each content's declared generating-set size.
+///
+/// **Split out of [`ArtifactRows`] because the two halves cost different amounts and are wanted at
+/// different cadences.** Building this is a walk over the level's records copying three small
+/// things per artifact; building [`MembershipRows`] beside it decodes and projects every
+/// membership, which is the 376 s at 10⁷ artifacts that
+/// `design/artifact-serving-at-scale.md` §8.1 measures. Everything `verdict` asks that is not a
+/// masked question is answered from here, so a later stage may rebuild one half without the other.
+/// Today both are built together under one [`ProjectionKey`], which is what keeps them describing
+/// the same population — see [`ArtifactRows`]' one-snapshot note.
+///
+/// **What it deliberately does not hold.** The generating sets themselves stay in the registry:
+/// the containment partition composes from them inside the same store borrow that builds this, and
+/// a second entity-space copy of `Σ|G|` bitmaps would be residency spent to avoid a walk that is
+/// already paid. And the proportional criterion's denominator is **not** here, because
+/// [`ArtifactView::declared_size`] takes it from the row form on purpose — numerator and
+/// denominator from one projection. An entity-space copy beside it would be a second, larger
+/// number with the same name, and §10 of the scale design puts the per-artifact declared size with
+/// the row-major layout that needs it rather than here.
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactRecords {
+    /// Per ordinal, what this artifact is an attachment to — `None` for an ordinary artifact.
+    ///
+    /// **Entity space, and deliberately not projected.** A target is tested on its disposition and
+    /// on its layer's gate, neither of which is a row-space question, so a projection would be a
+    /// second address for something already addressed.
+    attachments: Vec<Option<Attachment>>,
+    /// Per ordinal, this artifact's parent edge as the registry holds it — read by the serving
+    /// path to name a parent that is *also* in the response, and by nothing in [`ArtifactView`].
+    /// It is not a visibility term: see [`ArtifactRecord::parent`].
+    parents: Vec<Option<ParentRef>>,
+    /// Per ordinal, per rank: `|G|` in **entity space**, from the durable record.
+    ///
+    /// **Kept beside the projected set because a projection that lost a member must not read as
+    /// containment.** A generating set is entity-space and permanent; row space holds only what
+    /// this view has folded in, so a member awaiting a fold projects to nothing and would silently
+    /// drop out of the test — leaving a viewer contained in a *smaller* set than the caller
+    /// declared, which is the whole disclosure. Carrying the declared size makes the loss
+    /// detectable, and a lossy projection fails containment for everybody rather than passing it
+    /// for somebody.
+    ///
+    /// **Rank here is the position in the artifact's ranked `contents`** — not a Morton rank and
+    /// not a rank within a bitmap.
+    declared: Vec<Vec<u64>>,
+}
+
 /// One layer's membership in the row space of one view, built at open and rebuilt when the
-/// generation moves.
+/// generation moves — the expensive half of [`ArtifactRows`].
 ///
 /// **Built member-wise, and this is a disclosure rule.** Projecting an entity *range* to a row
 /// range would admit whatever documents happen to sit between two members in Morton order — and one
 /// extra member can lift an artifact over its existence criterion. The write cycle forbids
 /// range-wise translation for that reason; the same rule reaches the build of this form.
 #[derive(Debug, Clone, Default)]
-pub struct ArtifactRows {
+pub struct MembershipRows {
     /// Parallel to a level's ordinals; `None` is a hole, not an empty membership.
     rows: Vec<Option<Bitmap>>,
-    /// Per ordinal, per rank: that content's **generating set** in row space, beside
-    /// the size it had in entity space. **Rank here is the position in the artifact's ranked
-    /// `contents`** — not a Morton rank and not a rank within a bitmap.
-    ///
-    /// **Both, because a projection that lost a member must not read as containment.** A generating
-    /// set is entity-space and permanent; row space holds only what this view has folded in, so a
-    /// member awaiting a fold projects to nothing and would silently drop out of the test — leaving
-    /// a viewer contained in a *smaller* set than the caller declared, which is the whole
-    /// disclosure. Carrying the declared size makes the loss detectable, and a lossy projection
-    /// fails containment for everybody rather than passing it for somebody.
-    contents: Vec<Vec<ProjectedSet>>,
-    /// Per ordinal, what this artifact is an attachment to — `None` for an ordinary artifact.
-    ///
-    /// **Entity space, and deliberately not projected.** A target is tested on its disposition and
-    /// on its layer's gate, neither of which is a row-space question, so a projection would be a
-    /// second address for something already addressed. It rides here because this is the structure a
-    /// level's serving path already holds per ordinal.
-    attachments: Vec<Option<Attachment>>,
+    /// Per ordinal, per rank: that content's **generating set** in row space. Pushed in lockstep
+    /// with [`ArtifactRecords::declared`], which is the size the same set had in entity space.
+    generating: Vec<Vec<Bitmap>>,
+}
+
+/// One level's row form and the records beside it, under one validity key.
+///
+/// **One snapshot.** Both halves are built from a single borrow of the [`ArtifactStore`] at a
+/// single level version, so a write landing between two reads cannot leave the records describing
+/// one population and the projection another — the failure mode `2026-08-21-artifact-layout-selection.md`
+/// §9's first constraint names, where a membership that grew between the two reads leaves a
+/// stale-narrow derived structure beside it.
+#[derive(Debug, Clone, Default)]
+pub struct ArtifactRows {
+    records: ArtifactRecords,
+    membership: MembershipRows,
 }
 
 /// The containment test's three outcomes.
@@ -127,56 +173,34 @@ pub enum Containment {
     Unsatisfied,
 }
 
-/// One content's generating set, projected, with what it should have projected to.
-#[derive(Debug, Clone)]
-struct ProjectedSet {
-    rows: Bitmap,
-    /// `|G|` in entity space, from the durable record.
-    declared: u64,
-}
-
-impl ArtifactRows {
-    /// Project a level's memberships into `space`.
+impl ArtifactRecords {
+    /// Walk a level's records for the three per-ordinal facts that need no row space.
     ///
-    /// Costly by design and not on any per-request path: `RowSpace::project` decodes the whole
-    /// membership. It is paid at open and at a generation move, which is the same cadence the
-    /// session's own mask projection is paid at.
-    pub fn build<'a>(
-        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
-        space: &RowSpace,
-    ) -> Self {
-        let mut rows: Vec<Option<Bitmap>> = Vec::new();
-        let mut contents: Vec<Vec<ProjectedSet>> = Vec::new();
-        let mut attachments: Vec<Option<Attachment>> = Vec::new();
+    /// Cheap — no membership is decoded and nothing is projected — which is the whole reason this
+    /// is separable from [`MembershipRows::build`].
+    pub fn build<'a>(artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>) -> Self {
+        let mut records = ArtifactRecords::default();
         for (ordinal, record) in artifacts {
-            let idx = ordinal as usize;
-            if rows.len() <= idx {
-                rows.resize_with(idx + 1, || None);
-                contents.resize_with(idx + 1, Vec::new);
-                attachments.resize_with(idx + 1, || None);
-            }
-            rows[idx] = Some(space.project_base(&record.members));
-            attachments[idx] = record.attached_to.clone();
-            contents[idx] = record
-                .contents
-                .iter()
-                .map(|v| ProjectedSet {
-                    // Base rows here too, and here the consequence is sharper than a low count: a
-                    // generating set that lost members in projection can never be contained, so a
-                    // label whose sample includes documents ingested since the last fold is
-                    // withheld from **everyone** until that fold. Fail-closed, and the direction
-                    // this must fail in — the alternative is serving content on a set that no
-                    // longer names what the text was derived from.
-                    rows: space.project_base(&v.generated_from),
-                    declared: v.generated_from.cardinality(),
-                })
-                .collect();
+            records.put(ordinal as usize, record);
         }
-        ArtifactRows {
-            rows,
-            contents,
-            attachments,
+        records
+    }
+
+    /// Place one record at `idx`, growing the dense vectors to reach it. A slot never written is a
+    /// **hole**, not an empty artifact — see [`ArtifactStore`].
+    fn put(&mut self, idx: usize, record: &ArtifactRecord) {
+        if self.attachments.len() <= idx {
+            self.attachments.resize_with(idx + 1, || None);
+            self.parents.resize_with(idx + 1, || None);
+            self.declared.resize_with(idx + 1, Vec::new);
         }
+        self.attachments[idx] = record.attached_to.clone();
+        self.parents[idx] = record.parent;
+        self.declared[idx] = record
+            .contents
+            .iter()
+            .map(|v| v.generated_from.cardinality())
+            .collect();
     }
 
     /// What the artifact at `ordinal` hangs from, if it hangs from anything.
@@ -186,8 +210,77 @@ impl ArtifactRows {
             .and_then(Option::as_ref)
     }
 
+    /// The artifact's parent edge, as the registry holds it.
+    pub(crate) fn parent(&self, ordinal: u32) -> Option<ParentRef> {
+        self.parents.get(ordinal as usize).copied().flatten()
+    }
+
+    /// `|G|` per rank, entity space. Empty for a hole and for an artifact with no contents alike —
+    /// the two are told apart by [`ArtifactRows::satisfied_rank`] against the layer's declaration,
+    /// never here.
+    fn declared(&self, ordinal: u32) -> &[u64] {
+        self.declared
+            .get(ordinal as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// How many ordinals this level covers, holes included.
+    pub fn len(&self) -> usize {
+        self.attachments.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.attachments.is_empty()
+    }
+}
+
+impl MembershipRows {
+    /// Project a level's memberships into `space`.
+    ///
+    /// Costly by design and not on any per-request path: `RowSpace::project` decodes the whole
+    /// membership. It is paid at open and at a generation move, which is the same cadence the
+    /// session's own mask projection is paid at.
+    pub fn build<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+    ) -> Self {
+        let mut membership = MembershipRows::default();
+        for (ordinal, record) in artifacts {
+            membership.put(ordinal as usize, record, space);
+        }
+        membership
+    }
+
+    fn put(&mut self, idx: usize, record: &ArtifactRecord, space: &RowSpace) {
+        if self.rows.len() <= idx {
+            self.rows.resize_with(idx + 1, || None);
+            self.generating.resize_with(idx + 1, Vec::new);
+        }
+        self.rows[idx] = Some(space.project_base(&record.members));
+        self.generating[idx] = record
+            .contents
+            .iter()
+            // Base rows here too, and here the consequence is sharper than a low count: a
+            // generating set that lost members in projection can never be contained, so a label
+            // whose sample includes documents ingested since the last fold is withheld from
+            // **everyone** until that fold. Fail-closed, and the direction this must fail in — the
+            // alternative is serving content on a set that no longer names what the text was
+            // derived from.
+            .map(|v| space.project_base(&v.generated_from))
+            .collect();
+    }
+
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
         self.rows.get(ordinal as usize).and_then(Option::as_ref)
+    }
+
+    /// The projected generating sets, per rank. Parallel to [`ArtifactRecords::declared`].
+    fn generating(&self, ordinal: u32) -> &[Bitmap] {
+        self.generating
+            .get(ordinal as usize)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// How many ordinals this level covers, holes included.
@@ -197,6 +290,59 @@ impl ArtifactRows {
 
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
+    }
+}
+
+impl ArtifactRows {
+    /// Build both halves from one walk of one level, at one level version.
+    pub fn build<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        space: &RowSpace,
+    ) -> Self {
+        let mut records = ArtifactRecords::default();
+        let mut membership = MembershipRows::default();
+        for (ordinal, record) in artifacts {
+            let idx = ordinal as usize;
+            records.put(idx, record);
+            membership.put(idx, record, space);
+        }
+        ArtifactRows {
+            records,
+            membership,
+        }
+    }
+
+    /// The entity-space half.
+    pub fn records(&self) -> &ArtifactRecords {
+        &self.records
+    }
+
+    /// The row-space half.
+    pub fn membership(&self) -> &MembershipRows {
+        &self.membership
+    }
+
+    /// What the artifact at `ordinal` hangs from, if it hangs from anything.
+    pub(crate) fn attachment(&self, ordinal: u32) -> Option<&Attachment> {
+        self.records.attachment(ordinal)
+    }
+
+    /// The artifact's parent edge, as the registry holds it.
+    pub(crate) fn parent(&self, ordinal: u32) -> Option<ParentRef> {
+        self.records.parent(ordinal)
+    }
+
+    pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
+        self.membership.get(ordinal)
+    }
+
+    /// How many ordinals this level covers, holes included.
+    pub fn len(&self) -> usize {
+        self.membership.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.membership.is_empty()
     }
 
     /// The masked count: how many of this artifact's members this viewer can see.
@@ -245,12 +391,9 @@ impl ArtifactRows {
         mask: &impl MaskedSet,
         layer_declares_content: bool,
     ) -> Containment {
-        let sets = self
-            .contents
-            .get(ordinal as usize)
-            .map(Vec::as_slice)
-            .unwrap_or(&[]);
-        if sets.is_empty() {
+        let declared = self.records.declared(ordinal);
+        let generating = self.membership.generating(ordinal);
+        if declared.is_empty() {
             // **Nothing to contain, or nothing left to serve — and the layer's declaration is what
             // tells them apart.** A layer declaring no supplied content has artifacts that serve on
             // their other conjuncts; one that *does* declare it has artifacts that must carry it,
@@ -264,14 +407,18 @@ impl ArtifactRows {
                 Containment::NothingToContain
             };
         }
-        for (i, set) in sets.iter().enumerate() {
-            // A set that lost members in projection can never be contained — see `ProjectedSet`.
-            // Checked before the mask rather than after, because it is a property of the artifact
-            // and not of the viewer, and because it must not be expressible as *contained*.
-            if set.rows.cardinality() != set.declared {
+        // Both halves were pushed in lockstep from one record, so the zip is total; a shorter
+        // projection could only come from a form assembled by hand, and truncating is the
+        // fail-closed reading of that.
+        for (i, (rows, declared)) in generating.iter().zip(declared).enumerate() {
+            // A set that lost members in projection can never be contained — see
+            // [`ArtifactRecords::declared`]. Checked before the mask rather than after, because it
+            // is a property of the artifact and not of the viewer, and because it must not be
+            // expressible as *contained*.
+            if rows.cardinality() != *declared {
                 continue;
             }
-            if mask.count_intersection(&set.rows) == set.declared {
+            if mask.count_intersection(rows) == *declared {
                 return Containment::Satisfied(i as u32);
             }
         }
@@ -642,9 +789,15 @@ mod tests {
     /// predicate, and building a permutation would test the projection instead.
     fn rows_of(sets: &[&[u32]]) -> ArtifactRows {
         ArtifactRows {
-            rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
-            contents: vec![Vec::new(); sets.len()],
-            attachments: vec![None; sets.len()],
+            records: ArtifactRecords {
+                attachments: vec![None; sets.len()],
+                parents: vec![None; sets.len()],
+                declared: vec![Vec::new(); sets.len()],
+            },
+            membership: MembershipRows {
+                rows: sets.iter().map(|s| Some(Bitmap::of(s))).collect(),
+                generating: vec![Vec::new(); sets.len()],
+            },
         }
     }
 
@@ -666,15 +819,15 @@ mod tests {
     /// holds fewer members than the entity-space set the caller published.
     fn rows_with_contents(members: &[u32], contents: &[(&[u32], u64)]) -> ArtifactRows {
         ArtifactRows {
-            rows: vec![Some(Bitmap::of(members))],
-            contents: vec![contents
-                .iter()
-                .map(|(set, declared)| ProjectedSet {
-                    rows: Bitmap::of(set),
-                    declared: *declared,
-                })
-                .collect()],
-            attachments: vec![None],
+            records: ArtifactRecords {
+                attachments: vec![None],
+                parents: vec![None],
+                declared: vec![contents.iter().map(|(_, declared)| *declared).collect()],
+            },
+            membership: MembershipRows {
+                rows: vec![Some(Bitmap::of(members))],
+                generating: vec![contents.iter().map(|(set, _)| Bitmap::of(set)).collect()],
+            },
         }
     }
 
@@ -1018,14 +1171,20 @@ mod tests {
     /// One label, attached to a cluster in another layer.
     fn attached_rows(members: &[u32]) -> ArtifactRows {
         ArtifactRows {
-            rows: vec![Some(Bitmap::of(members))],
-            contents: vec![Vec::new()],
-            attachments: vec![Some(Attachment {
-                layer: CLUSTERS.to_string(),
-                level: 0,
-                ordinal: 3,
-                entity: CLUSTER_ENTITY,
-            })],
+            records: ArtifactRecords {
+                attachments: vec![Some(Attachment {
+                    layer: CLUSTERS.to_string(),
+                    level: 0,
+                    ordinal: 3,
+                    entity: CLUSTER_ENTITY,
+                })],
+                parents: vec![None],
+                declared: vec![Vec::new()],
+            },
+            membership: MembershipRows {
+                rows: vec![Some(Bitmap::of(members))],
+                generating: vec![Vec::new()],
+            },
         }
     }
 

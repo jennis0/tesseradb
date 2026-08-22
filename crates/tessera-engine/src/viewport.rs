@@ -3632,12 +3632,15 @@ impl Engine {
                             .unwrap_or_default();
                         crate::derived::compute(&declared_derived, &visible, &locator)
                     };
-                    let (key, parent) =
-                        self.write
-                            .with_artifacts(|store| match store.get(&name, level, ordinal) {
-                                Some(record) => (record.key.clone(), record.parent),
-                                None => (None, None),
-                            });
+                    // **The parent comes from the level's own records and the key from the store.**
+                    // Both are per-ordinal facts of one generation, but only one of them is held
+                    // in the row form: a key is a caller's string, one per artifact, and copying
+                    // ten million of them into a cached structure buys nothing the store's own
+                    // lookup does not already answer.
+                    let parent = rows.parent(ordinal);
+                    let key = self
+                        .write
+                        .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone());
                     // Recorded, not resolved: which artifacts this response holds is not known
                     // until every layer and level has been walked, and a parent — or the artifact
                     // a dependent hangs from — may sit in a level this loop has not reached.
