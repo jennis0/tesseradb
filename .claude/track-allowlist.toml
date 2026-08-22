@@ -117,3 +117,14 @@ paths = [
   "docs/design/configuration.md",
   "docs/design/contracts.md",
 ]
+
+# Wave 4 — the Stage 7 validation campaign (controller, 2026-08-22): fixtures materialised, served
+# and measured against the built engine. A measurement track owns its bench arms and its probe
+# record and writes no engine code.
+[track.campaign]
+paths = [
+  "crates/tessera-bench/*",
+  "crates/tessera-corpus/*",
+  "probes/*",
+  "docs/evidence/memos/*",
+]
