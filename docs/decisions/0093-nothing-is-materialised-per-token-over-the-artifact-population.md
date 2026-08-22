@@ -3,6 +3,8 @@
 **Date:** 2026-08-21 · **Status:** Settled (owner ruling) — **amended the same day**, after the
 campaign's adversarial review, with the row-major exception the owner named and with the evidence
 corrections that review found ([the record](../evidence/memos/2026-08-21-artifact-serving-scale-review.md)).
+**Its evidence was re-measured on the corrected probe and recorded here on 2026-08-22**; the ruling
+is unchanged and its price is now a number.
 
 ## Context
 
@@ -15,7 +17,8 @@ but not on the request, containment (`G ⊆ M_auth`) and the masked count.
 **There are a great many tokens** (owner, 2026-08-21). A principal is a token, principals do not
 share masks, and the target scenario is many concurrent ones over a shared bundle. So a structure
 sized by the artifact population is the wrong shape on that cadence however cheap one copy of it is:
-at 10⁷ artifacts the per-token route measured 151 ms of setup and ~40 MB of state, per session.
+at 10⁷ artifacts the per-token route costs 0.85–1.7 s of setup and ~40 MB of state, per token, per
+generation (measured; see the evidence below).
 
 ## The decision
 
@@ -49,30 +52,42 @@ what [`annotations.md`](../design/annotations.md) §4 already says the tractabil
 on — *what decides is which terms, never how many items* (**I5**) — applied to storage rather than
 to evaluation.
 
-⊘ **How many distinct expressions a real layer produces is unmeasured, and this ruling does not rest
-on it.** The claim that the count stays small assumes generating sets drawn from inside one signature
-group — which [`annotations.md`](../design/annotations.md) §8.1 shows as a **variant an author may
-adopt** against label creep, not as a rule the service imposes. The measurement behind it planted 32
-signature groups and drew every set from one, so 32 is what the fixture could produce; the demo corpus
-holds **54,791 distinct permission signatures over 2.42M items** (`probes/phase0-memo.md` §2.3). Two
-consequences: the expression identifier is **at least a `u16`**, and the distinct-expression count over
-a real generating-set population is a queued measurement. What the ruling rests on is the *cadence* —
-the structure names no principal — and that is true at any expression count.
+**How many distinct expressions a real layer produces is now measured, and it does not change the
+ruling — it changes what the partition is for.** The probe's expression census composes,
+canonicalises and interns the expression for every artifact of a population and counts the distinct
+ones (scale memo §4.2, `probes/2026-08-20-artifact-serving-scale/data/expressions.csv`). Under
+[`annotations.md`](../design/annotations.md) §8.1's **per-term** authoring the count is 32 at every
+generating-set size swept — the vocabulary's, not the layer's. Under generating sets drawn across the
+demo corpus's real signature distribution — **54,794 distinct signatures over 2.4M items** — it is
+**29,175 distinct expressions at `|G| = 1`, 329,080 at `|G| = 2`, 976,510 at `|G| = 4`, and ~10⁶ at
+`|G| ≥ 8`: one expression per artifact over 10⁶ artifacts**, with interned expressions reaching
+~306 MB at the widest set measured. **Outside per-term authoring the partition's sharing collapses
+entirely.** What survives is the cadence this ruling rests on — one build-time copy naming no
+principal, at any expression count — and what does not survive is the per-request *union* of the
+satisfied expressions' bitmaps, which is a route only where the count is the vocabulary's. Where it
+is the population's, containment is a per-candidate lookup through the identifier column, which the
+viewport bounds: cheap at a narrow zoom, and the wide zoom's price is the build wave's to take. The
+expression identifier is **at least a `u16`** either way.
 
-**It measures at parity with the per-token route and ahead of it where it matters.** ⊘ *These cells
-appear in no committed run log — unrecorded earlier revision, re-measurement queued, and both routes
-compared here omit the masked candidacy test the design now requires (scale memo §4).* At 10⁷
-artifacts and a full mask the two are within noise across four viewports (140.0 ms against 141.9 at
-whole map, 0.221 against 0.186 at a 0.024% viewport) — with the per-token structure's 151 ms of
-setup deleted rather than amortised, against a build-time interning that took 0.1 s at 32 expressions.
-At a **narrow** principal the build-time route wins outright, **4.09 ms against 13.1** at whole-map
-zoom, because the expressions a principal fails are never touched where the per-token pass had to
-evaluate every artifact once to find that out.
+**What the per-token route would have cost is now recorded rather than argued.** Measured at 10⁶
+artifacts over 10⁸ points, whole map, full mask, every route carrying the masked candidacy probe the
+design requires — *median of three runs;
+`probes/2026-08-20-artifact-serving-scale/data/parity-r1e8-a1e6-medians.csv`*: the shipped
+per-artifact loop is **1 362 ms** (4 443 ms at its worst cell), the build-time partition without
+hoisting **379 ms**, the design's route **134 ms**, and the per-token route **12.4 ms per request —
+plus 99–343 ms of setup per token per generation**, rising to **0.85–1.7 s at 10⁷ artifacts**, at
+~4 B per artifact. So the per-token structure is genuinely the faster one per request, and the ruling
+is a cadence judgement with a price attached: at 121 ms saved per request the setup breaks even after
+one to three requests at 10⁶ artifacts and two to four at 10⁷ *(derived)*, never breaks even if the
+generation moves first, and thousands of near-unique tokens are **4–40 GB resident plus minutes of
+rebuild at every generation move** *(derived)*. Its setup is also dearest for the narrowest
+principals — 99 ms at a full mask against 343 ms at 3.1% — which is the opposite of where a cache
+would want its cost.
 
-**It costs ~40 MB of state naming nobody** at the 32-expression fixture — 30 MB of bitmaps and 10 MB
-of identifiers — against ~40 MB per live session, and a token then costs what it always did: its mask
-fragment, and no artifact structure at all. The storage figure moves with the expression count and the
-identifier width; the property that it names nobody does not.
+**The build-time partition costs one copy naming nobody**: 7.3 MB over 10⁶ `(artifact, rank)` pairs
+and 73.3 MB over 2×10⁷ at the fixture's 32 expressions *(measured)*, ~306 MB where the census puts
+one expression per artifact. A token costs what it always did — its mask fragment, and no artifact
+structure at all.
 
 ## What this forecloses
 
@@ -85,7 +100,7 @@ Two candidates remain, both unbuilt and neither yet chosen:
 - **Per-signature counts**, build-time and mask-independent, summed over the satisfied signatures
   per request. Its storage scales with the **signature** count rather than the artifact count, which
   is the thing to measure against a real corpus before building it — the fixture's thirty-two against
-  the demo corpus's 54,791.
+  the census's **54,794 distinct signatures** over the demo corpus's 2.4M items.
 - **Bounding evaluation to the levels the request can serve from**, which changes what is evaluated
   rather than what is served, and reaches the request contract.
 
@@ -110,8 +125,10 @@ overlay's.
   the rest of the per-generation structures, and it inherits the invalidation defect with it (memo
   §8.1): any artifact write moves the store version, so the partition is rebuilt for every layer in
   every view.
-- ⊘ **What the partition costs to build is unmeasured.** The probe interned 32 expressions in 0.1 s
-  over ten million artifacts, which prices the fixture's expression count and not a corpus's.
+- **What the partition costs to build**, at the fixture's expression count: 0.8 s over 10⁶
+  `(artifact, rank)` pairs and 5.9–12.0 s over 2×10⁷ *(measured)*. ⊘ That is thirty-two expressions
+  composed and interned; at the census's real distribution it is a million distinct canonical forms
+  instead, and **that build cost is not measured**.
 
 ⊘ **The deny correction is the partition's acceptance test, not a refinement of it.** A **deletion**
 and a **suppression** each remove a member of `G` from `M_auth` whatever the terms say, so the answer
