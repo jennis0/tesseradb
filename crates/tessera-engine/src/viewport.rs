@@ -2977,6 +2977,10 @@ struct DependencyContext<'a> {
     view: &'a str,
     view_data: &'a tessera_store::ViewData,
     mask: &'a crate::compose::EffectiveMask,
+    /// This view's `deleted ∪ suppressed` in row space — the containment partition's acceptance
+    /// test, carried here for the same reason `mask` is: a dependency's verdict is the *same*
+    /// verdict, so it must be reached with the same inputs.
+    denied: &'a croaring::Bitmap,
     reachable: &'a tessera_lifecycle::ResolvedLayers,
 }
 
@@ -3131,6 +3135,7 @@ impl Engine {
             view,
             view_data,
             mask: &mask,
+            denied,
             reachable: &reachable,
         };
         let dependency_served = self.dependency_gate(&ctx);
@@ -3143,6 +3148,7 @@ impl Engine {
             mask: &mask,
             dependency_served: &dependency_served,
             containment,
+            denied,
         };
         // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
         // `artifact_visibility` names a field withholds here as it does on the viewport, which is
@@ -3371,6 +3377,7 @@ impl Engine {
             mask: ctx.mask,
             dependency_served: &nested,
             containment,
+            denied: ctx.denied,
         }
         // ⊘ Per-artifact terms arrive with content, so the target's own label is `None` here
         // exactly as it is on the two serving routes — the same fail-closed answer reached by the
@@ -3425,12 +3432,24 @@ impl Engine {
         // Built once for the whole response, and from the *same* resolution the names above came
         // from: a label's target may live in any layer its own declares in `depends_on`, reachable
         // or not, and asking a second resolution would be a second answer to one question.
+        // **Fail-closed on a missing entry**, exactly as the point path is: every view the bundle
+        // carries has one, empty when nothing is denied (`compose::derive_denied`), so an absent
+        // key means the mask and the bundle disagree about what this generation holds. Reading it
+        // as *nothing is denied here* would let the containment partition serve content generated
+        // from suppressed and deleted documents, with no error anywhere.
+        let denied = generation
+            .denied
+            .get(view)
+            .ok_or_else(|| EngineError::DenyMaskMissing {
+                view: view.to_string(),
+            })?;
         let ctx = DependencyContext {
             generation,
             satisfied: &session.satisfied,
             view,
             view_data,
             mask,
+            denied,
             reachable: &reachable,
         };
         let dependency_served = self.dependency_gate(&ctx);
@@ -3523,6 +3542,7 @@ impl Engine {
                     mask,
                     dependency_served: &dependency_served,
                     containment,
+                    denied,
                 };
                 // **Every candidate is tested before any is cut**, and the two passes are separate
                 // for a reason that is not performance: the verdict is a per-artifact question

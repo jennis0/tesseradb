@@ -468,7 +468,7 @@ impl ArtifactRows {
         &self,
         ordinal: u32,
         answers: &ContainmentAnswers<'_>,
-        mask: &impl MaskedSet,
+        denied: &Bitmap,
         layer_declares_content: bool,
     ) -> Option<Containment> {
         if !answers.covers(ordinal) {
@@ -492,8 +492,12 @@ impl ArtifactRows {
             }
             // **The acceptance test.** The expression says the viewer's terms reach every member;
             // a deletion or a suppression removes one whatever the terms say, and this is where
-            // that is asked — live, of the mask this request composed.
-            if mask.withholds_any(rows) {
+            // that is asked — live, against the generation's own deny mask.
+            //
+            // Row space rather than entity space, and exact for the same reason the expression is:
+            // every member of a set that cleared the projection check above has a base row, and
+            // `row_of` is injective, so `projected ∩ denied_rows = ∅` iff `G ∩ denied = ∅`.
+            if denied.intersect(rows) {
                 continue;
             }
             return Some(Containment::Satisfied(i as u32));
@@ -777,6 +781,19 @@ pub struct ArtifactView<'a, M: MaskedSet> {
     pub dependency_served: &'a dyn Fn(&Attachment) -> bool,
     /// The viewer's **composed** mask — see [`MaskedSet`] for why the type forbids anything else.
     pub mask: &'a M,
+    /// `deleted ∪ suppressed`, in this view's row space — the generation's own deny mask.
+    ///
+    /// **The containment partition's acceptance test, and it is not a refinement**
+    /// (`design/artifact-serving-at-scale.md` §4.2; the review's finding 2). The partition answers
+    /// `G ⊆ M_auth` from term signatures, which a deletion or a suppression does not touch, so an
+    /// expression consulted alone is fail-open for exactly the case the write cycle exists to make
+    /// safe. This is the same set [`crate::compose`] composed the mask from — re-derived by the
+    /// deny lane at the acknowledgement, and on an unsuppress **re-derived rather than
+    /// subtracted**, so `delete → suppress → unsuppress` leaves the entity deleted.
+    ///
+    /// Read only by the partition's arm. The masked-count route needs nothing here: the mask it
+    /// counts against already has these rows taken out.
+    pub denied: &'a Bitmap,
     /// This principal's answers over the level's containment partition, where the level has one.
     ///
     /// **A fast arm, never a second rule.** `None` puts every artifact on the masked-count route,
@@ -878,7 +895,7 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
         if let Some(answers) = &self.containment {
             if let Some(containment) =
                 self.rows
-                    .satisfied_rank_via(ordinal, answers, self.mask, declares_content)
+                    .satisfied_rank_via(ordinal, answers, self.denied, declares_content)
             {
                 return containment;
             }
@@ -987,6 +1004,7 @@ mod tests {
         satisfied: FxHashSet<TermId>,
         rows: ArtifactRows,
         mask: Bitmap,
+        denied: Bitmap,
     }
 
     impl Fixture {
@@ -996,6 +1014,7 @@ mod tests {
                 satisfied: FxHashSet::default(),
                 rows: rows_of(members),
                 mask: Bitmap::of(mask),
+                denied: Bitmap::new(),
             }
         }
 
@@ -1013,6 +1032,7 @@ mod tests {
                 mask: &self.mask,
                 dependency_served: &dependency_served,
                 containment: None,
+                denied: &self.denied,
             }
         }
     }
@@ -1214,6 +1234,7 @@ mod tests {
             mask: &all,
             dependency_served: &dependency_served,
             containment: None,
+            denied: &Bitmap::new(),
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1235,6 +1256,7 @@ mod tests {
             mask: &nearly,
             dependency_served: &dependency_served,
             containment: None,
+            denied: &Bitmap::new(),
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1264,6 +1286,7 @@ mod tests {
                 mask,
                 dependency_served: &dependency_served,
                 containment: None,
+                denied: &Bitmap::new(),
             }
             .verdict(EntityId::new(999), 0, None)
         };
@@ -1308,6 +1331,7 @@ mod tests {
             mask: &everything,
             dependency_served: &dependency_served,
             containment: None,
+            denied: &Bitmap::new(),
         };
         assert_eq!(
             view.verdict(EntityId::new(999), 0, None),
@@ -1366,6 +1390,7 @@ mod tests {
                 mask: &mask,
                 dependency_served: prerequisite,
                 containment: None,
+                denied: &Bitmap::new(),
             }
             .verdict(LABEL_ENTITY, 0, None)
         };
@@ -1401,6 +1426,7 @@ mod tests {
                 mask: &mask,
                 dependency_served: &dependency_served,
                 containment: None,
+                denied: &Bitmap::new(),
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Verdict)
@@ -1425,6 +1451,7 @@ mod tests {
                 mask: &mask,
                 dependency_served: &dependency_absent,
                 containment: None,
+                denied: &Bitmap::new(),
             }
             .verdict(LABEL_ENTITY, 0, None),
             ArtifactVerdict::Absent(Withheld::Attachment)
@@ -1451,6 +1478,7 @@ mod tests {
             mask: &mask,
             dependency_served: &never,
             containment: None,
+            denied: &Bitmap::new(),
         }
         .verdict(EntityId::new(999), 0, None)
         .is_served());
@@ -1472,35 +1500,6 @@ mod tests {
     }
 
     // ---- the containment partition's arm -----------------------------------------------------
-
-    /// A mask that can tell *absent* from *withheld*, which a bare `Bitmap` cannot.
-    ///
-    /// The predicate's fast arm asks two different questions of the mask — is this row visible,
-    /// and is it **denied** — and only the composed mask distinguishes them in a release build.
-    /// This is the test-only stand-in, and the two sets are given separately so a case can put a
-    /// row in neither, in one, or in both.
-    struct WithheldMask {
-        visible: Bitmap,
-        withheld: Bitmap,
-    }
-
-    impl MaskedSet for WithheldMask {
-        fn count_intersection(&self, set: &Bitmap) -> u64 {
-            self.visible.and(set).andnot(&self.withheld).cardinality()
-        }
-
-        fn intersects_set(&self, set: &Bitmap) -> bool {
-            !self.visible.and(set).andnot(&self.withheld).is_empty()
-        }
-
-        fn visible_rows(&self, set: &Bitmap) -> Bitmap {
-            self.visible.and(set).andnot(&self.withheld)
-        }
-
-        fn withholds_any(&self, set: &Bitmap) -> bool {
-            self.withheld.intersect(set)
-        }
-    }
 
     /// A partition over one artifact's ranked contents, built from the clauses a test names
     /// directly rather than from postings — these cases are about the predicate's arm, and
@@ -1530,10 +1529,7 @@ mod tests {
             (&[7], &[1, 2], Some(1)),
             (&[8], &[3, 4], None),
         ] {
-            let mask = WithheldMask {
-                visible: Bitmap::of(visible),
-                withheld: Bitmap::new(),
-            };
+            let mask = Bitmap::of(visible);
             let held = satisfied_terms(held);
             let answers = partition.answers(&held);
             let expected = match expected {
@@ -1546,7 +1542,7 @@ mod tests {
                 "the masked-count route disagrees with the case's own arithmetic"
             );
             assert_eq!(
-                rows.satisfied_rank_via(0, &answers, &mask, true),
+                rows.satisfied_rank_via(0, &answers, &Bitmap::new(), true),
                 Some(expected),
                 "the partition's arm disagrees with the masked-count route"
             );
@@ -1567,43 +1563,33 @@ mod tests {
         let answers = partition.answers(&held);
 
         // Nothing denied: the caller's first choice.
-        let open = WithheldMask {
-            visible: Bitmap::of(&[1, 2, 3, 4]),
-            withheld: Bitmap::new(),
-        };
         assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &open, true),
+            rows.satisfied_rank_via(0, &answers, &Bitmap::new(), true),
             Some(Containment::Satisfied(0))
         );
 
-        // Row 4 suppressed — a member of rank 0's set and of nothing else.
-        let denied = WithheldMask {
-            visible: Bitmap::of(&[1, 2, 3, 4]),
-            withheld: Bitmap::of(&[4]),
-        };
+        // Row 4 suppressed — a member of rank 0's set and of nothing else. The mask the
+        // masked-count route counts against already has that row taken out, which is what makes
+        // the two arms comparable at all.
         assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &denied, true),
+            rows.satisfied_rank_via(0, &answers, &Bitmap::of(&[4]), true),
             Some(Containment::Satisfied(1)),
             "the expression still holds and the member is gone, so the next rank answers"
         );
         assert_eq!(
-            rows.satisfied_rank(0, &denied, true),
+            rows.satisfied_rank(0, &Bitmap::of(&[1, 2, 3]), true),
             Containment::Satisfied(1),
             "and the masked-count route says the same, which is what makes it a correction \
              rather than a second rule"
         );
 
         // And with the narrow set denied too there is nothing left to serve.
-        let all_denied = WithheldMask {
-            visible: Bitmap::of(&[1, 2, 3, 4]),
-            withheld: Bitmap::of(&[1, 4]),
-        };
         assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &all_denied, true),
+            rows.satisfied_rank_via(0, &answers, &Bitmap::of(&[1, 4]), true),
             Some(Containment::Unsatisfied)
         );
         assert_eq!(
-            rows.satisfied_rank(0, &all_denied, true),
+            rows.satisfied_rank(0, &Bitmap::of(&[2, 3]), true),
             Containment::Unsatisfied
         );
     }
@@ -1620,12 +1606,8 @@ mod tests {
         let partition = rows.partition().unwrap();
         let held = satisfied_terms(&[7]);
         let answers = partition.answers(&held);
-        let everything = WithheldMask {
-            visible: Bitmap::from_range(0..1000),
-            withheld: Bitmap::new(),
-        };
         assert_eq!(
-            rows.satisfied_rank_via(0, &answers, &everything, true),
+            rows.satisfied_rank_via(0, &answers, &Bitmap::new(), true),
             Some(Containment::Unsatisfied),
             "a viewer who can see every row there is must still not be served a set that lost \
              members on the way into row space"
@@ -1643,13 +1625,9 @@ mod tests {
         let partition = rows.partition().unwrap();
         let held = satisfied_terms(&[7]);
         let answers = partition.answers(&held);
-        let mask = WithheldMask {
-            visible: Bitmap::of(&[1, 2, 3, 4]),
-            withheld: Bitmap::new(),
-        };
         assert!(answers.covers(0));
         assert_eq!(
-            rows.satisfied_rank_via(1, &answers, &mask, true),
+            rows.satisfied_rank_via(1, &answers, &Bitmap::new(), true),
             None,
             "the second ordinal is past the partition, so it has no answer to give"
         );

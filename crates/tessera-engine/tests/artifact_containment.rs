@@ -182,7 +182,13 @@ impl Fixture {
             .expect("the fixture's postings are readable")
     }
 
-    fn mask(&self, granted: &[u32], overlay: &Overlay) -> (EffectiveMask, FxHashSet<TermId>) {
+    /// The composed mask, the principal's term set, and this view's deny mask — the three things
+    /// a request holds, derived exactly as `compose` and the deny lane derive them.
+    fn mask(
+        &self,
+        granted: &[u32],
+        overlay: &Overlay,
+    ) -> (EffectiveMask, FxHashSet<TermId>, Bitmap) {
         let satisfied: FxHashSet<TermId> = granted.iter().map(|t| TermId::new(*t)).collect();
         let mut sorted: Vec<TermId> = satisfied.iter().copied().collect();
         sorted.sort_unstable_by_key(|t| t.raw());
@@ -192,15 +198,9 @@ impl Fixture {
             .unwrap();
         let base = Arc::new(RowProjection::new(&fragment, &self.row_space));
         let buffer = IngestBuffer::new();
-        let mask = compose(
-            &satisfied,
-            overlay,
-            &buffer,
-            base,
-            &self.row_space,
-            &denied_rows_of(overlay, &self.row_space),
-        );
-        (mask, satisfied)
+        let denied = denied_rows_of(overlay, &self.row_space);
+        let mask = compose(&satisfied, overlay, &buffer, base, &self.row_space, &denied);
+        (mask, satisfied, denied)
     }
 
     /// The answer computed from the fixture's own generator: the first rank whose every member
@@ -262,7 +262,7 @@ fn differential(fx: &Fixture) -> bool {
     let rows = fx.rows();
     let partitioned = fx.rows().with_partition(Some(fx.partition()));
     assert!(
-        partitioned.partition().unwrap().expressions().len() > 100,
+        partitioned.partition().unwrap().expressions() > 100,
         "a fixture whose generating sets all interned together would prove nothing about \
          agreement — the census's drawn case is the one that has to hold"
     );
@@ -287,7 +287,7 @@ fn differential(fx: &Fixture) -> bool {
     let mut settled_eagerly = None;
     for overlay in [&Overlay::new(), &overlay] {
         for granted in principals() {
-            let (mask, satisfied) = fx.mask(&granted, overlay);
+            let (mask, satisfied, denied) = fx.mask(&granted, overlay);
             let answers = partitioned.partition().unwrap().answers(&satisfied);
             settled_eagerly = Some(answers.settled_eagerly());
             for ordinal in 0..fx.artifacts {
@@ -299,7 +299,7 @@ fn differential(fx: &Fixture) -> bool {
                      ordinal {ordinal} for terms {granted:?}"
                 );
                 assert_eq!(
-                    partitioned.satisfied_rank_via(ordinal, &answers, &mask, true),
+                    partitioned.satisfied_rank_via(ordinal, &answers, &denied, true),
                     Some(expected),
                     "the containment partition disagrees at ordinal {ordinal} for terms \
                      {granted:?}"
@@ -338,10 +338,10 @@ fn an_unsuppress_does_not_restore_a_deleted_member_through_the_partition() {
     let member = EntityId::new(u64::from(fx.published[ordinal as usize][0][0]));
 
     let contained_via = |overlay: &Overlay| {
-        let (mask, satisfied) = fx.mask(&granted, overlay);
+        let (_mask, satisfied, denied) = fx.mask(&granted, overlay);
         let answers = partitioned.partition().unwrap().answers(&satisfied);
         partitioned
-            .satisfied_rank_via(ordinal, &answers, &mask, true)
+            .satisfied_rank_via(ordinal, &answers, &denied, true)
             .expect("the partition covers this ordinal")
     };
 
@@ -426,12 +426,12 @@ fn no_partition_is_built_under_a_plugin_that_is_not_the_builtin() {
     let plain = fx.rows();
     let granted: Vec<u32> = (0..TERMS).filter(|t| t % 2 == 0).collect();
     let overlay = Overlay::new();
-    let (mask, satisfied) = fx.mask(&granted, &overlay);
+    let (mask, satisfied, denied) = fx.mask(&granted, &overlay);
     let answers = rows.partition().unwrap().answers(&satisfied);
     for ordinal in 0..fx.artifacts {
         assert_eq!(
             plain.satisfied_rank(ordinal, &mask, true),
-            rows.satisfied_rank_via(ordinal, &answers, &mask, true)
+            rows.satisfied_rank_via(ordinal, &answers, &denied, true)
                 .unwrap(),
             "the gate changed an answer at ordinal {ordinal}"
         );
@@ -482,11 +482,11 @@ fn the_composed_expression_is_the_members_own_signatures() {
             // terms: the members' signatures are satisfied and the artifact is still not
             // contained, because one member has no row in this view at all.
             if lossy {
-                let (mask, satisfied) = fx.mask(&granted, &Overlay::new());
+                let (_mask, satisfied, denied) = fx.mask(&granted, &Overlay::new());
                 let answers = partition.answers(&satisfied);
                 assert_eq!(answers.satisfies(ordinal, rank), Some(true));
                 assert_ne!(
-                    partitioned.satisfied_rank_via(ordinal, &answers, &mask, true),
+                    partitioned.satisfied_rank_via(ordinal, &answers, &denied, true),
                     Some(Containment::Satisfied(rank as u32)),
                     "a set that lost a member in projection was served on a satisfied expression"
                 );
