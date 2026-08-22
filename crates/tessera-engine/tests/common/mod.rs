@@ -296,6 +296,47 @@ pub fn build_corpus_fixture_with_layers(
     build(&args).expect("the generator's own layers build");
 }
 
+/// The generator's points and access relation, under a **caller-supplied** declaration.
+///
+/// For the cases whose subject is a layer the generator does not declare — a spatial layer with
+/// boxes, say, which its boundary arm has a roster for and no geometry. The points, the pairs and
+/// the extent are the generator's, so its closed forms are still the oracle; the layers are the
+/// case's own.
+pub fn build_with_layers(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &tessera_corpus::Corpus,
+    config: tessera_build::config::Config,
+) {
+    let args = BuildArgs {
+        point_fields: Default::default(),
+        points: points_path.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &config.schema,
+        ),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        out: out.to_path_buf(),
+        extent: corpus.extent(),
+        view_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    };
+    build(&args).expect("the fixture's own declaration builds");
+}
+
 /// Read the bundle's external-ids extent into a `source_id -> new entity_id` map — the same
 /// ground truth `tessera-build`'s own smoke test cross-checks against.
 pub fn source_to_new_map(bundle_root: &Path, prefix: &str) -> BTreeMap<u64, u64> {
