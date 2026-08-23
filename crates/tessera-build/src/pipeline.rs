@@ -518,6 +518,50 @@ fn plan_build(
 ) -> Result<BuildPlan> {
     let budget = args.memory_budget.unwrap_or_else(detect_memory_budget);
 
+    // ---- the other peak: everything the batch loop below does not hold ----------------------
+    // **The batch stride reaches none of it** (`residency.rs`): a column in entity order is `n`
+    // values by construction and a member table is its own size, so there is no smaller plan to
+    // fall back to and the honest answer is a refusal with the arithmetic printed. This is the half
+    // `--memory-budget` did not reach — the campaign's builds were OOM-killed at 47.3–47.6 GB under
+    // a 12 GB budget, three runs and one number, because the flag only ever sized the loop.
+    //
+    // Checked **before** the batch plan, and refused rather than warned: this is the larger term
+    // and the one no stride can move, so an operator reading a refusal should read this one first.
+    // The plan below already refuses an infeasible stride, and a budget the operator named is a
+    // bound they asked to have enforced. An auto-derived budget is `MemAvailable` damped, so exceeding *that* is the kill
+    // this exists to replace.
+    let tail = crate::residency::model(args, n);
+    if tail.total() > budget {
+        return Err(BuildError::Invalid(format!(
+            "this build's entity-order stages need about {} MiB, over the {} MiB memory budget. \
+             Unlike the signature batch loop these do not batch — a declared column holds one \
+             value per item and a member table holds its own rows — so a smaller --batch-items \
+             does not help. Raise --memory-budget, drop a member source, or narrow the schema. \
+             Where the bytes are:{}",
+            tail.total() >> 20,
+            budget >> 20,
+            tail.describe()
+        )));
+    }
+    // **A warning where the model's own error bar reaches the budget**, and not a refusal:
+    // `residency.rs` is a lower bound — it enumerates what the stages hold and not what the
+    // Parquet readers, the analysers and the allocator hold around them, and the one build it was
+    // measured against read 190 MiB against a 407 MiB peak. Refusing on twice the model would
+    // block builds that fit; saying nothing leaves the operator with the same silence the campaign
+    // met. So the numbers are printed and the decision is theirs — the house rule for a thing that
+    // is recoverable and discloses nothing.
+    else if tail.total().saturating_mul(2) > budget {
+        eprintln!(
+            "warning: this build's entity-order stages need at least {} MiB against a {} MiB \
+             budget, and that figure is a lower bound — it counts what the stages hold, not the \
+             readers and allocator around them (measured at roughly half the real peak). These \
+             stages do not batch. Where the bytes are:{}",
+            tail.total() >> 20,
+            budget >> 20,
+            tail.describe()
+        );
+    }
+
     // The worst batch's pre-dedup pairs for stride `b`, bounded by summing every histogram
     // range a batch window overlaps — conservative by at most the two boundary ranges.
     let prefix: Vec<u64> = std::iter::once(0)
@@ -1269,9 +1313,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // coverage exactly as they agree about bytes.
     crate::report_attribute_coverage(&coverage);
 
-    // Layers and their artifacts, resolved here for the reason the attribute tail is: this is
-    // where the two structures that turn a source id into the entity this build assigned it are
-    // both still alive. A member is named by source id, exactly as the pairs file's ids are.
+    timer.end(BuildStage::AttributeTail, n);
+
+    // ---- 8c. layers and their artifacts ------------------------------------------------
+    // Resolved here for the reason the attribute tail is: this is where the two structures that
+    // turn a source id into the entity this build assigned it are both still alive. A member is
+    // named by source id, exactly as the pairs file's ids are.
+    //
+    // **Its own stage boundary**, so an observer can say how much of the peak is here: the member
+    // tables are read whole and the published memberships stay resident, and this ran unattributed
+    // inside the attribute tail until the campaign's kills made the distinction worth having
+    // (`residency.rs`).
     let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
@@ -1304,9 +1356,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     crate::write_containment_report(&args.out, &published_layers)?;
 
-    timer.end(BuildStage::AttributeTail, n);
+    timer.end(BuildStage::Layers, published_layers.layers.len() as u64);
 
-    // ---- 8b. attribute filter postings (filter-index §4) -------------------------------
+    // ---- 8d. attribute filter postings (filter-index §4) -------------------------------
     // Its own stage, after entity assignment and before the tiler sort: entity ids are final
     // here (stage 5, permanent under I9) and the values have just been read, which are the two
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the

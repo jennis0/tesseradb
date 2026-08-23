@@ -29,6 +29,7 @@ pub mod input;
 pub mod layers;
 pub mod observer;
 mod pipeline;
+mod residency;
 pub(crate) mod spill;
 
 use rayon::prelude::*;
