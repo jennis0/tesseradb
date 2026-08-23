@@ -49,7 +49,46 @@ require_member_visibility = "none"
 """
 
 
-def assemble_config(fixture: Path, ceiling: bool = False) -> Path:
+def drop_layer_blocks(config: str, names: list[str]) -> str:
+    """Remove named `[[layer]]` blocks from a declaration.
+
+    **Why a tier would want this.** `tessera build` at 2.5×10⁸ points over the whole generator
+    declaration reaches ~44–47 GB resident and is OOM-killed on a 47 GB box, and it does so whether
+    the memory budget is auto-derived or set explicitly to 12 GB — the flag does not bound the peak
+    (the README's finding 4). The two arms that carry almost all of the member rows are
+    `generator/flat` (2n rows) and `generator/treed` (~3.4n), so a tier that drops them builds where
+    the whole declaration does not, and keeps every route the acceptance clause is about: the
+    partition relation both ways, and the spatial predicate.
+
+    Dropping is a **fixture** decision recorded in the README, never a way to make a figure look
+    better: the two dropped arms are measured in full at 10⁷, and their absence at 2.5×10⁸ is
+    stated wherever that tier is quoted.
+    """
+    if not names:
+        return config
+    out: list[str] = []
+    skipping = False
+    for line in config.splitlines(keepends=True):
+        if line.startswith("[[layer]]"):
+            skipping = False
+        if line.strip().startswith("name") and "=" in line:
+            value = line.split("=", 1)[1].strip().strip('"')
+            if value in names:
+                # Walk back to this block's `[[layer]]` header and drop everything after it.
+                while out and not out[-1].startswith("[[layer]]"):
+                    out.pop()
+                if out:
+                    out.pop()
+                skipping = True
+                continue
+        if skipping and (line.startswith("[[") or line.startswith("# ")):
+            skipping = False
+        if not skipping:
+            out.append(line)
+    return "".join(out)
+
+
+def assemble_config(fixture: Path, ceiling: bool = False, drop: list[str] | None = None) -> Path:
     """The campaign's declaration: the generator's own, plus the spatial layer whose boxes
     `artifact_campaign_fixture` authored, and optionally the design-ceiling layer.
 
@@ -59,7 +98,8 @@ def assemble_config(fixture: Path, ceiling: bool = False) -> Path:
     base = (fixture / "corpus-config.toml").read_text()
     extra = (fixture / "boundary-layer.toml").read_text()
     out = fixture / "campaign-config.toml"
-    out.write_text(base + "\n" + extra + (CEILING_LAYER_TOML if ceiling else ""))
+    out.write_text(drop_layer_blocks(base, drop or []) + "\n" + extra
+                   + (CEILING_LAYER_TOML if ceiling else ""))
     return out
 
 
@@ -82,6 +122,11 @@ def main() -> None:
              "47 GB box**: the automatic derivation takes 80%% of MemAvailable and models the "
              "batch loop's own structures, and at 2.5x10^8 over this declaration the real peak ran "
              "past it — the build was OOM-killed at 47.3 GB after 24 minutes with no budget given.",
+    )
+    ap.add_argument(
+        "--drop-layers", nargs="*", default=None,
+        help="layer names to omit from the declaration — how a tier too large for the whole "
+             "fixture is still built for the routes the acceptance clause is about",
     )
     ap.add_argument(
         "--no-measure",
@@ -122,7 +167,7 @@ def main() -> None:
     report["fixture"] = json.loads((work / "fixture" / "fixture.json").read_text())
     report["fixture"].pop("grants", None)  # the grants live in their own file; they are large
 
-    assemble_config(work / "fixture", ceiling=args.ceiling)
+    assemble_config(work / "fixture", ceiling=args.ceiling, drop=args.drop_layers)
     C.require_disk(work)
     ports = (C.free_port(), C.free_port(), C.free_port())
     C.write_deployment(work, ports)
@@ -142,6 +187,7 @@ def main() -> None:
     bundle_bytes = sum(p.stat().st_size for p in (work / "bundle").rglob("*") if p.is_file())
     report["build"] = {
         "memory_budget": args.memory_budget,
+        "dropped_layers": args.drop_layers,
         "seconds": float(wall),
         "peak_rss_bytes": int(rss) * 1024,
         "bundle_bytes": bundle_bytes,
