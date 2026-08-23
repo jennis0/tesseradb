@@ -623,6 +623,29 @@ are in `bracket-a1e6-blocks{6,8,10,12}-fixture.txt` beside them.
 
 ---
 
+## The gate
+
+Run on the final tree with the box otherwise idle:
+
+```
+cargo test --workspace --no-fail-fast      1 956 passed / 0 failed / 11 ignored, 168 binaries
+cargo clippy --workspace --all-targets -- -D warnings   clean
+bash scripts/check-layers.sh              ok
+bash scripts/check-clients.sh             ok — 4 test files, 59 tests
+python3 scripts/check-doc-links.py        624 files, 0 errors, 11 pre-existing warnings
+```
+
+**1 956 / 0 / 11 is the baseline exactly**, which is what a measurement track's gate should read: it
+added four bench binaries and one dependency edge (`tessera-bench → tessera-corpus`, which
+`check-layers.sh` permits — that script constrains what `tessera-corpus` may depend *on*) and no
+engine code at all.
+
+⊘ **One file in the working tree is not this track's.** `.claude/track-allowlist.toml` carries the
+uncommitted `[track.campaign]` section that authorises this work; it belongs to the controller and
+is left unstaged. `check-track-allowlist.sh campaign` reports it and nothing else.
+
+---
+
 ## Appendix R — review trail
 
 | revision | date | what changed |
