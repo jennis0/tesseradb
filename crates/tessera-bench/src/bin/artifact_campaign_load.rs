@@ -169,7 +169,6 @@ async fn main() {
 
     let mut handles = Vec::new();
     for (index, (rung, token)) in tokens.into_iter().enumerate() {
-        let began = began;
         let client = client.clone();
         let viewer = args.viewer.clone();
         let layer = args.layer.clone();
