@@ -109,6 +109,8 @@ paths = [
   "crates/tessera-lifecycle/src/*",
   "crates/tessera-store/src/membership.rs",
   "crates/tessera-store/src/manifest.rs",
+  "crates/tessera-store/src/derived.rs",
+  "crates/tessera-store/src/lib.rs",
   "crates/tessera-server/src/*",
   "crates/tessera-server/tests/*",
   "crates/tessera-build/src/*",
