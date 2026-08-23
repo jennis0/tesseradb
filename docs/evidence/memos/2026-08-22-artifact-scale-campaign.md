@@ -165,6 +165,35 @@ comes from the Rust arm; the wrong ones are in the git history at `6631ec8`, del
 
 ---
 
+## The bracket re-run: the anomaly reproduces and reverses the question
+
+The 2026-08-20 campaign's layout sweep broke its own trend at `blocks = 8` and queued a targeted
+re-run. Re-run at 6, 8, 10 and 12 blocks per artifact with the iteration count doubled and three
+processes per point, the whole-map cell reads **104.1 → 42.8 → 44.3 → 36.2 ms** and the worst cell
+**122.3 → 81.7 → 67.4 → 68.1 ms**, with run-to-run ranges that do not overlap between 6 and any of
+the others.
+
+So the point at 8 is not a break in a rising trend: **the trend reverses there and keeps falling.**
+Artifact-major cost stops rising at about six blocks per artifact and declines thereafter. Every
+other fixture statistic is held exactly across the four points — 0.960 members per row, 32 distinct
+containment expressions over 2 000 000 pairs, a 2.0 MB tile index — and the one quantity that moves
+with the cost is the **`everywhere` set**, the artifacts too wide for any node of the tile index,
+rising 1.6% → 2.3% → 2.9% → 3.6% as the cost falls. Widening a membership past the point where any
+node contains it appears to move it onto a cheaper path; that is a correlation over four controlled
+points, not a mechanism this campaign instrumented.
+
+⊘ **`layout::ROW_MAJOR_BLOCKS_PER_ARTIFACT` is 10.0 and provisional pending exactly this run. The
+run does not give it a better number — it says there is no crossover to find in this band on the
+artifact-major side**, because at 10.0 the heuristic flips away from a layout that is improving.
+Whether the constant should move, and which way, is an owner question with four measured points
+behind it now.
+
+**Two of the twelve runs were not this campaign's own.** The first bracket process was killed by the
+environment after blocks 6 and 8 completed; blocks 10 and 12 were resumed with the identical command
+line. Every point is three processes at six iterations.
+
+---
+
 ## Acceptance, clause by clause
 
 The delivery record's Stage 7 check: *"10⁹ points carrying 10⁶ artifacts, with 10⁷ as targeted

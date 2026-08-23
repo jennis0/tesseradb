@@ -581,7 +581,45 @@ marked provisional pending this. `run-bracket.sh` re-runs the `dispersed` arm at
 blocks per artifact with the iteration count doubled** (`--iters 6`), three processes per
 configuration, on an otherwise idle box.
 
-*(results below)*
+**The anomaly is real, it reproduces, and it is not an anomaly.** `hoisted`, median of three runs
+of six iterations each, with the run-to-run range beside the whole-map figure:
+
+| blocks per artifact | whole map, full mask | worst cell | the `everywhere` set |
+|---:|---:|---:|---:|
+| **6** | **104.1 ms** *(102.4–108.9)* | **122.3 ms** (50–75% mask, 75% viewport) | 1.6% |
+| **8** | 42.8 ms *(40.5–54.5)* | 81.7 ms | 2.3% |
+| **10** | 44.3 ms *(42.5–46.0)* | 67.4 ms | 2.9% |
+| **12** | **36.2 ms** *(35.6–38.8)* | 68.1 ms | 3.6% |
+
+**The trend does not resume above 8 — it reverses at 8 and keeps falling.** The original sweep read
+61, 111 and 159 ms at 2, 4 and 6 blocks per artifact and then 51 at 8, and called the last one a
+break in the trend. With the iteration count doubled and three processes per point, the same shape
+appears with a wider gap: the whole-map cell falls **104 → 43 → 44 → 36 ms** from 6 to 12 blocks per
+artifact, and the worst cell falls monotonically **122 → 82 → 67 → 68 ms**. The run-to-run ranges do
+not overlap between 6 and any of the others, so this is not sampling noise.
+
+**And the fixture says what moves with it.** Every other statistic is held exactly — 0.960 members
+per row at every point, 32 distinct containment expressions over 2 000 000 `(artifact, rank)` pairs
+serialising to 7.3 MB, a 2.0 MB tile index, and blocks per artifact exactly 6.0, 8.0, 10.0 and 12.0.
+The one quantity that moves monotonically with the cost is the **`everywhere` set** — the artifacts
+too wide for any node of the tile index, which the walk cannot place and which are handled by a
+different path — rising **1.6% → 2.3% → 2.9% → 3.6%** as the cost falls. The candidate explanation
+this campaign can offer is that widening a membership past the point where any node contains it
+moves it *off* the per-node walk, and that the off-walk path is the cheaper one at these
+proportions. It is a correlation across four points with everything else held, not a mechanism this
+campaign has instrumented.
+
+⊘ **What this says about the threshold.** `layout::ROW_MAJOR_BLOCKS_PER_ARTIFACT` is 10.0,
+documented as *"the low end of the band where a measurement exists"* and marked provisional pending
+this re-run. The re-run does not move it to a better number — it says **there is no crossover to
+find in this band on the artifact-major side**, because artifact-major cost stops rising at about 6
+blocks per artifact and declines thereafter. At 10.0 the heuristic flips to row-major at a point
+where the layout it is flipping away from is *improving*. Whether the constant should move, and in
+which direction, is an owner question this campaign has now given four measured points for and does
+not answer.
+
+The raw medians are `bracket-a1e6-blocks{6,8,10,12}-medians.csv` and each point's fixture statistics
+are in `bracket-a1e6-blocks{6,8,10,12}-fixture.txt` beside them.
 
 ---
 
