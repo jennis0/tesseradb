@@ -831,7 +831,8 @@ fn the_folds_projection_and_the_derived_index_are_the_same_column() {
     for shape in [Shape::Runs, Shape::Nested, Shape::Scattered] {
         let fx = build_fixture(shape);
         let derived = TileIndex::build(&fx.membership(), fx.row_space.base_rows());
-        let projected = TileIndex::project(fx.store.level(LAYER, 0), &fx.row_space);
+        let ordinals = fx.store.level(LAYER, 0).count() as u32;
+        let projected = TileIndex::project(ordinals, || fx.store.level(LAYER, 0), &fx.row_space);
         assert_eq!(
             projected.as_bytes(),
             derived.as_bytes(),

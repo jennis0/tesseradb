@@ -566,9 +566,35 @@ struct WireSink {
     deadline: Duration,
     /// Set at the first flush; the whole-stream deadline is measured from it.
     first_flush_at: Option<Instant>,
+    /// **Why this sink stopped accepting frames**, where it stopped for a reason of its own.
+    ///
+    /// A refusal reaches the engine as `SinkClosed` and comes back as `EngineError::Cancelled`,
+    /// which the mid-body arm treats as *the client went away* and deliberately does not log. That
+    /// is right for a disconnect and wrong for a shed: the 2026-08-22 campaign found a first
+    /// request truncated at 111 s with **neither** `viewport stream aborted` line firing, because
+    /// the server's own deadline had fired and had no way to say so. This is that way.
+    shed: Option<Shed>,
     arrow_serialise_ns: u64,
     points_total: u64,
     flushes: u64,
+}
+
+/// A sink refusal the **server** chose, told apart from the client going away.
+#[derive(Debug, Clone, Copy)]
+enum Shed {
+    /// The whole-stream budget from first flush, `serve.stream_deadline_ms`.
+    Deadline,
+    /// The per-send stall budget, `serve.stream_write_stall_ms` — a reader that stopped reading.
+    Stall,
+}
+
+impl Shed {
+    fn detail(self) -> &'static str {
+        match self {
+            Shed::Deadline => "the whole-stream deadline fired: the response was committed and the                                work behind its next frame outran serve.stream_deadline_ms. A cold                                request over a level whose derived structures the prefix does not                                carry is the shape to check first — the build's artifact pass                                writes them, and an open reporting no adoptions says they were not                                taken",
+            Shed::Stall => "the per-send stall budget fired: the client stopped reading and                             serve.stream_write_stall_ms elapsed with the body channel full",
+        }
+    }
 }
 
 impl WireSink {
@@ -584,12 +610,14 @@ impl WireSink {
                 .first_flush_at
                 .is_some_and(|t| t.elapsed() >= self.deadline)
             {
+                self.shed = Some(Shed::Deadline);
                 return Err(SinkClosed);
             }
             match self.tx.try_send(item) {
                 Ok(()) => return Ok(()),
                 Err(mpsc::error::TrySendError::Full(back)) => {
                     if send_started.elapsed() >= self.stall {
+                        self.shed = Some(Shed::Stall);
                         return Err(SinkClosed);
                     }
                     item = back;
@@ -787,6 +815,18 @@ fn run_viewport_stream(
         }
     };
 
+    // **Owned copies of what names the request**, taken before the engine borrows `req`, so the
+    // shed log below can say which request it was without extending a borrow across the call.
+    // Three coordinates and no principal: a view id, a zoom and the layer names the caller asked
+    // for, all of them the caller's own words back.
+    let named_view = req.view.clone();
+    let named_zoom = req.zoom;
+    let named_layers = req
+        .layers
+        .as_ref()
+        .map(|names| names.join(","))
+        .unwrap_or_default();
+
     // Borrowed as `&[&str]` for the engine's request, which holds the list rather than owning it.
     let layer_names: Option<Vec<&str>> = req
         .layers
@@ -848,7 +888,28 @@ fn run_viewport_stream(
             // (`streamed-serving.md` §6). Cancellation here is the client's own disconnect or
             // shed and logs nothing; anything else is a server fault worth a line.
             None => {
-                if !matches!(e, tessera_engine::EngineError::Cancelled) {
+                // **A shed the server chose is not a client disconnect**, and until this branch
+                // existed the two were the same silence — see [`WireSink::shed`]. Named loudly and
+                // with the elapsed figure, because the elapsed figure is the diagnosis: a whole
+                // number of seconds past the deadline is a client that stopped reading, and a
+                // multiple of it is work behind the next frame.
+                if let Some(shed) = sink.shed {
+                    tracing::warn!(
+                        view = %named_view,
+                        zoom = named_zoom,
+                        layers = %named_layers,
+                        elapsed_ms = sink.start.elapsed().as_millis() as u64,
+                        since_first_flush_ms = sink
+                            .first_flush_at
+                            .map(|t| t.elapsed().as_millis() as u64)
+                            .unwrap_or(0),
+                        deadline_ms = sink.deadline.as_millis() as u64,
+                        stall_ms = sink.stall.as_millis() as u64,
+                        flushes = sink.flushes,
+                        "viewport stream SHED mid-body by the server — {}",
+                        shed.detail()
+                    );
+                } else if !matches!(e, tessera_engine::EngineError::Cancelled) {
                     tracing::warn!(error = %e, "viewport stream aborted mid-body");
                 }
                 shared.store(STREAM_ABORTED, Ordering::SeqCst);
@@ -1018,6 +1079,7 @@ async fn viewport(
         stall: Duration::from_millis(state.stream_write_stall_ms),
         deadline: Duration::from_millis(state.stream_deadline_ms),
         first_flush_at: None,
+        shed: None,
         arrow_serialise_ns: 0,
         points_total: 0,
         flushes: 0,

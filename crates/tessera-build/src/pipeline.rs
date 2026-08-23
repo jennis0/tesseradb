@@ -1272,7 +1272,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // Layers and their artifacts, resolved here for the reason the attribute tail is: this is
     // where the two structures that turn a source id into the entity this build assigned it are
     // both still alive. A member is named by source id, exactly as the pairs file's ids are.
-    let published_layers = if args.layers.is_empty() {
+    let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
         {
@@ -1466,6 +1466,37 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     timer.end(BuildStage::SegmentWrite, n);
 
+    // ---- 10b. the post-bundle artifact pass (decision 0094's first half) ---------------
+    //
+    // **Here and not at step 8**, where the layers were published: the pick reads where each
+    // membership landed in *row* space, and row space did not exist until the permutation two
+    // statements above. Before the manifests, so the layouts it records and the extents it writes
+    // ride the write the build was always going to make — see `crate::artifact_pass`.
+    // Taken out of the report so the pass can edit the registered records beside it, and dropped
+    // with this statement's scope: the records are what the manifest carries and the store is only
+    // what the pass observes.
+    let artifact_store = std::mem::take(&mut published_layers.store);
+    let artifact_pass = crate::artifact_pass::run(
+        &mut published_layers,
+        &artifact_store,
+        &args.out.join(crate::PREFIX),
+        crate::PHASH,
+        &args.view_id,
+        n as u32,
+        &plugin.data_plugin_hash(),
+    );
+    drop(artifact_store);
+    crate::artifact_pass::report(&artifact_pass);
+    published_layers
+        .tile_index_extents
+        .clone_from(&artifact_pass.tile_index_extents);
+    published_layers
+        .row_column_extents
+        .clone_from(&artifact_pass.row_column_extents);
+    published_layers
+        .containment_extents
+        .clone_from(&artifact_pass.containment_extents);
+
     // ---- 11. manifests ---------------------------------------------------------------
     let mut other_paths = vec![
         postings_path,
@@ -1480,6 +1511,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     other_paths.extend(ext_locator_path);
     other_paths.extend(presence_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
+    other_paths.extend(artifact_pass.paths.iter().cloned());
     let report = write_manifests(
         args,
         &BundleFiles {

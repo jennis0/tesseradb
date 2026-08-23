@@ -1202,6 +1202,25 @@ impl Engine {
             &manifest_row_column_extents,
             &write_state.artifacts,
         );
+        // **What the open actually took**, counted here rather than left to be inferred from the
+        // absence of a build later.
+        //
+        // The three lists above are written by a fold *and by `tessera build`* — the build's
+        // post-bundle artifact pass files them on the same coordinates through the same writer
+        // (`tessera_store::membership`), so a fresh bundle adopts exactly as a folded one does. That
+        // is the half of the 2026-08-22 campaign's finding 2 this line makes observable: an open
+        // reporting zero adoptions against a manifest that names extents is every coordinate being
+        // rejected, which is correct and is the expensive answer — the next request derives what
+        // this open would have mapped, and at half a million artifacts that derivation is the
+        // minute-long one the campaign found being truncated inside a response.
+        tracing::info!(
+            containment_named = manifest_containment_extents.len(),
+            containment_adopted = artifact_projections.adopted(),
+            tile_indexes_named = manifest_tile_index_extents.len(),
+            row_columns_named = manifest_row_column_extents.len(),
+            prefix = %generation.load().prefix,
+            "the engine adopted the prefix's derived artifact structures"
+        );
 
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));

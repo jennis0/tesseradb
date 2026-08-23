@@ -48,20 +48,21 @@ use croaring::Bitmap;
 
 use tessera_lifecycle::membership::ArtifactRecord;
 use tessera_store::membership::{
-    pack_label_column, pack_list_column, LabelColumnPack, ListColumnPack, ROW_COLUMN_HOLE,
+    pack_label_column, LabelColumnPack, ListColumnPack, ROW_COLUMN_HOLE,
 };
 use tessera_store::permutation::RowSpace;
 use tessera_types::layer::ServingLayout;
 
 use crate::artifacts::MembershipRows;
 
-/// One walk of a level's live artifacts, handing each ordinal its **projected** rows.
+/// One walk of a level's live artifacts, handing each ordinal its **projected** rows — and the
+/// bytes are produced by [`tessera_store::membership::project_row_column`], beside the format.
 ///
 /// **A callback rather than an iterator**, because the caller has to be able to run it more than
 /// once: a list column is an offset table sized by one pass and filled by a second, and the fold's
 /// walk holds one membership at a time rather than the level's. An iterator would have to be
 /// re-created, which is what this type is.
-type LevelWalk<'a> = &'a dyn Fn(&mut dyn FnMut(u32, &Bitmap));
+type LevelWalk<'a> = tessera_store::membership::LevelWalk<'a>;
 use crate::compose::WholeMask;
 
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
@@ -469,64 +470,16 @@ impl RowColumn {
         layout: ServingLayout,
         each: LevelWalk<'_>,
     ) -> Option<Self> {
-        let bytes = match layout {
-            ServingLayout::ArtifactMajor | ServingLayout::SpatialRanges => return None,
-            ServingLayout::RowMajorLabel => {
-                let mut labels = vec![ROW_COLUMN_HOLE; row_count as usize];
-                let mut overlapped = false;
-                each(&mut |ordinal, rows| {
-                    for row in rows.iter() {
-                        let at = row as usize;
-                        // A row past the column is a member the projection placed above this view's
-                        // base row space, which `project_base` does not produce. Guarded rather than
-                        // trusted: the alternative is a panic on a shape nothing here controls.
-                        if at >= labels.len() {
-                            continue;
-                        }
-                        // **A double claim is not a partition**, and this is where the pin's second
-                        // refusal fires — the one that could not be checked at parse.
-                        if labels[at] != ROW_COLUMN_HOLE {
-                            overlapped = true;
-                            return;
-                        }
-                        labels[at] = ordinal;
-                    }
-                });
-                if overlapped {
-                    return None;
-                }
-                pack_label_column(ordinals, &labels)
-            }
-            ServingLayout::RowMajorList => {
-                // Pass one sizes each row's list; pass two fills it. Two passes rather than a
-                // vector per row, which at 10⁹ rows is the allocator's whole address space in
-                // headers alone.
-                let mut at = vec![0u32; row_count as usize + 1];
-                each(&mut |_, rows| {
-                    for row in rows.iter() {
-                        if (row as usize) < row_count as usize {
-                            at[row as usize + 1] += 1;
-                        }
-                    }
-                });
-                for i in 1..at.len() {
-                    at[i] += at[i - 1];
-                }
-                let mut values = vec![0u32; *at.last().unwrap_or(&0) as usize];
-                let mut cursor = at.clone();
-                each(&mut |ordinal, rows| {
-                    for row in rows.iter() {
-                        let at = row as usize;
-                        if at >= row_count as usize {
-                            continue;
-                        }
-                        values[cursor[at] as usize] = ordinal;
-                        cursor[at] += 1;
-                    }
-                });
-                pack_list_column(ordinals, &at, &values)
-            }
-        };
+        let bytes =
+            tessera_store::membership::project_row_column(ordinals, row_count, layout, each)?;
+        Some(Self::of_bytes(bytes, layout))
+    }
+
+    /// Frame a column this process just produced and read it back through the same checks a mapped
+    /// file takes — the reason [`crate::containment::ContainmentPartition`] gives: the two routes
+    /// are one reader, so a framing rule can never hold for a file and not for the form a
+    /// publication built.
+    pub fn of_bytes(bytes: Vec<u8>, layout: ServingLayout) -> Self {
         let pack = match layout {
             ServingLayout::RowMajorLabel => Pack::Label(
                 LabelColumnPack::from_bytes(bytes)
@@ -537,7 +490,7 @@ impl RowColumn {
                     .expect("a column this crate just packed frames by construction"),
             ),
         };
-        Some(Self::over(pack))
+        Self::over(pack)
     }
 }
 

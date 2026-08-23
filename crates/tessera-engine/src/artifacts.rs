@@ -417,48 +417,22 @@ impl MembershipRows {
     }
 
     /// **The shape the automatic layout pick reads** — [`Self::blocks_per_artifact`] with the
-    /// artifact count and the disjointness observation beside it.
+    /// artifact count, the `everywhere` fraction and the disjointness observation beside it.
     ///
     /// **Called once per level per fold**, which is what makes the running union affordable:
     /// whether the memberships are disjoint decides the label/list split and is a property of the
     /// data rather than of the declaration, so there is no cheaper way to learn it than to look.
-    /// The union stops being kept the moment an overlap is found.
-    pub fn shape(&self) -> crate::layout::LevelShape {
-        let mut artifacts = 0u64;
-        let mut blocks = 0u64;
-        let mut partitions = true;
-        let mut claimed = Bitmap::new();
-        for ordinal in 0..self.len() as u32 {
-            let Some(rows) = self.get(ordinal) else {
-                continue;
-            };
-            if rows.is_empty() {
-                continue;
-            }
-            artifacts += 1;
-            blocks += rows.statistics().n_containers as u64;
-            // **Whether the memberships are disjoint decides the label/list split**, and it is
-            // observed here rather than declared: single-valuedness is a property of the data. The
-            // running union stops being kept the moment an overlap is found, so a layer that
-            // plainly overlaps pays one intersection rather than a second copy of itself.
-            if partitions {
-                if claimed.intersect(rows) {
-                    partitions = false;
-                    claimed = Bitmap::new();
-                } else {
-                    claimed.or_inplace(rows);
+    ///
+    /// `row_count` is the view's base row space, which the `everywhere` test needs: the node ladder
+    /// is derived from it ([`tessera_store::membership::observe_shape`]).
+    pub fn shape(&self, row_count: u32) -> crate::layout::LevelShape {
+        tessera_store::membership::observe_shape(row_count, &|visit| {
+            for ordinal in 0..self.len() as u32 {
+                if let Some(rows) = self.get(ordinal) {
+                    visit(ordinal, rows);
                 }
             }
-        }
-        crate::layout::LevelShape {
-            artifacts,
-            blocks_per_artifact: if artifacts == 0 {
-                0.0
-            } else {
-                blocks as f64 / artifacts as f64
-            },
-            partitions,
-        }
+        })
     }
 }
 

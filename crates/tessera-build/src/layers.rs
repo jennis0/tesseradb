@@ -229,13 +229,12 @@ pub struct PublishedLayers {
     /// and said nothing about their versions would make the first restart's coordinates
     /// unrelatable to the ones the build's own store held.
     ///
-    /// ⊘ **The build writes no containment partition**, so `containment_extents` is empty in a
-    /// bundle straight out of `tessera build` and the first fold is what fills it. Composing one
-    /// here would put `tessera_engine::containment` on a build-side dependency edge that
-    /// `check-layers.sh` refuses; nothing about containment behaves differently, because a level
-    /// with no partition composes one on first use. What differs is acquisition, which
-    /// [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)
-    /// puts outside its rule.
+    /// **The build now writes every derived structure a fold does** — see `crate::artifact_pass`,
+    /// which runs after the segment write and fills the three extent lists below. It composes
+    /// through `tessera_store::membership`, beside the formats, rather than through the engine: a
+    /// build-side edge on `tessera-engine` is what an earlier revision of this comment ruled out,
+    /// and moving the writer down to the format's own crate is what made the edge unnecessary
+    /// rather than merely avoided.
     pub level_versions: Vec<tessera_store::manifest::LevelVersion>,
     pub artifact_record_extents: Vec<RecordExtent>,
     /// Every file written here, for `MANIFEST.files` — an undigested file is one a torn write
@@ -246,6 +245,23 @@ pub struct PublishedLayers {
     pub unclustered: Vec<UnclusteredRows>,
     /// Artifacts each layer's member keys **created**, per layer, carried out for the same reason.
     pub minted: BTreeMap<String, u64>,
+    /// **The store this pass published into, carried out for the post-bundle artifact pass**
+    /// (`crate::artifact_pass`).
+    ///
+    /// The pass has to observe where each membership *landed in row space*, and row space does not
+    /// exist yet at this stage — the tiler sort is two stages away. So the records travel to the end
+    /// of the build rather than being read back off the extents this just wrote, which would parse
+    /// every membership a second time to reach a structure that is already in hand.
+    ///
+    /// It is carried across the build's residency peak, and that is a real cost stated rather than
+    /// hidden: the memberships are one bitmap per artifact over the corpus, tens of megabytes at
+    /// the campaign's 10⁵ artifacts against a peak measured in gigabytes.
+    pub store: ArtifactStore,
+    /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
+    /// runs.
+    pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
+    pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
+    pub containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
 }
 
 impl Default for PublishedLayers {
@@ -261,6 +277,10 @@ impl Default for PublishedLayers {
             paths: Vec::new(),
             unclustered: Vec::new(),
             minted: BTreeMap::new(),
+            store: ArtifactStore::new(),
+            tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
+            containment_extents: Vec::new(),
         }
     }
 }
@@ -1063,6 +1083,7 @@ pub fn publish(
         .collect();
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
+    published.store = store;
     Ok(published)
 }
 
