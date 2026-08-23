@@ -79,6 +79,8 @@ Every driver is in this directory and every figure has a CSV in the campaign dir
 | the concurrency sweep | `concurrency.py` | 1/8/32/128 sessions at mixed breadths, sustained panning |
 | serving during a fold | `fold_under_load.py` | latency before/during/after, the fold's own duration, freshness across it |
 | ingest during serving | `ingest_during_serving.py` | read path quiet against under-ingest, the write path's own latency, freshness at the flush |
+| the layout question | `layout_after_fold.py` | which layout each level is served by, before its first fold and after |
+| a whole tier | `run-tier.sh` | the read-only steps then the writing ones, in the order that keeps them comparable |
 | the bracket re-run | `run-bracket.sh` | the 2026-08-20 campaign's `blocks = 8` anomaly, four points and doubled iterations |
 | collation | `collate.py` | the CSVs, and the flag on any cell above 2× its probe-side figure |
 

@@ -50,7 +50,12 @@ step () {
   tail -6 "$LOGS/$name.log"
 }
 
-want fixture "$@" && step fixture fixture.py --work "$WORK" --n "$N"
+# **Above about 10^8 points, pass a budget.** `tessera build`'s automatic derivation takes 80% of
+# MemAvailable and models the batch loop's own structures; at 2.5x10^8 over this declaration the
+# real peak ran past it and the build was OOM-killed at 47.3 GB after 24 minutes.
+BUDGET_ARG=""
+[ -n "${MEMORY_BUDGET:-}" ] && BUDGET_ARG="--memory-budget $MEMORY_BUDGET"
+want fixture "$@" && step fixture fixture.py --work "$WORK" --n "$N" $BUDGET_ARG
 want census "$@" && step census census.py --work "$WORK" --n "$N"
 want grid "$@" && step grid grid.py --work "$WORK" --iterations "$ITERATIONS"
 want concurrency "$@" && step concurrency concurrency.py --work "$WORK" \
@@ -59,6 +64,7 @@ want fold "$@" && step fold fold_under_load.py --work "$WORK" --n "$N" \
   --sessions "$SESSIONS" --settle 30
 want ingest "$@" && step ingest ingest_during_serving.py --work "$WORK" --n "$N" \
   --sessions "$SESSIONS" --seconds 120
+want layout "$@" && step layout layout_after_fold.py --work "$WORK"
 want collate "$@" && ( cd "$HERE" && python3 collate.py --work "$WORK" --tier "$LABEL" )
 
 echo
