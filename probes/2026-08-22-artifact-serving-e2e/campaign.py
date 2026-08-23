@@ -413,6 +413,26 @@ def viewport_request(
     return elapsed, len(raw), artifacts or [], trailer
 
 
+def warm(server: Server, token: str, vp: Viewport, layers: list[str]) -> tuple[bool, float]:
+    """One request whose only job is to make the next one warm. Returns `(truncated, seconds)`.
+
+    **Why it tolerates a truncation.** A cold request whose row-form build outruns the whole-stream
+    deadline is aborted mid-body (README §8) — and the build completes anyway, so the request after
+    it is answered in milliseconds. A truncation on a first request is therefore a fact to record
+    and step past, not a reason to abandon the measurement.
+
+    Tolerating it rather than raising the deadline keeps every measured figure on the **shipped**
+    configuration, which is the point: the campaign reports what a deployment gets, and a harness
+    that quietly widened a limit to get past it would be reporting something else.
+    """
+    started = time.monotonic()
+    try:
+        viewport_request(server, token, vp, layers, decode=False)
+        return False, time.monotonic() - started
+    except requests.exceptions.ChunkedEncodingError:
+        return True, time.monotonic() - started
+
+
 # ---------------------------------------------------------------------------- the oracle
 
 

@@ -118,7 +118,7 @@ def main() -> None:
             "tier", "principal", "principal_terms", "principal_visible", "layer", "arm",
             "served", "census", "served_not_in_census", "census_not_served",
             "count_disagreements", "exact", "authorise_seconds", "census_seconds",
-            "request_seconds",
+            "request_seconds", "warm_seconds", "warm_truncated",
         ])
         bad = [r for r in rows if not r["exact"]]
         print(f"  census: {len(rows) - len(bad)} of {len(rows)} cells exact")
@@ -139,7 +139,7 @@ def main() -> None:
         write_csv(out / f"{tier}-grid.csv", rows, [
             "tier", "layer", "principal", "principal_terms", "principal_fraction", "viewport",
             "viewport_fraction", "zoom", "artifacts_served", "body_bytes", "cold_ms", "p50_ms",
-            "p99_ms", "min_ms", "max_ms", "iterations", "server_p50_ms", "stream_p50_ms",
+            "p99_ms", "min_ms", "max_ms", "iterations", "cold_truncated", "server_p50_ms", "stream_p50_ms",
             "serialise_p50_ms", "rss_bytes", "probe_ms", "ratio_to_probe",
             "over_2x_probe",
         ])

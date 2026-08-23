@@ -73,7 +73,7 @@ def main() -> None:
         mark = len(server.log.read_text(errors="replace").splitlines())
         token, _ = server.authorise(grants["0.9375"]["grant"].split(","))
         for layer in args.layers:
-            C.viewport_request(server, token, WHOLE_MAP, [layer], decode=False)
+            C.warm(server, token, WHOLE_MAP, [layer])
         report["before_fold"] = layouts(server.log, mark)
 
         folds_before = server.status()["compaction"]["folds"]
@@ -91,7 +91,7 @@ def main() -> None:
 
         mark = len(server.log.read_text(errors="replace").splitlines())
         for layer in args.layers:
-            C.viewport_request(server, token, WHOLE_MAP, [layer], decode=False)
+            C.warm(server, token, WHOLE_MAP, [layer])
         report["after_fold"] = layouts(server.log, mark)
     finally:
         server.stop()

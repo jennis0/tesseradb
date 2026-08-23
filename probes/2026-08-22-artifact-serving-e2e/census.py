@@ -114,6 +114,11 @@ def main() -> None:
                     args.seed, args.n, arm, spec["grant"], args.terms_per_level, work / "scratch"
                 )
                 census_seconds = time.monotonic() - started
+                # The first request at a (principal, layer) builds the level's row form, and at
+                # this campaign's larger levels that build outruns the whole-stream deadline and
+                # the response is truncated (README §8). The build completes regardless, so the
+                # census warms first and records whether the warming request survived.
+                truncated, warm_seconds = C.warm(server, token, WHOLE_MAP, [layer])
                 served, request_seconds = served_counts(server, token, layer)
                 verdict = compare(served, expected)
                 verdict.update(
@@ -125,6 +130,8 @@ def main() -> None:
                     authorise_seconds=round(auth_seconds, 3),
                     census_seconds=round(census_seconds, 3),
                     request_seconds=round(request_seconds, 4),
+                    warm_seconds=round(warm_seconds, 3),
+                    warm_truncated=truncated,
                 )
                 results.append(verdict)
                 mark = "exact" if verdict["exact"] else "MISMATCH"

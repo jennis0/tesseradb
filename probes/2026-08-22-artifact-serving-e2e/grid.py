@@ -85,18 +85,23 @@ def main() -> None:
                     cold = None
                     served = 0
                     body = 0
+                    truncated = False
                     for i in range(args.iterations + 1):
+                        if i == 0:
+                            # The cold pass. A truncation here is the README's §8 defect and is
+                            # recorded rather than raised — the row form is built either way, so
+                            # the warm iterations that follow are the measurement they were going
+                            # to be.
+                            truncated, cold = C.warm(server, token, vp, [layer])
+                            continue
                         seconds, body, artifacts, trailer = C.viewport_request(
                             server, token, vp, [layer], k=args.k
                         )
                         served = len(artifacts)
-                        if i == 0:
-                            cold = seconds
-                        else:
-                            samples.append(seconds)
-                            server_us.append(trailer.get("server_us") or 0)
-                            stream_us.append(trailer.get("stream_us") or 0)
-                            serialise_ns.append(trailer.get("arrow_serialise_ns") or 0)
+                        samples.append(seconds)
+                        server_us.append(trailer.get("server_us") or 0)
+                        stream_us.append(trailer.get("stream_us") or 0)
+                        serialise_ns.append(trailer.get("arrow_serialise_ns") or 0)
                     rows.append({
                         "principal": principal,
                         "principal_terms": spec["terms"],
@@ -109,6 +114,7 @@ def main() -> None:
                         "artifacts_served": served,
                         "body_bytes": body,
                         "cold_ms": round(cold * 1000, 3),
+                        "cold_truncated": truncated,
                         "p50_ms": round(statistics.median(samples) * 1000, 3),
                         "p99_ms": round(percentile(samples, 0.99) * 1000, 3),
                         "min_ms": round(min(samples) * 1000, 3),
