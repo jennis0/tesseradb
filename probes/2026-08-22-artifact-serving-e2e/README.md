@@ -651,3 +651,19 @@ is left unstaged. `check-track-allowlist.sh campaign` reports it and nothing els
 | revision | date | what changed |
 |---|---|---|
 | r1 | 2026-08-22 | Created — the Stage 7 validation campaign: three corpus sizes, a design-ceiling probe, the bracket re-run, and four findings for the owner |
+
+
+## After the campaign — the findings' dispositions (2026-08-23)
+
+This section is the bridge to the fix wave; the campaign's own text above records what was seen and
+stands unedited. Findings 1 and 2 are fixed together — the build now runs a post-bundle artifact
+pass that chooses layouts, writes the derived files, and reports the shape, so a fresh bundle's
+first request adopts rather than composes, and a stream shed is logged. Finding 3's refusal was
+right and its message was wrong: the membership was corrupt **before** encoding — an intermittent
+container corruption below this stack, worked around by sort-then-append, the upstream half open
+and this machine's memory under suspicion (the parquet panic in §7 is a second symptom). Finding 4
+has a footer-derived lower-bound residency model refusing over budget before the first pass; the
+quoted refusal message above is the campaign-era spelling, kept as the record. Finding 5 is
+documented and deferred, streamed continuation the likely shape. The bracket re-run along the
+everywhere axis is in `data/` (14 CSVs) and could not settle the threshold: the dispersed arm
+serves one side of the comparison only.
