@@ -76,7 +76,7 @@ from oracle.wire import decode_viewport
 from suite.canonical import Streamed, canonicalise_viewport
 
 GRID_MAX = 65536.0
-SLICE = "s0"
+VIEW = "s0"
 # Zooms 0-6 of the grid's full 0-16 depth range (contracts §2.5) — deep enough that the corner
 # tile the extra item occupies is a small, specific prefix distinct from its neighbours (checked
 # below at the deepest zoom), shallow enough to keep the test fast. Not exhaustive over all 17
@@ -162,7 +162,7 @@ def _canonical_response(server, token, zoom, bbox) -> Streamed:
     review pointed out that an I2 defect confined to the underlay path moves no tile count and no
     point set, so every canary comparison would have passed while §4.6 called I2 covered.
     """
-    raw = server.viewport(token, SLICE, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
+    raw = server.viewport(token, VIEW, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
 
     tiles, _points = decode_viewport(raw)
     for tile, visible, _matched, served in tiles:
@@ -330,5 +330,5 @@ def test_the_canary_occupies_a_tile_no_state_reports(canary_servers):
     corner = (1 << (2 * zoom)) - 1
     for srv in (free_srv, canary_srv):
         token = srv.authorise([str(t) for t in range(6)])["token"]
-        tiles, _points = decode_viewport(srv.viewport(token, SLICE, zoom, bbox, k=K))
+        tiles, _points = decode_viewport(srv.viewport(token, VIEW, zoom, bbox, k=K))
         assert corner not in {t for t, _v, _m, _s in tiles}

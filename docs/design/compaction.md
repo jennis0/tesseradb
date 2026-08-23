@@ -12,7 +12,7 @@ withdrawn for the post-swap floor.
 slower fold is an acceptable price for a gentler one (spec §6.1). **The two owner rulings this
 document owed against documents it defers to have landed** (2026-08-06): `architecture.md` §11.3 is
 corrected — a fold *does* invalidate the term index and every mask fragment (r34, decision 0050) —
-and contracts §2.1 is narrowed to one *base* segment per partition-slice plus the fold's in-flight
+and contracts §2.1 is narrowed to one *base* segment per partition-view plus the fold's in-flight
 extents (r21, decision 0051). **The §5/§6 re-review ran at r5 and is
 dispositioned**, and its findings changed both sections: §5's retirement rule tests the whole
 carry-forward set, §6.1's throttle was refuted and replaced (decision 0052), and §6.2's refusal
@@ -79,7 +79,7 @@ else can, and the reason it is invariant-bearing rather than housekeeping is the
    the system can delete a file.
 3. **Reorganisation at the root.** Flush appends and merge bounds what flush grows, but both work
    *within* a prefix and over an ever-growing base. The fold returns the bundle to one segment per
-   partition-slice, one base postings tier, one external-id run and one locator — contracts §2.1's
+   partition-view, one base postings tier, one external-id run and one locator — contracts §2.1's
    *"a build is a full compaction"*, reached without a build.
 
 Everything else follows from those three. In particular the fold is **not** the answer to segment
@@ -87,7 +87,7 @@ count (merge is), tier count (coalesce is), or visibility latency (flush is). If
 design is justified by one of those, it belongs in write-path §7 instead.
 
 **Scope exclusions, each for a stated reason.** The fold does **not** re-quantise (decision 0040 —
-bounds are index configuration, immutable for a slice's life; a wrong extent is a migration). It
+bounds are index configuration, immutable for a view's life; a wrong extent is a migration). It
 does **not** renumber the entity axis: entity ids are stable across rebuilds (§5.1), the overlay
 and the WAL are entity-keyed, and every `tessera_id` a client holds is a bijection of one — so
 §11.1's batch-grid change, which would reassign them, is an identity-breaking rebuild and not this.
@@ -128,7 +128,7 @@ plan-time-clone hazard applies here identically and at greater cost.
 
 | | At the snapshot | At publication |
 |---|---|---|
-| **live segments** (base + extents) | folded into one segment per partition-slice | post-snapshot segments carried forward, re-based |
+| **live segments** (base + extents) | folded into one segment per partition-view | post-snapshot segments carried forward, re-based |
 | **delta tiers** | folded into the new base postings | post-snapshot tiers carried forward, listed |
 | **external-id runs + locator extents** | folded into one run 0 and one locator **bounded at the snapshot's entity space** (spec §3, pass 3) | post-snapshot runs carried forward, recency order preserved |
 | **dictionary extents** | — | carried forward **verbatim** (spec §3, pass 4b) |
@@ -242,7 +242,7 @@ a corpus-sized `Vec`.
 A k-way merge over every live segment's `morton.u32` and `columns.arrow`, ordered by
 `(morton, tessera_id)`, **skipping any row whose entity is in `D₀`** — the plan's tombstone clone,
 never `executed`, which does not exist until publication (spec §5). It emits `morton.u32` and
-`columns.arrow` for one new segment per (partition, slice), and scatters `perm[entity] = row` into a
+`columns.arrow` for one new segment per (partition, view), and scatters `perm[entity] = row` into a
 memory-mapped `permutation.bin`.
 
 ✔ **The pass is built** — `tessera_store::fold_row_space`. Its cursor and its scalar adapter are
@@ -463,7 +463,7 @@ On the executor, in this order.
 6. **One swap**, carrying: the new prefix; `segments_version + 1`; the live watermark; the new
    bundle; the **new base postings reader**; post-snapshot tiers only; the live `Arc<Dict>`; the
    live overlay **minus the executed entries**; `overlay_version + 1`; the live buffer; the new
-   fragment identity and its cache; the new external-id index; and `denied[slice]` **re-derived**
+   fragment identity and its cache; the new external-id index; and `denied[view]` **re-derived**
    against the new row space — never carried forward, since a denied row id now names a different
    entity.
 7. **Rotate the WAL** (spec §5).
@@ -799,7 +799,7 @@ structural change anything in this document proposed: two live row spaces, and �
 fail-open would hide.
 
 Two further obstacles the r5 review found, recorded because they would have been discovered late:
-`session_geometry` is *handed* a `slice_data` its caller already resolved from the bundle, so
+`session_geometry` is *handed* a `view_data` its caller already resolved from the bundle, so
 knowing which row space a session is on before picking the bundle is a signature change through it
 and everything beneath; and `KEEP_SUPERSEDED_GENERATIONS = 1` prunes an old-row-space entry one
 publication later — ~90 s at a default tick — so the retained row space would outlive the entries
@@ -809,9 +809,9 @@ What survives from it is the observation that made it seem necessary and is stil
 overlay is entity-space, and a fold does not renumber the entity axis** (spec §0), so one `Overlay`
 is valid for both row spaces. Nothing now needs that, but it is why the idea looked cheap.
 
-Two smaller options are also declined, and for the record: **slice-scoped folds** buy nothing yet
-(⊘ no build emits a second slice), though they remain a reason to write the fold slice-at-a-time
-from the start rather than retrofit it when slices land; and **draining the projection cache before
+Two smaller options are also declined, and for the record: **view-scoped folds** buy nothing yet
+(⊘ no build emits a second view), though they remain a reason to write the fold view-at-a-time
+from the start rather than retrofit it when views land; and **draining the projection cache before
 a fold** shortens the rebuild population proportionally but merely moves the cost onto the sessions
 it drops, which now pay a miss either way.
 
@@ -987,8 +987,8 @@ is over its threshold **and** the interval floor has elapsed. ✔ marks what is 
 | Condition | Default | What it is measuring |
 |---|---|---|
 | ✔ `retirable_depth ≥ compaction_after_deletions` | `overlay_soft_limit` (500,000) | un-retired **deletions** — see below. Unwindowed |
-| ✔ inside the daily window **and** any slice's live segment count ≥ `compaction_window_min_segments` | `00:00` UTC + 4 h, 8 segments | the axis merge saturates on (decision 0049), paid down when it is cheap to pay |
-| ✔ any slice's live segment count ≥ `compaction_max_segments` | 64 | the same axis past the point where deferring costs more than folding. Unwindowed |
+| ✔ inside the daily window **and** any view's live segment count ≥ `compaction_window_min_segments` | `00:00` UTC + 4 h, 8 segments | the axis merge saturates on (decision 0049), paid down when it is cheap to pay |
+| ✔ any view's live segment count ≥ `compaction_max_segments` | 64 | the same axis past the point where deferring costs more than folding. Unwindowed |
 | ✔ `dead_bytes / live_bytes ≥ compaction_dead_bytes_ratio` | 1.0 | paying double for storage; the measured no-compaction steady state is 2.0–2.6×. Unwindowed |
 | ✔ `tombstoned_rows / live_rows ≥ compaction_dead_rows_fraction` | 0.2 | rows every viewport pays for and no viewer may see. Unwindowed |
 | ✔ `compaction_min_interval_secs` | 86,400 | the floor under all of them |
@@ -1102,7 +1102,7 @@ rotation (write-path §4.5) — an idle node rotates nothing — and the same ar
 force here, where the operation doubles disc and rebuilds every session's row projection. A
 deployment that takes three deletions a year has three un-retired entries and no reason to rewrite
 47 GB. **The window above is not that timer** (decision 0056): it is a work gauge with an hour
-attached, it fires only when a slice has segments worth folding, and it decides *when* rather than
+attached, it fires only when a view has segments worth folding, and it decides *when* rather than
 *whether*.
 
 Three refusals, and each says so rather than retrying silently: the gates above (poisoned,
@@ -1403,7 +1403,7 @@ both surfaced at r3 and neither this document's to make.
 corrected: a fold rewrites the term index and rotates the fragment identity, and **both halves or
 neither** — dropping the row while leaving the postings would let Rule F's retirement re-expose the
 item it retired (architecture r34, decision 0050). contracts §2.1's *"exactly one segment per
-partition-slice"* is narrowed to one **base** segment plus the fold's in-flight extents, since a
+partition-view"* is narrowed to one **base** segment plus the fold's in-flight extents, since a
 fold that never blocks flush cannot emit one and the alternative was a write outage of the fold's
 whole length (contracts r21, decision 0051). The property that sentence protected survives intact:
 carried-forward segments are extents with their own addressing, exactly as flush segments already

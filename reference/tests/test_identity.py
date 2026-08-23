@@ -196,7 +196,7 @@ def test_trailing_newline_is_rejected_not_normalised(vectors):
     """Finding 2 (task-5 review): `$` matches immediately before a trailing `\\n`, and
     `bytes.fromhex` then silently tolerates ASCII whitespace, so the old
     `^[0-9a-f]{32}$` regex accepted a key with a trailing newline as the canonical key --
-    exactly the shape a key read from `--id-key-file` arrives in. Memo §1.2's rule is
+    exactly the shape a key read from the environment or `--identity-file` arrives in. Memo §1.2's rule is
     reject, not normalise; `\\Z` (not `$`) is what makes that true."""
     canonical = "000102030405060708090a0b0c0d0e0f"
     assert ident.IdentityKey.from_hex(canonical) is not None  # sanity: valid on its own
@@ -401,8 +401,8 @@ def test_fixture_bundle_rows_are_stored_in_morton_then_tessera_id_order(fixture_
     wrong values must fail this, not pass it."""
     import numpy as np
 
-    slice_id = fixture_bundle.segments_manifest["segments"][0]["slice"]
-    order = fixture_bundle.derive_row_order(slice_id)
+    view_id = fixture_bundle.segments_manifest["segments"][0]["view"]
+    order = fixture_bundle.derive_row_order(view_id)
     expected = np.arange(len(order), dtype=order.dtype)
     assert np.array_equal(order, expected), (
         "the bundle's stored rows are not in (morton, tessera_id) order; first divergence at "
@@ -414,8 +414,8 @@ def test_fixture_bundle_identity_column_agrees_with_the_key(fixture_bundle):
     """`forward(key, shard, entity_of_row[r]) == tessera_id[r]`, where `entity_of_row` comes from
     the permutation (key-independent) and `tessera_id` from the stored column. The only check
     that catches a key/column disagreement — and the one `test_byte_scan.py` cites."""
-    slice_id = fixture_bundle.segments_manifest["segments"][0]["slice"]
-    fixture_bundle.verify_identity_cross_check(slice_id)
+    view_id = fixture_bundle.segments_manifest["segments"][0]["view"]
+    fixture_bundle.verify_identity_cross_check(view_id)
 
 
 def test_fixture_bundle_sidecar_round_trips_through_the_locator(fixture_bundle):

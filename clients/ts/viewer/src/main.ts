@@ -84,7 +84,7 @@ const FILTER_DEBOUNCE_MS = 350;
 const store = createStore({
   meta: null,
   session: null,
-  slice: '',
+  view: '',
   datasetId: '',
   switching: false,
   termsLabel: '',
@@ -98,7 +98,7 @@ const store = createStore({
   sessionWarm: false,
   status: 'idle',
   lastError: null,
-  view: null,
+  depthChoice: null,
   budget: DEFAULT_BUDGET,
   mTarget: 16,
   lastVisibleInView: null,
@@ -266,10 +266,10 @@ const deck = new Deck({
  * detail panel has nothing behind the count to show, and there is deliberately nothing to fetch.
  */
 function openArtifact(id: bigint) {
-  const {session, slice} = store.state;
+  const {session, view} = store.state;
   if (!session || !client) return;
   client
-    .artifact(session.token, id, {slice})
+    .artifact(session.token, id, {view})
     .then((detail) => {
       store.update((s) => {
         s.selectedArtifact = {...detail, id};
@@ -401,8 +401,8 @@ async function resolveCategoryCodes(column: string) {
  *
  * **This is a different question from the legend's**, asked of the same endpoint through its other
  * form. The legend resolves the codes it *drew*; this pages the values the server is willing to
- * list, which `listing` gates before answering — `public` publishes taxonomy whose existence
- * discloses nothing, `per_viewer` is refused. Keeping the two results in separate maps is what stops
+ * list, which `visibility` gates before answering — `public` publishes taxonomy whose existence
+ * discloses nothing, `derived` is refused. Keeping the two results in separate maps is what stops
  * a listed-but-undrawn value ever reaching a swatch.
  */
 async function loadFilterValues(column: string) {
@@ -432,7 +432,7 @@ async function loadFilterValues(column: string) {
  * Apply the filter draft: drop everything held, and ask again.
  *
  * **The replica must be reset by hand here, and this is the one thing about filtering a client gets
- * wrong.** A response's identity key partitions by principal, credential, mask and slice — *not* by
+ * wrong.** A response's identity key partitions by principal, credential, mask and view — *not* by
  * filter — so bands fetched under one filter remain renderable under the next and would be served
  * from cache as though they belonged to it. Nothing on the wire says otherwise; the client that
  * changed the question is the only party that knows the held answers are to a different one.
@@ -647,7 +647,7 @@ function bindControls() {
           s.ranks = {};
           s.domains = {};
           // The filter *drafts* stay — a user switching principal is asking the same question of a
-          // different viewer. The offered value sets do not: `listing` is evaluated per principal,
+          // different viewer. The offered value sets do not: `visibility` is evaluated per principal,
           // so a picker built under the old token may list values this one may not see.
           s.filterValues = {};
           s.filterValueErrors = {};
@@ -864,7 +864,9 @@ store.subscribe(
       view.assembled?.depth ?? -1
     }|${markSlab.drawn}|${view.assembled?.provisional ?? 0}|${encodingSignature(store)}|${
       view.selectedWorldXY?.join(',') ?? ''
-    }|${view.artifactVersion}|${view.artifactLayer ?? ''}`;
+    }|${view.artifactVersion}|${view.artifactLayer ?? ''}|${
+      view.selectedArtifact?.id ?? ''
+    }`;
     if (drawing === painted) return;
     painted = drawing;
 
@@ -1037,7 +1039,7 @@ async function activate(dataset: Dataset) {
   store.update((s) => {
     s.session = session;
     s.meta = meta;
-    s.slice = meta.slices[0]!.id;
+    s.view = meta.views[0]!.id;
     s.mTarget = meta.selection.thetaTargetMarks;
     // Seeded from what this bundle publishes as filterable, which is why the abstract box exists on
     // one dataset and not the other without a line of code knowing either name.
@@ -1076,7 +1078,7 @@ async function activate(dataset: Dataset) {
         // The artifact channel asks for itself; see `artifacts.ts`.
         {
           ...req,
-          slice: store.state.slice,
+          view: store.state.view,
           filters: composeFilters(store.state.filters),
           layers: []
         },
@@ -1086,7 +1088,7 @@ async function activate(dataset: Dataset) {
     },
     meta.quantisation,
     {
-      slice: meta.slices[0]!.id,
+      view: meta.views[0]!.id,
       onPhase: (kind, ms, n) => {
         if (trace.enabled) trace.event(kind, {ms, n});
         // A piece of a split response has been absorbed: its bands are drawable NOW, not when the

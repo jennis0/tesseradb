@@ -50,16 +50,24 @@
 //!
 //! # The grant structure
 //!
-//! Each item carries one or two terms drawn from a fixed 16 × 64 term space whose levels halve in
+//! Each item carries one or two terms drawn from a 16 × 64 term space whose levels halve in
 //! probability: a level-*L* term covers about `n / 2^(L+1) / 64` items, so term widths span dense
 //! to near-singleton at any size. That spectrum is what grant construction needs — head, tail and
 //! crossover principals are all expressible as term sets — without any per-term state. A term's
 //! descriptor is its decimal string, which is the `builtin:passthrough` convention the build's
 //! dictionary already derives from the pairs relation, so a [`Grant`] here and the access label
 //! the server resolves name the same postings.
+//!
+//! **64 is the default slot width, not the only one.** [`Corpus::new`] always builds the
+//! 16 × 64 = 1024-term space every existing fixture is pinned to; [`Corpus::with_terms_per_level`]
+//! widens the slot count (the level count stays fixed — see its doc) so a campaign wanting ~10⁶
+//! unique terms can have them from the same spectrum.
 
 pub mod artifacts;
-mod materialise;
+pub mod boundary;
+pub mod hierarchy;
+pub mod materialise;
+pub mod partition;
 
 use std::collections::HashMap;
 
@@ -130,7 +138,7 @@ const SALT_BLURB: u64 = salt(b"blurb   ");
 /// defined for **every** `e`, which is what lets [`Corpus::ingest_batch`] extend the corpus past
 /// the built prefix with items drawn from the same functions.
 ///
-/// The declared columns are fixed — [`Corpus::schema_toml`] is a constant, not a parameter. A
+/// The declared columns are fixed — [`Corpus::config_toml`] is a constant, not a parameter. A
 /// configurable schema would make "the corpus" a family of corpora and put the fixture under
 /// configuration; one statement of the five families (number, datetime, category, keyword, text)
 /// is the whole point of a generator the suite can trust (spec §8, §12.1).
@@ -139,6 +147,10 @@ pub struct Corpus {
     seed: u64,
     n: u64,
     extent: Bounds,
+    /// Slots per term level — [`DEFAULT_TERMS_PER_LEVEL`] unless [`Corpus::with_terms_per_level`]
+    /// chose another. Always a power of two: [`term_of_draw`] masks it out of the keyed draw
+    /// directly, the same trick a modulus by a non-power-of-two could not do without bias.
+    terms_per_level: u32,
 }
 
 /// One item, every declared field evaluated. `None` is *absence* — the item carries no value for
@@ -169,7 +181,7 @@ pub struct Item {
     pub blurb: Option<String>,
 }
 
-/// The category's value keys, in code order (`schema_toml` pins key *i* to code *i + 1*; code 0
+/// The category's value keys, in code order (`config_toml` pins key *i* to code *i + 1*; code 0
 /// is the reserved *absent* sentinel).
 pub const BAY_VALUES: [&str; 7] = ["amber", "basalt", "cedar", "dune", "ember", "flint", "gale"];
 
@@ -185,14 +197,29 @@ const LEXICON: [&str; 64] = [
     "orbit",
 ];
 
-/// Term-space shape: 16 levels × 64 slots. Level *L* is drawn with probability `2^-(L+1)`
-/// (trailing zeros of a uniform draw, capped), so term widths span about `n/128` down to
-/// near-singleton — the spectrum grant construction needs, with no per-term state anywhere.
+/// Term-space shape: 16 levels, each split into a keyed-width slot. Level *L* is drawn with
+/// probability `2^-(L+1)` (trailing zeros of a uniform draw, capped), so term widths span about
+/// `n/128` down to near-singleton — the spectrum grant construction needs, with no per-term state
+/// anywhere.
+///
+/// **The level count stays fixed; only the slot width is a corpus parameter.** `trailing_zeros`
+/// on a `u64` draw is at most 63 and level *L*'s probability is already `2^-64` by `L = 63` — going
+/// past ~20 levels reaches depths a corpus this side of 10¹⁸ items would never populate, so
+/// widening `TERM_LEVELS` would only add levels that are permanently empty. Reaching the campaign's
+/// ~10⁶ terms is [`Corpus::terms_per_level`] widened instead, which keeps the same 16-level
+/// dense→singleton spectrum and just gives each level more slots to spread across
+/// ([`Corpus::with_terms_per_level`]).
 const TERM_LEVELS: u32 = 16;
-const TERMS_PER_LEVEL: u32 = 64;
-/// One past the largest term id the generator can emit. A grant naming a term outside this space
-/// is a typo, and [`Grant::parse`] refuses it rather than counting nothing in silence.
-pub const TERM_SPACE: u32 = TERM_LEVELS * TERMS_PER_LEVEL;
+/// The default width — 1024 unique terms total — every existing test, fixture and doc comment
+/// (`crate::TERM_SPACE`, [`Grant::parse`]) is pinned to. [`Corpus::new`] always uses this; only
+/// [`Corpus::with_terms_per_level`] can choose another.
+const DEFAULT_TERMS_PER_LEVEL: u32 = 64;
+/// One past the largest term id the *default*-width generator can emit. A grant naming a term
+/// outside this space is a typo, and [`Grant::parse`] refuses it rather than counting nothing in
+/// silence. A corpus built with [`Corpus::with_terms_per_level`] has its own, wider space —
+/// [`Corpus::term_space`] and [`Grant::parse_bounded`] are what that path uses instead; this
+/// constant is unchanged so every existing caller of the unparameterised path keeps its bound.
+pub const TERM_SPACE: u32 = TERM_LEVELS * DEFAULT_TERMS_PER_LEVEL;
 
 /// A depth-`zoom` Morton prefix over the cell grid — the value [`tessera_spatial::Tile::prefix`]
 /// holds at that depth, and the census's tile key.
@@ -207,12 +234,23 @@ pub struct Grant {
 }
 
 impl Grant {
-    /// Parse the catalogue's principal encoding: comma-separated decimal descriptors, empties
-    /// dropped (the passthrough rule). A descriptor that is not a decimal term id, or names a term
-    /// outside [`TERM_SPACE`], is refused: the census exists to state exact expected counts, and
-    /// the server-side behaviour for an unknown descriptor is a silent drop — a typo'd grant here
-    /// would otherwise produce a confidently wrong comparison instead of an error.
+    /// Parse the catalogue's principal encoding against the default 1024-wide term space —
+    /// comma-separated decimal descriptors, empties dropped (the passthrough rule). A descriptor
+    /// that is not a decimal term id, or names a term outside [`TERM_SPACE`], is refused: the
+    /// census exists to state exact expected counts, and the server-side behaviour for an unknown
+    /// descriptor is a silent drop — a typo'd grant here would otherwise produce a confidently
+    /// wrong comparison instead of an error.
+    ///
+    /// **Every existing caller uses this**, unchanged, because every existing corpus is the
+    /// default width. A corpus built with [`Corpus::with_terms_per_level`] has a wider term space
+    /// and must check a grant against it with [`Grant::parse_bounded`] instead.
     pub fn parse(encoded: &str) -> Result<Grant, String> {
+        Self::parse_bounded(encoded, TERM_SPACE)
+    }
+
+    /// [`Grant::parse`], against `term_space` rather than the default 1024 — what a corpus built
+    /// with [`Corpus::with_terms_per_level`] checks a grant against, since its term space is wider.
+    pub fn parse_bounded(encoded: &str, term_space: u32) -> Result<Grant, String> {
         let mut terms = Vec::new();
         for part in encoded.split(',') {
             let part = part.trim();
@@ -222,10 +260,10 @@ impl Grant {
             let raw: u32 = part
                 .parse()
                 .map_err(|_| format!("grant descriptor '{part}' is not a decimal term id"))?;
-            if raw >= TERM_SPACE {
+            if raw >= term_space {
                 return Err(format!(
                     "grant descriptor '{part}' names no term this corpus can emit (term space is \
-                     0..{TERM_SPACE})"
+                     0..{term_space})"
                 ));
             }
             terms.push(TermId::new(raw));
@@ -246,12 +284,42 @@ impl Grant {
 }
 
 impl Corpus {
-    /// A corpus of `n` items under `seed`, positioned within `extent`. Refuses a degenerate
-    /// extent for [`tessera_spatial::Bounds::validate`]'s reason: quantisation is undefined over
-    /// one.
+    /// A corpus of `n` items under `seed`, positioned within `extent`, at the default 1024-wide
+    /// term space. Refuses a degenerate extent for [`tessera_spatial::Bounds::validate`]'s reason:
+    /// quantisation is undefined over one.
     pub fn new(seed: u64, n: u64, extent: Bounds) -> Result<Corpus, String> {
+        Self::with_terms_per_level(seed, n, extent, DEFAULT_TERMS_PER_LEVEL)
+    }
+
+    /// [`Corpus::new`], with the term space widened (or narrowed) by choosing a different slot
+    /// count per level rather than the default 64 — [`Corpus::term_space`] is `16 * terms_per_level`
+    /// after this. Refuses a `terms_per_level` that is zero or not a power of two: [`term_of_draw`]
+    /// carves the slot out of a keyed draw with a bitmask, which only distributes evenly over a
+    /// power-of-two width.
+    ///
+    /// **This is the one place the corpus's term-space width is chosen.** The level count
+    /// ([`TERM_LEVELS`]) stays fixed — see its doc for why widening it further is not useful —
+    /// so this is how the campaign reaches ~10⁶ unique terms: `terms_per_level = 65_536` gives a
+    /// term space of 1_048_576, the same 16-level dense→singleton spectrum spread over far more
+    /// slots per level.
+    pub fn with_terms_per_level(
+        seed: u64,
+        n: u64,
+        extent: Bounds,
+        terms_per_level: u32,
+    ) -> Result<Corpus, String> {
         extent.validate()?;
-        Ok(Corpus { seed, n, extent })
+        if terms_per_level == 0 || !terms_per_level.is_power_of_two() {
+            return Err(format!(
+                "terms_per_level must be a nonzero power of two, got {terms_per_level}"
+            ));
+        }
+        Ok(Corpus {
+            seed,
+            n,
+            extent,
+            terms_per_level,
+        })
     }
 
     pub fn seed(&self) -> u64 {
@@ -264,6 +332,13 @@ impl Corpus {
 
     pub fn extent(&self) -> Bounds {
         self.extent
+    }
+
+    /// This corpus's term space: every term id [`Corpus::terms`] can emit is `< term_space`, and
+    /// [`Grant::parse_bounded`] against this value is the check that agrees with it. `1024` unless
+    /// constructed with [`Corpus::with_terms_per_level`].
+    pub fn term_space(&self) -> u32 {
+        TERM_LEVELS * self.terms_per_level
     }
 
     /// One axis: 24 independent bits of the dimension's keyed mix, mapped into the extent at the
@@ -316,8 +391,8 @@ impl Corpus {
     /// Item `e`'s terms — its grant structure, independently salted. One or two terms (two draws,
     /// collapsed when they collide), sorted; O(1), no I/O, no `n`.
     pub fn terms(&self, e: u64) -> Vec<TermId> {
-        let a = term_of_draw(keyed(self.seed, SALT_TERM_A, e));
-        let b = term_of_draw(keyed(self.seed, SALT_TERM_B, e));
+        let a = term_of_draw(keyed(self.seed, SALT_TERM_A, e), self.terms_per_level);
+        let b = term_of_draw(keyed(self.seed, SALT_TERM_B, e), self.terms_per_level);
         match a.cmp(&b) {
             std::cmp::Ordering::Less => vec![a, b],
             std::cmp::Ordering::Equal => vec![a],
@@ -372,6 +447,33 @@ impl Corpus {
         out.sort_unstable();
         out
     }
+
+    /// The artifact census's shared driver (`artifacts.rs`, `partition.rs`, `boundary.rs`): one
+    /// O(*n*) pass, bucketing each visible entity into the artifact(s) `holders_of` names for it.
+    ///
+    /// **One pass rather than one membership walk per artifact**, which is what makes this the
+    /// oracle rather than a restatement of `artifact_members`: it asks the *reverse* direction for
+    /// every entity once, exactly as an engine answering "which artifacts does this masked session
+    /// see, and how much of each" would, so an artifact absent from the output is one this grant
+    /// sees nothing of — never a zero-count row (spec §9.2's rule, restated per artifact).
+    pub(crate) fn bucket_census(
+        &self,
+        grant: &Grant,
+        holders_of: impl Fn(u64) -> Vec<u64>,
+    ) -> Vec<(u64, u64)> {
+        let mut counts: HashMap<u64, u64> = HashMap::new();
+        for e in 0..self.n {
+            if !self.visible(e, grant) {
+                continue;
+            }
+            for a in holders_of(e) {
+                *counts.entry(a).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(u64, u64)> = counts.into_iter().collect();
+        out.sort_unstable();
+        out
+    }
 }
 
 /// Absent iff the draw's top six bits are all zero — P(absent) = 1/64, on bits no value spends.
@@ -380,11 +482,16 @@ fn present(draw: u64) -> bool {
 }
 
 /// A term from one uniform draw: the level from trailing zeros (halving probabilities, capped at
-/// the deepest level), the slot from six high bits the level test cannot touch.
-fn term_of_draw(draw: u64) -> TermId {
+/// the deepest level), the slot from high bits the level test cannot touch — masked to
+/// `terms_per_level` rather than shifted, so widening the slot count changes nothing about which
+/// bits decide the level.
+///
+/// **Bit-exact at the default width.** `terms_per_level = 64` masks with `63`, which is what this
+/// function did before it took a parameter — the reason [`Corpus::new`]'s corpus is unchanged.
+fn term_of_draw(draw: u64, terms_per_level: u32) -> TermId {
     let level = draw.trailing_zeros().min(TERM_LEVELS - 1);
-    let slot = ((draw >> 40) & 63) as u32;
-    TermId::new(level * TERMS_PER_LEVEL + slot)
+    let slot = ((draw >> 40) & u64::from(terms_per_level - 1)) as u32;
+    TermId::new(level * terms_per_level + slot)
 }
 
 #[cfg(test)]
@@ -395,16 +502,30 @@ mod tests {
     /// [`Corpus::item_of_fx_key`] rests on, cheap enough to assert directly.
     #[test]
     fn the_mix_constants_are_modular_inverses() {
-        assert_eq!(0xBF58_476D_1CE4_E5B9u64.wrapping_mul(0x96DE_1B17_3F11_9089), 1);
-        assert_eq!(0x94D0_49BB_1331_11EBu64.wrapping_mul(0x3196_42B2_D24D_8EC3), 1);
+        assert_eq!(
+            0xBF58_476D_1CE4_E5B9u64.wrapping_mul(0x96DE_1B17_3F11_9089),
+            1
+        );
+        assert_eq!(
+            0x94D0_49BB_1331_11EBu64.wrapping_mul(0x3196_42B2_D24D_8EC3),
+            1
+        );
         assert_eq!(GOLDEN.wrapping_mul(GOLDEN_INV), 1);
     }
 
     #[test]
     fn the_salts_are_distinct() {
         let salts = [
-            SALT_X, SALT_Y, SALT_FX, SALT_TERM_A, SALT_TERM_B, SALT_WEIGHT, SALT_SEEN, SALT_BAY,
-            SALT_TAG, SALT_BLURB,
+            SALT_X,
+            SALT_Y,
+            SALT_FX,
+            SALT_TERM_A,
+            SALT_TERM_B,
+            SALT_WEIGHT,
+            SALT_SEEN,
+            SALT_BAY,
+            SALT_TAG,
+            SALT_BLURB,
         ];
         let mut sorted = salts.to_vec();
         sorted.sort_unstable();
@@ -418,7 +539,10 @@ mod tests {
         for e in 0..10_000 {
             let terms = corpus.terms(e);
             assert!(!terms.is_empty() && terms.len() <= 2);
-            assert!(terms.windows(2).all(|w| w[0] < w[1]), "sorted, deduplicated");
+            assert!(
+                terms.windows(2).all(|w| w[0] < w[1]),
+                "sorted, deduplicated"
+            );
             assert!(terms.iter().all(|t| t.raw() < TERM_SPACE));
         }
     }
@@ -430,6 +554,52 @@ mod tests {
         assert!(Grant::parse("").unwrap().terms().is_empty());
         assert!(Grant::parse("cs.LG").is_err(), "non-decimal descriptor");
         assert!(Grant::parse("1024").is_err(), "outside the term space");
+    }
+
+    /// **The parameterisation must not move a single existing answer.** `Corpus::new` is defined
+    /// as `with_terms_per_level(.., DEFAULT_TERMS_PER_LEVEL)`, and the default mask (`63`) is
+    /// bit-identical to the one `term_of_draw` used before it took a parameter — so this asserts
+    /// the thing the campaign's whole licence to widen the space depends on: nobody's fixture
+    /// moved.
+    #[test]
+    fn the_default_term_space_is_exactly_1024_and_unwidened_by_the_parameter() {
+        assert_eq!(TERM_SPACE, 1024);
+        let default = Corpus::new(0x5EED, 10_000, grid()).unwrap();
+        assert_eq!(default.term_space(), TERM_SPACE);
+        let explicit =
+            Corpus::with_terms_per_level(0x5EED, 10_000, grid(), DEFAULT_TERMS_PER_LEVEL).unwrap();
+        for e in 0..10_000 {
+            assert_eq!(
+                default.terms(e),
+                explicit.terms(e),
+                "the explicit default-width constructor disagrees with `new` at {e}"
+            );
+        }
+    }
+
+    /// Widening the slot count keeps the same 16-level spectrum — the halving-probability level
+    /// draw is untouched — and reaches the campaign's ~10⁶-term target: `16 * 65_536 = 1_048_576`.
+    #[test]
+    fn a_wider_term_space_keeps_every_term_inside_it() {
+        let wide = Corpus::with_terms_per_level(0x5EED, 10_000, grid(), 65_536).unwrap();
+        assert_eq!(wide.term_space(), 1_048_576);
+        for e in 0..10_000 {
+            for t in wide.terms(e) {
+                assert!(
+                    t.raw() < wide.term_space(),
+                    "term {t:?} escapes the widened space"
+                );
+            }
+        }
+        assert!(Grant::parse_bounded("1000000", wide.term_space()).is_ok());
+        assert!(Grant::parse_bounded("1048576", wide.term_space()).is_err());
+    }
+
+    #[test]
+    fn terms_per_level_must_be_a_nonzero_power_of_two() {
+        assert!(Corpus::with_terms_per_level(1, 100, grid(), 0).is_err());
+        assert!(Corpus::with_terms_per_level(1, 100, grid(), 100).is_err());
+        assert!(Corpus::with_terms_per_level(1, 100, grid(), 128).is_ok());
     }
 
     fn grid() -> Bounds {

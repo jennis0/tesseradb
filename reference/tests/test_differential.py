@@ -37,7 +37,7 @@ from oracle.bundle import Bundle
 
 from .wire import decode_viewport
 
-SLICE = "s0"
+VIEW = "s0"
 SEED = 20260728
 # Task 16, Step 4: the 10^9-bundle exit run uses a reduced sample count (the brief's "5 grants x
 # 5 viewports" -- the independent Python oracle is slow by design, and re-deriving a mask from
@@ -97,8 +97,8 @@ def test_stored_position_matches_the_source_byte_for_byte(oracle_bundle: Bundle)
     The comparison is exact. Positions are integers now, so the `f32` tolerance the old
     coordinate check carried — and the disagreement a tolerance can hide — is gone.
     """
-    seg = oracle_bundle.segment(SLICE)
-    expected = oracle_bundle.row_position_codes(SLICE)
+    seg = oracle_bundle.segment(VIEW)
+    expected = oracle_bundle.row_position_codes(VIEW)
     for i in range(0, seg.row_count, max(1, seg.row_count // 5000)):
         assert expected[i] == seg.stored_code(i), (
             f"row {i}: stored position {seg.stored_code(i):#018x} disagrees with the source's "
@@ -160,14 +160,14 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
         # know them; `GET /v1/meta` publishes them precisely so an independent implementation can
         # reproduce the served set. theta's anchor is computed independently below, not read back.
         constants = server.meta(token)["selection"]
-        v_total = _oracle_visible_total(oracle_bundle, base_mask, SLICE)
+        v_total = _oracle_visible_total(oracle_bundle, base_mask, VIEW)
 
         for _ in range(N_VIEWPORTS_PER_GRANT):
             zoom = rng.randint(*ZOOM_RANGE)
             bbox = _random_bbox(rng)
             k = 200  # max_k (Reference Sheet R1) — exercise the full per-tile sampling budget
 
-            raw = server.viewport(token, SLICE, zoom, bbox, k=k)
+            raw = server.viewport(token, VIEW, zoom, bbox, k=k)
             server_tiles, server_points = decode_viewport(raw)
 
             # ONE `Selection` per request, asked about each of its tiles — see
@@ -176,7 +176,7 @@ def _grid_differential(server, oracle_bundle: Bundle, *, require_partial: bool =
             # selects from it, so deriving them by two routes would let a disagreement between them
             # hide in the oracle. It is also what keeps the literal definition affordable — the
             # free `viewport.served()` makes a whole pass per tile.
-            oracle = vp.Selection(oracle_bundle, base_mask, SLICE, zoom)
+            oracle = vp.Selection(oracle_bundle, base_mask, VIEW, zoom)
             oracle_tile_counts = oracle.counts_for(
                 morton.tiles_for_bbox(bbox, zoom, oracle_bundle.extent)
             )
@@ -240,12 +240,12 @@ def _visible_of(server_tiles, tile):
     raise AssertionError(f"tile {tile} not in the tiles batch")
 
 
-def _oracle_visible_total(bundle, mask, slice_id):
-    return vp.visible_total(bundle, mask, slice_id)
+def _oracle_visible_total(bundle, mask, view_id):
+    return vp.visible_total(bundle, mask, view_id)
 
 
-def _oracle_counts(bundle, base_mask, slice_id, zoom, bbox):
-    return vp.counts(bundle, base_mask, slice_id, zoom, bbox)
+def _oracle_counts(bundle, base_mask, view_id, zoom, bbox):
+    return vp.counts(bundle, base_mask, view_id, zoom, bbox)
 
 
 def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bundle):
@@ -261,10 +261,10 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
     bbox = (0.0, 0.0, GRID_MAX, GRID_MAX)
     zoom = 4
 
-    raw_before = server.viewport(token, SLICE, zoom, bbox, k=200)
+    raw_before = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles_before, _ = decode_viewport(raw_before)
     counts_before = {t: v for t, v, m, _s in tiles_before}
-    oracle_before = _oracle_counts(oracle_bundle, base_mask, SLICE, zoom, bbox)
+    oracle_before = _oracle_counts(oracle_bundle, base_mask, VIEW, zoom, bbox)
     assert counts_before == oracle_before
 
     target_entity = min(base_mask)
@@ -275,11 +275,11 @@ def test_suppress_over_control_plane_drops_the_count(server, oracle_bundle: Bund
     changes = mask_mod.ChangeSet()
     changes.apply(target_entity, "suppress")
 
-    raw_after = server.viewport(token, SLICE, zoom, bbox, k=200)
+    raw_after = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles_after, _ = decode_viewport(raw_after)
     counts_after = {t: v for t, v, m, _s in tiles_after}
     resolved_mask = changes.resolve(base_mask, {term_id})
-    oracle_after = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
+    oracle_after = _oracle_counts(oracle_bundle, resolved_mask, VIEW, zoom, bbox)
 
     assert counts_after == oracle_after
     assert sum(counts_after.values()) == sum(counts_before.values()) - 1
@@ -348,10 +348,10 @@ def test_mixed_change_composition_stress(server, oracle_bundle: Bundle):
     assert delete_entity not in resolved_mask
     assert suppress_entity not in resolved_mask
 
-    raw = server.viewport(token, SLICE, zoom, bbox, k=200)
+    raw = server.viewport(token, VIEW, zoom, bbox, k=200)
     tiles, _ = decode_viewport(raw)
     server_counts = {t: v for t, v, m, _s in tiles}
-    oracle_counts = _oracle_counts(oracle_bundle, resolved_mask, SLICE, zoom, bbox)
+    oracle_counts = _oracle_counts(oracle_bundle, resolved_mask, VIEW, zoom, bbox)
 
     assert server_counts == oracle_counts
 

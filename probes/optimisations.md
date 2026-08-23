@@ -204,12 +204,12 @@ empty-tile failure, for exactly the users least able to report it.
 ### 3.2 The *projected mask* must stay cached — **DECIDED** *(serving)*
 
 Permuting a 69M-item mask from entity to row space costs **8.8 s** at
-10⁹. §10.4 already requires caching it per *(token, slice, pin)*; the
+10⁹. §10.4 already requires caching it per *(token, view, pin)*; the
 number makes the consequence concrete — if it ever drifts onto the
 per-viewport path, the system is dead. Worth a comment at the call site,
 not just a line in a document.
 
-**What is cached is the projected mask**, per *(token, slice, pin)* — not
+**What is cached is the projected mask**, per *(token, view, pin)* — not
 `permutation.bin`, which is read once per session and never per viewport.
 The earlier heading said "the permutation", which reads as the file.
 Clarified 2026-07-29; no decision changes.
@@ -275,14 +275,14 @@ what makes the whole-group visibility shortcut available at all.
    69M-item mask (results §6) is dominated by container count. Cluster
    the authorised rows and the projected bitmap collapses from ~15,000
    containers toward runs: cheaper to build, smaller to cache per
-   *(token, slice, pin)*, cheaper for every subsequent range operation.
+   *(token, view, pin)*, cheaper for every subsequent range operation.
    This is the strongest leg.
 2. **The whole-group visibility shortcut** — every item in a signature
    group is visible to exactly the same principals, so a group can be
    admitted or skipped without consulting the mask. Invariant-bearing;
    see below.
 3. **Permutation encodability.** Today `permutation.bin` is a flat
-   `u32 × bound` array (~4 GB/slice at 10⁹) and is left uncompressed for
+   `u32 × bound` array (~4 GB/view at 10⁹) and is left uncompressed for
    a *deliberate* reason, not an incidental one: §11.1 forbids assigning
    entity IDs in Morton order (leak C6), so entity order and row order
    are unrelated by construction and the values are a maximum-entropy

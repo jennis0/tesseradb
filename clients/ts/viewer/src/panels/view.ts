@@ -34,7 +34,9 @@ export function renderCounts(state: AppState): string {
       return panel('Counts', '<div class="muted">waiting for the first view</div>');
     case 'loading': {
       if (!state.sessionWarm) {
-        const waited = state.view ? Math.round((Date.now() - state.view.requestedAt) / 1000) : 0;
+        const waited = state.depthChoice
+          ? Math.round((Date.now() - state.depthChoice.requestedAt) / 1000)
+          : 0;
         // The visible set materialises inside the session's first request, and at a large corpus a
         // broad principal's union takes seconds — a different wait from every later "loading", so
         // it says what is happening rather than reading as a hung fetch.
@@ -105,22 +107,22 @@ export function renderCounts(state: AppState): string {
 
 /** What the budget chose, and how close the prediction came. Prediction against reality is the row that matters. */
 export function renderDepth(state: AppState): string {
-  const view = state.view;
+  const chosen = state.depthChoice;
   // Against the prediction, only exact tiles are comparable — they are what the budget asked for.
   const actual = state.assembled?.exactDrawn ?? 0;
   const drift =
-    view && view.predictedMarks > 0
-      ? `${(((actual - view.predictedMarks) / view.predictedMarks) * 100).toFixed(0)}%`
+    chosen && chosen.predictedMarks > 0
+      ? `${(((actual - chosen.predictedMarks) / chosen.predictedMarks) * 100).toFixed(0)}%`
       : '—';
 
   return panel(
     'Depth chosen',
-    `${row('depth', view ? String(view.depth) : '—')}
-     ${row('tiles requested', view ? fmt(view.tiles) : '—')}
-     ${row('predicted marks', view ? fmt(view.predictedMarks) : '—')}
+    `${row('depth', chosen ? String(chosen.depth) : '—')}
+     ${row('tiles requested', chosen ? fmt(chosen.tiles) : '—')}
+     ${row('predicted marks', chosen ? fmt(chosen.predictedMarks) : '—')}
      ${row('actual marks', fmt(actual))}
      ${row('drift', drift)}
      ${row('m_target (calibrated)', state.mTarget.toFixed(2))}
-     ${row('limited by', view ? view.limitedBy : '—')}`
+     ${row('limited by', chosen ? chosen.limitedBy : '—')}`
   );
 }

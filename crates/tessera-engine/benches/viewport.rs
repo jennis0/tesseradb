@@ -70,19 +70,20 @@ fn ensure_bundle() -> PathBuf {
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
+            point_fields: Default::default(),
             points: root.join("data/scaled/geometry.parquet"),
-            pairs: root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
+            attribute_sources: Vec::new(),
+            access: tessera_build::config::AccessInput::relation(root.join("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
             extent: extent(),
-            slice_id: "s0".to_string(),
+            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
             idset: 1,
             shard_id: 0,
-            layers: None,
-            artifacts: None,
-            artifact_members: None,
+            layers: Vec::new(),
+            layer_inputs: Vec::new(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,
@@ -133,15 +134,15 @@ fn bench_compose(c: &mut Criterion) {
         .expect("fragment build should succeed");
 
     let bundle = open_bundle(&bundle_root).expect("bundle should open");
-    let slice = &bundle.partitions["default"].slices["s0"];
-    let base = Arc::new(RowProjection::new(&fragment, &slice.row_space));
+    let view = &bundle.partitions["default"].views["s0"];
+    let base = Arc::new(RowProjection::new(&fragment, &view.row_space));
 
     let satisfied: rustc_hash::FxHashSet<TermId> = terms.iter().copied().collect();
     let overlay = Overlay::new();
     let buffer = IngestBuffer::new();
     // Derived once, outside the timed loop, exactly as a publication derives it: the deny half of
     // composition is one `andnot` inside the loop whatever the deny depth, which is the point.
-    let denied = tessera_engine::denied_rows_of(&overlay, &slice.row_space);
+    let denied = tessera_engine::denied_rows_of(&overlay, &view.row_space);
 
     c.bench_function("compose", |b| {
         b.iter(|| {
@@ -150,7 +151,7 @@ fn bench_compose(c: &mut Criterion) {
                 &overlay,
                 &buffer,
                 Arc::clone(&base),
-                &slice.row_space,
+                &view.row_space,
                 &denied,
             )
         });

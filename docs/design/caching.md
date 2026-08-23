@@ -21,7 +21,7 @@ bootstrap, view-key refresh and long-range jumps.
 The naive path stays correct (P6) — it simply operates at a lower mark budget.
 
 **The view key**, which every key below is expressed against, is client-interaction §6's
-composite of **(mask, overlay version, slice, *k*, idset)** — the coordinate within which a served
+composite of **(mask, overlay version, view, *k*, idset)** — the coordinate within which a served
 viewport is stable. **The viewport is not one of its components**, so one view key covers every pan
 and zoom a session performs; that is what makes it usable as a cache key at all.
 
@@ -85,7 +85,7 @@ The levers, in order:
 2. **Publish the sizing formula** as the deployment rule, so a box is sized against Σ active
    visible mass rather than user count.
 3. *(Recorded, not proposed.)* A **smaller resident projection for broad masks** — projecting per
-   touched Morton range rather than whole-slice. Engine design work against design §10.4; the only
+   touched Morton range rather than whole-view. Engine design work against design §10.4; the only
    structural fix.
 
 ## 5. The caches
@@ -96,18 +96,19 @@ point cache and the server density raster — could not sensibly share a design.
 | # | Cache | Home | Key | Bound | Eviction | Invalidated by |
 |---|---|---|---|---|---|---|
 | S1 | Mask fragment *(exists)* | server | canonical grant set | `fragment_cache_bytes` | LRU | content-addressed; never |
-| S2 | Row projection *(exists)* | server | (token, slice, segments_version) | `row_projection_cache_bytes` | LRU + `prune_generation` | every geometry publication rotates the key; the superseded entry stays servable across a flush, never across a merge (write-path §4.6) |
-| S3 | Density raster | server | (grant set, slice, content version, depth) | new knob, ~512 MB | LRU | content version; rebuild async, serve stale-marked |
-| S4 | Overview / bootstrap answers | server | (grant set, slice, content version, view, k) | new knob | LRU | content version |
-| S5 | Adapter tiles *(class b only)* | server, in boundary | (grant set, overlay version, segments_version, slice, view-key nonce, z/x/y, k, encoding) | new knob, 1–2 GB | LRU + single-flight | content version; view-key-scoped URL self-busts browser copies |
+| S2 | Row projection *(exists)* | server | (token, view, segments_version) | `row_projection_cache_bytes` | LRU + `prune_generation` | every geometry publication rotates the key; the superseded entry stays servable across a flush, never across a merge (write-path §4.6) |
+| S2b | Artifact masked-count histogram *(exists)* | server | (token, view, layer, level, level_version, segments_version, overlay_version, fragment identity) | `masked_count_cache_bytes` | LRU, removal-only | row-major levels only — [decision 0093](../decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s one named exception; a deny rotates `overlay_version` so a suppression is unreachable at the next request, and an unsuppress re-derives |
+| S3 | Density raster | server | (grant set, view, content version, depth) | new knob, ~512 MB | LRU | content version; rebuild async, serve stale-marked |
+| S4 | Overview / bootstrap answers | server | (grant set, view, content version, view, k) | new knob | LRU | content version |
+| S5 | Adapter tiles *(class b only)* | server, in boundary | (grant set, overlay version, segments_version, view, view-key nonce, z/x/y, k, encoding) | new knob, 1–2 GB | LRU + single-flight | content version; view-key-scoped URL self-busts browser copies |
 | C1 | **Replica point bands** | client | (view key, tile prefix) → band up to cut *c* | `client_cache_bytes`, 512 MB–1 GB | **truncate cuts, deepest/least-recent/farthest first; never the floor prefix** | identity generation → all; content version → stale-mark, lazy refetch |
-| C2 | Density raster | client | (view key, slice), deepest level only | 1–4 MB | replaced whole | content version |
+| C2 | Density raster | client | (view key, view), deepest level only | 1–4 MB | replaced whole | content version |
 
 Plus **the session cursor**, which is not a cache: `(tile, view key, cut)` triples, ~64 KB/session,
 advisory and safely evictable under P5.
 
 **S2's re-key is hygiene, not a lever.** The projection is pre-overlay — `EffectiveMask { base,
-minus, plus }` applies the diff at query time — so it is a pure function of (grant set, slice,
+minus, plus }` applies the diff at query time — so it is a pure function of (grant set, view,
 segments_version) and could be shared by content address, exactly as S1 already is. Worth doing;
 but under near-unique grant sets it saves nothing, so it must not be presented as the capacity
 answer. **One real cost:** `revoke` calls `prune_token`, which works only because the key
@@ -224,7 +225,7 @@ precisely *because* of that. The adapter's documentation must **state the budget
 than let an integrator discover it.
 
 What class (b) needs is **coalescing, not caching**: single-flight per (grant set, view key,
-viewport band), evaluate once, split by `served`, hand each `{z}/{x}/{y}` its slice. Posture per §8.3
+viewport band), evaluate once, split by `served`, hand each `{z}/{x}/{y}` its view. Posture per §8.3
 unchanged — inside the trust boundary, `Cache-Control: private`, view-key-scoped URL segment as a
 **session nonce rather than the raw view key** (URLs reach history and proxies), key carrying overlay
 version and not mask identity alone.
@@ -302,7 +303,7 @@ Measure, in order:
 
 **r2 (2026-08-01) applies decision [0029](../decisions/0029-view-key.md)** and changes no key's
 content. What §5's table and §7's mechanism called an "epoch" is the **view key** — the composite
-of mask, overlay version, slice, *k* and idset within which a served viewport is stable. The
+of mask, overlay version, view, *k* and idset within which a served viewport is stable. The
 viewport is not one of its components, which is exactly why it can key a cache: one entry covers
 every pan and zoom a session performs under it. Where a key already enumerates the view key's other
 components — S3 and S4 — the remaining term is named the **content version**, which is what

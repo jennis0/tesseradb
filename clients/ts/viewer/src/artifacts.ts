@@ -126,7 +126,7 @@ export class ArtifactChannel {
   }
 
   private async request(): Promise<void> {
-    const {session, slice, artifactLayer} = this.store.state;
+    const {session, view: viewId, artifactLayer} = this.store.state;
     const view = this.view;
     if (!session || !view) return;
     this.inFlight?.abort();
@@ -152,7 +152,7 @@ export class ArtifactChannel {
       const response = await this.client.viewport(
         session.token,
         {
-          slice,
+          view: viewId,
           zoom: view.depth,
           bbox: rectToRequestBbox(tileRectOfBbox(view.bbox, view.depth), view.depth, this.quantisation),
           // The counts and the artifacts frame, and no points at all: this channel draws none, and
@@ -223,10 +223,10 @@ export async function loadArtifactPlaces(): Promise<Map<string, ArtifactPlaces>>
     const response = await fetch('/clusters.json', {cache: 'no-store'});
     if (!response.ok) return byLayer;
     const body = (await response.json()) as {
-      layers?: Record<string, {stableKey: string; x: number; y: number}[]>;
+      layers?: Record<string, {key: string; x: number; y: number}[]>;
     };
     for (const [layer, clusters] of Object.entries(body.layers ?? {})) {
-      byLayer.set(layer, new Map(clusters.map((c) => [c.stableKey, {x: c.x, y: c.y}])));
+      byLayer.set(layer, new Map(clusters.map((c) => [c.key, {x: c.x, y: c.y}])));
     }
   } catch {
     // Left empty on a parse failure, for the same reason.
@@ -248,10 +248,72 @@ export function placedArtifacts(
 ): {artifact: Artifact; x: number; y: number}[] {
   const placed: {artifact: Artifact; x: number; y: number}[] = [];
   for (const artifact of artifacts) {
-    const at = artifact.stableKey === null ? undefined : places.get(artifact.stableKey);
+    const at = artifact.key === null ? undefined : places.get(artifact.key);
     if (!at) continue;
     placed.push({artifact, x: at.x, y: at.y});
   }
   placed.sort((a, b) => (a.artifact.maskedCount < b.artifact.maskedCount ? -1 : 1));
   return placed;
+}
+
+/**
+ * The tree the response carried, assembled from `parentId`.
+ *
+ * **Built from what was served and nothing else.** A parent is named only where it is in the same
+ * response ([decision 0087](../../../../docs/decisions/0087-cross-level-edges-are-information-not-rollup.md)),
+ * and an artifact whose parent was withheld arrives with `parentId` null — identically to one that
+ * has no parent at all. So a link that does not resolve is treated as no link, and the artifact is
+ * a root of what this viewer was given. There is no "hidden parent" state here because there is
+ * nothing on the wire to fill one from, and modelling one would assert the existence of a coarser
+ * artifact this principal was not shown.
+ *
+ * **It is this response's tree, not the layer's.** The set changes as the map moves and as the
+ * cut's budget bites: two viewers, and the same viewer at two depths, correctly see different
+ * shapes over the same layer.
+ */
+export type ServedLineage = {
+  /** Every served artifact by identifier. */
+  byId: Map<bigint, Artifact>;
+  /** A parent's served children, by the parent's identifier. Absent means none were served. */
+  childrenOf: Map<bigint, Artifact[]>;
+  /** Those with no served parent — where a walk of the tree starts. */
+  roots: Artifact[];
+  /** Whether any link resolved at all: a flat layer, and a tree cut to one level, look the same. */
+  linked: boolean;
+};
+
+export function servedLineage(artifacts: Artifact[]): ServedLineage {
+  const byId = new Map(artifacts.map((a) => [a.tesseraId, a]));
+  const childrenOf = new Map<bigint, Artifact[]>();
+  const roots: Artifact[] = [];
+  for (const artifact of artifacts) {
+    const parent = artifact.parentId === null ? undefined : byId.get(artifact.parentId);
+    if (!parent) {
+      roots.push(artifact);
+      continue;
+    }
+    const siblings = childrenOf.get(parent.tesseraId);
+    if (siblings) siblings.push(artifact);
+    else childrenOf.set(parent.tesseraId, [artifact]);
+  }
+  return {byId, childrenOf, roots, linked: childrenOf.size > 0};
+}
+
+/**
+ * One artifact and everything served beneath it — the subtree a viewer picks out by opening it.
+ *
+ * The visited set is not defensive tidiness about a server that might send a cycle; it is what
+ * makes a walk over data from *outside* this program terminate. A malformed response should slow
+ * a panel down, never hang the frame loop.
+ */
+export function subtreeOf(lineage: ServedLineage, root: bigint): Set<bigint> {
+  const seen = new Set<bigint>();
+  const stack = [root];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const child of lineage.childrenOf.get(id) ?? []) stack.push(child.tesseraId);
+  }
+  return seen;
 }

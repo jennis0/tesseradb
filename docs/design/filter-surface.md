@@ -1,7 +1,7 @@
 # The filter surface — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r4, revised where the artefact changed under it.** `filter-index.md` r4
+**Status:** **Provisional — r5. §9's conformance claim is corrected against machinery that has since been built (Appendix R); r4 stands otherwise, revised where the artefact changed under it.** `filter-index.md` r4
 made the flat value column the artefact of record and the mask its scan candidate, which withdraws two
 controls this document had registered (§2.1, §3.2) and withdrew §4.1–§4.5's shared projection cache.
 §4's measured project-vs-per-tile rule replaces it and is built. To become normative: an owner ruling
@@ -124,7 +124,7 @@ as written** — indistinguishable *"in outcome and in work"* — and no amendme
 
 `M_auth` is the candidate bitmap. Pushing it into an operand's evaluation bounds every intermediate: each
 posting as a wide union accumulates, each canonical node of a level-tree range, and the working set across
-a bit-sliced column's *k* slice operations.
+a bit-sliced column's *k* view operations.
 
 **The cost asymmetry runs in the right direction.** Bitmap operations cost **O(containers touched), not
 O(cardinality)**. A sparse principal's `M_auth` touches few containers, so push-down is cheapest exactly
@@ -238,7 +238,7 @@ through `IdentityKey::invert` costs **~17.5 ns per row**, which dominates every 
 loop and cannot be batched away: inverting a whole tile into a scratch buffer before testing
 membership measures *slightly worse* than interleaving (6.22 ms against 6.00 ms), because the cost is
 the four Feistel rounds and not a stalled pipeline. The table removes it for **4 bytes per row per
-slice**, shared across every filter column — it is a property of the slice's geometry, not of any
+view**, shared across every filter column — it is a property of the view's geometry, not of any
 attribute, so sixteen filterable columns need no more of it than one does.
 
 **Both constants are shape-dependent and neither may be quoted flat.** Arm 3's results are contiguous,
@@ -318,7 +318,7 @@ compared against the live row space, and segment IDs are never reused. **That co
 argument, and the key only selects the candidate.**
 
 **The extension's own cost is the clone, and it couples the cache's population to the publication cadence.**
-At *P* resident broad entries per slice, each flush costs ~*P* × 41 ms of pool time; the byte budget is
+At *P* resident broad entries per view, each flush costs ~*P* × 41 ms of pool time; the byte budget is
 therefore a throughput constraint as well as a memory one, and §4.4 sizes it as both. Extension is **lazy**
 — performed on next touch, folding ~41 ms into one request per operand per publication — rather than eager
 over the whole resident set, so an idle operand costs nothing.
@@ -374,8 +374,8 @@ matching 10⁸ entities costs ~12.7 s to project (*modelled*). So:
 The entries worth caching per canonical node are the *upper-level* nodes, and those are the broad ones: a
 node near the root covers ~*N*/*b* entities, and attribute membership is scattered in row space, so its row
 projection is bitmap-container dominated at **~31–125 MB each at 10⁹** (*modelled* from the *measured*
-125.12 MB dense bound). One popular column's top levels are 4–20 such nodes — **0.5–2.5 GB per slice per
-generation, modelled** — doubled by a retained superseded generation and again by a second slice.
+125.12 MB dense bound). One popular column's top levels are 4–20 such nodes — **0.5–2.5 GB per view per
+generation, modelled** — doubled by a retained superseded generation and again by a second view.
 
 That is the arithmetic the budget must be set against, and it is not obviously satisfiable: a few GB holds
 one hot column and evicts under a second, while each eviction of a broad entry re-arms a ~12.7 s
@@ -393,7 +393,7 @@ introduces it and the register must carry it.
 
 ### 4.5 The cache key
 
-`(operand identity, slice, segments_version, bundle identity, prefix)`.
+`(operand identity, view, segments_version, bundle identity, prefix)`.
 
 **The bundle identity is required, not defensive.** Attribute ordinals are bundle-relative positions
 (index §2.4), so an entry surviving a rebuild would serve a bitmap naming a different set of entities. The
@@ -653,12 +653,29 @@ which is the class a mechanism-focused review misses.
 
 ## 9. Conformance and measurement
 
-**This design makes I12's mask half coverable.** The suite records I12 as uncovered and explicitly not as a
-testing gap — *"no label service, no plugin host, no generating sets, no filter surface."* Landing the
-surface removes the last of those, but **not the others**: there is no label service, no frontier and no
-`min_visible_members` in the tree, so the frontier half of I12 and the whole of I3 stay blocked on machinery
-this design does not build. Claiming otherwise would be the present-tense-about-absent-machinery error
-decision 0013 forbids, inside a conformance section.
+**This design makes I12's mask half coverable.** The suite recorded I12 as uncovered and explicitly not as a
+testing gap — *"no label service, no plugin host, no generating sets, no filter surface."* Landing the surface
+removed the last of those, and **the annotation work has since removed two more** *(r5, correcting this
+section rather than changing the design)*. Taken clause by clause, what is true now:
+
+- **The criterion is built.** An artifact is served only where its masked count clears the bar its layer
+  declares, and that count is `|membership ∩ M|` against the composed mask — a live control, and the one the
+  deleted `min_visible_members` key used to name badly.
+- **The frontier is withdrawn, not missing.** Every artifact is tested on its own and the root-down descent
+  is gone (decisions [0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md),
+  [0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
+  [0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)); the depth that remains is a
+  request-time budget, which is not a disclosure control. So there is no frontier *depth* for a filter to
+  move, and a test of one would be a test of a withdrawn mechanism.
+- **What was called the label service is built, under another name.** Labels are artifact content: a layer's
+  artifacts carry ranked contents, each with its generating set, and a viewer is served the first content
+  whose set they contain entire. Containment is evaluated on every route that serves an artifact. What is
+  still absent from the older conception is the *ladder's* choosing — the service resolves a caller-supplied
+  ordering and takes no opinion (decision [0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)) — and search's containment gate, which is unruled.
+
+So the frontier half of I12 and the whole of I3 are **coverable and untested**, not blocked. This design does
+not build them and does not claim them; naming them absent, now that they are not, would understate the
+suite's gap as surely as claiming them would overstate it.
 
 | Row | What it asserts | Status |
 |---|---|---|
@@ -666,7 +683,7 @@ decision 0013 forbids, inside a conformance section.
 | **Rule S** | A suppressed entity is absent from every filter result *and every filter count* although its postings stand — the case §5.1 and §5.3 turn on, and the one a fragment-intersecting implementation passes every other test while failing | Coverable |
 | **C11** | A filter naming an invisible value and one naming a nonexistent value agree **in outcome** — status, body, every count. Work is deliberately not asserted (§3.2), and a test asserting it would fail the design as ruled | Coverable |
 | **I2 canary** | Canary items carrying attribute values move no filtered aggregate. The canary allocation rules gain *"canary attribute descriptors interned last"*, mirroring the existing rule for canary terms — without it, a canary displacing an attribute ordinal makes the comparator flag fixture perturbation as disclosure | Coverable |
-| **I12, frontier half; I3** | ⊘ Blocked on the label service, as they are today | Not coverable |
+| **I12, frontier half; I3** | The surviving artifact-side form (architecture §8.4): an artifact's verdict, masked count and containment are unmoved by any filter, both tests running against `M_auth` alone. Built and blind to the filter by construction | **Coverable, untested** *(r5; was: blocked on the label service)* — outside this design, and named here only so the row does not read as absent machinery |
 | **C8** | No response shape carries a cardinality over an un-intersected intermediate | A **review obligation**, not a test row: a universally-quantified negative over all shapes is what the suite's own standard rejects. What holds it in test is the differential's masked-count equality and the canary comparator |
 
 **The differential relation carries values.** Index §9 specifies `(entity_id, column, value)` rather than
@@ -695,6 +712,16 @@ needs and the arm as declared does not carry:
 ---
 
 ## Appendix R — review trail
+
+**2026-08-19 (r5) — §9 said three things were absent and two of them are built.** A correction, not a
+design change: nothing in §1–§8 moves and no filter behaviour changes. §9's sentence — *"there is no
+label service, no frontier and no `min_visible_members` in the tree"* — was true when written and each
+of its three clauses now needs a different answer. The **existence criterion** is built and enforced,
+and is what the deleted key named. The **frontier** is withdrawn as a concept rather than missing
+(decisions 0080, 0082, 0083), so its depth is not a thing a filter could move. And the **labels**
+themselves are built, as artifact content gated on generating-set containment. The frontier half of
+I12 and the whole of I3 are therefore *coverable and untested* rather than blocked, and §9's row says
+so. This design still does not build them, and still claims neither.
 
 **2026-08-16 — §5.2's display threshold is withdrawn with §7.5's descent** (architecture r43,
 decisions [0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md),
@@ -805,7 +832,8 @@ admission threshold counts distinct authorisation fingerprints so a single princ
 Eviction cadence joins the register as an accepted activity channel.
 
 Three claims were scoped down. **I12 becomes coverable only in its mask half** — the frontier half and I3
-stay blocked on the label service, and a test row for absent machinery is what decision 0013 forbids. The
+stayed blocked on the label service at the time *(superseded at r5: that machinery is built)*, and a test row
+for absent machinery is what decision 0013 forbids. The
 **conformance relation carries values, not ordinals**, or the oracle reproduces the engine's key encodings
 and stops being a second implementation. And **§5.3's range-summary machinery is marked ⊘** with its
 placement stated, since no route serves a summary — the register entry is earned, the mechanism was

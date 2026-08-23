@@ -20,7 +20,7 @@
 //!
 //! One JSON object goes to stdout; human-oriented notes go to stderr. Keys:
 //!
-//! - `bundle`, `partition`, `slice`, `segment`, `rows` — what was analysed.
+//! - `bundle`, `partition`, `view`, `segment`, `rows` — what was analysed.
 //! - `global` — an occupancy object over the whole column.
 //! - `region` — `null`, or the bbox/zoom drilldown: `bbox`, `zoom`, `tiles` (tiles resolved),
 //!   `tiles_occupied` (tiles with at least one row), `mean_occupied_cells_per_tile`
@@ -134,18 +134,18 @@ fn run(args: &Args) -> Result<(), String> {
         opened_at.elapsed().as_secs_f64()
     );
 
-    // A build writes exactly one segment per (partition, slice) and this tool's single-pass
+    // A build writes exactly one segment per (partition, view) and this tool's single-pass
     // run-length scan is only meaningful over one sorted column, so anything else is refused
     // rather than silently merged (concatenating segments would fabricate runs at the seams).
     let mut segments: Vec<(&str, &str, &SegmentData)> = Vec::new();
     for (phash, partition) in &bundle.partitions {
-        for (slice_id, slice) in &partition.slices {
-            for seg in &slice.segments {
-                segments.push((phash, slice_id, seg));
+        for (view_id, view) in &partition.views {
+            for seg in &view.segments {
+                segments.push((phash, view_id, seg));
             }
         }
     }
-    let &(phash, slice_id, seg) = match segments.as_slice() {
+    let &(phash, view_id, seg) = match segments.as_slice() {
         [only] => only,
         other => {
             return Err(format!(
@@ -156,7 +156,7 @@ fn run(args: &Args) -> Result<(), String> {
     };
     let codes = seg.morton.u32();
     eprintln!(
-        "segment '{}' (partition '{phash}', slice '{slice_id}'): {} rows",
+        "segment '{}' (partition '{phash}', view '{view_id}'): {} rows",
         seg.seg_id,
         codes.len()
     );
@@ -178,7 +178,7 @@ fn run(args: &Args) -> Result<(), String> {
     let report = json!({
         "bundle": args.bundle.display().to_string(),
         "partition": phash,
-        "slice": slice_id,
+        "view": view_id,
         "segment": seg.seg_id,
         "rows": codes.len() as u64,
         "global": global.to_json(),

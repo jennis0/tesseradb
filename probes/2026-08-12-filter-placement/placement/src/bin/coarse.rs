@@ -2,14 +2,14 @@
 //! something a viewport-shaped route cannot bound.
 //!
 //! Arm 1's win comes from the viewport being small. At the coarsest zoom it is not: the request
-//! spans the whole slice and asks for a **count per tile**, so a row-space route walks every row in
+//! spans the whole view and asks for a **count per tile**, so a row-space route walks every row in
 //! the corpus. This arm prices that cell, which is the one that decides whether the entity-space
 //! copy can be dropped outright or only skipped when the viewport is small.
 //!
 //! Same three routes as arm 1, answering "how many visible rows in each tile match?":
 //!
 //! - **E** — the shipped scan under `M_auth`, then `project` (the per-tile crossing never fires
-//!   here: the viewport is the whole slice, so the result can never exceed 3× its rows), then a
+//!   here: the viewport is the whole view, so the result can never exceed 3× its rows), then a
 //!   range cardinality per tile.
 //! - **R-dense** — scan the hot column whole, intersect the matches with the row-space mask once,
 //!   then a range cardinality per tile.
@@ -24,7 +24,7 @@ use placement::{mask, median, permutation, project, splitmix, MaskShape};
 use tessera_filter::{Codes, ValueColumn};
 use tessera_types::AttrLocalId;
 
-/// Tiles at a coarse level: 64×64 over the quadtree, which is the order a whole-slice request
+/// Tiles at a coarse level: 64×64 over the quadtree, which is the order a whole-view request
 /// resolves to before the drawn-mark budget starts cutting depth.
 const TILES: usize = 4_096;
 const ROUNDS: usize = 3;

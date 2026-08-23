@@ -77,13 +77,13 @@ def test_the_blob_addressing_is_self_consistent(catalogue_bundle_root, catalogue
     planted, which is the fixture-input half of the relation."""
     failures = rb.self_check(
         rb.record_dir_of(catalogue_bundle_root),
-        expected_entities=cat.blob_entities_expected(),
+        expected_entities=cat.blob_entities_expected(catalogue_bundle),
         allowed_tags=_blob_tags(catalogue_bundle.manifest),
     )
     assert not failures, "the blob's addressing has drifted:\n" + "\n".join(failures)
 
 
-def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_root):
+def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_root, catalogue_bundle):
     """Records §3's "a target, not a cap", on the artefact: the planted > 256 KiB note must land
     in a block above the target holding exactly that one row — never split across blocks — and
     the corpus must cut enough ordinary blocks that the first/last-of-block drill-down cases
@@ -107,8 +107,11 @@ def test_an_oversized_row_gets_an_oversized_block_of_its_own(catalogue_bundle_ro
             "larger than the target may pass it"
         )
     # The planted oversize entity is the one carrying such a row (rank → entity via has-row).
+    # `NOTE_OVERSIZE_ID` is the **source** id the note was planted on, so it crosses to entity
+    # space here rather than being compared as though the two were one number.
+    oversize_entity = catalogue_bundle.entity_of_source(cat.NOTE_OVERSIZE_ID)
     oversize_entities = {hasrow[b["first_rank"]] for b in oversized}
-    assert oversize_entities == {cat.NOTE_OVERSIZE_ID}, (
-        f"the oversized rows belong to {sorted(oversize_entities)}, not the planted "
-        f"{cat.NOTE_OVERSIZE_ID}"
+    assert oversize_entities == {oversize_entity}, (
+        f"the oversized rows belong to {sorted(oversize_entities)}, not entity "
+        f"{oversize_entity} (source {cat.NOTE_OVERSIZE_ID}), which is where the note was planted"
     )

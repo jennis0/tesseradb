@@ -2,7 +2,7 @@
 //! "one source"), so each written form is read back and compared against [`Corpus::item`] and
 //! [`Corpus::terms`] — the functions total verification will later hold served rows against.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use arrow::array::{
     Array, ArrayAccessor, BinaryArray, Float32Array, StringArray, TimestampMicrosecondArray,
@@ -142,7 +142,11 @@ fn pairs_parquet_rows_are_the_terms() {
                 .push(term_id.value(i));
         }
     }
-    assert_eq!(by_item.len() as u64, c.n(), "every item carries at least one pair");
+    assert_eq!(
+        by_item.len() as u64,
+        c.n(),
+        "every item carries at least one pair"
+    );
     for e in 0..c.n() {
         let expected: Vec<u32> = c.terms(e).iter().map(|t| t.raw()).collect();
         assert_eq!(by_item[&e], expected, "item {e}");
@@ -165,7 +169,18 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
             .iter()
             .map(|f| f.name().clone())
             .collect::<Vec<_>>(),
-        ["external_id", "x", "y", "access", "fx_key", "weight", "seen_at", "bay", "tag", "blurb"]
+        [
+            "external_id",
+            "x",
+            "y",
+            "access",
+            "fx_key",
+            "weight",
+            "seen_at",
+            "bay",
+            "tag",
+            "blurb"
+        ]
     );
 
     let external_id = column::<BinaryArray>(&batch, "external_id");
@@ -196,6 +211,179 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
             field.name().as_str(),
             "weight" | "seen_at" | "bay" | "tag" | "blurb"
         );
-        assert_eq!(field.is_nullable(), admits_absence, "column '{}'", field.name());
+        assert_eq!(
+            field.is_nullable(),
+            admits_absence,
+            "column '{}'",
+            field.name()
+        );
     }
+}
+
+/// The artifact fixture's files agree with the closed forms they were written from — the same
+/// property [`points_parquet_rows_are_the_items`] pins for the item arm, extended to all four
+/// closed-form artifact arms (flat, partition, boundary, treed). Small `n`, so a brute-force
+/// comparison is affordable in the test itself.
+#[test]
+fn the_artifact_fixture_agrees_with_the_closed_forms() {
+    use tessera_corpus::materialise::{
+        ArtifactFixtureCounts, BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER, PARTITION_LAYER,
+    };
+
+    let c = corpus(6_000);
+    let dir = tempfile::tempdir().unwrap();
+    let counts = c.write_artifact_fixtures(dir.path()).unwrap();
+
+    // The partition column on points.parquet agrees with `partition_artifact_of` for every entity.
+    let points_path = dir.path().join("points.parquet");
+    c.write_points_parquet(&points_path).unwrap();
+    let mut partition_by_entity: HashMap<u64, u32> = HashMap::new();
+    for batch in read_parquet(&points_path) {
+        let entity_id = column::<UInt64Array>(&batch, "entity_id");
+        let partition = column::<UInt32Array>(&batch, "partition");
+        for i in 0..batch.num_rows() {
+            partition_by_entity.insert(entity_id.value(i), partition.value(i));
+        }
+    }
+    for e in 0..c.n() {
+        assert_eq!(
+            u64::from(partition_by_entity[&e]),
+            c.partition_artifact_of(PARTITION_LAYER, e),
+            "points.parquet's partition column disagrees with the closed form at entity {e}"
+        );
+    }
+
+    // The flat roster and membership: `flat_artifacts.len()` artifacts, each artifact's members
+    // exactly `artifact_members` — both directions, since the roster names the count and the
+    // membership file is checked entity by entity below.
+    let roster: Vec<String> = read_parquet(&dir.path().join("flat_artifacts.parquet"))
+        .iter()
+        .flat_map(|b| {
+            let key = column::<StringArray>(b, "key");
+            (0..b.num_rows())
+                .map(|i| key.value(i).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(roster.len() as u64, counts.flat_artifacts);
+    assert_eq!(
+        roster,
+        (0..counts.flat_artifacts)
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+    );
+
+    let mut flat_members: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+    let mut flat_rows = 0u64;
+    for batch in read_parquet(&dir.path().join("flat_members.parquet")) {
+        let key = column::<StringArray>(&batch, "key");
+        let entity = column::<UInt64Array>(&batch, "entity");
+        for i in 0..batch.num_rows() {
+            let a: u64 = key.value(i).parse().unwrap();
+            flat_members.entry(a).or_default().insert(entity.value(i));
+            flat_rows += 1;
+        }
+    }
+    assert_eq!(flat_rows, counts.flat_member_rows);
+    for a in 0..counts.flat_artifacts {
+        let expected: BTreeSet<u64> = c
+            .artifact_members(FLAT_LAYER, FIXTURE_LEVEL, a)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            flat_members.get(&a).cloned().unwrap_or_default(),
+            expected,
+            "artifact {a}'s materialised membership disagrees with `artifact_members`"
+        );
+    }
+
+    // The partition roster and its enumerated twin: single-valued, so every entity names exactly
+    // one key, and that key is `partition_artifact_of`.
+    let mut partition_members: HashMap<u64, u64> = HashMap::new();
+    let mut partition_rows = 0u64;
+    for batch in read_parquet(&dir.path().join("partition_members.parquet")) {
+        let key = column::<StringArray>(&batch, "key");
+        let entity = column::<UInt64Array>(&batch, "entity");
+        for i in 0..batch.num_rows() {
+            let a: u64 = key.value(i).parse().unwrap();
+            let prior = partition_members.insert(entity.value(i), a);
+            assert!(prior.is_none(), "entity {} named twice", entity.value(i));
+            partition_rows += 1;
+        }
+    }
+    assert_eq!(partition_rows, c.n(), "the partition twin is exhaustive");
+    assert_eq!(partition_rows, counts.partition_member_rows);
+    for e in 0..c.n() {
+        assert_eq!(
+            partition_members[&e],
+            c.partition_artifact_of(PARTITION_LAYER, e)
+        );
+    }
+
+    // The boundary roster: every key is an authored prefix, and the set is exactly
+    // `boundary_artifacts`'s.
+    let boundary_roster: BTreeSet<u64> =
+        read_parquet(&dir.path().join("boundary_artifacts.parquet"))
+            .iter()
+            .flat_map(|b| {
+                let key = column::<StringArray>(b, "key");
+                (0..b.num_rows())
+                    .map(|i| key.value(i).parse::<u64>().unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+    let expected_boundary: BTreeSet<u64> = c
+        .boundary_artifacts(BOUNDARY_LAYER, FIXTURE_LEVEL)
+        .into_iter()
+        .collect();
+    assert_eq!(boundary_roster, expected_boundary);
+    assert_eq!(boundary_roster.len() as u64, counts.boundary_artifacts);
+
+    // The treed roster and lineage: `key` ascending `0..treed_artifacts`, `parent` null only at
+    // the root and otherwise `artifact_parent`'s answer, and the membership file agreeing with
+    // `treed_members` node by node.
+    let mut treed_parent: BTreeMap<u64, Option<u64>> = BTreeMap::new();
+    for batch in read_parquet(&dir.path().join("treed_artifacts.parquet")) {
+        let key = column::<StringArray>(&batch, "key");
+        let parent = column::<StringArray>(&batch, "parent");
+        for i in 0..batch.num_rows() {
+            let a: u64 = key.value(i).parse().unwrap();
+            let p = (!parent.is_null(i)).then(|| parent.value(i).parse::<u64>().unwrap());
+            treed_parent.insert(a, p);
+        }
+    }
+    assert_eq!(treed_parent.len() as u64, counts.treed_artifacts);
+    for a in 0..counts.treed_artifacts {
+        assert_eq!(
+            treed_parent[&a],
+            c.artifact_parent(a),
+            "node {a}'s materialised parent disagrees with `artifact_parent`"
+        );
+    }
+
+    let mut treed_members: BTreeMap<u64, BTreeSet<u64>> = BTreeMap::new();
+    let mut treed_rows = 0u64;
+    for batch in read_parquet(&dir.path().join("treed_members.parquet")) {
+        let key = column::<StringArray>(&batch, "key");
+        let entity = column::<UInt64Array>(&batch, "entity");
+        for i in 0..batch.num_rows() {
+            let a: u64 = key.value(i).parse().unwrap();
+            treed_members.entry(a).or_default().insert(entity.value(i));
+            treed_rows += 1;
+        }
+    }
+    assert_eq!(treed_rows, counts.treed_member_rows);
+    for a in 0..counts.treed_artifacts {
+        let expected: BTreeSet<u64> = c
+            .treed_members(counts.treed_artifacts, a)
+            .into_iter()
+            .collect();
+        assert_eq!(
+            treed_members.get(&a).cloned().unwrap_or_default(),
+            expected,
+            "node {a}'s materialised membership disagrees with `treed_members`"
+        );
+    }
+
+    let _: ArtifactFixtureCounts = counts; // the type is part of the public surface under test
 }

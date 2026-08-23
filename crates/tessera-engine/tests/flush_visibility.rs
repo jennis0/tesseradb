@@ -2,8 +2,8 @@
 //!
 //! This is the property the whole flush exists for, and it was the last thing to arrive. Until
 //! `Engine::viewport` could union tile ranges across segments — counting each segment's ranges in
-//! slice row space and spending one tile's `k` budget over the union, §7.2's cap and floor being
-//! per *tile* rather than per segment — publishing a second segment into a slice would have made
+//! view row space and spending one tile's `k` budget over the union, §7.2's cap and floor being
+//! per *tile* rather than per segment — publishing a second segment into a view would have made
 //! every viewport on it fail. That is now built (`select::SelectionParts`), and publication is
 //! unconditional.
 //!
@@ -64,7 +64,7 @@ fn fixture(tmp: &std::path::Path) -> std::path::PathBuf {
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -145,23 +145,23 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
     assert_eq!(partition.manifest.deltas.len(), 1, "one delta tier");
     assert_eq!(partition.manifest.locator_extents.len(), 1);
 
-    let slice = &partition.slices["s0"];
-    assert_eq!(slice.segments.len(), 2, "both segments mapped");
+    let view = &partition.views["s0"];
+    assert_eq!(view.segments.len(), 2, "both segments mapped");
 
     // **The extent survives the restart, and nothing on disk carries it.** It is rebuilt from the
     // flush segment's own `tessera_id` column by inverting the identity permutation
     // (`SegmentExtent::rebuild`) — the segment is Morton-sorted, so §2.1's four scalars are not a
     // mapping, and this is what stands in for the file they would otherwise need.
     assert_eq!(
-        slice.row_space.extent_count(),
+        view.row_space.extent_count(),
         1,
         "the reopened row space carries an extent for the flush segment"
     );
-    let extent = &slice.row_space.extents()[0];
+    let extent = &view.row_space.extents()[0];
     assert_eq!(extent.entity_lo, id.raw());
     assert_eq!(extent.entity_hi, id.raw());
     assert_eq!(
-        slice.row_space.row_of(id).map(|r| r.raw()),
+        view.row_space.row_of(id).map(|r| r.raw()),
         Some(extent.row_base),
         "and the flushed entity resolves to the first row of its segment"
     );
@@ -177,9 +177,9 @@ fn a_published_flush_is_a_bundle_a_restart_opens() {
 /// `entity < watermark` gate existed to stop.
 ///
 /// **The filter is `row_of`, not a watermark.** A watermark is exact only while entity-allocation
-/// order and flush order coincide — one slice per partition, which write-path §4.3 records as
+/// order and flush order coincide — one view per partition, which write-path §4.3 records as
 /// load-bearing and unenforced. `row_of` is the predicate the watermark approximates, so it holds
-/// at any number of slices.
+/// at any number of views.
 ///
 /// The same WAL is reused deliberately: a separate one would exercise nothing, since the point is
 /// precisely that the flushed rows' records are still there.
@@ -215,7 +215,7 @@ fn a_reopened_engine_does_not_re_buffer_rows_that_already_have_geometry() {
     // loss.
     let bundle = tessera_store::open_bundle(&root).expect("the published bundle opens");
     let partition = bundle.partitions.values().next().unwrap();
-    assert!(partition.slices["s0"].row_space.row_of(id).is_some());
+    assert!(partition.views["s0"].row_space.row_of(id).is_some());
 }
 
 /// **The allocator floor survives on the side-manifest alone** (I9).
@@ -318,7 +318,7 @@ fn a_flushed_item_is_visible_in_a_viewport() {
         "the flushed item is counted exactly once"
     );
     // §7.1's count is over the union of segments; the *point* appears only if selection spent the
-    // tile's budget across the union too, and if the gather resolved a slice-space row back to
+    // tile's budget across the union too, and if the gather resolved a view-space row back to
     // the segment that owns it.
     let tessera_id = reopened
         .tessera_id_of(id)

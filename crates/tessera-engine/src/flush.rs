@@ -35,7 +35,7 @@
 //! or WAL-durable, at the boundary where rows enter the buffer, so the state a check here would
 //! detect cannot arise. A second copy of the predicate is how the two would come to disagree —
 //! `Quantisation::contains` is the one definition, and issue #72 (quantisation moves to
-//! `SliceDescriptor`) is the change that would otherwise have to update both.
+//! `ViewDescriptor`) is the change that would otherwise have to update both.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -60,9 +60,9 @@ use crate::Generation;
 /// (one tick's arrivals) and the threshold only decides an encoding, never a content.
 const SMALL_TERM_THRESHOLD: u32 = 32;
 
-/// One flush's immutable plan: the items of one slice that will acquire geometry.
+/// One flush's immutable plan: the items of one view that will acquire geometry.
 ///
-/// The slice is not carried: `plan_flush` is called per slice and the caller already holds it, so
+/// The view is not carried: `plan_flush` is called per view and the caller already holds it, so
 /// a copy here would be a second answer to a question that has one.
 #[derive(Debug)]
 pub(crate) struct FlushPlan {
@@ -80,7 +80,7 @@ pub(crate) struct FlushPlan {
 /// fail-closed postures rather than absences of work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum NoFlush {
-    /// Nothing buffered for this slice, or everything buffered for it is deleted.
+    /// Nothing buffered for this view, or everything buffered for it is deleted.
     NothingToFlush,
     /// **The WAL is poisoned** (§3.5). Under the apply-anyway rule an under-durable delete is in
     /// force in memory and was answered 500, and contracts §3.1's residual is that a restart makes
@@ -114,14 +114,14 @@ pub(crate) enum NoFlush {
     SteppedDown,
 }
 
-/// Plan a flush of `slice` against `generation`.
+/// Plan a flush of `view` against `generation`.
 ///
 /// Pure: it reads the generation and nothing else, so the same generation always yields the same
 /// plan. The two postures are passed in rather than read here, because they are the executor's
 /// health and not the generation's.
 pub(crate) fn plan_flush(
     generation: &Generation,
-    slice: &str,
+    view: &str,
     wal_poisoned: bool,
     overlay_diverged: bool,
 ) -> Result<FlushPlan, NoFlush> {
@@ -147,7 +147,7 @@ pub(crate) fn plan_flush(
     let mut items: Vec<(EntityId, BufferedItem)> = generation
         .buffer
         .iter()
-        .filter(|(entity, item)| item.slice == slice && !is_deleted(&generation.overlay, **entity))
+        .filter(|(entity, item)| item.view == view && !is_deleted(&generation.overlay, **entity))
         .map(|(entity, item)| (*entity, item.clone()))
         .collect();
     if items.is_empty() {
@@ -168,7 +168,7 @@ pub(crate) fn plan_flush(
 pub(crate) struct FlushContext {
     pub(crate) prefix_dir: PathBuf,
     pub(crate) partition: String,
-    pub(crate) slice: String,
+    pub(crate) view: String,
     pub(crate) seg_id: String,
     pub(crate) row_base: u32,
     pub(crate) identity_key: IdentityKey,
@@ -225,7 +225,7 @@ pub(crate) struct FlushContext {
 /// below.
 pub(crate) struct CompletedFlush {
     pub(crate) partition: String,
-    pub(crate) slice: String,
+    pub(crate) view: String,
     /// The entity ids removed from the buffer at publication. **Exactly what was consumed**, not a
     /// range: the rebase removes these from the *then-current* buffer, whatever arrived while the
     /// flush ran (§1.2).
@@ -349,7 +349,7 @@ pub(crate) fn execute_flush(
     let out = write_flush_segment(
         &ctx.prefix_dir,
         &ctx.partition,
-        &ctx.slice,
+        &ctx.view,
         FlushInput {
             seg_id: &ctx.seg_id,
             rows,
@@ -368,8 +368,8 @@ pub(crate) fn execute_flush(
         plan.items.len() as u64,
     );
     let tier_rel = format!(
-        "partitions/{}/slices/{}/segments/{}/delta.arrow",
-        ctx.partition, ctx.slice, ctx.seg_id
+        "partitions/{}/views/{}/segments/{}/delta.arrow",
+        ctx.partition, ctx.view, ctx.seg_id
     );
     let tier_path = ctx.prefix_dir.join(&tier_rel);
     write_delta_tier(&tier_path, &promotion.postings, SMALL_TERM_THRESHOLD)
@@ -460,7 +460,7 @@ pub(crate) fn execute_flush(
 
     Ok(CompletedFlush {
         partition: ctx.partition,
-        slice: ctx.slice,
+        view: ctx.view,
         consumed,
         segment,
         extent: out.extent,
@@ -624,8 +624,8 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
         dict: Arc::new(ctx.dict.extended_with(&interned)),
         extent: Some(DictExtent {
             path: format!(
-                "partitions/{}/slices/{}/segments/{}/terms-0.dict",
-                ctx.partition, ctx.slice, ctx.seg_id
+                "partitions/{}/views/{}/segments/{}/terms-0.dict",
+                ctx.partition, ctx.view, ctx.seg_id
             ),
             records: interned.len() as u64,
         }),
@@ -1227,8 +1227,8 @@ fn segment_dir(ctx: &FlushContext) -> PathBuf {
     ctx.prefix_dir
         .join("partitions")
         .join(&ctx.partition)
-        .join("slices")
-        .join(&ctx.slice)
+        .join("views")
+        .join(&ctx.view)
         .join("segments")
         .join(&ctx.seg_id)
 }
@@ -1300,14 +1300,15 @@ mod tests {
     use tessera_lifecycle::IngestBuffer;
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
+    use tessera_plugin::Plugin;
     use tessera_types::{TermId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
-    const SLICE: &str = "s0";
+    const VIEW: &str = "s0";
 
     fn item(terms: &[u32]) -> BufferedItem {
         BufferedItem {
             terms: terms.iter().map(|t| TermId::new(*t)).collect(),
-            slice: SLICE.to_string(),
+            view: VIEW.to_string(),
             x: 0.5,
             y: 0.5,
             scalars: vec![WalScalar::U64(1)],
@@ -1322,7 +1323,7 @@ mod tests {
             let row = WalRow {
                 external_id: Some(format!("ext-{entity}").into_bytes()),
                 entity_id: EntityId::new(*entity),
-                slice: item.slice.clone(),
+                view: item.view.clone(),
                 descriptors: Vec::new(),
                 x: item.x,
                 y: item.y,
@@ -1350,9 +1351,9 @@ mod tests {
 
     fn generation_of(overlay: Overlay, buffer: IngestBuffer) -> Generation {
         let manifest = Manifest {
-            bundle_format: 2,
+            bundle_format: 3,
             created_at: "2026-08-02T00:00:00Z".to_string(),
-            data_plugin_hash: "builtin:passthrough:1".to_string(),
+            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
             vocabularies: vec![],
@@ -1371,7 +1372,7 @@ mod tests {
                 shard_id: 0,
                 idset: 1,
             },
-            slices: vec![],
+            views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
             files: BTreeMap::new(),
@@ -1401,13 +1402,13 @@ mod tests {
             overlay_version: 0,
             overlay: Arc::new(overlay),
             buffer: Arc::new(buffer),
-            // The fixture bundle carries no slices, so a fresh derivation is empty.
+            // The fixture bundle carries no views, so a fresh derivation is empty.
             denied: Arc::new(crate::DenyMask::default()),
         }
     }
 
     fn plan(generation: &Generation) -> Result<FlushPlan, NoFlush> {
-        plan_flush(generation, SLICE, false, false)
+        plan_flush(generation, VIEW, false, false)
     }
 
     /// **A suppression never touches postings and retires only on unsuppress**, so a flush that
@@ -1448,7 +1449,7 @@ mod tests {
         // A later delete cannot reach this plan: it is a value, taken from one generation.
         let later = generation_with(&[(7, item(&[1]))], &[(7, ChangeOp::Delete)]);
         assert!(matches!(
-            plan_flush(&later, SLICE, false, false),
+            plan_flush(&later, VIEW, false, false),
             Err(NoFlush::NothingToFlush)
         ));
     }
@@ -1461,7 +1462,7 @@ mod tests {
     fn a_wal_poisoned_node_plans_nothing() {
         let generation = generation_with(&[(7, item(&[1]))], &[]);
         assert!(matches!(
-            plan_flush(&generation, SLICE, true, false),
+            plan_flush(&generation, VIEW, true, false),
             Err(NoFlush::WalPoisoned)
         ));
     }
@@ -1473,17 +1474,17 @@ mod tests {
     fn a_diverged_node_plans_nothing_even_though_its_wal_is_healthy() {
         let generation = generation_with(&[(7, item(&[1]))], &[]);
         assert!(matches!(
-            plan_flush(&generation, SLICE, false, true),
+            plan_flush(&generation, VIEW, false, true),
             Err(NoFlush::OverlayDiverged)
         ));
     }
 
-    /// Items of another slice are not this slice's to flush: a segment's entity range is
+    /// Items of another view are not this view's to flush: a segment's entity range is
     /// contiguous only within one (§2.1).
     #[test]
-    fn another_slices_items_are_left_alone() {
+    fn another_views_items_are_left_alone() {
         let mut other = item(&[1]);
-        other.slice = "elsewhere".to_string();
+        other.view = "elsewhere".to_string();
         let generation = generation_with(&[(7, other)], &[]);
         assert!(matches!(plan(&generation), Err(NoFlush::NothingToFlush)));
     }

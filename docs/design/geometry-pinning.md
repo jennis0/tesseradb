@@ -116,7 +116,7 @@ earlier draft of this document got it wrong.
 
 **A flush appends, so it invalidates nothing.** Flush §2.1 gives segment *k*
 `[row_base_k, row_base_k + row_count_k)` and the extent list is ordered and disjoint; an extent is
-admissible only where its `row_base` is exactly the slice's current row total, and a flush never
+admissible only where its `row_base` is exactly the view's current row total, and a flush never
 rewrites the base `permutation.bin`. So a pin taken before a flush and answered after it returns
 **identical answers for every row that existed when the pin was issued**. The retention machinery
 is being paid for on the one event that cannot invalidate what it protects.
@@ -153,8 +153,8 @@ Two consequences:
 - A staleness signal that distinguishes prefixes distinguishes the only boundary that matters.
 - **A Morton prefix is a permanently stable address.** An earlier draft carried re-quantisation as
   the one case where it stops being one; [decision 0040](../decisions/0040-quantisation-is-slice-scoped-index-config.md)
-  removes the case. Quantisation is slice-scoped index configuration, immutable at runtime, and
-  compaction carries each slice's forward byte-for-byte — re-quantisation is not one of the
+  removes the case. Quantisation is view-scoped index configuration, immutable at runtime, and
+  compaction carries each view's forward byte-for-byte — re-quantisation is not one of the
   reorganisations compaction does. So a client never has to be told to discard cell identifiers,
   and spec §12's superseded-prefix obligation is a freshness question rather than a correctness
   one.

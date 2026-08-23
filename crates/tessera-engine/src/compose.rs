@@ -1,7 +1,7 @@
 //! I1 mask composition: `M_auth = (fragment \ L) ∪ direct_eval(L)` — evaluated as diffs over a
 //! cached row-space projection of the frozen fragment, never by recomputing the whole mask.
 //!
-//! [`RowProjection`] is the cached `Permutation::project` output for one `(token, slice, pin)` —
+//! [`RowProjection`] is the cached `Permutation::project` output for one `(token, view, pin)` —
 //! computed once — seconds at 10⁹ rows — and reused across every
 //! viewport and every `compose` call in that session, never recomputed on a per-viewport path.
 //!
@@ -40,17 +40,17 @@ use tessera_types::{EntityId, TermId};
 
 use crate::DenyMask;
 
-/// A cached row-space projection of one frozen fragment, for one `(token, slice, pin)`.
+/// A cached row-space projection of one frozen fragment, for one `(token, view, pin)`.
 ///
 /// Constructing this crosses entity space into row space via `Permutation::project`, which
 /// touches every set bit of the fragment and then sorts the result — cheap at the 10k scale this
 /// phase's fixtures use, but *seconds* at 10⁹ rows (see `Permutation::project`'s doc). Callers
-/// must cache the result per `(token, slice, pin)` and never reconstruct it on a per-viewport
+/// must cache the result per `(token, view, pin)` and never reconstruct it on a per-viewport
 /// path (shared-context constraint 8) — `compose` itself only ever reads it via `range_cardinality`
 /// / `contains`, both O(containers touched), never re-derives it from the fragment.
 pub struct RowProjection {
     rows: Bitmap,
-    /// How many of the slice's extents this projection already covers — the index
+    /// How many of the view's extents this projection already covers — the index
     /// `RowSpace::project_extents_from` resumes at when a flush extends it (see
     /// [`RowProjection::extend`]).
     extents_covered: usize,
@@ -83,7 +83,7 @@ pub struct RowProjection {
 }
 
 impl RowProjection {
-    /// Project `fragment`'s entity-space bitmap into this slice's row space. Do not call this on
+    /// Project `fragment`'s entity-space bitmap into this view's row space. Do not call this on
     /// the per-viewport path — see this struct's doc.
     pub fn new(fragment: &FrozenFragment, rows: &RowSpace) -> Self {
         Self::over(rows.project(&fragment.view()), rows)
@@ -216,19 +216,22 @@ impl RowProjection {
 /// The two crossings from the filter's entity-space result into row space produce sets of
 /// different extent, and the difference is not an implementation detail a consumer may ignore.
 /// [`RowSpace::project`](tessera_store::permutation::RowSpace::project) crosses the whole result
-/// and yields every matching row in the slice; the per-tile route tests only the rows the
+/// and yields every matching row in the view; the per-tile route tests only the rows the
 /// request's tiles actually span, and is *silent* — not negative — everywhere else. Handing a
 /// counting path the second while it believes it holds the first under-reports `matched` with no
 /// error anywhere, which is why the extent travels with the bitmap rather than in a comment at
 /// the call site.
 pub enum FilterRows {
-    /// Every matching row in the slice. Exact at any range.
+    /// Every matching row in the view. Exact at any range.
     Complete(Bitmap),
     /// Only the rows inside `domain` were tested. Outside it the bitmap is empty and that
     /// emptiness means nothing at all.
     ///
     /// `domain` is ascending, disjoint and maximally merged — [`Self::covers`] binary-searches it.
-    Viewport { rows: Bitmap, domain: Vec<Range<u32>> },
+    Viewport {
+        rows: Bitmap,
+        domain: Vec<Range<u32>>,
+    },
 }
 
 impl FilterRows {
@@ -335,6 +338,83 @@ pub trait MaskedSet {
     /// Materialising is the cost derived content opts into: O(visible members), against the count's
     /// O(containers touched). That asymmetry is why the vocabulary is declared per layer.
     fn visible_rows(&self, set: &Bitmap) -> Bitmap;
+
+    /// `|[r.start, r.end) ∩ mask|` — the masked count of a contiguous **row range**.
+    ///
+    /// **The one question a range-shaped membership asks**, and it is on this trait rather than
+    /// beside it for [`MaskedSet`]'s own reason: a spatial level's membership is a set of ranges,
+    /// so this *is* asking the mask about an artifact's membership, one contiguous piece at a time.
+    /// A caller that summed `count_intersection` over materialised ranges would get the same number
+    /// and pay a bitmap per range to do it.
+    ///
+    /// **Filter-blind, exactly as [`MaskedSet::count_intersection`] is** — the count beside an
+    /// artifact is what the principal may see, not what their search box admits (**I12**).
+    ///
+    /// **The default is the general answer and the production one is the cheap answer.** Any mask
+    /// can answer this by materialising the range and intersecting; [`EffectiveMask`] overrides it
+    /// with the same three-term arithmetic its other counts take, which is O(containers touched)
+    /// and allocates nothing. Both compute the same number from inside `M_auth`, which is what
+    /// makes the default safe rather than merely convenient.
+    fn count_range(&self, r: Range<u32>) -> u64 {
+        self.count_intersection(&Bitmap::from_range(r))
+    }
+}
+
+/// The **whole** composed mask, materialised — every row this viewer may see, in this view's row
+/// space.
+///
+/// **One caller, and it is the row-major count** ([`crate::row_column::RowColumn::histogram`]). A
+/// row-major level has no per-artifact membership to intersect, so its only route to
+/// `|membership ∩ M_auth|` is a walk of the mask reading off which artifact each visible row belongs
+/// to — the one place [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)
+/// admits a structure sized by the artifact population per session, and it is admitted because there
+/// is no other route.
+///
+/// **Its own trait rather than a third method on [`MaskedSet`]**, for a reason that is about the
+/// question rather than about tidiness: `MaskedSet` is *the questions an artifact's membership asks
+/// of a viewer's mask* — both its methods take the membership as an argument — and this asks nothing
+/// about any artifact. Keeping it separate also keeps the probe that measures the routes
+/// (`tessera-bench`) implementing exactly the trait the per-artifact routes need.
+///
+/// **The safety property is the same one and it is unchanged**: the one production implementor is
+/// [`EffectiveMask`], so a whole-mask walk cannot be taken against the pre-overlay projection, which
+/// strictly contains `M_auth` after any accepted delete. The [`Bitmap`] implementor below is
+/// test-only.
+pub trait WholeMask {
+    /// See the trait's doc.
+    ///
+    /// **Filter-blind, exactly as [`MaskedSet::count_intersection`] is.** The count beside an
+    /// artifact is what the *principal* may see, not what their current search box admits;
+    /// anchoring it on a filtered set would make an artifact's existence criterion a function of the
+    /// filter, which is **I12**'s forbidden direction. `visible_all().and_cardinality(set)` and
+    /// `count_intersection(set)` are therefore the same number by construction, which the test
+    /// beside the implementation asserts rather than assumes.
+    ///
+    /// O(containers in the projection) and a full copy of it — hundreds of megabytes at the
+    /// campaign's target, which is why the histogram it feeds is built once per session per
+    /// generation and cached, never per request.
+    fn visible_all(&self) -> Bitmap;
+}
+
+impl WholeMask for EffectiveMask {
+    /// `(base − minus) ∪ plus` — the same three terms in the same order the count takes, with no
+    /// `set` to narrow by. `minus ⊆ base` and `plus ∩ base = ∅` hold structurally ([`compose`]
+    /// asserts them), so every row appears once and the cardinality of what comes back is
+    /// [`EffectiveMask::visible_total`] exactly.
+    fn visible_all(&self) -> Bitmap {
+        let mut visible = self.base.bitmap().clone();
+        visible.andnot_inplace(&self.minus);
+        visible.or_inplace(&self.plus);
+        visible
+    }
+}
+
+/// A mask with no denials — **test-only**, for [`MaskedSet`]'s reason.
+#[cfg(test)]
+impl WholeMask for Bitmap {
+    fn visible_all(&self) -> Bitmap {
+        self.clone()
+    }
 }
 
 impl MaskedSet for EffectiveMask {
@@ -375,6 +455,12 @@ impl MaskedSet for EffectiveMask {
         visible.or_inplace(&self.plus.and(set));
         visible
     }
+
+    /// [`EffectiveMask::count_range`] under the trait — one implementation, so a range counted
+    /// through the predicate and one counted directly cannot disagree.
+    fn count_range(&self, r: Range<u32>) -> u64 {
+        EffectiveMask::count_range(self, r)
+    }
 }
 
 /// A mask with no denials — **test-only**, so that no release build can put an uncomposed set where
@@ -403,7 +489,6 @@ impl EffectiveMask {
         self.filter = Some(rows);
         self
     }
-
 
     /// `base.range_cardinality(r) − |minus ∩ r| + |plus ∩ r|` — see this module's doc for why the
     /// two clamps in [`compose`] make this arithmetic exact rather than merely approximate.
@@ -520,7 +605,11 @@ impl EffectiveMask {
     ///
     pub fn contains_row(&self, row: u32) -> bool {
         self.debug_assert_in_domain(&(row..row + 1));
-        if self.filter.as_ref().is_some_and(|f| !f.rows().contains(row)) {
+        if self
+            .filter
+            .as_ref()
+            .is_some_and(|f| !f.rows().contains(row))
+        {
             return false;
         }
         if self.minus.contains(row) {
@@ -703,8 +792,8 @@ pub(crate) fn verdict(
     // was replay re-buffering every retained WAL row; `WritePath::reconstruct` now drops any row
     // whose entity already has geometry, so the buffer holds exactly the rows without it and a
     // hit here cannot be an entity the fragment covers. The gate was also only ever *exact* while
-    // entity-allocation order and flush order coincided — one slice per partition — so removing it
-    // takes a silent multi-slice hazard out with it.
+    // entity-allocation order and flush order coincided — one view per partition — so removing it
+    // takes a silent multi-view hazard out with it.
     buffer
         .get(entity)
         .map(|item| item.terms.iter().any(|t| satisfied.contains(t)))
@@ -712,7 +801,7 @@ pub(crate) fn verdict(
 
 /// Derive the row-space deny mask from the authoritative entity-space stores.
 ///
-/// **`{row_of(e) : e ∈ deleted ∪ suppressed}`, per slice, and nothing else.** The union is taken
+/// **`{row_of(e) : e ∈ deleted ∪ suppressed}`, per view, and nothing else.** The union is taken
 /// from [`Overlay::denied`] rather than assembled here, so the rule below has one expression.
 ///
 /// **The derivation rule, stated where it is derived.** This function's result is the *only* legal
@@ -730,25 +819,22 @@ pub(crate) fn verdict(
 /// `segments_version`. `Executor::publish` asserts this equality in debug builds, so a build site
 /// that breaks the rule fails the suite rather than a viewer's map.
 ///
-/// An entity with no row — still buffered, or belonging to another slice — contributes nothing:
+/// An entity with no row — still buffered, or belonging to another view — contributes nothing:
 /// the mask is complete for what it governs, which is row-space questions, and `verdict` answers
 /// the entity-space ones.
 pub(crate) fn derive_denied(overlay: &Overlay, bundle: &Bundle) -> DenyMask {
     let mut out = DenyMask::default();
     for partition in bundle.partitions.values() {
-        for (slice, slice_data) in &partition.slices {
-            // Every slice gets an entry, empty or not: a missing one must mean "the mask and the
+        for (view, view_data) in &partition.views {
+            // Every view gets an entry, empty or not: a missing one must mean "the mask and the
             // bundle disagree", never "nothing is denied here".
-            out.insert(
-                slice.clone(),
-                denied_rows_of(overlay, &slice_data.row_space),
-            );
+            out.insert(view.clone(), denied_rows_of(overlay, &view_data.row_space));
         }
     }
     out
 }
 
-/// One slice's deny mask — see [`derive_denied`], whose per-slice body this is.
+/// One view's deny mask — see [`derive_denied`], whose per-view body this is.
 pub fn denied_rows_of(overlay: &Overlay, row_space: &RowSpace) -> Bitmap {
     let mut rows = Bitmap::new();
     for entity in overlay.denied().iter() {

@@ -65,19 +65,20 @@ fn ensure_bundle() -> PathBuf {
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
+            point_fields: Default::default(),
             points: root.join("data/scaled/geometry.parquet"),
-            pairs: root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
+            attribute_sources: Vec::new(),
+            access: tessera_build::config::AccessInput::relation(root.join("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
             extent: extent(),
-            slice_id: "s0".to_string(),
+            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
             idset: 1,
             shard_id: 0,
-            layers: None,
-            artifacts: None,
-            artifact_members: None,
+            layers: Vec::new(),
+            layer_inputs: Vec::new(),
             mint_external_ids: false,
             batch_items: None,
             memory_budget: None,
@@ -141,7 +142,7 @@ fn viewports(n: usize, extent: f64, seed: u64, zoom: u8) -> Vec<[f64; 4]> {
 struct Sums {
     generation_resolve_ns: u128,
     stamp_compare_ns: u128,
-    slice_lookup_ns: u128,
+    view_lookup_ns: u128,
     row_projection_ns: u128,
     compose_ns: u128,
     theta_anchor_ns: u128,
@@ -235,7 +236,7 @@ fn main() {
             let t = out.timings;
             sums.generation_resolve_ns += t.generation_resolve_ns as u128;
             sums.stamp_compare_ns += t.stamp_compare_ns as u128;
-            sums.slice_lookup_ns += t.slice_lookup_ns as u128;
+            sums.view_lookup_ns += t.view_lookup_ns as u128;
             sums.row_projection_ns += t.row_projection_ns as u128;
             sums.compose_ns += t.compose_ns as u128;
             sums.theta_anchor_ns += t.theta_anchor_ns as u128;
@@ -254,7 +255,7 @@ fn main() {
         let avg = |x: u128| x / n;
         let serial_prefix = avg(sums.generation_resolve_ns)
             + avg(sums.stamp_compare_ns)
-            + avg(sums.slice_lookup_ns)
+            + avg(sums.view_lookup_ns)
             + avg(sums.row_projection_ns)
             + avg(sums.compose_ns)
             + avg(sums.theta_anchor_ns)
@@ -277,8 +278,8 @@ fn main() {
             avg(sums.stamp_compare_ns)
         );
         println!(
-            "    slice_lookup_ns        {:>8}",
-            avg(sums.slice_lookup_ns)
+            "    view_lookup_ns        {:>8}",
+            avg(sums.view_lookup_ns)
         );
         println!(
             "    row_projection_ns      {:>8}",

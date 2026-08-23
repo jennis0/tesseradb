@@ -57,7 +57,7 @@ const full = [q.x_min, q.y_min, q.x_max, q.y_max];
 // the capturing server happens to hold. Omitting it would answer for every layer this principal
 // reaches, and the pair exists to pin the *absent*-frame case — the ordinary shape of a response,
 // and the one a decoder must read as "no artifacts" rather than as a truncated body.
-const base = {slice: meta.slices[0].id, zoom: 2, bbox: full, k: 50, layers: []};
+const base = {view: meta.views[0].id, zoom: 2, bbox: full, k: 50, layers: []};
 
 const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'core', 'test', 'fixtures');
 await mkdir(dir, {recursive: true});

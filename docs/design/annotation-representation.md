@@ -4,7 +4,7 @@
 **Status:** **Normative for the annotation representation** — what the model is made of: storage, addressing, the visibility predicate's evaluation, the fold's artifact pass, and serving. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). Companion to [`annotations.md`](annotations.md), which owns the *model*. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. `architecture.md` remains the specification and wins every conflict.
 **⊘ Four things are open inside a normative document**, marked at their sites and each due at the stage that needs it rather than held against promotion: search's containment gate (§8 — Stage 8), the filter axis (§6.3 — Stage 8), membership packaging (§2.4 — Stage 2, the one layout question the rulings did not settle), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). §11.3's unmeasured items are allocated to stages the same way; the fold's artifact pass is the largest of them and is Stage 4's first measurement, not its last.
 **Why it is separate:** the model survived review under three lenses; the section that made it concrete did not. Three reviewers (2026-08-15) returned findings that clustered almost entirely on `annotations.md` §7 and §7.1 — a reuse claim asserting that artifacts are items and therefore inherit every entity-keyed structure. That section is withdrawn and replaced by this document. Keeping the model and the representation apart is what stops the next such finding invalidating both.
-**Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
+**Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`views-and-multi-table.md`](views-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`; this document's own sections are **spec §n**.
 
 > **⊘ None of this is built.** No artifacts, no layers, no membership structure. Figures are marked
@@ -47,7 +47,7 @@ Eight questions decide the representation. They are answered in order, and §2 d
 **Every figure in this table is serialised bytes.** Resident cost is a separate measured quantity —
 ~80–94 B per Roaring container, so **6.16× these numbers on contiguous membership and 7.79× on the
 synthetic arm** (§11.3, and the [probe](../../probes/2026-08-16-membership-residency/README.md)).
-The 794 MB above is therefore ~4.9–6.2 GB in memory, before the per-slice and per-level multipliers.
+The 794 MB above is therefore ~4.9–6.2 GB in memory, before the per-view and per-level multipliers.
 
 **Size per member, not per artifact.** An earlier revision read three scale points as *"~80 bytes per
 artifact, flat"* and built the formula `(rows × width)/(80 × artifacts)` on it. All three held
@@ -172,7 +172,7 @@ extent by panning. **The box is deleted, not repaired** — no representation he
 fault, which is a better outcome than a rule forbidding it.
 
 **Disk holds the entity form, memory holds the row form.** Entity space is the canonical,
-slice-invariant record; row space is per slice, derived, and rebuilt on the generation key exactly as
+view-invariant record; row space is per view, derived, and rebuilt on the generation key exactly as
 projected mask fragments already are. An ingest appends an extent rather than renumbering
 ([`permutation.rs`](../../crates/tessera-store/src/permutation.rs)), so an append invalidates
 nothing — and the resident membership form is bounded at base rows, a member whose row is still in a
@@ -259,13 +259,13 @@ membership was never materialised. The tiebreak is irrelevant to it in both dire
 entity-space set to compact, and no fragmentation to accumulate.
 
 **One question this raises that the campaign did not, and it needs a ruling.** A point may belong to
-several slices with independent coordinates, so *"the Morton code"* is not well defined for a
-multi-slice corpus: an entity has one per slice, and an entity ID is allocated once. The tiebreak
-therefore optimises **one** slice's spatial order, and a corpus with several slices collects it only
-in whichever slice the ordering was taken from — the others are back to arbitrary. Options are a
-declared primary slice, or the first slice an entity joins, and neither is obviously right. ⊘
+several views with independent coordinates, so *"the Morton code"* is not well defined for a
+multi-view corpus: an entity has one per view, and an entity ID is allocated once. The tiebreak
+therefore optimises **one** view's spatial order, and a corpus with several views collects it only
+in whichever view the ordering was taken from — the others are back to arbitrary. Options are a
+declared primary view, or the first view an entity joins, and neither is obviously right. ⊘
 **Undecided**; recorded in §12 beside the tiebreak itself, because taking the tiebreak without
-answering it picks a slice by accident.
+answering it picks a view by accident.
 
 ### 2.3 The ordinal space, and what survives of it
 
@@ -291,13 +291,13 @@ is the obvious design and will be proposed again.
 ```
 artifacts/<layer>/
   registry.json                     # gate, structure, default cut depth, derived vocabulary,
-                                    #   slices, declared levels, zoom→level map where levels exist
+                                    #   views, declared levels, zoom→level map where levels exist
   levels/<k>/meta.json              # artifact count, entity_base, zoom range,
                                     #   membership source, containment verification result
   levels/<k>/members/<ordinal>.roaring   # enumerated membership, entity space (§2, §2.1)
   levels/<k>/geometry.arrow         # predicate membership: the shape only (§2.0)
-  levels/<k>/artifacts.arrow        # per ordinal: content and variation references,
-                                    #   optional caller stable key (§5.2)
+  levels/<k>/artifacts.arrow        # per ordinal: content and rank references,
+                                    #   optional caller key (§5.2)
   edges.arrow                       # (layer, level, ordinal) → (layer, level, ordinal)
 ```
 
@@ -485,9 +485,9 @@ flowchart TB
   T -->|no| X
   T -->|yes| C{"existence criterion, if declared:<br/>masked own-count clears it?"}
   C -->|no| X
-  C -->|yes| G{"some variation's contents<br/>all contained in M_auth?"}
+  C -->|yes| G{"some entry's generating set<br/>all contained in M_auth?"}
   G -->|no| X
-  G -->|yes| R["serve that variation, entire"]
+  G -->|yes| R["serve that entry, entire"]
 ```
 
 *The overlay test is first and unconditional. `verdict` is the existing per-entity composition
@@ -511,10 +511,23 @@ predicate is per-artifact by construction, so suppressing a cluster stops the *c
 its labels go on serving on every route that does not traverse the edge: search, a held identifier, a
 filter. Those labels name and describe the thing that was just hidden. The conjunctive rule the model
 states for edge *traversal* does not reach them, because those routes never traverse the edge — they
-reach the label directly. The term is one extra `verdict` lookup on the attachment target, on an
-identifier the label already stores, and it is the same lookup the predicate's first branch already
-performs. **The same argument covers the target's gate**, not only its deny state: a label must not
-outlive the reachability of what it labels.
+reach the label directly.
+
+**The term is the target's whole predicate, and it is a prerequisite**
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), rule 2):
+a dependent is served only where the artifact it attaches to is served, evaluated before and in
+addition to the dependent's own gate and criterion, and gated on **that artifact** rather than on
+the parent layer holding something. So a target's deny state, its layer's reachability, its
+existence, its own access label, its existence criterion against this viewer's masked count and its
+containment all decide here — and a dependent whose dependency is invisible is **absent**,
+contributing to no count a viewer is shown, on the same rule every other invisible artifact follows
+(**I2**). The conjunction can only narrow what a principal sees, so it opens no channel and adds no
+leak-register row. What it costs is the target's masked count per attached artifact per request,
+which is what makes it a term worth stating: the cheaper three-part form this replaced left a
+cluster withheld by its own criterion still nameable by a label declaring a weaker one
+([decision 0086](../decisions/0086-the-attachment-term-does-not-inherit-the-targets-criterion.md),
+superseded on that point). A single sweep in declaration order resolves every prerequisite without
+search, because a layer is declared after every layer it names in `depends_on`.
 
 **Artifacts still get entity IDs**, because the deny lane, `tessera_id` and the overlay all address
 by entity. What they do not get is membership in `M_auth`, or the assumption that a bitmap
@@ -572,7 +585,7 @@ callers should be told so plainly rather than discovering it.
 **Replacement is a layer lifecycle event, not 10⁷ deletions.** Pushing a replaced clustering
 through the deny lane would deliver 20× the `overlay_soft_limit` (500,000, write-path §7) as a single
 event, into a lane sized for trickle denies, retiring at a fold with no artifact pass. Instead, the
-slice lifecycle applies unchanged ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3 — ⊘
+view lifecycle applies unchanged ([`views-and-multi-table.md`](views-and-multi-table.md) §3 — ⊘
 itself provisional and unbuilt, so this cites a shape, not machinery):
 create is a WAL'd registry entry, drop is a WAL'd tombstone, the artifacts become garbage collected
 at the next fold, and **the name stays tombstoned against reuse** — a recreated `clusters/2026-08`
@@ -607,7 +620,7 @@ bitmaps a point is simply in no published artifact, publishing more artifacts is
 nothing is asserted that later becomes false.
 
 **Bulk publication is operational, not semantic.** A 10⁷-artifact level is a build-plane job for the
-same reason `tessera build --attach-slice` is — volume that must not ride the trickle path — and a
+same reason `tessera build --attach-view` is — volume that must not ride the trickle path — and a
 level published in pieces is coherent at every step, merely incomplete. It matters because the
 atomic reading would have forced a rebuild for a one-artifact correction. ✔ Built 2026-08-16: the
 build takes a declaration file and two Parquet files, resolves members through its own assignment,
@@ -672,8 +685,8 @@ identity the caller never asserted. Losing per-artifact state is the *meaning* o
 analysis, not an accident of it.
 
 An earlier revision of this section made the opposite call: a publish-time refusal — a layer
-holding live suppressions could not be published over unless every suppressed artifact's stable key
-was absent from the successor or arrived already suppressed — which made the stable key mandatory
+holding live suppressions could not be published over unless every suppressed artifact's key
+was absent from the successor or arrived already suppressed — which made the key mandatory
 for any layer that had ever taken a suppression. **The refusal is withdrawn.** It existed to make a
 suppression survive an event that ends the object it addresses; with edit as the ordinary refresh,
 the case it protected against is a caller deliberately replacing an analysis. Automatic replay onto
@@ -683,7 +696,7 @@ or a reshaped clustering each silently un-hides something an owner hid.
 **What replaces the refusal is a report.** An operator who suppressed something and then replaced
 the layer under it is *told* that a suppression no longer addresses anything — the same operability
 signal as the fold's degraded-content report, on the same control-plane credential. ⊘ Neither
-report is built. The stable key returns to being optional (§5.2): a caller-side mapping across
+report is built. The key returns to being optional (§5.2): a caller-side mapping across
 generations, offered because only the caller knows two objects are the same.
 
 ⊘ **Until the edit pass lands, replacement is the only refresh that exists**, so today a
@@ -744,9 +757,11 @@ The packed extent carries a hole as an empty blob, which the offsets already exp
 distinction matters because the obvious reading is fail-open. Dropping the edge from a label that
 pointed at the deleted artifact would leave the label *unattached* — and an unattached artifact
 serves on its own conjuncts, so the deletion of a cluster would publish every label written about
-it. What holds instead is an existence term beside the disposition one: an attachment must still
-**resolve**, and a hole resolves to nothing. The withholding then survives the retirement of the
-entry that first caused it, with no state to remember and no edge to rewrite.
+it. What holds instead is the prerequisite of §4: the target must still be **served**, and a hole is
+served to nobody. The withholding then survives the retirement of the entry that first caused it,
+with no state to remember and no edge to rewrite. The label is also deleted in its own right — a
+deletion cascades to its dependents (§5.0.4) — so what the fold finds at the label's ordinal is a
+hole of its own, retired in the same publication and by the same rule.
 
 ⊘ **Content is not reclaimed.** A retired artifact's supplied content stays in the record-blob
 extents the fold carries forward, unreferenced: nothing addresses it once the slot is a hole, so
@@ -807,12 +822,22 @@ not a tax on every refresh. The alternative — cascading silently — would lea
 clusters they were not generated from, which is worse than an outage and is exactly the class
 **I8** exists to prevent.
 
+**That argument is about repointing, and it does not reach deletion.** A deleted artifact leaves
+nothing to point at, so nothing can be mispointed: deleting an artifact deletes the artifacts
+depending on it ([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+rule 1), which is the *drop them first* sequence above, performed rather than demanded. **A
+replacement still refuses rather than repointing, and a deletion cascades rather than stranding.**
+The cascade is a deletion and takes the deletion lane — a record of its own in the same window, and
+retirement at the compaction fold that executes it (Rule F, write-path §5.4), never by any other
+route. The edge's second meaning is a serving rule and is stated with the predicate it belongs to
+(§4): a dependent is served only where the artifact it depends on is served, per artifact.
+
 ### 5.1 Runtime-created artifacts
 
 A selection assembled mid-session cannot ride `/control/ingest`, whose row carries a
-`{slice → (x, y)}` coordinate map and an entity's terms. An artifact has no coordinates, and carries
+`{view → (x, y)}` coordinate map and an entity's terms. An artifact has no coordinates, and carries
 a membership reference, a layer binding and a gate. It needs its own control verb, which the write
-cycle now defines — `(layer, membership, gate, content, stable key?)`, a WAL record, eligibility at
+cycle now defines — `(layer, membership, gate, content, key?)`, a WAL record, eligibility at
 ack ([`annotation-write-cycle.md`](annotation-write-cycle.md) §5) — with the contract shape still
 contracts work.
 
@@ -834,7 +859,7 @@ event — changing the analysis, not refreshing it — the retirement of per-ses
 (model §7, C17) rests on identity that the dominant path preserves. ⊘ Edit is deferred; until its
 pass lands every refresh is a replacement and bookmarks are honestly documented as expiring.
 
-**The stable key is optional, and stays so.** A caller may supply one per artifact, carried in
+**The key is optional, and stays so.** A caller may supply one per artifact, carried in
 `artifacts.arrow` and resolved through a per-layer index — *"the immunology cluster"*, identified
 across generations by the caller because only the caller knows the two are the same. It is a
 caller-side mapping across replacements, nothing more; no refusal and no deny-lane machinery hangs
@@ -903,16 +928,39 @@ was noise in the coarse run may join a cluster in the fine one. A coarser view i
 not an ancestor, and switching to it does not coarsen a claim, it **replaces one analysis with a
 different one**. `reach` is undefined across levels because there are no edges to close over.
 
-***Both, and they agree — the administrative case.*** A ward is a ward everywhere on the map, so the
+***Both, and they agree — the tiered case, of which administrative boundaries are the motivating
+example.*** A ward is a ward everywhere on the map, so the
 resolution is semantic and balanced: the layer declares levels *and* carries containment edges, and a
-level number and a tree depth mean the same thing. This is what levels were for, and the only case in
+coarser feature is both an ancestor and a level up. This is what levels were for, and the only case in
 which reading one as the other is safe.
 
-| | A tree | Stacked levels | Administrative |
+**Its edges run between levels, and they are information rather than roll-up**
+([decision 0087](../decisions/0087-cross-level-edges-are-information-not-rollup.md)). A layer's edges
+are all within a level or all between them — declared, never inferred, and a layer may not mix them —
+and which shape it has decides what they are *for*. **The value is `tiered` rather than
+`administrative`**: the other kinds name structures, and a subject taxonomy or a biological
+classification is this same shape without being administrative at all. Within a level they are the ladder a cut climbs:
+substituting a parent cluster for its children is an honest coarsening, because a cluster is an
+abstract blob. Between levels they are not, because substituting a state for its counties draws one
+shape across a region whose neighbours are still counties. So the cut never climbs them, **an
+artifact budget is inert** on such a layer exactly as it is on a flat one, and the resolution control
+is the client choosing a level. What the edges deliver instead is structure — which states are in a
+country — carried to the client as a parent identifier on the artifacts frame (contracts §3.2), so it
+can nest what it draws or filter to one subtree while still drawing the wider map.
+
+**An edge need not step to the immediately next level.** A city directly under a country because that
+country has no states is a fact about the data rather than a gap in a ladder; what is refused is an
+edge running *against* the levels, from a finer to a coarser one, which is the guarantee that makes a
+level a scale.
+
+| | A tree | Stacked levels | Tiered |
 |---|---|---|---|
-| The lineage is in | edges | absent — the levels are independent | edges, matching the levels |
+| Declared | `kind = "nested"` | `kind = "stacked"` | `kind = "tiered"` |
+| The lineage is in | edges, **within** a level | absent — the levels are independent | edges, **between** the levels |
 | Levels declared | none; every artifact at level 0 | one per analysis | one per scale |
 | A coarser view is | an ancestor | a different analysis | either, interchangeably |
+| The edges are for | **roll-up** — the cut climbs them | — | **information** — what contains what |
+| `artifact_budget` | trades depth for count | inert | inert |
 | The zoom→level map | does not apply | advisory, the client's choice | its purpose |
 | `reach` | well defined | undefined across levels | well defined |
 
@@ -1086,7 +1134,7 @@ its options in that document's §11.
 
 ## 9. Metadata
 
-`/v1/meta` carries the layer registry, **gate-filtered per principal** — the slice registry's
+`/v1/meta` carries the layer registry, **gate-filtered per principal** — the view registry's
 mechanism, resolved per session and keyed on the layer version, a gate edit bumping the key and a
 live suppression check on the layer's own entity running ahead of the cached resolution
 ([`annotation-write-cycle.md`](annotation-write-cycle.md) §6, which supersedes the
@@ -1095,7 +1143,7 @@ never-registered name stay indistinguishable in outcome and in work.
 
 Per layer: identity, structure (whether it carries edges, and its declared levels if any), the
 zoom-to-level map where levels exist, the default cut depth, the declared derived vocabulary, which
-slices it appears in, and what kinds of supplied content its artifacts carry.
+views it appears in, and what kinds of supplied content its artifacts carry.
 
 **Never the artifact cardinality.** A count of artifacts in a layer is a corpus-wide count over
 objects the principal may not individually see, which is C8's row.
@@ -1104,7 +1152,7 @@ objects the principal may not individually see, which is C8's row.
 [decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md).** The hazard was a
 viewer who knows a layer declares a shape receiving an artifact without one — learning that its
 generating set reaches outside their mask. That state no longer exists: an artifact failing
-containment on any of the resolved variation's contents is absent, whole, so no served artifact
+containment on the resolved entry's generating set is absent, whole, so no served artifact
 ever lacks a content its layer declares. **C3 holds as written** — there is no shell to be
 distinguishable from absence, and no mechanism is owed.
 
@@ -1262,8 +1310,8 @@ and needs nothing.)
   synthetic arm**, both flat. **794 MB therefore costs ~4.9–6.2 GB resident**, and the measured
   point closest to the design's — 10⁷ artifacts of four runs each — is 3.6 GB against 582 MB
   serialised. The pessimistic arm at 10⁷ does not fit in 47 GB at all and is OOM-killed.
-  The multipliers stand unmeasured on top of that figure: by slice, by level, and by two during a
-  replace. `slices-and-multi-table.md` §3 exists to price per-slice multipliers and does not carry
+  The multipliers stand unmeasured on top of that figure: by view, by level, and by two during a
+  replace. `views-and-multi-table.md` §3 exists to price per-view multipliers and does not carry
   this one. **The row-space choice earns its keep twice over**: §2 justifies it on storage, and the
   same contiguity pays again in RAM at a constant the storage argument did not predict.
   The working model is `resident ≈ 90 B × artifacts × runs per artifact`, linear over 1–100 runs
@@ -1305,7 +1353,7 @@ and needs nothing.)
    specified. Includes what the artifact population's authoritative candidate set is, given it is
    never `M_auth`.
 
-Alongside those: variations are a general artifact property with a caller-supplied ranking
+Alongside those: ranked contents are a general artifact property with a caller-supplied ranking
 ([decision 0078](../decisions/0078-the-service-takes-no-opinion-on-which-variation.md)), the
 frontier is a per-artifact test
 ([decision 0080](../decisions/0080-the-frontier-is-a-per-artifact-test.md)), and replacement is
@@ -1334,7 +1382,7 @@ criterion's denominator for predicate membership (model §5), and:
   path is row space, so this is disk and projection input. Two things the decision carries that this
   section did not: the build's signature sort holds a 12-byte record under an enforced batch
   residency model, so the code is a fourth field and the record layout is a real choice; and §2.2.1's
-  multi-slice question is **deferred rather than answered**, which is safe only while one slice
+  multi-view question is **deferred rather than answered**, which is safe only while one view
   exists.
 - ✔ **What a point deletion does to the content generated from it** — **ruled**, via the write
   cycle ([`annotation-write-cycle.md`](annotation-write-cycle.md) §9, owner 2026-08-15): `G` is
@@ -1400,6 +1448,21 @@ error was invisible from inside the argument that made it.
 
 ## Appendix R
 
+**r7 — 2026-08-19. A dependency edge carries deletion and visibility.** §4's extra term was three
+cheap questions — the target's deny state, its layer's reachability, and whether its slot still
+exists — and is now the target's whole `verdict`
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), rule 2):
+a dependent is served only where what it depends on is served, per artifact, which closes the case
+0086 left open and pays the masked count 0086 declined to. §5.0.4 keeps its refusal and gains its
+boundary: replacement mints identities and so still refuses rather than repointing, while deletion
+cascades to dependents and rides the deletion lane, retiring at the fold that executes it. Both
+rules are non-configurable, and neither widens what a principal sees.
+
+**r6 — 2026-08-19. Vocabulary only.** *Variation* becomes an entry of an artifact's ranked
+**`contents`**, indexed by its **rank**, matching `annotations.md` §2.3 and `configuration.md` §1.
+The level layout's `artifacts.arrow` carries rank references rather than variation references, and
+the caller's key is `key`, not `stable_key`, wherever it appears. No mechanism moved.
+
 **r5 — 2026-08-16.** §2.4 records where an attachment lives — in the attached artifact's own
 record, the edge being read on exactly the path that reads the artifact — and §5.0's bulk-publication
 note becomes a statement of what exists: the build plane takes declarations, memberships, content and
@@ -1421,7 +1484,7 @@ amendments this design owed are performed (r43).
 settled downward (§4), the visibility predicate carries the flag, the criterion and variation
 containment as one conjunction (§4), supplied content's home is the record blob with the edit route
 ⊘ deferred (§2.4), §5.0.2's publish-time suppression refusal is replaced by 0081's
-edit/replacement split with the stable key optional again, and §5 distinguishes the two refresh
+edit/replacement split with the key optional again, and §5 distinguishes the two refresh
 operations, replacement being the only one built. §12 now records four of the five rulings landed;
 search's gate remains the open one.
 

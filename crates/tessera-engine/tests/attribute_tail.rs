@@ -39,7 +39,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{ColumnBuf, Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::command::UnallocatedRow;
@@ -53,17 +53,21 @@ use tessera_store::read::{open_bundle, ColumnsRef, ScalarSlice};
 /// lands somewhere legal. Different widths make a positional slip a type mismatch the readers
 /// refuse, and make the `columns.arrow` byte size a check in its own right.
 const SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+vocabulary = "band"
 
 [[attribute]]
 name     = "ingested_at"
@@ -141,7 +145,7 @@ fn write_points_with_attributes(path: &Path, n: u64) {
 fn parse_schema(tmp: &Path) -> Schema {
     let path = tmp.join("schema.toml");
     std::fs::write(&path, SCHEMA_TOML).unwrap();
-    Schema::parse(&path, &std::collections::HashMap::new()).expect("the fixture schema parses")
+    Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema).expect("the fixture schema parses")
 }
 
 /// Build a fixture bundle carrying the attribute tail.
@@ -150,26 +154,28 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     let pairs = tmp.join("pairs.parquet");
     write_points_with_attributes(&points, n);
     write_pairs_n(&pairs, n);
+    let schema = parse_schema(tmp);
     let args = BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: parse_schema(tmp),
+        schema,
     };
     build(&args).expect("a build with a declared schema should succeed");
 }
@@ -195,8 +201,8 @@ fn tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, i64, f32)> {
                 .join(prefix)
                 .join("partitions")
                 .join(phash)
-                .join("slices")
-                .join(&segment.slice)
+                .join("views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
@@ -320,7 +326,7 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .iter()
         .find(|v| v.name == "band")
         .expect("the declared vocabulary reaches the manifest");
-    assert_eq!(vocabulary.listing, tessera_store::manifest::Listing::Public);
+    assert_eq!(vocabulary.visibility, tessera_store::manifest::Visibility::Public);
     let codes: BTreeMap<&str, u32> = vocabulary
         .values
         .iter()
@@ -367,26 +373,31 @@ fn both_build_implementations_write_the_same_tail() {
     let pairs = tmp.path().join("pairs.parquet");
     write_points_with_attributes(&points, 2_000);
     write_pairs_n(&pairs, 2_000);
+    let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
+        point_fields: Default::default(),
         points: points.clone(),
-        pairs: pairs.clone(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.clone(),
+            &schema,
+        ),
+        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: parse_schema(tmp.path()),
+        schema: schema.clone(),
     };
 
     let streamed = tmp.path().join("streamed");
@@ -395,11 +406,11 @@ fn both_build_implementations_write_the_same_tail() {
     tessera_build::build_in_memory(&args_for(&linear)).expect("the in-memory build succeeds");
 
     let a = std::fs::read(
-        streamed.join("v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+        streamed.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
     )
     .unwrap();
     let b = std::fs::read(
-        linear.join("v00000/partitions/default/slices/s0/segments/seg-0/columns.arrow"),
+        linear.join("v00000/partitions/default/views/s0/segments/seg-0/columns.arrow"),
     )
     .unwrap();
     assert_eq!(
@@ -425,7 +436,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-1".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -487,7 +498,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
             .accept_ingest(
                 vec![UnallocatedRow {
                     external_id: Some(format!("merged-{batch}").into_bytes()),
-                    slice: "s0".to_string(),
+                    view: "s0".to_string(),
                     descriptors: vec![b"0".to_vec()],
                     // Spread across the extent so the merge genuinely interleaves in Morton order
                     // rather than appending one segment after another.
@@ -571,7 +582,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"folded-1".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 500.0,
                 y: 500.0,
@@ -654,7 +665,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
 /// point. A row-indexed assertion would pass on a gather that carried values forward unpermuted.
 ///
 /// **Two segments and a multi-tile viewport**, because the interesting failures need both. The
-/// flush gives the slice a second segment, so a tile's rows resolve to different parts and any
+/// flush gives the view a second segment, so a tile's rows resolve to different parts and any
 /// per-part hoisting has to key correctly; `zoom = 3` spans many tiles, so the per-tile results
 /// have to concatenate in tile order. The schema's three widths are what make a positional slip a
 /// type error rather than a plausible value (see this file's header).
@@ -669,7 +680,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"ingested-read-path".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 5.0,
                 y: 5.0,
@@ -765,6 +776,16 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
 /// fixtures cannot. The widths differ for the file-header reason: a positional slip is a type
 /// mismatch, never a plausible value.
 const NON_PREFIX_SCHEMA_TOML: &str = r#"
+[[vocabulary]]
+name       = "band"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  low = 1
+  mid = 2
+  high = 3
+
 [[attribute]]
 name  = "audit"
 type  = "i64"
@@ -773,14 +794,8 @@ index = true
 [[attribute]]
 name       = "band"
 type       = "category"
-width      = "u8"
 render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  low = 1
-  mid = 2
-  high = 3
+vocabulary = "band"
 
 [[attribute]]
 name   = "score"
@@ -840,27 +855,30 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, NON_PREFIX_SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
-            .expect("the non-prefix fixture schema parses"),
+        schema,
     };
     build(&args).expect("a build whose render set is not a declaration prefix succeeds");
 }
@@ -870,7 +888,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
 fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(b"non-prefix-flushed".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -898,8 +916,8 @@ fn non_prefix_tail_by_identity(root: &Path) -> BTreeMap<u64, (u8, f32)> {
                 .join(prefix)
                 .join("partitions")
                 .join(phash)
-                .join("slices")
-                .join(&segment.slice)
+                .join("views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
@@ -1094,17 +1112,31 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
 /// blob. Two widths in the blob for the same reason the hot tail's fixture has three: a tag slip
 /// must be a type mismatch, not a plausible value.
 const RECORD_SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[vocabulary]]
+name       = "tier"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  bronze = 1
+  silver = 2
+  gold   = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+vocabulary = "band"
 
 [[attribute]]
 name = "note"
@@ -1115,19 +1147,13 @@ name = "revision"
 type = "i64"
 
 # **A `public` category with neither flag.** §4.2's entity-space floor belongs to a category's
-# *readers* — `/v1/categories` and the `per_viewer` gate — so this shape has no reader, no floor,
+# *readers* — `/v1/categories` and the `derived` gate — so this shape has no reader, no floor,
 # and no home but the blob. Declared last so the existing field tags do not move.
+
 [[attribute]]
 name       = "tier"
 type       = "category"
-width      = "u8"
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  bronze = 1
-  silver = 2
-  gold   = 3
-
+vocabulary = "tier"
 "#;
 
 fn note_of(source: u64) -> String {
@@ -1223,27 +1249,30 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, RECORD_SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the record fixture schema parses");
     let args = BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
-            .expect("the record fixture schema parses"),
+        schema,
     };
     build(&args).expect("a build with blob-resident columns succeeds");
 }
@@ -1285,7 +1314,7 @@ fn record_stack(root: &Path) -> tessera_filter::RecordStack {
 fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(external.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,

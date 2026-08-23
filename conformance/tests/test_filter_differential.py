@@ -81,9 +81,14 @@ def _tiles_by_id(tiles) -> dict[int, tuple[int, int, int]]:
     return {t: (v, m, s) for t, v, m, s in tiles}
 
 
-def _served_entities(raw: bytes) -> set[int]:
+def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
     """The served set as entity ids, joined through the planted `fx_key` — the suite's one
     legitimate handle→item route (no reverse map, no I10 tension).
+
+    `entity_of_fx` is passed rather than derived here because the last hop of that join, `fx_key`'s
+    source id to the entity the build gave it, is the bundle's to answer (`cat.entity_of_fx_key`).
+    This function used to build it from `enumerate(fx_keys())`, which is the source id — the same
+    number only while the build's tiebreak was the source id (decision 0073).
 
     **A response that served nothing carries no points frame**, and therefore no points schema:
     under the streamed format a frame is written per non-empty chunk, so zero points is zero
@@ -92,11 +97,16 @@ def _served_entities(raw: bytes) -> set[int]:
     the zero-visibility principal and a filter that matches nothing both reach it legitimately, and
     both are cases this differential exists to check rather than to skip.
     """
-    entity_of_fx = {key: e for e, key in enumerate(cat.fx_keys())}
     if not any(kind == 3 for kind, _ in split_frames(raw)):
         return set()
     points = decode_viewport_points(raw)
     return {entity_of_fx[k] for k in points.column("fx_key").to_pylist()}
+
+
+@pytest.fixture(scope="module")
+def entity_of_fx(catalogue_bundle) -> dict[int, int]:
+    """See [`_served_entities`]: the handle→item join's last hop is the bundle's."""
+    return cat.entity_of_fx_key(catalogue_bundle)
 
 
 @pytest.fixture(scope="module")
@@ -109,7 +119,9 @@ def sweep_cases():
 # ---------------------------------------------------------------------------------------------
 
 
-def test_the_filter_columns_are_decorrelated_from_the_grant_structure(catalogue_filter_columns):
+def test_the_filter_columns_are_decorrelated_from_the_grant_structure(
+    catalogue_bundle, catalogue_filter_columns
+):
     """If the attribute tracked the permission, every cross-principal assertion below would pass
     while meaning nothing: masking and filtering would select the same items for different
     reasons. So the decorrelation is a checked precondition, not a comment — each cycling
@@ -143,7 +155,11 @@ def test_the_filter_columns_are_decorrelated_from_the_grant_structure(catalogue_
         )
     # hollow: declared, planted nowhere. solo: exactly one member, visible to the crossover pair.
     assert "hollow" not in members
-    assert members["solo"] == {cat.DEPARTMENT_SOLO_ID}
+    # `DEPARTMENT_SOLO_ID` is the **source** id the value was planted on; `members` is keyed by
+    # entity, so the comparison crosses the two spaces and has to say so.
+    assert members["solo"] == {catalogue_bundle.entity_of_source(cat.DEPARTMENT_SOLO_ID)}
+    # Its block, in either space: a block's source range and entity range hold the same items,
+    # which `verify()`'s check 3b asserts item by item.
     assert cat.DEPARTMENT_SOLO_ID in cat.BLOCKS["cross_lo"].entities
 
 
@@ -165,7 +181,7 @@ def test_meta_publishes_the_filter_operands(catalogue_server):
     line and this test follows without an edit here.
 
     Two of the individual facts the expectation encodes are worth their own words. **The route
-    is invisible on the wire**: `archive` is `public` and `department` is `per_viewer`, so
+    is invisible on the wire**: `archive` is `public` and `department` is `derived`, so
     decision 0063 answers the first from its derived postings and the second by scanning — and
     the published family and operand list are identical for both, because routing is a property
     of the deployment's declaration, never of the query surface. And a string column's family is
@@ -194,7 +210,7 @@ def test_meta_publishes_the_filter_operands(catalogue_server):
 
 @pytest.mark.parametrize("case", cat.catalogue(), ids=lambda c: c.name)
 def test_i12_a_filter_narrows_matched_and_never_touches_visible(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, case
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, case
 ):
     """The sweep: one composed expression, every catalogue principal, exact agreement.
 
@@ -207,9 +223,9 @@ def test_i12_a_filter_narrows_matched_and_never_touches_visible(
     `M_sel ⊆ M_auth`: a subset assertion alone would also pass a filter that dropped visible
     matching items, which is a defect this suite must distinguish from masking."""
     token = catalogue_server.authorise(list(case.grants))["token"]
-    plain = catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    plain = catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     filtered = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=SWEEP_EXPR
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=SWEEP_EXPR
     )
 
     plain_tiles = _tiles_by_id(decode_viewport(plain)[0])
@@ -238,14 +254,14 @@ def test_i12_a_filter_narrows_matched_and_never_touches_visible(
     m_sel = filt.evaluate(SWEEP_EXPR, catalogue_filter_columns, m_auth)
     assert m_sel <= m_auth  # structural in the oracle; the engine half is the assertions below
 
-    expected_visible = vp.counts(catalogue_bundle, m_auth, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
-    expected_matched = vp.counts(catalogue_bundle, m_sel, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    expected_visible = vp.counts(catalogue_bundle, m_auth, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
+    expected_matched = vp.counts(catalogue_bundle, m_sel, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     assert {t: v for t, (v, _m, _s) in filt_tiles.items()} == expected_visible
     assert {t: m for t, (_v, m, _s) in filt_tiles.items() if m} == expected_matched
 
     # The served sets: filtered ⊆ unfiltered (I12 on the wire), and filtered == oracle M_sel.
-    plain_served = _served_entities(plain)
-    filt_served = _served_entities(filtered)
+    plain_served = _served_entities(plain, entity_of_fx)
+    filt_served = _served_entities(filtered, entity_of_fx)
     assert filt_served <= plain_served, (
         "the filtered response served points the unfiltered one did not — a filter widened the "
         "served set, which is I12 inverted"
@@ -257,7 +273,7 @@ def test_i12_a_filter_narrows_matched_and_never_touches_visible(
 
 
 def test_a_live_theta_never_thins_a_filtered_selection(
-    catalogue_bundle, catalogue_density_server, catalogue_filter_columns
+    catalogue_bundle, catalogue_density_server, catalogue_filter_columns, entity_of_fx
 ):
     """§8.5's match-layer count rule, at the configuration the density rule actually ships in.
 
@@ -275,14 +291,14 @@ def test_a_live_theta_never_thins_a_filtered_selection(
     case = next(c for c in cat.catalogue() if c.name == "full_100pct")
     token = server.authorise(list(case.grants))["token"]
 
-    plain = server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    plain = server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     plain_tiles = _tiles_by_id(decode_viewport(plain)[0])
     assert any(s < v for v, _m, s in plain_tiles.values()), (
         "θ is not live on this server — no unfiltered tile was thinned, so this test has lost "
         "its control and the fixture needs looking at"
     )
 
-    filtered = server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=SWEEP_EXPR)
+    filtered = server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=SWEEP_EXPR)
     filt_tiles = _tiles_by_id(decode_viewport(filtered)[0])
     for tile, (visible, matched, served) in filt_tiles.items():
         assert matched <= visible, f"tile {tile}: matched {matched} > visible {visible} — I12"
@@ -295,7 +311,7 @@ def test_a_live_theta_never_thins_a_filtered_selection(
     # exactly — the same equality the saturated sweep asserts, now with θ live enough to have
     # thinned it if the rule regressed.
     m_sel = filt.evaluate(SWEEP_EXPR, catalogue_filter_columns, set(case.entities))
-    assert _served_entities(filtered) == m_sel
+    assert _served_entities(filtered, entity_of_fx) == m_sel
 
 
 def test_the_empty_combinators_are_their_operators_identities(
@@ -306,17 +322,17 @@ def test_the_empty_combinators_are_their_operators_identities(
     case = sweep_cases["crossover_above"]
     token = catalogue_server.authorise(list(case.grants))["token"]
     plain_tiles = _tiles_by_id(
-        decode_viewport(catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT))[0]
+        decode_viewport(catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT))[0]
     )
 
     everything = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"all_of": []}
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"all_of": []}
     )
     for tile, (visible, matched, _s) in _tiles_by_id(decode_viewport(everything)[0]).items():
         assert (visible, matched) == (plain_tiles[tile][0], plain_tiles[tile][0])
 
     nothing = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"any_of": []}
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"any_of": []}
     )
     nothing_tiles, nothing_points = decode_viewport(nothing)
     assert {t: v for t, (v, _m, _s) in _tiles_by_id(nothing_tiles).items()} == {
@@ -332,7 +348,7 @@ def test_the_empty_combinators_are_their_operators_identities(
 
 
 def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
-    catalogue_server, sweep_cases
+    catalogue_bundle, catalogue_server, entity_of_fx, sweep_cases
 ):
     """Five spellings of "matches nothing this principal may know about", one body.
 
@@ -350,7 +366,7 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
     token = catalogue_server.authorise(list(case.grants))["token"]
 
     plain_tiles = _tiles_by_id(
-        decode_viewport(catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT))[0]
+        decode_viewport(catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT))[0]
     )
 
     bodies = {}
@@ -362,7 +378,7 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
         ("unknown code", 200),
     ]:
         resp = catalogue_server.viewport_request(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": operand}}
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": operand}}
         )
         assert resp.status_code == 200, (
             f"{label}: {resp.status_code} — an unresolvable value is an empty operand, never a "
@@ -385,7 +401,7 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
         assert _answer(body) == _answer(first), (
             f"the {label!r} response differs from the {first_label!r} response — the outcomes "
             "are distinguishable, so the filter surface is an existence oracle over what "
-            "`listing = \"per_viewer\"` hides (C11)"
+            "`visibility = \"derived\"` hides (C11)"
         )
 
     tiles, points = decode_viewport(first)
@@ -397,9 +413,10 @@ def test_a_hidden_value_a_hollow_value_and_a_nonexistent_value_are_one_outcome(
 
     # The positive control: one visible member, found.
     solo = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": "solo"}}
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": "solo"}}
     )
-    assert _served_entities(solo) == {cat.DEPARTMENT_SOLO_ID}, (
+    solo_entity = catalogue_bundle.entity_of_source(cat.DEPARTMENT_SOLO_ID)
+    assert _served_entities(solo, entity_of_fx) == {solo_entity}, (
         "the solo control failed — a single-member value was not served, so the five empty "
         "bodies above may just be a filter that matches nothing"
     )
@@ -428,9 +445,10 @@ ROUTED_EXPRS = [
     "case_name", ["full_100pct", "crossover_above", "sparse_0_01pct"]
 )
 def test_a_public_category_answers_exactly_what_the_definition_says(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases, case_name, name, expr
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases,
+    case_name, name, expr
 ):
-    """**The routed differential.** `archive` is `listing = "public"`, so decision 0063 answers its
+    """**The routed differential.** `archive` is `visibility = "public"`, so decision 0063 answers its
     `eq` and `in` from the column's derived per-value postings — a corpus-wide set intersected with
     the candidate — where `department` is answered by scanning the candidate's values. The oracle
     has one evaluation for both, so agreement here is agreement between two constructions rather
@@ -448,11 +466,11 @@ def test_a_public_category_answers_exactly_what_the_definition_says(
     m_sel = filt.evaluate(expr, catalogue_filter_columns, m_auth)
 
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
     )
-    assert _served_entities(raw) == m_sel, f"{case_name} / {name}"
+    assert _served_entities(raw, entity_of_fx) == m_sel, f"{case_name} / {name}"
 
-    expected_matched = vp.counts(catalogue_bundle, m_sel, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    expected_matched = vp.counts(catalogue_bundle, m_sel, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     tiles = _tiles_by_id(decode_viewport(raw)[0])
     assert {t: m for t, (_v, m, _s) in tiles.items() if m} == expected_matched, (
         f"{case_name} / {name}: the per-tile matched counts disagree with the definition"
@@ -460,9 +478,9 @@ def test_a_public_category_answers_exactly_what_the_definition_says(
 
 
 def test_the_two_routes_compose_with_each_other(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
 ):
-    """A `public` leaf and a `per_viewer` leaf in one expression. The two are evaluated by
+    """A `public` leaf and a `derived` leaf in one expression. The two are evaluated by
     different constructions and must still intersect and union as sets — a routed leaf that
     returned a set outside the candidate would show up here first, since the conjunction's later
     leaf is evaluated under the earlier one's result."""
@@ -477,9 +495,9 @@ def test_the_two_routes_compose_with_each_other(
     ):
         m_sel = filt.evaluate(expr, catalogue_filter_columns, m_auth)
         raw = catalogue_server.viewport(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
         )
-        assert _served_entities(raw) == m_sel, expr
+        assert _served_entities(raw, entity_of_fx) == m_sel, expr
         assert m_sel <= m_auth, "I12: a filter may not widen the mask"
 
 
@@ -507,7 +525,7 @@ DISTRIBUTED_EXPR = {
 
 
 def test_a_nested_tree_agrees_with_brute_force_and_its_algebra(
-    catalogue_bundle, catalogue_server, catalogue_filter_columns, sweep_cases
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
 ):
     case = sweep_cases["crossover_above"]
     token = catalogue_server.authorise(list(case.grants))["token"]
@@ -519,15 +537,15 @@ def test_a_nested_tree_agrees_with_brute_force_and_its_algebra(
     assert m_sel == filt.evaluate(DISTRIBUTED_EXPR, catalogue_filter_columns, m_auth)
 
     nested = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=NESTED_EXPR
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=NESTED_EXPR
     )
-    assert _served_entities(nested) == m_sel
-    expected_matched = vp.counts(catalogue_bundle, m_sel, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    assert _served_entities(nested, entity_of_fx) == m_sel
+    expected_matched = vp.counts(catalogue_bundle, m_sel, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     tiles = _tiles_by_id(decode_viewport(nested)[0])
     assert {t: m for t, (_v, m, _s) in tiles.items() if m} == expected_matched
 
     distributed = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=DISTRIBUTED_EXPR
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=DISTRIBUTED_EXPR
     )
     assert decode_viewport(distributed) == decode_viewport(nested), (
         "two algebraically equal spellings served different responses — evaluation depends on "
@@ -551,13 +569,13 @@ def test_an_unknown_column_refuses_and_an_unknown_value_does_not(
     token = catalogue_server.authorise(list(case.grants))["token"]
 
     unknown_column = catalogue_server.viewport_request(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"nonesuch": {"eq": "x"}}
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"nonesuch": {"eq": "x"}}
     )
     assert unknown_column.status_code == 422, unknown_column.text
     assert unknown_column.json()["error"] == "contract"
 
     unknown_value = catalogue_server.viewport_request(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": "nonesuch"}}
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"department": {"eq": "nonesuch"}}
     )
     assert unknown_value.status_code == 200, (
         "an unknown value must be an empty operand, never a refusal — refusing it makes the "
@@ -574,7 +592,7 @@ def test_the_unbuilt_operators_refuse_by_name(catalogue_server, sweep_cases):
     token = catalogue_server.authorise(list(case.grants))["token"]
 
     resp = catalogue_server.viewport_request(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters={"title": {"match": "smith"}}
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters={"title": {"match": "smith"}}
     )
     assert resp.status_code == 422, f"match on a keyword: {resp.status_code} {resp.text}"
     assert resp.json()["error"] == "contract"
@@ -599,14 +617,14 @@ def test_an_over_deep_expression_is_a_contract_refusal_not_a_server_fault(
         expr = {"all_of": [expr]}
 
     resp = catalogue_server.viewport_request(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
     )
     assert resp.status_code == 422, f"{resp.status_code} {resp.text}"
     assert resp.json()["error"] == "contract"
 
 
 def test_none_of_requires_a_value_and_names_one_column(
-    catalogue_server, catalogue_filter_columns, sweep_cases
+    catalogue_server, catalogue_filter_columns, entity_of_fx, sweep_cases
 ):
     """**Decision 0066 on the wire**: `none_of` means *carries a value in this column, and none of
     these matches it* — so an item carrying no value for the column is outside it, where a
@@ -621,8 +639,8 @@ def test_none_of_requires_a_value_and_names_one_column(
     token = catalogue_server.authorise(list(case.grants))["token"]
     expr = {"none_of": [{"department": {"eq": "alpha"}}]}
 
-    raw = catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr)
-    served = _served_entities(raw)
+    raw = catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr)
+    served = _served_entities(raw, entity_of_fx)
 
     m_auth = set(case.entities)
     expected = filt.evaluate(expr, catalogue_filter_columns, m_auth)
@@ -648,7 +666,7 @@ def test_none_of_requires_a_value_and_names_one_column(
         ),
     ]:
         resp = catalogue_server.viewport_request(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=filters
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=filters
         )
         assert resp.status_code == 422, f"{label}: {resp.status_code} {resp.text}"
         assert resp.json()["error"] == "contract", label
@@ -660,7 +678,7 @@ def test_an_operator_outside_the_columns_family_refuses(catalogue_server, sweep_
     The distinction is which side of the trust boundary the fact lives on. A column's family is
     deployment schema — `/v1/meta` publishes it "so a client need not infer it" — and is identical
     for every principal, so refusing discloses nothing. A *value*'s existence is viewer data, and
-    refusing that would be an existence oracle over exactly the vocabulary `per_viewer` hides. So
+    refusing that would be an existence oracle over exactly the vocabulary `derived` hides. So
     the two get opposite treatments on purpose, and this test pins the family half.
 
     Recorded as a divergence when this suite was first written, and ruled the other way: the
@@ -679,7 +697,7 @@ def test_an_operator_outside_the_columns_family_refuses(catalogue_server, sweep_
         ("contains on a category", {"department": {"contains": "lph"}}),
     ]:
         resp = catalogue_server.viewport_request(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=filters
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=filters
         )
         assert resp.status_code == 422, f"{label}: {resp.status_code}"
 
@@ -705,7 +723,7 @@ def test_i3_has_no_surface_to_test(catalogue_server, sweep_cases):
     resp = requests.post(
         f"{catalogue_server.viewer_base}/v1/labels",
         headers={"Authorization": f"Bearer {token}"},
-        json={"slice": cat.SLICE_ID, "zoom": ZOOM, "bbox": list(cat.FULL_VIEWPORT)},
+        json={"view": cat.VIEW_ID, "zoom": ZOOM, "bbox": list(cat.FULL_VIEWPORT)},
         timeout=10,
     )
     assert resp.status_code in (404, 405), (

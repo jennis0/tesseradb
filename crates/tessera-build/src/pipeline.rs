@@ -87,10 +87,10 @@
 //! defence's scope.)
 //!
 //! **The labelling plugin is `builtin:passthrough`.** [`build_dictionary`] exploits the fact that
-//! passthrough's label rule is *decomposable*: an item's descriptors are its comma-separated
-//! source terms independently, so a term's descriptor can be derived from the term alone and the
-//! whole item never has to be assembled. That is a property of passthrough, not of the plugin
-//! ABI — a plugin that derived descriptors from the label as a whole would be mislabelled by
+//! passthrough's label rule is *decomposable*: an item's descriptors are its source terms taken
+//! one at a time, so a term's descriptor can be derived from the term alone and the whole item
+//! never has to be assembled. That is a property of passthrough, not of the plugin
+//! ABI — a plugin that derived descriptors from the item's terms as a whole would be mislabelled by
 //! this shortcut, and mislabelled authorisation data is the one failure mode this system exists
 //! to prevent. [`require_decomposable_labelling`] refuses to run against any other plugin rather
 //! than assume it decomposes (I2, fail closed).
@@ -518,6 +518,50 @@ fn plan_build(
 ) -> Result<BuildPlan> {
     let budget = args.memory_budget.unwrap_or_else(detect_memory_budget);
 
+    // ---- the other peak: everything the batch loop below does not hold ----------------------
+    // **The batch stride reaches none of it** (`residency.rs`): a column in entity order is `n`
+    // values by construction and a member table is its own size, so there is no smaller plan to
+    // fall back to and the honest answer is a refusal with the arithmetic printed. This is the half
+    // `--memory-budget` did not reach — the campaign's builds were OOM-killed at 47.3–47.6 GB under
+    // a 12 GB budget, three runs and one number, because the flag only ever sized the loop.
+    //
+    // Checked **before** the batch plan, and refused rather than warned: this is the larger term
+    // and the one no stride can move, so an operator reading a refusal should read this one first.
+    // The plan below already refuses an infeasible stride, and a budget the operator named is a
+    // bound they asked to have enforced. An auto-derived budget is `MemAvailable` damped, so exceeding *that* is the kill
+    // this exists to replace.
+    let tail = crate::residency::model(args, n);
+    if tail.total() > budget {
+        return Err(BuildError::Invalid(format!(
+            "this build's entity-order stages need about {} MiB, over the {} MiB memory budget. \
+             Unlike the signature batch loop these do not batch — a declared column holds one \
+             value per item and a member table holds its own rows — so a smaller --batch-items \
+             does not help. Raise --memory-budget, drop a member source, or narrow the schema. \
+             Where the bytes are:{}",
+            tail.total() >> 20,
+            budget >> 20,
+            tail.describe()
+        )));
+    }
+    // **A warning where the model's own error bar reaches the budget**, and not a refusal:
+    // `residency.rs` is a lower bound — it enumerates what the stages hold and not what the
+    // Parquet readers, the analysers and the allocator hold around them, and the one build it was
+    // measured against read 190 MiB against a 407 MiB peak. Refusing on twice the model would
+    // block builds that fit; saying nothing leaves the operator with the same silence the campaign
+    // met. So the numbers are printed and the decision is theirs — the house rule for a thing that
+    // is recoverable and discloses nothing.
+    else if tail.total().saturating_mul(2) > budget {
+        eprintln!(
+            "warning: this build's entity-order stages need at least {} MiB against a {} MiB \
+             budget, and that figure is a lower bound — it counts what the stages hold, not the \
+             readers and allocator around them (measured at roughly half the real peak). These \
+             stages do not batch. Where the bytes are:{}",
+            tail.total() >> 20,
+            budget >> 20,
+            tail.describe()
+        );
+    }
+
     // The worst batch's pre-dedup pairs for stride `b`, bounded by summing every histogram
     // range a batch window overlaps — conservative by at most the two boundary ranges.
     let prefix: Vec<u64> = std::iter::once(0)
@@ -704,6 +748,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // ---- 2. the dictionary -----------------------------------------------------------
     let dict_dir = args.out.join(PREFIX).join("dictionary");
     std::fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
+    // What every source term is called, established before any term id exists — a field-sourced
+    // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
+    let access = crate::plan_access(args)?;
     let Dictionary {
         term_keys,
         term_ids,
@@ -713,7 +760,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         histogram,
         histogram_shift,
         dict_paths,
-    } = build_dictionary(args, &source_ids, &dict_dir)?;
+    } = build_dictionary(args, &access, &source_ids, &dict_dir)?;
     if term_count >= u32::MAX as u64 {
         return Err(BuildError::Invalid(format!(
             "{term_count} distinct terms exceeds the 2^32 term-ID space"
@@ -775,7 +822,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 },
             )
         };
-    input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
+    crate::scan_access(args, &access, |source_id, source_term| {
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
             if let Err(e) = resolve(&mut chunk, &mut resolved, &mut sink) {
@@ -844,22 +891,28 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 Ok(())
             })
         };
-        input::scan_points(&args.points, &args.extent, args.limit, |point| {
-            chunk.push((point.source_id, (point.qx, point.qy)));
-            if chunk.len() == JOIN_CHUNK_ROWS {
-                if let Err(e) = resolve(
-                    &mut chunk,
-                    x_of_ordinal,
-                    y_of_ordinal,
-                    &mut points_seen,
-                    &mut geom_anchor,
-                ) {
-                    failure = Some(e);
-                    return ControlFlow::Break(());
+        input::scan_points(
+            &args.points,
+            &args.point_fields,
+            &args.extent,
+            args.limit,
+            |point| {
+                chunk.push((point.source_id, (point.qx, point.qy)));
+                if chunk.len() == JOIN_CHUNK_ROWS {
+                    if let Err(e) = resolve(
+                        &mut chunk,
+                        x_of_ordinal,
+                        y_of_ordinal,
+                        &mut points_seen,
+                        &mut geom_anchor,
+                    ) {
+                        failure = Some(e);
+                        return ControlFlow::Break(());
+                    }
                 }
-            }
-            ControlFlow::Continue(())
-        })?;
+                ControlFlow::Continue(())
+            },
+        )?;
         if let Some(error) = failure {
             return Err(error);
         }
@@ -940,7 +993,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // Per-ordinal signature starts (u32: the plan caps any batch's pairs well below
         // 2^32), the long-signature bitset, and the pre-sort keys — today's stage 4 over one
         // batch, with `starts` subsuming the old long-only start index because the band emit
-        // below needs every item's slice, not only the long ones.
+        // below needs every item's view, not only the long ones.
         let mut starts: Vec<u32> = Vec::with_capacity(batch_len + 1);
         let mut long_sig: Vec<u64> = vec![0; batch_len.div_ceil(64)];
         let mut recs: Vec<SortRec> = Vec::with_capacity(batch_len);
@@ -975,9 +1028,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 // half is the code `morton_of` would give for the same point, so entity order and
                 // row order agree about what is nearby. Computed rather than stored: a third
                 // mapped array would cost 4 B/item to save one interleave per item.
-                morton: split32(x_of_ordinal[ordinal as usize], y_of_ordinal[ordinal as usize])
-                    .0
-                    .raw(),
+                morton: split32(
+                    x_of_ordinal[ordinal as usize],
+                    y_of_ordinal[ordinal as usize],
+                )
+                .0
+                .raw(),
                 ordinal: ordinal as u32,
             });
         }
@@ -1053,9 +1109,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let slice_dir = partition_dir.join("slices").join(&args.slice_id);
-    let segment_dir = slice_dir.join("segments").join(SEG_ID);
-    for dir in [&terms_dir, &entities_dir, &slice_dir, &segment_dir] {
+    let view_dir = partition_dir.join("views").join(&args.view_id);
+    let segment_dir = view_dir.join("segments").join(SEG_ID);
+    for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
         std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
 
@@ -1249,21 +1305,30 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // `minters` seeds one live minter per discovered vocabulary from what the schema already
     // pins; the scan mints into it for every novel key, and its final state — carried past this
     // call — is what step 11 below records into `MANIFEST.vocabularies`.
-    let mut minters = args.schema.discovered_minters();
-    let attributes_by_entity =
+    let mut minters = args.schema.open_minters();
+    let (attributes_by_entity, coverage) =
         read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal, &mut minters)?;
+    // **Printed here, where the join has just happened and the numbers are the join's own.** The
+    // linear build reports the identical figures from its own pass, so the two builds agree about
+    // coverage exactly as they agree about bytes.
+    crate::report_attribute_coverage(&coverage);
 
-    // Layers and their artifacts, resolved here for the reason the attribute tail is: this is
-    // where the two structures that turn a source id into the entity this build assigned it are
-    // both still alive. A member is named by source id, exactly as the pairs file's ids are.
-    let published_layers = match &args.layers {
-        None => crate::layers::PublishedLayers::default(),
-        Some(path) => {
-            let plan = crate::layers::read(
-                path,
-                args.artifacts.as_deref(),
-                args.artifact_members.as_deref(),
-            )?;
+    timer.end(BuildStage::AttributeTail, n);
+
+    // ---- 8c. layers and their artifacts ------------------------------------------------
+    // Resolved here for the reason the attribute tail is: this is where the two structures that
+    // turn a source id into the entity this build assigned it are both still alive. A member is
+    // named by source id, exactly as the pairs file's ids are.
+    //
+    // **Its own stage boundary**, so an observer can say how much of the peak is here: the member
+    // tables are read whole and the published memberships stay resident, and this ran unattributed
+    // inside the attribute tail until the campaign's kills made the distinction worth having
+    // (`residency.rs`).
+    let mut published_layers = if args.layers.is_empty() {
+        crate::layers::PublishedLayers::default()
+    } else {
+        {
+            let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
             crate::layers::publish(
                 &plan,
                 &|source| {
@@ -1275,7 +1340,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 n,
                 &args.out.join(crate::PREFIX),
                 crate::PHASH,
-                &args.slice_id,
+                &args.view_id,
+                &crate::layers::predicate_artifact_keys(
+                    &args.layers,
+                    &args.schema,
+                    &minters,
+                    &|index| distinct_codes(attributes_by_entity[index].iter()),
+                )?,
             )?
         }
     };
@@ -1283,9 +1354,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     drop(source_ids);
     drop(entity_of_ordinal);
 
-    timer.end(BuildStage::AttributeTail, n);
+    crate::write_containment_report(&args.out, &published_layers)?;
 
-    // ---- 8b. attribute filter postings (filter-index §4) -------------------------------
+    timer.end(BuildStage::Layers, published_layers.layers.len() as u64);
+
+    // ---- 8d. attribute filter postings (filter-index §4) -------------------------------
     // Its own stage, after entity assignment and before the tiler sort: entity ids are final
     // here (stage 5, permanent under I9) and the values have just been read, which are the two
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
@@ -1348,10 +1421,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // ---- 10. the segment -------------------------------------------------------------
     let morton_path = segment_dir.join("morton.u32");
+    // **The resolution this frame actually gave the corpus**, counted off the same sorted codes
+    // that are about to become `morton.u32` — the linear build counts the identical thing at its
+    // own segment write. Nothing is retained: `rows` is already `(morton, tessera_id)` ascending,
+    // so distinct cells is a comparison per row (see `Occupancy::of_sorted_codes`).
+    let occupancy = crate::Occupancy::of_sorted_codes(rows.iter().map(|r| r.morton));
     write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
         .map_err(|e| BuildError::io(&morton_path, e))?;
 
-    let permutation_path = slice_dir.join("permutation.bin");
+    let permutation_path = view_dir.join("permutation.bin");
     write_permutation_iter(
         &permutation_path,
         rows.iter().map(|r| EntityId::new(r.entity as u64)),
@@ -1362,7 +1440,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted rows
     // the permutation was scattered from.
-    let row_entity_path = slice_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
     // Collected **once** and kept: this is the row→entity permutation, and the attribute tail
     // below wants the same vector. It used to be gathered here and again there, so 4 B per row was
     // held twice for the whole segment write — 1 GB at 2.5×10⁸ and 4 GB at 10⁹, for two passes over
@@ -1440,6 +1518,37 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
 
     timer.end(BuildStage::SegmentWrite, n);
 
+    // ---- 10b. the post-bundle artifact pass (decision 0094's first half) ---------------
+    //
+    // **Here and not at step 8**, where the layers were published: the pick reads where each
+    // membership landed in *row* space, and row space did not exist until the permutation two
+    // statements above. Before the manifests, so the layouts it records and the extents it writes
+    // ride the write the build was always going to make — see `crate::artifact_pass`.
+    // Taken out of the report so the pass can edit the registered records beside it, and dropped
+    // with this statement's scope: the records are what the manifest carries and the store is only
+    // what the pass observes.
+    let artifact_store = std::mem::take(&mut published_layers.store);
+    let artifact_pass = crate::artifact_pass::run(
+        &mut published_layers,
+        &artifact_store,
+        &args.out.join(crate::PREFIX),
+        crate::PHASH,
+        &args.view_id,
+        n as u32,
+        &plugin.data_plugin_hash(),
+    );
+    drop(artifact_store);
+    crate::artifact_pass::report(&artifact_pass);
+    published_layers
+        .tile_index_extents
+        .clone_from(&artifact_pass.tile_index_extents);
+    published_layers
+        .row_column_extents
+        .clone_from(&artifact_pass.row_column_extents);
+    published_layers
+        .containment_extents
+        .clone_from(&artifact_pass.containment_extents);
+
     // ---- 11. manifests ---------------------------------------------------------------
     let mut other_paths = vec![
         postings_path,
@@ -1454,6 +1563,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     other_paths.extend(ext_locator_path);
     other_paths.extend(presence_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
+    other_paths.extend(artifact_pass.paths.iter().cloned());
     let report = write_manifests(
         args,
         &BundleFiles {
@@ -1469,6 +1579,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         plan.recorded_batch_items,
         &minters,
         &published_layers,
+        occupancy,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
@@ -1476,22 +1587,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     Ok(report)
 }
 
-/// Read the declared attribute columns into **entity-major** vectors, one per declared attribute.
-///
-/// Resolved through `source_ids` → ordinal → `entity_of_ordinal`, exactly as the geometry pass
-/// above resolves its own rows, and for the same reason: entity ids are assigned in
-/// signature-sorted order (§11.1), so a source id is not its own entity id and a direct index
-/// hands every item another item's attributes. That is a defect with no symptom — every value is
-/// present, every value is well-typed, and every value belongs to a different item.
-///
-/// Returns an empty vector when the schema declares nothing, which is what keeps a schema-less
-/// build's `columns.arrow` byte-identical to the one it wrote before this existed.
-///
-/// **Every entity must be visited.** A source row this pass misses would leave its entity's slot
-/// at the type's zero — indistinguishable from a legitimately absent value, in a column that
-/// reports no error. The count is checked rather than trusted: this is a *third* pass over the
-/// points file, and a file that changed under the build is exactly what the geometry pass's own
-/// anchor check exists to catch.
 /// One attribute's values in entity order: a typed column, with presence beside it.
 ///
 /// **This replaced a `Vec<ScalarValue>` per column, and the difference is the whole reason a build
@@ -1614,15 +1709,34 @@ impl EntityColumn {
     }
 }
 
+/// Read the declared attribute columns into **entity-major** vectors, one per declared attribute,
+/// with one pass per attribute source.
+///
+/// Resolved through `source_ids` → ordinal → `entity_of_ordinal`, exactly as the geometry pass
+/// above resolves its own rows, and for the same reason: entity ids are assigned in
+/// signature-sorted order (§11.1), so a source id is not its own entity id and a direct index
+/// hands every item another item's attributes. That is a defect with no symptom — every value is
+/// present, every value is well-typed, and every value belongs to a different item.
+///
+/// Returns an empty vector when the schema declares nothing, which is what keeps a schema-less
+/// build's `columns.arrow` byte-identical to the one it wrote before this existed.
+///
+/// **An entity this pass never reaches keeps an absent slot, and that is a report rather than a
+/// failure** (`configuration.md` §1). The columns are filled absent before a row is read, so a
+/// column no source names for an entity is *absent* — the same state the source's own null
+/// produces, and the one every consumer already reads. Which entities came away with a value, and
+/// how many rows named entities this build never loaded, are counted per source and printed:
+/// a source covering a subset is a column that is simply absent for the rest, and a source
+/// covering a superset is the ordinary shape of a table that lives elsewhere.
 fn read_attributes_by_entity(
     args: &BuildArgs,
     n: u64,
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
-) -> Result<Vec<EntityColumn>> {
+) -> Result<(Vec<EntityColumn>, Vec<crate::AttributeCoverage>)> {
     if args.schema.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let attributes = &args.schema.attributes;
     // One typed column per attribute, indexed by entity — see [`EntityColumn`] for why this is not
@@ -1631,8 +1745,50 @@ fn read_attributes_by_entity(
         .iter()
         .map(|a| EntityColumn::filled(a.ty, n as usize))
         .collect();
-    let mut seen = 0u64;
-    let mut unknown: Option<u64> = None;
+    // **One sweep per source, not one over a single corpus file.** Each declared attribute names
+    // the file it is read from, so the groups are the passes; a build whose columns sit in three
+    // files reads three files, and each one joins on the identity column its own group declared.
+    let mut coverage = Vec::with_capacity(args.attribute_sources.len());
+    for group in &args.attribute_sources {
+        read_one_attribute_source(
+            args,
+            group,
+            n,
+            source_ids,
+            entity_of_ordinal,
+            minters,
+            &mut by_entity,
+            &mut coverage,
+        )?;
+    }
+    Ok((by_entity, coverage))
+}
+
+/// One attribute source's merge sweep into the entity-major columns.
+#[allow(clippy::too_many_arguments)]
+fn read_one_attribute_source(
+    args: &BuildArgs,
+    group: &crate::config::AttributeSource,
+    n: u64,
+    source_ids: &[u64],
+    entity_of_ordinal: &[u32],
+    minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    by_entity: &mut [EntityColumn],
+    coverage: &mut Vec<crate::AttributeCoverage>,
+) -> Result<()> {
+    let columns: Vec<&crate::config::Attribute> = group
+        .attributes
+        .iter()
+        .map(|&i| &args.schema.attributes[i])
+        .collect();
+    let attributes = &columns;
+    let mut matched_rows = 0u64;
+    // **Counted, not refused** (`configuration.md` §1). A row naming an entity this build did not
+    // load is what a join does with a source that covers a superset — which every legitimate
+    // attribute table over a limited build is — and ignoring it is fail-closed in both directions
+    // that matter: an absent attribute matches fewer points in a filter, and an absent access
+    // label leaves a point visible to nobody.
+    let mut unknown_rows = 0u64;
     // A value whose tag is not its column's is a build defect, not an input one, and `set` is the
     // only place that can see it. Captured rather than unwrapped: the scan's callback cannot fail,
     // and a panic here would report the row rather than the column that is wrong.
@@ -1666,44 +1822,56 @@ fn read_attributes_by_entity(
         .collect();
     let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
 
+    // How many entities came away with a value in each of this group's columns — counted where the
+    // value is moved across, which is the only place presence is known without a second scan.
+    let mut present = vec![0u64; attributes.len()];
+
     // Everything mutable is a parameter rather than a capture, so the scan's callback and this can
     // both hold it — the shape the geometry pass's `resolve` uses, and for the same borrow reason.
     let resolve = |chunk: &mut Vec<(u64, u32)>,
                    staged: &mut [EntityColumn],
                    by_entity: &mut [EntityColumn],
-                   seen: &mut u64,
-                   unknown: &mut Option<u64>| {
-        join_chunk(chunk, source_ids, |ordinal, source_id, pos| {
+                   matched: &mut u64,
+                   unknown: &mut u64,
+                   present: &mut [u64]| {
+        join_chunk(chunk, source_ids, |ordinal, _source_id, pos| {
             let Some(ordinal) = ordinal else {
-                unknown.get_or_insert(source_id);
+                *unknown += 1;
                 return Ok(());
             };
             let entity = entity_of_ordinal[ordinal as usize] as usize;
-            *seen += 1;
-            for ((column, src), attribute) in by_entity
-                .iter_mut()
+            *matched += 1;
+            // **Indexed rather than zipped**, because a group's columns are a subsequence of the
+            // declaration: the staged buffer is this group's, and each of its columns lands in the
+            // slot the declaration gave that attribute.
+            for ((&column, src), count) in group
+                .attributes
+                .iter()
                 .zip(staged.iter_mut())
-                .zip(attributes.iter())
+                .zip(present.iter_mut())
             {
-                column
-                    .take_from(entity, src, pos as usize, &attribute.name)
-                    .map_err(|e| {
-                        BuildError::Invalid(format!("attribute '{}': {e}", attribute.name))
-                    })?;
+                if src.is_present(pos as usize) {
+                    *count += 1;
+                }
+                let name = &args.schema.attributes[column].name;
+                by_entity[column]
+                    .take_from(entity, src, pos as usize, name)
+                    .map_err(|e| BuildError::Invalid(format!("attribute '{name}': {e}")))?;
             }
             Ok(())
         })
     };
 
     input::scan_attributes(
-        &args.points,
+        &group.path,
+        &group.fields,
         &args.schema,
+        attributes,
         minters,
         args.limit,
         |source_id, values| {
             let pos = chunk.len();
-            for ((column, value), attribute) in
-                staged.iter_mut().zip(values).zip(attributes.iter())
+            for ((column, value), attribute) in staged.iter_mut().zip(values).zip(attributes.iter())
             {
                 if let Err(e) = column.set(pos, value.clone(), &attribute.name) {
                     mistyped.get_or_insert_with(|| e.to_string());
@@ -1714,9 +1882,10 @@ fn read_attributes_by_entity(
                 if let Err(e) = resolve(
                     &mut chunk,
                     &mut staged,
-                    &mut by_entity,
-                    &mut seen,
-                    &mut unknown,
+                    by_entity,
+                    &mut matched_rows,
+                    &mut unknown_rows,
+                    &mut present,
                 ) {
                     failure = Some(e);
                 }
@@ -1727,9 +1896,10 @@ fn read_attributes_by_entity(
         if let Err(e) = resolve(
             &mut chunk,
             &mut staged,
-            &mut by_entity,
-            &mut seen,
-            &mut unknown,
+            by_entity,
+            &mut matched_rows,
+            &mut unknown_rows,
+            &mut present,
         ) {
             failure = Some(e);
         }
@@ -1742,19 +1912,18 @@ fn read_attributes_by_entity(
     if let Some(message) = mistyped {
         return Err(BuildError::Invalid(message));
     }
-    if let Some(source_id) = unknown {
-        return Err(input_changed(&format!(
-            "the points file's attribute pass names entity {source_id}, which its first pass did \
-             not"
-        )));
-    }
-    if seen != n {
-        return Err(input_changed(&format!(
-            "the points file's attribute pass yielded {seen} rows, but its first pass selected \
-             {n} — some row would carry a value that is absent only because it was never read"
-        )));
-    }
-    Ok(by_entity)
+    coverage.push(crate::AttributeCoverage {
+        source: group.name.clone(),
+        entities: n,
+        matched_rows,
+        unknown_rows,
+        columns: attributes
+            .iter()
+            .zip(&present)
+            .map(|(a, &count)| (a.name.clone(), count))
+            .collect(),
+    });
+    Ok(())
 }
 
 /// Write the entity-space filter postings for every column declared `index = true`, and
@@ -1798,7 +1967,7 @@ fn read_attributes_by_entity(
 /// no longer adds a second copy of the column to it.
 pub(crate) fn write_filter_postings(
     partition_dir: &Path,
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
 ) -> Result<Vec<PathBuf>> {
     write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
@@ -1810,7 +1979,7 @@ use tessera_filter_write::POSTINGS_BAND_ROWS;
 
 fn write_filter_postings_banded(
     partition_dir: &Path,
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     band_rows: usize,
 ) -> Result<Vec<PathBuf>> {
@@ -1895,13 +2064,13 @@ fn write_filter_postings_banded(
 /// against the manifest without any name table in the artefact.
 pub(crate) fn write_record_blob(
     partition_dir: &Path,
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
 ) -> Result<Vec<PathBuf>> {
     // **Blob-resident is "no other home", not "no flags"** — and for a category the two differ.
     // Records §4.2 exempts categories from the blob because their entity-space structures are the
     // vocabulary machinery's constant floor, but that floor is `postings_are_owed`, which holds
-    // for an *indexed* or `per_viewer` category and not for a `public` one. A `public` category
+    // for an *indexed* or `derived` category and not for a `public` one. A `public` category
     // declared with neither flag therefore has no hot column, no value column and no postings, so
     // excluding every category here stored its values nowhere at all and refused nothing —
     // silent loss of a field the caller declared. Asking the same question the entity-space pass
@@ -1940,7 +2109,7 @@ pub(crate) fn write_record_blob(
     let n = by_entity.first().map_or(0, EntityColumn::len);
     let mut fields: Vec<RecordField> = Vec::with_capacity(blob_columns.len());
     // A range loop on purpose: each entity gathers across *several* parallel columns, which is
-    // not the single-slice shape `needless_range_loop`'s rewrite fits.
+    // not the single-view shape `needless_range_loop`'s rewrite fits.
     #[allow(clippy::needless_range_loop)]
     for entity in 0..n {
         fields.clear();
@@ -1979,7 +2148,7 @@ pub(crate) fn write_record_blob(
 /// this column — the per-family absence rule `write_record_blob`'s doc states.
 fn record_value_of(
     value: &ScalarValue,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
 ) -> Result<Option<RecordValue>> {
     if attribute.vocabulary.is_some() {
         let code = category_code(value, &attribute.name)?;
@@ -2091,7 +2260,7 @@ fn write_column_values(
     column_dir: &Path,
     values_path: &Path,
     presence_path: &Path,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<WrittenColumn> {
     let mut present = croaring::Bitmap::new();
@@ -2214,7 +2383,7 @@ fn write_column_values(
 /// and has no upstream check, so the refusal is here, naming the column and the entity a build
 /// operator has to go and fix.
 fn keyword_values<'a>(
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &'a EntityColumn,
     present: &mut croaring::Bitmap,
     universal: &mut bool,
@@ -2267,7 +2436,7 @@ fn category_chunk(ty: ScalarType, held: &[u32]) -> Codes {
 
 /// The kind of column a declared attribute stores — the type the writer is created with, before
 /// its first value arrives.
-fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
+fn column_kind(attribute: &crate::config::Attribute) -> ColumnKind {
     // A keyword's values file is an ordinal column, not a string one: the strings live once each
     // in the dictionary beside it, and the scan reads fixed-width `u32`s at the fixed-width scan's
     // measured constants rather than at a string scan's (records §4.3).
@@ -2316,7 +2485,7 @@ fn column_kind(attribute: &crate::schema::Attribute) -> ColumnKind {
 fn push_numeric_chunks(
     writer: &mut ValueColumnWriter,
     values_path: &Path,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<()> {
     macro_rules! stream {
@@ -2378,7 +2547,7 @@ fn push_numeric_chunks(
 /// **`index = true`** is the obvious one: the column is declared filterable, and postings are
 /// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
 ///
-/// **`listing = "per_viewer"`** is the other, and it is *not* optional. That control gates the
+/// **`visibility = "derived"`** is the other, and it is *not* optional. That control gates the
 /// existence of a value name, and the gate is membership-derived: a value is offered only if the
 /// principal can see an item carrying it (per-point-attributes §3.3). Deriving that needs the
 /// per-`(column, code)` member sets, which are exactly these postings. Without them `/v1/categories`
@@ -2386,7 +2555,7 @@ fn push_numeric_chunks(
 /// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
 /// compute-admission justification ("no mask composition, no projection, no file IO") false.
 ///
-/// So a `per_viewer` category gets postings whatever its `index` says. This is the one place the
+/// So a `derived` category gets postings whatever its `index` says. This is the one place the
 /// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
 /// that does not answer identically and differ only in latency, but here a disclosure control depends
 /// on them existing.
@@ -2407,7 +2576,7 @@ fn push_numeric_chunks(
 /// format rather than minting a second one is the whole reason this crate already depends on it.
 fn write_text_index(
     column_dir: &Path,
-    attribute: &crate::schema::Attribute,
+    attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<Vec<PathBuf>> {
     // The identity was resolved at the schema parse; the name is its first component. Resolving it
@@ -2482,7 +2651,7 @@ fn write_text_index(
     Ok(vec![dict_path, postings_path])
 }
 
-fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::Attribute) -> bool {
+fn postings_are_owed(schema: &crate::config::Schema, attribute: &crate::config::Attribute) -> bool {
     if attribute.index {
         return true;
     }
@@ -2490,7 +2659,7 @@ fn postings_are_owed(schema: &crate::schema::Schema, attribute: &crate::schema::
         .vocabulary
         .as_ref()
         .and_then(|name| schema.vocabularies.get(name))
-        .is_some_and(|v| v.listing == crate::schema::Listing::PerViewer)
+        .is_some_and(|v| v.visibility == crate::config::Visibility::Derived)
 }
 
 /// The vocabulary code a category column's value carries.
@@ -2517,7 +2686,7 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
 /// `residual_row` and `tessera_row` are built through, applied to the same arrays, so a row's
 /// geometry, identity and attributes cannot come from different items.
 fn permute_attribute_tail(
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
     by_entity: Vec<EntityColumn>,
     entity_row: &[u32],
 ) -> Result<AttributeTail> {
@@ -2580,7 +2749,9 @@ struct AttributeTail {
 /// to.
 /// Takes presence per row rather than the values themselves: the entity-major columns are typed
 /// now (see [`EntityColumn`]), so absence is a bit beside the value and never a variant of it.
-pub(crate) fn render_presence_of(present_per_row: impl IntoIterator<Item = bool>) -> Option<Bitmap> {
+pub(crate) fn render_presence_of(
+    present_per_row: impl IntoIterator<Item = bool>,
+) -> Option<Bitmap> {
     let mut present = Bitmap::new();
     let mut any_absent = false;
     for (row, is_present) in present_per_row.into_iter().enumerate() {
@@ -2607,33 +2778,45 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
         None if args.limit.is_none() => input::count_point_rows(&args.points)? as usize,
         None => {
             let mut count = 0usize;
-            input::scan_points(&args.points, &args.extent, args.limit, |_| {
-                count += 1;
-                ControlFlow::Continue(())
-            })?;
+            input::scan_points(
+                &args.points,
+                &args.point_fields,
+                &args.extent,
+                args.limit,
+                |_| {
+                    count += 1;
+                    ControlFlow::Continue(())
+                },
+            )?;
             count
         }
     };
     let mut ids = Vec::with_capacity(count);
-    input::scan_points(&args.points, &args.extent, args.limit, |point| {
-        ids.push(point.source_id);
-        ControlFlow::Continue(())
-    })?;
+    input::scan_points(
+        &args.points,
+        &args.point_fields,
+        &args.extent,
+        args.limit,
+        |point| {
+            ids.push(point.source_id);
+            ControlFlow::Continue(())
+        },
+    )?;
     Ok(ids)
 }
 
 /// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
 ///
 /// The dictionary pass derives each term's descriptor from the term id alone, which is only
-/// sound when the plugin's label rule is decomposable — when `terms_of_label` over a
-/// comma-joined list yields exactly the per-element descriptors, in order. `builtin:passthrough`
-/// (R6) is defined that way; nothing in the plugin ABI requires it, and a plugin that derived
-/// descriptors from the label as a whole (a rule engine, a normaliser, anything that folds
-/// terms together) would be silently mislabelled here — every posting would name the wrong term,
-/// which is a disclosure, not a bug in a performance path.
+/// sound when the plugin's label rule is decomposable — when `terms_of_labels` over a term list
+/// yields exactly one descriptor per element, in order. `builtin:passthrough` (R6) is defined
+/// that way; nothing in the plugin ABI requires it, and a plugin that derived descriptors from
+/// the item's terms as a whole (a rule engine, a normaliser, anything that folds terms together)
+/// would be silently mislabelled here — every posting would name the wrong term, which is a
+/// disclosure, not a bug in a performance path.
 ///
 /// So this is checked twice over, and fails closed: the plugin must *be* passthrough by its
-/// declared `data_plugin_hash`, and it must *behave* decomposably on a probe label. The hash
+/// declared `data_plugin_hash`, and it must *behave* decomposably on a probe term list. The hash
 /// check is what will still hold when `build` grows a plugin parameter; the probe is what
 /// catches a passthrough whose rule was changed without its hash being bumped.
 fn require_decomposable_labelling(plugin: &impl Plugin) -> Result<()> {
@@ -2648,14 +2831,16 @@ fn require_decomposable_labelling(plugin: &impl Plugin) -> Result<()> {
             reference.data_plugin_hash()
         )));
     }
-    let probe: &[u8] = b"11,7,4096";
-    let descriptors = plugin.terms_of_label(probe)?;
-    let expected: Vec<Vec<u8>> = vec![b"11".to_vec(), b"7".to_vec(), b"4096".to_vec()];
-    if descriptors != expected {
+    let probe: Vec<Vec<u8>> = vec![b"11".to_vec(), b"7".to_vec(), b"4096".to_vec()];
+    let descriptors = plugin.terms_of_labels(&probe)?;
+    if descriptors != probe {
         return Err(BuildError::Invalid(format!(
-            "the plugin's label rule is not decomposable: label {:?} yielded {:?}, not one \
-             descriptor per comma-separated term",
-            String::from_utf8_lossy(probe),
+            "the plugin's label rule is not decomposable: the term list {:?} yielded {:?}, not \
+             one descriptor per term, in order",
+            probe
+                .iter()
+                .map(|d| String::from_utf8_lossy(d).into_owned())
+                .collect::<Vec<_>>(),
             descriptors
                 .iter()
                 .map(|d| String::from_utf8_lossy(d).into_owned())
@@ -2697,6 +2882,7 @@ struct Dictionary {
 /// Returns [`Dictionary`].
 fn build_dictionary(
     args: &BuildArgs,
+    access: &crate::AccessPlan,
     source_ids: &[u64],
     dict_dir: &std::path::Path,
 ) -> Result<Dictionary> {
@@ -2734,7 +2920,7 @@ fn build_dictionary(
         })
     };
     let mut failure: Option<BuildError> = None;
-    input::scan_pairs(&args.pairs, args.limit, |source_id, source_term| {
+    let fill = crate::scan_access(args, access, |source_id, source_term| {
         pair_rows += 1;
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {
@@ -2745,6 +2931,7 @@ fn build_dictionary(
         }
         ControlFlow::Continue(())
     })?;
+    crate::report_access_fill(args, fill);
     if let Some(error) = failure {
         return Err(error);
     }
@@ -2763,18 +2950,31 @@ fn build_dictionary(
         .collect();
     order.sort_unstable();
 
-    // The probe corpus carries integer term ids; the item's `access` label is the comma-joined
-    // decimal source term ids, so `builtin:passthrough` yields decimal-string descriptors (R6).
+    // A source term's descriptor is what `builtin:passthrough` yields for it (R6): the decimal
+    // for the exploded relation's integer ids, the term itself for a field-sourced view.
     // Streamed, not interned: the descriptors here are distinct by construction (one per
     // distinct source term) and arrive in term-id order, which is `DictStreamWriter`'s exact
     // contract — at T = 117M an interner is gigabytes of pointless ownership.
     let mut dict = tessera_authz::DictStreamWriter::new(dict_dir);
+    // **`public` is appended first, so it is term 0 in every bundle** and is minted for no other
+    // descriptor — the streaming half of what `build_in_memory` does by interning it first. A
+    // source term spelling `public` therefore maps to 0 rather than appending a second record,
+    // which would put one descriptor in the dictionary twice.
+    let public = dict.append(tessera_authz::PUBLIC_LABEL);
+    debug_assert_eq!(public, tessera_authz::PUBLIC_TERM);
     let mut pairs_of_term: Vec<(u64, u32)> = Vec::with_capacity(order.len());
-    let mut row_counts: Vec<u64> = Vec::with_capacity(order.len());
+    let mut row_counts: Vec<u64> = vec![0; 1];
     for &(_, source_term) in &order {
-        let term = dict.append(source_term.to_string().as_bytes());
+        let descriptor = access.descriptors.descriptor(source_term);
+        let rows = first_ordinal[&source_term].1;
+        if descriptor.as_bytes() == tessera_authz::PUBLIC_LABEL {
+            pairs_of_term.push((source_term, public.raw()));
+            row_counts[public.raw() as usize] = rows;
+            continue;
+        }
+        let term = dict.append(descriptor.as_bytes());
         pairs_of_term.push((source_term, term.raw()));
-        row_counts.push(first_ordinal[&source_term].1);
+        row_counts.push(rows);
     }
     drop(first_ordinal);
     drop(order);
@@ -2953,6 +3153,29 @@ fn refine_group(
     }
 }
 
+/// The distinct category-width codes a column of values carries — the input
+/// [`crate::layers::predicate_artifact_keys`] reads a predicate layer's roster out of.
+///
+/// **Absence is not a value**, so a point with no value for the column is in none of the layer's
+/// artifacts, exactly as a member row with a null key is in none of an enumerated layer's. A value
+/// of any other width contributes nothing either: `compile_membership` refuses such a column at the
+/// declaration, so one reaching here is a schema that never validated rather than a value to guess
+/// at.
+pub(crate) fn distinct_codes(
+    values: impl Iterator<Item = ScalarValue>,
+) -> std::collections::BTreeSet<u32> {
+    let mut codes = std::collections::BTreeSet::new();
+    for value in values {
+        match value {
+            ScalarValue::U8(v) => codes.insert(u32::from(v)),
+            ScalarValue::U16(v) => codes.insert(u32::from(v)),
+            ScalarValue::U32(v) => codes.insert(v),
+            _ => false,
+        };
+    }
+    codes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2960,9 +3183,9 @@ mod tests {
 
     /// **Every declared field lands in exactly one home, and the two placement passes must agree
     /// on which** (records §3). The blob takes a field the entity-space pass declines, so the
-    /// question both ask is `postings_are_owed`: a `per_viewer` category keeps its entity-space
+    /// question both ask is `postings_are_owed`: a `derived` category keeps its entity-space
     /// floor and gets no blob row, while a `public` category with neither flag — which that pass
-    /// declines, having no `index` and no per-viewer listing — must land here rather than
+    /// declines, having no `index` and no `derived` visibility — must land here rather than
     /// nowhere.
     ///
     /// The `public` half is a regression test. Excluding every category from the blob reads as
@@ -2971,36 +3194,42 @@ mod tests {
     /// refused the declaration — the caller declared a column and the corpus silently dropped it.
     #[test]
     fn a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home() {
-        let category = crate::schema::Attribute {
+        let category = crate::config::Attribute {
             name: "department".to_string(),
+            field: None,
+            title: None,
             ty: ScalarType::U16,
             analyser: None,
             vocabulary: Some("departments".to_string()),
-            vocabulary_kind: Some(crate::schema::VocabularyKind::Declared),
+            value_set: Some(crate::config::ValueSet::Closed),
             index: false,
             render: false,
         };
-        let note = crate::schema::Attribute {
+        let note = crate::config::Attribute {
             name: "note".to_string(),
+            field: None,
+            title: None,
             ty: ScalarType::Keyword,
             analyser: None,
             vocabulary: None,
-            vocabulary_kind: None,
+            value_set: None,
             index: false,
             render: false,
         };
 
-        // A `per_viewer` listing is what gives a category its entity-space floor.
-        let per_viewer = |listing| {
+        // A `derived` visibility is what gives a category its entity-space floor.
+        let vocabularies_at = |visibility| {
             let mut v = std::collections::HashMap::new();
             v.insert(
                 "departments".to_string(),
-                crate::schema::Vocabulary {
+                crate::config::Vocabulary {
                     name: "departments".to_string(),
-                    kind: crate::schema::VocabularyKind::Declared,
-                    listing,
+                    title: None,
+                    value_set: crate::config::ValueSet::Closed,
+                    visibility,
+                    width: ScalarType::U16,
                     codes: Default::default(),
-                    labels: Default::default(),
+                    titles: Default::default(),
                     reserved: Vec::new(),
                 },
             );
@@ -3008,9 +3237,9 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = crate::schema::Schema {
+        let schema = crate::config::Schema {
             attributes: vec![category.clone(), note.clone()],
-            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
+            vocabularies: vocabularies_at(crate::config::Visibility::Derived),
         };
         // One entity; values are per column, in declaration order.
         let by_entity = vec![
@@ -3042,29 +3271,33 @@ mod tests {
         );
         assert_eq!(fields[0].tag, 1, "the surviving field is `note`, tag 1");
 
-        // Alone, the `per_viewer` category leaves the stage with nothing to write at all.
+        // Alone, the `derived` category leaves the stage with nothing to write at all.
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = crate::schema::Schema {
+        let schema = crate::config::Schema {
             attributes: vec![category.clone()],
-            vocabularies: per_viewer(crate::schema::Listing::PerViewer),
+            vocabularies: vocabularies_at(crate::config::Visibility::Derived),
         };
         let only_category =
-            [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                .expect("typed column")];
+            [
+                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+                    .expect("typed column"),
+            ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage accepts");
         assert!(written.is_empty(), "no blob-resident column, no files");
 
-        // But the same category under a `public` listing owes no value column and no postings, so
+        // But the same category under `public` owes no value column and no postings, so
         // the blob is its only home and must take it.
         let dir = tempfile::tempdir().expect("tempdir");
-        let schema = crate::schema::Schema {
+        let schema = crate::config::Schema {
             attributes: vec![category],
-            vocabularies: per_viewer(crate::schema::Listing::Public),
+            vocabularies: vocabularies_at(crate::config::Visibility::Public),
         };
         let only_category =
-            [EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                .expect("typed column")];
+            [
+                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+                    .expect("typed column"),
+            ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage writes");
         assert!(
@@ -3100,8 +3333,7 @@ mod tests {
         // heavily enough to cross the Roaring threshold and code 0 (absent) carried too.
         let values = EntityColumn::from_values(
             ScalarType::U32,
-            (0..5_000u32)
-            .map(|e| {
+            (0..5_000u32).map(|e| {
                 ScalarValue::U32(match e % 7 {
                     0 => tessera_store::vocabulary::ABSENT_CODE,
                     1 => 3_999_999_999,

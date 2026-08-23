@@ -23,8 +23,8 @@ m(T)      = min(cap, max(min(k_min, cap), C_θ(T)))
 served(T) = the min(m(T), |vis(T)|) smallest members of vis(T) by tessera_id
 ```
 
-with θ anchored on the viewer's own **composed** visible total over the slice: `P_0 = ⌊m_target ·
-2⁶⁴ / V_total⌋`, `P_{d+1} = 4·P_d`, saturating — and `V_total` is `|M_auth ∩ rows(slice)|`,
+with θ anchored on the viewer's own **composed** visible total over the view: `P_0 = ⌊m_target ·
+2⁶⁴ / V_total⌋`, `P_{d+1} = 4·P_d`, saturating — and `V_total` is `|M_auth ∩ rows(view)|`,
 composed *and counted in row space* (r24). Both qualifiers are load-bearing: *composed* is the I2
 requirement below, and *row space* is §11.2's rule that an entity with no row contributes to no
 count whatever `L` says — which under group-commit allocation is the normal steady state of an
@@ -136,7 +136,7 @@ def theta_cut(v_total: int, m_target: int, depth: int) -> int | None:
     the zero branch because a count cannot be negative and this module refuses to invent a fourth
     behaviour for a state that cannot arise.
 
-    `v_total` is the viewer's **composed** visible total over the slice, counted in **row space**
+    `v_total` is the viewer's **composed** visible total over the view, counted in **row space**
     (r24) — the mask after the overlay diff, not the raw fragment (I2; see the module doc).
     """
     if v_total <= 0:
@@ -155,7 +155,7 @@ def theta_cut(v_total: int, m_target: int, depth: int) -> int | None:
 
 
 class Selection:
-    """§7.2 evaluated over one `(bundle, mask, slice, depth)`.
+    """§7.2 evaluated over one `(bundle, mask, view, depth)`.
 
     Constructed once per request and asked about each of that request's tiles, because **the count
     and the selection must read the same `vis(T)`**. §7.1 discloses the tile's exact masked count
@@ -168,11 +168,11 @@ class Selection:
     question it was not asked the first time a `ChangeSet` composed a new mask.
     """
 
-    def __init__(self, bundle: Bundle, mask: set[int], slice_id: str, depth: int):
+    def __init__(self, bundle: Bundle, mask: set[int], view_id: str, depth: int):
         self.bundle = bundle
-        self.slice_id = slice_id
+        self.view_id = view_id
         self.depth = depth
-        self.segment = bundle.segment(slice_id)
+        self.segment = bundle.segment(view_id)
 
         if self.segment.tessera_id is None:
             raise ValueError("segment has no stored tessera_id column (pre-r6 bundle)")
@@ -180,9 +180,9 @@ class Selection:
         # The full 64-bit positions, recomputed from the source geometry: the cell half decides
         # the tile, and the whole thing is what the wire comparison is against. One derivation,
         # so the tile a row is placed in and the position it is served with cannot disagree.
-        self.position_codes = bundle.row_position_codes(slice_id)
+        self.position_codes = bundle.row_position_codes(view_id)
         codes = [code >> 32 for code in self.position_codes]
-        entities = bundle.row_entity_ids(slice_id)
+        entities = bundle.row_entity_ids(view_id)
         shift = 32 - 2 * depth
 
         # The literal pass: for every row, which depth-`depth` tile is it in, and is its entity
@@ -328,12 +328,12 @@ class Selection:
 def counts(
     bundle: Bundle,
     mask: set[int],
-    slice_id: str,
+    view_id: str,
     zoom: int,
     bbox: tuple[float, float, float, float],
 ) -> dict[int, int]:
     """`{tile: count of mask-visible rows}` for every depth-`zoom` tile overlapping `bbox`."""
-    selection = Selection(bundle, mask, slice_id, zoom)
+    selection = Selection(bundle, mask, view_id, zoom)
     return selection.counts_for(morton.tiles_for_bbox(bbox, zoom, bundle.extent))
 
 
@@ -363,10 +363,10 @@ def params_from_meta(meta_selection: dict, *, k: int, v_total: int) -> dict:
     }
 
 
-def visible_total(bundle: Bundle, mask: set[int], slice_id: str) -> int:
-    """The viewer's total visible count over the whole slice — θ's anchor input.
+def visible_total(bundle: Bundle, mask: set[int], view_id: str) -> int:
+    """The viewer's total visible count over the whole view — θ's anchor input.
 
     Computed independently from the segment and the pairs-derived mask, deliberately **not** read
     back from a server response (see the module doc).
     """
-    return sum(1 for entity in bundle.row_entity_ids(slice_id) if entity in mask)
+    return sum(1 for entity in bundle.row_entity_ids(view_id) if entity in mask)

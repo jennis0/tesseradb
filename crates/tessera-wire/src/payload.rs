@@ -253,7 +253,7 @@ pub fn sub_cells_frame(cells: &[u64], counts: &[u64]) -> Vec<u8> {
 pub struct ArtifactRow<'a> {
     pub layer: &'a str,
     pub tessera_id: u64,
-    pub stable_key: Option<&'a str>,
+    pub key: Option<&'a str>,
     pub masked_count: u64,
     /// Derived geometry, in the **grid units** the points frame's `code` is built from — the
     /// client needs no quantisation extent to draw either. Each is present exactly when the
@@ -262,13 +262,27 @@ pub struct ArtifactRow<'a> {
     /// `[qx_min, qy_min, qx_max, qy_max]`.
     pub bbox: Option<[u32; 4]>,
     pub hull: Option<&'a [[u32; 2]]>,
-    /// The publisher's supplied content — **one variation, entire**, one value per kind the layer
+    /// The publisher's supplied content — **one entry of the ranked `contents`, entire**, one value per kind the layer
     /// declares, in declaration order. Empty where the layer declares none.
     ///
-    /// A viewer receiving this artifact contains that variation's generating set completely; one
+    /// A viewer receiving this artifact contains that entry's generating set completely; one
     /// who contains none receives no artifact at all rather than this list empty. So there is no
     /// *content withheld* state on this wire and no shape to express one.
     pub content: &'a [String],
+    /// The identifier of this artifact's parent, **and only ever one that is in this same
+    /// response**.
+    ///
+    /// This is the structure a client needs to nest what it draws, or to filter to one subtree
+    /// while still drawing the rest of the map. It is what a hierarchy is *for* on a levelled
+    /// layer, whose edges carry containment rather than a ladder to coarsen along.
+    ///
+    /// **Null is the fail-closed answer and covers two different situations deliberately.** The
+    /// artifact may be a root; or its parent may exist and not have been served — below its own
+    /// criterion for this viewer, suppressed, or dropped by the frontier. Naming a parent in the
+    /// second case would disclose that a coarser grouping exists which this principal is not
+    /// cleared to see, so the two are one value here and a client must read null as *no parent in
+    /// this response* rather than as *no parent*.
+    pub parent_id: Option<u64>,
 }
 
 /// The kind-5 artifacts frame: one row per served artifact.
@@ -296,7 +310,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Field::new("layer", DataType::Utf8, false),
         Field::new("tessera_id", DataType::UInt64, false),
         // A publisher need not supply a key.
-        Field::new("stable_key", DataType::Utf8, true),
+        Field::new("key", DataType::Utf8, true),
         Field::new("masked_count", DataType::UInt64, false),
         Field::new("centroid_x", DataType::Float64, true),
         Field::new("centroid_y", DataType::Float64, true),
@@ -322,6 +336,10 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
             false,
         ),
+        // **Appended last, and its position is contract**, on the same argument the tiles frame's
+        // `served` carries: decoders that index this batch positionally exist, so inserting it
+        // earlier would silently rebind every column after it.
+        Field::new("parent_id", DataType::UInt64, true),
     ]));
 
     let mut hull_x = ListBuilder::new(UInt32Builder::new()).with_field(item());
@@ -362,7 +380,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|r| r.tessera_id),
         )),
-        Arc::new(StringArray::from_iter(rows.iter().map(|r| r.stable_key))),
+        Arc::new(StringArray::from_iter(rows.iter().map(|r| r.key))),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|r| r.masked_count),
         )),
@@ -387,6 +405,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(hull_x.finish()),
         Arc::new(hull_y.finish()),
         Arc::new(content.finish()),
+        Arc::new(UInt64Array::from_iter(rows.iter().map(|r| r.parent_id))),
     ];
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");

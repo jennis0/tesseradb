@@ -33,7 +33,7 @@ make the mechanism unaffordable at exactly the sizes it exists for.
 
 ## Materialisation — the shim, and why it exists
 
-The corpus reaches the build as files — points, pairs, `schema.toml` — written by the crate's own
+The corpus reaches the build as files — points, pairs, `config.toml` — written by the crate's own
 materialisers, and **the CLI carries no verb that writes them**: `tessera corpus` has `items` and
 `census` only, which answer expectations but cannot produce the build's inputs, and §12.1's
 "the corpus emits a batch and the driver posts it" names no route from Python to
@@ -67,7 +67,7 @@ from it.
   absence and decision 0064's wire half is deferred — so the expected side maps an absent render
   number to 0 on both the points tail and the drill-down. A category's absence is its reserved
   code 0 on the tail and an omitted field at drill-down, which the declaration's own key→code
-  table decides ([`Declaration`], parsed from the materialised `schema.toml` rather than restated
+  table decides ([`Declaration`], parsed from the materialised `config.toml` rather than restated
   here).
 - **The points tail is read positionally, not by name.** The tail's buffers are the render columns
   in manifest order, but the wire currently labels them with the first *k* names of the **full**
@@ -100,15 +100,16 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 
 from oracle import morton
-from oracle.harness import CLI_BIN, REPO_ROOT, ensure_cli_built
+from oracle.harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
 
 from .battery import Categories, Item, Meta, Recorded, Viewport
 from .canonical import Json, Streamed
 
 #: The grid's own coordinates — the extent the conformance fixtures build against (contracts
-#: §2.5), and the one the corpus verbs default to.
+#: §2.5), and the one the corpus verbs default to. The **build** reads it from the generator's own
+#: declaration, which states it as the view's `extent`; this is the oracle's copy, used to derive
+#: expected geometry.
 GRID_EXTENT = (0.0, 65536.0, 0.0, 65536.0)
-GRID_EXTENT_ARG = "0,65536,0,65536"
 
 #: A fixed identity key for the fixture bundle: the lineage decision is "a test fixture, minted
 #: deterministically", stated per the build's own rule rather than circumvented. Nothing may
@@ -150,7 +151,7 @@ fn main() -> ExitCode {
     let corpus = tessera_corpus::Corpus::new(seed, n, extent).expect("corpus");
     corpus.write_points_parquet(&out.join("points.parquet")).expect("points");
     corpus.write_pairs_parquet(&out.join("pairs.parquet")).expect("pairs");
-    std::fs::write(out.join("schema.toml"), corpus.schema_toml()).expect("schema");
+    std::fs::write(out.join("config.toml"), corpus.config_toml()).expect("config");
     if hi > lo {
         let batch = corpus.ingest_batch(lo..hi);
         let file = std::fs::File::create(out.join("ingest.arrows")).expect("ingest file");
@@ -248,29 +249,35 @@ def materialise_corpus(
         ingest_hi=hi,
         points=out_dir / "points.parquet",
         pairs=out_dir / "pairs.parquet",
-        schema=out_dir / "schema.toml",
+        schema=out_dir / "config.toml",
         ingest=(out_dir / "ingest.arrows") if hi > lo else None,
     )
 
 
-def build_bundle(files: CorpusFiles, bundle_root: Path, *, slice_id: str = "s0") -> None:
+def build_bundle(files: CorpusFiles, bundle_root: Path, *, view_id: str = "s0") -> None:
     """`tessera build` over the materialised inputs — the same invocation shape as the catalogue's
-    (`oracle.catalogue._build_argv`): external ids minted from the source entity id (the denies
-    address items by exactly those bytes), a stated identity-key decision, the grid extent."""
+    (`oracle.catalogue._build_argv`): a deployment file naming the declaration and the output,
+    external ids minted from the source entity id (the denies address items by exactly those
+    bytes), and the identity-key decision stated through the environment.
+
+    Nothing names a source or an extent here: the generator's own declaration sits beside the two
+    parquet files it names, and carries the grid extent this corpus's expected answers are stated
+    in (`configuration.md` §1, §3). `view_id` is the view that declaration declares.
+    """
     ensure_cli_built()
+    deployment = write_deployment(
+        files.schema.parent / "tessera.toml", bundle=bundle_root, schema=files.schema
+    )
     subprocess.run(
         [
             str(CLI_BIN), "build",
-            "--points", str(files.points),
-            "--pairs", str(files.pairs),
-            "--schema", str(files.schema),
-            "--extent", GRID_EXTENT_ARG,
-            "--slice", slice_id,
+            "--deployment", str(deployment),
+            "--view", view_id,
             "--out", str(bundle_root),
             "--mint-external-ids",
-            "--id-key", FIXTURE_ID_KEY_HEX,
         ],
         cwd=REPO_ROOT,
+        env=build_env(FIXTURE_ID_KEY_HEX),
         check=True,
         capture_output=True,
     )
@@ -279,6 +286,29 @@ def build_bundle(files: CorpusFiles, bundle_root: Path, *, slice_id: str = "s0")
 # ---------------------------------------------------------------------------------------------
 # The declaration — parsed from the materialised schema, never restated
 # ---------------------------------------------------------------------------------------------
+
+
+def _value_codes(vocabulary: Mapping[str, object]) -> Mapping[str, int] | None:
+    """A vocabulary's `key -> code` map, in either spelling (configuration.md §1).
+
+    `values` is a table when the caller pinned codes and a bare array when it left them to the
+    build, which assigns from 1 in declaration order, skipping `reserved` and never reaching the
+    absent sentinel. The oracle has to mirror that assignment rather than refuse the spelling: it is
+    the second reader the conformance suite exists to differ against, and a reader that only speaks
+    one half of the surface silently narrows what the suite can cover.
+    """
+    values = vocabulary.get("values")
+    if values is None or isinstance(values, Mapping):
+        return values
+    reserved = set(vocabulary.get("reserved", ()))
+    codes: dict[str, int] = {}
+    code = 1
+    for key in values:
+        while code in reserved:
+            code += 1
+        codes[key] = code
+        code += 1
+    return codes
 
 
 @dataclass(frozen=True)
@@ -293,21 +323,26 @@ class ColumnDecl:
 
 @dataclass(frozen=True)
 class Declaration:
-    """The corpus's declared columns, read from the `schema.toml` the build compiled — so the
+    """The corpus's declared columns, read from the `config.toml` the build compiled — so the
     expected shapes below and the bundle's manifest share one source."""
 
     columns: tuple[ColumnDecl, ...]
 
     @classmethod
-    def load(cls, schema_path: Path) -> "Declaration":
-        raw = tomllib.loads(schema_path.read_text())
+    def load(cls, config_path: Path) -> "Declaration":
+        # A category's value table lives on the `[[vocabulary]]` block it names, not on the column
+        # — `width`, `value_set` and `visibility` belong to the code space rather than to any one
+        # attribute (configuration.md §1). The column is resolved through the reference here so the
+        # expected shapes go on reading one table per column.
+        raw = tomllib.loads(config_path.read_text())
+        vocabularies = {v["name"]: v for v in raw.get("vocabulary", ())}
         columns = tuple(
             ColumnDecl(
                 name=a["name"],
                 type=a["type"],
                 render=bool(a.get("render", False)),
                 index=bool(a.get("index", False)),
-                values=a.get("values"),
+                values=_value_codes(vocabularies.get(a.get("vocabulary", ""), {})),
             )
             for a in raw["attribute"]
         )
@@ -746,7 +781,6 @@ __all__ = [
     "Expected",
     "FIXTURE_ID_KEY_HEX",
     "GRID_EXTENT",
-    "GRID_EXTENT_ARG",
     "TotalVerificationFailure",
     "build_bundle",
     "check_categories",

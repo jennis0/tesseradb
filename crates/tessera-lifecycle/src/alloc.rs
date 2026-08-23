@@ -251,10 +251,13 @@ pub fn high_water_from(records: &[WalRecord]) -> u64 {
             }
             WalRecord::ChangeByEntity { .. } => {}
             // A row-less allocation moves the *other* mark, and moving this one with it would
-            // hand every point id below the row-less region away in a single step.
+            // hand every point id below the row-less region away in a single step. A growth
+            // allocates nothing at all — it names an artifact that already has its ordinal and its
+            // entity — so it moves neither mark.
             WalRecord::LayerCreate { .. }
             | WalRecord::LayerDrop { .. }
-            | WalRecord::ArtifactPublish { .. } => {}
+            | WalRecord::ArtifactPublish { .. }
+            | WalRecord::ArtifactGrow { .. } => {}
         }
     }
     hw
@@ -504,19 +507,18 @@ mod tests {
 
     fn layer_create(entity: u64, run_start: u64) -> WalRecord {
         use tessera_types::layer::{
-            EntityRun, Hierarchy, HierarchyKind, LayerAccess, MembershipSource, ReservedRuns,
+            EntityRun, Hierarchy, HierarchyKind, MembershipSource, ReservedRuns,
         };
         WalRecord::LayerCreate {
-            declaration: tessera_types::layer::LayerDeclaration {
+            declaration: Box::new(tessera_types::layer::LayerDeclaration {
                 name: format!("l{entity}"),
-                title: "l".into(),
-                slices: Vec::new(),
+                title: Some("l".into()),
+                views: Vec::new(),
                 membership: MembershipSource::Enumerated,
-                access: LayerAccess {
-                    label: None,
-                    artifacts_carry_own: false,
-                },
-                visible_when: None,
+                value_set: Default::default(),
+                visibility: None,
+                artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+                require_member_visibility: None,
                 hierarchy: Hierarchy {
                     kind: HierarchyKind::Flat,
                     prune_children: false,
@@ -524,7 +526,9 @@ mod tests {
                 content: Default::default(),
                 depends_on: Vec::new(),
                 levels: Vec::new(),
-            },
+                layout: None,
+                shape: None,
+            }),
             layer_entity: EntityId::new(entity),
             runs: vec![ReservedRuns::from_runs(vec![EntityRun {
                 start: run_start,
@@ -541,10 +545,7 @@ mod tests {
         assert_eq!(low_water_from(&[]), ROWLESS_CEILING);
 
         let a = layer_create(ROWLESS_CEILING - 1, ROWLESS_CEILING - RESERVED_BLOCK);
-        let b = layer_create(
-            ROWLESS_CEILING - 2,
-            ROWLESS_CEILING - 3 * RESERVED_BLOCK,
-        );
+        let b = layer_create(ROWLESS_CEILING - 2, ROWLESS_CEILING - 3 * RESERVED_BLOCK);
         assert_eq!(
             low_water_from(&[a.clone(), b.clone()]),
             ROWLESS_CEILING - 3 * RESERVED_BLOCK,
@@ -552,7 +553,10 @@ mod tests {
         );
         // Order-independent, like its upward mirror: a later, higher record must not pull the mark
         // back up.
-        assert_eq!(low_water_from(&[b, a.clone()]), ROWLESS_CEILING - 3 * RESERVED_BLOCK);
+        assert_eq!(
+            low_water_from(&[b, a.clone()]),
+            ROWLESS_CEILING - 3 * RESERVED_BLOCK
+        );
 
         // A drop does not raise it. The name is tombstoned and the ids stay spent (decision 0072
         // is settled and unbuilt), so raising the mark would reissue exactly the ids whose
@@ -613,7 +617,7 @@ mod tests {
             rows: vec![crate::wal::WalRow {
                 external_id: Some(entity_id.to_le_bytes().to_vec()),
                 entity_id: EntityId::new(entity_id),
-                slice: "default".to_string(),
+                view: "default".to_string(),
                 descriptors: Vec::new(),
                 x: 0.0,
                 y: 0.0,

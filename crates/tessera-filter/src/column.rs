@@ -146,7 +146,7 @@ impl ColumnPostings {
     /// The caller does it once, at the end, if the result is going anywhere that cares.
     pub fn narrow(&self, value: AttrLocalId, candidate: &Bitmap) -> io::Result<Bitmap> {
         // A candidate with nothing in it intersects to nothing, whatever the posting holds — and
-        // taking that here means a principal who can see none of this slice reads no posting bytes
+        // taking that here means a principal who can see none of this view reads no posting bytes
         // at all rather than reading them to intersect them away.
         if candidate.is_empty() {
             return Ok(Bitmap::new());

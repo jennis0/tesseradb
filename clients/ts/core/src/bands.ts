@@ -93,7 +93,7 @@ export type Band = {
  * Does this band hold the whole of `served(T)`, and will it still at `k`?
  *
  * θ is viewport-invariant — design §7.2's threshold depends on the mask, the generation and the
- * slice, never on the bounding box or the zoom — so at a fixed content key and fixed depth `m(T)`
+ * view, never on the bounding box or the zoom — so at a fixed content key and fixed depth `m(T)`
  * does not move, and the `served` the server already reported is still current. Two clauses:
  *
  * 1. the band holds every point the definition serves; and

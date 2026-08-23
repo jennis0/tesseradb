@@ -9,7 +9,7 @@
 //! - **Pairs** — an explicit `entity_id: u32` column beside the values, ascending.
 //! - **Roaring** — a `croaring` presence bitmap; values stored compactly, rank gives the slot.
 //! - **Runs** — a `(start, len, base_rank)` table, which is what a presence bitmap degenerates to
-//!   when entity ranges arrive in contiguous per-slice blocks.
+//!   when entity ranges arrive in contiguous per-view blocks.
 //!
 //! Everything is in RAM: the probe reports serialised byte counts rather than writing files, both
 //! because the disk this ran on had no room and because the question is bytes-and-throughput
@@ -43,23 +43,23 @@ fn splitmix(x: u64) -> u64 {
 enum Presence {
     /// Every entity carries a value. The common case for a column declared over the whole corpus.
     All,
-    /// Ten slices, interleaved in blocks of `SLICE_RUN` entities. Models concurrent multi-slice
-    /// ingest: a commit window is per slice, but windows interleave, so an entity range is
+    /// Ten views, interleaved in blocks of `VIEW_RUN` entities. Models concurrent multi-view
+    /// ingest: a commit window is per view, but windows interleave, so an entity range is
     /// ascending-with-holes rather than contiguous (write-path §4.2).
-    Slices,
+    Views,
     /// One entity in ten, scattered. The worst case for any run-structured encoding.
     Scattered,
 }
 
-/// Entities per slice-block. A commit window's worth of ingest at the owner's stated rates.
-const SLICE_RUN: u64 = 100_000;
-const SLICE_COUNT: u64 = 10;
+/// Entities per view-block. A commit window's worth of ingest at the owner's stated rates.
+const VIEW_RUN: u64 = 100_000;
+const VIEW_COUNT: u64 = 10;
 
 impl Presence {
     fn name(self) -> &'static str {
         match self {
             Presence::All => "all",
-            Presence::Slices => "slices-10",
+            Presence::Views => "views-10",
             Presence::Scattered => "scattered-10pct",
         }
     }
@@ -68,8 +68,8 @@ impl Presence {
     fn holds(self, e: u64) -> bool {
         match self {
             Presence::All => true,
-            // Slice 0's blocks: every SLICE_COUNT-th run of SLICE_RUN entities.
-            Presence::Slices => (e / SLICE_RUN) % SLICE_COUNT == 0,
+            // View 0's blocks: every VIEW_COUNT-th run of VIEW_RUN entities.
+            Presence::Views => (e / VIEW_RUN) % VIEW_COUNT == 0,
             Presence::Scattered => splitmix(e ^ 0xA5A5) % 10 == 0,
         }
     }
@@ -317,7 +317,7 @@ fn main() {
     println!("n,presence,layout,present_entities,addressing_bytes,values_bytes,addressing_bytes_per_present,candidate,scan_ms,hits");
 
     for &n in &scales {
-        for presence in [Presence::All, Presence::Slices, Presence::Scattered] {
+        for presence in [Presence::All, Presence::Views, Presence::Scattered] {
             // `bare` is only meaningful when presence is universal: with holes the array index
             // stops being the entity id, which is the whole point at issue.
             let layouts: &[&str] = if presence == Presence::All {

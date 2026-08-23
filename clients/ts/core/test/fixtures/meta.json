@@ -7,7 +7,7 @@
       "arrow_type": "u8",
       "category": {
         "kind": "declared",
-        "listing": "public",
+        "visibility": "public",
         "vocabulary": "archive"
       },
       "index": false,
@@ -19,7 +19,7 @@
       "arrow_type": "u16",
       "category": {
         "kind": "declared",
-        "listing": "public",
+        "visibility": "public",
         "vocabulary": "primary_category"
       },
       "index": false,
@@ -31,7 +31,7 @@
       "arrow_type": "u16",
       "category": {
         "kind": "declared",
-        "listing": "public",
+        "visibility": "public",
         "vocabulary": "primary_category"
       },
       "index": false,
@@ -43,7 +43,7 @@
       "arrow_type": "u16",
       "category": {
         "kind": "discovered",
-        "listing": "per_viewer",
+        "visibility": "derived",
         "vocabulary": "category_suffix"
       },
       "index": false,
@@ -352,7 +352,7 @@
       "levels": [],
       "membership": "enumerated",
       "name": "clusters/golden",
-      "slices": [
+      "views": [
         "s0"
       ],
       "supplied_content": [],
@@ -375,7 +375,7 @@
     "max_underlay_offset": 4,
     "theta_target_marks": 16
   },
-  "slices": [
+  "views": [
     {
       "display_name": "s0",
       "id": "s0"

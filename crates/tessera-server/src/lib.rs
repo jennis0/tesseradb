@@ -73,7 +73,7 @@ pub struct Prepared {
 /// against distinct grant sets — and their constants say so.
 ///
 /// **This is a floor, not a sizing.** `DEFAULT_ROW_PROJECTION_CACHE_BYTES` carries a further 2× for
-/// entry-count headroom (a second slice, or a generation swap's transient duplicate); passing this
+/// entry-count headroom (a second view, or a generation swap's transient duplicate); passing this
 /// check at exactly 1× is admissible but leaves none. And neither bound is a memory *budget*: peak
 /// is `bound + compute_admission × per_entry`, which at 48-way admission is another ~6 GB — see
 /// `tessera_engine`'s `RowProjectionCache` doc, where that arithmetic lives with its operand.
@@ -139,7 +139,7 @@ fn validate_cache_bounds(config: &Config) -> Result<(), BoxError> {
 /// references (§5.3). **The base is not excluded by a rule; it is excluded by this bound**, which
 /// is why the bound is validated rather than assumed.
 ///
-/// The base segment is the largest in each slice — a flush segment is one tick's arrivals — so the
+/// The base segment is the largest in each view — a flush segment is one tick's arrivals — so the
 /// comparison is against the largest segment the deployment holds.
 fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), BoxError> {
     let generation = engine.generation();
@@ -147,7 +147,7 @@ fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), 
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.slices.values())
+        .flat_map(|p| p.views.values())
         .flat_map(|s| s.segments.iter())
         .map(|s| s.columns.byte_len() + s.morton.byte_len())
         .max()
@@ -173,6 +173,36 @@ fn validate_merge_size_relation(config: &Config, engine: &Engine) -> Result<(), 
 pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     let config = config::load(config_path)?;
     validate_cache_bounds(&config)?;
+
+    // **The two serving secrets, read before anything is opened.** They are located in
+    // `tessera.toml` and read here rather than at parse, because `tessera build` reads the same
+    // file and has no business requiring a serving credential to be exported before it will write
+    // a bundle (`configuration.md` §3). Here means *first*, though: a plane that cannot be
+    // credentialed must refuse before the bundle is opened and the WAL is touched, not after.
+    let session_credential = config.session_credential.resolve("session")?;
+    let operator_credential = config.operator_credential.resolve("operator")?;
+
+    // **The addresses, for the same reason and with the same posture.** `[serve]` is optional in
+    // the deployment file because `tessera build` reads it too and a build has nothing to listen
+    // on; what is not optional is a *server* coming up without them. Refused here rather than
+    // defaulted, on SA §7's rule — a default port is a listening socket nobody chose.
+    for (what, declared) in [
+        ("viewer", config.viewer_addr.is_some()),
+        ("session", config.session_addr.is_some()),
+        ("control", config.control_listen.is_some()),
+    ] {
+        if !declared {
+            return Err(format!(
+                "this deployment declares no `{what}` address. `tessera serve` needs all three — \
+                 add them under `[serve]` in the deployment file:\n\n    [serve]\n    \
+                 viewer  = \"127.0.0.1:8080\"\n    session = \"127.0.0.1:8081\"\n    \
+                 control = \"unix:/run/tessera/control.sock\"\n\n`[serve]` is optional because \
+                 `tessera build` reads this same file and has nothing to listen on; it is required \
+                 to serve, and there is no default because a default port is a socket nobody chose"
+            )
+            .into());
+        }
+    }
 
     let engine_config = EngineConfig {
         token_max_lifetime_secs: config.token_max_lifetime_secs,
@@ -246,6 +276,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         config.row_projection_cache_bytes,
         config.fragment_cache_bytes,
     );
+    // The third bound, and its own setter for the reason `Engine::set_masked_count_cache_bytes`
+    // gives: it exists for a deployment that has a row-major layer at all, which is a property of
+    // the corpus rather than of the box.
+    engine.set_masked_count_cache_bytes(config.masked_count_cache_bytes);
     // `single_flight_wait_ms`' consumer — how long a request parks on another request's
     // row-projection build before it is shed (decision 0058).
     engine.set_single_flight_wait_ms(config.single_flight_wait_ms);
@@ -292,8 +326,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         stream_flush_bytes: config.stream_flush_bytes,
         stream_write_stall_ms: config.stream_write_stall_ms,
         stream_deadline_ms: config.stream_deadline_ms,
-        session_credential: config.session_credential.clone(),
-        operator_credential: config.operator_credential.clone(),
+        session_credential,
+        operator_credential,
         dev_cors_origins: config.dev_cors_origins.clone(),
         #[cfg(feature = "fault-injection")]
         faults,
@@ -321,8 +355,15 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
 pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
     let Prepared { state, config } = prepared;
 
-    let viewer_listener = tokio::net::TcpListener::bind(config.viewer_addr).await?;
-    let session_listener = tokio::net::TcpListener::bind(config.session_addr).await?;
+    // `prepare` refused a deployment declaring no addresses, so these are present by construction.
+    let viewer_addr = config
+        .viewer_addr
+        .expect("prepare() refuses a serve with no viewer address");
+    let session_addr = config
+        .session_addr
+        .expect("prepare() refuses a serve with no session address");
+    let viewer_listener = tokio::net::TcpListener::bind(viewer_addr).await?;
+    let session_listener = tokio::net::TcpListener::bind(session_addr).await?;
 
     let viewer_router = viewer::router(Arc::clone(&state));
     let session_router = session::router(Arc::clone(&state));
@@ -333,7 +374,10 @@ pub async fn run(prepared: Prepared) -> Result<(), BoxError> {
     let session_task =
         tokio::spawn(async move { axum::serve(session_listener, session_router).await });
 
-    let control_task = match config.control_listen {
+    let control_task = match config
+        .control_listen
+        .expect("prepare() refuses a serve with no control address")
+    {
         ControlListen::Tcp(addr) => {
             let listener = tokio::net::TcpListener::bind(addr).await?;
             tokio::spawn(async move { axum::serve(listener, control_router).await })

@@ -22,7 +22,7 @@
 #                 --schema probes/2026-08-12-epic1-measurements/schema-render.toml \
 #                 --values archive=data/scaled/attrs/archive.parquet \
 #                 --values primary_category=data/scaled/attrs/primary_category.parquet \
-#                 --extent 0,65536,0,65536 --slice s0 --limit 2422486
+#                 --extent 0,65536,0,65536 --view s0 --limit 2422486
 
 [[attribute]]
 name       = "archive"

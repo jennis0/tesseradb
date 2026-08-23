@@ -51,7 +51,7 @@ function replica(
       return serve({bbox, zoom: req.zoom, k: req.k});
     },
     Q,
-    {slice: 's', now: () => 0, revalidateAfterMs: Infinity, ...opts}
+    {view: 's', now: () => 0, revalidateAfterMs: Infinity, ...opts}
   );
   r.reset();
   return {r, calls};

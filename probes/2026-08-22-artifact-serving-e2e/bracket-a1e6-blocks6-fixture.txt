@@ -1,0 +1,16 @@
+# rows=100000000 artifacts=1000000 members=100 runs=4 blocks=6 ranks=2 gset=8 spread=1 iters=6 legacy=false arm=dispersed
+# row space: 1.4 s
+# entity-space records: 8.7 s, 6.0 row blocks per artifact
+# coverage: 0.960 members per row (96000000 members over 100000000 rows), 6.0 row blocks per artifact
+# containment groups: 32 distinct expressions over 2000000 (artifact, rank) pairs, 0.7 s, 7.3 MB serialised
+# projection (the generation move): 41.9 s
+# label column: the layer does not partition, so there is none
+# list column: not built — this arm is served artifact-major at every zoom
+# tile index: 0.1 s to build, 2.0 MB serialised
+# everywhere (too wide for any node): 16385 of 1000000 artifacts, 1.6%
+# session verdicts at mask=100%: 106 ms, 1000000 of 1000000 pass
+# session verdicts at mask=75%: 151 ms, 830137 of 1000000 pass
+# session verdicts at mask=50%: 173 ms, 589897 of 1000000 pass
+# session verdicts at mask=25%: 192 ms, 330088 of 1000000 pass
+# session verdicts at mask=9.375%: 176 ms, 144553 of 1000000 pass
+# session verdicts at mask=3.125%: 295 ms, 46674 of 1000000 pass

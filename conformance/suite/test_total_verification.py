@@ -71,7 +71,7 @@ SEED = 20260815
 N = 4096
 INGEST = (N, N + 64)
 BBOX = (0.0, 0.0, 65536.0, 65536.0)
-SLICE_ID = "s0"
+VIEW_ID = "s0"
 #: Above every visible total at this fixture size, so every tile is saturated, the row half sees
 #: every visible row, and a denied row's absence is the corpus's, not the selection's.
 K = 200_000
@@ -94,7 +94,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
     files = materialise_corpus(SEED, N, work / "corpus", ingest=INGEST)
     declaration = Declaration.load(files.schema)
     bundle_root = work / "bundle"
-    build_bundle(files, bundle_root, slice_id=SLICE_ID)
+    build_bundle(files, bundle_root, view_id=VIEW_ID)
 
     server, proc = spawn_server(bundle_root, work)
     try:
@@ -104,7 +104,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
         # The establishing viewport: served ids for the battery, and the tessera→fx join every
         # deny and every drill-down expectation needs (`tessera_id` is minted per build and never
         # persisted; `fx_key` is the identity that survives).
-        raw = server.viewport(token, SLICE_ID, 3, BBOX, k=K, underlay_offset=2)
+        raw = server.viewport(token, VIEW_ID, 3, BBOX, k=K, underlay_offset=2)
         points = wire.decode_viewport_points(raw)
         fx_of_tessera = dict(
             zip(
@@ -115,7 +115,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
         item_ids = tuple(sorted(fx_of_tessera)[:3])
         battery = build_battery(
             meta,
-            slice_id=SLICE_ID,
+            view_id=VIEW_ID,
             item_ids=item_ids,
             bbox=BBOX,
             zooms=(0, 3),
@@ -174,7 +174,7 @@ def run(tmp_path_factory) -> SimpleNamespace:
                 else server.authorise([str(t) for t in grant])["token"]
             )
             canon = record_one(
-                server, grant_token, Viewport(SLICE_ID, CENSUS_DEPTH, bbox=BBOX, k=2)
+                server, grant_token, Viewport(VIEW_ID, CENSUS_DEPTH, bbox=BBOX, k=2)
             )
             censuses[name] = tile_visible(canon)
 

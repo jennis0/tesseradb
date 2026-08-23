@@ -159,19 +159,19 @@ pub enum WalScalar {
 /// to make that identity durable. `None` here must never collide with `None` elsewhere, and must
 /// never be treated as "an external id happens to be empty".
 ///
-/// `slice` names the row space the row's future row belongs to. It is durable rather than
-/// re-derived because a flush segment covers a contiguous entity range only *within one slice*:
-/// with more than one slice a commit window's entity range interleaves across them, and a
+/// `view` names the row space the row's future row belongs to. It is durable rather than
+/// re-derived because a flush segment covers a contiguous entity range only *within one view*:
+/// with more than one view a commit window's entity range interleaves across them, and a
 /// segment's range becomes ascending-with-holes. The row is the only place that fact survives a
 /// restart, and the WAL is append-only — so the field goes in while the layout is still being
 /// revised, not once a published segment depends on it. The handler resolves it against the
-/// bundle's declared slices and refuses anything else; nothing defaults it, because a defaulted
-/// slice is how a row silently joins the wrong row space.
+/// bundle's declared views and refuses anything else; nothing defaults it, because a defaulted
+/// view is how a row silently joins the wrong row space.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
     pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
-    pub slice: String,
+    pub view: String,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f32,
     pub y: f32,
@@ -302,7 +302,13 @@ pub enum WalRecord {
     /// decide whether it is reachable and what may be served from it, so a registration that
     /// recorded only the name would come back from replay reachable by everyone.
     LayerCreate {
-        declaration: LayerDeclaration,
+        /// **Boxed, and the box is not tidiness.** A declaration carries two access labels, a
+        /// member default, a views list, a computed list and a level list, which makes it several
+        /// times the size of every other record's payload — and a `WalRecord` is sized by its
+        /// largest variant, so an unboxed one would widen every `IngestBatch` row buffer in the
+        /// commit window. Postcard is transparent through the box, so the record's bytes are
+        /// unchanged.
+        declaration: Box<LayerDeclaration>,
         /// The layer's own entity, so layer suppression rides `/control/changes` and the deny lane
         /// unchanged rather than needing a second mechanism.
         layer_entity: EntityId,
@@ -343,6 +349,47 @@ pub enum WalRecord {
         extend_runs: Vec<EntityRun>,
         artifacts: Vec<PublishedArtifact>,
     },
+    /// Entities joining the memberships of artifacts that **already exist** — a build's member
+    /// table performed at the other entry point
+    /// ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+    ///
+    /// **A delta, never a restated membership, and that is the whole reason this variant exists.**
+    /// Restating the record at its own ordinal replays correctly and needs no new shape — it is
+    /// what [`WalRecord::ArtifactPublish`] already does — but it costs `O(|membership|)` bytes on
+    /// the fsync path for every batch that names the artifact: ~12 MB per batch for a 10⁸-member
+    /// cluster. A write path priced by the size of what it is joining is not a write path.
+    ///
+    /// **It grows a membership and can do nothing else.** There is no ordinal here that names no
+    /// record: growth against a hole adds nothing rather than creating something, so this record
+    /// cannot resurrect an artifact a fold retired, and it cannot mint one either. A key an open
+    /// layer *creates* the artifact for is not carried here at all: minting is a publication, and
+    /// the artifact is published carrying the points that created it
+    /// ([`artifacts-from-points.md`](../../../docs/design/artifacts-from-points.md) §6.3).
+    ///
+    /// **Nothing else in the log carries this, and the pin is what keeps it.** A grown record sits
+    /// *below* its level's published high-water, and the append-only packer covers only the tail
+    /// above it — so until the fold rewrites every level whole, this record is the only copy of the
+    /// join. `ArtifactStore::oldest_wal_pos` holds the log at it, and the fold releases it.
+    ArtifactGrow {
+        layer: String,
+        level: u32,
+        growth: Vec<MembershipGrowth>,
+    },
+}
+
+/// One artifact's growth inside a [`WalRecord::ArtifactGrow`].
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MembershipGrowth {
+    /// The position in the level whose membership grows. **Resolved from the caller's key on the
+    /// executor and recorded**, exactly as a publication records the ordinals it claimed: replay
+    /// applies what was decided rather than re-resolving a key whose index has since moved.
+    pub ordinal: u32,
+    /// The entities joining, CRoaring portable — **entity space and a delta**. Entity space for
+    /// [`PublishedArtifact::members`]'s reason (a row-space set is a frozen projection); a delta
+    /// for this variant's own.
+    pub joining: Vec<u8>,
 }
 
 /// One artifact inside a [`WalRecord::ArtifactPublish`].
@@ -357,17 +404,53 @@ pub struct PublishedArtifact {
     /// reason [`WalRecord::LayerCreate`] carries its ids: replay applies what was decided.
     pub entity: EntityId,
     /// The caller's own key, if they supplied one.
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
     /// Entity-space membership, CRoaring portable. **Entity space and not row space** — a row-space
     /// membership is a frozen projection, correct until the first fold and then naming other
     /// people's documents (`membership.rs`).
     pub members: Vec<u8>,
-    /// The artifact's supplied content, as ranked variations. Empty on a layer declaring none.
-    pub variations: Vec<PublishedVariation>,
+    /// The artifact's supplied content, as ranked contents. Empty on a layer declaring none.
+    pub contents: Vec<PublishedContent>,
     /// What this artifact is an attachment to, **resolved** — the caller named the target by its
-    /// stable key, and replay applies the address that was decided rather than re-resolving a key
+    /// key, and replay applies the address that was decided rather than re-resolving a key
     /// whose target may since have been dropped.
     pub attached_to: Option<PublishedAttachment>,
+    /// The artifact's declared bounding box, `[min_x, min_y, max_x, max_y]`, on a layer whose
+    /// `shape` declares one.
+    ///
+    /// **An array rather than the typed `Bbox`**, so the durable shape is four numbers in a stated
+    /// order and the type's own refusals — non-finite, inverted — stay where publication makes
+    /// them. A record replayed from here is checked again by the same constructor, so a log that
+    /// somehow carried an inverted box restores an artifact with no shape rather than one whose
+    /// membership is a region nobody wrote.
+    pub shape: Option<[f64; 4]>,
+    /// This artifact's parent in its layer's hierarchy — resolved from the key the caller named,
+    /// on `attached_to`'s argument.
+    ///
+    /// **Only the parent direction is durable.** The child direction is the same relation read the
+    /// other way, and a level's child index is built from these at open exactly as its row-space
+    /// membership is. Storing both would make the fold responsible for keeping two copies of one
+    /// fact agreeing across every deletion — the bookkeeping that has produced a defect in each of
+    /// the last two stages — in exchange for a lookup the serving path already builds per level.
+    ///
+    /// **A level as well as an ordinal, because a layer's edges are one of two shapes.** A nested
+    /// layer's run within one level and a coarser view is an ancestor; a tiered layer's
+    /// run *between* levels, from a coarser to a finer one. Which shape a layer has is declared,
+    /// never inferred, and it may not mix them.
+    ///
+    /// **No layer qualifier and no entity.** An edge relates two artifacts of one *layer*, so the
+    /// layer is the reader's own; and unlike an attachment this is not a visibility term — a
+    /// node's verdict is its own (decision 0080) — so there is no target entity to test.
+    pub parent: Option<ParentRef>,
+}
+
+/// The resolved parent of an artifact, inside its own layer.
+///
+/// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParentRef {
+    pub level: u32,
+    pub ordinal: u32,
 }
 
 /// The resolved target of an attachment inside a [`PublishedArtifact`] — see
@@ -382,11 +465,11 @@ pub struct PublishedAttachment {
     pub entity: EntityId,
 }
 
-/// One ranked variation inside a [`PublishedArtifact`].
+/// One entry of a [`PublishedArtifact`]'s ranked `contents`; its position is its **rank**.
 ///
 /// On-disk format: field order is positional under postcard — see [`WalRow`]'s note.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PublishedVariation {
+pub struct PublishedContent {
     /// One value per kind the layer declares, positionally. The bytes themselves are re-written to
     /// the record blob at publication; they ride the log too because the log is what replay has
     /// before any extent exists.
@@ -461,7 +544,7 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// the header itself — and on any change to a record's *field* layout or the variant table, since
 /// postcard encodes struct fields and enum discriminants positionally and would otherwise decode
 /// a missing field or shifted variant as whatever bytes follow it. Version 2 added
-/// [`WalRow::slice`]; version 3 made the log a sequence and put each member's number and base
+/// [`WalRow::view`]; version 3 made the log a sequence and put each member's number and base
 /// position in its header; version 4 deleted the `Lease` and `Flush` variants — the first was
 /// written by nothing (allocation rides `IngestBatch` rows), the second was written and read by
 /// nothing (recovery reconstructs the buffer by the has-a-row predicate and rotation computes its
@@ -484,12 +567,20 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// version-10 log would decode the new variants' bytes as whatever it thinks that index means. A
 /// layer registration decoded as an ingest batch is not a degraded read, it is a corrupt one.
 /// Version 11 adds [`WalRecord::ArtifactPublish`], appended on the same rule. Version 12 gives
-/// [`PublishedArtifact`] its `variations` field — an *appended struct field*, which postcard would
+/// [`PublishedArtifact`] its `contents` field — an *appended struct field*, which postcard would
 /// otherwise read out of the bytes of whatever record follows, so the bump is the whole guard.
 /// Version 13 gives it `attached_to`, on the same rule — and here the guard is load-bearing twice
 /// over, because an attachment is a *visibility* term: a log read on version 12's rules restores
-/// the label of a suppressed cluster as an unattached artifact, and serves it.
-const WAL_VERSION: u16 = 13;
+/// the label of a suppressed cluster as an unattached artifact, and serves it. Version 14 gives
+/// [`tessera_types::layer::LayerDeclaration`] its `value_set` — an *inserted* struct field, so
+/// every field after it decodes from the wrong bytes on version 13's rules, and the fields after it
+/// are the gate and the membership requirement. A registration whose criterion decoded out of
+/// alignment is a disclosure control read from whatever follows it. Version 15 adds
+/// [`WalRecord::ArtifactGrow`], appended so no existing discriminant moves — and the bump is the
+/// guard, because a version-14 reader meeting one would decode a growth as whatever it thinks that
+/// index means, which is nothing: the members that joined would be silently absent from the
+/// artifact a caller was acked for.
+const WAL_VERSION: u16 = 15;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1662,7 +1753,7 @@ mod tests {
             rows: vec![WalRow {
                 external_id: None,
                 entity_id: EntityId::new(1),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,
@@ -1694,49 +1785,54 @@ mod tests {
         // criterion and the own-terms flag are what decide who may see it and what may be served.
         use tessera_types::layer::{
             ContentDeclaration, EntityRun, ExistenceCriterion, Hierarchy, HierarchyKind,
-            LayerAccess, LevelDeclaration, MembershipSource, SuppliedContent,
+            LevelDeclaration, MembershipSource, SuppliedContent,
         };
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("wal");
 
         let create = WalRecord::LayerCreate {
-            declaration: LayerDeclaration {
+            declaration: Box::new(LayerDeclaration {
                 name: "boundaries/uk-2026".into(),
-                title: "UK administrative boundaries".into(),
-                slices: vec!["geographic".into()],
+                title: Some("UK administrative boundaries".into()),
+                views: vec!["geographic".into()],
                 membership: MembershipSource::Spatial,
-                access: LayerAccess {
-                    label: Some("public".into()),
-                    artifacts_carry_own: true,
-                },
-                visible_when: Some(ExistenceCriterion::MinVisible(25)),
+                value_set: Default::default(),
+                visibility: Some("public".into()),
+                artifact_visibility: tessera_types::layer::ArtifactVisibility::carried(
+                    "visibility",
+                ),
+                require_member_visibility: Some(ExistenceCriterion::Count(25)),
                 hierarchy: Hierarchy {
                     kind: HierarchyKind::Stacked,
                     prune_children: true,
                 },
                 content: ContentDeclaration {
-                    derived: vec!["centroid".into()],
+                    computed: vec!["centroid".into()],
                     supplied: vec![SuppliedContent {
-                        kind: "polygon".into(),
-                        corpus_derived: false,
+                        name: "polygon".into(),
+                        ty: "polygon".into(),
+                        require_member_visibility:
+                            tessera_types::layer::SuppliedRequirement::Inherited,
                     }],
-                    on_member_deletion: Default::default(),
+                    withdraw_on_member_deletion: true,
                 },
                 depends_on: vec!["clusters/hdbscan-2026-08".into()],
                 levels: vec![
                     LevelDeclaration {
                         level: 0,
-                        title: "LSOA".into(),
+                        title: Some("LSOA".into()),
                         zoom: Some((12, 16)),
                     },
                     LevelDeclaration {
                         level: 1,
-                        title: "LAD".into(),
+                        title: Some("LAD".into()),
                         zoom: None,
                     },
                 ],
-            },
+                layout: None,
+                shape: None,
+            }),
             layer_entity: EntityId::new(4_294_901_759),
             runs: vec![
                 ReservedRuns::from_runs(vec![EntityRun {
@@ -1788,20 +1884,22 @@ mod tests {
                 PublishedArtifact {
                     ordinal: 65_535,
                     entity: EntityId::new(4_294_836_223),
-                    stable_key: Some("c-0017".into()),
+                    key: Some("c-0017".into()),
                     members: serialise_members(&first),
-                    variations: Vec::new(),
+                    contents: Vec::new(),
                     attached_to: None,
+                    parent: None,
+                    shape: None,
                 },
                 // An artifact whose members have all been deleted is a real state, and an
-                // absent `stable_key` is the other optional field — both under postcard, which
+                // absent `key` is the other optional field — both under postcard, which
                 // decodes positionally, so this is the pair that would misread first.
                 PublishedArtifact {
                     ordinal: 65_536,
                     entity: EntityId::new(4_294_705_152),
-                    stable_key: None,
+                    key: None,
                     members: serialise_members(&second),
-                    variations: vec![PublishedVariation {
+                    contents: vec![PublishedContent {
                         values: vec!["a label".into()],
                         generated_from: serialise_members(&first),
                     }],
@@ -1814,6 +1912,20 @@ mod tests {
                         ordinal: 17,
                         entity: EntityId::new(4_294_901_759),
                     }),
+                    // The fourth optional field, and the one that decodes *after* the attachment
+                    // — so a shape that lost a byte in the attachment would land here and read a
+                    // parent out of the wrong offset. Set on the artifact that also carries the
+                    // attachment, which is where the two can be told apart, and with a **level
+                    // that is not this artifact's own**: a cross-level parent is the shape whose
+                    // two words could be read in either order without either looking wrong.
+                    parent: Some(ParentRef {
+                        level: 2,
+                        ordinal: 65_535,
+                    }),
+                    // The fifth optional field, and the last one — set here so the round-trip
+                    // covers a record carrying every optional at once, which is the arrangement a
+                    // positional decoder misreads first.
+                    shape: Some([-1.5, 0.0, 2.5, 4.0]),
                 },
             ],
         };

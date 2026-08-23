@@ -217,7 +217,7 @@ pub(crate) trait CacheWeight {
 /// **512 B is MODELLED, and this project does not blur modelled with measured.** There is no
 /// measurement behind it and it must not be read as one. The inventory it is built from, per
 /// entry: the `Arc<K>` allocation and its two refcounts (~56 B with a `String` key), the key's own
-/// heap buffer (~16–32 B for a slice name), a hashbrown slot (~40 B), the `BTreeMap` node's
+/// heap buffer (~16–32 B for a view name), a hashbrown slot (~40 B), the `BTreeMap` node's
 /// amortised share (~24 B), the `Arc<V>` allocation (~40 B), and croaring's `roaring_bitmap_t`
 /// with its container array — opaque C-side allocation that `size_of` cannot see at all. That
 /// inventory lands at ~190–260 B; 512 B is the next round number above it, chosen so the charge
@@ -255,7 +255,7 @@ enum Slot<K, V> {
         ///
         /// 1. **No `K: Clone` on the hot path.** Re-inserting into the recency index needs an owned
         ///    key; without this field a hit would clone `K` itself (a `String` allocation for
-        ///    `RowProjectionKey`'s slice name) on every warm request. Cloning the `Arc` is a
+        ///    `RowProjectionKey`'s view name) on every warm request. Cloning the `Arc` is a
         ///    refcount bump. This is what the field really buys, and it is worth its one word.
         /// 2. **One hash lookup per hit.** A touch needs both the `Arc<K>` and `&mut Slot`, and
         ///    `get_key_value` + `get_mut` would be two. This *is* now true — [`Slot::Ready`]'s

@@ -70,7 +70,7 @@ fn engine_with_faults(tmp: &TempDir, queue_bound: usize) -> (Engine, Arc<FaultSw
 fn row(key: &str) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(key.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: Vec::new(),
         x: 0.0,
         y: 0.0,

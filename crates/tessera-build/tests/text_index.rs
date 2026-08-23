@@ -17,7 +17,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::{Attribute, Schema};
+use tessera_build::config::{Attribute, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_filter::{Access, RecordBlob, RecordValue, SortedDict};
 use tessera_spatial::tiler::ScalarType;
@@ -93,11 +93,13 @@ fn write_empty_pairs(path: &Path) {
 fn text_schema(index: bool) -> Schema {
     Schema {
         attributes: vec![Attribute {
+            field: None,
             name: "abstract".to_string(),
+            title: None,
             ty: ScalarType::Text,
             analyser: Some("unicode/icu4x-2.2/p1".to_string()),
             vocabulary: None,
-            vocabulary_kind: None,
+            value_set: None,
             index,
             render: false,
         }],
@@ -113,8 +115,10 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out,
         extent: Bounds {
             x_min: 0.0,
@@ -122,15 +126,14 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
             y_min: 0.0,
             y_max: 1000.0,
         },
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,

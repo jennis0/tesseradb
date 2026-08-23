@@ -343,6 +343,7 @@ mod tests {
     use std::sync::Arc;
 
     use tessera_lifecycle::{IngestBuffer, Overlay};
+    use tessera_plugin::Plugin;
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
 
@@ -360,9 +361,9 @@ mod tests {
     /// the fixture instead.
     fn generation_at(prefix: &str, segments_version: u64, watermark: u64) -> Generation {
         let manifest = Manifest {
-            bundle_format: 2,
+            bundle_format: 3,
             created_at: "2026-07-31T00:00:00Z".to_string(),
-            data_plugin_hash: "builtin:passthrough:1".to_string(),
+            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
             vocabularies: vec![],
@@ -381,7 +382,7 @@ mod tests {
                 shard_id: 0,
                 idset: 1,
             },
-            slices: vec![],
+            views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
             files: BTreeMap::new(),
@@ -406,7 +407,7 @@ mod tests {
             overlay_version: 0,
             overlay: Arc::new(Overlay::new()),
             buffer: Arc::new(IngestBuffer::new()),
-            // The fixture bundle carries no slices, so a fresh derivation is empty.
+            // The fixture bundle carries no views, so a fresh derivation is empty.
             denied: Arc::new(crate::DenyMask::default()),
         }
     }
@@ -480,6 +481,10 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),

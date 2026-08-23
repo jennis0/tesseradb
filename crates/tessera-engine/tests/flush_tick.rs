@@ -100,7 +100,7 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
     // Buffered row: a second request publishes it without waiting out the deadline.
     let row = tessera_lifecycle::UnallocatedRow {
         external_id: Some(b"prompt-flush".to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 0.5,
         y: 0.5,

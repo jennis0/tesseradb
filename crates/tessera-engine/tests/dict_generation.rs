@@ -112,7 +112,7 @@ fn authorise_resolves_against_the_generations_dict() {
     let credential = br#"{"terms": ["0", "novel"]}"#.to_vec();
     let before = engine.authorise(&credential).unwrap();
     assert_eq!(
-        before.satisfied.len(),
+        resolved(&before),
         1,
         "an unknown descriptor is simply unsatisfied, never an error"
     );
@@ -136,12 +136,12 @@ fn authorise_resolves_against_the_generations_dict() {
 
     let after = engine.authorise(&credential).unwrap();
     assert_eq!(
-        after.satisfied.len(),
+        resolved(&after),
         2,
         "a promoted descriptor is satisfiable by a session authorised after the publication"
     );
     assert_eq!(
-        before.satisfied.len(),
+        resolved(&before),
         1,
         "and the session authorised before it is untouched — `satisfied` is never re-resolved, \
          which is what §3.4's patch-equals-a-rebuild rests on"
@@ -203,7 +203,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
     // `novel` is not in the built dictionary, so it drops out of `satisfied` here.
     let credential = br#"{"terms": ["0", "novel"]}"#.to_vec();
     let stale = engine.authorise(&credential).unwrap();
-    assert_eq!(stale.satisfied.len(), 1, "the fixture must not know `novel`");
+    assert_eq!(resolved(&stale), 1, "the fixture must not know `novel`");
     let before = stale.fragment.view().cardinality();
 
     // Ingest under the novel descriptor and flush, which promotes it and mints its term. The rows
@@ -213,7 +213,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
         let external = format!("novel-{i}");
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"novel".to_vec()],
             x: 10.0 + i as f32,
             y: 10.0 + i as f32,
@@ -246,7 +246,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
 
     // Same bytes, re-presented. This resolves `novel` and must be served its posting.
     let fresh = engine.authorise(&credential).unwrap();
-    assert_eq!(fresh.satisfied.len(), 2, "the promoted descriptor resolves");
+    assert_eq!(resolved(&fresh), 2, "the promoted descriptor resolves");
 
     // Different bytes, identical satisfied set — the control the issue names. It cannot take the
     // memo's fast path, so it is the answer the line above must agree with.
@@ -312,7 +312,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
 
     let credential = br#"{"terms": ["0", "novel"]}"#.to_vec();
     let stale = engine.authorise(&credential).unwrap();
-    assert_eq!(stale.satisfied.len(), 1, "the fixture must not know `novel`");
+    assert_eq!(resolved(&stale), 1, "the fixture must not know `novel`");
 
     // A resident projection is what makes this session visible to the refresh at all.
     engine
@@ -326,7 +326,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
         let external = format!("refresh-novel-{i}");
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"novel".to_vec()],
             x: 10.0 + i as f32,
             y: 10.0 + i as f32,
@@ -361,4 +361,17 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
         control.fragment.view().cardinality(),
         "the background refresh poisoned the canonical-key memo for this credential"
     );
+}
+
+/// The credential's own resolved descriptors: `satisfied` minus the reserved `public` term.
+///
+/// **Every session holds `public` by construction** (`per-point-attributes.md` §3.8), added inside
+/// the engine rather than by the credential — so counting `satisfied` directly would count a term
+/// this file's cases are not about, in every one of them.
+fn resolved(session: &tessera_engine::Session) -> usize {
+    assert!(
+        session.satisfied.contains(&tessera_authz::PUBLIC_TERM),
+        "every session holds the reserved `public` term"
+    );
+    session.satisfied.len() - 1
 }

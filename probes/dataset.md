@@ -104,8 +104,8 @@ row_id = np.arange(keep.sum())              # its Morton ranks
 
 Verified against an independent re-sort at 250k and 2.4M. The stored
 `row_id` column is the *full-corpus* rank; smaller scales derive theirs
-as above. This is §5.1's per-slice row assignment with scale standing in
-for slice.
+as above. This is §5.1's per-view row assignment with scale standing in
+for view.
 
 Columns: `entity_id`, `morton`, `row_id`, `priority` (u16, splitmix hash
 of entity ID — mask-independent per §7.2).

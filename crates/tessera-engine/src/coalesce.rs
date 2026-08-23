@@ -228,8 +228,8 @@ pub(crate) fn plan_coalesce(
     // locator extent covers one span `[lo, hi]`, and `external_id_of_checked` finds an extent by
     // the first span that contains the entity — so a span overlapping another extent's would
     // answer one entity's ordinal against another's run. Ascending and non-overlapping is what
-    // makes the union a single well-formed span; it is satisfied trivially at one slice per
-    // partition, and it is what keeps two slices' interleaved flushes from being coalesced
+    // makes the union a single well-formed span; it is satisfied trivially at one view per
+    // partition, and it is what keeps two views' interleaved flushes from being coalesced
     // together.
     let locator_size = |extent: &LocatorExtent| -> Option<u64> {
         (!is_build(&extent.path) && !is_build(&extent.external_id_run))
@@ -280,9 +280,11 @@ pub(crate) fn plan_coalesce(
     // consecutive entries of the live list, lands in place, and the merge is an
     // ordinal-preserving concatenation (contracts §2.4; decision 0042).
     if let Some((_base, promoted)) = manifest.dict_extents.split_first() {
-        if let Some(window) = select_window(promoted, policy.width, policy, |extent: &DictExtent| {
-            Some(size_of(&extent.path))
-        }) {
+        if let Some(window) =
+            select_window(promoted, policy.width, policy, |extent: &DictExtent| {
+                Some(size_of(&extent.path))
+            })
+        {
             plan.dicts = manifest.dict_extents[window.start + 1..window.end + 1].to_vec();
         }
     }
@@ -784,11 +786,13 @@ pub(crate) fn execute_coalesce(
             .iter()
             .zip(postings.iter())
             .zip(presences.iter())
-            .map(|((dict, postings), present)| tessera_filter_write::TextLayerRef {
-                dict,
-                postings,
-                present: Some(present),
-            })
+            .map(
+                |((dict, postings), present)| tessera_filter_write::TextLayerRef {
+                    dict,
+                    postings,
+                    present: Some(present),
+                },
+            )
             .collect();
 
         let extent = TextExtent {
@@ -823,10 +827,14 @@ pub(crate) fn execute_coalesce(
         // Reopened before the manifest can name it, the record axis's posture: the two halves are
         // checked against each other here, so a merge defect refuses the pass rather than
         // publishing a layer whose ordinals name the wrong words on every later `match`.
-        let reopened_dict = tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read)
-            .map_err(|e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")))?;
+        let reopened_dict =
+            tessera_filter::SortedDict::open(&dict_path, tessera_filter::Access::Read).map_err(
+                |e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")),
+            )?;
         let reopened_postings = tessera_filter::ColumnPostings::open(&postings_path, false)
-            .map_err(|e| CoalesceFailed(format!("the coalesced text extent does not reopen: {e}")))?;
+            .map_err(|e| {
+                CoalesceFailed(format!("the coalesced text extent does not reopen: {e}"))
+            })?;
         if reopened_dict.len() != reopened_postings.record_count() {
             return Err(CoalesceFailed(format!(
                 "the coalesced text extent for '{}' holds {} terms and {} postings records",
@@ -1130,6 +1138,10 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -1148,7 +1160,7 @@ mod tests {
             files: BTreeMap::new(),
         };
         for i in 0..flushes {
-            let seg = format!("partitions/{PARTITION}/slices/s0/segments/flush-{i}-1");
+            let seg = format!("partitions/{PARTITION}/views/s0/segments/flush-{i}-1");
             for name in [
                 "delta.arrow",
                 "external-ids.arrow",
@@ -1275,9 +1287,9 @@ mod tests {
         assert_eq!(
             dicts,
             [
-                format!("partitions/{PARTITION}/slices/s0/segments/flush-0-1/terms-0.dict"),
-                format!("partitions/{PARTITION}/slices/s0/segments/flush-1-1/terms-0.dict"),
-                format!("partitions/{PARTITION}/slices/s0/segments/flush-2-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/views/s0/segments/flush-0-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/views/s0/segments/flush-1-1/terms-0.dict"),
+                format!("partitions/{PARTITION}/views/s0/segments/flush-2-1/terms-0.dict"),
             ],
             "the carried extents coalesce, and the base dictionary is not among them"
         );

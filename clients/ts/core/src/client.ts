@@ -113,7 +113,7 @@ export class TesseraClient {
     return {
       apiVersion: m.api_version,
       idset: m.idset,
-      slices: m.slices.map((s) => ({id: s.id, displayName: s.display_name})),
+      views: m.views.map((s) => ({id: s.id, displayName: s.display_name})),
       quantisation: {
         xMin: m.quantisation.x_min,
         xMax: m.quantisation.x_max,
@@ -126,7 +126,7 @@ export class TesseraClient {
         // Null for a plain column, and the absence is the whole signal: without it a `u16`
         // category is indistinguishable from a `u16` integer, since the hot path ships the code.
         category: s.category
-          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, listing: s.category.listing}
+          ? {vocabulary: s.category.vocabulary, kind: s.category.kind, visibility: s.category.visibility}
           : null,
         render: s.render,
         index: s.index
@@ -155,7 +155,7 @@ export class TesseraClient {
       layers: (m.layers ?? []).map((l) => ({
         name: l.name,
         title: l.title,
-        slices: l.slices,
+        views: l.views,
         membership: l.membership,
         hierarchy: {kind: l.hierarchy.kind, pruneChildren: l.hierarchy.prune_children},
         levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom ?? null})),
@@ -179,7 +179,7 @@ export class TesseraClient {
     /** Route decode to the speculative lane — see {@link Decoder.decode}. */
     background = false
   ): Promise<ViewportResponse> {
-    const body: Record<string, unknown> = {slice: req.slice, zoom: req.zoom};
+    const body: Record<string, unknown> = {view: req.view, zoom: req.zoom};
     if (req.bbox) body.bbox = req.bbox;
     // JSON has no 64-bit integer, and a Morton prefix at depth 16 needs 32 bits — inside `Number`'s
     // exact range, so the narrowing is lossless here and stays so for every depth the grid allows.
@@ -245,7 +245,7 @@ export class TesseraClient {
    * than a refusal, and must not treat a missing code as a failure. A code the client actually
    * *drew* always resolves: its point was admitted by the mask, so the value has a visible member.
    *
-   * Throws {@link TesseraError} for a real refusal — notably `500 fail-closed` on a `per_viewer`
+   * Throws {@link TesseraError} for a real refusal — notably `500 fail-closed` on a `derived`
    * column, whose gate is specified and unbuilt.
    */
   async categories(
@@ -287,7 +287,7 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
     const body = (await response.json()) as RawCategories;
     return {
-      values: body.values.map((v) => ({code: v.code, key: v.key, label: v.label ?? null})),
+      values: body.values.map((v) => ({code: v.code, key: v.key, title: v.title ?? null})),
       next: body.next
     };
   }
@@ -321,9 +321,9 @@ export class TesseraClient {
   /**
    * `POST /v1/artifacts/{tessera_id}`: one artifact's layer, key and masked count.
    *
-   * **`slice` is required here and optional on {@link item}**, and the asymmetry is real: a point's
+   * **`view` is required here and optional on {@link item}**, and the asymmetry is real: a point's
    * record is the same wherever it is read from, but a masked count is an intersection in row
-   * space and row space is per slice.
+   * space and row space is per view.
    *
    * **`404` is the only failure shape, and it distinguishes nothing.** An identifier naming
    * nothing, one naming a point, one whose layer this principal cannot reach, one suppressed, and
@@ -334,9 +334,9 @@ export class TesseraClient {
   async artifact(
     token: string,
     tesseraId: bigint,
-    opts: {slice: string; idset?: number}
+    opts: {view: string; idset?: number}
   ): Promise<ArtifactDetail> {
-    const body: Record<string, unknown> = {slice: opts.slice};
+    const body: Record<string, unknown> = {view: opts.view};
     if (opts.idset !== undefined) body.idset = opts.idset;
     const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
       method: 'POST',
@@ -346,13 +346,13 @@ export class TesseraClient {
     if (!response.ok) await fail(response);
     const served = (await response.json()) as {
       layer: string;
-      stable_key?: string;
+      key?: string;
       masked_count: number;
     };
     return {
       layer: served.layer,
       // Absent rather than null when the publisher supplied none.
-      stableKey: served.stable_key ?? null,
+      key: served.key ?? null,
       // JSON carries it as a number, and a count is not an identifier: it is bounded by the
       // corpus, so nothing here can reach 2^53. Widened to `bigint` anyway, because it is the same
       // quantity the wire delivers as `u64` and a panel must be able to print the two the same way.
@@ -365,12 +365,12 @@ export class TesseraClient {
 type RawMeta = {
   api_version: number;
   idset: number;
-  slices: {id: string; display_name: string}[];
+  views: {id: string; display_name: string}[];
   quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;
-    category: {vocabulary: string; kind: 'declared' | 'discovered'; listing: 'per_viewer' | 'public'} | null;
+    category: {vocabulary: string; kind: 'declared' | 'discovered'; visibility: 'derived' | 'public'} | null;
     render: boolean;
     index: boolean;
   }[];
@@ -379,7 +379,7 @@ type RawMeta = {
   layers?: {
     name: string;
     title: string;
-    slices: string[];
+    views: string[];
     membership: Layer['membership'];
     hierarchy: {kind: Layer['hierarchy']['kind']; prune_children: boolean};
     levels: {level: number; title: string; zoom: [number, number] | null}[];
@@ -402,6 +402,6 @@ type RawMeta = {
 /** `GET /v1/categories/{column}`'s wire shape. */
 type RawCategories = {
   column: string;
-  values: {code: number; key: string; label?: string | null}[];
+  values: {code: number; key: string; title?: string | null}[];
   next: string | null;
 };

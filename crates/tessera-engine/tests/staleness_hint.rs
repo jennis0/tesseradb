@@ -79,7 +79,7 @@ fn a_session_holding_an_unresolved_descriptor_is_hinted_by_a_promotion() {
 
     let session: Session = engine.authorise(PARTLY_UNRESOLVED).expect("authorises");
     assert_eq!(
-        session.satisfied.len(),
+        resolved(&session),
         1,
         "one descriptor resolved and one did not, or this test proves nothing"
     );
@@ -95,7 +95,7 @@ fn a_session_holding_an_unresolved_descriptor_is_hinted_by_a_promotion() {
         "a promotion moved the dictionary past where this session resolved its terms"
     );
     assert_eq!(
-        session.satisfied.len(),
+        resolved(&session),
         1,
         "and the hint is telling the truth: this session's mask still omits the promoted term, \
          which is the under-seeing it exists to advertise — `satisfied` is never re-resolved"
@@ -103,7 +103,7 @@ fn a_session_holding_an_unresolved_descriptor_is_hinted_by_a_promotion() {
 
     // The only remedy is a new session.
     let fresh = engine.authorise(PARTLY_UNRESOLVED).expect("authorises");
-    assert_eq!(fresh.satisfied.len(), 2, "the promoted descriptor resolves");
+    assert_eq!(resolved(&fresh), 2, "the promoted descriptor resolves");
     assert!(
         !fresh.is_stale(&engine.generation()),
         "and re-authorising clears it"
@@ -154,4 +154,17 @@ fn a_hinted_session_continues_to_serve() {
         out.tiles.iter().map(|t| t.visible).sum::<u64>() > 0,
         "and it still sees everything its unchanged mask covers"
     );
+}
+
+/// The credential's own resolved descriptors: `satisfied` minus the reserved `public` term.
+///
+/// **Every session holds `public` by construction** (`per-point-attributes.md` §3.8), added inside
+/// the engine rather than by the credential — so counting `satisfied` directly would count a term
+/// this file's cases are not about, in every one of them.
+fn resolved(session: &tessera_engine::Session) -> usize {
+    assert!(
+        session.satisfied.contains(&tessera_authz::PUBLIC_TERM),
+        "every session holds the reserved `public` term"
+    );
+    session.satisfied.len() - 1
 }

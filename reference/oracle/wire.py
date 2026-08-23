@@ -6,7 +6,7 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
     kind 4  trailer    JSON                                   exactly one, last
-    kind 5  artifacts  (layer, tessera_id, stable_key,        at most one, after tiles and before
+    kind 5  artifacts  (layer, tessera_id, key,        at most one, after tiles and before
                         masked_count, and the derived            any points; absent when none served
                         geometry columns)
 
@@ -43,12 +43,12 @@ class Artifact(NamedTuple):
 
     layer: str
     tessera_id: int
-    stable_key: str | None
+    key: str | None
     masked_count: int
     centroid: tuple[float, float] | None
     box: tuple[int, int, int, int] | None
     hull: list[tuple[int, int]] | None
-    #: One variation, entire, positional to the layer's declared kinds. Empty means the layer
+    #: One content, entire, positional to the layer's declared kinds. Empty means the layer
     #: declares no supplied content — never that content was withheld.
     content: list[str]
 
@@ -179,7 +179,7 @@ def decode_frames(data: bytes):
                     for name in (
                         "layer",
                         "tessera_id",
-                        "stable_key",
+                        "key",
                         "masked_count",
                         "centroid_x",
                         "centroid_y",
@@ -202,7 +202,7 @@ def decode_frames(data: bytes):
                         Artifact(
                             layer=columns["layer"][row],
                             tessera_id=columns["tessera_id"][row],
-                            stable_key=columns["stable_key"][row],
+                            key=columns["key"][row],
                             masked_count=columns["masked_count"][row],
                             centroid=(
                                 None if cx is None else (cx, columns["centroid_y"][row])

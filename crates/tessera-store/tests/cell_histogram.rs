@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use tessera_plugin::Plugin;
 
 use sha2::{Digest, Sha256};
 
@@ -15,7 +16,7 @@ use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, Bounds};
 use tessera_store::manifest::{
     CurrentPointer, FileDigest, IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation,
-    SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_types::{EntityId, TesseraId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
@@ -60,7 +61,7 @@ const CELLS: [(u16, u16, u64); 6] = [
     (40000, 40000, 20),
 ];
 
-/// Build a one-partition, one-slice, one-segment bundle at `root` realising [`CELLS`] over the
+/// Build a one-partition, one-view, one-segment bundle at `root` realising [`CELLS`] over the
 /// unit extent. Point coordinates are cell centres, so quantisation cannot straddle a cell
 /// boundary.
 fn build_bundle(root: &Path) {
@@ -87,19 +88,19 @@ fn build_bundle(root: &Path) {
 
     let prefix_dir = root.join("v00000");
     let partition_dir = prefix_dir.join("partitions").join("default");
-    let slice_dir = partition_dir.join("slices").join("main");
-    let seg_dir = slice_dir.join("segments").join("seg0");
+    let view_dir = partition_dir.join("views").join("main");
+    let seg_dir = view_dir.join("segments").join("seg0");
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
     write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
-    write_permutation(&slice_dir.join("permutation.bin"), &entity_ids, n)
+    write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n)
         .expect("write_permutation");
 
     let mut segments_files = BTreeMap::new();
     for rel in [
-        "partitions/default/slices/main/permutation.bin",
-        "partitions/default/slices/main/segments/seg0/columns.arrow",
-        "partitions/default/slices/main/segments/seg0/morton.u32",
+        "partitions/default/views/main/permutation.bin",
+        "partitions/default/views/main/segments/seg0/columns.arrow",
+        "partitions/default/views/main/segments/seg0/morton.u32",
     ] {
         segments_files.insert(rel.to_string(), file_digest(&prefix_dir.join(rel)));
     }
@@ -111,9 +112,13 @@ fn build_bundle(root: &Path) {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
+        row_column_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
-            slice: "main".to_string(),
+            view: "main".to_string(),
             seg_id: "seg0".to_string(),
             row_count: items.len() as u32,
             entity_lo: 0,
@@ -135,9 +140,9 @@ fn build_bundle(root: &Path) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 2,
+        bundle_format: 3,
         created_at: "2026-07-31T00:00:00Z".to_string(),
-        data_plugin_hash: "builtin:passthrough:1".to_string(),
+        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
@@ -156,7 +161,7 @@ fn build_bundle(root: &Path) {
             shard_id: 0,
             idset: 1,
         },
-        slices: vec![SliceDescriptor {
+        views: vec![ViewDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),
         }],

@@ -23,7 +23,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{AcceptError, Engine, EngineConfig};
 use tessera_lifecycle::command::UnallocatedRow;
@@ -33,13 +33,17 @@ use tessera_types::EntityId;
 
 /// A discovered `department` vocabulary, wide enough that ordinary tests never see exhaustion.
 const DISCOVERED_WIDE: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u16"
 render     = true
-vocabulary = "discovered"
-listing    = "per_viewer"
+vocabulary = "department"
 "#;
 
 /// A `u8` discovered `department` vocabulary with 250 of its 255 usable codes retired at build,
@@ -50,16 +54,18 @@ fn discovered_sparse_schema_toml() -> String {
     let retired: Vec<String> = (1..=250u32).map(|c| c.to_string()).collect();
     format!(
         r#"
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "open"
+visibility = "derived"
+reserved   = [{}]
+
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u8"
 render     = true
-vocabulary = "discovered"
-listing    = "per_viewer"
-
-[attribute.values]
-reserved = [{}]
+vocabulary = "department"
 "#,
         retired.join(", ")
     )
@@ -68,23 +74,27 @@ reserved = [{}]
 /// A **declared** `band` vocabulary — the closed-vocabulary sibling, for the case that pins the
 /// executor's mint loop leaves an already-coded column untouched.
 const DECLARED_BAND: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+vocabulary = "band"
 "#;
 
 fn parse_schema(tmp: &Path, text: &str) -> Schema {
-    let path = tmp.join("schema.toml");
+    let path = tmp.join("config.toml");
     std::fs::write(&path, text).unwrap();
-    Schema::parse(&path, &std::collections::HashMap::new()).expect("the fixture schema parses")
+    Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema).expect("the fixture schema parses")
 }
 
 /// `points.parquet` with `entity_id`, `x`, `y`, and a `category` utf8 column always null — every
@@ -117,19 +127,20 @@ fn write_points_with_absent_category(path: &Path, n: u64, column: &str) {
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
         points: points.to_path_buf(),
-        pairs: pairs.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -181,7 +192,7 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,
@@ -209,8 +220,8 @@ fn stored_code_of(root: &Path, column: &str, entity: EntityId) -> Option<u32> {
                 .join(prefix)
                 .join("partitions")
                 .join(phash)
-                .join("slices")
-                .join(&segment.slice)
+                .join("views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id);
             let columns = ColumnsRef::load(&dir.join("columns.arrow"))
@@ -314,7 +325,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
 
     let row = |external_id: &str| UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 1.0,
         y: 1.0,
@@ -483,7 +494,7 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
         .accept_ingest(
             vec![UnallocatedRow {
                 external_id: Some(b"one-too-many".to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: vec![b"0".to_vec()],
                 x: 1.0,
                 y: 1.0,

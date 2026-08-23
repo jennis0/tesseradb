@@ -111,7 +111,7 @@ async fn e_suppress_via_changes_drops_the_count_without_reauthorising() {
     let token = auth["token"].as_str().unwrap();
 
     let viewport_req = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
 
     let resp = server
@@ -578,7 +578,7 @@ async fn changes_batch_validates_before_applying_anything() {
     let token = auth["token"].as_str().unwrap();
 
     let viewport_req = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
     let resp = server
         .client
@@ -704,7 +704,7 @@ fn concurrent_ingest_and_change_both_survive() {
         // name the entity id at all.
         let row = tessera_lifecycle::UnallocatedRow {
             external_id: Some(new_external_id.clone()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 5.0,
             y: 5.0,
@@ -993,7 +993,7 @@ async fn healthz_stays_prompt_while_a_long_viewport_runs() {
             .post(viewer_url)
             .bearer_auth(token)
             .json(&serde_json::json!({
-                "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 1,
                 "underlay_offset": 12
             }))
             .send()
@@ -1282,7 +1282,7 @@ async fn a_stepped_down_partition_is_not_ready() {
         serde_json::from_slice(&std::fs::read(partition_dir.join("SEGMENTS-0.json")).unwrap())
             .unwrap();
     value["segments_version"] = serde_json::json!(1);
-    value["files"]["partitions/default/slices/s0/segments/seg-unsynced/columns.arrow"] =
+    value["files"]["partitions/default/views/s0/segments/seg-unsynced/columns.arrow"] =
         serde_json::json!({ "size": 4, "sha256": "00".repeat(32) });
     std::fs::write(
         partition_dir.join("SEGMENTS-1.json"),
@@ -1491,7 +1491,7 @@ async fn a_poisoned_wal_is_not_ready_but_still_accepts_a_deny() {
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
     let viewport_req = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
     let visible = |token: String, req: serde_json::Value| {
         let client = server.client.clone();
@@ -1637,7 +1637,7 @@ async fn a_partially_applied_change_batch_reports_one_honest_status() {
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
     let viewport_req = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
     let visible = |token: String, req: serde_json::Value| {
         let client = server.client.clone();
@@ -1755,6 +1755,15 @@ impl tessera_plugin::Plugin for ParkingPlugin {
             }
         }
         self.inner.terms_of_label(access)
+    }
+
+    fn terms_of_labels(
+        &self,
+        labels: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        // The wire path is the one this fixture parks in; the list form is the build's and is
+        // never reached from `/control/ingest`.
+        self.inner.terms_of_labels(labels)
     }
 
     fn terms_of_auth(
@@ -1882,7 +1891,7 @@ async fn viewport_status(server: &TestServer, token: &str) -> u16 {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -2230,7 +2239,7 @@ async fn status_stage_barriers_move_when_their_stages_run() {
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
     let viewport_req = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
     let resp = server
         .client
@@ -3629,7 +3638,7 @@ async fn a_mixed_deny_batch_whose_append_fails_applies_only_the_deny_ops() {
     let auth = authorise(&server, &["0"]).await;
     let token = auth["token"].as_str().unwrap().to_string();
     let viewport_req = serde_json::json!({
-        "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+        "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
     });
     let visible = |token: String, req: serde_json::Value| {
         let client = server.client.clone();
@@ -3828,9 +3837,9 @@ async fn control_status_publishes_tier_scope_fragmentation_once_a_flush_publishe
 ///
 /// **Mutations this kills:** publishing a constant or a stale snapshot (leg 2 stays at 1); keying
 /// the gauge on the manifest's `segments` array rather than the mapped set; dropping the
-/// `(partition, slice)` identity, which is what compaction §9's per-slice trigger reads.
+/// `(partition, view)` identity, which is what compaction §9's per-view trigger reads.
 #[tokio::test]
-async fn control_status_publishes_the_live_segment_count_per_slice() {
+async fn control_status_publishes_the_live_segment_count_per_view() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -3845,18 +3854,18 @@ async fn control_status_publishes_the_live_segment_count_per_slice() {
     )
     .await;
 
-    // A build writes exactly one segment per (partition, slice) — contracts §2.1.
+    // A build writes exactly one segment per (partition, view) — contracts §2.1.
     let before = control_status(&server).await;
     let segments = before["segments"].as_array().unwrap().clone();
     assert_eq!(
         segments.len(),
         1,
-        "this build emits one (partition, slice); the gauge is a list because compaction §9's \
-         trigger is per-slice and will not always be. Got {}",
+        "this build emits one (partition, view); the gauge is a list because compaction §9's \
+         trigger is per-view and will not always be. Got {}",
         before["segments"]
     );
     assert_eq!(segments[0]["partition"], "default");
-    assert_eq!(segments[0]["slice"], "s0");
+    assert_eq!(segments[0]["view"], "s0");
     assert_eq!(
         segments[0]["count"], 1,
         "one segment straight out of a build"
@@ -3910,7 +3919,7 @@ async fn control_status_publishes_the_live_segment_count_per_slice() {
 
     // The gauge is the generation's own set, not a counter that happens to agree with it today.
     let generation = server.state.engine.generation();
-    let live: usize = generation.bundle.partitions["default"].slices["s0"]
+    let live: usize = generation.bundle.partitions["default"].views["s0"]
         .segments
         .len();
     assert_eq!(
@@ -4004,14 +4013,14 @@ async fn an_undeclared_ingest_column_is_422_naming_the_column() {
     );
 }
 
-/// `x-tessera-slice` (contracts §3.4): a known slice is accepted, an unknown one is `404`.
+/// `x-tessera-view` (contracts §3.4): a known view is accepted, an unknown one is `404`.
 ///
 /// **404, not 422**, because §3.1's code list is closed and its 404 row says "unknown `tessera_id`,
-/// node, external ID **or slice**" — which is already what the viewer plane answers. §3.4's 422 is
-/// for *ambiguity*: a bundle with two or more slices and no header. This fixture has one slice, so
+/// node, external ID **or view**" — which is already what the viewer plane answers. §3.4's 422 is
+/// for *ambiguity*: a bundle with two or more views and no header. This fixture has one view, so
 /// the ambiguous case is unreachable here and the omitted header is accepted.
 #[tokio::test]
-async fn an_unknown_ingest_slice_is_404_and_a_known_one_is_accepted() {
+async fn an_unknown_ingest_view_is_404_and_a_known_one_is_accepted() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -4032,19 +4041,19 @@ async fn an_unknown_ingest_slice_is_404_and_a_known_one_is_accepted() {
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "slice-bad")
-        .header("x-tessera-slice", "no-such-slice")
+        .header("x-tessera-batch-id", "view-bad")
+        .header("x-tessera-view", "no-such-view")
         .header("content-type", "application/octet-stream")
         .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404, "contracts §3.1's 404 row names 'slice'");
+    assert_eq!(resp.status(), 404, "contracts §3.1's 404 row names 'view'");
     let json: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(json["error"], "unknown");
     assert!(
-        json["detail"].as_str().unwrap().contains("no-such-slice"),
-        "the offending slice id must reach the caller: {}",
+        json["detail"].as_str().unwrap().contains("no-such-view"),
+        "the offending view id must reach the caller: {}",
         json["detail"]
     );
     assert_eq!(
@@ -4053,25 +4062,25 @@ async fn an_unknown_ingest_slice_is_404_and_a_known_one_is_accepted() {
         "a refused batch has no effect"
     );
 
-    // The slice the fixture actually has, and then no header at all: both accepted.
+    // The view the fixture actually has, and then no header at all: both accepted.
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "slice-good")
-        .header("x-tessera-slice", "s0")
+        .header("x-tessera-batch-id", "view-good")
+        .header("x-tessera-view", "s0")
         .header("content-type", "application/octet-stream")
         .body(build_ingest_batch(&[(N_ITEMS + 1, 10.0, 10.0, "0")]))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 200, "the bundle's own slice is accepted");
+    assert_eq!(resp.status(), 200, "the bundle's own view is accepted");
 
     let resp = server
         .client
         .post(server.control_url("/control/ingest"))
         .bearer_auth(OPERATOR_CREDENTIAL)
-        .header("x-tessera-batch-id", "slice-absent")
+        .header("x-tessera-batch-id", "view-absent")
         .header("content-type", "application/octet-stream")
         .body(build_ingest_batch(&[(N_ITEMS + 2, 10.0, 10.0, "0")]))
         .send()
@@ -4080,7 +4089,7 @@ async fn an_unknown_ingest_slice_is_404_and_a_known_one_is_accepted() {
     assert_eq!(
         resp.status(),
         200,
-        "the header is optional when the bundle has one slice"
+        "the header is optional when the bundle has one view"
     );
 }
 
@@ -4397,26 +4406,30 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
 
     let schema_path = tmp.join("scalar-tail-schema.toml");
     std::fs::write(&schema_path, scalar_tail_schema_toml()).unwrap();
+    let schema = tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .unwrap()
+        .schema;
     let args = BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: FIXTURE_IDSET,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: tessera_build::schema::Schema::parse(&schema_path, &Default::default()).unwrap(),
+        schema,
     };
     build(&args).expect("the scalar-tail fixture build should succeed");
 }
@@ -4513,7 +4526,7 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
     let token = auth["token"].as_str().unwrap();
     let viewport = |filters: Option<serde_json::Value>| {
         let mut body = serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
         });
         if let Some(filters) = filters {
             body["filters"] = filters;

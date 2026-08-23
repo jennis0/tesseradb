@@ -3,7 +3,7 @@
 //! `annotation-representation.md` §2 sizes membership at **794 MB** for 10⁷ artifacts over 10⁹
 //! rows, and §11.3 marks the residency unmeasured in the same breath: *"794 MB is serialised bytes;
 //! 10⁷ separately allocated bitmaps carry per-object overhead the campaign never measured, and the
-//! figure multiplies by slices, by levels, and by two during a replace."* `artifact-delivery.md` §7
+//! figure multiplies by views, by levels, and by two during a replace."* `artifact-delivery.md` §7
 //! makes it the item that could refute the shape — if resident cost is materially worse than
 //! serialised, the fine-level case stops being servable and the deleted assignment column (rep
 //! §2.7) comes back for that regime.

@@ -9,7 +9,7 @@ import type {AppState} from '../state.js';
 const STAGE_FIELDS = [
   'generation_resolve_ns',
   'stamp_compare_ns',
-  'slice_lookup_ns',
+  'view_lookup_ns',
   'row_projection_ns',
   'compose_ns',
   'tiles_for_bbox_ns',

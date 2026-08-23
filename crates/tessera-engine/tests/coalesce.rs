@@ -65,7 +65,7 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
     let descriptor = format!("novel-{i}").into_bytes();
     let row = UnallocatedRow {
         external_id: Some(format!("ext-{i}").into_bytes()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![descriptor.clone()],
         x: 5.0,
         y: 5.0,
@@ -231,7 +231,7 @@ fn a_coalesced_manifest_reopens_with_every_item_and_binding_intact() {
             "a binding did not survive the restart"
         );
         assert!(
-            generation.bundle.partitions["default"].slices["s0"]
+            generation.bundle.partitions["default"].views["s0"]
                 .row_space
                 .row_of(*entity)
                 .is_some(),

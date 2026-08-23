@@ -3,7 +3,7 @@
 //! **What this is: a third producer for [`SegmentWriter`], not a second one.** Flush's
 //! `write_segment` takes an already-sorted in-memory batch; [`crate::merge::execute_merge`]'s
 //! k-way merge takes a *contiguous, non-overlapping* window of adjacent segments. This pass takes
-//! **every live segment of one (partition, slice)** — the base plus every extent, named by the
+//! **every live segment of one (partition, view)** — the base plus every extent, named by the
 //! fold's plan-time snapshot — and merges them the same way `execute_merge` does: a heap over one
 //! `(morton, tessera_id)` key per input cursor, each cursor an index into a pair of mapped files.
 //! Nothing here decodes a batch and nothing here re-sorts; the merged order falls out of the heap
@@ -104,7 +104,7 @@ pub struct FoldSegmentInput {
 
 /// Everything [`fold_row_space`] needs beyond its inputs and where to write.
 pub struct FoldRowSpaceSpec<'a> {
-    /// Every live segment of one (partition, slice) at the fold's snapshot — the base plus every
+    /// Every live segment of one (partition, view) at the fold's snapshot — the base plus every
     /// extent. Order does not matter: the merge is driven entirely by the heap over each cursor's
     /// `(morton, tessera_id)` key.
     pub inputs: &'a [FoldSegmentInput],
@@ -248,7 +248,7 @@ pub fn fold_row_space(
             return Err(StoreError::MalformedBundle {
                 detail: format!(
                     "fold_row_space: segment '{}' row {row} inverts to shard {shard}, not this \
-                     bundle's {} — folding it would place another shard's entity in this slice's \
+                     bundle's {} — folding it would place another shard's entity in this view's \
                      row space",
                     cursor.seg_id, spec.shard_id
                 ),
@@ -387,7 +387,7 @@ mod tests {
         .expect("flush");
         FoldSegmentInput {
             seg_id: seg_id.to_string(),
-            dir: dir.join(format!("partitions/p/slices/s/segments/{seg_id}")),
+            dir: dir.join(format!("partitions/p/views/s/segments/{seg_id}")),
         }
     }
 

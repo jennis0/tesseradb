@@ -13,7 +13,7 @@
  *       kind 3  points     Arrow IPC stream: tessera_id uint64, code uint64, ...scalars —
  *                          zero or more frames, concatenating to the full points stream
  *       kind 4  trailer    JSON; exactly one, last — its presence marks the response complete
- *       kind 5  artifacts  Arrow IPC stream: layer utf8, tessera_id uint64, stable_key utf8
+ *       kind 5  artifacts  Arrow IPC stream: layer utf8, tessera_id uint64, key utf8
  *                          (nullable), masked_count uint64 — at most one, after tiles and before
  *                          any points frame; ABSENT when the response served none
  *

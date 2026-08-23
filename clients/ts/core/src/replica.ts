@@ -20,7 +20,7 @@ import type {Quantisation, ViewportResponse} from './types.js';
  */
 
 export type ReplicaOptions = {
-  slice: string;
+  view: string;
   /** The byte budget for held bands. `caching.md` §5 sizes C1 at 512 MB–1 GB. */
   cacheBytes?: number;
   /**
@@ -144,7 +144,7 @@ export class Replica {
   constructor(
     private readonly fetchViewport: (
       req: {
-        slice: string;
+        view: string;
         zoom: number;
         bbox?: [number, number, number, number];
         tiles?: bigint[];
@@ -349,7 +349,7 @@ export class Replica {
       });
     const request = (rect: TileRect) => {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
-      const fetching = this.fetchViewport({slice: this.opts.slice, zoom: depth, bbox, k}, signal, background);
+      const fetching = this.fetchViewport({view: this.opts.view, zoom: depth, bbox, k}, signal, background);
       // The loop below may throw out of an earlier piece (an abort, a shed request) while this one
       // is still flying; its refusal is then nobody's answer and must not surface as unhandled.
       fetching.catch(() => {});
@@ -378,7 +378,7 @@ export class Replica {
       const revalidatedAt = performance.now();
       const bbox = rectToRequestBbox(want, depth, this.quantisation);
       response = await this.fetchViewport(
-        {slice: this.opts.slice, zoom: depth, bbox, k: 0},
+        {view: this.opts.view, zoom: depth, bbox, k: 0},
         signal
       );
       this.observe(response);

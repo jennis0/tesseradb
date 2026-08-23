@@ -1,0 +1,2 @@
+tier,n,terms_per_level,materialise_seconds,materialise_peak_rss_bytes,input_bytes,build_seconds,build_peak_rss_bytes,bundle_bytes,flat_artifacts,partition_artifacts,boundary_artifacts,boundary_depth,treed_artifacts
+1e7-postfold,10000000,65536,9.25,175984640,1460366857,89.47,5514649600,1208354235,99997,99997,37,4,998

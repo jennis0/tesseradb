@@ -57,9 +57,9 @@ define_id_newtype!(Handle, u32);
 define_id_newtype!(Priority, u16);
 define_id_newtype!(MortonCode, u32);
 
-/// String newtype for slice identifiers
+/// String newtype for view identifiers
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct SliceId(pub String);
+pub struct ViewId(pub String);
 
 /// String newtype for segment identifiers
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -87,9 +87,14 @@ pub struct GenerationStamp {
 
 // Constants (contracts spec r3)
 // 2: `declared_scalars[..].filter` renamed to `index` and `record_extents` required in
-// SEGMENTS-<n>.json (records-and-search §2/§3/§7). The bump makes a stale local bundle a loud
-// refusal rather than a silent misread — a fail-closed guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 2;
+// SEGMENTS-<n>.json (records-and-search §2/§3/§7).
+// 3: a vocabulary's `listing` renamed to `visibility` with `per_viewer` respelt `derived`, and a
+// value's `label` renamed to `title` (configuration.md §1, decision 0088). The second is the one
+// that needs the number: `title` is optional, so a bundle at 2 opens against a reader at 3 with
+// every value title silently dropped, where the required key refuses loudly on its own.
+// Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
+// guard, not compatibility (decision 0048).
+pub const BUNDLE_FORMAT: u32 = 3;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -113,7 +118,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 2);
+        assert_eq!(BUNDLE_FORMAT, 3);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

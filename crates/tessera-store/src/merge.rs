@@ -160,7 +160,7 @@ pub struct MergeSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
-    /// Where the merged extent begins in slice row space — the **first consumed extent's**
+    /// Where the merged extent begins in view row space — the **first consumed extent's**
     /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
     /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
     pub row_base: u32,
@@ -220,7 +220,7 @@ const OP: &str = "execute_merge";
 pub fn execute_merge(
     prefix_dir: &Path,
     partition: &str,
-    slice: &str,
+    view: &str,
     spec: MergeSpec<'_>,
 ) -> Result<FlushOutput> {
     if spec.inputs.is_empty() {
@@ -244,8 +244,8 @@ pub fn execute_merge(
         prefix_dir
             .join("partitions")
             .join(partition)
-            .join("slices")
-            .join(slice)
+            .join("views")
+            .join(view)
             .join("segments")
             .join(seg_id)
     };
@@ -310,7 +310,7 @@ pub fn execute_merge(
                 detail: format!(
                     "execute_merge: segment '{}' row {row} inverts to shard {shard}, not this \
                      bundle's {} — merging it would place another shard's entity in this \
-                     slice's row space",
+                     view's row space",
                     cursor.seg_id, spec.shard_id
                 ),
             });
@@ -392,7 +392,7 @@ pub fn execute_merge(
 
     let rel = |name: &str| {
         format!(
-            "partitions/{partition}/slices/{slice}/segments/{}/{name}",
+            "partitions/{partition}/views/{view}/segments/{}/{name}",
             spec.seg_id
         )
     };
@@ -412,7 +412,7 @@ pub fn execute_merge(
 
     Ok(FlushOutput {
         segment: SegmentDescriptor {
-            slice: slice.to_string(),
+            view: view.to_string(),
             seg_id: spec.seg_id.to_string(),
             row_count: row_count as u32,
             entity_lo,
@@ -552,7 +552,7 @@ mod tests {
         .expect("merge");
         assert_eq!(out.segment.row_count, 8);
 
-        let merged = dir.path().join("partitions/p/slices/s/segments/seg-m");
+        let merged = dir.path().join("partitions/p/views/s/segments/seg-m");
         let columns = ColumnsRef::load(&merged.join("columns.arrow")).expect("columns");
         let ScalarSlice::I32(scores) = columns.scalar("score").expect("score column") else {
             panic!("score is declared i32");
@@ -577,7 +577,7 @@ mod tests {
         );
         assert!(out
             .files
-            .contains_key("partitions/p/slices/s/segments/seg-m/presence/score.roaring"));
+            .contains_key("partitions/p/views/s/segments/seg-m/presence/score.roaring"));
     }
 
     /// A merge whose inputs have no absence between them writes no bitmap, exactly as a flush with
@@ -605,7 +605,7 @@ mod tests {
         )
         .expect("merge");
 
-        let merged = dir.path().join("partitions/p/slices/s/segments/seg-m");
+        let merged = dir.path().join("partitions/p/views/s/segments/seg-m");
         assert!(!merged.join(RENDER_PRESENCE_DIR).exists());
         assert!(!out
             .files

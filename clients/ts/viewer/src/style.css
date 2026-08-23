@@ -72,6 +72,14 @@ body {
   color: #7d8794;
 }
 
+/* A served artifact's depth in the served tree. The indent is the whole of the nesting cue: guide
+   lines were tried and, three levels deep in a 260px column, read as a table's rules rather than as
+   containment. `min()` keeps a deep branch from pushing its name off the panel — past four levels
+   the indent stops growing and the ordering carries the rest. */
+.row .nest {
+  padding-left: min(calc(var(--depth, 0) * 11px), 44px);
+}
+
 .bad {
   color: #ff8f7a;
 }

@@ -43,12 +43,12 @@ use crate::wal::{ChangeOp, WalError, WalRow, WalScalar};
 /// item with no external ID is addressable only by its `tessera_id`, is established in no live
 /// map, and is not a duplicate of any other such item.
 ///
-/// `slice` is resolved by the handler against the bundle's declared slices — never defaulted here
+/// `view` is resolved by the handler against the bundle's declared views — never defaulted here
 /// — for the reason given at [`WalRow`]'s own field.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedRow {
     pub external_id: Option<Vec<u8>>,
-    pub slice: String,
+    pub view: String,
     pub descriptors: Vec<Vec<u8>>,
     pub x: f32,
     pub y: f32,
@@ -104,7 +104,7 @@ impl UnallocatedRow {
             WalRow {
                 external_id: pending.external_id,
                 entity_id,
-                slice: self.slice,
+                view: self.view,
                 descriptors: self.descriptors,
                 x: self.x,
                 y: self.y,
@@ -112,6 +112,60 @@ impl UnallocatedRow {
             },
             pending.terms,
         )
+    }
+}
+
+/// **An artifact one ingest batch's rows join**, named by the key the caller's column carried and
+/// pointing back at the rows that carried it (`artifacts-from-points.md` §6.2).
+///
+/// **Rows, not entities, because the entities do not exist yet.** A batch's ids are assigned when
+/// its commit window closes, so a membership column read at the boundary can only say *which rows
+/// of this batch* named the key; the executor turns those positions into entities after the
+/// assignment and before the append, which is what puts the join in the same commit as the rows.
+///
+/// **The key travels as a key**, on [`Command::PublishArtifacts`]'s rule: `ordinal_of_key` reads
+/// state only the executor may write. It is resolved once, at admission, and the ordinal is carried
+/// from there — recorded rather than re-derived, so what the log holds is what was decided.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchMembership {
+    pub layer: String,
+    pub level: u32,
+    pub key: String,
+    /// Indices into this batch's `rows`, ascending and without repeats.
+    pub rows: Vec<u32>,
+}
+
+/// **A parent edge one batch's list column declared**, as the caller's own keys spell it.
+///
+/// Carried beside the memberships rather than folded into them because it is a different claim
+/// about the same data: an entry names a membership, and *consecutive* entries name an edge
+/// ([`tessera_types::layer::parent_edges`]). The wire route cannot create an edge — a growth adds
+/// members and never lineage — so what the executor does with one is check it against the edge the
+/// publication already stored, and refuse where the two disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatchEdge {
+    pub layer: String,
+    /// The child's level; the parent sits at this level for a lineage and one coarser for a tiered
+    /// containment, which is the resolution `LayerRegistry` already performs at publication.
+    pub level: u32,
+    pub child: String,
+    pub parent: String,
+}
+
+/// What one ingest batch's membership column said (`artifacts-from-points.md` §6.2): which
+/// artifacts its rows join, and which parent edges its adjacency declared.
+///
+/// Default-empty, and that is every batch that names no layer — the overwhelming majority, and the
+/// shape of the path before this existed.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchArtifacts {
+    pub memberships: Vec<BatchMembership>,
+    pub edges: Vec<BatchEdge>,
+}
+
+impl BatchArtifacts {
+    pub fn is_empty(&self) -> bool {
+        self.memberships.is_empty() && self.edges.is_empty()
     }
 }
 
@@ -133,6 +187,10 @@ pub enum Command {
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+        /// The artifacts this batch's rows named in a column named for a layer — empty for a batch
+        /// that named none (§6.2). Resolved and grown when the window closes, in the same commit as
+        /// the rows, so there is no state in which a point is ingested and its membership is not.
+        artifacts: BatchArtifacts,
     },
     /// One accepted `/control/changes` entry.
     ///
@@ -150,8 +208,11 @@ pub enum Command {
     /// allocations that follow them, both read state only the executor may write. A handler that
     /// validated first could be overtaken by a registration of the same name between its check and
     /// the enqueue, and would then have acked two layers onto one name.
+    /// **Boxed** so one large variant does not set the size of every command in the queue: a
+    /// declaration is the biggest thing that travels here by a wide margin, and `Ingest` and
+    /// `Change` are the two the executor moves at rate.
     RegisterLayer {
-        declaration: tessera_types::layer::LayerDeclaration,
+        declaration: Box<tessera_types::layer::LayerDeclaration>,
     },
     /// Drop an annotation layer, tombstoning its name for ever.
     DropLayer { name: String },
@@ -170,6 +231,25 @@ pub enum Command {
         layer: String,
         level: u32,
         artifacts: Vec<crate::membership::IncomingArtifact>,
+    },
+    /// Add entities to the memberships of artifacts that **already exist**, each named by the key
+    /// it was published under.
+    ///
+    /// **Members are entities already**, on [`Command::PublishArtifacts`]'s rule, and the keys are
+    /// **not** resolved here: `ordinal_of_key` reads state only the executor may write, so a
+    /// handler that resolved first could be overtaken by a fold retiring the artifact between its
+    /// lookup and the enqueue, and would have grown an ordinal a later publication now holds.
+    ///
+    /// The whole batch or none of it: a key that names no artifact refuses the command rather than
+    /// growing the rest, so a caller is never left unable to say which of their joins happened.
+    ///
+    /// **It rides the bounded, sheddable lane**, like the publication it grows — a join refused for
+    /// load is backpressure and the caller retries, where a deny refused for load is an item left
+    /// visible. See [`Command::is_never_shed`].
+    GrowMemberships {
+        layer: String,
+        level: u32,
+        joins: Vec<crate::membership::IncomingGrowth>,
     },
 }
 
@@ -327,7 +407,21 @@ pub enum Ack {
     /// signature-sorted order the IDs were assigned in. The handler turns each into a
     /// `tessera_id` for the response (contracts §3.4 r6), which is the only reason an entity ID
     /// is materialised outside the engine at all (I10).
-    Ingested { entity_ids: Vec<EntityId> },
+    Ingested {
+        entity_ids: Vec<EntityId>,
+        /// How many artifacts this batch's membership column **created** — a key no artifact held,
+        /// on a layer whose `value_set` is open (`artifacts-from-points.md` §3). Zero for every
+        /// batch that named none, which is every batch that carries no membership column and every
+        /// one whose keys all existed.
+        ///
+        /// **Reported because minting is not undoable.** A typo creates a permanent object rather
+        /// than being refused, which is the trade an open layer makes knowingly; the mitigation is
+        /// that the caller who made it is told, in the same 200 that accepted the rows.
+        ///
+        /// **A replayed batch reports zero**, and that is the honest reading: the count is what
+        /// *this submission* created, and a duplicate batch id creates nothing.
+        minted: u64,
+    },
     /// A disposition change applied. Nothing to return: the caller named the item.
     Changed,
     /// A layer was registered. The entity is returned so the handler can hand back its
@@ -343,6 +437,11 @@ pub enum Ack {
     /// between; across two principals it is a corpus-wide count over objects one of them may not
     /// see, which is C8's row. The `tessera_id` is the only artifact address that crosses the wire.
     ArtifactsPublished { entities: Vec<EntityId> },
+    /// Memberships grew. **Nothing to return: the caller named the artifacts**, by the keys they
+    /// published them under — the same reason [`Ack::Changed`] carries nothing. No identity was
+    /// minted, so there is no new `tessera_id` to hand back, and the ordinals the growth resolved
+    /// to are exactly what never crosses the wire (C8).
+    MembershipsGrown,
 }
 
 /// Why an accepted command failed while executing. See [`SubmitError`] for the "never started"
@@ -497,7 +596,7 @@ mod tests {
     fn row() -> UnallocatedRow {
         UnallocatedRow {
             external_id: Some(b"ext-1".to_vec()),
-            slice: "default".to_string(),
+            view: "default".to_string(),
             descriptors: vec![b"dept:eng".to_vec(), b"region:emea".to_vec()],
             x: 1.5,
             y: -2.5,
@@ -565,6 +664,7 @@ mod tests {
             rows: vec![row()],
             batch_id: "b".into(),
             body_hash: [0u8; 32],
+            artifacts: Default::default(),
         };
         assert!(!ingest.is_never_shed());
     }

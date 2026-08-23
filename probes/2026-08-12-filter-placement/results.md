@@ -64,7 +64,7 @@ decides whether the entity-space copy can be dropped outright or only bypassed:
 | scattered | 25% | 0.1% | 206.55 | **42.32** | 80.37 | R, 4.9× |
 | scattered | 25% | 25% | 434.41 | 267.06 | **82.08** | R, 5.3× |
 
-*ms at 10⁸: 4,096 tile counts over the whole slice. The 10⁹ figures below are ten times these —
+*ms at 10⁸: 4,096 tile counts over the whole view. The 10⁹ figures below are ten times these —
 **modelled, not measured**, and the ×10 is the routes' shape rather than a measured linearity. Over
 10⁷→10⁸ the per-decade factor across these eighteen cells runs **4.83× to 30.2×**: tightest on
 R-dense (8.69–10.22×, the route whose domain is the corpus by construction), 4.83–12.92× on E-total,
@@ -161,7 +161,7 @@ values that already exists. A rendered column declared filterable today pays bot
   arm 1's R constants describe the approach, not code — unlike its E constants, which are
   `ValueColumn::scan_eq` itself. Expect the built version to be slower by whatever the segment
   boundary and the `ScalarSlice` match cost, neither of which is in these numbers.
-- **One segment, one slice.** The fixture is a single base segment; a real slice is a base plus flushed
+- **One segment, one view.** The fixture is a single base segment; a real view is a base plus flushed
   segments, so the render route's walk is per segment and its per-range setup is paid more often.
 - **A skewed vocabulary is modelled, not sampled.** Arm 3's tail is `D·u²` rather than the arXiv
   distribution itself; the postings storage figure for a large vocabulary is the number most likely to

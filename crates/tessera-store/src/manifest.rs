@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use tessera_spatial::tiler::ScalarType;
-use tessera_types::layer::RegisteredLayer;
+use tessera_types::layer::{RegisteredLayer, ServingLayout};
 use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
 use crate::error::{Result, StoreError};
@@ -206,7 +206,7 @@ pub struct ManifestVocabulary {
     pub kind: VocabularyKind,
     /// Whether the *existence* of a value is sensitive (§3.8) — the disclosure control
     /// `/v1/categories` gates on.
-    pub listing: Listing,
+    pub visibility: Visibility,
     pub values: Vec<ManifestVocabularyValue>,
     /// Retired codes, never reassigned (§3.4). Carried into the manifest rather than left in the
     /// schema file so that a later build reading this bundle's lineage can see which codes are
@@ -233,27 +233,39 @@ pub enum VocabularyKind {
 /// Whether the *existence* of a value is sensitive — the disclosure control of §3.8, orthogonal to
 /// [`VocabularyKind`]'s operational question.
 ///
-/// **Typed rather than a string, because it is now load-bearing.** It decides whether
-/// `/v1/categories` filters a value set per principal, so a spelling no reader recognises must
-/// refuse the manifest at the parse rather than fall through to a default — and both defaults are
-/// wrong in a direction that matters: `public` publishes a gated value set, `per_viewer` withholds
-/// a published one and looks like a permission bug.
+/// **One spelling, from the declaration through to the wire** (`configuration.md` §1): the config
+/// word, the manifest discriminant and what `/v1/meta` publishes are the same two strings. The
+/// second spelling this type used to carry — `derived` on the manifest against `derived` in the
+/// declaration — cost a translation table in the build and gave one control two words in review.
+///
+/// **Typed rather than a string, because it is load-bearing.** It decides whether `/v1/categories`
+/// filters a value set per principal, so a spelling no reader recognises must refuse the manifest
+/// at the parse rather than fall through to a default — and both defaults are wrong in a direction
+/// that matters: `public` publishes a gated value set, `derived` withholds a published one and
+/// looks like a permission bug.
+///
+/// **`Derived` is the membership axis and `Public` the label one**
+/// (decision 0088): `Derived` says the viewer must already see *some* member —
+/// `require_member_visibility = "any"` — where `Public` names an access label. They share a key
+/// because that is what the configuration surface declares today (`configuration.md` §1); the
+/// decision retires the word `derived` without ruling on what fills the slot, so the surface
+/// governs the spelling and this note records why one type carries two readings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Listing {
+pub enum Visibility {
     /// The value set is filtered per principal: a value appears only if the principal can see at
     /// least one item carrying it (per-point-attributes §3.3).
-    PerViewer,
+    Derived,
     /// The value set is published as authored, to every principal with a session. Legal only for a
     /// `declared` vocabulary, where an accountable party wrote the names down (§3.8).
     Public,
 }
 
-impl Listing {
+impl Visibility {
     pub fn as_str(self) -> &'static str {
         match self {
-            Listing::PerViewer => "per_viewer",
-            Listing::Public => "public",
+            Visibility::Derived => "derived",
+            Visibility::Public => "public",
         }
     }
 }
@@ -262,13 +274,13 @@ impl Listing {
 ///
 /// **The key is not the display name** (§3.4). `sev_1` is the key a row's code stands for;
 /// "Critical" is a property of it. Conflating them makes renaming for display a rewrite of every
-/// row, which is why `label` is separate and amendable without a build.
+/// row, which is why `title` is separate and amendable without a build.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ManifestVocabularyValue {
     pub key: String,
     pub code: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
+    pub title: Option<String>,
 }
 
 /// `quantisation`: the extent Morton codes are computed against (contracts §2.5).
@@ -411,9 +423,9 @@ impl IdentityDescriptor {
     }
 }
 
-/// `slices` entry.
+/// `views` entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SliceDescriptor {
+pub struct ViewDescriptor {
     pub id: String,
     pub display_name: String,
 }
@@ -449,7 +461,7 @@ pub struct Manifest {
     pub quantisation: Quantisation,
     pub entity_id_high_water: u64,
     pub identity: IdentityDescriptor,
-    pub slices: Vec<SliceDescriptor>,
+    pub views: Vec<ViewDescriptor>,
     pub partitions: Vec<PartitionDescriptor>,
     #[serde(default)]
     pub provenance: serde_json::Value,
@@ -492,7 +504,7 @@ impl Manifest {
 /// One entry of `SEGMENTS-<n>.json`'s `segments` array — one build (or streamed) segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SegmentDescriptor {
-    pub slice: String,
+    pub view: String,
     pub seg_id: String,
     pub row_count: u32,
     pub entity_lo: u64,
@@ -607,7 +619,7 @@ pub struct AttrExtent {
 ///
 /// **A separate list from [`AttrExtent`] because the shape genuinely differs**, as the record
 /// blob's does. Every other indexed family stores one value per entity, so its extent is a value
-/// slice plus presence with the dictionary beside it; a text field has *many* terms per entity, so
+/// view plus presence with the dictionary beside it; a text field has *many* terms per entity, so
 /// there is no per-entity slot to store and the postings are the whole index. Widening `AttrExtent`
 /// instead would make `values` optional for one family and force every reader of every other family
 /// to handle an absence that cannot occur.
@@ -707,6 +719,120 @@ pub struct MembershipExtent {
     pub count: u32,
 }
 
+/// One `(layer, level)`'s artifact-write counter, as of the publication this manifest describes.
+///
+/// **The counter is what a derived structure is valid *for*, and until now it lived only in
+/// memory.** `ArtifactStore` counts the writes that have landed on each level, and everything
+/// derived from a level — its row-space projection, its lineage, its containment partition — is
+/// correct only for the version it was derived from. A restart rebuilt the store from these
+/// manifests and started every level's counter at whatever the seeding happened to produce, so a
+/// coordinate recorded before the restart could not be compared with one after it.
+///
+/// **Per `(layer, level)` and not one counter for the store**, for `ArtifactStore::versions`' own
+/// reason: a store-wide counter makes one publication anywhere invalidate every level's derived
+/// form everywhere (`design/artifact-serving-at-scale.md` §8.1).
+///
+/// A level present in `membership_extents` and absent here is a level whose version is unknown,
+/// which is not the same as zero — see [`SegmentsManifest::level_versions`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LevelVersion {
+    pub layer: String,
+    pub level: u32,
+    /// How many artifact writes had landed on this level when this manifest was written.
+    pub version: u64,
+}
+
+/// One entry of `containment_extents`: one level's fold-written containment partition
+/// (`tessera_engine::containment`, and `membership.rs` for the format).
+///
+/// **The coordinate is the whole of the adoption rule.** The partition is a pure function of a
+/// level's records and the prefix's postings, so a file describes the level *at one version*; a
+/// reader adopts it only where the level it seeds is at exactly that version, and recomposes
+/// otherwise. Never a weaker match. Growth shrinks nothing and publication only adds, so a stale
+/// partition answers containment for a generating set that has since grown — and growth makes
+/// containment **harder**, which makes the stale answer the permissive one on the one test
+/// **I3** exists to make conservative.
+///
+/// **One file per level, not per publication**, which is the difference from [`MembershipExtent`]:
+/// a membership extent covers the ordinals one publication appended and a reader unions them, where
+/// a partition covers the whole level and is replaced wholesale. That follows from what it is —
+/// interning is over the level's whole population, so an expression identifier means nothing
+/// outside the table it was interned into.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContainmentExtent {
+    /// Prefix-relative path of the packed partition.
+    pub path: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when this partition was composed. **Also the adoption test**: a reader
+    /// takes the file only where the level it seeded is at exactly this version.
+    pub level_version: u64,
+}
+
+/// One entry of `tile_index_extents`: one `(view, layer, level)`'s fold-written per-artifact
+/// extents, over which `tessera_engine::tile_index` folds the hierarchical row-range index
+/// (`membership.rs` for the format).
+///
+/// **The coordinate is [`ContainmentExtent`]'s rule with a view on it**, and the view is the whole
+/// of the difference. A containment expression names entities' terms, so no row space is involved
+/// in it and one file answers for every view of a level. An extent is a pair of **rows**, so it
+/// answers for exactly the view whose row space it was projected through — and a level's row form
+/// is per view for the same reason. A file adopted under another view would settle artifacts
+/// against ranges that name other documents.
+///
+/// The version half is the same rule and the same direction of mistake: a growth adds members, so
+/// a stale extent is **narrow**, and a narrow extent settles an artifact whose membership reaches
+/// outside the viewport — which turns the design's collapse (`membership ⊆ viewport`, so one probe
+/// answers both questions) into a claim that is no longer true. Equality, never anything weaker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TileIndexExtent {
+    /// Prefix-relative path of the packed extent column.
+    pub path: String,
+    /// The view whose row space these extents are in.
+    pub view: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when this column was projected. **Also the adoption test.**
+    pub level_version: u64,
+}
+
+/// One entry of `row_column_extents`: one `(view, layer, level)`'s fold-written **row-major**
+/// column — a label per row, or a list per row (`membership.rs` for the two formats).
+///
+/// **[`TileIndexExtent`]'s coordinate, with the layout tag beside it.** A column is addressed by
+/// row, so it answers for exactly the view whose row space it was written over, and the level's
+/// version is what says whether it still describes that level. Equality on both, never anything
+/// weaker: a stale column is **narrow** — a growth added rows it does not label — and an unlabelled
+/// row is one no artifact claims, so the artifact holding it silently stops being a candidate
+/// there.
+///
+/// **The tag is the fail-closed guard the selection memo §5 asks for**, and it is not compatibility
+/// machinery. The manifest states which form each level's file is in and each format carries a
+/// distinct magic, so a reader handed a file the manifest mis-describes refuses at the first bytes
+/// rather than decoding a list's offset table as a label column. A refusal here is a drop and a
+/// recomposition, exactly as an unreadable containment partition is — the level is served
+/// artifact-major, which is what every request did before this structure existed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RowColumnExtent {
+    /// Prefix-relative path of the packed column.
+    pub path: String,
+    /// The view whose row space this column is addressed in.
+    pub view: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when this column was written. **Also the adoption test.**
+    pub level_version: u64,
+    /// Which form the file is in — checked against the file's own magic at open.
+    ///
+    /// Never [`ServingLayout::ArtifactMajor`]: that layout has no column, so an entry claiming it
+    /// names a file no writer produces, and the reader refuses it.
+    pub layout: ServingLayout,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -785,6 +911,42 @@ pub struct SegmentsManifest {
     /// exactly what a lost list looks like, and the artifacts are then served as absent with nothing
     /// anywhere reporting a fault.
     pub membership_extents: Vec<MembershipExtent>,
+    /// Every `(layer, level)`'s artifact-write counter as of this publication — see
+    /// [`LevelVersion`].
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument and with the same shape of
+    /// consequence: an absent list and a lost list are indistinguishable under a default, and a
+    /// lost one restarts every level at zero — which is a coordinate a derived structure written
+    /// under the *old* numbering could compare equal to. A manifest omitting it is malformed, not
+    /// version-free.
+    pub level_versions: Vec<LevelVersion>,
+    /// Every fold-written containment partition this partition holds — see [`ContainmentExtent`].
+    /// Empty in a bundle that has never folded, and in one served by a plugin other than the
+    /// builtin.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument. The consequence of a lost list is
+    /// milder than that field's — a partition that is not adopted is recomposed on first use, and
+    /// the answer is the same — but *indistinguishable from an empty one* is the property the rule
+    /// is about, and a list that silently emptied itself would turn a fold's consolidation into a
+    /// stall on whichever request arrived first, with nothing reporting a fault.
+    pub containment_extents: Vec<ContainmentExtent>,
+    /// Every fold-written tile-index extent column this partition holds — see [`TileIndexExtent`].
+    /// Empty in a bundle that has never folded.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument and with `containment_extents`'
+    /// consequence: an unadopted column is refolded on first use and the answer is the same, but a
+    /// list that silently emptied itself would turn a fold's consolidation into a stall on
+    /// whichever request arrived first, with nothing reporting a fault.
+    pub tile_index_extents: Vec<TileIndexExtent>,
+    /// Every fold-written row-major column this partition holds — see [`RowColumnExtent`]. Empty
+    /// in a bundle that has never folded, and in one whose every level is artifact-major, which is
+    /// most of them.
+    ///
+    /// No `serde(default)`, on `membership_extents`' argument and with `tile_index_extents`'
+    /// consequence: an unadopted column is recomposed on first use and the answer is the same, but
+    /// a list that silently emptied itself would turn a fold's consolidation into a stall on
+    /// whichever request arrived first, with nothing reporting a fault.
+    pub row_column_extents: Vec<RowColumnExtent>,
     /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
     /// store as [`SegmentsManifest::record_extents`], listed separately.
     ///
@@ -1132,6 +1294,10 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),

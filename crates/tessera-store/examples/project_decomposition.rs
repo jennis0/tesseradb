@@ -167,7 +167,7 @@ fn map_slots(path: &Path) -> (Mmap, usize) {
     let file = File::open(path).expect("the fixture opens");
     // SAFETY: read-only for the lifetime of the mapping; nothing in this probe writes it.
     let mmap = unsafe { Mmap::map(&file) }.expect("the fixture maps");
-    let bound = u64::from_le_bytes(mmap[8..16].try_into().expect("8-byte slice")) as usize;
+    let bound = u64::from_le_bytes(mmap[8..16].try_into().expect("8-byte view")) as usize;
     assert_eq!(mmap.len(), HEADER_LEN + bound * 4, "fixture length");
     (mmap, bound)
 }
@@ -453,7 +453,7 @@ fn bucketise(slots: &[u32], mask: &Bitmap, row_bound: u32) -> Vec<Vec<u32>> {
             if let Some(&slot) = slots.get(entity as usize) {
                 if slot != ROW_ABSENT {
                     // `slot < row_bound` holds for every non-sentinel slot of a valid permutation
-                    // (`Permutation::validate_rows` establishes it once per slice at bundle open),
+                    // (`Permutation::validate_rows` establishes it once per view at bundle open),
                     // so the shift cannot address past the ends.
                     buckets[(slot >> BUCKET_SHIFT) as usize].push(slot);
                 }

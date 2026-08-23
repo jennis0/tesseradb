@@ -30,14 +30,17 @@ pub use alloc::{
     allocator_ceiling, allocator_floor, assign_sorted, high_water_from, low_water_from, Allocator,
     PendingItem,
 };
-pub use membership::{ArtifactRecord, ArtifactStore, IncomingArtifact};
-pub use registry::{LayerRegistry, RegistryError, ResolvedLayers};
+pub use membership::{ArtifactRecord, ArtifactStore, IncomingArtifact, IncomingGrowth};
+pub use registry::{no_pending, EdgeCheck, LayerRegistry, RegistryError, ResolvedLayers};
 pub use buffer::{BufferedItem, DescriptorResolver, IngestBuffer};
-pub use command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
+pub use command::{
+    Ack, BatchArtifacts, BatchEdge, BatchMembership, Command, ExecError, Receipt, SubmitError,
+    UnallocatedRow,
+};
 pub use faults::WalMeter;
 pub use overlay::{replay, Overlay};
 pub use wal::{
-    ChangeOp, ExecutorWal, OverlaySnapshotEntry, PublishedArtifact, Wal, WalError, WalRecord,
-    WalRow, WalScalar,
+    ChangeOp, ExecutorWal, MembershipGrowth, OverlaySnapshotEntry, PublishedArtifact, Wal, WalError,
+    WalRecord, WalRow, WalScalar,
 };
-pub use window::{ClosedEntry, CommitWindow, WindowEntry};
+pub use window::{ClosedEntry, CommitWindow, ResolvedMembership, WindowEntry};

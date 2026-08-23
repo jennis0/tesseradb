@@ -158,7 +158,7 @@ def main() -> int:
         print(f"authorise() [fragment build, one-off, w={w}]: {authorise_s * 1000:.1f} ms")
 
         # Warm-up pass: one viewport to force row-projection cache fill (Permutation::project is
-        # seconds at 10^9 rows -- cached per (token, slice, pin), never on the per-viewport path).
+        # seconds at 10^9 rows -- cached per (token, view, pin), never on the per-viewport path).
         # bbox picked to touch a decent tile spread at a modest zoom.
         t0 = time.perf_counter()
         warm_resp = srv.viewport_response(token, "s0", 6, [0.0, 0.0, EXTENT, EXTENT], k=30)

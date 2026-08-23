@@ -258,7 +258,7 @@ SCHEMA_TOML = """\
 #                 --schema data/scaled/attrs/schema.toml \\
 #                 --values archive=data/scaled/attrs/archive.parquet \\
 #                 --values primary_category=data/scaled/attrs/primary_category.parquet \\
-#                 --extent 0,65536,0,65536 --slice s0 --limit 2422486 ...
+#                 --view s0 --limit 2422486 ...   (the extent is the view's own now)
 #
 # Residency, which `tessera build` also reports: 16 B/row over the 12 B fixed row (+133%).
 

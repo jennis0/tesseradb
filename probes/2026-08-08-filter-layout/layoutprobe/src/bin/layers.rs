@@ -15,7 +15,7 @@
 //!   every file, which brackets what the open-time digest sweep pays per file before hashing.
 //!
 //! Extent shape modelled: contiguous entity ranges above the base high-water, `per_flush` entities
-//! each — the single-slice shape. Concurrent multi-slice ingest interleaves holes (write-path
+//! each — the single-view shape. Concurrent multi-view ingest interleaves holes (write-path
 //! §4.2), which adds presence runs per extent; the per-layer floor measured here is therefore a
 //! floor, not a ceiling, and the harness notes it rather than modelling every shape.
 

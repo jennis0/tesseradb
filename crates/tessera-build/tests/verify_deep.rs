@@ -103,19 +103,20 @@ fn flushed_bundle(root: &Path) {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: Vec::new(),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -190,7 +191,7 @@ fn flushed_bundle(root: &Path) {
 
     // The flushed entities' postings live in a delta tier the base `pairs.parquet` has never
     // seen — the state the pairs check must not refuse.
-    let delta_rel = "partitions/default/slices/s0/segments/flush-1/delta.arrow".to_string();
+    let delta_rel = "partitions/default/views/s0/segments/flush-1/delta.arrow".to_string();
     let delta_path = prefix_dir.join(&delta_rel);
     tessera_authz::write_delta_tier(
         &delta_path,
@@ -217,6 +218,10 @@ fn flushed_bundle(root: &Path) {
         layers: seg0.layers.clone(),
         layer_tombstones: seg0.layer_tombstones.clone(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
+        row_column_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments,
         deltas: vec![delta_rel],
@@ -262,7 +267,11 @@ fn refresh_digest(root: &Path, rel: &str) {
         serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
     if segments["files"].get(rel).is_some() {
         segments["files"][rel] = digest;
-        fs::write(&segments_path, serde_json::to_vec_pretty(&segments).unwrap()).unwrap();
+        fs::write(
+            &segments_path,
+            serde_json::to_vec_pretty(&segments).unwrap(),
+        )
+        .unwrap();
         return;
     }
 
@@ -290,7 +299,7 @@ fn refresh_digest(root: &Path, rel: &str) {
 /// The false-refusal direction (§18 obligation 10): a valid bundle that has flushed and
 /// re-ingested must verify — shallow and deep. Before the row-offset fix the shallow verifier
 /// refused every such bundle: its bijection sweep counted only the base permutation's rows and
-/// its identity loop restarted the row index at zero per segment while indexing a slice-wide
+/// its identity loop restarted the row index at zero per segment while indexing a view-wide
 /// array.
 #[test]
 fn a_flushed_and_reingested_bundle_verifies_shallow_and_deep() {
@@ -357,8 +366,8 @@ fn the_fixture_carries_a_key_bound_in_two_runs() {
 // defect. A checker nobody has seen fail is a checker nobody knows works.
 
 fn expect_refusal(root: &Path, needle: &str) {
-    let err = verify_deep(root, &VerifyOpts::default())
-        .expect_err("the damaged bundle must be refused");
+    let err =
+        verify_deep(root, &VerifyOpts::default()).expect_err("the damaged bundle must be refused");
     let message = err.to_string();
     assert!(
         message.contains(needle),
@@ -374,11 +383,10 @@ fn a_segment_whose_column_is_one_row_short_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/slices/s0/segments/flush-1/columns.arrow";
+    let rel = "partitions/default/views/s0/segments/flush-1/columns.arrow";
     let path = root.join("v00000").join(rel);
 
-    let reader =
-        arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
+    let reader = arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
     let schema = reader.schema();
     let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
     assert_eq!(batches.len(), 1);
@@ -400,13 +408,16 @@ fn a_segment_whose_morton_column_is_out_of_order_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
     flushed_bundle(temp.path());
     let root = bundle_root(&temp);
-    let rel = "partitions/default/slices/s0/segments/flush-1/morton.u32";
+    let rel = "partitions/default/views/s0/segments/flush-1/morton.u32";
     let path = root.join("v00000").join(rel);
 
     let mut bytes = fs::read(&path).unwrap();
     assert_eq!(bytes.len(), 8, "two rows, one u32 code each");
     let (first, second) = bytes.split_at_mut(4);
-    assert_ne!(first, second, "the fixture's codes must differ for the swap to damage");
+    assert_ne!(
+        first, second,
+        "the fixture's codes must differ for the swap to damage"
+    );
     first.swap_with_slice(second);
     fs::write(&path, &bytes).unwrap();
     refresh_digest(&root, rel);
@@ -432,10 +443,11 @@ fn a_posting_past_the_high_water_is_refused() {
     expect_refusal(&root, "entity_id_high_water");
 }
 
-/// Postings sorted and duplicate-free: term 0's record is hand-encoded with its own first entity
-/// duplicated (the honest writer refuses such input, so the record is built from raw bytes; the
-/// duplicate repeats a genuine pair so the sortedness check fires before the pairs comparison
-/// could).
+/// Postings sorted and duplicate-free: the first *carried* term's record is hand-encoded with its
+/// own first entity duplicated (the honest writer refuses such input, so the record is built from
+/// raw bytes; the duplicate repeats a genuine pair so the sortedness check fires before the pairs
+/// comparison could). Not term 0, which is the reserved `public` label and carries a posting only
+/// where the corpus declares it.
 #[test]
 fn a_posting_with_a_duplicate_entity_is_refused() {
     let temp = tempfile::TempDir::new().unwrap();
@@ -445,7 +457,11 @@ fn a_posting_with_a_duplicate_entity_is_refused() {
     let path = root.join("v00000").join(rel);
 
     let per_term = read_base_postings(&path);
-    let first = *per_term[0].first().expect("term 0 has a posting");
+    let (carried, first) = per_term
+        .iter()
+        .enumerate()
+        .find_map(|(t, entities)| entities.first().map(|e| (t, *e)))
+        .expect("some term has a posting");
     let mut records: Vec<Vec<u8>> = per_term
         .iter()
         .enumerate()
@@ -456,7 +472,7 @@ fn a_posting_with_a_duplicate_entity_is_refused() {
     let mut damaged = vec![0u8]; // tag 0: raw little-endian u32 array
     damaged.extend_from_slice(&first.to_le_bytes());
     damaged.extend_from_slice(&first.to_le_bytes());
-    records[0] = damaged;
+    records[carried] = damaged;
     tessera_authz::write_posting_records(&path, &records).unwrap();
     refresh_digest(&root, rel);
 
@@ -526,7 +542,11 @@ fn a_dict_extent_with_a_miscounted_declaration_is_refused() {
         serde_json::from_slice(&fs::read(&segments_path).unwrap()).unwrap();
     let declared = segments["dict_extents"][0]["records"].as_u64().unwrap();
     segments["dict_extents"][0]["records"] = serde_json::json!(declared + 1);
-    fs::write(&segments_path, serde_json::to_vec_pretty(&segments).unwrap()).unwrap();
+    fs::write(
+        &segments_path,
+        serde_json::to_vec_pretty(&segments).unwrap(),
+    )
+    .unwrap();
 
     expect_refusal(&root, "positional");
 }
@@ -541,7 +561,8 @@ fn a_pairs_file_missing_a_base_pair_is_refused() {
     let rel = "partitions/default/terms/pairs.parquet";
     let path = root.join("v00000").join(rel);
 
-    let mut per_term = read_base_postings(&root.join("v00000/partitions/default/terms/postings.arrow"));
+    let mut per_term =
+        read_base_postings(&root.join("v00000/partitions/default/terms/postings.arrow"));
     let with_rows = per_term
         .iter()
         .position(|entities| !entities.is_empty())
@@ -580,14 +601,12 @@ fn a_source_binding_request_is_refused_until_the_contract_carries_the_field() {
 fn read_base_postings(path: &Path) -> Vec<Vec<u32>> {
     let reader = tessera_authz::PostingsReader::open(path, false).unwrap();
     (0..reader.term_count())
-        .map(|t| {
-            match reader.posting_at(t).unwrap().unwrap() {
-                tessera_authz::PostingRef::Array(bytes) => bytes
-                    .chunks_exact(4)
-                    .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-                    .collect(),
-                tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
-            }
+        .map(|t| match reader.posting_at(t).unwrap().unwrap() {
+            tessera_authz::PostingRef::Array(bytes) => bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .collect(),
+            tessera_authz::PostingRef::Roaring(view) => view.iter().collect(),
         })
         .collect()
 }
@@ -611,5 +630,9 @@ fn append_dict_extent_repeating_first_descriptor(root: &Path, k: usize) {
         .push(serde_json::json!({ "path": rel, "records": 1 }));
     segments["files"][&rel] =
         serde_json::json!({ "size": record.len(), "sha256": hex_sha256(record) });
-    fs::write(&segments_path, serde_json::to_vec_pretty(&segments).unwrap()).unwrap();
+    fs::write(
+        &segments_path,
+        serde_json::to_vec_pretty(&segments).unwrap(),
+    )
+    .unwrap();
 }

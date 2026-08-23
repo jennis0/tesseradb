@@ -142,7 +142,7 @@ fn build_rows_with_signatures(
             let descriptors = vec![format!("{}", i % signatures.max(1)).into_bytes()];
             UnallocatedRow {
                 external_id: Some(format!("{tag}-{i}").into_bytes()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 x: ((i * 7) % 1000) as f32,
                 y: ((i * 13) % 1000) as f32,
                 scalars: Vec::new(),

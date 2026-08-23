@@ -78,7 +78,7 @@ The test is whether a competent reader gets it at reading speed, once.
 Length is governed by the same test at document scale. Cover the substance and stop. A document
 does not need an introduction restating its title, a summary restating its body, a section for
 every heading a similar document happened to have, or an enumeration of alternatives nobody
-proposed. Most design documents here are a few hundred lines; the two that run past a thousand
+proposed. Most design documents here are a few hundred lines. Two run past a thousand; they
 earned it by specifying the whole system, and are not a model to imitate. If a draft has grown
 past what it needs, the fix is to cut it before review, not to explain the length.
 
@@ -89,7 +89,8 @@ cannot tell which things actually are — and this corpus has a small number of 
 genuinely are.
 
 - Reserve **bold** for the sentence a skimming reader must not miss. A paragraph with four bold
-  phrases has none.
+  phrases has none. This governs corpus prose. Bold at the head of a list item is a different
+  construction — a handle the reader skips by — and is not covered by this rule.
 - Do not call a reasonable design choice groundbreaking, novel, or the key insight. Say what it
   does and let it be judged.
 - Scale the space to the importance. A mechanism that took a week to get right but is
@@ -114,10 +115,8 @@ Tables count. A three-way comparison is a table, not three paragraphs.
 - **Record negative results.** `crates/tessera-bench/src/arms/ingest.rs` says
   *"F3: NOT confirmed by measurement — do not claim it is."* A refuted hypothesis is a result,
   and it stops the idea coming back.
-- **Distinguish specified from implemented.** Where the corpus describes something not yet built,
-  it must say so at that point — not in a preamble the reader has forgotten by §5. Present tense
-  about absent machinery is the most damaging error available here, because it reads as an
-  assurance.
+- **Distinguish specified from implemented.** The marker convention, and why present tense about
+  absent machinery is the most damaging error available here, is under rule 1.
 - **Argue, do not assert.** A reader who disagrees should be able to find the reason and attack
   it. `crates/tessera-engine/src/select.rs` spends fifty lines on "why there is no candidate-list
   route" because the rejected alternative looks obviously better and will be proposed again.

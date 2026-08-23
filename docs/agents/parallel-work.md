@@ -71,12 +71,17 @@ overlaps, dead patterns and the unclaimed set; `--selftest` checks the matcher i
 ## The gate every task passes
 
 ```bash
-cargo test --workspace
+cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/check-layers.sh
+bash scripts/check-clients.sh
 bash scripts/check-track-allowlist.sh <track>
 python3 scripts/check-doc-links.py
 ```
+
+`check-clients.sh` typechecks and tests the TypeScript client, including the operator `.mjs`
+scripts under `checkJs`. It is in the gate because a rename that touched twenty-one client files
+shipped three defects that the Rust-and-Python gate could not see.
 
 `check-layers.sh` is the mechanical half of the architecture: forbidden dependency edges, the
 no-tokio-in-engine-or-store rule, I4 (no cross-space ID conversions), and I10 (no `EntityId` in

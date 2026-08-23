@@ -97,7 +97,7 @@ rather than forty ticks, with read latency beside it.
 
 > ⊘ **The arm does not exist.** Flush, both halves of merge and the fold all do (write-path §4, §7;
 > compaction §4), so the gates in spec §8 have something to bound: the ack→visible gap is
-> `flush_max_age_secs` per slice rather than unbounded, and G5's counts are the ones `soak.rs`
+> `flush_max_age_secs` per view rather than unbounded, and G5's counts are the ones `soak.rs`
 > already holds. What is missing is only the arm — until it runs, nothing measures read latency
 > under sustained ingest at all.
 

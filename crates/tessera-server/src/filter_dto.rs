@@ -10,7 +10,7 @@
 //!
 //! They look alike and are not. A caller naming a column that does not exist made an error and can
 //! be told so. Refusing an unknown *value* would make the filter an existence oracle over exactly
-//! the vocabulary `listing = "per_viewer"` hides: ask for `department = "black-programmes"`, and a
+//! the vocabulary `visibility = "derived"` hides: ask for `department = "black-programmes"`, and a
 //! `422` says the value exists while an empty result says nothing. So an unresolvable value
 //! resolves to a code no row carries and the request is answered normally
 //! (`filter-surface.md` §2.1).
@@ -446,7 +446,7 @@ mod tests {
     }
 
     /// **The disclosure control.** An unknown value is not an error — refusing it would say the
-    /// value exists, which is what `per_viewer` hides. It resolves to the reserved absent code, so
+    /// value exists, which is what `derived` hides. It resolves to the reserved absent code, so
     /// the request is answered normally and matches nothing.
     #[test]
     fn an_unknown_value_is_an_empty_operand_not_a_refusal() {

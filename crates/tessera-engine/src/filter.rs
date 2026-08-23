@@ -25,13 +25,13 @@
 //! indistinguishable *in work*, obtained structurally rather than by padding.
 //!
 //! **A category's derived postings answer `eq` and `in` where, and only where, the column's
-//! vocabulary is `listing = "public"`** (decision 0063). Postings resolve over the whole corpus and
+//! vocabulary is `visibility = "public"`** (decision 0063). Postings resolve over the whole corpus and
 //! are then intersected with the candidate, where the scan takes the candidate as its input — so
 //! their work is a function of the *value named*. `probes/2026-08-08-filter-layout/` arm 9 measures
 //! a hidden, scattered 10⁷-member value at **2.1 ms** intersected where an absent value costs
 //! **0.000 ms**: a scattered value's members meet every container even when no bits do. Under
-//! `per_viewer` that difference is a disclosure of exactly what the declaration withholds, so a
-//! `per_viewer` column keeps the scan. Under `public` the value set is served to every principal
+//! `derived` that difference is a disclosure of exactly what the declaration withholds, so a
+//! `derived` column keeps the scan. Under `public` the value set is served to every principal
 //! alike by `/v1/categories`, so the timing distinguishes only a fact the client already holds —
 //! registered as leak-register row **C24**.
 //!
@@ -172,7 +172,7 @@ use tessera_filter::{
 /// server on engine API types only, and an operand's *values* are part of this crate's API surface
 /// even though the column they are compared against is not.
 pub use tessera_filter::{Endpoint, Scalar};
-use tessera_store::manifest::Listing;
+use tessera_store::manifest::Visibility;
 use tessera_types::{AttrLocalId, TermId};
 
 use crate::compose::verdict;
@@ -369,7 +369,7 @@ pub enum FilterOperand {
 /// The code a predicate names when its value does not resolve.
 ///
 /// **An unresolvable value is an empty operand, never a refusal** (`filter-surface.md` §2.1).
-/// Refusing would say the value exists, which is exactly what `listing = "per_viewer"` hides — so a
+/// Refusing would say the value exists, which is exactly what `visibility = "derived"` hides — so a
 /// filter naming a value the principal may not see must be answered, and answered with nothing.
 ///
 /// Code 0 is the vocabulary's reserved *absent* sentinel: never drawn, never bound to a key. That
@@ -384,9 +384,9 @@ pub const UNRESOLVABLE_VALUE: AttrLocalId = AttrLocalId::new(0);
 /// **I12**'s "a filter narrows `M_sel` and never widens it" is a property of the shape rather than a
 /// check, and no expression can name a set outside the principal's own mask.
 ///
-/// `NoneOf` is deliberately absent: it needs the `per_viewer` rule decision 0062 records — negation
+/// `NoneOf` is deliberately absent: it needs the `derived` rule decision 0062 records — negation
 /// over a gated category must be evaluated *within the visible vocabulary*, or it becomes an
-/// existence oracle over the values `listing` hides.
+/// existence oracle over the values `visibility` hides.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FilterExpr {
     /// One column's predicate.
@@ -496,7 +496,7 @@ impl FilterExpr {
 /// Opened once per generation, not per request.
 ///
 /// **Membership is not filterability.** The map holds every column the build wrote a value column
-/// for — which includes a `listing = "per_viewer"` category that is not declared filterable, since
+/// for — which includes a `visibility = "derived"` category that is not declared filterable, since
 /// its postings are what `/v1/categories` derives value visibility from. [`FilterColumns::resolve`]
 /// gates on [`Layers::filterable`] rather than on presence, so such a column is refused exactly as
 /// an undeclared one is: an *undeclared* column is a caller error, where an unresolvable *value* is
@@ -547,6 +547,43 @@ impl Default for FilterColumns {
     }
 }
 
+/// One indexed column's value layers, base first — a **read** view over what
+/// [`FilterColumns::value_layers`] holds.
+///
+/// **The split into base and extents is the whole reason this type exists.** An artifact layer's
+/// row-addressed membership is written over the *base* row space and survives a flush because an
+/// append moves no bit it holds (`RowSpace::project_base`); the entities a flush published since sit
+/// above that base and are exactly the ones the **extent** layers hold values for. So a reader that
+/// wants both halves has to be able to ask for each, and one that asks for all of them at once —
+/// which is what a fold's rewrite wants — takes both.
+///
+/// **Disjoint in entity space by I9**, so no entity has a value in two layers and the order they
+/// are visited decides nothing — which is what makes the base/extent split a partition of the
+/// column rather than a filter over it.
+#[derive(Clone, Copy)]
+pub struct ValueLayers<'a> {
+    layers: &'a [Layer],
+}
+
+impl<'a> ValueLayers<'a> {
+    /// The build's own column — the one whose entities the base row space covers. `None` where the
+    /// column arrived entirely in flush extents, which is a column declared after the build.
+    pub fn base(&self) -> Option<&'a ValueColumn> {
+        self.layers
+            .iter()
+            .find(|layer| layer.values_rel.is_none())
+            .map(|layer| layer.values.as_ref())
+    }
+
+    /// The flush extents, oldest first — the entities published since the base was written.
+    pub fn extents(&self) -> impl Iterator<Item = &'a ValueColumn> {
+        self.layers
+            .iter()
+            .filter(|layer| layer.values_rel.is_some())
+            .map(|layer| layer.values.as_ref())
+    }
+}
+
 /// A stack of zero layers — what a schema with no blob-resident column and no extents owns.
 /// Infallible: `RecordStack::open` touches no file when given nothing to open.
 fn empty_record_stack() -> RecordStack {
@@ -560,7 +597,7 @@ fn empty_record_stack() -> RecordStack {
 /// Derived at open from the compiled declaration alone — never from a statistic, never per
 /// principal (§8.2): `entity` where the column has an entity-space value column it may answer a
 /// filter from (`index = true`, or a rendered category whose vocabulary floor stores one —
-/// `listing = "per_viewer"`); `row` where `render = true` put it in the hot column, which is every
+/// `visibility = "derived"`); `row` where `render = true` put it in the hot column, which is every
 /// rendered column, `utf8` being refused from the hot column at the schema.
 ///
 /// **The family travels with the placement because the row route cannot infer it from the
@@ -591,7 +628,7 @@ pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
 ///
 /// **Not a tuning knob and not a per-request choice.** See this module's header and decision 0063:
 /// the postings' work is a function of the value named, which is a disclosure under
-/// `listing = "per_viewer"` and a published fact under `listing = "public"`.
+/// `visibility = "derived"` and a published fact under `visibility = "public"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route {
     /// Every operand is answered by scanning the value column, layer by layer.
@@ -621,16 +658,16 @@ struct Layers {
     /// checked in one bitmap operation — see [`FilterColumns::compose`] — rather than trusted.
     covered: Bitmap,
     /// **Declared `index = true`.** A column may be held here without being filterable: a
-    /// `listing = "per_viewer"` category owes membership postings whatever its `index` says
+    /// `visibility = "derived"` category owes membership postings whatever its `index` says
     /// (`filter-index.md` §2.3), and `/v1/categories` reads them from here. [`FilterColumns::resolve`]
     /// refuses such a column exactly as it refuses an undeclared one, so holding it opens no
     /// operand the schema did not declare.
     filterable: bool,
     /// The base build's per-value postings, where the column has them: every category column whose
-    /// vocabulary is `per_viewer`, and every category column declared filterable.
+    /// vocabulary is `derived`, and every category column declared filterable.
     ///
     /// Held whatever the route, because the membership question `/v1/categories` asks is answered
-    /// from these on a `per_viewer` column that the *filter* route deliberately does not use them
+    /// from these on a `derived` column that the *filter* route deliberately does not use them
     /// for.
     postings: Option<Arc<ColumnPostings>>,
     /// The analyser this column was **indexed** with, resolved from the manifest's recorded
@@ -890,7 +927,7 @@ pub enum FilterError {
     /// entities, so a read that cannot vouch for its answer must refuse rather than treat the miss
     /// as ordinary. An ordinary miss is not this — it is [`NO_SUCH_ORDINAL`], and it still scans.
     DictionaryUnreadable { column: String, detail: String },
-    /// The column has no derived membership postings, so the `per_viewer` visibility predicate
+    /// The column has no derived membership postings, so the `derived` visibility predicate
     /// cannot be evaluated for it. Fail-closed for the reason `categories.rs` gives: an empty value
     /// set is what a principal who may see none of them is told.
     MembershipUnavailable(String),
@@ -951,7 +988,7 @@ impl std::fmt::Display for FilterError {
                     columns.join(", ")
                 ),
             },
-            FilterError::NegationWithoutPresence { column, family } =>  write!(
+            FilterError::NegationWithoutPresence { column, family } => write!(
                 f,
                 "a 'none_of' names column '{column}', which is a {family} column and stores no \
                  per-item value to be present or absent — its index is the words its documents \
@@ -976,7 +1013,7 @@ impl FilterError {
     /// Note which side [`FilterError::UndeclaredColumn`] falls on: the *name* of a filterable
     /// column is public, so refusing by name discloses nothing. An unknown **value** is a different
     /// matter entirely and is never an error at all — it is an empty operand, because refusing it
-    /// would make the filter an existence oracle over exactly what `listing = "per_viewer"` hides.
+    /// would make the filter an existence oracle over exactly what `visibility = "derived"` hides.
     pub fn is_callers_fault(&self) -> bool {
         match self {
             FilterError::UndeclaredColumn(_)
@@ -992,20 +1029,20 @@ impl FilterError {
 
 impl std::error::Error for FilterError {}
 
-/// The `listing` of the vocabulary a column draws from, or `None` where it is not a category.
+/// The `visibility` of the vocabulary a column draws from, or `None` where it is not a category.
 ///
 /// Read from the **vocabulary**, which is the object that carries it. A column naming a vocabulary
 /// the manifest does not hold is refused at seed (`Vocabularies::seed`), so the `None` this returns
 /// for one means "not a category" and nothing else.
-fn listing_of(
+fn visibility_of(
     scalar: &tessera_store::manifest::DeclaredScalar,
     vocabularies: &[tessera_store::manifest::ManifestVocabulary],
-) -> Option<Listing> {
+) -> Option<Visibility> {
     let name = scalar.vocabulary.as_deref()?;
     vocabularies
         .iter()
         .find(|v| v.name == name)
-        .map(|v| v.listing)
+        .map(|v| v.visibility)
 }
 
 /// Does the build write a value column for this column?
@@ -1013,7 +1050,7 @@ fn listing_of(
 /// **The mirror of `tessera_build`'s `postings_are_owed`, and it must stay one.** Reading a file set
 /// the build did not write is a refusal at open; failing to read one it did write is a column whose
 /// values are on disk and unserved. Two reasons, and the second is the one a reader will not expect:
-/// `index = true` is the obvious one, and `listing = "per_viewer"` is the other — that
+/// `index = true` is the obvious one, and `visibility = "derived"` is the other — that
 /// control's gate is membership-derived (per-point-attributes §3.3) and the member sets it needs are
 /// the postings derived from this column, so it gets both whatever its `index` says
 /// (`filter-index.md` §2.3).
@@ -1030,7 +1067,7 @@ pub(crate) fn owes_value_column(
     if scalar.arrow_type == tessera_spatial::tiler::ScalarType::Text {
         return false;
     }
-    scalar.index || listing_of(scalar, vocabularies) == Some(Listing::PerViewer)
+    scalar.index || visibility_of(scalar, vocabularies) == Some(Visibility::Derived)
 }
 
 /// Does this column's value live in the record blob? **A field is blob-resident exactly when it has
@@ -1039,8 +1076,8 @@ pub(crate) fn owes_value_column(
 ///
 /// **Categories are not exempt, and reading the exemption as the family's is the bug this function
 /// exists to prevent.** §4.2's floor belongs to a category's *readers* — `/v1/categories` and the
-/// `per_viewer` gate — not to the family: the entity-space structures are granted to an `index`ed
-/// or `per_viewer` category, so a **`public` category declared with neither flag has no reader and
+/// `derived` gate — not to the family: the entity-space structures are granted to an `index`ed
+/// or `derived` category, so a **`public` category declared with neither flag has no reader and
 /// no floor**. Excluding every category here leaves that shape with nowhere to store a value, which
 /// no declaration refuses: the build writes the field, the flush drops it, and drill-down shows it
 /// for built items and omits it for ingested ones.
@@ -1126,7 +1163,7 @@ impl FilterColumns {
     /// which are the request path's. A `bool` here cannot express it, so the rule is enforced by the
     /// signature rather than by a comment asking the next caller to remember it.
     #[allow(clippy::too_many_arguments)] // One argument per artefact class the manifest names;
-    // bundling them into a struct would be a second shape to keep in step with the manifest.
+                                         // bundling them into a struct would be a second shape to keep in step with the manifest.
     pub fn open(
         prefix_dir: &Path,
         partition: &str,
@@ -1147,7 +1184,7 @@ impl FilterColumns {
             // and both families that reach it can express absence there. The entity route needs an
             // entity-space value column AND a licence to answer a filter from it — `index`, or
             // 0068's "render implies filterable" over the per-viewer vocabulary floor. A
-            // `per_viewer` column with neither flag keeps its value column for membership and
+            // `derived` column with neither flag keeps its value column for membership and
             // stays unfilterable, exactly as before.
             let family = Family::of(scalar);
             let row = scalar.render && family.reaches_hot_column();
@@ -1219,22 +1256,21 @@ impl FilterColumns {
                         ),
                     )
                 })?;
-                let analyser = tessera_analyse::analyser(
-                    identity.split('/').next().unwrap_or_default(),
-                )
-                .filter(|a| a.identity() == identity)
-                .map(Arc::new)
-                .ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
+                let analyser =
+                    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+                        .filter(|a| a.identity() == identity)
+                        .map(Arc::new)
+                        .ok_or_else(|| {
+                            std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                format!(
                             "column '{}' was indexed by analyser '{identity}', which this binary \
                              does not carry. Its terms cannot be reproduced, so every `match` over \
                              it would answer from a different segmentation",
                             scalar.name
                         ),
-                    )
-                })?;
+                            )
+                        })?;
                 columns.insert(
                     scalar.name.clone(),
                     Layers {
@@ -1275,7 +1311,7 @@ impl FilterColumns {
                 .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
                 .transpose()?;
             let route = if postings.is_some()
-                && listing_of(scalar, vocabularies) == Some(Listing::Public)
+                && visibility_of(scalar, vocabularies) == Some(Visibility::Public)
             {
                 Route::Postings
             } else {
@@ -1369,7 +1405,7 @@ impl FilterColumns {
     /// The entity-space value `column` stores for `entity`, at its storage type, or `None` where
     /// no layer holds one — drill-down's entity-space home (records §3).
     ///
-    /// **Every column with a value column answers, filterable or not**: a `per_viewer` category
+    /// **Every column with a value column answers, filterable or not**: a `derived` category
     /// with neither flag still stores its codes here, and the caller has already established the
     /// *item* visible, which is exactly the membership condition §3.3 derives value visibility
     /// from — a visible entity carrying the value is the witness that offers it.
@@ -1857,7 +1893,20 @@ impl FilterColumns {
         Ok(out)
     }
 
-    /// The membership question `/v1/categories` asks of a `per_viewer` column: which of this
+    /// **One indexed column's value layers, for a reader that wants the values themselves rather
+    /// than a predicate over them** — the attribute-predicate membership, which *is* the column
+    /// (`design/artifact-serving-at-scale.md` §5.1).
+    ///
+    /// `None` where the column is not held here at all, which is every undeclared name and every
+    /// column with no entity-space storage. A caller that finds none serves the layer with no
+    /// column, which is the fail-closed answer: no artifact of it is a candidate anywhere.
+    pub(crate) fn value_layers(&self, column: &str) -> Option<ValueLayers<'_>> {
+        self.columns.get(column).map(|layers| ValueLayers {
+            layers: &layers.layers,
+        })
+    }
+
+    /// The membership question `/v1/categories` asks of a `derived` column: which of this
     /// column's values does at least one entity in `candidate` carry (per-point-attributes §3.3)?
     ///
     /// **Derived, never maintained**, and evaluated entirely inside the composed verdict — so a
@@ -2142,10 +2191,8 @@ impl FilterColumns {
             let Ok(Some(fields)) = self.records.fields_of(entity) else {
                 continue;
             };
-            let Some(RecordValue::Utf8(prose)) = fields
-                .into_iter()
-                .find(|f| f.tag == tag)
-                .map(|f| f.value)
+            let Some(RecordValue::Utf8(prose)) =
+                fields.into_iter().find(|f| f.tag == tag).map(|f| f.value)
             else {
                 continue;
             };
@@ -2500,10 +2547,10 @@ fn text_match(
     // narrow token by token without a second dictionary pass.
     let mut ordinals: Vec<Option<u32>> = Vec::with_capacity(tokens.len());
     for token in tokens {
-        ordinals.push(
-            dict.resolve(token)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
-        );
+        ordinals
+            .push(dict.resolve(token).map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+            })?);
     }
 
     // ---- plain `match`: one running set, narrowed token by token ------------------------------
@@ -2686,12 +2733,12 @@ fn contains_route(candidate_entities: u64, dictionary_keys: u64) -> ContainsRout
 /// `contains` against one keyword layer, by whichever route [`contains_route`] names.
 ///
 /// **The routes are benched against each other and against the flat `utf8` scan they replaced**,
-    /// in the one window where both formats existed
-    /// ([the fence](../../../docs/evidence/memos/2026-08-13-utf8-retirement-fence.md)) and again
-    /// after both routes were repaired
-    /// ([the recovery](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)). The
-    /// crossover's constants above are calibration; either route answers correctly whichever is
-    /// chosen.
+/// in the one window where both formats existed
+/// ([the fence](../../../docs/evidence/memos/2026-08-13-utf8-retirement-fence.md)) and again
+/// after both routes were repaired
+/// ([the recovery](../../../docs/evidence/memos/2026-08-13-contains-recovery.md)). The
+/// crossover's constants above are calibration; either route answers correctly whichever is
+/// chosen.
 fn keyword_contains(
     values: &ValueColumn,
     dict: &SortedDict,
@@ -3036,7 +3083,10 @@ mod phrase_tests {
     fn the_degenerate_shapes_are_decided_before_the_walk() {
         assert!(!contains_phrase(&t("one two"), &t("one two three")));
         assert!(!contains_phrase(&[], &t("anything")));
-        assert!(!contains_phrase(&t("a document"), &[]), "an empty phrase is not everywhere");
+        assert!(
+            !contains_phrase(&t("a document"), &[]),
+            "an empty phrase is not everywhere"
+        );
         assert!(!contains_phrase(&[], &[]));
     }
 }
@@ -3730,21 +3780,37 @@ mod keyword_tests {
     /// price.
     #[test]
     fn the_two_contains_routes_traverse_alike() {
-        let d = dict(&["arxiv/0001", "arxiv/1001", "bio/0001", "cs/0003", "math/0001"]);
+        let d = dict(&[
+            "arxiv/0001",
+            "arxiv/1001",
+            "bio/0001",
+            "cs/0003",
+            "math/0001",
+        ]);
         let entities = [1u32, 2, 5, 9, 40, 41, 100_000];
         let ordinals = [0u32, 3, 1, 4, 2, 0, 3];
         let values = partial(&entities, &ordinals);
         let mut compared = 0;
-        for candidate in [set(&entities), set(&[1, 41, 100_000]), set(&[5]), set(&[7, 8])] {
+        for candidate in [
+            set(&entities),
+            set(&[1, 41, 100_000]),
+            set(&[5]),
+            set(&[7, 8]),
+        ] {
             for needle in ["0001", "arxiv", "zzz", "/", "math/0001", ""] {
                 let _ = take_scan_work();
                 let broad = contains_broad(&values, &d, needle, &candidate).unwrap();
                 let broad_work = take_scan_work();
                 let narrow = contains_narrow(&values, &d, needle, &candidate).unwrap();
                 let narrow_work = take_scan_work();
-                assert_eq!(members(&broad), members(&narrow), "{needle:?} answers differ");
                 assert_eq!(
-                    broad_work, narrow_work,
+                    members(&broad),
+                    members(&narrow),
+                    "{needle:?} answers differ"
+                );
+                assert_eq!(
+                    broad_work,
+                    narrow_work,
                     "{needle:?} over {:?}: the routes traversed differently",
                     members(&candidate)
                 );

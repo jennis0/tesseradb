@@ -1,6 +1,6 @@
 # Tessera — System Architecture: Storage, Serving and Lifecycle
 
-**Status:** Draft r15 — r14 plus decisions 0058 and 0059 in §6.3 and §9: single-flight waiters park on the build they used to be refused by, and the counters an operator reads on that path are named. r14 was r13 plus decision 0048's deletion applied to §6.6's *evaluate* disposition. **r13's correction is preserved and must stay**: the evaluate deletion arrived on a branch cut before r13, so taking its §6.6 paragraph verbatim would have reinstated both the immediate-postings-subtraction reading and the invented "row tombstone" that r13 removed. r13 was r12 plus §6.6's refuted deletion sentence corrected (Appendix R). r12 was r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
+**Status:** Draft r17 — r16 plus §4.1's refusal paragraph saying what the data-plugin-hash check actually does now that it exists: it runs at open, an absent hash fails closed, and the auth hash has no counterpart. §4.3's ⊘ narrows accordingly — the data hash is enforced, the auth hash is still a field nobody reads. No architectural boundary moves. r16 was r15 plus §4.3's export list naming the plugin ABI's second data-side entry point, `terms_of_labels` (contracts §4.3 r32): the build hands the plugin the terms its source column already holds instead of joining them into one string for the plugin to split apart, which had made a separator byte inside a caller's term into two grants. No architectural boundary moves. r15 was r14 plus decisions 0058 and 0059 in §6.3 and §9: single-flight waiters park on the build they used to be refused by, and the counters an operator reads on that path are named. r14 was r13 plus decision 0048's deletion applied to §6.6's *evaluate* disposition. **r13's correction is preserved and must stay**: the evaluate deletion arrived on a branch cut before r13, so taking its §6.6 paragraph verbatim would have reinstated both the immediate-postings-subtraction reading and the invented "row tombstone" that r13 removed. r13 was r12 plus §6.6's refuted deletion sentence corrected (Appendix R). r12 was r11 plus [`write-path.md`](write-path.md)'s §13.1 supersession, performed at its promotion (2026-08-04): §6.2, §6.4 and §6.5 are reduced to their security and architectural statements plus pointers, and §6.7's merge-scheduler paragraph is deleted in favour of write-path §7. Both halves of merge now publish. §6.6's retirement rule is restated as Rule S / Rule F, the stamp ledger and its floor being deleted from the spec rather than deferred
 
 **Companion to** `architecture.md` (the specification, which owns the invariants and the *why*) and the capability epics in this repository's issues (which own sequencing — the phase model they replaced is archived). This document owns the *shape of the built system*: processes, crates, contracts, artifact formats, the operational lifecycle, configuration and packaging. `§n` refers to the architecture design; `contracts §n` to `contracts.md`; `lifecycle §n` to `concurrency-lifecycle.md`. Where this document and the design disagree, the design is right; where this document and `contracts.md` disagree, contracts §0.3's recorded deviations govern.
 
@@ -56,7 +56,7 @@ flowchart TB
 
 | Mode | What runs | For whom |
 |---|---|---|
-| `tessera serve -c tessera.toml` | the binary, three planes | deployments |
+| `tessera serve` | the binary, three planes, per the `tessera.toml` it walks up to find | deployments |
 | `tessera build` | the binary, batch mode | anyone producing bundles (§6.1) |
 | `tessera verify` | the binary, read protocol + structural checks | operators, CI |
 | `tessera-engine` (crate) | the engine linked into a Rust host | embedders with their own shell |
@@ -75,7 +75,7 @@ When a bundle contains compartmented partitions, the parent process is a *router
 
 **The router holds** the bundle-level term dictionary (descriptors are opaque policy-side identifiers, not corpus data — D11), the plugin host, token state, and the label *presence registry* (§2.3). It holds no postings, no masks, no columns, no entity IDs.
 
-**Each worker holds** its partition's term postings, mask *fragments* (built and cached locally, never shipped), columns, permutation, overlay, watermark, WAL, external-ID sidecar, node membership, generating-set slices and label text.
+**Each worker holds** its partition's term postings, mask *fragments* (built and cached locally, never shipped), columns, permutation, overlay, watermark, WAL, external-ID sidecar, node membership, generating-set views and label text.
 
 **Authorise fans out.** The router runs `terms_of_auth`, interns to term IDs, computes the reachable partition set by testing required sets from the manifest, and sends the satisfied-term list to each reachable worker, which builds (or content-address-hits) its fragment and acks with no payload. A worker restart loses its fragment cache only; the next query rebuilds it transparently.
 
@@ -91,7 +91,7 @@ The presence registry (label id → presence set; no text, no entity IDs, no car
 
 ### 2.4 What this does not decide
 
-Sharding by Morton range (§13.3) stays out of scope and unforeclosed: nothing here assumes a single global mask, and the router/worker protocol is the shape a shard fan-out will need. Slices are data, not processes: all temporal slices of a partition are served by one worker, selected per request.
+Sharding by Morton range (§13.3) stays out of scope and unforeclosed: nothing here assumes a single global mask, and the router/worker protocol is the shape a shard fan-out will need. Views are data, not processes: all temporal views of a partition are served by one worker, selected per request.
 
 ## 3. Crate decomposition
 
@@ -214,7 +214,7 @@ bundle/
                                    and scalars; small-term threshold; quantisation bounds
                                    (so every artifact producer shares one grid); entity-ID
                                    high-water; the identity block (construction, rounds,
-                                   key, shard, idset — §4.5); slice and partition lists;
+                                   key, shard, idset — §4.5); view and partition lists;
                                    build provenance, including the batch size when the
                                    build batched (§6.1); per-file digests and sizes
     dictionary/terms-<k>.dict      immutable extents, logically concatenated — ONE
@@ -233,7 +233,7 @@ bundle/
                                    direct scan rather than from postings
       entities/external-ids-<k>.arrow   caller external ID → entity, byte-sorted **within each run**; runs are not ordered against one another
       entities/ext-locator.u32          entity → ordinal in the above, for drill-down
-      slices/<slice_id>/
+      views/<view_id>/
         permutation.bin            entity→row, one direction only
         segments/<seg_id>/
           columns.arrow            tessera_id, residual, priority, declared scalars
@@ -249,7 +249,7 @@ Four things this tree deliberately does **not** contain, each a recorded deviati
 
 > **⊘ Specified, not implemented.** Step-down is built; its time bound is not, and `readyz` does not consult one. A replica that falls arbitrarily far behind therefore serves stale geometry as ready. Safe today only because there is no replica: one process opens one bundle it wrote itself.
 
-**Refusals.** The engine refuses a bundle whose format version is newer than it knows, and refuses to serve when the manifest's data-plugin hash differs from the configured plugin's — that mismatch is a full-reindex event (§6.1), not tolerable drift.
+**Refusals.** The engine refuses a bundle whose format version is newer than it knows, and refuses to serve when the manifest's data-plugin hash differs from the configured plugin's — that mismatch is a full-reindex event (§6.1), not tolerable drift. The comparison happens at open, before anything is served, and a manifest carrying **no** hash is a mismatch too: a bundle that does not say what labelled it cannot be shown to have been labelled by the plugin in hand. Only the *data* hash is checked. The auth module's hash is not in the manifest — it keys the mask cache (§6.1) — so there is no equivalent open-time check on that side, and the asymmetry is deliberate rather than an omission: a rotated auth hash invalidates caches and re-mints tokens, where a changed data hash means every posting on disc was written by a different rule.
 
 **Rollback.** Flipping `CURRENT` backwards abandons segments streamed into the newer prefix; those batches survive in the WAL up to its retention window and replay into the restored prefix. Rollback is an operator action with a bounded data-loss-and-recovery story rather than a silent one.
 
@@ -265,11 +265,11 @@ HTTP on every surface, Arrow IPC bodies for anything columnar, JSON for control 
 
 | Verb | Request | Response |
 |---|---|---|
-| `GET /v1/meta` | — | slices, coordinate bounds, max tile depth, declared-scalar schema, contract versions, idset, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
-| `POST /v1/viewport` | slice, zoom, tile range or bbox, filter set, k (server-capped), optional geometry stamp | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; the geometry stamp answered from, and whether the presented one is stale |
+| `GET /v1/meta` | — | views, coordinate bounds, max tile depth, declared-scalar schema, contract versions, idset, filter-operand *names*, and the **C11** containment-filtered label vocabulary — the one data-derived field, gated on `M_auth` (the viewer's authorised set) |
+| `POST /v1/viewport` | view, zoom, tile range or bbox, filter set, k (server-capped), optional geometry stamp | Arrow: per-tile exact masked counts, matched-and-visible alongside total-visible; sampled points (`tessera_id`, x, y, declared scalars); optional density-underlay stream; the geometry stamp answered from, and whether the presented one is stale |
 | `POST /v1/items/{tessera_id}` | drill-down; the identifier is assumed current (§6.8) — there is no rotation parameter | item detail |
-| `POST /v1/labels` | slice, viewport, filter set, optional geometry stamp | frontier nodes with at most one gated label each, plus tier |
-| `POST /v1/region` | slice, polygon or box, filter set, optional pin | exact masked count; sampled preview; masked breakdowns |
+| `POST /v1/labels` | view, viewport, filter set, optional geometry stamp | frontier nodes with at most one gated label each, plus tier |
+| `POST /v1/region` | view, polygon or box, filter set, optional pin | exact masked count; sampled preview; masked breakdowns |
 
 > **⊘ Specified, not implemented.** Three verbs are mounted: `/v1/meta`, `/v1/viewport`, `/v1/items/{tessera_id}`. `/v1/labels` and `/v1/region` are absent — not stubbed, so a caller gets a 404 rather than an empty or partial answer, which is the right failure. Both depend on machinery (the node table, the label ladder) that does not exist.
 
@@ -300,9 +300,9 @@ Plus `/healthz` and `/readyz`. Failure semantics everywhere: **fail closed** —
 
 ### 4.3 The plugin ABI (policy ↔ core)
 
-A module exporting `terms_of_label`, `terms_of_auth` and `declared_bounds`. Descriptors are opaque byte strings; the engine owns interning in the single bundle-level namespace. The module hash keys both blast radii: the auth-function hash enters the fragment cache key, the data-function hash enters the manifest.
+A module exporting `terms_of_label`, `terms_of_labels`, `terms_of_auth` and `declared_bounds` — the data side twice over, once for an item whose label arrives as one opaque byte string (the wire) and once for an item whose terms the caller already separated (a build's source column), the second obliged to return one descriptor per element in order (contracts §4.3). Descriptors are opaque byte strings; the engine owns interning in the single bundle-level namespace. The module hash keys both blast radii: the auth-function hash enters the fragment cache key, the data-function hash enters the manifest.
 
-> **⊘ Partially implemented.** `tessera-plugin` ships the trait and one implementation, `Passthrough` (`builtin:passthrough`), compiled in. There is **no wasmtime dependency and no module loading**: `[plugin] module` accepts exactly `"builtin:passthrough"` and any other value — including `"builtin:access-expressions"` — is refused at startup. So the module-hash blast radii exist as manifest fields rather than as a mechanism, and I5 (the plugin's two functions agree) is trivially true and untestable for passthrough. The streaming build additionally *refuses to run* against any plugin whose labelling is not decomposable, rather than assuming it is (§6.1).
+> **⊘ Partially implemented.** `tessera-plugin` ships the trait and one implementation, `Passthrough` (`builtin:passthrough`), compiled in. There is **no wasmtime dependency and no module loading**: `[plugin] module` accepts exactly `"builtin:passthrough"` and any other value — including `"builtin:access-expressions"` — is refused at startup. So the module-hash blast radii are only half a mechanism: the **data** hash is enforced — `Engine::open` refuses a bundle whose `data_plugin_hash` is not the serving plugin's — but nothing *rotates* a module, because nothing loads one, and the auth hash is a manifest field with no reader. I5 (the plugin's two functions agree) is trivially true and untestable for passthrough. The streaming build additionally *refuses to run* against any plugin whose labelling is not decomposable, rather than assuming it is (§6.1).
 
 Where a WASM host arrives, it runs with no WASI capabilities, and out-of-process-over-a-pipe is the documented fallback for policy engines that cannot target WASM.
 
@@ -349,7 +349,7 @@ flowchart LR
 
 Two properties of that path are worth stating because a reader reconstructing it from the design would get them backwards.
 
-**Projection happens once per session, not once per request** — and it is the *fragment* that is projected, not the composed mask. The strategy and the two clamps it requires are design §10.4's, stated normatively there; this document does not restate them. What belongs here is only where they live: `RowProjection` and `compose` in `tessera-engine`, with the projection cached per `(token, slice, segments_version)` and the diffs applied per request.
+**Projection happens once per session, not once per request** — and it is the *fragment* that is projected, not the composed mask. The strategy and the two clamps it requires are design §10.4's, stated normatively there; this document does not restate them. What belongs here is only where they live: `RowProjection` and `compose` in `tessera-engine`, with the projection cached per `(token, view, segments_version)` and the diffs applied per request.
 
 **A pin is a value threaded by ownership through every call.** No ambient "current version" static exists (I11). A pin fixes row-space geometry and never authorisation state: a suppression applies to a pinned request the moment it is accepted.
 
@@ -505,7 +505,9 @@ The bundle plus the WAL is the recovery story: immutable-once-retired prefixes m
 
 ## 7. Configuration
 
-One file, `tessera.toml`. The philosophy has a security edge: **performance knobs default; disclosure controls do not.** A config missing a disclosure control fails to start, naming the design section that explains the knob — the config file doubles as the deployment's disclosure-review checklist.
+One file, `tessera.toml`, **found by walking up from the working directory** as `Cargo.toml` is (`--deployment <path>` names one outright), and read by `tessera build` as well as by `tessera serve`: a build's output path and a server's `bundle.path` are one value seen from two sides, so they are declared once. Its build-side keys — `[build].schema`, naming the corpus declaration, and `[identity].env`, naming the environment variable that carries the identity key — are [`configuration.md`](configuration.md) §3's, along with the rule that every path in this file resolves against the file's own directory. A missing `tessera.toml` is a refusal naming what to create, never a set of defaults.
+
+The philosophy has a security edge: **performance knobs default; disclosure controls do not.** A config missing a disclosure control fails to start, naming the design section that explains the knob — the config file doubles as the deployment's disclosure-review checklist.
 
 Two properties reinforce it. Every section but `[disclosure]` is `deny_unknown_fields`, so a typo'd key or section header is a startup error rather than a silent default: an operator who sets a knob and gets the default has no signal at all that they did. `[disclosure]` is the exception, and in the direction that costs most: it is parsed as a generic TOML value and hand-validated, so it rejects a *missing* required key and silently ignores an *unknown* one — a misspelling alongside a correct key passes. That is the one section whose keys are disclosure controls. And every check **refuses rather than clamps** — `k_min = 0` would silently disable the I7 floor clause, a zero `theta_target_marks` would blank the density signal, a zero `compute_admission` would shed everything, and each is a typed error naming its own silent failure. The cost is that a config carrying a key from a newer build is refused rather than ignored; that is the right direction for a fail-closed config, because a downgrade that silently drops half an operator's tuning is the worse outcome.
 
@@ -529,7 +531,8 @@ token_max_lifetime  = 3600            # seconds, integer. Required: there is no 
 viewer  = "127.0.0.1:7407"            # loopback by default; binding wider is an explicit act
 session = "127.0.0.1:7408"            # authorise/revoke only; the app tier's surface
 control = "unix:/run/tessera/control.sock"   # loopback TCP + credential on Windows
-# credentials: by file or by env var, never inline
+# credentials: by file or by env var, never inline. The locator is checked here; the secret is
+# read at startup, so `tessera build` — which reads this same file — needs neither exported
 session_credential_file  = "/etc/tessera/session.cred"
 operator_credential_file = "/etc/tessera/operator.cred"
 # selection clause (§7.2) — refused, never clamped, if inconsistent
@@ -550,6 +553,7 @@ single_flight_wait_ms = 6000          # waiting for a build already running (§6
 # caches and pins
 row_projection_cache_bytes = 2_147_483_648
 fragment_cache_bytes = 1_073_741_824
+masked_count_cache_bytes = 268_435_456
 expected_concurrent_sessions = 8
 pin_ttl_secs = 300
 pins_per_session_max = 4
@@ -574,7 +578,7 @@ Two things that do **not** belong here: the prompt-sample-versus-full-membership
 
 ## 8. Consumption and packaging
 
-The binary and its HTTP surfaces are the product. `tessera serve -c tessera.toml` under systemd or a container, `POST /session/authorise` from the integrating backend's session middleware (session credential only — the app tier never holds operator), and the viewer plane behind the organisation's TLS termination. No Docker requirement, no JVM, no external services; the object store is optional, since a bundle is a directory.
+The binary and its HTTP surfaces are the product. `tessera serve` under systemd or a container, `POST /session/authorise` from the integrating backend's session middleware (session credential only — the app tier never holds operator), and the viewer plane behind the organisation's TLS termination. No Docker requirement, no JVM, no external services; the object store is optional, since a bundle is a directory.
 
 **Bounding the number of concurrent connections is the deployment's job, and the reason is worth stating rather than leaving to be discovered.** The process bounds what each request costs — the compute gate bounds in-flight viewer requests, the ingest admission bound bounds concurrent ingest handlers, and startup refuses a per-connection body cap above 64 MiB — but it accepts connections without limit. `/control/ingest` in particular is buffer-the-whole-body shaped: the Arrow batch is decoded in one piece, so the body is resident in full before the handler runs and before any admission bound sees it. A caller holding the operator credential can therefore pin one batch cap per connection. The control plane defaults to a unix socket precisely so this is an admin-network question; where any plane is exposed beyond a trusted network, a reverse proxy is what bounds the connection count, and it is a deployment requirement rather than a recommendation. The in-process alternatives — a concurrency-limit layer, a listener-level accept cap — were both assessed and declined, because each converts a prompt refusal into a wait: the first queues where the ingest bound sheds, and the second leaves callers in the kernel's accept backlog with no status code at all. Streaming the upload is the real fix and belongs with the flush work.
 
@@ -584,7 +588,7 @@ The binary and its HTTP surfaces are the product. `tessera serve -c tessera.toml
 
 > **⊘ Specified, not implemented.** There is no `python/` directory, no wheel, no SDK and no supervisor. Python appears only as the test-only oracle (`reference/`) and the conformance harness (`conformance/`). A reader must not assume `pip install tessera` exists, and the supervisor hygiene an earlier revision specified — port 0, a watchdog pipe, a pidfile — has no implementation to be hygienic about.
 
-**What the integrator owns**, because the service cannot check it: consistent plugin functions (I5), a stable projection across slices, stable cluster node identity, honest generating sets (C12), unique external IDs, and a token-refresh policy (I6). `tessera verify` runs what *is* mechanisable — digest verification, manifest and plugin-hash agreement, permutation bijectivity, declared-bounds conformance.
+**What the integrator owns**, because the service cannot check it: consistent plugin functions (I5), a stable projection across views, stable cluster node identity, honest generating sets (C12), unique external IDs, and a token-refresh policy (I6). `tessera verify` runs what *is* mechanisable — digest verification, manifest and plugin-hash agreement, permutation bijectivity, declared-bounds conformance. ⊘ **Plugin-hash agreement is not among them**: `verify` is handed a bundle and no plugin, so it has nothing to compare the manifest's hash against. The check exists only at `Engine::open` (§4.1), which means a bundle can be verified clean and still be one this process must refuse to serve.
 
 ## 9. Observability and failure
 
@@ -594,7 +598,7 @@ The session figures are there because the registry sheds expired sessions on a g
 
 **Executor posture is a four-state monotone readiness signal** feeding `/readyz`: `not-started`, `running`, `wal-poisoned`, `dead`. The interesting state is the third — **`wal-poisoned` keeps the executor alive and still applying denies**, which is a deliberate choice between two fail-closed answers: exiting would stop suppressions being applied to the in-memory state that requests actually read. The spellings are operator-facing and a test pins them, so renaming a Rust variant cannot silently change a scraped field.
 
-Metrics would map to named risks so dashboards read in the design's vocabulary: mask-fragment build latency, fragment cardinality and frozen size, overlay size, watermark lag, WAL depth and fsync latency, over-bound warn count, segment and delta counts per slice, **posting fragmentation per partition** (§11.1's signature runs erode with every small ingest batch and nothing repairs them, so the erosion is only visible if measured), invalidation-queue depth, partition-creation events (alarm), and C4's timing spread — measured from day one so "quantify before treating as acceptable" actually happens.
+Metrics would map to named risks so dashboards read in the design's vocabulary: mask-fragment build latency, fragment cardinality and frozen size, overlay size, watermark lag, WAL depth and fsync latency, over-bound warn count, segment and delta counts per view, **posting fragmentation per partition** (§11.1's signature runs erode with every small ingest batch and nothing repairs them, so the erosion is only visible if measured), invalidation-queue depth, partition-creation events (alarm), and C4's timing spread — measured from day one so "quantify before treating as acceptable" actually happens.
 
 > **⊘ Specified, not implemented.** There is no metrics emitter: no Prometheus dependency, no `/metrics` route, no metrics listener. `/control/status` is the substitute, and it is a pull-only JSON snapshot on the admin plane rather than a time series — so *rates*, including the fragmentation trend the paragraph above exists to catch, must be derived by whatever scrapes it. The fragmentation figure is emitted, but over commit-window allocation rather than the per-partition base-plus-delta quantity named above; contracts §3.4 marks it partially implemented and states what that narrowing costs a reader.
 
@@ -619,16 +623,34 @@ Recorded in the design's own style, because each will otherwise be re-proposed.
 9. **Disclosure controls have no defaults.**
 10. **One binary for daemon and CLI.**
 11. **One term-interning namespace, bundle-level.** Descriptors are opaque policy-side identifiers, and the isolation property covers entity IDs and bitmaps, which never leave a worker. Rejected: per-partition namespaces — they dissolve byte-equality of descriptors as the I5 mechanism, and break required-set gating at the router.
-12. **Label presence sets are first-class**: generating sets stored as per-partition slices, each carrying the label's full presence set; the router withholds unless presence ⊆ reachable and every presence partition affirms containment.
+12. **Label presence sets are first-class**: generating sets stored as per-partition views, each carrying the label's full presence set; the router withholds unless presence ⊆ reachable and every presence partition affirms containment.
 13. **WAL-before-ack durability; deny-disposition changes are never load-shed.** An unpersisted overlay fails open, so deletion and suppression must be both durable and always accepted.
 14. **Caller-supplied external IDs are the admin-plane identity.** They give `/control/changes` an addressee, ingest an idempotency story, and the admin plane an identifier that is neither an entity ID (I10) nor a viewer identity.
 15. **Watermark patching is lazy stamp advance, never in-place mutation.** Correctness comes from I1's live-set composition; patching is an amortised cost optimisation.
 16. **A point's wire identity is a stable, keyed `tessera_id`, not a per-session handle.** Stability is what lets a client bookmark, share and reconcile a point; the handle bought nothing the permutation's opacity does not, and after the entity-ID column left `columns.arrow` no artifact the gather reads stores an entity ID. Per-session handles are retained for Phase 3 node handles, where the identity genuinely is per-session. C17 records what linkability across sessions and principals costs.
 17. **One thread owns the WAL, by value; the commit window sets the signature-sort scope at the server.** Ordering stops being a discipline defended by a comment and becomes a property of there being nowhere else for the steps to happen — and the sort scope stops being whatever chunk a client happened to POST.
 
-**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across slices (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
+**Deliberately not decided here**, deferred with their owners: sharded index placement (measurement), retroactive revocation across views (policy), prompt-sample versus full-membership gating (recorded in the manifest either way), how a large batch lands into a live bundle (§6.7), and the mask-build tier alternative — the entity [index-ordinal split](deferred-index-ordinal-split.md), which would make signature grouping hold globally rather than within a batch, at the cost of a group-aware merge policy and a different `permutation.bin` encoding. Its trigger is measurement: §9's per-partition posting fragmentation exists to detect exactly the erosion that would justify it.
 
 ## Appendix R — Review record
+
+**r17** (2026-08-19) makes §4.1's refusal claim true and then bounds it. The engine had never
+compared the manifest's data-plugin hash against the configured plugin's, so this paragraph and
+contracts §2.2 were both present-tense about machinery that did not exist — the failure mode being a
+disclosure rather than an outage, since postings written under one labelling rule read back intact
+and resolve against another with no error raised. The check now runs in `Engine::open`, an absent or
+empty manifest hash counts as a mismatch, and the paragraph says both. It also says what the check
+does *not* cover: the auth module's hash, which is not in the manifest and has no reader, so §4.3's
+⊘ narrows from "manifest fields rather than a mechanism" to the auth half alone.
+
+**r16** (2026-08-18) names the plugin ABI's second data-side export in §4.3. `terms_of_labels`
+takes an item's terms already separated and must return exactly one descriptor per element, in
+order — the property the streaming build's dictionary pass has always assumed and now probes
+through this entry point rather than through a comma-joined label. `terms_of_label` is unchanged
+and remains the route for an item whose label arrives as one opaque byte string on the wire. The
+⊘ note below it stands unaltered: there is still no wasmtime host, and `builtin:passthrough` —
+whose identity string moves to `:2`, taking both hashes with it — is still the whole of the
+policy surface.
 
 **r15** (2026-08-09) applies decisions
 [0058](../decisions/0058-a-single-flight-racer-waits-rather-than-being-refused.md) and

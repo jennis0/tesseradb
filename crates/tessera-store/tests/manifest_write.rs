@@ -11,6 +11,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use tessera_plugin::Plugin;
 
 use sha2::{Digest, Sha256};
 
@@ -18,7 +19,7 @@ use tessera_spatial::tiler::{sort_batch, TilerItem};
 use tessera_spatial::{fixed32, Bounds};
 use tessera_store::manifest::{
     IdentityDescriptor, Manifest, PartitionDescriptor, Quantisation, SegmentDescriptor,
-    SegmentsManifest, SliceDescriptor,
+    SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::manifest_write::{write_current, write_manifest_json};
 use tessera_store::write::{write_permutation, write_segment};
@@ -54,7 +55,7 @@ fn hex_sha256(bytes: &[u8]) -> String {
     out
 }
 
-/// Build the one-partition, one-slice, one-segment fixture `MANIFEST.json` needs to sit beside
+/// Build the one-partition, one-view, one-segment fixture `MANIFEST.json` needs to sit beside
 /// for `open_bundle` to succeed — everything short of the two files this module's functions
 /// write. Returns the assembled (but not yet written) [`Manifest`] and the prefix directory it
 /// belongs under.
@@ -77,12 +78,12 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
 
     let prefix_dir = root.join("v00000");
     let partition_dir = prefix_dir.join("partitions").join("default");
-    let slice_dir = partition_dir.join("slices").join("main");
-    let seg_dir = slice_dir.join("segments").join("seg0");
+    let view_dir = partition_dir.join("views").join("main");
+    let seg_dir = view_dir.join("segments").join("seg0");
     fs::create_dir_all(&seg_dir).expect("mkdir seg_dir");
 
     write_segment(&seg_dir, &items, &codes, &[]).expect("write_segment");
-    write_permutation(&slice_dir.join("permutation.bin"), &entity_ids, n)
+    write_permutation(&view_dir.join("permutation.bin"), &entity_ids, n)
         .expect("write_permutation");
 
     let file_digest = |path: &Path| {
@@ -94,15 +95,15 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     };
     let mut segments_files = BTreeMap::new();
     segments_files.insert(
-        "partitions/default/slices/main/permutation.bin".to_string(),
-        file_digest(&slice_dir.join("permutation.bin")),
+        "partitions/default/views/main/permutation.bin".to_string(),
+        file_digest(&view_dir.join("permutation.bin")),
     );
     segments_files.insert(
-        "partitions/default/slices/main/segments/seg0/columns.arrow".to_string(),
+        "partitions/default/views/main/segments/seg0/columns.arrow".to_string(),
         file_digest(&seg_dir.join("columns.arrow")),
     );
     segments_files.insert(
-        "partitions/default/slices/main/segments/seg0/morton.u32".to_string(),
+        "partitions/default/views/main/segments/seg0/morton.u32".to_string(),
         file_digest(&seg_dir.join("morton.u32")),
     );
 
@@ -113,9 +114,13 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
+        row_column_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: vec![SegmentDescriptor {
-            slice: "main".to_string(),
+            view: "main".to_string(),
             seg_id: "seg0".to_string(),
             row_count: items.len() as u32,
             entity_lo: 0,
@@ -140,9 +145,9 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
     .expect("write SEGMENTS-0.json");
 
     let manifest = Manifest {
-        bundle_format: 2,
+        bundle_format: 3,
         created_at: created_at.to_string(),
-        data_plugin_hash: "builtin:passthrough:1".to_string(),
+        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
@@ -161,7 +166,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
             shard_id: 0,
             idset: 1,
         },
-        slices: vec![SliceDescriptor {
+        views: vec![ViewDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),
         }],
@@ -191,14 +196,14 @@ fn write_manifest_json_then_write_current_round_trips_through_open_bundle() {
     write_current(dir.path(), "v00000", &digest).expect("write_current");
 
     let bundle = open_bundle(dir.path()).expect("open_bundle over a bundle these writers built");
-    assert_eq!(bundle.manifest.bundle_format, 2);
+    assert_eq!(bundle.manifest.bundle_format, 3);
     assert_eq!(bundle.manifest.entity_id_high_water, 64);
     assert_eq!(bundle.manifest.identity.idset, 1);
 
     let partition = bundle.partitions.get("default").expect("default partition");
-    let slice = partition.slices.get("main").expect("main slice");
-    assert_eq!(slice.segments.len(), 1);
-    assert_eq!(slice.segments[0].row_count, 64);
+    let view = partition.views.get("main").expect("main view");
+    assert_eq!(view.segments.len(), 1);
+    assert_eq!(view.segments[0].row_count, 64);
 }
 
 /// The digest `write_manifest_json` returns is the SHA-256 of the bytes actually sitting on
@@ -308,6 +313,10 @@ fn manifest_fixture() -> SegmentsManifest {
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
+        row_column_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
@@ -331,7 +340,7 @@ fn manifest_fixture() -> SegmentsManifest {
 /// with a manifest built from the same base and naming only its own segment, so the winner's
 /// acked and published rows went missing from what a restart opens.
 ///
-/// Asserted at the filesystem operation rather than through two slices, because
+/// Asserted at the filesystem operation rather than through two views, because
 /// `tessera build` emits one and `dispatch_flushes` now sends one plan: the collision is a
 /// property of the write, and this is the guard at the artefact that stands behind the rule at
 /// the caller.

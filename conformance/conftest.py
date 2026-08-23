@@ -64,50 +64,52 @@ def catalogue_bundle(catalogue_bundle_root: Path):
 
 
 @pytest.fixture(scope="session")
-def catalogue_filter_columns():
+def catalogue_filter_columns(catalogue_bundle):
     """The catalogue's filter columns as the **fixture** planted them — the filter oracle's input.
 
     Built from `oracle.catalogue`'s pure generation functions (`department_of`, `title_of`,
     `submitter_of`) and the declaration's own key→code pinning, never from the bundle's `attrs/`
     artefact: the differential's independence is that the oracle knows what each entity was *given*
-    while the engine serves what the build *stored* (see `oracle/filters.py`'s module doc). Entity
-    id == source id for this corpus, an equality `verify()` re-derives rather than assumes.
+    while the engine serves what the build *stored* (see `oracle/filters.py`'s module doc).
+
+    **Keyed by entity id, planted by source id, and the two are not the same number.** The
+    generation functions take a source id; every answer the differential compares against is in
+    entity space. Those coincided until decision 0073 made the within-signature tiebreak the Morton
+    code, and the equality was written into this docstring as something `verify()` re-derived — it
+    did not: its block check compares sets, and a within-block permutation preserves one. Joining
+    through `Bundle.entities_by_source` is what makes each entity's planted value its own.
     """
     from oracle import catalogue as cat  # noqa: PLC0415
     from oracle.filters import CategoryColumn, KeywordColumn  # noqa: PLC0415
 
+    entity_of = catalogue_bundle.entities_by_source()
+
+    def planted(generate):
+        """`entity -> value` for every source the generator gives a value to."""
+        return {
+            entity_of[source]: value
+            for source in range(cat.N_ITEMS)
+            if (value := generate(source)) is not None
+        }
+
     return {
         "department": CategoryColumn(
-            values={
-                e: key
-                for e in range(cat.N_ITEMS)
-                if (key := cat.department_of(e)) is not None
-            },
+            values=planted(cat.department_of),
             codes=dict(cat.DEPARTMENT_CODES),
         ),
         # The `public` counterpart: the same definition, over the column whose operands the engine
         # answers from its derived postings rather than by scanning (decision 0063). The oracle has
         # one evaluation and the engine has two, which is what makes the routed answer testable.
         "archive": CategoryColumn(
-            values={
-                e: key for e in range(cat.N_ITEMS) if (key := cat.archive_of(e)) is not None
-            },
+            values=planted(cat.archive_of),
             codes=dict(cat.ARCHIVE_CODES),
         ),
-        "title": KeywordColumn(
-            values={
-                e: text for e in range(cat.N_ITEMS) if (text := cat.title_of(e)) is not None
-            }
-        ),
+        "title": KeywordColumn(values=planted(cat.title_of)),
         # The keyword column. Its values arrive here exactly as every other column's do — the
         # strings the fixture planted — and deliberately not as a dictionary and an ordinal per
         # entity, which is what the engine holds and what the oracle must not learn (records §10;
         # `oracle.filters.KeywordColumn`'s docstring argues it at the class).
-        "submitter": KeywordColumn(
-            values={
-                e: key for e in range(cat.N_ITEMS) if (key := cat.submitter_of(e)) is not None
-            }
-        ),
+        "submitter": KeywordColumn(values=planted(cat.submitter_of)),
     }
 
 

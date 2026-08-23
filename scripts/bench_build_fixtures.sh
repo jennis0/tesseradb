@@ -91,14 +91,12 @@ for s in "${SCALES[@]}"; do
   [[ "$s" =~ ^[0-9]+$ ]] || { echo "--scales: '$s' is not a number" >&2; exit 2; }
 done
 
-# The morton input branch REQUIRES the identity extent (tessera-build/src/input.rs: the scaled
-# corpus stores morton codes, not coordinates, and any other extent would silently re-quantise).
-EXTENT="0,65536,0,65536"
-
 # The same fixed non-degenerate key the engine/build fixture tests use, so a bundle built here is
-# comparable with one built by the test suite. Fine on a command line for a throwaway benchmark
-# fixture; never do this for a deployment (contracts §2.2).
-KEY="000102030405060708090a0b0c0d0e0f"
+# comparable with one built by the test suite. It reaches the build through the environment, which
+# is the only route there is — a key on a command line reaches shell history, process listings and
+# CI logs (contracts §2.2). A fixed one is fine for a throwaway benchmark fixture and never for a
+# deployment.
+export TESSERA_IDENTITY_KEY="000102030405060708090a0b0c0d0e0f"
 
 # Entity cap per label set; 0 means uncapped. A build past the cap would produce a corpus whose
 # tail carries NO terms at all — invisible to every principal — which is the silent hole
@@ -106,6 +104,48 @@ KEY="000102030405060708090a0b0c0d0e0f"
 declare -A CAP=( [hiterms]=10000000 [hiterms-ov0.5]=10000000 [hiterms-ov0.9]=10000000 )
 
 mkdir -p "$FIXTURES" "$LOG_DIR"
+
+# One declaration for every fixture: one view over the scaled geometry, its points' labels in the
+# exploded relation each label set supplies, and the identity extent the Morton branch requires.
+# The label set differs per build, so that source is overridden on the command line by its own
+# name (`--file labels=…`, configuration.md §8); the geometry is the same file every time and its
+# path is written here.
+CONFIG="$ROOT/data/scaled/bench-fixtures.config.toml"
+cat > "$CONFIG" <<'TOML'
+[sources]
+geometry = "geometry.parquet"
+labels   = "pairs/categories-subclass.pairs.parquet"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 65536.0 }
+source           = "geometry"
+point_visibility = { source = "labels", default = "public" }
+TOML
+
+# The deployment file each build is invoked against. `[bundle].path` is rewritten per fixture
+# below and `--out` names it too, which is the ordinary override.
+DEPLOYMENT="$LOG_DIR/fixtures.tessera.toml"
+cat > "$DEPLOYMENT" <<TOML
+[bundle]
+path  = "$FIXTURES/bundle"
+cache = "$LOG_DIR/cache"
+wal   = "$LOG_DIR/wal.log"
+
+[build]
+schema = "$CONFIG"
+
+[plugin]
+module = "builtin:passthrough"
+
+[disclosure]
+token_max_lifetime = 3600
+
+[serve]
+viewer  = "127.0.0.1:37585"
+session = "127.0.0.1:49303"
+control = "127.0.0.1:45721"
+TOML
 
 [[ -x "$TESSERA" ]] || { echo "missing $TESSERA — run: cargo build --release -p tessera-cli" >&2; exit 1; }
 [[ -f "$GEOMETRY" ]] || { echo "missing $GEOMETRY" >&2; exit 1; }
@@ -162,10 +202,10 @@ for scale in "${SCALES[@]}"; do
     # --mint-external-ids: fixtures keep carrying the external-ID family's cost realistically
     # (memo 2026-07-30 §3.2 D1 — the default build is now spec-conformant and writes none).
     if "$TESSERA" build \
-        --points "$GEOMETRY" --pairs "$pairs" --out "$out" \
-        --extent "$EXTENT" --slice s0 --limit "$scale" \
-        --mint-external-ids \
-        --id-key "$KEY" --idset 1 >"$log" 2>&1; then
+        --deployment "$DEPLOYMENT" \
+        --file "labels=$pairs" --out "$out" \
+        --limit "$scale" \
+        --mint-external-ids --idset 1 >"$log" 2>&1; then
       elapsed=$(( $(date +%s) - started ))
       bytes=$(du -sb "$out" | cut -f1)
       echo "  ok  ${elapsed}s  $(numfmt --to=iec "$bytes")"

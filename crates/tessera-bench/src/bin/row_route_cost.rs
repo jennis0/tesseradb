@@ -4,10 +4,10 @@
 //! `records-and-search.md` §6.2 quotes 0.48–0.73 ns per viewport row and a 7–1,269× advantage over
 //! the entity route, and marks both as describing *the approach, not shipped code* (review N4).
 //! The probe that produced them wrote its own row-space scan over a single segment of a single
-//! slice; the built route pays a segment boundary and a `ScalarSlice` match on top, and — the
+//! view; the built route pays a segment boundary and a `ScalarSlice` match on top, and — the
 //! thing no probe figure can carry — runs `scan_rows` under rayon, split over the same domain the
 //! tile sweep splits. §11 item 6 owes both residuals: the built route's constants against the
-//! probe's, and the coarse-zoom whole-slice scan **under the sweep's real parallelism**.
+//! probe's, and the coarse-zoom whole-view scan **under the sweep's real parallelism**.
 //!
 //! # How the constant is obtained without touching the engine
 //!
@@ -27,7 +27,7 @@
 //! - **`viewport`** — the per-row constant across viewport sizes, both code widths (`archive` is
 //!   `u8`, `primary_category` is `u16`) and two selectivities. This is what §6.2's 0.48–0.73 ns is
 //!   to be read against.
-//! - **`coarse`** — zoom 0 over the whole extent: the domain *is* the slice, which is §6.2's
+//! - **`coarse`** — zoom 0 over the whole extent: the domain *is* the view, which is §6.2's
 //!   "coarse-zoom cell" and the residual's subject. Run at one thread and at every core, so the
 //!   parallel speedup is measured rather than assumed.
 //! - **`routes`** — the same request answered both ways, on a fixture whose categories carry
@@ -39,7 +39,7 @@
 //! `data/scaled/attrs/points.parquet` is the only attributed points file that exists, and
 //! `probes/build_attributes.py` refuses to fabricate a tail above it. The probe's constants were
 //! measured at 10⁸. A per-row constant is the quantity least disturbed by that gap — the probe's
-//! own finding is that R-dense is invariant in corpus size — but the *coarse* cell is a whole-slice
+//! own finding is that R-dense is invariant in corpus size — but the *coarse* cell is a whole-view
 //! scan, so its milliseconds are this scale's and any 10⁹ figure derived from them is modelled.
 //! Nothing here reports one as measured.
 //!
@@ -64,23 +64,23 @@ const THETA_TARGET: u64 = 16;
 const MAX_TILES_PER_REQUEST: usize = 262_144;
 
 struct Fixture {
-    slice: String,
+    view: String,
     extent: [f64; 4],
     /// `(column, key, code)` per category column, in manifest order.
     categories: Vec<(String, String, u32)>,
     items: u64,
 }
 
-/// Read the slice id, the quantisation extent and every category column's vocabulary straight off
+/// Read the view id, the quantisation extent and every category column's vocabulary straight off
 /// the manifest — a filter leaf names a *code*, and the manifest is where the binding lives.
 fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
     let bundle = open_bundle(root)?;
     let q = bundle.manifest.quantisation;
-    let slice = bundle
+    let view = bundle
         .partitions
         .values()
         .next()
-        .and_then(|p| p.slices.keys().next().cloned())
+        .and_then(|p| p.views.keys().next().cloned())
         .unwrap_or_else(|| "s0".to_string());
     let mut categories = Vec::new();
     for scalar in &bundle.manifest.declared_scalars {
@@ -106,7 +106,7 @@ fn inspect(root: &Path) -> Result<Fixture, Box<dyn std::error::Error>> {
     }
     let items = bundle.manifest.entity_id_high_water;
     Ok(Fixture {
-        slice,
+        view,
         extent: [q.x_min, q.y_min, q.x_max, q.y_max],
         categories,
         items,
@@ -204,7 +204,7 @@ struct Cell {
 fn measure(
     engine: &Engine,
     session: &tessera_engine::Session,
-    slice: &str,
+    view: &str,
     zoom: u8,
     bbox: [f64; 4],
     expr: &FilterExpr,
@@ -214,14 +214,14 @@ fn measure(
     // and belongs in no sample; every harness here excludes it.
     let _ = engine.viewport(
         session,
-        ViewportRequest::new(slice, zoom, bbox, 200).filter(expr.clone()),
+        ViewportRequest::new(view, zoom, bbox, 200).filter(expr.clone()),
     )?;
     let before = engine.filter_row_routes();
     let mut best: Option<Cell> = None;
     for _ in 0..repeat {
         let out = engine.viewport(
             session,
-            ViewportRequest::new(slice, zoom, bbox, 200).filter(expr.clone()),
+            ViewportRequest::new(view, zoom, bbox, 200).filter(expr.clone()),
         )?;
         let t = out.timings;
         let cell = Cell {
@@ -275,10 +275,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prefix = current_prefix(&fixture_root)?;
     let terms = all_terms(&fixture_root, &prefix)?;
     println!(
-        "fixture {} — {} items, slice {}, {} terms, {} cores\n",
+        "fixture {} — {} items, view {}, {} terms, {} cores\n",
         fixture_root.display(),
         fx.items,
-        fx.slice,
+        fx.view,
         terms.len(),
         cores
     );
@@ -299,7 +299,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             for frac in [0.02f64, 0.1, 0.35, 1.0] {
                 let bbox = centred(fx.extent, frac);
-                let cell = measure(&engine, &session, &fx.slice, 6, bbox, &expr, repeat)?;
+                let cell = measure(&engine, &session, &fx.view, 6, bbox, &expr, repeat)?;
                 if cell.rows_in_ranges == 0 {
                     continue;
                 }
@@ -319,8 +319,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // ---- Cell 2: the coarse-zoom whole-slice scan, at one thread and at every core.
-    println!("\n== coarse: zoom 0, the whole extent — the domain is the slice ==");
+    // ---- Cell 2: the coarse-zoom whole-view scan, at one thread and at every core.
+    println!("\n== coarse: zoom 0, the whole extent — the domain is the view ==");
     println!(
         "{:<18} {:>6} {:>12} {:>10} {:>11} {:>11} {:>10}",
         "column", "thr", "rows", "matched", "cross ms", "ns/row", "total ms"
@@ -333,7 +333,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 column: column.clone(),
                 operand: FilterOperand::Equals(AttrLocalId::new(*code)),
             };
-            let cell = measure(&engine, &session, &fx.slice, 0, fx.extent, &expr, repeat)?;
+            let cell = measure(&engine, &session, &fx.view, 0, fx.extent, &expr, repeat)?;
             println!(
                 "{:<18} {:>6} {:>12} {:>10} {:>11.3} {:>11.3} {:>10.3}{}",
                 format!("{column}={key}"),
@@ -400,7 +400,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             for frac in [0.02f64, 0.1, 0.35, 1.0] {
                 let bbox = centred(bx.extent, frac);
                 let zoom = if frac >= 1.0 { 0 } else { 6 };
-                let cell = measure(&engine, &session, &bx.slice, zoom, bbox, &expr, repeat)?;
+                let cell = measure(&engine, &session, &bx.view, zoom, bbox, &expr, repeat)?;
                 if cell.rows_in_ranges == 0 {
                     continue;
                 }

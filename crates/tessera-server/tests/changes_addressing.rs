@@ -23,7 +23,7 @@ async fn visible(server: &TestServer, token: &str) -> u64 {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await
@@ -41,7 +41,7 @@ async fn a_drawn_tessera_id(server: &TestServer, token: &str) -> u64 {
         .post(server.viewer_url("/v1/viewport"))
         .bearer_auth(token)
         .json(&serde_json::json!({
-            "slice": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0]
         }))
         .send()
         .await

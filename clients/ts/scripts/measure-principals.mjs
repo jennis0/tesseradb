@@ -62,7 +62,7 @@ const metaResp = await fetch(`${viewer}/v1/meta`, {
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
 const q = meta.quantisation;
-const slice = meta.slices[0].id;
+const view = meta.views[0].id;
 
 /** The `visible` total from a zoom-0, full-extent call: this principal's visible-set size. */
 async function visibleFor(terms) {
@@ -72,18 +72,21 @@ async function visibleFor(terms) {
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
     // k = 1 because we want the counts, not the marks: the tile batch carries exact masked
     // figures regardless of how many points the response gathers.
-    body: JSON.stringify({slice, zoom: 0, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 1})
+    body: JSON.stringify({view, zoom: 0, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 1})
   });
   if (!r.ok) throw new Error(`viewport ${terms}: ${r.status} ${await r.text()}`);
   const buf = new Uint8Array(Buffer.from(await r.arrayBuffer()));
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  // Named `frame`, not `view`: `view` is this module's view id, read a few lines above and used in
+  // the request body, and a `const view` here shadows it for the whole function body — the request
+  // above then reads an initialiser that has not run yet and every term throws.
+  const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   // `u8 kind, u32 LE length, <payload>` — every frame prefixed, tiles always first (`core/frame.ts`
   // carries the full table). Asserted rather than assumed: reading the length from byte 0 decodes
   // the kind tag as part of it, which yields a plausible-looking offset and an empty table, and an
   // empty table here reads as "this principal sees nothing" rather than as a broken parse.
-  const kind = view.getUint8(0);
+  const kind = frame.getUint8(0);
   if (kind !== 1) throw new Error(`expected a tiles frame first, got kind ${kind}`);
-  const tileLength = view.getUint32(1, true);
+  const tileLength = frame.getUint32(1, true);
   const tiles = tableFromIPC(buf.subarray(5, 5 + tileLength));
   const column = tiles.getChild('visible');
   if (!column) throw new Error('the tiles frame carries no `visible` column');
@@ -125,7 +128,7 @@ if (args.ranks) {
   const totalPairs = pairShare.reduce((a, b) => a + b, 0);
   // The denominator is the corpus a maximal principal can see, not the item count — measured the
   // same way as everything else. The whole dictionary in one authorise call would be a megabyte of
-  // auth_data; the top slice of a Zipf-shaped ranking is within a hair of the same union.
+  // auth_data; the top view of a Zipf-shaped ranking is within a hair of the same union.
   const CORPUS_PROBE_TERMS = Math.min(ranked.length, 4096);
   const corpus = await visibleFor(ranked.slice(0, CORPUS_PROBE_TERMS));
   console.log(`corpus visible (top ${CORPUS_PROBE_TERMS} ranked terms): ${corpus.toLocaleString()}`);
@@ -161,11 +164,13 @@ if (args.ranks) {
     return {n: lo, visible: await unionOf(lo)};
   };
 
-  for (const [label, fraction] of [
+  /** @type {[string, number][]} */
+  const bands = [
     ['sparse', 0.01],
     ['medium', 0.1],
     ['heavy', 0.5]
-  ]) {
+  ];
+  for (const [label, fraction] of bands) {
     const start = startFor(fraction);
     const {n, visible} = await runReaching(start, corpus * fraction);
     const pct = (100 * visible) / corpus;

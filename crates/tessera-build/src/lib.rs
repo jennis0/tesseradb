@@ -19,13 +19,17 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
+pub mod artifact_pass;
+pub mod check;
+pub mod config;
 pub mod deep;
+pub mod disclosure;
 pub mod error;
 pub mod input;
 pub mod layers;
 pub mod observer;
 mod pipeline;
-pub mod schema;
+mod residency;
 pub(crate) mod spill;
 
 use rayon::prelude::*;
@@ -47,7 +51,7 @@ use tessera_spatial::{split32, Bounds};
 use tessera_store::manifest::{
     identity_key_fingerprint, CurrentPointer, DeclaredScalar, DictExtent, FileDigest,
     IdentityDescriptor, Manifest, ManifestVocabulary, ManifestVocabularyValue, PartitionDescriptor,
-    Quantisation, SegmentDescriptor, SegmentsManifest, SliceDescriptor,
+    Quantisation, SegmentDescriptor, SegmentsManifest, ViewDescriptor,
 };
 use tessera_store::write::{write_permutation, write_segment};
 use tessera_store::{write_current, write_manifest_json, PairsParquetWriter};
@@ -57,6 +61,7 @@ use tessera_types::{
 };
 
 pub use deep::{verify_deep, VerifyDeepReport, VerifyOpts};
+pub use disclosure::write_disclosure_report;
 pub use error::{BuildError, Result};
 pub use observer::{BuildObserver, BuildStage, NoopObserver};
 
@@ -65,27 +70,48 @@ pub use observer::{BuildObserver, BuildStage, NoopObserver};
 const PREFIX: &str = "v00000";
 /// This build writes exactly one partition: there are no compartments.
 const PHASH: &str = "default";
-/// One segment per (partition, slice) at build (contracts §2.1).
+/// One segment per (partition, view) at build (contracts §2.1).
 const SEG_ID: &str = "seg-0";
 
 /// Arguments to [`build`].
 #[derive(Clone)]
 pub struct BuildArgs {
     /// Parquet file of points: `entity_id` plus either `x`/`y` or `morton` (see [`input`]).
+    ///
+    /// The built view's own `source` (`configuration.md` §1), overridable by `--file NAME=PATH`.
     pub points: PathBuf,
-    /// Parquet file of the exploded `(entity_id, term_id)` relation.
-    pub pairs: PathBuf,
+    /// Where the view's identity and geometry fields sit in that file — the view's `fields` map,
+    /// resolved. [`config::Fields::default`] is canonical names throughout.
+    pub point_fields: crate::config::Fields,
+    /// The declared attributes **grouped by the file each is read from**, and the identity column
+    /// each group joins on (`configuration.md` §1's `[sources]` and `[defaults]`).
+    ///
+    /// **A group is a pass.** Each one is a merge sweep over its own file against this build's
+    /// assigned ordinals, so a declaration whose columns sit in three files pays three passes and
+    /// no file has to carry a column it does not have. Empty for an empty schema, which is what
+    /// keeps a schema-less build's `columns.arrow` byte-identical to the one it wrote before this
+    /// existed.
+    ///
+    /// **Separate from the view's own source**, and usually the same file: identity and geometry
+    /// are per view, attributes are entity space, and a corpus whose geometry is recomputed does
+    /// not rewrite its attributes to say so.
+    pub attribute_sources: Vec<crate::config::AttributeSource>,
+    /// Where each point's access terms come from, and what a point carrying none gets.
+    ///
+    /// The built view's `point_visibility`, resolved: an exploded `(entity_id, term_id)` relation,
+    /// a `list<string>` field of the points source, or neither — every point taking the default.
+    pub access: crate::config::AccessInput,
     /// Bundle root to create.
     pub out: PathBuf,
     /// The quantisation extent Morton codes are computed against (contracts §2.5).
     pub extent: Bounds,
-    /// The slice this build's segment belongs to.
-    pub slice_id: String,
+    /// The view this build's segment belongs to.
+    pub view_id: String,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
     pub limit: Option<u64>,
     /// The deployment's identity key (contracts §2.2). **Not** per bundle: it must be carried
     /// across rebuilds or every `tessera_id` any client holds silently breaks. Resolved by the
-    /// CLI from `--carry-id-key-from` / `--id-key-file` / `--id-key` / `--mint-id-key`, and
+    /// CLI from the environment / `--identity-file` / `--carry-id-key-from` / `--mint-id-key`, and
     /// passed here already decided so that both build paths see the same bytes.
     pub identity_key: IdentityKey,
     /// `identity_key`'s canonical 32-lowercase-hex-character form, exactly as MANIFEST records
@@ -110,23 +136,22 @@ pub struct BuildArgs {
     /// realistically, per the owner ruling that made it a representative cost rather than a
     /// reduction target.
     pub mint_external_ids: bool,
-    /// `layers.toml`: annotation layers to register into this bundle's manifest, in registration
-    /// order (`layers`). Omit for a bundle with no layers, which is what every build wrote before
-    /// this input existed.
+    /// The config's `[[layer]]` blocks, compiled, in declaration order — which is registration
+    /// order, a layer having to follow every layer it names in `depends_on`. Empty for a bundle
+    /// with no layers, which is what every build wrote before this input existed.
     ///
-    /// **A build input on `schema`'s terms** — it compiles into the manifest, and the engine seeds
-    /// its registry from there before replaying a WAL record. What it is *not* is a second
+    /// **A build input on the schema's terms** — it compiles into the manifest, and the engine
+    /// seeds its registry from there before replaying a WAL record. What it is *not* is a second
     /// authority: the declarations run through the same registry and the same allocator the
     /// control plane uses, so both routes refuse the same declarations and place the same ids.
-    pub layers: Option<PathBuf>,
-    /// Parquet of one row per `(artifact, variation)`: `layer`, `stable_key`, and optionally
-    /// `level`, `variation`, `values`, `attached_layer`/`attached_level`/`attached_key`. Requires
-    /// [`BuildArgs::layers`].
-    pub artifacts: Option<PathBuf>,
-    /// Parquet of one row per `(artifact, member)`: `layer`, `stable_key`, `member` — a **source**
-    /// entity id — and optionally `level` and `variation`, a null variation being the artifact's
-    /// membership and `k` variation *k*'s generating set. Requires [`BuildArgs::layers`].
-    pub artifact_members: Option<PathBuf>,
+    pub layers: Vec<tessera_types::layer::LayerDeclaration>,
+    /// Where each layer's artifacts come from — its own Parquet of one row per artifact, or the
+    /// rows written inline — and the `[layer.members]` source beside it, one row per
+    /// `(artifact, entity)`. Parallel to [`BuildArgs::layers`] and refused against it: an input
+    /// naming a layer this build does not declare is a name the manifest cannot carry.
+    ///
+    /// **One source per layer**, so no row carries the layer it belongs to.
+    pub layer_inputs: Vec<crate::config::LayerSources>,
     /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
     ///
     /// The file is read by nothing on any request path — its consumers are the test-only
@@ -155,15 +180,16 @@ pub struct BuildArgs {
     /// alone); band boundaries never affect output bytes, only transient memory. `None`
     /// derives from the budget.
     pub band_rows: Option<u64>,
-    /// The compiled `schema.toml`: the per-item columns this build writes into `columns.arrow`'s
-    /// tail, in declared order (`--schema`, bound values via `--values`).
+    /// The config's entity-space half: the per-item columns this build writes into
+    /// `columns.arrow`'s tail, in declared order, and the vocabularies they draw on (`--config`,
+    /// bound value files via `--file`).
     ///
-    /// **Default-empty, and that case must stay byte-identical.** Every bundle built before
-    /// `--schema` existed declared no scalar, and an empty schema must go on producing exactly the
+    /// **Default-empty, and that case must stay byte-identical.** Every bundle built before a
+    /// config existed declared no scalar, and an empty schema must go on producing exactly the
     /// bytes it did — `tessera-cli`'s identity test asserts a byte-identical `columns.arrow`
     /// across rebuilds carrying one key, and a schema that widened the fixed table by default
     /// would break it for reasons unrelated to identity.
-    pub schema: crate::schema::Schema,
+    pub schema: crate::config::Schema,
 }
 
 /// **Hand-written, not derived: `identity_key_hex` is the deployment key in plaintext.**
@@ -175,10 +201,11 @@ impl std::fmt::Debug for BuildArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuildArgs")
             .field("points", &self.points)
-            .field("pairs", &self.pairs)
+            .field("attribute_sources", &self.attribute_sources)
+            .field("access", &self.access)
             .field("out", &self.out)
             .field("extent", &self.extent)
-            .field("slice_id", &self.slice_id)
+            .field("view_id", &self.view_id)
             .field("limit", &self.limit)
             .field("identity_key", &self.identity_key)
             .field(
@@ -200,7 +227,7 @@ impl std::fmt::Debug for BuildArgs {
 #[derive(Debug, Clone)]
 pub struct BuildReport {
     pub prefix: String,
-    pub slice_id: String,
+    pub view_id: String,
     pub seg_id: String,
     /// Number of items (= `entity_id_high_water`, since the bootstrap build allocates from 0).
     pub items: u64,
@@ -210,6 +237,162 @@ pub struct BuildReport {
     pub pairs: u64,
     /// Total size on disk of every file the manifests name.
     pub bundle_bytes: u64,
+    /// How much of the frame's resolution the points actually used.
+    pub occupancy: Occupancy,
+    /// Member rows whose key said *this point is in no artifact* — a null key, or exactly `-1`
+    /// (`artifacts-from-points.md` §2). Noise is a quarter of the points at each split of a
+    /// condensed tree, so this is an ordinary number rather than a fault; it is here because a
+    /// clustering that skipped *every* row named the wrong column, and only the count says so.
+    pub unclustered_member_rows: u64,
+    /// Artifacts **created by a member key no artifacts source declared**, under
+    /// `value_set = "open"` (`artifacts-from-points.md` §3). The ordinary number for a bare
+    /// clustering is *every* cluster, so this is not a fault either; it is here because minting
+    /// cannot be undone — a mistyped key becomes a permanent object — and the count is the whole of
+    /// what stands between an operator and noticing. An ingest batch reports the same number for
+    /// itself in its own 200.
+    pub minted_artifacts: u64,
+}
+
+/// **How many of the grid's cells the placed points actually landed in**, beside how many points
+/// there were.
+///
+/// A frame goes wrong in two ways and the clamp count (`config::Frame`) sees only one of them.
+/// Data *outside* the frame is pushed onto its edge, so those positions are actively wrong — that
+/// is the clamp, and past half the corpus it is a refusal. Data *tiny inside* the frame clamps
+/// nothing at all: every position is correct, and nearly all of the resolution is gone, because
+/// points a long way apart in the source land in one cell and can no longer be told apart.
+/// Coordinates spanning 100…118 against a 0…65536 frame do this with zero clamps.
+///
+/// **The frame report's bounding box cannot close that gap**, because it is derived from the
+/// data's extremes: two far-flung outliers make the box span most of the grid while 99% of the
+/// corpus still shares a handful of cells. The number that cannot be fooled that way is how many
+/// cells hold at least one point, counted exactly over every point the build placed.
+///
+/// **A warning, never a refusal.** A clamped corpus is stored *wrong* and is worth stopping for; a
+/// sparse one is stored *correctly but coarsely*, which is a legitimate thing to want — a small
+/// pilot corpus, a deliberately coarse frame, headroom left for data still to arrive. Refusing it
+/// would block builds the caller meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Occupancy {
+    /// Points placed — one per row written.
+    pub points: u64,
+    /// Distinct cells those points landed in. Zero only for a build with no points, which is
+    /// refused before it reaches here.
+    pub cells: u64,
+}
+
+/// The average points per occupied cell at which the build says so emphatically.
+///
+/// **Ten, because nothing at this system's operating point reaches it on a frame that fits.**
+/// 4.3×10⁹ cells exist, so points spread over the whole grid collide rarely — about 1.0 per
+/// occupied cell at 10⁸ and 1.1 at 10⁹ — and a corpus concentrated into a tenth of the frame's
+/// area still only reaches 1.1 at 10⁸. The measure is a ratio rather than a count for a second
+/// reason: ten points in ten cells is a perfectly framed tiny corpus, not a sparse one, and only a
+/// count would scold it.
+///
+/// **The bound is not scale-free, and the limit is stated rather than left to be discovered.** A
+/// uniform corpus's ratio climbs with points per *available* cell, so it rises with both scale and
+/// concentration: at 10⁹ points in a hundredth of the frame's area it reaches about 23 and warns
+/// even under a frame `auto` fitted, a dense core with two distant outliers being exactly that
+/// corpus. Below 10⁹ no concentration reaches ten. This is a warning and not a refusal, so the
+/// cost of that case is a line of output.
+///
+/// The one corpus this warns about honestly and unhelpfully is a source whose positions genuinely
+/// coincide — a hundred documents recorded at one place really are one point. The raw numbers are
+/// printed either way, beside the data's own bounds in the frame report, which is what lets a
+/// caller tell the two apart.
+pub const COLLAPSE_WARNING_POINTS_PER_CELL: f64 = 10.0;
+
+impl Occupancy {
+    /// Count the distinct cells over a build's Morton codes **in tiler order**.
+    ///
+    /// **A run count over the sorted codes, not a bitmap.** Both builds reach this holding the
+    /// codes they are about to write to `morton.u32`, which is `(morton, tessera_id)` ascending
+    /// by contract (contracts §2.6 r6) — so equal codes are adjacent and the exact answer is one
+    /// comparison per point with nothing retained. A Roaring bitmap of the codes gives the same
+    /// exact answer for unsorted input, and is what this would need if the count moved anywhere
+    /// else; here it would allocate up to half a gigabyte (65,536 dense containers at 10⁹ points)
+    /// at the segment write, which is precisely the stage the pipeline holds as little as possible
+    /// beside. The order is asserted rather than assumed — out of order, a run count silently
+    /// over-reports, and an over-report is a warning that does not fire.
+    pub(crate) fn of_sorted_codes(codes: impl IntoIterator<Item = u32>) -> Occupancy {
+        let (mut points, mut cells) = (0u64, 0u64);
+        let mut previous: Option<u32> = None;
+        for code in codes {
+            points += 1;
+            match previous {
+                Some(last) => {
+                    assert!(
+                        code >= last,
+                        "occupancy: Morton codes must arrive in tiler order ({last} then {code})"
+                    );
+                    cells += u64::from(code != last);
+                }
+                None => cells = 1,
+            }
+            previous = Some(code);
+        }
+        Occupancy { points, cells }
+    }
+
+    /// Points per occupied cell — one where every point has a cell to itself, and the factor by
+    /// which the frame is coarser than this corpus needs where it is more. The reporting form is
+    /// [`Self::distinct_fraction`]; this is what the threshold is expressed in.
+    pub fn points_per_cell(&self) -> f64 {
+        if self.cells == 0 {
+            0.0
+        } else {
+            self.points as f64 / self.cells as f64
+        }
+    }
+
+    /// **What is reported: how many of this corpus's points have a position of their own.** One
+    /// hundred per cent is a point per cell; ten per cent means nine points in ten share a
+    /// position with another and cannot be told apart.
+    ///
+    /// The obvious reading of "how full is the grid" — occupied cells over the 4.3×10⁹ that exist
+    /// — is unreadable and nearly always wrong-looking: a corpus can never occupy more cells than
+    /// it has points, so a perfectly framed ten-thousand-point build fills 0.0002% of the grid and
+    /// a collapsed one fills 0.000003%. Both round to nothing, and the figure measures corpus size
+    /// far more than it measures the frame. Against the corpus's own points the same two builds
+    /// read 100% and 1.2%.
+    pub fn distinct_fraction(&self) -> f64 {
+        if self.points == 0 {
+            return 1.0;
+        }
+        self.cells as f64 / self.points as f64
+    }
+
+    /// **What the build says about resolution, every time, whether or not anything is wrong.**
+    /// The raw numbers, so a caller can judge a frame this does not warn about — and so silence
+    /// never means nobody looked.
+    pub fn report(&self, view: &str) -> String {
+        format!(
+            "view '{view}': {} point(s) landed in {} distinct cell(s) — {:.1}% of them have a \
+             position of their own",
+            self.points,
+            self.cells,
+            self.distinct_fraction() * 100.0
+        )
+    }
+
+    /// The emphatic line this occupancy earns, if any — past
+    /// [`COLLAPSE_WARNING_POINTS_PER_CELL`], and never a refusal.
+    pub fn warning(&self, view: &str) -> Option<String> {
+        if self.points_per_cell() < COLLAPSE_WARNING_POINTS_PER_CELL {
+            return None;
+        }
+        Some(format!(
+            "view '{view}': RESOLUTION LOST — only {:.1}% of these points have a position of \
+             their own, so points far apart in the source are stored at the same position and \
+             cannot be told apart. That is a frame far wider than the data it holds, unless the \
+             source's own positions genuinely coincide. Built anyway: every position written is \
+             correct, only coarse, and a pilot corpus, a deliberately wide frame or headroom for \
+             data still to arrive are all reasons to mean it. Write `extent = \"auto\"` to fit \
+             the frame to this data if it was not intended",
+            self.distinct_fraction() * 100.0
+        ))
+    }
 }
 
 /// The signature-sorted assignment key (§11.1): an item's **sorted term-ID list**.
@@ -226,6 +409,186 @@ pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
     key
 }
 
+/// What a build needs in hand before it can turn a row into a term id: the descriptor every source
+/// term names, and the source term a point carrying nothing is filled with.
+///
+/// **Established once, before either build's first pass**, because both passes of the streaming
+/// build and the single pass of the linear one must agree on it exactly — a source term is a
+/// position in a sorted vocabulary for a field-sourced view, and a disagreement about that list is
+/// a disagreement about every permanent entity id (I9).
+pub(crate) struct AccessPlan {
+    pub descriptors: input::TermDescriptors,
+    /// The source term a point carrying none is given. Meaningless for the relation route, which
+    /// fills nothing.
+    pub default_term: u64,
+}
+
+/// Read whatever a build must know before assigning term ids (see [`AccessPlan`]).
+pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
+    use crate::config::AccessSource;
+    let field = match &args.access.source {
+        // The relation supplies its own integer term ids and needs no vocabulary pass.
+        AccessSource::Relation(_) => {
+            return Ok(AccessPlan {
+                descriptors: input::TermDescriptors::Ids,
+                default_term: 0,
+            })
+        }
+        AccessSource::Field(field) => Some(field.as_str()),
+        AccessSource::Default => None,
+    };
+    let vocabulary = input::read_access_vocabulary(
+        &args.points,
+        &args.point_fields,
+        field,
+        &args.access.default,
+        args.limit,
+    )?;
+    let default_term = vocabulary
+        .binary_search_by(|t| t.as_str().cmp(&args.access.default))
+        .expect("the default is read into the vocabulary unconditionally")
+        as u64;
+    Ok(AccessPlan {
+        descriptors: input::TermDescriptors::Vocabulary(vocabulary),
+        default_term,
+    })
+}
+
+/// Walk this build's access relation, whichever of the three shapes declared it, as
+/// `(source entity id, source term)`.
+pub(crate) fn scan_access<F: FnMut(u64, u64) -> std::ops::ControlFlow<()>>(
+    args: &BuildArgs,
+    plan: &AccessPlan,
+    visit: F,
+) -> Result<input::AccessFill> {
+    use crate::config::AccessSource;
+    match (&args.access.source, &plan.descriptors) {
+        (AccessSource::Relation(path), _) => {
+            input::scan_pairs(path, &access_fields(args), args.limit, visit)?;
+            Ok(input::AccessFill::default())
+        }
+        (source, input::TermDescriptors::Vocabulary(vocabulary)) => input::scan_access_field(
+            &args.points,
+            &args.point_fields,
+            match source {
+                AccessSource::Field(field) => Some(field.as_str()),
+                _ => None,
+            },
+            vocabulary,
+            plan.default_term,
+            args.limit,
+            visit,
+        ),
+        (_, input::TermDescriptors::Ids) => unreachable!("planned by `plan_access` together"),
+    }
+}
+
+/// Say how many points carried terms of their own and how many took the view's default.
+///
+/// **Printed rather than merely counted** (`configuration.md` §5): a fill is a visibility
+/// decision the build made on the caller's behalf, and a corpus that turned out to be almost
+/// entirely default is one whose author wants to know before it is served.
+pub(crate) fn report_access_fill(args: &BuildArgs, fill: input::AccessFill) {
+    if fill.filled == 0 {
+        return;
+    }
+    eprintln!(
+        "view '{}': {} point(s) carried access terms of their own; {} took the declared default \
+         '{}'",
+        args.view_id, fill.carried, fill.filled, args.access.default
+    );
+}
+
+/// What one attribute source's join actually met: how many of this build's entities came away with
+/// a value, and how many of the source's rows named an entity the build never loaded.
+///
+/// **Entities covered is the denominator, and rows dropped is not.** A legitimate superset and a
+/// broken join both drop an overwhelming fraction of their rows — a sentiment table covering every
+/// paper arXiv ever published against a 50,000-paper build drops 97% of itself and is perfectly
+/// correct — so the number that separates the two is how much of *this* corpus came away with a
+/// value. Both are printed, and only the first is the measure.
+#[derive(Debug, Clone)]
+pub struct AttributeCoverage {
+    /// The caller's own name for the source, from `[sources]`.
+    pub source: String,
+    /// Entities in this build — the denominator.
+    pub entities: u64,
+    /// Rows of this source that resolved to one of them.
+    pub matched_rows: u64,
+    /// Rows that named an entity this build did not load. **Ignored, never refused**: that is
+    /// what a join does, and it is fail-closed in both directions that matter — an absent
+    /// attribute matches fewer points in a filter, and an absent access label leaves a point
+    /// visible to nobody.
+    pub unknown_rows: u64,
+    /// Each declared column this source carries, and how many entities came away with a value in
+    /// it. Fewer than [`AttributeCoverage::matched_rows`] where the source itself holds nulls.
+    pub columns: Vec<(String, u64)>,
+}
+
+/// A count with thousands separators, because these are the numbers an operator compares by eye.
+fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// **What each attribute source's join met, printed at every build** (`configuration.md` §1).
+///
+/// Reported and **never refused**, on the rule that separates a disclosure boundary from a build
+/// input: an unmatched row discloses nothing and costs a rerun, and refusing would block the
+/// legitimate case — a source covering a superset of this build's entities — as loudly as the
+/// broken one. Zero coverage says so emphatically and still builds, which is the owner's ruling
+/// twice over.
+pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
+    for source in coverage {
+        for (name, present) in &source.columns {
+            if *present == 0 && source.entities > 0 {
+                eprintln!(
+                    "attribute '{name}': NO ENTITY HAS A VALUE — 0 of {} entities matched",
+                    thousands(source.entities)
+                );
+            } else {
+                eprintln!(
+                    "attribute '{name}': {} of {} entities have a value",
+                    thousands(*present),
+                    thousands(source.entities)
+                );
+            }
+        }
+        eprintln!(
+            "        {} source row(s) named entities this build did not load",
+            thousands(source.unknown_rows)
+        );
+        // The join did not meet at all. Emphatic and not a refusal: the ids may simply be another
+        // corpus's, and only the operator knows which — but a build that says nothing here ships a
+        // bundle whose every declared column is empty.
+        if source.matched_rows == 0 && source.entities > 0 {
+            eprintln!(
+                "        source '{}' AND THIS BUILD'S ENTITY SPACE DO NOT MEET — not one of its \
+                 rows named an entity this build loaded. The join is on the entity id: check that \
+                 `entity_id_field` names the column carrying it, and that these are the same ids \
+                 the view's own source carries",
+                source.source
+            );
+        }
+    }
+}
+
+/// The access relation's own field names — canonical, and named for a refusal to quote.
+///
+/// `point_visibility` takes no `fields` map of its own (`configuration.md` §1): the exploded
+/// relation is `entity_id` and `term_id` under those names. What this carries is the *object*, so
+/// a file missing one of them is refused naming the view whose labels went unread.
+fn access_fields(args: &BuildArgs) -> crate::config::Fields {
+    crate::config::Fields::canonical(format!("view '{}' point_visibility", args.view_id))
+}
+
 /// Argument and destination checks shared by both build implementations.
 fn validate_args(args: &BuildArgs) -> Result<()> {
     args.extent
@@ -240,13 +603,41 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
     // resolvable. Refused rather than ignored: a build that quietly dropped the artifacts would
     // produce a bundle whose clusters are absent, which no viewer can tell from clusters that
     // failed their existence criterion.
-    if args.layers.is_none() && (args.artifacts.is_some() || args.artifact_members.is_some()) {
+    if args.layers.is_empty() && !args.layer_inputs.is_empty() {
         return Err(BuildError::Invalid(
-            "--artifacts and --artifact-members name artifacts in layers, so they need --layers"
+            "an artifact source names artifacts in layers, and the config declares no `[[layer]]` \
+             block for them to belong to"
                 .into(),
         ));
     }
-    for (what, value) in [("slice id", args.slice_id.as_str())] {
+    // Every declared attribute must be read from somewhere, and the declaration refuses one that
+    // is not, naming the columns (`config::Config::acquire`, `configuration.md` §1's
+    // `[defaults]`); this is the same rule for the callers that build these arguments directly.
+    // A column no group carries would be written as the absent sentinel for every row — a column
+    // that cost its width to say nothing.
+    if !args.schema.is_empty() {
+        let mut carried: Vec<usize> = args
+            .attribute_sources
+            .iter()
+            .flat_map(|s| s.attributes.iter().copied())
+            .collect();
+        carried.sort_unstable();
+        let missing: Vec<&str> = (0..args.schema.attributes.len())
+            .filter(|i| carried.binary_search(i).is_err())
+            .map(|i| args.schema.attributes[i].name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            return Err(BuildError::Invalid(format!(
+                "the schema declares {} attribute(s) and no source is bound to read {} of them \
+                 from: {}. Every column names a `[sources]` key or takes `[defaults].source` \
+                 (configuration.md §1)",
+                args.schema.attributes.len(),
+                missing.len(),
+                missing.join(", ")
+            )));
+        }
+    }
+    for (what, value) in [("view id", args.view_id.as_str())] {
         if value.is_empty()
             || value.contains('/')
             || value.contains('\\')
@@ -322,7 +713,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     validate_args(args)?;
 
     // ---- 1. read inputs --------------------------------------------------------------
-    let mut points = input::read_points(&args.points, &args.extent, args.limit)?;
+    let mut points =
+        input::read_points(&args.points, &args.point_fields, &args.extent, args.limit)?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
             "no points selected — a bundle with no items has no expressible entity range".into(),
@@ -338,7 +730,24 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             "points file contains duplicate entity_id values".into(),
         ));
     }
-    let mut pairs_by_source = input::read_pairs(&args.pairs, args.limit)?;
+    // What every source term will be called, before any term id exists — a field-sourced view's
+    // sorted vocabulary, or the relation's own integers (`AccessPlan`).
+    let access = plan_access(args)?;
+    let mut pairs_by_source: HashMap<u64, Vec<u64>> = HashMap::new();
+    let fill = scan_access(args, &access, |source_id, source_term| {
+        pairs_by_source
+            .entry(source_id)
+            .or_default()
+            .push(source_term);
+        std::ops::ControlFlow::Continue(())
+    })?;
+    report_access_fill(args, fill);
+    // Sorted and deduplicated per item: the label set is a *set*, and the signature key and the
+    // postings writer both depend on it being one.
+    for terms in pairs_by_source.values_mut() {
+        terms.sort_unstable();
+        terms.dedup();
+    }
 
     // ---- 2. label each item through the plugin, interning descriptors ----------------
     let plugin = Passthrough::new();
@@ -347,30 +756,31 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     fs::create_dir_all(&dict_dir).map_err(|e| BuildError::io(&dict_dir, e))?;
     let mut dict = DictWriter::new(&dict_dir);
 
+    // **`public` is interned first, so it is term 0 in every bundle** and is minted for no other
+    // descriptor (`tessera_authz::PUBLIC_TERM`). Reserved unconditionally, whether or not any point
+    // carries it: the label's identity has to be a property of the format rather than of the input,
+    // since `Engine::authorise` adds it to every principal's satisfied set and a term whose number
+    // moved with the data would make that addition mean something different per bundle.
+    dict.intern(tessera_authz::PUBLIC_LABEL);
+
     let mut staged: Vec<StagedItem> = Vec::with_capacity(points.len());
     let mut over_bound_items = 0u64;
     for point in &points {
         let source_terms = pairs_by_source.remove(&point.source_id).unwrap_or_default();
-        // The probe corpus carries integer term IDs; the item's `access` label is the
-        // comma-joined decimal source term IDs, so `builtin:passthrough` yields decimal-string
-        // descriptors.
-        let mut access = String::new();
-        for (i, t) in source_terms.iter().enumerate() {
-            if i > 0 {
-                access.push(',');
-            }
-            access.push_str(&t.to_string());
-        }
-        let descriptors = plugin.terms_of_label(access.as_bytes())?;
+        let labels: Vec<Vec<u8>> = source_terms
+            .iter()
+            .map(|t| access.descriptors.descriptor(*t).into_owned().into_bytes())
+            .collect();
+        let descriptors = plugin.terms_of_labels(&labels)?;
         if descriptors.len() > bounds.max_terms_per_item as usize {
             // A declared bound is a *declaration*: record it and carry on. Dropping terms here
             // would silently widen the item's visibility (I2/I3).
             //
             // This counts descriptors, and the streaming pipeline counts the item's signature
             // length; the two always agree. `read_pairs` returns each item's source terms sorted
-            // and deduplicated, so the joined label has distinct decimal elements, passthrough
-            // yields one distinct descriptor each, and interning is injective — the descriptor
-            // count *is* the distinct term count, which is what a signature holds.
+            // and deduplicated, so the label list has distinct elements, passthrough yields one
+            // distinct descriptor per element, and interning is injective — the descriptor count
+            // *is* the distinct term count, which is what a signature holds.
             over_bound_items += 1;
         }
         let terms: Vec<TermId> = descriptors.iter().map(|d| dict.intern(d)).collect();
@@ -447,9 +857,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let slice_dir = partition_dir.join("slices").join(&args.slice_id);
-    let segment_dir = slice_dir.join("segments").join(SEG_ID);
-    for dir in [&terms_dir, &entities_dir, &slice_dir, &segment_dir] {
+    let view_dir = partition_dir.join("views").join(&args.view_id);
+    let segment_dir = view_dir.join("segments").join(SEG_ID);
+    for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
         fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
     }
 
@@ -500,49 +910,84 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
 
     // ---- 6b. the declared attribute tail ---------------------------------------------
-    // A second pass over the points file, joined to the staged items **by source id**, because
+    // One pass **per attribute source**, joined to the staged items **by source id**, because
     // `scan_attributes` visits rows in file order and staging is in entity order. Skipped
     // entirely when the schema is empty, which is what keeps a schema-less build's `columns.arrow`
     // byte-identical to the one it wrote before this existed.
     //
-    // Every staged item must receive a value. A row the attribute pass never visits would keep an
-    // empty `scalars` vector, and the segment writer refuses that by name rather than padding it
-    // — padding would put every later row's value under the wrong identity in a column whose
-    // width says nothing is wrong.
+    // Every staged item must receive a *slot* for every declared column, which is what the absent
+    // pre-fill below is for: a row this pass never visits would otherwise keep an empty `scalars`
+    // vector, and the segment writer refuses that by name rather than padding it — padding would
+    // put every later row's value under the wrong identity in a column whose width says nothing is
+    // wrong. What it must **not** require is that every item be *matched*: an entity no source
+    // names is a column that is absent for it, which is what a join does and what the coverage
+    // report below states in numbers (`configuration.md` §1).
     //
     // `minters` seeds one live `VocabularyMinter` per discovered vocabulary from whatever the
     // schema already pins, and the scan mints into it for every novel key the corpus supplies.
     // Its final state — carried past this block — is what `write_manifests` records into
     // `MANIFEST.vocabularies` below, so a rebuild and the serving path see exactly what this
     // build minted.
-    let mut minters = args.schema.discovered_minters();
+    let mut minters = args.schema.open_minters();
     if !args.schema.is_empty() {
         let position_of_source: HashMap<u64, usize> = staged
             .iter()
             .enumerate()
             .map(|(position, item)| (item.source_id, position))
             .collect();
-        let mut seen = 0usize;
-        input::scan_attributes(
-            &args.points,
-            &args.schema,
-            &mut minters,
-            args.limit,
-            |source_id, values| {
-                if let Some(&position) = position_of_source.get(&source_id) {
-                    tiler_items[position].scalars = values.to_vec();
-                    seen += 1;
-                }
-            },
-        )?;
-        if seen != staged.len() {
-            return Err(BuildError::Invalid(format!(
-                "the attribute pass matched {seen} of {} staged items. The points file's two \
-                 passes disagree about which entities it holds, so some row would be written \
-                 with another row's attribute values",
-                staged.len()
-            )));
+        // **Absent, then overwritten.** Every item starts with one absent value per declared
+        // column, so an entity no source names keeps a column of nothing rather than an empty
+        // `scalars` vector the segment writer would refuse. That is what makes coverage a report:
+        // an unmatched entity is a legitimate outcome of a join and is counted, not stopped.
+        for item in tiler_items.iter_mut() {
+            item.scalars = vec![ScalarValue::Null; args.schema.attributes.len()];
         }
+        let mut coverage = Vec::with_capacity(args.attribute_sources.len());
+        for group in &args.attribute_sources {
+            let columns: Vec<&crate::config::Attribute> = group
+                .attributes
+                .iter()
+                .map(|&i| &args.schema.attributes[i])
+                .collect();
+            let mut matched_rows = 0u64;
+            let mut unknown_rows = 0u64;
+            let mut present = vec![0u64; group.attributes.len()];
+            input::scan_attributes(
+                &group.path,
+                &group.fields,
+                &args.schema,
+                &columns,
+                &mut minters,
+                args.limit,
+                |source_id, values| {
+                    let Some(&position) = position_of_source.get(&source_id) else {
+                        unknown_rows += 1;
+                        return;
+                    };
+                    matched_rows += 1;
+                    for ((&column, value), count) in
+                        group.attributes.iter().zip(values).zip(present.iter_mut())
+                    {
+                        if !matches!(value, ScalarValue::Null) {
+                            *count += 1;
+                        }
+                        tiler_items[position].scalars[column] = value.clone();
+                    }
+                },
+            )?;
+            coverage.push(AttributeCoverage {
+                source: group.name.clone(),
+                entities: staged.len() as u64,
+                matched_rows,
+                unknown_rows,
+                columns: columns
+                    .iter()
+                    .zip(&present)
+                    .map(|(a, &n)| (a.name.clone(), n))
+                    .collect(),
+            });
+        }
+        report_attribute_coverage(&coverage);
     }
 
     // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
@@ -599,6 +1044,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     }
     let scalar_schema = scalar_schema_of(&args.schema);
     let codes = sort_batch(&mut tiler_items, &mut entity_ids);
+    // **The resolution this frame actually gave the corpus**, counted here because `codes` is the
+    // row order — `(morton, tessera_id)` ascending — and is the same vector `write_segment` puts
+    // into `morton.u32` below. The streaming pipeline counts the identical thing at its own
+    // segment write; a figure that appeared on one path and not the other would be worse than
+    // none, since which path ran is not something the caller chose.
+    let occupancy = Occupancy::of_sorted_codes(codes.iter().copied());
 
     // The render columns' presence, after the sort because the bitmap is over **rows**, and before
     // the substitution below because that is what erases the distinction: `columns.arrow` is
@@ -634,9 +1085,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     fsync_file(&segment_dir.join("columns.arrow"))?;
     fsync_file(&segment_dir.join("morton.u32"))?;
 
-    let permutation_path = slice_dir.join("permutation.bin");
+    let permutation_path = view_dir.join("permutation.bin");
     let row_order: Vec<EntityId> = entity_ids;
-    // `bound` is the partition slice's max entity ID + 1. The bootstrap build allocates a dense
+    // `bound` is the partition view's max entity ID + 1. The bootstrap build allocates a dense
     // 0..n, so that is exactly the item count.
     write_permutation(&permutation_path, &row_order, n)
         .map_err(|e| BuildError::io(&permutation_path, e))?;
@@ -645,7 +1096,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // The other direction, for the filtered viewport's per-tile route
     // (`tessera_store::row_entity`). `row_order` is already the row→entity vector, so this writes
     // what the permutation was just scattered from rather than deriving anything.
-    let row_entity_path = slice_dir.join(tessera_store::ROW_ENTITY_FILE);
+    let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
     let rows_by_index: Vec<u32> = row_order.iter().map(|e| e.raw() as u32).collect();
     tessera_store::write_row_entity(&row_entity_path, &rows_by_index)
         .map_err(|e| BuildError::io(&row_entity_path, e))?;
@@ -655,14 +1106,11 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // Entity ids are assigned by now — an item's entity is its position in `staged` — so a member
     // named by source id resolves, and the row-less region can be allocated against a settled
     // point mark.
-    let published_layers = match &args.layers {
-        None => crate::layers::PublishedLayers::default(),
-        Some(path) => {
-            let plan = crate::layers::read(
-                path,
-                args.artifacts.as_deref(),
-                args.artifact_members.as_deref(),
-            )?;
+    let mut published_layers = if args.layers.is_empty() {
+        crate::layers::PublishedLayers::default()
+    } else {
+        {
+            let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
             let by_source: HashMap<u64, u64> = staged
                 .iter()
                 .enumerate()
@@ -674,10 +1122,53 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 n,
                 &args.out.join(PREFIX),
                 PHASH,
-                &args.slice_id,
+                &args.view_id,
+                // The linear build holds its values on the items rather than in typed entity
+                // columns, which is the only thing about the two builds this rule sees.
+                &crate::layers::predicate_artifact_keys(
+                    &args.layers,
+                    &args.schema,
+                    &minters,
+                    &|index| {
+                        crate::pipeline::distinct_codes(
+                            tiler_items.iter().map(|item| item.scalars[index].clone()),
+                        )
+                    },
+                )?,
             )?
         }
     };
+
+    write_containment_report(&args.out, &published_layers)?;
+
+    // ---- 8b. the post-bundle artifact pass ---------------------------------------------
+    //
+    // **Both builds run it, and that is not optional**: `tests/build_equivalence.rs` asserts the
+    // two produce byte-identical bundles, and the pass writes files and edits the layer records the
+    // manifest carries. The linear build writes its permutation at step 7, so row space already
+    // exists here — the batched build has to wait for its tiler sort, which is the only reason the
+    // two call sites sit at different step numbers. See `crate::artifact_pass`.
+    let artifact_store = std::mem::take(&mut published_layers.store);
+    let artifact_pass = crate::artifact_pass::run(
+        &mut published_layers,
+        &artifact_store,
+        &args.out.join(PREFIX),
+        PHASH,
+        &args.view_id,
+        n as u32,
+        &plugin.data_plugin_hash(),
+    );
+    drop(artifact_store);
+    crate::artifact_pass::report(&artifact_pass);
+    published_layers
+        .tile_index_extents
+        .clone_from(&artifact_pass.tile_index_extents);
+    published_layers
+        .row_column_extents
+        .clone_from(&artifact_pass.row_column_extents);
+    published_layers
+        .containment_extents
+        .clone_from(&artifact_pass.containment_extents);
 
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([
@@ -689,6 +1180,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     other_paths.extend(presence_paths);
     other_paths.extend(filter_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
+    other_paths.extend(artifact_pass.paths.iter().cloned());
     write_manifests(
         args,
         &BundleFiles {
@@ -704,6 +1196,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         args.batch_items.filter(|&b| b < n),
         &minters,
         &published_layers,
+        occupancy,
     )
 }
 
@@ -713,7 +1206,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 /// a column's width — which would produce two bundles the byte-equality oracle calls different
 /// for a reason that is not the entity assignment it exists to check.
 fn scalar_schema_of(
-    schema: &crate::schema::Schema,
+    schema: &crate::config::Schema,
 ) -> Vec<(String, tessera_spatial::tiler::ScalarType)> {
     // Render columns only — the segment's tail and `permute_attribute_tail`'s output must name the
     // same columns in the same order, or every row's values land under the wrong headings.
@@ -747,6 +1240,7 @@ fn write_manifests(
     batch_items_recorded: Option<u64>,
     minters: &HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     published_layers: &crate::layers::PublishedLayers,
+    occupancy: Occupancy,
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -791,7 +1285,7 @@ fn write_manifests(
         // The row-less region's mark, and it must be the manifest's: the WAL carries the same one
         // in its registration records and rotation reclaims those, so a mark that lived only there
         // is lost at the first rotation and the next registration is handed ids a live layer
-        // already holds (decision 0074). `ROWLESS_CEILING` when `--layers` was not given, which is
+        // already holds (decision 0074). `ROWLESS_CEILING` when the declaration carried no layer, which is
         // the untouched region rather than a default standing in for a lost value.
         entity_id_low_water: published_layers.low_water,
         layers: published_layers.layers.clone(),
@@ -799,9 +1293,16 @@ fn write_manifests(
         // a running node, and a build produces a bundle rather than editing one.
         layer_tombstones: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
+        level_versions: published_layers.level_versions.clone(),
+        // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where
+        // the build published no artifacts, or where a derived structure would not compose — each
+        // of which leaves the level composing it on first use, exactly as before the pass existed.
+        containment_extents: published_layers.containment_extents.clone(),
+        tile_index_extents: published_layers.tile_index_extents.clone(),
+        row_column_extents: published_layers.row_column_extents.clone(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
-            slice: args.slice_id.clone(),
+            view: args.view_id.clone(),
             seg_id: SEG_ID.to_string(),
             row_count: n as u32,
             entity_lo: 0,
@@ -858,9 +1359,10 @@ fn write_manifests(
         // `HashMap`'s iteration order would otherwise put non-determinism into the manifest bytes
         // — which are under a digest.
         //
-        // A **declared** vocabulary's values are exactly what the schema pinned (`v.codes`,
-        // unchanged). A **discovered** one's values come from `minters[&v.name]` instead — the
-        // schema's pinned seed *plus* every code this build minted for a key the seed lacked —
+        // A **closed** vocabulary's values are exactly what the config declared (`v.codes`,
+        // unchanged — pinned or assigned alike). An **open** one's values come from
+        // `minters[&v.name]` instead — the declaration's codes *plus* every code this build
+        // minted for a key the declaration lacked —
         // because `v.codes` alone would silently omit everything minted during the scan. Either
         // way the values are read back sorted by key ([`tessera_store::vocabulary::values_of`]),
         // so the bytes here do not depend on a `BTreeMap`'s or a minter's internal order.
@@ -874,7 +1376,7 @@ fn write_manifests(
                         Some(minter) => tessera_store::vocabulary::values_of(minter)
                             .into_iter()
                             .map(|value| ManifestVocabularyValue {
-                                label: v.labels.get(&value.key).cloned(),
+                                title: v.titles.get(&value.key).cloned(),
                                 ..value
                             })
                             .collect(),
@@ -884,23 +1386,24 @@ fn write_manifests(
                             .map(|(key, &code)| ManifestVocabularyValue {
                                 key: key.clone(),
                                 code,
-                                label: v.labels.get(key).cloned(),
+                                title: v.titles.get(key).cloned(),
                             })
                             .collect(),
                     };
                     ManifestVocabulary {
                         name: v.name.clone(),
-                        // The schema's kind, carried verbatim: it is what ingest consults to
-                        // decide whether a key nothing has bound is a typo or a new value.
-                        kind: match v.kind {
-                            crate::schema::VocabularyKind::Declared => {
+                        // The declaration's value set, carried verbatim: it is what ingest
+                        // consults to decide whether a key nothing has bound is a typo or a new
+                        // value. The manifest keeps its own two words for it.
+                        kind: match v.value_set {
+                            crate::config::ValueSet::Closed => {
                                 tessera_store::manifest::VocabularyKind::Declared
                             }
-                            crate::schema::VocabularyKind::Discovered => {
+                            crate::config::ValueSet::Open => {
                                 tessera_store::manifest::VocabularyKind::Discovered
                             }
                         },
-                        listing: v.listing,
+                        visibility: v.visibility,
                         values,
                         reserved: v.reserved.clone(),
                     }
@@ -924,9 +1427,9 @@ fn write_manifests(
             shard_id: args.shard_id,
             idset: args.idset,
         },
-        slices: vec![SliceDescriptor {
-            id: args.slice_id.clone(),
-            display_name: args.slice_id.clone(),
+        views: vec![ViewDescriptor {
+            id: args.view_id.clone(),
+            display_name: args.view_id.clone(),
         }],
         partitions: vec![PartitionDescriptor {
             phash: PHASH.to_string(),
@@ -956,12 +1459,15 @@ fn write_manifests(
 
     Ok(BuildReport {
         prefix: PREFIX.to_string(),
-        slice_id: args.slice_id.clone(),
+        view_id: args.view_id.clone(),
         seg_id: SEG_ID.to_string(),
         items: n,
         terms: term_count,
         pairs: pair_count,
         bundle_bytes,
+        occupancy,
+        unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
+        minted_artifacts: published_layers.minted.values().sum(),
     })
 }
 
@@ -970,7 +1476,7 @@ fn write_manifests(
 pub struct VerifyReport {
     pub prefix: String,
     pub partitions: usize,
-    pub slices: usize,
+    pub views: usize,
     pub segments: usize,
     pub rows: u64,
     pub entity_id_high_water: u64,
@@ -998,14 +1504,14 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
         .map_err(|e| BuildError::Invalid(format!("MANIFEST identity.key: {e}")))?;
     let shard_id = bundle.manifest.identity.shard_id;
 
-    let mut slices = 0usize;
+    let mut views = 0usize;
     let mut segments = 0usize;
     let mut rows = 0u64;
     for partition in bundle.partitions.values() {
-        for (slice_id, slice) in &partition.slices {
-            slices += 1;
-            segments += slice.segments.len();
-            let total_rows = slice.row_space.total_rows();
+        for (view_id, view) in &partition.views {
+            views += 1;
+            segments += view.segments.len();
+            let total_rows = view.row_space.total_rows();
             rows += total_rows;
             // `open_bundle` already ran `validate_rows` on the base and `is_well_formed` on
             // every extent (no aliasing, no out-of-range row). The remaining half of
@@ -1016,43 +1522,42 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
             // bundle as "not a bijection" (the false refusal §18 obligation 10 names). Built as
             // a row-indexed array (rather than just a count) so the identity check below can
             // reuse it instead of inverting the row space a second time.
-            slice
-                .row_space
+            view.row_space
                 .base()
-                .validate_rows(slice.row_space.base_rows())?;
-            let entity_bound = slice
+                .validate_rows(view.row_space.base_rows())?;
+            let entity_bound = view
                 .row_space
                 .extents()
                 .last()
                 .map(|extent| extent.entity_hi + 1)
-                .unwrap_or_else(|| slice.row_space.base().bound());
+                .unwrap_or_else(|| view.row_space.base().bound());
             let total_rows_usize = usize::try_from(total_rows).map_err(|_| {
                 BuildError::Invalid(format!(
-                    "slice '{slice_id}': {total_rows} rows does not fit usize"
+                    "view '{view_id}': {total_rows} rows does not fit usize"
                 ))
             })?;
             let mut entity_of_row: Vec<Option<u64>> = vec![None; total_rows_usize];
             let mut claimed = 0u64;
             for entity in 0..entity_bound {
-                if let Some(row) = slice.row_space.row_of(tessera_types::EntityId::new(entity)) {
+                if let Some(row) = view.row_space.row_of(tessera_types::EntityId::new(entity)) {
                     entity_of_row[row.raw() as usize] = Some(entity);
                     claimed += 1;
                 }
             }
             if claimed != total_rows {
                 return Err(BuildError::Invalid(format!(
-                    "slice '{slice_id}': the row space claims {claimed} rows but the segments \
+                    "view '{view_id}': the row space claims {claimed} rows but the segments \
                      hold {total_rows} — not a bijection"
                 )));
             }
 
             // The identity column, per segment **at that segment's own row offset**. A segment's
-            // `columns.arrow` rows are local `0..row_count`; in the slice's row space they begin
+            // `columns.arrow` rows are local `0..row_count`; in the view's row space they begin
             // at the extent's `row_base` (the base segment's at 0). The offset is looked up from
             // the row space rather than accumulated in iteration order, so this cannot silently
             // depend on the segment list's ordering.
-            for segment in &slice.segments {
-                let row_base = slice
+            for segment in &view.segments {
+                let row_base = view
                     .row_space
                     .extents()
                     .iter()
@@ -1067,7 +1572,7 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
                         .flatten()
                         .ok_or_else(|| {
                             BuildError::Invalid(format!(
-                                "slice '{slice_id}' segment '{}' row {local}: no entity claims \
+                                "view '{view_id}' segment '{}' row {local}: no entity claims \
                                  this row",
                                 segment.seg_id
                             ))
@@ -1078,7 +1583,7 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
                         .raw();
                     if *id != expected {
                         return Err(BuildError::Invalid(format!(
-                            "slice '{slice_id}' segment '{}' row {local}: tessera_id {id:#x} \
+                            "view '{view_id}' segment '{}' row {local}: tessera_id {id:#x} \
                              does not match identity.key's derivation {expected:#x} for entity \
                              {entity}",
                             segment.seg_id
@@ -1096,7 +1601,7 @@ fn verified_open(root: &Path) -> Result<(tessera_store::read::Bundle, VerifyRepo
     let report = VerifyReport {
         prefix: current.prefix,
         partitions: bundle.partitions.len(),
-        slices,
+        views,
         segments,
         rows,
         entity_id_high_water: bundle.manifest.entity_id_high_water,
@@ -1287,7 +1792,84 @@ fn write_external_id_run(path: &Path, rows: &[ExternalIdRow]) -> Result<()> {
     fsync_file(path)
 }
 
-fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
+/// Write the hierarchy containment report into the bundle root's `reports/`.
+///
+/// **Beside the prefix, never inside it**, on the fold report's rule: a prefix is reclaimed and a
+/// notice nobody has read yet would go with it. **Written even when empty**, for the same reason
+/// that report is — an operator polling the directory must be able to tell *this build found
+/// nothing* from *this build never looked*, and an absent file says the second.
+///
+/// It decides nothing. A violating edge is published exactly as a clean one is; what the report
+/// buys is that the edge is named before a viewer meets its consequences.
+///
+/// **A build that registered no layers writes nothing at all** — not even the directory. There are
+/// no edges to have checked, so an empty report there would answer a question nobody asked, and
+/// creating `reports/` for it would mean every bundle carries the fold's notice directory before a
+/// fold has ever run.
+pub(crate) fn write_containment_report(
+    root: &Path,
+    published: &crate::layers::PublishedLayers,
+) -> Result<()> {
+    if published.layers.is_empty() {
+        return Ok(());
+    }
+    let violations = &published.containment_violations;
+    let dir = root.join("reports");
+    std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
+    let rows: Vec<serde_json::Value> = violations
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "layer": v.layer,
+                "level": v.level,
+                "child": v.child,
+                "parent": v.parent,
+                "escaping_members": v.escaping_members,
+            })
+        })
+        .collect();
+
+    // **The splits that lose the most, and how many were not listed.** A tree has one of these per
+    // internal node, which at 10⁷ artifacts is a report nobody opens; naming the worst is what an
+    // operator actually reads, and saying how many were dropped is what keeps the list from
+    // reading as "these are all of them" (`docs/agents/` — no silent caps).
+    const LISTED: usize = 100;
+    let mut splits: Vec<_> = published.split_coverage.iter().collect();
+    splits.sort_by(|a, b| {
+        (b.stray_members, b.members, &b.parent).cmp(&(a.stray_members, a.members, &a.parent))
+    });
+    let non_covering = splits.iter().filter(|s| s.stray_members > 0).count();
+    let listed: Vec<serde_json::Value> = splits
+        .iter()
+        .take(LISTED)
+        .map(|s| {
+            serde_json::json!({
+                "layer": s.layer,
+                "level": s.level,
+                "parent": s.parent,
+                "children": s.children,
+                "members": s.members,
+                "stray_members": s.stray_members,
+            })
+        })
+        .collect();
+
+    write_json(
+        &dir.join("containment.json"),
+        &serde_json::json!({
+            "violations": rows,
+            "splits": {
+                "total": splits.len(),
+                "non_covering": non_covering,
+                "listed": listed.len(),
+                "not_listed": splits.len().saturating_sub(listed.len()),
+                "by_stray_members": listed,
+            },
+        }),
+    )
+}
+
+pub(crate) fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value)
         .map_err(|e| BuildError::Invalid(format!("serialising {}: {e}", path.display())))?;
     write_bytes(path, &bytes)
@@ -1376,14 +1958,78 @@ fn relative_to(prefix_dir: &Path, path: &Path) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// The count is over *distinct* codes, and every point is counted — the two numbers the
+    /// report prints are not derived from each other.
+    #[test]
+    fn occupancy_counts_distinct_cells_and_every_point() {
+        let o = Occupancy::of_sorted_codes([7u32, 7, 7, 9, 9, 40]);
+        assert_eq!((o.points, o.cells), (6, 3));
+        assert!((o.points_per_cell() - 2.0).abs() < 1e-9);
+        assert_eq!(Occupancy::of_sorted_codes([]).cells, 0);
+    }
+
+    /// A run count is exact only in tiler order, and out of order it *over*-reports cells — which
+    /// would be a warning that quietly stops firing. Loud instead.
+    #[test]
+    #[should_panic(expected = "tiler order")]
+    fn occupancy_refuses_codes_out_of_tiler_order() {
+        Occupancy::of_sorted_codes([9u32, 7]);
+    }
+
+    /// **Ten points in ten cells is a perfectly framed corpus, not a sparse one.** The measure is
+    /// a ratio for exactly this reason: a count of cells would scold every small corpus.
+    #[test]
+    fn a_tiny_well_framed_corpus_earns_no_warning() {
+        let o = Occupancy::of_sorted_codes(0..10u32);
+        assert_eq!(o.warning("s0"), None);
+        assert!(o
+            .report("s0")
+            .contains("10 point(s) landed in 10 distinct cell(s)"));
+    }
+
+    /// The threshold is a ratio, so it fires at the same proportion at any scale — and the raw
+    /// numbers are printed either side of it. Ten points per occupied cell is the same statement
+    /// as a tenth of the points having a position of their own, which is how it is reported.
+    #[test]
+    fn the_warning_fires_on_the_ratio_not_the_size() {
+        let just_under = Occupancy {
+            points: 99,
+            cells: 10,
+        };
+        let just_over = Occupancy {
+            points: 100,
+            cells: 10,
+        };
+        assert_eq!(just_under.warning("s0"), None);
+        assert!(just_under
+            .report("s0")
+            .contains("10.1% of them have a position of their own"));
+        let warning = just_over
+            .warning("s0")
+            .expect("10 points per cell is the threshold");
+        assert!(warning.contains("RESOLUTION LOST"), "{warning}");
+        assert!(
+            warning.contains("stored at the same position and cannot be told apart"),
+            "{warning}"
+        );
+        // The same ratio a thousand times larger says the same thing.
+        let big = Occupancy {
+            points: 100_000,
+            cells: 10_000,
+        };
+        assert!(big.warning("s0").is_some());
+    }
+
     /// `BuildArgs` carries the deployment key's plaintext hex beside the redacted `IdentityKey`.
     /// A derived `Debug` would undo the redaction on the first `tracing::error!("{args:?}")`.
     #[test]
     fn build_args_debug_does_not_print_the_identity_key() {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
+            point_fields: Default::default(),
             points: PathBuf::from("points.parquet"),
-            pairs: PathBuf::from("pairs.parquet"),
+            attribute_sources: Vec::new(),
+            access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
             out: PathBuf::from("out"),
             extent: Bounds {
                 x_min: 0.0,
@@ -1391,15 +2037,14 @@ mod tests {
                 y_min: 0.0,
                 y_max: 1.0,
             },
-            slice_id: "s0".to_string(),
+            view_id: "s0".to_string(),
             limit: None,
             identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).unwrap(),
             identity_key_hex: KEY_HEX.to_string(),
             idset: 1,
             shard_id: 0,
-            layers: None,
-            artifacts: None,
-            artifact_members: None,
+            layers: Vec::new(),
+            layer_inputs: Vec::new(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,

@@ -12,7 +12,7 @@ use common::*;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
-    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::{EntityId, TesseraId};
@@ -24,25 +24,26 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 fn declaration(name: &str, criterion: Option<ExistenceCriterion>) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
-        slices: vec!["s0".into()],
+        title: Some(format!("{name} (title)")),
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
-        visible_when: criterion,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: criterion,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into()],
+            computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
+        shape: None,
     }
 }
 
@@ -113,7 +114,9 @@ fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
 fn the_count_beside_a_cluster_is_the_viewers_own() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(declaration("clusters/a", None)).unwrap();
+    engine
+        .register_layer(declaration("clusters/a", None))
+        .unwrap();
 
     // 300 documents in one cluster; a third of them carry the subset term.
     let sources = 0..300u64;
@@ -138,7 +141,10 @@ fn the_count_beside_a_cluster_is_the_viewers_own() {
         narrow[0].masked_count, expected_narrow,
         "the narrow principal is told how many of the cluster's members *they* can see"
     );
-    assert_eq!(broad[0].masked_count, 300, "and the broad one sees all of it");
+    assert_eq!(
+        broad[0].masked_count, 300,
+        "and the broad one sees all of it"
+    );
     assert_ne!(
         narrow[0].masked_count, 300,
         "a count equal to the membership would mean the mask was never applied — the failure that \
@@ -147,7 +153,7 @@ fn the_count_beside_a_cluster_is_the_viewers_own() {
     // Same cluster, same identity, two answers. The identifier is stable across principals by
     // construction (C17); only the number beside it moves.
     assert_eq!(broad[0].tessera_id, narrow[0].tessera_id);
-    assert_eq!(broad[0].stable_key.as_deref(), Some("c0"));
+    assert_eq!(broad[0].key.as_deref(), Some("c0"));
 }
 
 /// A cluster below its criterion is **absent**, and absent in a way that carries no reason — the
@@ -160,7 +166,7 @@ fn a_cluster_below_its_criterion_is_absent_for_one_principal_and_served_to_anoth
     let expected_narrow = visible_to_subset(sources.clone());
     // A bar the broad principal clears and the narrow one does not, chosen from the independently
     // computed intersection rather than from anything the engine said.
-    let criterion = ExistenceCriterion::MinVisible(expected_narrow + 1);
+    let criterion = ExistenceCriterion::Count(expected_narrow + 1);
     engine
         .register_layer(declaration("clusters/a", Some(criterion)))
         .unwrap();
@@ -194,7 +200,9 @@ fn a_cluster_below_its_criterion_is_absent_for_one_principal_and_served_to_anoth
 fn a_cluster_the_viewer_can_see_no_member_of_is_not_a_candidate() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(declaration("clusters/a", None)).unwrap();
+    engine
+        .register_layer(declaration("clusters/a", None))
+        .unwrap();
 
     // Every member chosen so that the subset credential holds none of their terms.
     let invisible: Vec<u64> = (0..300u64)
@@ -226,7 +234,9 @@ fn a_cluster_the_viewer_can_see_no_member_of_is_not_a_candidate() {
 fn a_cluster_outside_the_viewport_is_not_a_candidate() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(declaration("clusters/a", None)).unwrap();
+    engine
+        .register_layer(declaration("clusters/a", None))
+        .unwrap();
     engine
         .publish_artifacts(
             "clusters/a".into(),
@@ -271,7 +281,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     engine
         .register_layer(declaration(
             "clusters/a",
-            Some(ExistenceCriterion::MinVisible(expected_narrow + 1)),
+            Some(ExistenceCriterion::Count(expected_narrow + 1)),
         ))
         .unwrap();
     engine
@@ -297,7 +307,10 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     // The principal it is absent for cannot reach it by identifier either — held identifiers are
     // not a way round the criterion.
     let narrow_session = engine.authorise(&subset_credential()).unwrap();
-    assert!(engine.artifact(&narrow_session, id, None, "s0").unwrap().is_none());
+    assert!(engine
+        .artifact(&narrow_session, id, None, "s0")
+        .unwrap()
+        .is_none());
 
     // An identifier naming a point rather than an artifact is the same answer as an artifact
     // withheld. Taken from the response's own points, so it is genuinely an identifier this
@@ -324,7 +337,9 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
 fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_the_ack() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(declaration("clusters/a", None)).unwrap();
+    engine
+        .register_layer(declaration("clusters/a", None))
+        .unwrap();
     engine
         .publish_artifacts(
             "clusters/a".into(),
@@ -345,7 +360,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
 
     let after = artifacts_of(&engine, &full_coverage_credential());
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
-    assert_eq!(after[0].stable_key.as_deref(), Some("c1"));
+    assert_eq!(after[0].key.as_deref(), Some("c1"));
     assert!(engine
         .artifact(&session, served[0].tessera_id, None, "s0")
         .unwrap()
@@ -387,7 +402,10 @@ fn the_layer_selector_narrows_and_never_widens() {
     };
 
     assert_eq!(answer(None).len(), 2, "absent means every reachable layer");
-    assert!(answer(Some(&[])).is_empty(), "an empty list costs nothing and answers nothing");
+    assert!(
+        answer(Some(&[])).is_empty(),
+        "an empty list costs nothing and answers nothing"
+    );
     let one = answer(Some(&["clusters/a"]));
     assert_eq!(one.len(), 1);
     assert_eq!(one[0].layer, "clusters/a");
@@ -403,7 +421,9 @@ fn the_layer_selector_narrows_and_never_widens() {
 fn a_publication_reaches_the_next_viewport_through_the_projection_cache() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(declaration("clusters/a", None)).unwrap();
+    engine
+        .register_layer(declaration("clusters/a", None))
+        .unwrap();
     engine
         .publish_artifacts(
             "clusters/a".into(),
@@ -470,13 +490,16 @@ fn a_withheld_compact_cluster_has_its_count_recovered_from_the_underlay() {
     let engine = fx.open();
     let sources = sources_in_quadrant();
     let expected_narrow = visible_to_subset(sources.iter().copied());
-    assert!(expected_narrow > 0, "the fixture must put visible points in the quadrant");
+    assert!(
+        expected_narrow > 0,
+        "the fixture must put visible points in the quadrant"
+    );
 
     // A bar the narrow principal cannot clear, from the independently computed intersection.
     engine
         .register_layer(declaration(
             "clusters/compact",
-            Some(ExistenceCriterion::MinVisible(expected_narrow + 1)),
+            Some(ExistenceCriterion::Count(expected_narrow + 1)),
         ))
         .unwrap();
     engine
@@ -508,7 +531,10 @@ fn a_withheld_compact_cluster_has_its_count_recovered_from_the_underlay() {
         1,
         "the quadrant is one depth-1 cell, so this sum is over the cluster's extent and nothing \
          else: {:?}",
-        view.tiles.iter().map(|t| (t.tile, t.visible)).collect::<Vec<_>>()
+        view.tiles
+            .iter()
+            .map(|t| (t.tile, t.visible))
+            .collect::<Vec<_>>()
     );
     let recovered: u64 = view.tiles.iter().map(|t| t.visible).sum();
     assert_eq!(

@@ -66,7 +66,7 @@ class UnknownColumn(Exception):
 
     Contracts §3.2: an unknown *column* is a `422`, an unknown *value* is an empty operand — the
     two must not be conflated, because refusing a value would make the filter surface an
-    existence oracle over exactly what `listing = "per_viewer"` hides. This module mirrors the
+    existence oracle over exactly what `visibility = "derived"` hides. This module mirrors the
     distinction: an unknown column raises (the test asserts the server's 422), while an unknown
     value falls out of the arithmetic below as an operand matching nothing.
     """
@@ -92,7 +92,7 @@ class CategoryColumn:
     `values` maps entity id → value key, with absent entities simply missing (the fixture's
     generation function returned `None`; an absent value matches no predicate, which is the
     presence-bitmap rule arrived at from the definition side). `codes` is the fixture's own
-    `[attribute.values]` block — the declaration is the authority on codes, so resolving a code
+    `[vocabulary.values]` block — the declaration is the authority on codes, so resolving a code
     operand through it shares nothing with the bundle's stored column.
     """
 

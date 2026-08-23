@@ -22,12 +22,12 @@ pub enum ApiError {
     /// 403: a bearer token the engine recognises, but whose `expires_at` has passed (the engine
     /// itself never checks this; enforcing the deadline is `AppState::authenticated_session`'s job).
     ExpiredToken,
-    /// 404: a named slice, external id, or handle this bundle/session has never heard of.
+    /// 404: a named view, external id, or handle this bundle/session has never heard of.
     Unknown(String),
     /// 409: an ingest batch id replayed with a body that does not match what was accepted before.
     Conflict(String),
     /// 422: a request that parsed as JSON/Arrow but violates this API's own contract (a malformed
-    /// bbox, an ambiguous slice header, an unknown change op, non-UTF-8 `access` bytes, ...).
+    /// bbox, an ambiguous view header, an unknown change op, non-UTF-8 `access` bytes, ...).
     Contract(String),
     /// 500: mask construction, WAL durability, or any other fail-closed failure (Global
     /// Constraint 3). Never returned for a partial or best-effort result.
@@ -314,11 +314,11 @@ pub fn admission_retry_after_s(stats: &tessera_engine::ExecutorStats) -> u64 {
 }
 
 /// Map an `EngineError` to the R5 code list. `SegmentWithoutRowBase`, `Store`/`Wal`/`Overlay`/
-/// `Plugin`/`Io`/`Malformed` are all fail-closed engine-internal failures (500); `UnknownSlice`
+/// `Plugin`/`Io`/`Malformed` are all fail-closed engine-internal failures (500); `UnknownView`
 /// and `StaleIdSet` have a more specific code.
 pub fn map_engine_error(e: EngineError) -> ApiError {
     match e {
-        EngineError::UnknownSlice(slice) => ApiError::Unknown(format!("unknown slice '{slice}'")),
+        EngineError::UnknownView(view) => ApiError::Unknown(format!("unknown view '{view}'")),
         // Contracts §2.2/§3.2: `POST /v1/items/{tessera_id}`'s caller-supplied `idset` did not
         // match the generation `Engine::item` validated it against. Fixed detail string, named
         // explicitly rather than left to the catch-all, so a future catch-all change can never
@@ -365,7 +365,7 @@ pub fn map_engine_error(e: EngineError) -> ApiError {
              partially"
                 .to_string(),
         ),
-        // `/v1/categories` on a `per_viewer` column whose membership sets could not be read.
+        // `/v1/categories` on a `derived` column whose membership sets could not be read.
         // Fail-closed 500 rather than an empty 200, because an empty value set is a *real* answer —
         // it is what a principal who may see none of these values is told — and returning it for an
         // underivable predicate would make the two indistinguishable. Named explicitly, though the

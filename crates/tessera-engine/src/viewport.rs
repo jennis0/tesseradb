@@ -371,8 +371,8 @@ pub struct SubCellCount {
 /// Construct with [`ViewportRequest::new`] and add the optional parts.
 #[derive(Debug, Clone)]
 pub struct ViewportRequest<'a> {
-    /// A slice id from `GET /v1/meta`.
-    pub slice: &'a str,
+    /// A view id from `GET /v1/meta`.
+    pub view: &'a str,
     /// Tile depth, 0–16.
     pub zoom: u8,
     /// `[x0, y0, x1, y1]` in the bundle's declared extent. Ignored when `tiles` is present.
@@ -464,9 +464,9 @@ pub struct ViewportRequest<'a> {
 
 impl<'a> ViewportRequest<'a> {
     /// The required parameters; `stamp` and `underlay_offset` default to absent.
-    pub fn new(slice: &'a str, zoom: u8, bbox: [f64; 4], k: usize) -> Self {
+    pub fn new(view: &'a str, zoom: u8, bbox: [f64; 4], k: usize) -> Self {
         ViewportRequest {
-            slice,
+            view,
             zoom,
             bbox,
             tiles: None,
@@ -531,7 +531,7 @@ impl<'a> ViewportRequest<'a> {
 pub struct ViewCoordinates {
     /// Whether a held band may be **rendered at all** — the cache partition key.
     ///
-    /// Over the idset, the auth-data hash, the mask fragment's identity and the slice: everything
+    /// Over the idset, the auth-data hash, the mask fragment's identity and the view: everything
     /// that determines *what this principal may see*. Decision 0029's warning applies to this one —
     /// a client cache keyed more loosely than this serves one principal's authorised data to
     /// another, which is a disclosure and not a staleness bug.
@@ -561,7 +561,7 @@ pub struct ArtifactOut {
     /// and what a drill-down or a suppression later names.
     pub tessera_id: TesseraId,
     /// The publisher's own key, if they supplied one. Operator-chosen text, not corpus data.
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
     /// **How many of this artifact's members this principal can see** — never how many it has. The
     /// same number the existence criterion was tested against, computed once and used for both.
     pub masked_count: u64,
@@ -573,9 +573,14 @@ pub struct ArtifactOut {
     /// it safe beside a gate that may have admitted the artifact on its own terms: such an artifact
     /// is authorised to *exist*, not to describe members the viewer cannot see.
     pub derived: crate::derived::DerivedContent,
-    /// The publisher's supplied content — one value per kind the layer declares, positionally.
+    /// This artifact's parent, **and only ever one that is also in this response**.
     ///
-    /// **This is one variation, entire.** Where an artifact carries several ranked descriptions,
+    /// The structure a client needs to nest what it draws, or to filter to one subtree while still
+    /// drawing the rest of the map. **Null covers two situations on purpose**: a root, and a parent
+    /// that exists but was withheld from this viewer. Distinguishing them would disclose that a
+    /// coarser grouping exists which they are not cleared to see.
+    pub parent_id: Option<TesseraId>,
+    /// **This is one content, entire.** Where an artifact carries several ranked descriptions,
     /// this is the first whose generating set the viewer contains completely; a viewer containing
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
     /// no supplied content, and nothing else.
@@ -787,7 +792,7 @@ pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
     /// `(id, display_name)` pairs, in manifest order.
-    pub slices: Vec<(String, String)>,
+    pub views: Vec<(String, String)>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
@@ -813,8 +818,8 @@ impl Engine {
         EngineMeta {
             api_version: API_VERSION,
             bundle_format: manifest.bundle_format,
-            slices: manifest
-                .slices
+            views: manifest
+                .views
                 .iter()
                 .map(|s| (s.id.clone(), s.display_name.clone()))
                 .collect(),
@@ -861,7 +866,7 @@ impl Engine {
     ///
     /// **`idset` is checked against the SAME generation this call loads for the lookup below —
     /// never a separate `Engine::meta()` call.** A handler that called `Engine::meta()` (its own
-    /// `generation.load_full()`, plus a clone of every declared scalar and slice name, just to read
+    /// `generation.load_full()`, plus a clone of every declared scalar and view name, just to read
     /// one field) before calling this method would load the generation twice for one logical
     /// request, against lifecycle §1.1's one-load-per-request invariant. Checking here, first,
     /// against the snapshot already in hand is not merely cheaper: it closes the gap where a
@@ -962,18 +967,18 @@ impl Engine {
         let entity_raw =
             u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
         for partition in generation.bundle.partitions.values() {
-            for (slice, slice_data) in &partition.slices {
+            for (view, view_data) in &partition.views {
                 // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
                 // bounds-checked slot read, not a scan.
-                let Some(row) = slice_data.row_space.row_of(entity) else {
+                let Some(row) = view_data.row_space.row_of(entity) else {
                     continue;
                 };
-                // **A slice holds more than one segment once anything has flushed**, and `row` is
-                // a *slice*-space row: it must be resolved to the segment that owns it and to that
+                // **A view holds more than one segment once anything has flushed**, and `row` is
+                // a *view*-space row: it must be resolved to the segment that owns it and to that
                 // segment's local index before anything is read. Taking the first segment and
-                // indexing it with a slice row read past the build segment's end for every
+                // indexing it with a view row read past the build segment's end for every
                 // flushed item.
-                let segments = segments_with_row_bases(slice, slice_data)?;
+                let segments = segments_with_row_bases(view, view_data)?;
                 let Some(&(segment, row_base)) =
                     segments.iter().rev().find(|(_, base)| row.raw() >= *base)
                 else {
@@ -990,12 +995,12 @@ impl Engine {
                 let resolved = resolve_scalars(segment, &render_scalars);
                 let local = (row.raw() - row_base) as usize;
                 for (slot, declared_index) in manifest.render_indices().enumerate() {
-                    let Some(slice) = &resolved[slot] else {
+                    let Some(view) = &resolved[slot] else {
                         continue;
                     };
                     let d = &manifest.declared_scalars[declared_index];
                     values[declared_index] =
-                        row_field_out(slice, local, d, &generation.vocabularies);
+                        row_field_out(view, local, d, &generation.vocabularies);
                 }
 
                 // Home 2: entity space — every non-rendered column with a value column (indexed
@@ -1076,13 +1081,13 @@ impl Engine {
 /// the row cannot say which, and this reports the stored value rather than inventing a rule. The
 /// entity-space and blob homes do not share the ambiguity.
 fn row_field_out(
-    slice: &ScalarSlice<'_>,
+    view: &ScalarSlice<'_>,
     idx: usize,
     d: &DeclaredScalar,
     vocabularies: &Vocabularies,
 ) -> Option<ScalarOut> {
     if d.vocabulary.is_some() {
-        let code = match slice {
+        let code = match view {
             ScalarSlice::U8(s) => s[idx] as u32,
             ScalarSlice::U16(s) => s[idx] as u32,
             ScalarSlice::U32(s) => s[idx],
@@ -1096,7 +1101,7 @@ fn row_field_out(
     // neither is stored as a flat slice of itself.
     macro_rules! out {
         ($(($v:ident, $t:ty)),* $(,)?) => {
-            match slice {
+            match view {
                 $(ScalarSlice::$v(s) => ScalarOut::$v(s[idx]),)*
                 ScalarSlice::Bool(a) => ScalarOut::Bool(a.value(idx)),
                 ScalarSlice::Utf8(a) => ScalarOut::Utf8(a.value(idx).to_string()),
@@ -1230,15 +1235,15 @@ impl Engine {
         &self,
         generation: &Generation,
         geometry: &SessionGeometry,
-        slice: &str,
+        view: &str,
     ) -> ViewCoordinates {
         let mut hasher = Sha256::new();
         hasher.update(b"tessera-identity-key-v1");
         hasher.update(generation.bundle.manifest.identity.idset.to_le_bytes());
         hasher.update(geometry.auth_data_hash);
         hasher.update(geometry.fragment.identity);
-        hasher.update((slice.len() as u64).to_le_bytes());
-        hasher.update(slice.as_bytes());
+        hasher.update((view.len() as u64).to_le_bytes());
+        hasher.update(view.as_bytes());
         let identity_digest: [u8; 32] = hasher.finalize().into();
         let mut identity_key = [0u8; 16];
         identity_key.copy_from_slice(&identity_digest[..16]);
@@ -1263,14 +1268,14 @@ impl Engine {
         &self,
         session: &Session,
         generation: &Generation,
-        slice: &str,
-        slice_data: &tessera_store::read::SliceData,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
         cancel: &Option<CancelToken>,
         probe: &mut Probe,
     ) -> Result<Arc<SessionGeometry>> {
         let key = RowProjectionKey {
             token_id: session.token_id,
-            slice: slice.to_string(),
+            view: view.to_string(),
             segments_version: generation.segments_version,
             prefix: generation.prefix.clone(),
         };
@@ -1281,7 +1286,7 @@ impl Engine {
         // Rung 2. The generation exactly one below is the only one the retention depth keeps
         // (`crate::cache::KEEP_SUPERSEDED_GENERATIONS`) and the only one an append can be served
         // across.
-        let space = &slice_data.row_space;
+        let space = &view_data.row_space;
         if let Some(previous) = key.segments_version.checked_sub(1) {
             let stale_key = RowProjectionKey {
                 segments_version: previous,
@@ -1390,11 +1395,7 @@ impl Engine {
             artifacts: sink.artifacts,
             points,
             sub_cells: sink.sub_cells,
-            scalar_names: head
-                .render_scalars
-                .iter()
-                .map(|d| d.name.clone())
-                .collect(),
+            scalar_names: head.render_scalars.iter().map(|d| d.name.clone()).collect(),
             timings,
         })
     }
@@ -1428,7 +1429,7 @@ impl Engine {
     ) -> Result<StageTimings> {
         let ViewportRequest {
             filter: _,
-            slice,
+            view,
             zoom,
             bbox,
             tiles: requested_tiles,
@@ -1466,7 +1467,7 @@ impl Engine {
 
         let k = k.min(self.config.max_k);
 
-        // Fail closed on a slice spanning partitions, for the same reason the segment guard below
+        // Fail closed on a view spanning partitions, for the same reason the segment guard below
         // exists: this resolves to ONE partition, and theta's anchor and every rank are then taken
         // over that partition alone — which §12.3 forbids (the anchor must be session-global, or
         // "below the cut" means different things in different partitions). The build emits one
@@ -1476,19 +1477,19 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.slices.contains_key(slice))
+            .filter(|partition| partition.views.contains_key(view))
             .count();
         if carriers > 1 {
-            return Err(EngineError::MultiPartitionSlice(slice.to_string()));
+            return Err(EngineError::MultiPartitionView(view.to_string()));
         }
-        let slice_data = generation
+        let view_data = generation
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.slices.get(slice))
-            .ok_or_else(|| EngineError::UnknownSlice(slice.to_string()))?;
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
-        // Every segment of the slice, each with where its rows begin in the slice's row space.
+        // Every segment of the view, each with where its rows begin in the view's row space.
         //
         // **Keyed on `seg_id`, never on position.** `Bundle::with_segment` appends a flush
         // segment to `segments` while `RowSpace::with_extent` appends its extent, so the two lists
@@ -1501,8 +1502,8 @@ impl Engine {
         //
         // The build segment is the one `permutation.bin` addresses and has no extent; it is
         // therefore the one with no entry here, and its rows begin at 0.
-        let segments = segments_with_row_bases(slice, slice_data)?;
-        probe.lap(|t| &mut t.slice_lookup_ns);
+        let segments = segments_with_row_bases(view, view_data)?;
+        probe.lap(|t| &mut t.view_lookup_ns);
 
         // **Zero update-induced work on this thread, in the steady state** (decision 0044's D1).
         // Every flush advances `segments_version`, so every flush rotates this key for every live
@@ -1517,9 +1518,12 @@ impl Engine {
         // parallel tile sweep begins, and is then only *borrowed* (via `compose`'s
         // `EffectiveMask`) by every `tile_sweep` call — never re-fetched or re-built per tile.
         let geometry =
-            self.session_geometry(session, &generation, slice, slice_data, &cancel, &mut probe)?;
+            self.session_geometry(session, &generation, view, view_data, &cancel, &mut probe)?;
         // Minted here, from the geometry that actually resolved — see `view_coordinates`.
-        let coordinates = self.view_coordinates(&generation, &geometry, slice);
+        let coordinates = self.view_coordinates(&generation, &geometry, view);
+        // The same rule one structure along: the masked-count cache's key names the fragment this
+        // request composes against, which under stale-serve is the entry's and not the newest one.
+        let mask_identity = self.mask_identity(session, &generation, &geometry);
         let base = Arc::clone(&geometry.projection);
         probe.lap(|t| &mut t.row_projection_ns);
 
@@ -1557,16 +1561,16 @@ impl Engine {
         // on to do itself.
         check_cancelled(&cancel)?;
 
-        // **Fail-closed on a missing entry.** Every slice the bundle carries has one, empty when
+        // **Fail-closed on a missing entry.** Every view the bundle carries has one, empty when
         // nothing is denied (`compose::derive_denied`), so an absent key means the mask and the
         // bundle disagree about what this generation holds. Serving that as "nothing is denied
         // here" would publish suppressed and deleted rows on the map with no error anywhere —
         // the same shape as `SegmentWithoutRowBase`, and refused the same way.
         let denied = generation
             .denied
-            .get(slice)
+            .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
-                slice: slice.to_string(),
+                view: view.to_string(),
             })?;
 
         let mask = compose(
@@ -1574,7 +1578,7 @@ impl Engine {
             &generation.overlay,
             &generation.buffer,
             base,
-            &slice_data.row_space,
+            &view_data.row_space,
             denied,
         );
         probe.lap(|t| &mut t.compose_ns);
@@ -1680,7 +1684,7 @@ impl Engine {
             }
         };
 
-        // θ's anchor: the session's **composed** visible cardinality over this slice's whole row
+        // θ's anchor: the session's **composed** visible cardinality over this view's whole row
         // space. It must be the composed figure and not `base`'s — see `Threshold::anchor`'s doc
         // for the I2 argument and the concrete channel the pre-overlay figure opens.
         //
@@ -1720,7 +1724,7 @@ impl Engine {
         // into per-tile part lists, because a tile is the union of its parts across segments
         // (`select::SelectionParts`) while the sweep's monotone advantage is per column.
         //
-        // A slice with zero segments (an empty build) has nothing visible in any tile: every
+        // A view with zero segments (an empty build) has nothing visible in any tile: every
         // tile's part list is empty, and the response is empty — as before.
         let per_segment: Vec<Vec<Range<u32>>> = segments
             .iter()
@@ -1826,7 +1830,7 @@ impl Engine {
                     crate::filter::RoutedFilter::Entity(entities) => {
                         probe.count(|t| &mut t.filter_matched, entities.cardinality());
                         self.cross_filter_into_row_space(
-                            &slice_data.row_space,
+                            &view_data.row_space,
                             &entities,
                             &ranges,
                             &segments,
@@ -1838,7 +1842,7 @@ impl Engine {
                         let domain = crossing_domain(&ranges, &row_bases);
                         let rows = self.evaluate_row_route(
                             &tree,
-                            &slice_data.row_space,
+                            &view_data.row_space,
                             &segments,
                             &domain,
                             rows_in_ranges,
@@ -1988,12 +1992,13 @@ impl Engine {
         let artifacts = self.serve_artifacts(
             session,
             &generation,
-            slice,
-            slice_data,
+            view,
+            view_data,
             &ranges,
             &mask,
             req_layers,
             artifact_budget,
+            mask_identity,
         )?;
         if !artifacts.is_empty() {
             sink.artifacts(&artifacts)
@@ -2059,7 +2064,7 @@ impl Engine {
         Ok(probe.finish())
     }
 
-    /// Cross a filter's entity-space result into one slice's row space, by whichever of the two
+    /// Cross a filter's entity-space result into one view's row space, by whichever of the two
     /// routes is cheaper for this request.
     ///
     /// **Project** — [`RowSpace::project`] — crosses the whole result and costs ~20–30 ns per set
@@ -2077,7 +2082,7 @@ impl Engine {
     ///
     /// The route is **latency only**: the two answers agree exactly over every range the request
     /// can ask about, which is what [`FilterRows`] carries the domain to keep true, and what
-    /// `filter_routes_agree_over_the_domain` asserts. A slice that published no `row-entity.u32`
+    /// `filter_routes_agree_over_the_domain` asserts. A view that published no `row-entity.u32`
     /// cannot take the per-tile route at all and silently gets the projecting one.
     fn cross_filter_into_row_space(
         &self,
@@ -2387,7 +2392,7 @@ enum HotSlice<'a> {
 /// a value.
 ///
 /// **The presence bitmap is intersected once per run, outside the row loop.** `present` is this
-/// segment's presence for the column, already shifted into slice row space by
+/// segment's presence for the column, already shifted into view row space by
 /// [`scan_rows`], and `None` means every row carries a value — the representation an absent file
 /// has, so the common column costs neither bytes nor an intersection. Testing presence per row
 /// instead would put a bitmap lookup inside the loop the hoist below exists to keep flat.
@@ -2820,7 +2825,7 @@ fn as_f64(s: Scalar) -> f64 {
 struct ScannedSegment<'a> {
     row_base: u32,
     values: HotSlice<'a>,
-    /// The rows that carry a value, **in slice row space** — the presence bitmap shifted by
+    /// The rows that carry a value, **in view row space** — the presence bitmap shifted by
     /// `row_base` once, here, rather than per run. `None` where every row does.
     present: Option<croaring::Bitmap>,
 }
@@ -2859,7 +2864,7 @@ fn scan_rows(
                 // a string, so either way the segment and the manifest disagree about the tail.
                 _ => {
                     return Err(EngineError::Malformed(format!(
-                        "a segment of this slice has no rendered column '{column}' at a fixed \
+                        "a segment of this view has no rendered column '{column}' at a fixed \
                          width, which the routed filter requires; the manifest and the segment \
                          disagree about the tail"
                     )))
@@ -2918,14 +2923,14 @@ fn scan_rows(
     Ok(croaring::Bitmap::fast_or(&refs))
 }
 
-/// The rows of one segment that carry a value for `column`, **in slice row space** — `None` where
+/// The rows of one segment that carry a value for `column`, **in view row space** — `None` where
 /// every row does.
 ///
 /// `ColumnsRef::presence` answers for a column with no file, and for a name it does not know, with
 /// an all-present bitmap — so there is no branch here and no way for a caller to read a missing
 /// artefact as an absence. A damaged bitmap has already refused, at `ColumnsRef::load`.
 ///
-/// The shift into slice row space belongs here rather than in the scan: the bitmap is over the
+/// The shift into view row space belongs here rather than in the scan: the bitmap is over the
 /// segment's own `0..row_count` (`render_presence`'s module doc — a merge permutes rows, so it can
 /// be nothing else), and shifting once per segment keeps the run loop comparing bitmaps in one
 /// numbering.
@@ -2955,6 +2960,38 @@ fn present_rows(segment: &SegmentData, column: &str, row_base: u32) -> Option<cr
 /// the viewport — so the ratio is *modelled* to survive, not shown to.
 /// `Engine::filter_crossing_routes` is the observable that would catch it being wrong in a way a
 /// bench never reproduces.
+/// How long a chain of dependencies one request will follow.
+///
+/// **A backstop, not a limit anyone should reach.** A dependency graph is acyclic by construction —
+/// a layer is registered only after every layer it names in `depends_on` — so a real chain is
+/// bounded by the number of declared layers and is one or two links deep in practice. This bounds
+/// the recursion anyway, because the alternative to a bound on a request path is a stack that a
+/// disagreeing store could run off; refusing a chain longer than this withholds artifacts, which is
+/// the direction a backstop must fail in.
+const DEPENDENCY_CHAIN_MAX: u32 = 16;
+
+/// One request's state, as the dependency prerequisite needs it.
+///
+/// Gathered once per response rather than per artifact: every field is a property of the request —
+/// the viewer, the generation, the view and the composed mask — and none of them is a property of
+/// the artifact being tested.
+struct DependencyContext<'a> {
+    generation: &'a crate::Generation,
+    satisfied: &'a rustc_hash::FxHashSet<tessera_types::TermId>,
+    view: &'a str,
+    view_data: &'a tessera_store::ViewData,
+    mask: &'a crate::compose::EffectiveMask,
+    /// This view's `deleted ∪ suppressed` in row space — the containment partition's acceptance
+    /// test, carried here for the same reason `mask` is: a dependency's verdict is the *same*
+    /// verdict, so it must be reached with the same inputs.
+    denied: &'a croaring::Bitmap,
+    reachable: &'a tessera_lifecycle::ResolvedLayers,
+    /// What this request's composed mask *is* — the masked-count cache's key, carried here for
+    /// `mask`'s reason: a dependency's verdict is the same verdict, and on a row-major target it
+    /// reads the same histogram.
+    mask_identity: crate::histogram::MaskIdentity,
+}
+
 const PER_TILE_CROSSING_RATIO: u64 = 3;
 
 /// Split a chunk of the crossing domain no smaller than this, so a viewport small enough that the
@@ -2963,7 +3000,7 @@ const PER_TILE_CROSSING_RATIO: u64 = 3;
 /// realistic viewport still splits hundreds of ways.
 const CROSSING_CHUNK_MIN_ROWS: u32 = 4096;
 
-/// The slice-space rows a request's tiles span: every tile part shifted into slice row space by its
+/// The view-space rows a request's tiles span: every tile part shifted into view row space by its
 /// segment's `row_base`, sorted, and merged.
 ///
 /// **Merged, and that is not tidiness.** Adjacent tiles are adjacent Morton ranges, so merging
@@ -2988,7 +3025,132 @@ fn crossing_domain(ranges: &[Vec<(usize, Range<u32>)>], row_bases: &[u32]) -> Ve
     merged
 }
 
+/// **The vocabulary a predicate column's values are named by**, or `None` where the column has
+/// none — in which case an artifact's key is the value's own canonical decimal spelling
+/// (`tessera_types::layer::attribute_value_key`).
+///
+/// `None` also for a layer whose membership is not an attribute predicate at all, which is what
+/// makes the closure built from this total: it answers *no code* for every key of such a layer, and
+/// no such layer is ever asked.
+fn predicate_vocabulary<'a>(
+    generation: &'a crate::Generation,
+    declaration: &tessera_types::layer::LayerDeclaration,
+) -> Option<&'a tessera_store::vocabulary::VocabularyMinter> {
+    let tessera_types::layer::MembershipSource::Attribute(field) = &declaration.membership else {
+        return None;
+    };
+    let name = generation
+        .bundle
+        .manifest
+        .declared_scalars
+        .iter()
+        .find(|scalar| &scalar.name == field)?
+        .vocabulary
+        .as_deref()?;
+    generation.vocabularies.get(name)
+}
+
+/// **Where a predicate layer's membership comes from, for one request against one generation.**
+///
+/// `None` for an enumerated layer, and for a predicate layer whose rule cannot be evaluated at all
+/// — a column this generation does not hold, or a spatial layer that declares no shape. Both are
+/// the fail-closed answer: such a level is served with no membership, so none of its artifacts is a
+/// candidate anywhere, rather than every artifact being one.
+fn predicate_source<'a>(
+    declaration: &tessera_types::layer::LayerDeclaration,
+    generation: &'a crate::Generation,
+    segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
+    code_of_key: &'a dyn Fn(&str) -> Option<u32>,
+) -> Option<crate::artifacts::PredicateSource<'a>> {
+    match &declaration.membership {
+        tessera_types::layer::MembershipSource::Enumerated => None,
+        tessera_types::layer::MembershipSource::Attribute(field) => {
+            let values = generation.filter_columns.value_layers(field)?;
+            Some(crate::artifacts::PredicateSource::Attribute(
+                crate::artifacts::AttributeSource {
+                    values,
+                    code_of_key,
+                },
+            ))
+        }
+        // ⊘ A spatial layer with no `shape` holds no artifacts and has no ranges to serve — the
+        // state this surface has always had, and the one the generator's boundary fixture is in.
+        tessera_types::layer::MembershipSource::Spatial => {
+            let shape = declaration.shape?;
+            // **The build's own quantisation frame, not the request's.** A box covered against a
+            // different extent quantises to different cells and so to different tiles — a different
+            // membership — which is why this comes from the manifest that the geometry was written
+            // under rather than from anything a viewer sends.
+            let q = &generation.bundle.manifest.quantisation;
+            Some(crate::artifacts::PredicateSource::Spatial(
+                crate::artifacts::SpatialSource {
+                    depth: shape.depth,
+                    extent: Bounds {
+                        x_min: q.x_min,
+                        x_max: q.x_max,
+                        y_min: q.y_min,
+                        y_max: q.y_max,
+                    },
+                    segments,
+                },
+            ))
+        }
+    }
+}
+
 impl Engine {
+    /// What this request's composed mask is, for the masked-count cache's key.
+    ///
+    /// **Taken from the geometry that actually resolved**, never from the live generation's idea of
+    /// it: a session may be served a one-generation-stale projection (decision 0044), so the
+    /// fragment a request composes against is the entry's and not the newest one there is. A key
+    /// naming the wrong fragment would file one visible set's counts under another's.
+    fn mask_identity(
+        &self,
+        session: &Session,
+        generation: &crate::Generation,
+        geometry: &crate::cache::SessionGeometry,
+    ) -> crate::histogram::MaskIdentity {
+        crate::histogram::MaskIdentity {
+            token_id: session.token_id,
+            segments_version: generation.segments_version,
+            overlay_version: generation.overlay_version,
+            fragment_identity: geometry.fragment.identity,
+            fragment_watermark: geometry.fragment.watermark,
+        }
+    }
+
+    /// This level's masked counts, where the level is served row-major and so has no other route to
+    /// them.
+    ///
+    /// **`None` on an artifact-major level, and that is not a fallback**: such a level counts one
+    /// artifact at a time against the composed mask, which a request's budget bounds.
+    ///
+    /// **Built lazily, on the first request that needs it** — a whole walk of the mask, which is the
+    /// 0.85–1.7 s at 10⁷ artifacts decision 0093 prices. A cold drill-down on a row-major level
+    /// therefore pays the level's whole histogram to answer about one artifact, which is stated here
+    /// rather than discovered: the column has no per-artifact route to a masked count, so the choice
+    /// is between this and re-scanning the mask for every drill-down.
+    #[allow(clippy::too_many_arguments)]
+    fn masked_counts(
+        &self,
+        identity: &crate::histogram::MaskIdentity,
+        view: &str,
+        layer: &str,
+        level: u32,
+        level_version: u64,
+        rows: &crate::artifacts::ArtifactRows,
+        mask: &crate::compose::EffectiveMask,
+    ) -> Option<Arc<crate::histogram::MaskedCounts>> {
+        let column = rows.column()?;
+        Some(
+            self.masked_counts
+                .get_or_build(identity.key(view, layer, level, level_version), || {
+                    crate::histogram::MaskedCounts::new(column.histogram(mask))
+                }),
+        )
+    }
+
     /// Drill down on one artifact by the identifier a response handed out.
     ///
     /// **The same predicate the viewport calls, and that is the whole design of this method.** An
@@ -3014,7 +3176,7 @@ impl Engine {
         session: &Session,
         id: TesseraId,
         idset: Option<u32>,
-        slice: &str,
+        view: &str,
     ) -> Result<Option<ArtifactOut>> {
         let generation = self.generation.load_full();
         if let Some(e) = idset {
@@ -3034,7 +3196,7 @@ impl Engine {
         let Some(layer) = self.write.registered_layer(&name) else {
             return Ok(None);
         };
-        if !layer.declaration.slices.iter().any(|s| s == slice) {
+        if !layer.declaration.views.iter().any(|s| s == view) {
             return Ok(None);
         }
         // Reachability, then the live suppression of the layer itself — the same two steps in the
@@ -3054,72 +3216,116 @@ impl Engine {
             .bundle
             .partitions
             .values()
-            .filter(|partition| partition.slices.contains_key(slice))
+            .filter(|partition| partition.views.contains_key(view))
             .count();
         if carriers > 1 {
-            return Err(EngineError::MultiPartitionSlice(slice.to_string()));
+            return Err(EngineError::MultiPartitionView(view.to_string()));
         }
-        let slice_data = generation
+        let view_data = generation
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.slices.get(slice))
-            .ok_or_else(|| EngineError::UnknownSlice(slice.to_string()))?;
+            .find_map(|partition| partition.views.get(view))
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
 
         let mut probe = Probe::new();
         let geometry =
-            self.session_geometry(session, &generation, slice, slice_data, &None, &mut probe)?;
+            self.session_geometry(session, &generation, view, view_data, &None, &mut probe)?;
         let denied = generation
             .denied
-            .get(slice)
+            .get(view)
             .ok_or_else(|| EngineError::DenyMaskMissing {
-                slice: slice.to_string(),
+                view: view.to_string(),
             })?;
         let mask = compose(
             &session.satisfied,
             &generation.overlay,
             &generation.buffer,
             Arc::clone(&geometry.projection),
-            &slice_data.row_space,
+            &view_data.row_space,
             denied,
         );
 
-        let store_version = self.write.with_artifacts(|store| store.version());
-        let rows = self.write.with_artifacts(|store| {
-            self.artifact_projections.get_or_build(
-                &generation.prefix,
-                slice,
-                &name,
-                level,
-                store,
-                store_version,
-                &slice_data.row_space,
+        let source = generation.partition_source();
+        let recorded = layer.layout_of(level);
+        // The predicate's own inputs, resolved once for this identifier — the same rule the
+        // viewport resolves per layer, from the same generation, so an artifact reached by
+        // identifier and one reached by viewport cannot be evaluated against different memberships.
+        let segments = segments_with_row_bases(view, view_data)?;
+        let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
+        let code_of_key = |key: &str| match vocabulary {
+            Some(vocabulary) => vocabulary.code_of(key),
+            None => key.parse::<u32>().ok(),
+        };
+        let predicate = predicate_source(&layer.declaration, &generation, &segments, &code_of_key);
+        let (rows, level_version) = self.write.with_artifacts(|store| {
+            (
+                self.artifact_projections.get_or_build(
+                    &generation.prefix,
+                    view,
+                    &name,
+                    level,
+                    store,
+                    &view_data.row_space,
+                    Some(&source),
+                    recorded,
+                    predicate.as_ref(),
+                    generation.segments_version,
+                ),
+                store.level_version(&name, level),
             )
         });
-        let attachment_gate = self.attachment_gate(&reachable);
-        let attachment_resolves = self.attachment_resolves();
-        let view = crate::artifacts::ArtifactView {
+        let mask_identity = self.mask_identity(session, &generation, &geometry);
+        // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
+        // the column has no per-artifact route to a masked count — see `Engine::masked_counts`.
+        let counts = self.masked_counts(
+            &mask_identity,
+            view,
+            &name,
+            level,
+            level_version,
+            &rows,
+            &mask,
+        );
+        // The same containment answers the viewport builds, from the same partition: an identifier
+        // route that resolved containment by a different arm would be a second ranking nobody
+        // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
+        let containment = rows
+            .partition()
+            .map(|p| p.answer_for_one(&session.satisfied));
+        let ctx = DependencyContext {
+            generation: &generation,
+            satisfied: &session.satisfied,
+            view,
+            view_data,
+            mask: &mask,
+            denied,
+            reachable: &reachable,
+            mask_identity,
+        };
+        let dependency_served = self.dependency_gate(&ctx);
+        let artifact_view = crate::artifacts::ArtifactView {
             declaration: &layer.declaration,
             overlay: &generation.overlay,
             satisfied: &session.satisfied,
             layer_reachable: true,
             rows: &rows,
             mask: &mask,
-            attachment_gate: &attachment_gate,
-            attachment_resolves: &attachment_resolves,
+            dependency_served: &dependency_served,
+            containment,
+            denied,
+            counts,
         };
-        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer declaring
-        // `artifacts_carry_own` withholds here as it does on the viewport, which is the same
-        // fail-closed answer reached by the same call.
-        let crate::artifacts::ArtifactVerdict::Serve {
-            masked_count,
-            variation,
-        } = view.verdict(entity, ordinal, None)
+        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
+        // `artifact_visibility` names a field withholds here as it does on the viewport, which is
+        // the same fail-closed answer reached by the same call.
+        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
+            artifact_view.verdict(entity, ordinal, None)
         else {
             return Ok(None);
         };
         // Same resolution as the viewport's, by the same call — an identifier route that served a
-        // different variation would be a second ranking nobody wrote.
+        // different content would be a second ranking nobody wrote.
         let Some(content) = self.supplied_content(
             &generation,
             &name,
@@ -3127,25 +3333,25 @@ impl Engine {
             ordinal,
             entity,
             layer.declaration.content.supplied.len(),
-            variation,
+            rank,
         ) else {
             return Ok(None);
         };
         // The same computation the viewport does, from the same composed mask — one route's
         // geometry differing from the other's would be two transcriptions of one rule, which is
         // exactly what the shared predicate above exists to prevent.
-        let declared_derived: Vec<crate::derived::DerivedProperty> = layer
+        let declared_derived: Vec<crate::derived::ComputedProperty> = layer
             .declaration
             .content
-            .derived
+            .computed
             .iter()
-            .filter_map(|name| crate::derived::DerivedProperty::parse(name))
+            .filter_map(|name| crate::derived::ComputedProperty::parse(name))
             .collect();
         let derived = if declared_derived.is_empty() {
             crate::derived::DerivedContent::default()
         } else {
             let locator =
-                crate::derived::RowLocator::new(segments_with_row_bases(slice, slice_data)?);
+                crate::derived::RowLocator::new(segments_with_row_bases(view, view_data)?);
             let visible = rows
                 .get(ordinal)
                 .map(|members| mask.visible_rows(members))
@@ -3156,13 +3362,16 @@ impl Engine {
             content,
             layer: name.clone(),
             tessera_id: id,
-            stable_key: self.write.with_artifacts(|store| {
-                store
-                    .get(&name, level, ordinal)
-                    .and_then(|r| r.stable_key.clone())
+            key: self.write.with_artifacts(|store| {
+                store.get(&name, level, ordinal).and_then(|r| r.key.clone())
             }),
             masked_count,
             derived,
+            // **Always null on this route, and not by omission.** A parent is named only where it
+            // is also in the response, and this response is one artifact — so there is nothing for
+            // it to name. Resolving the parent here anyway would hand a caller who holds one
+            // identifier the existence of a coarser artifact they were never served.
+            parent_id: None,
         }))
     }
 
@@ -3182,8 +3391,11 @@ impl Engine {
     /// would move with the box and let a viewer difference two boxes for the members in between.
     /// Candidacy is the only per-tile question here.
     #[allow(clippy::too_many_arguments)]
-    /// The values of the variation the predicate chose, or `None` where it chose one whose content
+    /// The values of the content the predicate chose, or `None` where it chose one whose content
     /// cannot be read back.
+    ///
+    /// **`rank` is the index into the artifact's ranked `contents`** — not a Morton rank and not a
+    /// rank within a bitmap, both of which this module uses the word for elsewhere.
     ///
     /// `Some(vec![])` and `None` are different answers and the difference is the whole point:
     /// the first is *this layer declares no supplied content*, which is most layers; the second is
@@ -3197,9 +3409,9 @@ impl Engine {
         ordinal: u32,
         entity: EntityId,
         kinds: usize,
-        variation: Option<u32>,
+        rank: Option<u32>,
     ) -> Option<Vec<String>> {
-        let Some(variation) = variation else {
+        let Some(rank) = rank else {
             return Some(Vec::new());
         };
         // The publication's own copy, while it is still in memory — the log is the only home the
@@ -3207,7 +3419,7 @@ impl Engine {
         let held = self.write.with_artifacts(|store| {
             store
                 .get(layer, level, ordinal)
-                .and_then(|record| record.variations.get(variation as usize))
+                .and_then(|record| record.contents.get(rank as usize))
                 .and_then(|set| set.values.clone())
         });
         if let Some(values) = held {
@@ -3215,12 +3427,12 @@ impl Engine {
         }
 
         // Otherwise the record blob, at this artifact's own entity: one block read, the same one a
-        // point's blob-resident fields cost. Tags are `variation × kinds + kind` against the
+        // point's blob-resident fields cost. Tags are `rank × kinds + kind` against the
         // layer's declaration — see `ArtifactStore::unpublished_content`.
         if kinds == 0 {
             return Some(Vec::new());
         }
-        let base = (variation as usize).checked_mul(kinds)?;
+        let base = (rank as usize).checked_mul(kinds)?;
         let fields = generation
             .filter_columns
             .records()
@@ -3242,48 +3454,149 @@ impl Engine {
         Some(values)
     }
 
-    /// The attachment term's gate half, shared by both serving routes.
+    /// The dependency prerequisite, shared by both serving routes: **is the artifact this one
+    /// attaches to served to this viewer?**
     ///
-    /// Answers *this viewer reaches that layer, and here is its own entity* — or `None`, which the
-    /// predicate reads as absence. One function rather than two call sites doing the same two steps,
-    /// on the argument the shared predicate itself rests on: a route that gated attachments
-    /// differently from the other would be two transcriptions of one rule, and the one that drifted
-    /// would be serving labels for hidden clusters.
+    /// One function rather than two call sites doing the same steps, on the argument the shared
+    /// predicate itself rests on: a route that gated dependencies differently from the other would
+    /// be two transcriptions of one rule, and the one that drifted would be serving labels for
+    /// clusters their viewer cannot see.
     ///
-    /// **A dropped target layer answers `None`**, and so does a name this principal cannot reach.
-    /// The two are the same answer here for the same reason they are the same answer everywhere
-    /// else: which of them applies is exactly the fact the gate withholds.
-    fn attachment_gate<'a>(
-        &'a self,
-        reachable: &'a tessera_lifecycle::ResolvedLayers,
-    ) -> impl Fn(&str) -> Option<EntityId> + 'a {
-        move |layer: &str| {
-            if !reachable.contains(layer) {
-                return None;
-            }
-            self.write.layer_entity(layer)
+    /// **The target's own `verdict`, not a cheaper summary of it**
+    /// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+    /// rule 2). Its layer's gate, its live suppression, its existence, its own terms, its existence
+    /// criterion against *this viewer's* masked count, and its containment all decide here, because
+    /// "visible" means the same thing for a dependency as it does for anything else. The
+    /// conjunction can only narrow, so the term introduces no disclosure of its own.
+    ///
+    /// **The order matters and is the order the served layer's own path takes**: reachability
+    /// first, then the layer's live disposition, then the level and the slot, then the predicate.
+    /// A reachability resolved once per session may be cached; a disposition may not, and asking
+    /// them in this order is what keeps a layer suppression from being outlived by a session.
+    ///
+    /// **Recursion, bounded by the declaration graph.** A dependency may itself be a dependent — a
+    /// label on a label — and the chain terminates because a layer is registered only after every
+    /// layer it names in `depends_on`, which makes the graph acyclic by construction. `depth` is a
+    /// backstop for a store that somehow disagrees with that, and it fails closed rather than
+    /// deep: a chain longer than any real declaration is refused, not followed.
+    fn dependency_served(
+        &self,
+        ctx: &DependencyContext<'_>,
+        attachment: &tessera_lifecycle::membership::Attachment,
+        depth: u32,
+    ) -> bool {
+        if depth == 0 {
+            return false;
         }
+        // A name this principal does not reach, and a layer dropped since the resolution, are one
+        // answer here for the reason they are one answer everywhere: which of them applies is
+        // exactly the fact being withheld.
+        if !ctx.reachable.contains(&attachment.layer) {
+            return false;
+        }
+        let Some(layer) = self.write.registered_layer(&attachment.layer) else {
+            return false;
+        };
+        if ctx.generation.overlay.is_deleted(layer.entity)
+            || ctx.generation.overlay.is_suppressed(layer.entity)
+        {
+            return false;
+        }
+        // A layer that does not live in this view has no membership in this row space, so there is
+        // nothing here that could be served.
+        if !layer.declaration.views.iter().any(|s| s == ctx.view) {
+            return false;
+        }
+        let record = self.write.with_artifacts(|store| {
+            store
+                .get(&attachment.layer, attachment.level, attachment.ordinal)
+                .map(|record| record.entity)
+        });
+        // **The slot answers, and it must answer with the entity the edge names.** A hole is what
+        // the fold leaves where it executed a deletion — in the same publication that retired the
+        // overlay entry saying so — and an ordinal holding a *different* entity is an edge into an
+        // artifact that is gone and has been republished over. Both are absent.
+        let Some(entity) = record.filter(|entity| *entity == attachment.entity) else {
+            return false;
+        };
+        let recorded = layer.layout_of(attachment.level);
+        // The target's own membership, evaluated the same way its own serving route would — a
+        // dependency answered from a different rule would be a second membership nobody wrote.
+        let Ok(segments) = segments_with_row_bases(ctx.view, ctx.view_data) else {
+            return false;
+        };
+        let vocabulary = predicate_vocabulary(ctx.generation, &layer.declaration);
+        let code_of_key = |key: &str| match vocabulary {
+            Some(vocabulary) => vocabulary.code_of(key),
+            None => key.parse::<u32>().ok(),
+        };
+        let predicate =
+            predicate_source(&layer.declaration, ctx.generation, &segments, &code_of_key);
+        let (rows, level_version) = self.write.with_artifacts(|store| {
+            (
+                self.artifact_projections.get_or_build(
+                    &ctx.generation.prefix,
+                    ctx.view,
+                    &attachment.layer,
+                    attachment.level,
+                    store,
+                    &ctx.view_data.row_space,
+                    Some(&ctx.generation.partition_source()),
+                    recorded,
+                    predicate.as_ref(),
+                    ctx.generation.segments_version,
+                ),
+                store.level_version(&attachment.layer, attachment.level),
+            )
+        });
+        // The target's own count, from whichever structure its layout puts it in — the same
+        // histogram the viewport would read, under the same key, so a dependency answered here and
+        // the target answered directly cannot disagree.
+        let counts = self.masked_counts(
+            &ctx.mask_identity,
+            ctx.view,
+            &attachment.layer,
+            attachment.level,
+            level_version,
+            &rows,
+            ctx.mask,
+        );
+        let nested = |a: &tessera_lifecycle::membership::Attachment| {
+            self.dependency_served(ctx, a, depth - 1)
+        };
+        // **Lazily, and this one is load-bearing rather than tidy.** The prerequisite runs once per
+        // attached candidate, so settling a level's whole expression table here would turn a
+        // per-artifact question into whole-population work per artifact.
+        let containment = rows.partition().map(|p| p.answer_for_one(ctx.satisfied));
+        crate::artifacts::ArtifactView {
+            declaration: &layer.declaration,
+            overlay: &ctx.generation.overlay,
+            satisfied: ctx.satisfied,
+            layer_reachable: true,
+            rows: &rows,
+            mask: ctx.mask,
+            dependency_served: &nested,
+            containment,
+            denied: ctx.denied,
+            counts,
+        }
+        // ⊘ Per-artifact terms arrive with content, so the target's own label is `None` here
+        // exactly as it is on the two serving routes — the same fail-closed answer reached by the
+        // same call.
+        .verdict(entity, attachment.ordinal, None)
+        .is_served()
     }
 
-    /// The existence half of the attachment term — see
-    /// [`ArtifactView::attachment_resolves`](crate::artifacts::ArtifactView::attachment_resolves).
-    ///
-    /// One store lookup per **attached** artifact of a response, and none for a clustering that
-    /// hangs from nothing. It asks the level directly rather than going through the registry,
-    /// because the registry's reserved runs answer for the *layer* and would resolve an ordinal a
-    /// fold has emptied.
-    fn attachment_resolves(&self) -> impl Fn(&tessera_lifecycle::membership::Attachment) -> bool + '_ {
-        move |attachment| {
-            self.write.with_artifacts(|store| {
-                store
-                    .get(&attachment.layer, attachment.level, attachment.ordinal)
-                    .is_some()
-            })
-        }
+    /// The prerequisite as the predicate takes it: a closure over one request's state.
+    fn dependency_gate<'a>(
+        &'a self,
+        ctx: &'a DependencyContext<'a>,
+    ) -> impl Fn(&tessera_lifecycle::membership::Attachment) -> bool + 'a {
+        move |attachment| self.dependency_served(ctx, attachment, DEPENDENCY_CHAIN_MAX)
     }
 
     // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
-    // of: the session, the generation, the slice and its data, the resolved tile ranges, the
+    // of: the session, the generation, the view and its data, the resolved tile ranges, the
     // composed mask, and the request's own two artifact parameters. Bundling them into a struct
     // would name the same nine things one call earlier.
     #[allow(clippy::too_many_arguments)]
@@ -3291,12 +3604,13 @@ impl Engine {
         &self,
         session: &Session,
         generation: &crate::Generation,
-        slice: &str,
-        slice_data: &tessera_store::SliceData,
+        view: &str,
+        view_data: &tessera_store::ViewData,
         ranges: &[Vec<(usize, Range<u32>)>],
         mask: &crate::compose::EffectiveMask,
         requested: Option<&[&str]>,
-        _artifact_budget: Option<u32>,
+        artifact_budget: Option<u32>,
+        mask_identity: crate::histogram::MaskIdentity,
     ) -> Result<Vec<ArtifactOut>> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
@@ -3320,16 +3634,40 @@ impl Engine {
         // Built once for the whole response, and from the *same* resolution the names above came
         // from: a label's target may live in any layer its own declares in `depends_on`, reachable
         // or not, and asking a second resolution would be a second answer to one question.
-        let attachment_gate = self.attachment_gate(&reachable);
-        let attachment_resolves = self.attachment_resolves();
+        // **Fail-closed on a missing entry**, exactly as the point path is: every view the bundle
+        // carries has one, empty when nothing is denied (`compose::derive_denied`), so an absent
+        // key means the mask and the bundle disagree about what this generation holds. Reading it
+        // as *nothing is denied here* would let the containment partition serve content generated
+        // from suppressed and deleted documents, with no error anywhere.
+        let denied = generation
+            .denied
+            .get(view)
+            .ok_or_else(|| EngineError::DenyMaskMissing {
+                view: view.to_string(),
+            })?;
+        let ctx = DependencyContext {
+            generation,
+            satisfied: &session.satisfied,
+            view,
+            view_data,
+            mask,
+            denied,
+            reachable: &reachable,
+            mask_identity,
+        };
+        let dependency_served = self.dependency_gate(&ctx);
 
         // The viewport as one row-space set, built once for every layer: the merged global spans of
         // every tile this request resolved. `crossing_domain` already merges and globalises them
         // for the filter's crossing, and reusing it is what keeps the two from disagreeing about
         // which rows a request covers.
-        let segments = segments_with_row_bases(slice, slice_data)?;
+        let segments = segments_with_row_bases(view, view_data)?;
         let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
-        // Built once per request rather than per layer: it is the same slice's segment list for
+        // The same list a shape's ranges are resolved against — built once for the response, and
+        // deliberately the same one the viewport's own tiles resolve through, so a membership and a
+        // viewport that overlap on the map overlap in row space.
+        let segments_for_shapes = segments.clone();
+        // Built once per request rather than per layer: it is the same view's segment list for
         // every artifact in the response, and a layer declaring no derived content never asks it
         // anything.
         let locator = crate::derived::RowLocator::new(segments);
@@ -3340,22 +3678,37 @@ impl Engine {
         if tile_rows.is_empty() {
             return Ok(Vec::new());
         }
+        // **The one composition, hoisted out of every layer and every artifact**
+        // (`design/artifact-serving-at-scale.md` §4 step 2, and `crate::tile_index::Viewport`).
+        // Built once per request: it is the same set for every layer in the response, and its cost
+        // is the viewport's containers rather than the population's.
+        let viewport = crate::tile_index::Viewport::compose(&tile_rows, mask);
 
-        let (store_version, shard) = (
-            self.write.with_artifacts(|store| store.version()),
-            generation.bundle.manifest.identity.shard_id,
-        );
+        let shard = generation.bundle.manifest.identity.shard_id;
+        // Built once for the whole response: the postings and the manifest's plugin are the
+        // generation's, not the layer's, and the gate they carry is one decision per request.
+        let source = generation.partition_source();
+
+        // **The layers this response walks**, which is what makes the dependent drop below
+        // decidable. A target missing from a response that never looked at its layer was not
+        // removed from anything — see [`orphaned_dependents`].
+        let in_request: std::collections::BTreeSet<String> = names.iter().cloned().collect();
 
         let mut out = Vec::new();
+        // Where each served artifact ended up, and what each points at — collected during the walk
+        // and reconciled after it.
+        let mut served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId> =
+            std::collections::BTreeMap::new();
+        let mut placed: Vec<Placement> = Vec::new();
         for name in names {
             let Some(layer) = self.write.registered_layer(&name) else {
                 // Dropped between the resolution and here. Absent is the right answer and the same
                 // one a gate failure gives.
                 continue;
             };
-            // A layer declares which slices it lives in; one it did not declare has no membership
+            // A layer declares which views it lives in; one it did not declare has no membership
             // in this row space to project.
-            if !layer.declaration.slices.iter().any(|s| s == slice) {
+            if !layer.declaration.views.iter().any(|s| s == view) {
                 continue;
             }
             // **The live half, asked per request.** A layer's own entity carries its suppression,
@@ -3370,27 +3723,64 @@ impl Engine {
             // Parsed once per layer. A name outside the vocabulary cannot reach here — the
             // declaration was refused at registration — so an unparseable one is dropped rather
             // than erroring the whole response.
-            let declared_derived: Vec<crate::derived::DerivedProperty> = layer
+            let declared_derived: Vec<crate::derived::ComputedProperty> = layer
                 .declaration
                 .content
-                .derived
+                .computed
                 .iter()
-                .filter_map(|name| crate::derived::DerivedProperty::parse(name))
+                .filter_map(|name| crate::derived::ComputedProperty::parse(name))
                 .collect();
+
+            // **The predicate's inputs, resolved once per layer rather than per level**: the
+            // membership is the layer's, and every level of a predicate layer reads the same
+            // column or the same declared depth. A layer with a stored membership resolves nothing.
+            let vocabulary = predicate_vocabulary(generation, &layer.declaration);
+            let code_of_key = |key: &str| match vocabulary {
+                Some(vocabulary) => vocabulary.code_of(key),
+                None => key.parse::<u32>().ok(),
+            };
+            let predicate = predicate_source(
+                &layer.declaration,
+                generation,
+                &segments_for_shapes,
+                &code_of_key,
+            );
 
             for (level, runs) in layer.runs.iter().enumerate() {
                 let level = level as u32;
-                let rows = self.write.with_artifacts(|store| {
-                    self.artifact_projections.get_or_build(
-                        &generation.prefix,
-                        slice,
-                        &name,
-                        level,
-                        store,
-                        store_version,
-                        &slice_data.row_space,
+                let recorded = layer.layout_of(level);
+                let (rows, level_version) = self.write.with_artifacts(|store| {
+                    (
+                        self.artifact_projections.get_or_build(
+                            &generation.prefix,
+                            view,
+                            &name,
+                            level,
+                            store,
+                            &view_data.row_space,
+                            Some(&source),
+                            recorded,
+                            predicate.as_ref(),
+                            generation.segments_version,
+                        ),
+                        store.level_version(&name, level),
                     )
                 });
+                // **The count's route, decided by the level's layout and by nothing about the
+                // request.** An artifact-major level counts per served artifact; a row-major one has
+                // no per-artifact membership to intersect and reads the histogram, which is built
+                // once per session per generation and cached under a key that moves with every
+                // accepted deny (`crate::histogram`).
+                let counts = self.masked_counts(
+                    &mask_identity,
+                    view,
+                    &name,
+                    level,
+                    level_version,
+                    &rows,
+                    mask,
+                );
+                let containment = rows.partition().map(|p| p.answers(&session.satisfied));
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
@@ -3398,29 +3788,116 @@ impl Engine {
                     layer_reachable: true,
                     rows: &rows,
                     mask,
-                    attachment_gate: &attachment_gate,
-                    attachment_resolves: &attachment_resolves,
+                    dependency_served: &dependency_served,
+                    containment,
+                    denied,
+                    counts,
                 };
-                for ordinal in 0..rows.len() as u32 {
-                    if !rows.intersects(ordinal, &tile_rows, mask) {
+                // **Every candidate is tested before any is cut**, and the two passes are separate
+                // for a reason that is not performance: the verdict is a per-artifact question
+                // with no lineage input (decision 0080), and a loop that decided *and* pruned in
+                // one step would have the shape that lets a node's neighbours reach its verdict.
+                let mut passing = Vec::new();
+                // **The walk replaces the sweep over every ordinal.** Cost is the viewport's
+                // perimeter in the hierarchy rather than the level's population: an artifact in no
+                // node the viewport touches has no member there, so it cannot have a *visible* one
+                // and skipping it withholds nothing (`crate::tile_index`, and §4.1 on why this is a
+                // candidate generator and never an answer). Holes and artifacts whose membership
+                // projects to nothing are in no node either, so neither reaches the predicate here
+                // — and both remain live on the identifier route, which walks no index.
+                //
+                // **Or the scan, where the level is served row-major**: one pass over
+                // `viewport ∩ M_auth` marking labels, which answers the same question at a cost in
+                // *points* rather than in artifacts (`ArtifactRows::candidacy`). Which route is
+                // taken is a property of the level and never of the request.
+                let candidates = rows.candidacy(&viewport);
+                for ordinal in candidates.iter() {
+                    // **Every candidate pays a masked probe**, on whichever of the three routes the
+                    // classification makes cheapest — see `ArtifactRows::candidate_in`, which is
+                    // the one place the choice is made and the one the differential drives.
+                    if !rows.candidate_in(ordinal, &candidates, &viewport, mask) {
                         continue;
                     }
                     let Some(entity) = runs.entity_of(ordinal as u64).map(EntityId::new) else {
                         continue;
                     };
-                    // ⊘ **No artifact carries its own terms yet**, so a layer declaring
-                    // `artifacts_carry_own` serves nothing here — fail-closed, and visibly so. The
-                    // per-artifact label arrives with content (Stage 3); until then the flag has
-                    // nothing to satisfy, and admitting the artifact instead would make a missing
-                    // declaration a grant to everyone.
-                    let crate::artifacts::ArtifactVerdict::Serve {
-                        masked_count,
-                        variation,
-                    } = view.verdict(entity, ordinal, None)
+                    // ⊘ **No artifact carries its own terms yet**, so a layer whose
+                    // `artifact_visibility` names a field serves nothing here — fail-closed, and
+                    // visibly so. The per-artifact label arrives with content (Stage 3); until then
+                    // the named field has nothing to satisfy, and admitting the artifact instead
+                    // would make a missing declaration a grant to everyone.
+                    let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
+                        view.verdict(entity, ordinal, None)
                     else {
                         continue;
                     };
-                    // The one variation this viewer contains, entire. ⊘ A variation restored from a
+                    passing.push((ordinal, entity, masked_count, rank));
+                }
+
+                // The level's lineage, read from the parent pointers of **every** artifact and not
+                // only the passing ones: an ancestor that failed its own criterion is still an
+                // ancestor, and a cut blind to it would keep a node its descendant covers.
+                //
+                // **Within-level edges only, and that is the whole of the tiered shape's
+                // treatment here** (owner ruling, 2026-08-18). A tiered layer's edges run
+                // between levels and are *information* — what contains what, so a client can nest
+                // what it draws or filter to one subtree — rather than a ladder to coarsen along.
+                // Climbing them would substitute a state for its counties and draw one large
+                // polygon across a region whose neighbours are still counties. So the cut does not
+                // see them, such a layer's lineage is empty here, and its budget is inert exactly
+                // as a flat layer's is.
+                //
+                // **Held per generation, not derived per request.** The pointers depend on neither
+                // the mask nor the viewport, so a request that rebuilds them is doing generation
+                // work: ~96 ms at a level of ten million, against the ~3 ms the cut over them now
+                // costs.
+                //
+                // **The version and the build are taken inside one hold of the artifacts lock**,
+                // which is what makes the cached lineage the lineage *of* the version it is filed
+                // under: read separately, a write landing between the two would file the new
+                // level's edges under the old level's version, and the next request would serve a
+                // cut through a tree that has moved.
+                let lineage = self.write.with_artifacts(|store| {
+                    self.lineages.get_or_build(
+                        &name,
+                        level,
+                        store.level_version(&name, level),
+                        || {
+                            crate::cut::Lineage::new(store.level(&name, level).map(
+                                |(ordinal, record)| {
+                                    let within = record
+                                        .parent
+                                        .filter(|parent| parent.level == level)
+                                        .map(|parent| parent.ordinal);
+                                    (ordinal, within)
+                                },
+                            ))
+                        },
+                    )
+                });
+                let ordinals: Vec<u32> = passing.iter().map(|&(o, ..)| o).collect();
+                // Ascending and deduplicated, which the cut guarantees — so the membership test in
+                // the emit loop below is a binary search rather than a scan of the served set once
+                // per candidate.
+                //
+                // **`prune_children` is the layer's, and it is a rendering choice rather than a
+                // disclosure one.** Pruned, a passing parent is dropped where a passing child sits
+                // beneath it; unpruned, both are served and the client receives the whole visible
+                // tree — which is what lets it nest what it draws, or filter to one subtree while
+                // still drawing the rest. Every artifact in either set cleared its own criterion,
+                // so neither is the safer answer.
+                let served = crate::cut::cut(
+                    &lineage,
+                    &ordinals,
+                    artifact_budget,
+                    layer.declaration.hierarchy.prune_children,
+                );
+
+                for (ordinal, entity, masked_count, rank) in passing {
+                    if served.binary_search(&ordinal).is_err() {
+                        continue;
+                    }
+                    // The one content this viewer contains, entire. ⊘ A content restored from a
                     // packed extent carries no values yet (its content belongs in the record blob,
                     // decision 0077, and that write is unbuilt), and is **withheld** rather than
                     // served with its description missing.
@@ -3431,7 +3908,7 @@ impl Engine {
                         ordinal,
                         entity,
                         layer.declaration.content.supplied.len(),
-                        variation,
+                        rank,
                     ) else {
                         continue;
                     };
@@ -3456,23 +3933,151 @@ impl Engine {
                             .unwrap_or_default();
                         crate::derived::compute(&declared_derived, &visible, &locator)
                     };
+                    // **The parent comes from the level's own records and the key from the store.**
+                    // Both are per-ordinal facts of one generation, but only one of them is held
+                    // in the row form: a key is a caller's string, one per artifact, and copying
+                    // ten million of them into a cached structure buys nothing the store's own
+                    // lookup does not already answer.
+                    let parent = rows.parent(ordinal);
+                    let key = self
+                        .write
+                        .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone());
+                    // Recorded, not resolved: which artifacts this response holds is not known
+                    // until every layer and level has been walked, and a parent — or the artifact
+                    // a dependent hangs from — may sit in a level this loop has not reached.
+                    served_at.insert((name.clone(), level, ordinal), tessera_id);
+                    placed.push(Placement {
+                        at: (name.clone(), level, ordinal),
+                        parent: parent.map(|p| (name.clone(), p.level, p.ordinal)),
+                        attached_to: rows
+                            .attachment(ordinal)
+                            .map(|a| (a.layer.clone(), a.level, a.ordinal)),
+                    });
                     out.push(ArtifactOut {
                         content,
                         layer: name.clone(),
                         tessera_id,
-                        stable_key: self.write.with_artifacts(|store| {
-                            store
-                                .get(&name, level, ordinal)
-                                .and_then(|r| r.stable_key.clone())
-                        }),
+                        key,
                         masked_count,
                         derived,
+                        // Filled in below, once the response's own membership is settled.
+                        parent_id: None,
                     });
                 }
             }
         }
-        Ok(out)
+        // **The cut ran after the verdicts, so a dependent may have passed on a target this
+        // response then removed.** Dropping it here — before the parents are resolved, so a
+        // dependent that goes takes its own name out of `served_at` with it — is what keeps one
+        // response from describing a cluster it does not contain (decision 0089).
+        let dropped = orphaned_dependents(&placed, &in_request, &mut served_at);
+
+        // **A parent is named only where it is also in this response**, which is the whole of the
+        // disclosure rule for this field. An artifact whose parent exists but was withheld — below
+        // its own criterion for this viewer, suppressed, or dropped by the frontier — carries a
+        // null here, indistinguishable from a root. Naming it would tell the viewer that a coarser
+        // grouping exists which they are not cleared to see, which is a disclosure the rest of this
+        // pass takes care to avoid making.
+        let mut served = Vec::with_capacity(out.len());
+        for ((mut artifact, place), dropped) in out.into_iter().zip(&placed).zip(dropped) {
+            if dropped {
+                continue;
+            }
+            artifact.parent_id = place
+                .parent
+                .as_ref()
+                .and_then(|key| served_at.get(key))
+                .copied();
+            served.push(artifact);
+        }
+        Ok(served)
     }
+}
+
+/// Where one served artifact sits, and what it points at.
+///
+/// Both edges are recorded during the walk and resolved after it, because whether either end is in
+/// the response is not known until every layer and level has been walked.
+struct Placement {
+    /// Its own address — `(layer, level, ordinal)`, the triple an [`Attachment`] carries.
+    at: (String, u32, u32),
+    /// The address of its parent, where it names one. Within its own layer by construction.
+    parent: Option<(String, u32, u32)>,
+    /// The address of the artifact it depends on, where its layer declares a dependency.
+    attached_to: Option<(String, u32, u32)>,
+}
+
+/// **A dependent whose target this response does not contain, and everything hanging from it.**
+///
+/// [Decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)
+/// makes a dependent visible exactly where its target is, and `Engine::dependency_served` enforces
+/// that by asking the target's own `verdict`. **The cut runs after the verdicts** — it serves fewer
+/// artifacts and never evaluates fewer — so a request carrying an `artifact_budget` over a treed
+/// layer, alongside a layer depending on it, would otherwise be answered with labels describing
+/// clusters that same response does not hold. One response never contradicts itself.
+///
+/// **Server-side, and the attachment identifier never reaches the wire.** Publishing it so a client
+/// could filter for itself was declined for the reason `parent_id` carries a null rather than a
+/// withheld parent's name: handing over the identifier names an artifact the response does not
+/// contain. A client never told the relationship cannot notice what is missing from it.
+///
+/// **The target's layer must be in this request.** A request naming the dependent layer *alone* —
+/// "give me just the labels" — finds no target here, and a naive lookup would drop every label.
+/// That is a legitimate call and refusing it is outside the disclosure surface; such a request
+/// behaves exactly as it did before this pass existed. What the condition catches is a response
+/// that walked the target's layer and did not serve the target: cut to a budget, pruned in favour
+/// of a child, or withheld at the emit step. A target outside this viewport falls under the same
+/// rule and is dropped with them — its label is describing something this response does not draw,
+/// and separating the two cases would mean carrying a reason per absent candidate through a pass
+/// that deliberately collapses reasons.
+///
+/// **This does not make the budget a disclosure control**
+/// ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md) stands).
+/// The pass can only remove, and everything it removes already passed its own test. It decides what
+/// is *drawn*, and a label describing something not drawn is not drawn either.
+///
+/// Chains cascade: a label on a label goes when the label it hangs from goes. The worklist walks
+/// the edges the response holds rather than rescanning it per drop, and terminates because each
+/// index is dropped at most once — a chain deeper than `DEPENDENCY_CHAIN_MAX` was already refused
+/// by the prerequisite that admitted these artifacts in the first place.
+///
+/// Returns one flag per placement, positionally, and removes what it drops from `served_at` so a
+/// dropped artifact cannot be named as anything's parent.
+fn orphaned_dependents(
+    placed: &[Placement],
+    in_request: &std::collections::BTreeSet<String>,
+    served_at: &mut std::collections::BTreeMap<(String, u32, u32), TesseraId>,
+) -> Vec<bool> {
+    let mut dependents_of: std::collections::BTreeMap<(&str, u32, u32), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    let mut queue: Vec<usize> = Vec::new();
+    for (i, place) in placed.iter().enumerate() {
+        let Some(target) = &place.attached_to else {
+            continue;
+        };
+        dependents_of
+            .entry((target.0.as_str(), target.1, target.2))
+            .or_default()
+            .push(i);
+        if in_request.contains(&target.0) && !served_at.contains_key(target) {
+            queue.push(i);
+        }
+    }
+    let mut dropped = vec![false; placed.len()];
+    while let Some(i) = queue.pop() {
+        if dropped[i] {
+            continue;
+        }
+        dropped[i] = true;
+        served_at.remove(&placed[i].at);
+        // Whatever hung from it goes too, and its target's layer is in this request by
+        // construction — this response walked the layer, which is how the artifact reached `out`.
+        let at = &placed[i].at;
+        if let Some(hanging) = dependents_of.get(&(at.0.as_str(), at.1, at.2)) {
+            queue.extend(hanging.iter().copied());
+        }
+    }
+    dropped
 }
 
 /// Test every row of `domain` against `entities`, giving the rows that matched.
@@ -3819,7 +4424,7 @@ const TILE_PAR_MIN_LEN: usize = 8;
 /// above), and the return value is owned outright by the caller — no shared mutable state, no
 /// interior mutability, nothing to synchronise.
 ///
-/// `Ok(None)` — an empty tile: no segment for this slice, or nothing visible in `range`. Exactly
+/// `Ok(None)` — an empty tile: no segment for this view, or nothing visible in `range`. Exactly
 /// the "skip empty" rule the old inline loop applied (no count row, no selection work). `Err`
 /// carries [`EngineError::Cancelled`] from the per-tile cancellation checkpoint below — checked
 /// first, so a flip
@@ -3851,7 +4456,7 @@ fn tile_sweep<'a>(
     let mut stats = TileProbe::new();
 
     // **The count is the sum over the segments the tile touches** — each segment's own tile range
-    // shifted into slice row space by its `row_base`, counted there, and added. §7.1's exact
+    // shifted into view row space by its `row_base`, counted there, and added. §7.1's exact
     // masked count is a property of the tile, not of whichever segment happens to hold the rows,
     // so a tile straddling a build segment and a fresh flush segment must report their union.
     let parts: Vec<SelectionPart<'_>> = tile_parts
@@ -3978,7 +4583,7 @@ fn tile_sweep<'a>(
 /// implementation detail of the sweep, not part of this crate's public API — [`ViewportOut`]
 /// and the [`ViewportSink`] callbacks are what callers see.
 ///
-/// `rows` are slice-space rows **ascending by `tessera_id`** ([`Selection::rows`]) — the order
+/// `rows` are view-space rows **ascending by `tessera_id`** ([`Selection::rows`]) — the order
 /// the wire requires within a tile, and the property every mid-stream cut's validity rests on.
 struct TileSweepOut<'a> {
     count: TileCount,
@@ -3988,7 +4593,7 @@ struct TileSweepOut<'a> {
     stats: TileStats,
 }
 
-/// A slice's segments paired with their `row_base` in slice row space, ascending.
+/// A view's segments paired with their `row_base` in view row space, ascending.
 ///
 /// **Keyed on `seg_id`, never zipped positionally.** `Bundle::with_segment` appends to `segments`
 /// while `RowSpace::with_extent` appends the extent, so after a flush the two lists agree by
@@ -4003,21 +4608,21 @@ struct TileSweepOut<'a> {
 ///
 /// **One definition, because two read paths need it.** `Engine::viewport` selects over the parts
 /// and `Engine::item` resolves a single row to its owner; when `item` had its own version — take
-/// `segments.first()` and index it with a *slice*-space row — a drill-down on any flushed item
+/// `segments.first()` and index it with a *view*-space row — a drill-down on any flushed item
 /// read past the build segment's end and panicked. A second copy is how the two come to disagree.
 fn segments_with_row_bases<'a>(
-    slice: &str,
-    slice_data: &'a tessera_store::read::SliceData,
+    view: &str,
+    view_data: &'a tessera_store::read::ViewData,
 ) -> Result<Vec<(&'a SegmentData, u32)>> {
-    let row_bases: std::collections::HashMap<&str, u32> = slice_data
+    let row_bases: std::collections::HashMap<&str, u32> = view_data
         .row_space
         .extents()
         .iter()
         .map(|extent| (extent.seg_id.as_str(), extent.row_base))
         .collect();
     let mut base_seen = false;
-    let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(slice_data.segments.len());
-    for segment in &slice_data.segments {
+    let mut segments: Vec<(&SegmentData, u32)> = Vec::with_capacity(view_data.segments.len());
+    for segment in &view_data.segments {
         let row_base = match row_bases.get(segment.seg_id.as_str()) {
             Some(&row_base) => row_base,
             // No extent: the build segment, at 0. Legitimate exactly once — see
@@ -4029,7 +4634,7 @@ fn segments_with_row_bases<'a>(
             }
             None => {
                 return Err(EngineError::SegmentWithoutRowBase {
-                    slice: slice.to_string(),
+                    view: view.to_string(),
                     seg_id: segment.seg_id.clone(),
                 })
             }
@@ -4080,7 +4685,7 @@ fn resolve_scalars<'a>(
 
 /// Gather one tile's selected rows **column-major**.
 ///
-/// `rows` are slice-space rows ascending by `tessera_id` — not by segment — so consecutive rows
+/// `rows` are view-space rows ascending by `tessera_id` — not by segment — so consecutive rows
 /// can land in different parts. They are therefore resolved to `(part, local)` **once**, in one
 /// pass, and every column then walks that placement rather than re-resolving per value. Together
 /// with the per-part slice resolution this leaves the inner loop a bounds-checked index into a
@@ -4125,7 +4730,7 @@ fn gather_tile_columns(
 
     let malformed = |d: &DeclaredScalar| {
         EngineError::Malformed(format!(
-            "a segment of this slice has no scalar column '{}' at the declared type {}, which \
+            "a segment of this view has no scalar column '{}' at the declared type {}, which \
              the manifest's render declaration requires; serving it would put values under \
              another column's name",
             d.name,
@@ -4493,7 +5098,7 @@ mod tests {
         );
     }
 
-    /// A slice with no `row-entity.u32` declines the per-tile route rather than answering from a
+    /// A view with no `row-entity.u32` declines the per-tile route rather than answering from a
     /// base it cannot invert. `entity_of` returning `None` on such a row means "ask another way",
     /// and reading it as "this row has no entity" would drop rows from a filtered viewport
     /// silently — so the route decision asks `can_invert` before committing, and the walk itself
@@ -4522,7 +5127,7 @@ mod tests {
         );
     }
 
-    /// The domain is the request's tile parts in slice row space: shifted by each segment's
+    /// The domain is the request's tile parts in view row space: shifted by each segment's
     /// `row_base`, sorted across segments, and merged where they touch. Merging is what makes the
     /// walk sequential and `FilterRows::covers` a single binary search; it must never widen.
     #[test]

@@ -75,7 +75,7 @@ class Viewport:
     the canary suite measured before its comparator split surfaces apart.
     """
 
-    slice_id: str
+    view_id: str
     zoom: int
     bbox: tuple[float, float, float, float] | None = None
     tiles: tuple[int, ...] | None = None
@@ -95,7 +95,7 @@ class Region:
     the tile path §3 names. ⊘ Not routed today: the battery carries this query wrapped in
     [`Absent`], and [`record_one`] refuses it, loudly, until the route exists."""
 
-    slice_id: str
+    view_id: str
     polygon: tuple[tuple[float, float], ...] | None = None
     bbox: tuple[float, float, float, float] | None = None
     filters: str | None = None
@@ -146,7 +146,7 @@ DEEP_ZOOM = 5
 def build_battery(
     meta: dict,
     *,
-    slice_id: str,
+    view_id: str,
     item_ids: Sequence[int],
     bbox: tuple[float, float, float, float],
     zooms: Sequence[int] = (0, 3),
@@ -185,19 +185,19 @@ def build_battery(
     entries: list[Query | Absent] = [Meta()]
     entries += [Categories(column) for column in category_columns]
     entries += [
-        Viewport(slice_id, zoom, bbox=bbox, k=k, underlay_offset=underlay_offset)
+        Viewport(view_id, zoom, bbox=bbox, k=k, underlay_offset=underlay_offset)
         for zoom in zooms
     ]
     if max(zooms) < DEEP_ZOOM:
         # The membership surface (module doc): deep enough that its tiles stay saturated —
         # observed per response, never arranged — after the shallow viewports truncate.
         entries.append(
-            Viewport(slice_id, DEEP_ZOOM, bbox=bbox, k=k, underlay_offset=1)
+            Viewport(view_id, DEEP_ZOOM, bbox=bbox, k=k, underlay_offset=1)
         )
     if filters is not None:
         entries.append(
             Viewport(
-                slice_id,
+                view_id,
                 zooms[0],
                 bbox=bbox,
                 k=k,
@@ -207,7 +207,7 @@ def build_battery(
         )
     entries.append(
         Absent(
-            Region(slice_id, bbox=bbox),
+            Region(view_id, bbox=bbox),
             reason="/v1/region is not in the router (correctness-suite §12.2); "
             "test_battery.py pins the absence so the marker cannot outlive it",
         )
@@ -292,7 +292,7 @@ def _viewport_body(server, token: str, query: Viewport) -> bytes:
     form (§3.2: two request forms, and a divergence between them is exactly what a battery
     exists to catch).
     """
-    body: dict = {"slice": query.slice_id, "zoom": query.zoom}
+    body: dict = {"view": query.view_id, "zoom": query.zoom}
     if query.bbox is not None:
         body["bbox"] = list(query.bbox)
     if query.tiles is not None:

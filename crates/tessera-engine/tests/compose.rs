@@ -455,7 +455,7 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
     let row = WalRow {
         external_id: Some(entity.to_le_bytes().to_vec()),
         entity_id: e(entity),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: Vec::new(),
         x: 0.0,
         y: 0.0,
@@ -493,7 +493,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                 WalRow {
                     external_id: Some(ext_x.clone()),
                     entity_id: e(ENTITY_X),
-                    slice: "s0".to_string(),
+                    view: "s0".to_string(),
                     descriptors: vec![b"term-x".to_vec()],
                     x: 0.0,
                     y: 0.0,
@@ -502,7 +502,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                 WalRow {
                     external_id: Some(ext_y.clone()),
                     entity_id: e(ENTITY_Y),
-                    slice: "s0".to_string(),
+                    view: "s0".to_string(),
                     descriptors: vec![b"term-y".to_vec()],
                     x: 0.0,
                     y: 0.0,

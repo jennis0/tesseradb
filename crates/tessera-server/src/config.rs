@@ -1,4 +1,25 @@
-//! Fail-closed configuration: `tessera.toml` (SA §7).
+//! Fail-closed configuration: `tessera.toml` (SA §7, `configuration.md` §3).
+//!
+//! **One file, read by both verbs.** `tessera.toml` says what this *deployment* is — where the
+//! bundle lives, where its cache and WAL go, what to listen on, how to tune it, where the corpus
+//! declaration is, and which environment variable carries the identity key. `schema.toml` says
+//! what the *corpus* is. The secret is in neither: it is in the environment, or in a `.env` beside
+//! this file, and never in git.
+//!
+//! **The build's output path and the server's `bundle_path` are one value seen from two sides**,
+//! so they are declared once — [`Config::bundle_path`] — and `tessera build --out` overrides it.
+//! Declaring them apart is how a server comes up against a directory the last build did not write.
+//!
+//! **Found by walking up from the working directory**, as `Cargo.toml` is ([`discover`]), so
+//! `tessera build` and `tessera serve` take no required flag anywhere under the project root.
+//! **A missing file is a refusal naming what to create** ([`ConfigError::NoDeploymentConfig`]),
+//! never a silent set of defaults: a deployment that came up on guessed paths would serve an empty
+//! bundle out of a directory nobody chose.
+//!
+//! **Every path in it resolves against its own directory**, not the working directory — the same
+//! rule a `source` in `schema.toml` follows. A relative `bundle.path` that moved with the shell's
+//! cwd would make `cd crates && tessera serve` open a different bundle from the one `tessera
+//! build` had just written.
 //!
 //! `[disclosure]` has no defaults at all: absence of the section, or of the key inside it, is
 //! a startup error naming design §7.5/§2.3 — a deployment must state its disclosure parameters
@@ -10,7 +31,10 @@
 //! it means *no test*.
 //! Every other section either has a documented default (`max_k = 1000`) or is required outright.
 //! Credentials are never inline: `[serve]`'s `*_credential_file`/`*_credential_env` pairs are the
-//! only way to supply the session/operator bearer secrets.
+//! only way to supply the session/operator bearer secrets, and the secret itself is read at
+//! [`crate::prepare`] rather than here — `tessera build` reads this same file, and a build has no
+//! business requiring a serving secret to be exported before it will write a bundle. A plane still
+//! cannot come up without one ([`Credential::resolve`]).
 //!
 //! ## The write-path and admission knobs
 //!
@@ -48,6 +72,25 @@ use serde::Deserialize;
 pub enum ConfigError {
     Io(std::io::Error),
     Toml(toml::de::Error),
+    /// No `tessera.toml` anywhere from the working directory up to the filesystem root, and no
+    /// `--deployment` naming one.
+    ///
+    /// **A refusal naming what to create, never a set of defaults.** Every path this file carries
+    /// is a decision — which bundle, which cache, which WAL, which declaration — and a guessed one
+    /// is a build writing where nobody asked or a server opening a bundle nobody built.
+    NoDeploymentConfig {
+        from: PathBuf,
+    },
+    /// `[identity]` carries the key itself rather than the name of the variable holding it.
+    ///
+    /// Refused with its own message rather than as an unknown field, because the mistake is
+    /// *reasonable* — the `--identity-file` format does spell it `key` — and the consequence is a
+    /// secret in a file that is meant to be committed.
+    IdentityKeyInline,
+    /// A key inside `[identity]` that is not `env`.
+    UnknownIdentityKey(String),
+    /// `[identity]` is present but is not a table.
+    IdentityNotATable,
     /// The `[disclosure]` section is absent entirely.
     MissingDisclosureSection,
     /// The `[disclosure]` section is present but missing one of its required keys.
@@ -296,6 +339,54 @@ pub enum ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ConfigError::NoDeploymentConfig { from } => write!(
+                f,
+                "no tessera.toml found, searching upward from {}. It is what says where this \
+                 deployment's bundle, cache and WAL live, where the corpus declaration is, and \
+                 which environment variable carries the identity key -- none of which has a \
+                 default worth guessing. Create one beside the corpus declaration:\n\n\
+                 \x20   [bundle]\n\
+                 \x20   path  = \"bundles/corpus\"   # tessera build --out writes here; \
+                 tessera serve opens it\n\
+                 \x20   cache = \".tessera/cache\"\n\
+                 \x20   wal   = \".tessera/wal.log\"\n\n\
+                 \x20   [build]\n\
+                 \x20   schema = \"schema.toml\"     # the corpus declaration; this is the \
+                 default\n\n\
+                 \x20   [identity]\n\
+                 \x20   env = \"TESSERA_IDENTITY_KEY\"   # the variable carrying the key; \
+                 this is the default\n\n\
+                 \x20   [plugin]\n\
+                 \x20   module = \"builtin:passthrough\"\n\n\
+                 \x20   [disclosure]\n\
+                 \x20   token_max_lifetime = 3600\n\n\
+                 \x20   [serve]\n\
+                 \x20   viewer  = \"127.0.0.1:37585\"\n\
+                 \x20   session = \"127.0.0.1:49303\"\n\
+                 \x20   control = \"127.0.0.1:45721\"\n\n\
+                 Or name one outright with --deployment <path>",
+                from.display()
+            ),
+            ConfigError::IdentityKeyInline => write!(
+                f,
+                "tessera.toml: [identity] carries `key`. The identity key never appears in this \
+                 file -- it is sixteen bytes keying the bijection every tessera_id a client holds \
+                 is derived through, and this file belongs in git. Name the variable that carries \
+                 it instead: `[identity] env = \"TESSERA_IDENTITY_KEY\"` (that is also the \
+                 default, so the whole section may be omitted). The value goes in the environment, \
+                 in a .env beside this file, or in a 0600 file named by --identity-file"
+            ),
+            ConfigError::UnknownIdentityKey(key) => write!(
+                f,
+                "tessera.toml: unknown key '{key}' in [identity]. The section takes `env` alone -- \
+                 the name of the environment variable carrying the identity key, defaulting to \
+                 TESSERA_IDENTITY_KEY. The key itself is never written here"
+            ),
+            ConfigError::IdentityNotATable => write!(
+                f,
+                "tessera.toml: [identity] must be a table: `[identity]` with \
+                 `env = \"TESSERA_IDENTITY_KEY\"` under it"
+            ),
             ConfigError::MergeSizeRelation {
                 max_merged_segment_bytes,
                 base_segment_bytes,
@@ -438,7 +529,7 @@ impl std::fmt::Display for ConfigError {
             ConfigError::StreamFlushBytesZero => write!(
                 f,
                 "serve.stream_flush_bytes = 0 would flush every gathered tile as its own frame; \
-                 set the flush threshold the client should decode per slice (default 1 MiB)"
+                 set the flush threshold the client should decode per view (default 1 MiB)"
             ),
             ConfigError::StreamWriteStallZero => write!(
                 f,
@@ -609,6 +700,17 @@ struct RawConfig {
     plugin: RawPlugin,
     #[serde(default)]
     disclosure: Option<toml::Value>,
+    /// `[build]` — what `tessera build` needs and `tessera serve` ignores. Absent means the whole
+    /// section defaults, which is the ordinary case: the declaration is `schema.toml` beside this
+    /// file.
+    #[serde(default)]
+    build: RawBuild,
+    /// `[identity]` — the **name** of the environment variable carrying the identity key, never
+    /// the key. Parsed as a `toml::Value` and validated by hand, on `[disclosure]`'s precedent,
+    /// so `key = "…"` gets the refusal it deserves rather than serde's unknown-field text.
+    #[serde(default)]
+    identity: Option<toml::Value>,
+    #[serde(default)]
     serve: RawServe,
     /// SA §7's `[ingest]` section — every key optional, so the whole section may be absent. These
     /// are the write path's performance knobs; none of them is a disclosure control.
@@ -684,6 +786,17 @@ enum RawRatio {
     Word(String),
 }
 
+/// SA §7's `[build]` section: the corpus declaration this deployment builds from.
+///
+/// **The output path is not here** — it is `bundle.path`, which the server also reads. One value,
+/// two sides: a build writes where the server opens.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawBuild {
+    #[serde(default)]
+    schema: Option<PathBuf>,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBundle {
@@ -698,12 +811,15 @@ struct RawPlugin {
     module: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawServe {
-    viewer: String,
-    session: String,
-    control: String,
+    #[serde(default)]
+    viewer: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    control: Option<String>,
     #[serde(default)]
     max_k: Option<usize>,
     /// Emit the `x-tessera-stage-ns` breakdown header. Defaults to **false**, and has no effect
@@ -751,6 +867,8 @@ struct RawServe {
     #[serde(default)]
     row_projection_cache_bytes: Option<u64>,
     #[serde(default)]
+    masked_count_cache_bytes: Option<u64>,
+    #[serde(default)]
     fragment_cache_bytes: Option<u64>,
     #[serde(default)]
     expected_concurrent_sessions: Option<usize>,
@@ -783,13 +901,24 @@ pub enum ControlListen {
 
 #[derive(Debug, Clone)]
 pub struct Config {
+    /// `bundle.path`. **The build's output and the server's input**, declared once: `tessera
+    /// build --out` overrides it, and `tessera serve` opens exactly what the last build wrote.
     pub bundle_path: PathBuf,
     pub cache_dir: PathBuf,
     pub wal_path: PathBuf,
+    /// `build.schema` — the corpus declaration (`configuration.md` §1), defaulting to
+    /// `schema.toml` beside this file. Read by `tessera build`; the server takes its schema from
+    /// the bundle's `MANIFEST.json` and never opens this (`configuration.md` §4).
+    pub schema_path: PathBuf,
+    /// `identity.env` — the **name** of the environment variable carrying the identity key,
+    /// defaulting to `TESSERA_IDENTITY_KEY`. Never the key.
+    pub identity_env: String,
     pub token_max_lifetime_secs: u64,
-    pub viewer_addr: SocketAddr,
-    pub session_addr: SocketAddr,
-    pub control_listen: ControlListen,
+    /// `None` where the deployment declares no `[serve]` addresses — legal, because `build` reads
+    /// this file too. `serve` refuses rather than defaulting.
+    pub viewer_addr: Option<SocketAddr>,
+    pub session_addr: Option<SocketAddr>,
+    pub control_listen: Option<ControlListen>,
     pub max_k: usize,
     /// §7.2's floor clause. See `EngineConfig::k_min`.
     pub k_min: usize,
@@ -806,7 +935,7 @@ pub struct Config {
     /// and the default page size when a caller names none.
     ///
     /// **A performance knob, so it defaults** (SA §7). It bounds a response, not a disclosure:
-    /// what a principal may be *told* is `listing`'s question and is settled before paging starts.
+    /// what a principal may be *told* is `visibility`'s question and is settled before paging starts.
     pub max_category_values: usize,
     /// Emit `x-tessera-stage-ns` on viewport responses. **Fails closed**: absent means false, and
     /// even true does nothing in a binary built without the `bench-timing` feature. The header
@@ -817,8 +946,13 @@ pub struct Config {
     /// not a layer that allows nothing. See [`crate::cors`] for why this is a development
     /// affordance rather than an integration feature.
     pub dev_cors_origins: Vec<String>,
-    pub session_credential: String,
-    pub operator_credential: String,
+    /// **Where** the session bearer secret comes from, not what it is. Read at
+    /// [`crate::prepare`], never at parse: `tessera build` reads this same file and has no
+    /// business requiring a serving secret to be exported before it will write a bundle. What
+    /// parse still refuses is a credential *declared nowhere* — the fail-closed half, and the one
+    /// that needs no secret to check.
+    pub session_credential: Credential,
+    pub operator_credential: Credential,
     /// Sizes `Engine::open`'s shared rayon pool, which should fill the machine.
     pub compute_threads: usize,
     /// The compute semaphore's permit count — a bound on in-flight *requests*, admitted for the
@@ -941,6 +1075,9 @@ pub struct Config {
     /// [`MEASURED_PROJECTION_BYTES_AT_1E9`] for the per-entry size the startup validation weighs it
     /// against.
     pub row_projection_cache_bytes: u64,
+    /// Byte bound on the masked-count cache — the per-`(session, layer, level)` histograms a
+    /// **row-major** layer's counts come from. See [`DEFAULT_MASKED_COUNT_CACHE_BYTES`].
+    pub masked_count_cache_bytes: u64,
     /// Byte bound on the *in-memory* fragment tier. See [`DEFAULT_FRAGMENT_CACHE_BYTES`]. The
     /// `.frag` sidecar tier is untouched by it.
     pub fragment_cache_bytes: u64,
@@ -1461,7 +1598,7 @@ const DEFAULT_OVERLAY_SOFT_LIMIT: usize = 500_000;
 
 // `flush_max_items` is deleted, not inert (decision 0045). "Marks the buffer flush-ready" had no
 // consumer: the tick never skips a non-empty buffer and a flush consumes everything buffered for
-// its slice, so the key could not have an effect. The buffer's real bound is
+// its view, so the key could not have an effect. The buffer's real bound is
 // `ingest_buffer_max_items`; the tick's is `flush_max_age_secs`.
 
 /// **The flush tick**, and therefore the bound on how stale an acknowledged item's absence may be:
@@ -1496,13 +1633,13 @@ const DEFAULT_COMPACTION_WINDOW_START_SECS: u32 = 0;
 /// the quiet period still folds, short enough that one down all night does not start at breakfast.
 const DEFAULT_COMPACTION_WINDOW_SECS: u32 = 4 * 3_600;
 
-/// Eight live segments in any one slice. **Assumed, not sized** (compaction §14): decision 0049
+/// Eight live segments in any one view. **Assumed, not sized** (compaction §14): decision 0049
 /// measured ~73 ms on a 300-tile viewport at ~152 segments against a 135–164 ms baseline, so this
 /// is where a fold begins to be worth its flip cost and is otherwise a guess. Probe P1 calibrates
 /// it.
 const DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS: usize = 8;
 
-/// Sixty-four live segments in any one slice, **at any hour** — compaction §9's own default, and
+/// Sixty-four live segments in any one view, **at any hour** — compaction §9's own default, and
 /// the ceiling above which deferring segment growth to the next window costs more than folding now.
 ///
 /// **The one threshold here with a measurement behind it, though not at this value**: decision 0049
@@ -1576,9 +1713,9 @@ const DEFAULT_COALESCE_WIDTH: usize = 8;
 ///    to sparse, array-container-dominated masks, which are small in absolute terms anyway.
 /// 2. It is the 10⁹ figure, so a smaller corpus leaves the bounds below over-provisioned rather
 ///    than wrong.
-/// 3. It is **per (session, slice, segments_version) entry**, not per session — the cache key's
+/// 3. It is **per (session, view, segments_version) entry**, not per session — the cache key's
 ///    three components (see `tessera_engine`'s `RowProjectionKey`). "Eight sessions, eight
-///    entries" holds only while one partition emits one slice, which is true today and silently
+///    entries" holds only while one partition emits one view, which is true today and silently
 ///    false the moment a build emits two: the same eight sessions then occupy sixteen entries.
 pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 
@@ -1599,12 +1736,36 @@ pub const MEASURED_PROJECTION_BYTES_AT_1E9: u64 = 125_120_000;
 /// apply at the dense bound this cache is sized against, where the mask is bitmap-container
 /// dominated and in-memory size equals serialised size — so anyone reaching for that justification
 /// is reaching for the wrong one. What the margin buys is the two ways the entry count exceeds the
-/// session count: **more than one slice per session** (the key is
-/// `(token_id, slice, segments_version)`, so a two-slice bundle doubles the entries at unchanged
+/// session count: **more than one view per session** (the key is
+/// `(token_id, view, segments_version)`, so a two-view bundle doubles the entries at unchanged
 /// concurrency), and **a generation swap**, during which a pinned request's old-`segments_version`
 /// entry coexists with the new one until `prune_generation` runs at drain-list reclaim. Both are
 /// entry-count effects, and at this bound either one alone still fits.
 const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Byte bound on the masked-count cache — the histograms a **row-major** layer's counts come from
+/// ([decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+/// one named exception, `tessera_engine::histogram`).
+///
+/// **256 MiB, and the arithmetic is the decision's own.** An entry is ~4 B per artifact — 4 MB at
+/// 10⁶ artifacts and 40 MB at 10⁷ — per `(session, layer, level)`. At the 10⁶ figure this admits
+/// ~64 entries, which is [`DEFAULT_EXPECTED_CONCURRENT_SESSIONS`]'s eight sessions over eight
+/// row-major levels; at 10⁷ it is six, and a deployment there should raise it.
+///
+/// **An eighth of [`DEFAULT_ROW_PROJECTION_CACHE_BYTES`], deliberately, and the asymmetry is not a
+/// margin.** A projection miss is a *measured* 1 277 ms rebuild that every request for that session
+/// then waits on; a histogram miss is one walk of a mask that is already resident, and it is paid by
+/// the levels that are row-major — which is a property of the corpus, and is **none of them** in a
+/// deployment that has never flipped one. Sizing this like its sibling would reserve gigabytes
+/// against a structure most deployments never build one of.
+///
+/// **It is not covered by [`crate::validate_cache_bounds`]**, and that is the same judgement: the
+/// relation that validation enforces is `bound >= expected_concurrent_sessions x per_entry`, and
+/// `per_entry` here is the *artifact count of a row-major level*, which the config cannot know and
+/// which is zero for most deployments. An under-sized bound costs a rebuilt histogram per request,
+/// which is slow rather than a 429 storm — so it is reported by the cache's own gauges rather than
+/// refused at startup.
+const DEFAULT_MASKED_COUNT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Byte bound on the **in-memory** fragment tier. The digest-verified `.frag` sidecar
 /// tier is untouched by it.
@@ -1619,8 +1780,8 @@ const DEFAULT_ROW_PROJECTION_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// bounds hold the same-shaped Roaring object at the same measured per-entry size, so `1 ×` here
 /// against `2 ×` there is a real difference and needs its reason stated rather than inferred: this
 /// cache's entry count is bounded by **distinct grant sets in flight**, not by sessions, so the
-/// row-projection margin's two justifications (a slice multiplier per session, and a generation
-/// swap's transient duplicate) do not apply — a slice does not appear in this key at all, and a
+/// row-projection margin's two justifications (a view multiplier per session, and a generation
+/// swap's transient duplicate) do not apply — a view does not appear in this key at all, and a
 /// fragment outlives a bundle swap. Eight *entries* here is therefore eight distinct policies.
 ///
 /// A deployment whose principals genuinely span more than eight distinct grant sets should raise
@@ -1713,9 +1874,58 @@ fn selection_width(key: &'static str, width: usize) -> Result<usize> {
     Ok(width)
 }
 
+/// The file name every deployment's configuration is found under.
+pub const DEPLOYMENT_FILE: &str = "tessera.toml";
+
+/// The environment variable carrying the identity key when `[identity]` names none.
+pub const DEFAULT_IDENTITY_ENV: &str = "TESSERA_IDENTITY_KEY";
+
+/// The corpus declaration when `[build]` names none.
+pub const DEFAULT_SCHEMA_FILE: &str = "schema.toml";
+
+/// Find this deployment's `tessera.toml`: `explicit` if given, else the nearest one at or above
+/// `from` (`configuration.md` §3).
+///
+/// **Walking up, as `Cargo.toml` is found**, so both verbs work from anywhere under the project
+/// root and neither needs a flag in the ordinary case. The search stops at the first hit rather
+/// than merging what it finds on the way: a deployment is one file, and a partial one further up
+/// silently supplying half the paths is exactly the guessing this file exists to prevent.
+pub fn discover(explicit: Option<&Path>, from: &Path) -> Result<PathBuf> {
+    if let Some(path) = explicit {
+        return Ok(path.to_path_buf());
+    }
+    let mut dir = Some(from);
+    while let Some(here) = dir {
+        let candidate = here.join(DEPLOYMENT_FILE);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        dir = here.parent();
+    }
+    Err(ConfigError::NoDeploymentConfig {
+        from: from.to_path_buf(),
+    })
+}
+
 pub fn load(path: &Path) -> Result<Config> {
     let text = fs::read_to_string(path)?;
-    parse(&text)
+    let mut config = parse(&text)?;
+    // **Every path resolves against this file's own directory** (`configuration.md` §3). Done
+    // here rather than in `parse` so the parse stays a pure function of the text — which is what
+    // the several dozen cases below rely on — and so there is exactly one place that knows where
+    // the document came from.
+    let base = path.parent().unwrap_or(Path::new(""));
+    for slot in [
+        &mut config.bundle_path,
+        &mut config.cache_dir,
+        &mut config.wal_path,
+        &mut config.schema_path,
+    ] {
+        if slot.is_relative() {
+            *slot = base.join(&*slot);
+        }
+    }
+    Ok(config)
 }
 
 fn parse(text: &str) -> Result<Config> {
@@ -1737,28 +1947,62 @@ fn parse(text: &str) -> Result<Config> {
         .ok_or(ConfigError::MissingDisclosureKey("token_max_lifetime"))?
         as u64;
 
-    let viewer_addr: SocketAddr = raw
+    // `[identity]` names the variable, never the key. Absent means the default, which is what
+    // makes the section omissible in the ordinary deployment.
+    let identity_env = match &raw.identity {
+        None => DEFAULT_IDENTITY_ENV.to_string(),
+        Some(value) => {
+            let table = value.as_table().ok_or(ConfigError::IdentityNotATable)?;
+            for key in table.keys() {
+                match key.as_str() {
+                    "env" => {}
+                    "key" => return Err(ConfigError::IdentityKeyInline),
+                    other => return Err(ConfigError::UnknownIdentityKey(other.to_string())),
+                }
+            }
+            match table.get("env").and_then(toml::Value::as_str) {
+                Some(name) if !name.trim().is_empty() => name.to_string(),
+                _ => DEFAULT_IDENTITY_ENV.to_string(),
+            }
+        }
+    };
+    let schema_path = raw
+        .build
+        .schema
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SCHEMA_FILE));
+
+    // **`[serve]` is optional, because `tessera build` reads this same file.** A project that only
+    // builds a bundle has no listen addresses to state, and requiring three ports before it could
+    // write one would be a serving concern refusing a build. Absent here is not absent at startup:
+    // `serve` refuses a deployment that declares no addresses, naming them (`lib.rs`'s `prepare`),
+    // so nothing comes up listening on a default nobody chose.
+    let viewer_addr: Option<SocketAddr> = raw
         .serve
         .viewer
-        .parse()
-        .map_err(|_| ConfigError::BadAddr(raw.serve.viewer.clone()))?;
-    let session_addr: SocketAddr = raw
+        .as_deref()
+        .map(|a| a.parse().map_err(|_| ConfigError::BadAddr(a.to_string())))
+        .transpose()?;
+    let session_addr: Option<SocketAddr> = raw
         .serve
         .session
-        .parse()
-        .map_err(|_| ConfigError::BadAddr(raw.serve.session.clone()))?;
-    let control_listen = parse_control_listen(&raw.serve.control)?;
+        .as_deref()
+        .map(|a| a.parse().map_err(|_| ConfigError::BadAddr(a.to_string())))
+        .transpose()?;
+    let control_listen = raw
+        .serve
+        .control
+        .as_deref()
+        .map(parse_control_listen)
+        .transpose()?;
 
-    let session_credential = load_credential(
-        "session",
-        raw.serve.session_credential_file.as_deref(),
-        raw.serve.session_credential_env.as_deref(),
-    )?;
-    let operator_credential = load_credential(
-        "operator",
-        raw.serve.operator_credential_file.as_deref(),
-        raw.serve.operator_credential_env.as_deref(),
-    )?;
+    let session_credential = Credential::declared(
+        raw.serve.session_credential_file,
+        raw.serve.session_credential_env,
+    );
+    let operator_credential = Credential::declared(
+        raw.serve.operator_credential_file,
+        raw.serve.operator_credential_env,
+    );
 
     // §7.2's clause parameters. Every check here refuses rather than clamps: a typo must not
     // silently disable an invariant (the floor) or silently blank the density signal (theta).
@@ -2052,7 +2296,7 @@ fn parse(text: &str) -> Result<Config> {
             .compaction_window_min_segments
             .unwrap_or(DEFAULT_COMPACTION_WINDOW_MIN_SEGMENTS),
         "a zero threshold makes every night's window fold a bundle that is already one segment \
-         per slice — the ungated timer compaction §9 declines, reached by setting a gauge to a \
+         per view — the ungated timer compaction §9 declines, reached by setting a gauge to a \
          value nothing can be below",
     )?;
     // The floor must sit strictly below the ceiling or the window can never open — see
@@ -2117,6 +2361,14 @@ fn parse(text: &str) -> Result<Config> {
         "a cache that admits nothing is a 100% miss rate, and because the single-flight miss path \
          returns ProjectionBuilding to every racer that presents as a permanent 429 storm with \
          cores pegged on rebuilds, not as a slower server",
+    )?;
+    let masked_count_cache_bytes = non_zero_u64(
+        "serve.masked_count_cache_bytes",
+        raw.serve
+            .masked_count_cache_bytes
+            .unwrap_or(DEFAULT_MASKED_COUNT_CACHE_BYTES),
+        "a cache that admits nothing rebuilds a whole level's masked counts on every request that \
+         reaches a row-major layer, which is a walk of the session's entire mask per request",
     )?;
     let fragment_cache_bytes = non_zero_u64(
         "serve.fragment_cache_bytes",
@@ -2216,6 +2468,8 @@ fn parse(text: &str) -> Result<Config> {
         bundle_path: raw.bundle.path,
         cache_dir: raw.bundle.cache,
         wal_path: raw.bundle.wal,
+        schema_path,
+        identity_env,
         token_max_lifetime_secs,
         viewer_addr,
         session_addr,
@@ -2259,6 +2513,7 @@ fn parse(text: &str) -> Result<Config> {
         compaction,
         flush_max_age_secs,
         row_projection_cache_bytes,
+        masked_count_cache_bytes,
         fragment_cache_bytes,
         expected_concurrent_sessions,
     })
@@ -2273,18 +2528,63 @@ fn parse_control_listen(raw: &str) -> Result<ControlListen> {
         .map_err(|_| ConfigError::BadAddr(raw.to_string()))
 }
 
-fn load_credential(name: &'static str, file: Option<&Path>, env: Option<&str>) -> Result<String> {
-    if let Some(path) = file {
-        return Ok(fs::read_to_string(path)?.trim().to_string());
+/// Where a bearer secret comes from: a `0600` file, or an environment variable. **Never inline** —
+/// `tessera.toml` belongs in git.
+///
+/// **The locator is configuration; the secret is not.** Holding the two apart is what lets
+/// `tessera build` read this file without a serving credential in its environment, and it keeps
+/// the secret out of a `Debug`-derived struct that gets logged.
+#[derive(Debug, Clone)]
+pub struct Credential {
+    file: Option<PathBuf>,
+    env: Option<String>,
+}
+
+impl Credential {
+    fn declared(file: Option<PathBuf>, env: Option<String>) -> Credential {
+        Credential { file, env }
     }
-    if let Some(var) = env {
-        return std::env::var(var).map_err(|_| ConfigError::MissingCredential(name));
+
+    /// Read the secret, refusing a credential declared nowhere. Called once, at startup, from
+    /// [`crate::prepare`] — so a plane can never come up without its secret, and a build that
+    /// reads this same file never needs one.
+    pub fn resolve(&self, name: &'static str) -> Result<String> {
+        if let Some(path) = &self.file {
+            return Ok(fs::read_to_string(path)?.trim().to_string());
+        }
+        if let Some(var) = &self.env {
+            return std::env::var(var).map_err(|_| ConfigError::MissingCredential(name));
+        }
+        Err(ConfigError::MissingCredential(name))
     }
-    Err(ConfigError::MissingCredential(name))
 }
 
 #[cfg(test)]
 mod tests {
+
+    /// **A build-only deployment declares no `[serve]` section at all**, and that parses.
+    ///
+    /// `tessera build` reads this same file (`configuration.md` §3), so requiring three listen
+    /// addresses before a bundle could be written would be a serving concern refusing a build.
+    /// What is *not* optional is a server coming up without them: `lib.rs`'s `prepare` refuses,
+    /// naming all three, rather than binding a port nobody chose.
+    #[test]
+    fn a_build_only_deployment_needs_no_serve_section() {
+        let toml = r#"
+            [bundle]
+            path = "b"
+            cache = "c"
+            wal = "w"
+            [plugin]
+            module = "builtin:passthrough"
+            [disclosure]
+            token_max_lifetime = 3600
+        "#;
+        let config = parse(toml).expect("a build-only deployment parses");
+        assert!(config.viewer_addr.is_none());
+        assert!(config.session_addr.is_none());
+        assert!(config.control_listen.is_none());
+    }
     use super::*;
 
     #[test]
@@ -2334,7 +2634,7 @@ mod tests {
     // ---- the compaction schedule (compaction §9, decision 0056) ------------------------------
 
     /// **The shipped defaults are the ones compaction §9 states**, and a deployment that writes no
-    /// `[ingest]` section gets them: a fold at midnight UTC for four hours once a slice reaches
+    /// `[ingest]` section gets them: a fold at midnight UTC for four hours once a view reaches
     /// eight segments, an unwindowed fold at `overlay_soft_limit` deletions, and one fold a day.
     ///
     /// **Mutations this kills:** defaulting the window off (a deployment gets a mechanism only if
@@ -2585,7 +2885,7 @@ compaction_after_deletions = 9000
     }
 
     /// A zero segment threshold makes every night's window fold a bundle that is already one
-    /// segment per slice — the same ungated timer, reached through the gauge instead.
+    /// segment per view — the same ungated timer, reached through the gauge instead.
     #[test]
     fn a_zero_segment_threshold_is_refused() {
         std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
@@ -2601,6 +2901,117 @@ compaction_after_deletions = 9000
                 key: "ingest.compaction_window_min_segments",
                 ..
             })
+        ));
+    }
+
+    // ---- the deployment file itself (`configuration.md` §3) -----------------------------------
+
+    /// **Both halves default**, so the ordinary `tessera.toml` writes neither section: the
+    /// declaration is `schema.toml` beside this file, and the key is in `TESSERA_IDENTITY_KEY`.
+    #[test]
+    fn the_build_half_defaults_to_schema_toml_and_the_named_variable() {
+        let config = parse(&valid_toml("")).expect("a config naming neither must load");
+        assert_eq!(config.schema_path, PathBuf::from(DEFAULT_SCHEMA_FILE));
+        assert_eq!(config.identity_env, DEFAULT_IDENTITY_ENV);
+    }
+
+    #[test]
+    fn the_build_half_is_declarable() {
+        let toml = format!(
+            "{}\n[build]\nschema = \"corpus/declaration.toml\"\n[identity]\nenv = \"ACME_KEY\"\n",
+            valid_toml("")
+        );
+        let config = parse(&toml).expect("both sections must load");
+        assert_eq!(config.schema_path, PathBuf::from("corpus/declaration.toml"));
+        assert_eq!(config.identity_env, "ACME_KEY");
+    }
+
+    /// **The key itself never appears in this file**, which belongs in git. Refused with its own
+    /// message rather than as an unknown field, because the mistake is a reasonable one —
+    /// `--identity-file`'s format does spell it `key` — and the consequence is a committed secret.
+    #[test]
+    fn a_key_written_into_the_deployment_file_is_refused() {
+        let toml = format!("{}\n[identity]\nkey = \"00\"\n", valid_toml(""));
+        let err = parse(&toml).unwrap_err();
+        assert!(matches!(err, ConfigError::IdentityKeyInline));
+        let message = err.to_string();
+        assert!(message.contains("never appears in this file"), "{message}");
+        assert!(message.contains("TESSERA_IDENTITY_KEY"), "{message}");
+
+        let toml = format!("{}\n[identity]\nenvv = \"X\"\n", valid_toml(""));
+        assert!(matches!(
+            parse(&toml),
+            Err(ConfigError::UnknownIdentityKey(ref k)) if k == "envv"
+        ));
+    }
+
+    /// **`tessera.toml` is found by walking up**, as `Cargo.toml` is, and a missing one is a
+    /// refusal naming what to create — never a silent set of defaults, since every path in it is a
+    /// decision.
+    #[test]
+    fn the_deployment_file_is_found_by_walking_up_and_its_absence_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let deep = tmp.path().join("a/b/c");
+        std::fs::create_dir_all(&deep).unwrap();
+
+        let err = discover(None, &deep).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("no tessera.toml found"), "{message}");
+        assert!(message.contains("--deployment"), "{message}");
+        for section in ["[bundle]", "[build]", "[identity]", "[serve]"] {
+            assert!(message.contains(section), "{section} missing: {message}");
+        }
+
+        let at = tmp.path().join(DEPLOYMENT_FILE);
+        std::fs::write(&at, "").unwrap();
+        assert_eq!(discover(None, &deep).unwrap(), at);
+
+        // Named outright, the search does not run at all.
+        let named = PathBuf::from("/elsewhere/tessera.toml");
+        assert_eq!(discover(Some(&named), &deep).unwrap(), named);
+    }
+
+    /// **Every path resolves against the file's own directory, not the shell's.** A relative
+    /// `bundle.path` that moved with the working directory would make `cd crates && tessera serve`
+    /// open a different bundle from the one `tessera build` had just written.
+    #[test]
+    fn paths_resolve_against_the_deployment_files_own_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let at = tmp.path().join(DEPLOYMENT_FILE);
+        std::fs::write(&at, valid_toml("")).unwrap();
+        let config = load(&at).expect("the file loads");
+        assert_eq!(config.bundle_path, tmp.path().join("b"));
+        assert_eq!(config.cache_dir, tmp.path().join("c"));
+        assert_eq!(config.wal_path, tmp.path().join("w"));
+        assert_eq!(config.schema_path, tmp.path().join(DEFAULT_SCHEMA_FILE));
+    }
+
+    /// **A serving secret is read at startup, never at parse.** `tessera build` reads this same
+    /// file and has no business requiring one to be exported before it will write a bundle; what
+    /// a plane cannot do is come up without one.
+    #[test]
+    fn a_serving_credential_is_read_at_startup_rather_than_at_parse() {
+        // A variable nothing in this process sets, named rather than unset: the cases around this
+        // one set credential variables of their own, and `remove_var` would race them.
+        let toml = valid_toml("").replace(
+            "TESSERA_TEST_SESSION_CRED",
+            "TESSERA_TEST_CREDENTIAL_THAT_IS_NEVER_SET",
+        );
+        let config = parse(&toml).expect("an unset credential variable must still parse");
+        assert!(matches!(
+            config.session_credential.resolve("session"),
+            Err(ConfigError::MissingCredential("session"))
+        ));
+
+        // And a credential declared nowhere at all fails the same way, at the same moment.
+        let toml = valid_toml("").replace(
+            "session_credential_env = \"TESSERA_TEST_SESSION_CRED\"\n",
+            "",
+        );
+        let config = parse(&toml).expect("a config declaring no session credential still parses");
+        assert!(matches!(
+            config.session_credential.resolve("session"),
+            Err(ConfigError::MissingCredential("session"))
         ));
     }
 
@@ -3010,13 +3421,14 @@ compaction_after_deletions = 9000
         ];
         let serve_keys = [
             "row_projection_cache_bytes",
+            "masked_count_cache_bytes",
             "fragment_cache_bytes",
             "expected_concurrent_sessions",
         ];
         assert_eq!(
             ingest_keys.len() + serve_keys.len(),
-            11,
-            "there are eleven write-path and admission knobs; this table must cover all of them"
+            12,
+            "there are twelve write-path and admission knobs; this table must cover all of them"
         );
 
         for key in ingest_keys {
@@ -3458,7 +3870,7 @@ compaction_after_deletions = 9000
         assert!(
             DEFAULT_ROW_PROJECTION_CACHE_BYTES >= 2 * working_set,
             "the projection bound must carry its 2× entry-count headroom: the key is \
-             (token_id, slice, segments_version), so a second slice or a generation swap doubles \
+             (token_id, view, segments_version), so a second view or a generation swap doubles \
              the entries at unchanged session concurrency"
         );
     }

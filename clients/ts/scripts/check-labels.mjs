@@ -42,13 +42,13 @@ const labelLayer = args.labels ?? 'topics/ctfidf-2026-08';
 const labelTerm = args.term ?? '46';
 const presets = JSON.parse(await readFile(args.presets ?? '.dev/presets/stage3.json', 'utf8'));
 
-/** This deployment's one slice and its idset — read from `/v1/meta`, as any client reads them. */
+/** This deployment's one view and its idset — read from `/v1/meta`, as any client reads them. */
 async function metaOf(token) {
   const r = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bearer ${token}`}});
   if (!r.ok) throw new Error(`meta: ${r.status} ${await r.text()}`);
   return r.json();
 }
-const sliceOf = async (token) => (await metaOf(token)).slices[0].id;
+const viewOf = async (token) => (await metaOf(token)).views[0].id;
 
 async function authorise(terms) {
   const r = await fetch(`${session}/session/authorise`, {
@@ -61,12 +61,12 @@ async function authorise(terms) {
 }
 
 function frames(buf) {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const out = [];
   let at = 0;
   while (at < buf.byteLength) {
-    const kind = view.getUint8(at);
-    const length = view.getUint32(at + 1, true);
+    const kind = frame.getUint8(at);
+    const length = frame.getUint32(at + 1, true);
     out.push({kind, payload: buf.subarray(at + 5, at + 5 + length)});
     at += 5 + length;
   }
@@ -82,7 +82,7 @@ async function artifacts(token, layers) {
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
     // `k = 0`: the annotation channel's own request shape. No points come back, so nothing here
     // depends on which documents the sampler happened to draw.
-    body: JSON.stringify({slice: meta.slices[0].id, zoom: 0, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 0, layers})
+    body: JSON.stringify({view: meta.views[0].id, zoom: 0, bbox: [q.x_min, q.y_min, q.x_max, q.y_max], k: 0, layers})
   });
   if (!r.ok) throw new Error(`viewport: ${r.status} ${await r.text()}`);
   const frame = frames(new Uint8Array(Buffer.from(await r.arrayBuffer()))).find((f) => f.kind === 5);
@@ -90,7 +90,7 @@ async function artifacts(token, layers) {
   if (!frame) return out;
   const table = tableFromIPC(frame.payload);
   const layerCol = table.getChild('layer');
-  const keys = table.getChild('stable_key');
+  const keys = table.getChild('key');
   const ids = table.getChild('tessera_id').toArray();
   const masked = table.getChild('masked_count').toArray();
   const content = table.getChild('content');
@@ -112,7 +112,7 @@ async function byIdentifier(token, id) {
   const r = await fetch(`${viewer}/v1/artifacts/${id}`, {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
-    body: JSON.stringify({slice: await sliceOf(token)})
+    body: JSON.stringify({view: await viewOf(token)})
   });
   if (r.status === 404) return null;
   if (!r.ok) throw new Error(`drill-down: ${r.status} ${await r.text()}`);

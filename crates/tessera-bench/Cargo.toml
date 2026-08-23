@@ -20,6 +20,12 @@ bench-timing = ["tessera-engine/bench-timing", "tessera-server/bench-timing"]
 
 [dependencies]
 tessera-types = { path = "../tessera-types" }
+# `artifact_campaign_fixture` authors the Stage 7 campaign's spatial boxes over the generator's
+# own authored tile prefixes, and constructs its principal ladder in the generator's term space.
+# `check-layers.sh` constrains what `tessera-corpus` may depend ON — the second statement of the
+# corpus must not learn to read an artefact — and says nothing about who depends on it; the CLI
+# and several test crates already do.
+tessera-corpus = { path = "../tessera-corpus" }
 tessera-plugin = { path = "../tessera-plugin" }
 tessera-authz = { path = "../tessera-authz" }
 tessera-spatial = { path = "../tessera-spatial" }
@@ -54,8 +60,17 @@ clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }
+# `artifact_campaign_load` encodes `auth_data` the way a client does — the same version
+# `tessera-server` decodes it with.
+base64 = "0.22"
+# `artifact_serving_scale` prices the serving loop over the pool the engine already uses:
+# the shipped loop is sequential and the machine has twelve cores, so the constant factor is
+# measured before anything structural is proposed.
+rayon = { workspace = true }
 rustc-hash = "1"
 toml = "0.8"
 libc = "0.2"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `blocking` for the campaign's ingest arm: a driver that posts one batch and reads its answer
+# before building the next has no use for a runtime, and the async arms beside it are unaffected.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }

@@ -57,7 +57,7 @@ from oracle.harness import spawn_server, stop_server
 from oracle.journal import AckedJournal
 from oracle.wire import decode_viewport
 
-SLICE = cat.SLICE_ID
+VIEW = cat.VIEW_ID
 FULL_VIEWPORT = cat.FULL_VIEWPORT
 DEPTH = 4
 
@@ -129,13 +129,13 @@ def overlay_density_server(tmp_path_factory, private_catalogue_bundle):
 
 
 def _engine_counts(server, token: str) -> dict[int, int]:
-    raw = server.viewport(token, SLICE, DEPTH, FULL_VIEWPORT, k=500)
+    raw = server.viewport(token, VIEW, DEPTH, FULL_VIEWPORT, k=500)
     tiles, _points = decode_viewport(raw)
     return {tile: visible for tile, visible, _matched, _served in tiles}
 
 
 def _oracle_counts(bundle: Bundle, mask: set[int]) -> dict[int, int]:
-    selection = vp.Selection(bundle, mask, SLICE, DEPTH)
+    selection = vp.Selection(bundle, mask, VIEW, DEPTH)
     return selection.counts_for(morton.tiles_for_bbox(FULL_VIEWPORT, DEPTH, bundle.extent))
 
 
@@ -146,7 +146,7 @@ def _engine_view(server, token: str, k: int, depth: int = DEPTH):
     order — contracts §2.6 makes ascending `tessera_id` within a tile part of the payload, and
     §7.2's nesting argument depends on the served set being a prefix, so the order is contract.
     """
-    raw = server.viewport(token, SLICE, depth, FULL_VIEWPORT, k=k)
+    raw = server.viewport(token, VIEW, depth, FULL_VIEWPORT, k=k)
     tiles, points = decode_viewport(raw)
 
     counts: dict[int, tuple[int, int]] = {}
@@ -190,8 +190,8 @@ def _compare_served(
     `v_total` is recomputed **from the composed mask** on every call rather than carried over —
     that is the anchor, and it moves the moment a deny is accepted.
     """
-    v_total = vp.visible_total(bundle, mask, SLICE)
-    selection = vp.Selection(bundle, mask, SLICE, depth)
+    v_total = vp.visible_total(bundle, mask, VIEW)
+    selection = vp.Selection(bundle, mask, VIEW, depth)
     expected_counts = selection.counts_for(
         morton.tiles_for_bbox(FULL_VIEWPORT, depth, bundle.extent)
     )
@@ -277,9 +277,22 @@ def denied_overlay(catalogue_bundle: Bundle, overlay_density_server):
     )
     assert v_before == len(base_mask)
 
+    # **Spread along the block, not taken from its head.** Since
+    # [decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md) the
+    # within-signature tiebreak is the Morton code, so an entity id's position inside its block
+    # tracks its position on the map. `ordered[:2400]` is therefore a contiguous *region* — it
+    # empties whole tiles, and the point-level test below then has too few tiles left to draw a
+    # conclusion from, which is how this surfaced. Striding restores what taking a prefix used to
+    # mean back when the tiebreak was the source id: a scattered sample of the block.
     ordered = sorted(base_mask)
-    deletes = ordered[:N_DELETES]
-    suppressions = ordered[N_DELETES : N_DELETES + N_SUPPRESSIONS]
+    total = N_DELETES + N_SUPPRESSIONS
+    step = len(ordered) / total
+    picked = [ordered[int(i * step)] for i in range(total)]
+    assert len(set(picked)) == total, "the stride picked an entity twice"
+    # Interleaved rather than split in two, so neither op is a region either.
+    deletes = picked[0::3]
+    suppressions = [e for i, e in enumerate(picked) if i % 3]
+    assert len(deletes) == N_DELETES and len(suppressions) == N_SUPPRESSIONS
 
     _apply(journal, deletes, "delete")
     _apply(journal, suppressions, "suppress")
@@ -388,10 +401,10 @@ def test_the_point_level_overlay_differential_rejects_both_defective_engines(
     denied = denied_overlay["denied"]
     k = denied_overlay["k"]
 
-    v_composed = vp.visible_total(catalogue_bundle, composed, SLICE)
-    v_pre = vp.visible_total(catalogue_bundle, base_mask, SLICE)
-    correct = vp.Selection(catalogue_bundle, composed, SLICE, DENSITY_DEPTH)
-    pre_overlay = vp.Selection(catalogue_bundle, base_mask, SLICE, DENSITY_DEPTH)
+    v_composed = vp.visible_total(catalogue_bundle, composed, VIEW)
+    v_pre = vp.visible_total(catalogue_bundle, base_mask, VIEW)
+    correct = vp.Selection(catalogue_bundle, composed, VIEW, DENSITY_DEPTH)
+    pre_overlay = vp.Selection(catalogue_bundle, base_mask, VIEW, DENSITY_DEPTH)
     params = vp.params_from_meta(constants, k=k, v_total=v_composed)
     params_pre_anchor = vp.params_from_meta(constants, k=k, v_total=v_pre)
 
@@ -473,7 +486,7 @@ def _entity_of(bundle: Bundle, tessera_id: int) -> int:
     """
     global _ENTITY_BY_IDENTITY
     if _ENTITY_BY_IDENTITY is None:
-        seg = bundle.segment(SLICE)
+        seg = bundle.segment(VIEW)
         _ENTITY_BY_IDENTITY = {
             int(seg.tessera_id[row]): int(seg.entity_id[row]) for row in range(seg.row_count)
         }

@@ -39,8 +39,8 @@ fn main() {
         let values: Vec<u32> = (0..n).map(|e| (splitmix(e) % DOMAIN as u64) as u32).collect();
         let universal = ValueColumn::universal(Codes::U32(values.into()));
 
-        // A **slice-blocked** partial column: ten slices interleaved in 10⁵-entity runs, which is
-        // the shape concurrent multi-slice ingest produces (write-path §4.2). This exercises the
+        // A **view-blocked** partial column: ten views interleaved in 10⁵-entity runs, which is
+        // the shape concurrent multi-view ingest produces (write-path §4.2). This exercises the
         // presence path, which the universal column never touches — and which arm 1 measured as the
         // campaign's worst cell.
         let (partial, present_count) = {
@@ -87,7 +87,7 @@ fn main() {
         }
         scattered.run_optimize();
 
-        for (shape, column) in [("universal", &universal), ("slice-blocked", &partial)] {
+        for (shape, column) in [("universal", &universal), ("view-blocked", &partial)] {
             for (name, cand) in [
                 ("sparse-contiguous-1pct", &sparse),
                 ("broad-25pct", &broad),

@@ -157,14 +157,14 @@ fn served_ids(
 }
 
 fn segment_count(engine: &Engine) -> usize {
-    engine.generation().bundle.partitions["default"].slices["s0"]
+    engine.generation().bundle.partitions["default"].views["s0"]
         .segments
         .len()
 }
 
 fn rows_of(engine: &Engine, entities: &[EntityId]) -> Vec<Option<u32>> {
     let generation = engine.generation();
-    let row_space = &generation.bundle.partitions["default"].slices["s0"].row_space;
+    let row_space = &generation.bundle.partitions["default"].views["s0"].row_space;
     entities
         .iter()
         .map(|e| row_space.row_of(*e).map(|r| r.raw()))
@@ -204,7 +204,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
             };
             rows.push(UnallocatedRow {
                 external_id: Some(external_id.as_bytes().to_vec()),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 // x ≡ s (mod TIER_WIDTH), scaled to distinct cells inside the extent.
                 x: ((t * TIER_WIDTH + s) * 20) as f32,
                 y: 5.0,
@@ -646,7 +646,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     let reopened = engine_at(tmp.path(), &root);
     let generation = reopened.generation();
     assert_eq!(
-        generation.bundle.partitions["default"].slices["s0"]
+        generation.bundle.partitions["default"].views["s0"]
             .segments
             .len(),
         2,
@@ -668,7 +668,7 @@ fn a_merged_manifest_reopens_with_every_item_and_every_tier() {
     );
     for (entity, external_id) in &items {
         assert!(
-            generation.bundle.partitions["default"].slices["s0"]
+            generation.bundle.partitions["default"].views["s0"]
                 .row_space
                 .row_of(*entity)
                 .is_some(),
@@ -728,7 +728,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
                 let descriptors = vec![b"0".to_vec()];
                 UnallocatedRow {
                     external_id: Some(format!("late-{t}").into_bytes()),
-                    slice: "s0".to_string(),
+                    view: "s0".to_string(),
                     x: ((t * TIER_WIDTH) * 20) as f32,
                     y: 45.0,
                     scalars: Vec::new(),
@@ -850,7 +850,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
         let descriptors = vec![b"0".to_vec()];
         batch.push(UnallocatedRow {
             external_id: Some(external_id.into_bytes()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             x: ((t % 47) * 20) as f32,
             y: 5.0,
             scalars: Vec::new(),
@@ -871,7 +871,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
 
 /// The live extent list as `(seg_id, entity_lo, entity_hi)`, in listed (entity) order.
 fn extents_of(engine: &Engine) -> Vec<(String, u64, u64)> {
-    engine.generation().bundle.partitions["default"].slices["s0"]
+    engine.generation().bundle.partitions["default"].views["s0"]
         .row_space
         .extents()
         .iter()

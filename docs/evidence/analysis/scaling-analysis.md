@@ -47,7 +47,7 @@ One counterintuitive detail: **gather cost plateaus with *k***. It is 3,870 page
 
 **Masks: on disk, via frozen mmap.** They are the only structure that scales with concurrency rather than with corpus, they are mmap-native in CRoaring's frozen format, and the OS evicts idle sessions with no eviction policy to write. This is where disk residency genuinely wins even at 10<sup>9</sup>.
 
-**Everything else: disk.** The term index (~15 GB at 10<sup>9</sup>) is read once per session and can be made local by sorting term IDs before fetching. The permutation (~4 GB per slice) is read in ascending entity order, so it is a sequential scan with gaps rather than random access. Base attributes and text are drill-down only.
+**Everything else: disk.** The term index (~15 GB at 10<sup>9</sup>) is read once per session and can be made local by sorting term IDs before fetching. The permutation (~4 GB per view) is read in ascending entity order, so it is a sequential scan with gaps rather than random access. Base attributes and text are drill-down only.
 
 So the design already sits roughly here — with pre-faulting applied to the wrong things.
 

@@ -188,10 +188,10 @@ impl Threshold {
 
 /// The selection parameters for one request, resolved once and shared across every tile.
 ///
-/// **θ's anchor must be a whole-slice total, never per-segment or per-partition** — a local anchor
+/// **θ's anchor must be a whole-view total, never per-segment or per-partition** — a local anchor
 /// makes "below the cut" mean different things in different segments, and the merge stops computing
-/// the definition. A slice spanning partitions fails closed today (`MultiPartitionSlice`); a
-/// slice spanning *segments* is now the ordinary case, flush appending one per tick;
+/// the definition. A view spanning partitions fails closed today (`MultiPartitionView`); a
+/// view spanning *segments* is now the ordinary case, flush appending one per tick;
 /// §7.2 and §12.3 carry the merge rule for when they no longer do.
 #[derive(Debug, Clone, Copy)]
 pub struct SelectParams {
@@ -321,29 +321,29 @@ pub fn decode_tier(visible: u64, range_len: u64) -> DecodeTier {
 }
 
 /// One segment's contribution to one tile: the segment, its own row range for that tile, and
-/// where its rows begin in the slice's row space.
+/// where its rows begin in the view's row space.
 ///
 /// **Why a tile is a list of these rather than one range.** `tile_ranges` searches a *segment's*
 /// Morton column and returns indices local to it, while the mask is a bitmap over the whole
-/// **slice** row space — the base segment at 0, each flush or merge segment at its extent's
-/// `row_base`. A slice holding more than one segment therefore resolves each one separately and
-/// the tile is their union. Every mask operation below takes a slice-space range
+/// **view** row space — the base segment at 0, each flush or merge segment at its extent's
+/// `row_base`. A view holding more than one segment therefore resolves each one separately and
+/// the tile is their union. Every mask operation below takes a view-space range
 /// (`row_base + local`); every identity-column and gather read takes the local one.
 #[derive(Debug, Clone)]
 pub struct SelectionPart<'a> {
     pub segment: &'a SegmentData,
     /// Segment-local, as [`tessera_store::tile_ranges`] returns it.
     pub range: Range<u32>,
-    /// This segment's `row_base` in the slice's row space; 0 for the build segment.
+    /// This segment's `row_base` in the view's row space; 0 for the build segment.
     pub row_base: u32,
-    /// `mask.count_range` over this part's **slice-space** range. Supplied by the caller because
+    /// `mask.count_range` over this part's **view-space** range. Supplied by the caller because
     /// it is already needed to decide whether the tile is empty at all.
     pub visible: u64,
 }
 
 impl<'a> SelectionPart<'a> {
-    /// The single-segment case: a slice whose only segment is the build one, whose rows therefore
-    /// begin at 0, so segment-local and slice-space rows coincide. What a bundle straight out of
+    /// The single-segment case: a view whose only segment is the build one, whose rows therefore
+    /// begin at 0, so segment-local and view-space rows coincide. What a bundle straight out of
     /// `tessera build` presents, and what the equivalence tests and the route-saving example
     /// construct.
     pub fn base(segment: &'a SegmentData, range: Range<u32>, visible: u64) -> Self {
@@ -355,8 +355,8 @@ impl<'a> SelectionPart<'a> {
         }
     }
 
-    /// This part's range in slice row space — what every mask operation takes.
-    fn slice_range(&self) -> Range<u32> {
+    /// This part's range in view row space — what every mask operation takes.
+    fn view_range(&self) -> Range<u32> {
         self.row_base + self.range.start..self.row_base + self.range.end
     }
 
@@ -365,7 +365,7 @@ impl<'a> SelectionPart<'a> {
     }
 }
 
-/// The parts of one tile, with the slice-space↔segment-local resolution they define.
+/// The parts of one tile, with the view-space↔segment-local resolution they define.
 ///
 /// **The union is a genuine union, not a concatenation, and that is §7.2's requirement rather than
 /// a convenience.** `cap` and `k_min` are per *tile*: a tile spanning three segments has one `k`
@@ -388,14 +388,14 @@ impl<'a> SelectionParts<'a> {
         self.parts
     }
 
-    /// The part owning `slice_row`, and that row's segment-local index.
+    /// The part owning `view_row`, and that row's segment-local index.
     ///
-    /// A reverse linear scan rather than a binary search: the part list is the slice's live
+    /// A reverse linear scan rather than a binary search: the part list is the view's live
     /// segment count, which the merge policy bounds to a handful, and at that size the scan is
     /// both faster and obviously correct. Parts are ascending in `row_base` (row space is built by
-    /// appending extents), so the first part starting at or below `slice_row` owns it.
-    pub fn resolve(&self, slice_row: u32) -> (&'a SegmentData, u32) {
-        let (_, segment, local) = self.resolve_indexed(slice_row);
+    /// appending extents), so the first part starting at or below `view_row` owns it.
+    pub fn resolve(&self, view_row: u32) -> (&'a SegmentData, u32) {
+        let (_, segment, local) = self.resolve_indexed(view_row);
         (segment, local)
     }
 
@@ -406,27 +406,27 @@ impl<'a> SelectionParts<'a> {
     /// part rather than once per row, and needs somewhere to look the resolved set up. Returning
     /// the index rather than having the caller match on the segment pointer keeps that lookup an
     /// array index, and keeps `resolve`'s own contract unchanged for everyone else.
-    pub fn resolve_indexed(&self, slice_row: u32) -> (usize, &'a SegmentData, u32) {
+    pub fn resolve_indexed(&self, view_row: u32) -> (usize, &'a SegmentData, u32) {
         for (i, part) in self.parts.iter().enumerate().rev() {
-            if slice_row >= part.row_base {
-                return (i, part.segment, slice_row - part.row_base);
+            if view_row >= part.row_base {
+                return (i, part.segment, view_row - part.row_base);
             }
         }
         // Unreachable for a row this module itself produced: every such row came from a part's own
-        // slice range, and the first part's `row_base` is 0. A panic rather than a fallback,
+        // view range, and the first part's `row_base` is 0. A panic rather than a fallback,
         // because a wrong answer here gathers one entity's coordinates under another's identity.
-        panic!("slice row {slice_row} lies below every part's row_base — not a row of this tile");
+        panic!("view row {view_row} lies below every part's row_base — not a row of this tile");
     }
 
-    fn id_at(&self, slice_row: u32) -> u64 {
-        let (segment, local) = self.resolve(slice_row);
+    fn id_at(&self, view_row: u32) -> u64 {
+        let (segment, local) = self.resolve(view_row);
         segment.columns.tessera_id()[local as usize]
     }
 }
 
 /// One tile's selected rows, ascending by `tessera_id`.
 pub struct Selection {
-    /// Row indices in **slice row space**, **ascending by the row's `tessera_id`** — not by row
+    /// Row indices in **view row space**, **ascending by the row's `tessera_id`** — not by row
     /// index. Resolve each to its segment with [`SelectionParts::resolve`] before gathering.
     pub rows: Vec<u32>,
     /// How many rows this call actually read, counted **inside** the loops that read them.
@@ -447,13 +447,13 @@ impl Selection {
     /// would be a differential-oracle landmine.
     ///
     /// `visible` must be `Σ part.visible` exactly, and each `part.visible` must be
-    /// `mask.count_range(part.slice_range())`. It always carried correctness (the serve-all
+    /// `mask.count_range(part.view_range())`. It always carried correctness (the serve-all
     /// predicate and the `m` clamp read it); the [`DecodeTier::FullRange`] tier also decodes by it
     /// — `visible == range.len()` is taken as proof that the whole range is visible, which is only
     /// true of the *composed* count.
     ///
     /// **The tier is chosen per part, the definition is evaluated over the union.** Density is a
-    /// property of how the mask sits over one contiguous range, so a slice whose base segment is
+    /// property of how the mask sits over one contiguous range, so a view whose base segment is
     /// dense and whose fresh flush segment is sparse should decode each the way that segment's own
     /// density warrants — but `C_θ`, the heap, the cap and the floor are all single, tile-wide
     /// quantities. A single-part tile takes exactly the path it took before segments could be
@@ -506,14 +506,14 @@ impl Selection {
                 if part.is_empty() {
                     continue;
                 }
-                let slice_range = part.slice_range();
-                let range_len = u64::from(slice_range.end - slice_range.start);
+                let view_range = part.view_range();
+                let range_len = u64::from(view_range.end - view_range.start);
                 match decode_tier(part.visible, range_len) {
                     DecodeTier::FullRange => {
                         rows_visited += range_len;
-                        rows.extend(slice_range.clone());
+                        rows.extend(view_range.clone());
                     }
-                    DecodeTier::Runs => mask.for_each_visible_run(slice_range.clone(), |run| {
+                    DecodeTier::Runs => mask.for_each_visible_run(view_range.clone(), |run| {
                         rows_visited += u64::from(run.end - run.start);
                         rows.extend(run);
                     }),
@@ -525,11 +525,11 @@ impl Selection {
                         // unbounded final `next_many` would decode up to a buffer's worth of rows
                         // past the part and throw them away — measured at ~15% of the whole
                         // request on ~500-visible tiles, since the waste is per tile. The
-                        // `>= slice_range.end` check stays as the fail-safe for a caller-
+                        // `>= view_range.end` check stays as the fail-safe for a caller-
                         // miscounted `visible`.
-                        let source = mask.decode_source(slice_range.clone());
+                        let source = mask.decode_source(view_range.clone());
                         let mut iter = source.bitmap().iter();
-                        iter.reset_at_or_after(slice_range.start);
+                        iter.reset_at_or_after(view_range.start);
                         let mut buf = [0u32; VALUE_BUF_LEN];
                         let mut remaining = part.visible;
                         'decode: while remaining > 0 {
@@ -539,7 +539,7 @@ impl Selection {
                                 break;
                             }
                             for &row in &buf[..n] {
-                                if row >= slice_range.end {
+                                if row >= view_range.end {
                                     break 'decode;
                                 }
                                 rows_visited += 1;
@@ -562,7 +562,7 @@ impl Selection {
             // pass sufficient.
             //
             // In the slice-fed tiers the threshold count goes first, over the contiguous id
-            // slice — a branchless filter-count the compiler vectorises — and the heap feed
+            // view — a branchless filter-count the compiler vectorises — and the heap feed
             // second; the value-fed tier interleaves them per row as the retired code did. The
             // split changes nothing observable because `c_theta` and the heap never read each
             // other.
@@ -628,12 +628,12 @@ impl Selection {
                 }
                 let ids = part.segment.columns.tessera_id();
                 let base = part.row_base;
-                let slice_range = part.slice_range();
-                let range_len = u64::from(slice_range.end - slice_range.start);
+                let view_range = part.view_range();
+                let range_len = u64::from(view_range.end - view_range.start);
                 match decode_tier(part.visible, range_len) {
                     DecodeTier::FullRange => {
                         scan_slice(
-                            slice_range.start,
+                            view_range.start,
                             &ids[part.range.start as usize..part.range.end as usize],
                             params,
                             &mut rows_visited,
@@ -641,8 +641,8 @@ impl Selection {
                             &mut heap,
                         );
                     }
-                    DecodeTier::Runs => mask.for_each_visible_run(slice_range.clone(), |run| {
-                        // `run` is in slice space; the identity column is indexed segment-locally.
+                    DecodeTier::Runs => mask.for_each_visible_run(view_range.clone(), |run| {
+                        // `run` is in view space; the identity column is indexed segment-locally.
                         scan_slice(
                             run.start,
                             &ids[(run.start - base) as usize..(run.end - base) as usize],
@@ -660,9 +660,9 @@ impl Selection {
                         // Bounded by this part's `visible` for the same reason as the serve-all
                         // arm above: the final unbounded read would decode a buffer's worth of
                         // rows past the part.
-                        let source = mask.decode_source(slice_range.clone());
+                        let source = mask.decode_source(view_range.clone());
                         let mut iter = source.bitmap().iter();
-                        iter.reset_at_or_after(slice_range.start);
+                        iter.reset_at_or_after(view_range.start);
                         let mut buf = [0u32; VALUE_BUF_LEN];
                         let mut remaining = part.visible;
                         'decode: while remaining > 0 {
@@ -672,7 +672,7 @@ impl Selection {
                                 break;
                             }
                             for &row in &buf[..n] {
-                                if row >= slice_range.end {
+                                if row >= view_range.end {
                                     break 'decode;
                                 }
                                 rows_visited += 1;

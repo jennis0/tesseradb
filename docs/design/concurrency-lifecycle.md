@@ -133,7 +133,7 @@ ingest buffer, is `deleted > suppressed > buffered`, single-sourced in one funct
 transcriptions of a precedence rule is how a suppression stops suppressing.
 
 **[write-path §5.3](write-path.md#53-the-overlay-two-stores-and-the-row-space-mask) owns the
-mechanism**, including the derived row-space mask (`deleted ∪ suppressed` per slice, subtracted
+mechanism**, including the derived row-space mask (`deleted ∪ suppressed` per view, subtracted
 with one `andnot`, so per-request work does not grow with denies ever accepted) and its
 derivation rule — additions may be incremental, **any removal re-derives**, since subtracting a
 row on unsuppress would re-expose an item `deleted` still holds.
@@ -279,7 +279,7 @@ tombstoned row is a fold, and folds are compaction's).
 
 ### 5.3 Compaction, with the full carry-forward rule
 
-Compaction snapshots a generation, emits the partition-slice's single segment, folds **snapshot-covered** posting deltas and tombstones into base postings, rewrites the permutation, and publishes a new prefix.
+Compaction snapshots a generation, emits the partition-view's single segment, folds **snapshot-covered** posting deltas and tombstones into base postings, rewrites the permutation, and publishes a new prefix.
 
 **Carried forward verbatim, not folded:** segments and deltas flushed after the snapshot, **tombstones accepted after the snapshot** — folding away a post-snapshot tombstone while the entity survives in the folded base is fail-open — the active suppression set, and all unfolded overlay entries. The new prefix's first side-manifest lists all of it; `n` continues; old prefix retention per §2.2.
 

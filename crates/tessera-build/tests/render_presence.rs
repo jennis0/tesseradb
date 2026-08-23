@@ -23,7 +23,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::{Attribute, Listing, Schema, Vocabulary, VocabularyKind};
+use tessera_build::config::{Attribute, Visibility, Schema, Vocabulary, ValueSet};
 use tessera_build::{build, BuildArgs};
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::Bounds;
@@ -108,11 +108,13 @@ fn write_empty_pairs(path: &Path) {
 
 fn render(name: &str, ty: ScalarType) -> Attribute {
     Attribute {
+        field: None,
         name: name.to_string(),
+        title: None,
         ty,
         analyser: None,
         vocabulary: None,
-        vocabulary_kind: None,
+        value_set: None,
         index: false,
         render: true,
     }
@@ -120,11 +122,13 @@ fn render(name: &str, ty: ScalarType) -> Attribute {
 
 fn schema() -> Schema {
     let archive = Attribute {
+        field: None,
         name: "archive".to_string(),
+        title: None,
         ty: ScalarType::U8,
         analyser: None,
         vocabulary: Some("archive".to_string()),
-        vocabulary_kind: Some(VocabularyKind::Declared),
+        value_set: Some(ValueSet::Closed),
         index: false,
         render: true,
     };
@@ -138,13 +142,15 @@ fn schema() -> Schema {
             "archive".to_string(),
             Vocabulary {
                 name: "archive".to_string(),
-                kind: VocabularyKind::Declared,
-                listing: Listing::Public,
+                title: None,
+                value_set: ValueSet::Closed,
+                width: ScalarType::U8,
+                visibility: Visibility::Public,
                 codes: ARCHIVE_VALUES
                     .iter()
                     .map(|(k, c)| (k.to_string(), *c))
                     .collect::<BTreeMap<_, _>>(),
-                labels: BTreeMap::new(),
+                titles: BTreeMap::new(),
                 reserved: Vec::new(),
             },
         )]),
@@ -152,9 +158,15 @@ fn schema() -> Schema {
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
+    let schema = schema();
     BuildArgs {
+        point_fields: Default::default(),
         points: points.to_path_buf(),
-        pairs: pairs.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: Bounds {
             x_min: 0.0,
@@ -162,21 +174,20 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             y_min: 0.0,
             y_max: 1000.0,
         },
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: schema(),
+        schema,
     }
 }
 
@@ -191,7 +202,7 @@ fn build_bundle() -> tempfile::TempDir {
 }
 
 fn segment_dir(out: &Path) -> PathBuf {
-    out.join("v00000/partitions/default/slices/s0/segments/seg-0")
+    out.join("v00000/partitions/default/views/s0/segments/seg-0")
 }
 
 /// The bitmap says exactly which rows carry a score, and the column still holds the type's zero at
@@ -261,7 +272,7 @@ fn no_file_is_written_for_a_full_column_or_for_a_category() {
 fn the_bitmap_is_digested_and_a_missing_one_refuses_at_open() {
     let dir = build_bundle();
     let out = dir.path().join("bundle");
-    let rel = "partitions/default/slices/s0/segments/seg-0/presence/score.roaring";
+    let rel = "partitions/default/views/s0/segments/seg-0/presence/score.roaring";
 
     let bundle = open_bundle(&out).expect("the bundle opens");
     let manifest = &bundle.manifest;

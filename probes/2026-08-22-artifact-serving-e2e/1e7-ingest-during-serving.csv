@@ -1,0 +1,2 @@
+tier,sessions,layer,rows_accepted,rows_per_second,batch_p50_ms,batch_p99_ms,batch_max_ms,read_quiet_requests,read_quiet_p50_ms,read_quiet_p99_ms,read_loaded_requests,read_loaded_p50_ms,read_loaded_p99_ms,count_before_attribute,count_after_flush_attribute,seconds_after_flush_request,count_before_enumerated,count_after_flush_enumerated,shed_during_run,peak_rss_bytes
+1e7,32,generator/partition-attribute,1000000,47420.74169733095,21.403166000000002,201.803307,790.3679729999999,2138,1283.99,1682.4,1424,961.38,1695.55,92,1000092,7.26,92,92,0,6812504064

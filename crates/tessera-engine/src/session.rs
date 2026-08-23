@@ -233,7 +233,7 @@ pub struct Session {
     /// Bearer token: 32 random bytes, hex-encoded.
     pub token: String,
     /// A process-local identity for this session, distinct from `token` — used as (part of) the
-    /// row-projection cache key (`(token_id, slice, segments_version)`, shared-context
+    /// row-projection cache key (`(token_id, view, segments_version)`, shared-context
     /// constraint 8) so the cache never has to hash or compare the full token string.
     pub token_id: u64,
     /// The credential's granted terms, resolved to bundle-relative `TermId`s. An unknown
@@ -337,7 +337,7 @@ impl Session {
     }
 }
 
-/// One (partition, slice)'s live segment count — [`Engine::live_segment_counts`]'s element, and
+/// One (partition, view)'s live segment count — [`Engine::live_segment_counts`]'s element, and
 /// what `/control/status` publishes under `segments`.
 ///
 /// **Plain `String`s and a `usize`, defined here rather than re-exported from `tessera-store`.**
@@ -346,10 +346,10 @@ impl Session {
 /// `DeclaredScalar` already establish at the crate root. This one owns nothing of the store's
 /// vocabulary, so it is a definition here rather than a re-export.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SliceSegments {
+pub struct ViewSegments {
     pub partition: String,
-    pub slice: String,
-    /// Segments this slice's viewport sweep would iterate — base plus every flush extent merge has
+    pub view: String,
+    /// Segments this view's viewport sweep would iterate — base plus every flush extent merge has
     /// not yet collapsed.
     pub segments: usize,
 }
@@ -357,7 +357,7 @@ pub struct SliceSegments {
 /// One partition's live geometry position — [`Engine::partition_status`]'s element, and what
 /// `/control/status` publishes as contracts §3.4's per-partition block.
 ///
-/// Defined here rather than re-exported from `tessera-store`, for [`SliceSegments`]' reason: the
+/// Defined here rather than re-exported from `tessera-store`, for [`ViewSegments`]' reason: the
 /// server may not depend on the store (SA §3), so a value it publishes must be nameable from this
 /// crate.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,29 +395,29 @@ pub enum EngineError {
     Wal(WalError),
     Plugin(PluginError),
     Io(io::Error),
-    /// A viewport request named a slice this bundle doesn't have.
-    UnknownSlice(String),
-    /// A slice holding a segment whose rows have no known place in the slice's row space.
+    /// A viewport request named a view this bundle doesn't have.
+    UnknownView(String),
+    /// A view holding a segment whose rows have no known place in the view's row space.
     ///
     /// `tile_ranges` returns **segment-local** row indices (contracts §2.4) while the mask is a
-    /// bitmap over the whole **slice** row space, so serving a segment requires knowing its
+    /// bitmap over the whole **view** row space, so serving a segment requires knowing its
     /// `row_base`. Exactly one segment — the build segment, the one `permutation.bin` addresses —
     /// legitimately has no extent and begins at 0; every other arrives with one, from a flush or
     /// from a merge. A second segment with no extent means the row space and the segment list
-    /// disagree about what the slice holds.
+    /// disagree about what the view holds.
     ///
     /// **Fails closed because the wrong answer is quiet.** Defaulting such a segment to `row_base
     /// 0` would count its rows against the base segment's mask positions and gather points from
     /// one entity under another's identity — every count plausible, every mark wrong, no error
     /// anywhere. That is a worse outcome than a 500.
     SegmentWithoutRowBase {
-        slice: String,
+        view: String,
         seg_id: String,
     },
-    /// This generation's deny mask has no entry for a slice its bundle carries.
+    /// This generation's deny mask has no entry for a view its bundle carries.
     ///
     /// **Fails closed for the same reason [`Self::SegmentWithoutRowBase`] does: the wrong answer
-    /// is silent.** `compose::derive_denied` gives every slice an entry, empty when nothing is
+    /// is silent.** `compose::derive_denied` gives every view an entry, empty when nothing is
     /// denied, precisely so that a missing one cannot be read as "nothing is denied here". Reading
     /// it that way would compose a mask with the deny half simply absent — every suppressed and
     /// deleted row served on the map, every count including them, and no error anywhere. A 500 is
@@ -426,21 +426,21 @@ pub enum EngineError {
     /// Unreachable while the mask and the bundle are built together, which `Executor::publish`
     /// asserts in debug.
     DenyMaskMissing {
-        slice: String,
+        view: String,
     },
-    /// A slice carried by more than one partition.
+    /// A view carried by more than one partition.
     ///
     /// The symmetric case to [`Self::SegmentWithoutRowBase`], and it fails closed for the symmetric
-    /// reason: `Engine::viewport` resolves a slice by taking the first partition that carries the
+    /// reason: `Engine::viewport` resolves a view by taking the first partition that carries the
     /// id, and θ's anchor plus every rank is then computed over **that partition alone**. Design
     /// §12.3 requires the anchor to be session-global across partitions — a per-partition anchor
     /// makes "below the cut" mean different things in different partitions, so the coordinator's
     /// union stops computing §7.2's definition. The build emits exactly one partition, so this
     /// is unreachable today; serving a §12 bundle half-masked with no error is what it prevents.
-    MultiPartitionSlice(String),
+    MultiPartitionView(String),
     /// A bundle-level file (`CURRENT`, a plugin hash) was not the shape this engine expects.
     Malformed(String),
-    /// `/v1/categories` was asked for a `listing = "per_viewer"` column whose per-`(column, code)`
+    /// `/v1/categories` was asked for a `visibility = "derived"` column whose per-`(column, code)`
     /// membership sets could not be read — they are the column's derived postings, and either the
     /// bundle carries none for it or the file failed to read.
     ///
@@ -471,7 +471,7 @@ pub enum EngineError {
     /// depth of its own, so a silently-reduced offset would hand the client cells it cannot
     /// interpret; rejecting means the depth is always `zoom + offset` from the caller's own request.
     UnderlayRefused(String),
-    /// This session's row projection for `(token_id, slice, segments_version)` was being built by
+    /// This session's row projection for `(token_id, view, segments_version)` was being built by
     /// a concurrent request, and **this request waited for it and the wait budget ran out**
     /// (decision 0058). It is no longer the immediate answer to finding a build in flight: a racer
     /// parks on that build and is served its result, because refusing sheds no load — the work is
@@ -533,28 +533,28 @@ impl std::fmt::Display for EngineError {
             EngineError::Wal(e) => write!(f, "wal error: {e}"),
             EngineError::Plugin(e) => write!(f, "plugin error: {e}"),
             EngineError::Io(e) => write!(f, "io error: {e}"),
-            EngineError::UnknownSlice(slice) => write!(f, "unknown slice '{slice}'"),
-            EngineError::SegmentWithoutRowBase { slice, seg_id } => write!(
+            EngineError::UnknownView(view) => write!(f, "unknown view '{view}'"),
+            EngineError::SegmentWithoutRowBase { view, seg_id } => write!(
                 f,
-                "slice '{slice}' holds segment '{seg_id}', which has no extent and so no known \
-                 row_base — the row space and the segment list disagree about what this slice \
+                "view '{view}' holds segment '{seg_id}', which has no extent and so no known \
+                 row_base — the row space and the segment list disagree about what this view \
                  holds (see EngineError::SegmentWithoutRowBase's doc)"
             ),
-            EngineError::DenyMaskMissing { slice } => write!(
+            EngineError::DenyMaskMissing { view } => write!(
                 f,
-                "this generation's deny mask has no entry for slice '{slice}', so the mask and \
+                "this generation's deny mask has no entry for view '{view}', so the mask and \
                  the bundle disagree about what it holds (see EngineError::DenyMaskMissing's doc)"
             ),
-            EngineError::MultiPartitionSlice(slice) => write!(
+            EngineError::MultiPartitionView(view) => write!(
                 f,
-                "slice '{slice}' is carried by more than one partition, which this engine's \
+                "view '{view}' is carried by more than one partition, which this engine's \
                  single-anchor selection does not yet support (see \
-                 EngineError::MultiPartitionSlice's doc)"
+                 EngineError::MultiPartitionView's doc)"
             ),
             EngineError::Malformed(detail) => write!(f, "malformed: {detail}"),
             EngineError::VocabularyVisibilityUnavailable { column, detail } => write!(
                 f,
-                "column '{column}' declares `listing = \"per_viewer\"`, and its per-viewer value \
+                "column '{column}' declares `visibility = \"derived\"`, and its per-viewer value \
                  visibility could not be derived ({detail}). This column's values are refused \
                  rather than published unfiltered, and rather than served empty — an empty value \
                  set is what a principal who may see none of them is told"
@@ -606,11 +606,24 @@ pub struct Engine {
     pub(crate) plugin: Arc<dyn Plugin>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
-    /// Artifact memberships in row space, one entry per `(slice, layer, level)` — see
+    /// Artifact memberships in row space, one entry per `(view, layer, level)` — see
     /// [`ArtifactProjections`]. Distinct from the cache above and deliberately so: that one is
     /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
     /// published), and they move on different events.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The masked-count histograms of the levels served **row-major**, per `(session, layer,
+    /// level)` — [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+    /// one named exception, byte-budgeted exactly as the row-projection cache is.
+    ///
+    /// **Beside the projections rather than inside them, because the cadences differ**: a row form
+    /// is per deployment and moves when a level is published, and this is per *session* and moves
+    /// when the principal's mask does — which includes every accepted deny. Empty for a deployment
+    /// with no row-major level, which is most of them.
+    pub(crate) masked_counts: Arc<crate::histogram::MaskedCountCache>,
+    /// One lineage per `(layer, level)` — see [`crate::cut::Lineages`]. Keyed per *deployment* like
+    /// the projections beside it, and on the store's version alone, because a level's parent
+    /// pointers are the same whichever view is served.
+    pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
@@ -797,6 +810,54 @@ impl Engine {
     ) -> Result<Engine> {
         let bundle = open_bundle(bundle_root).map_err(EngineError::Store)?;
 
+        // **The plugin that serves a bundle must be the plugin that labelled it** (contracts
+        // §2.2). The build records `data_plugin_hash` in `MANIFEST.json`; every posting in the
+        // bundle is the output of *that* implementation's label rule. Serving under a different
+        // one does not fail loudly anywhere downstream — the postings are read as written and the
+        // requests are resolved by the new rule, so every item is mislabelled and the mislabelling
+        // is invisible. This is the only place the two values meet, so it is the only place the
+        // agreement can be checked.
+        //
+        // **Fail closed on an empty or absent manifest hash.** A bundle that does not say what
+        // labelled it cannot be shown to have been labelled by this plugin, and the "unknown"
+        // case is exactly the hand-written or half-migrated manifest the check is for.
+        //
+        // Only the *data* hash is checked. The auth module's hash keys the mask cache
+        // (contracts §4.1) and is not recorded in the manifest, so there is no equivalent
+        // open-time enforcement for it — and no claim here that there is.
+        let served_hash = plugin.data_plugin_hash();
+        if bundle.manifest.data_plugin_hash != served_hash {
+            let recorded = if bundle.manifest.data_plugin_hash.is_empty() {
+                "<empty>"
+            } else {
+                &bundle.manifest.data_plugin_hash
+            };
+            return Err(EngineError::Malformed(format!(
+                "MANIFEST data_plugin_hash is '{recorded}' but this process serves with plugin \
+                 '{served_hash}': the bundle's postings were labelled by a different rule, so \
+                 serving them here would mislabel every one of them. Rebuild the bundle with \
+                 this plugin, or serve it with the plugin that built it."
+            )));
+        }
+
+        // **The containment partition's gate, announced where the plugin is** (see
+        // `crate::containment`). The partition answers `G ⊆ M_auth` from term signatures, which is
+        // sound exactly when authorisation is signature-shaped — true of the builtin plugin by
+        // construction and unverifiable for any other. Under a foreign plugin nothing is built and
+        // containment stays on the masked-count route, which asks `M_auth` itself. That is
+        // fail-closed and correct, and it is also invisible from a response, so it is said here.
+        if !crate::containment::signature_shaped(&served_hash) {
+            tracing::warn!(
+                data_plugin_hash = %served_hash,
+                "this bundle is served by a plugin other than the builtin, so the containment \
+                 partition is not built: the expression it interns is over term signatures, which \
+                 is sound only where an entity's visibility is decided by its own term set, and a \
+                 foreign plugin's rule cannot be shown to be. Containment is answered per artifact \
+                 per request against the composed mask instead — the same answer, at the cost the \
+                 partition exists to remove"
+            );
+        }
+
         let current = read_current(bundle_root)?;
         let prefix = current.prefix.clone();
         let bundle_identity = hex_decode_32(&current.manifest_digest).ok_or_else(|| {
@@ -914,7 +975,7 @@ impl Engine {
             .map(|partition| partition.manifest.entity_id_high_water)
             .collect();
         // **The row-less mark's homes are the side manifests only**, and `SEGMENTS-0.json` is one
-        // of them — a build given `--layers` spends row-less ids and records the mark there, so
+        // of them — a build whose declaration carries layers spends row-less ids and records the mark there, so
         // this is where a built layer's claim is honoured. `MANIFEST.json` carries no such field at
         // all, and folding the ceiling in as the bundle term is what says "nothing row-less yet"
         // without inventing one.
@@ -946,6 +1007,28 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.membership_extents.iter().cloned())
             .collect();
+        // The two lists that make a level's derived structures placeable across a restart, unioned
+        // on the same argument.
+        let manifest_level_versions: Vec<tessera_store::manifest::LevelVersion> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.level_versions.iter().cloned())
+            .collect();
+        let manifest_containment_extents: Vec<tessera_store::manifest::ContainmentExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.containment_extents.iter().cloned())
+            .collect();
+        let manifest_tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.tile_index_extents.iter().cloned())
+            .collect();
+        let manifest_row_column_extents: Vec<tessera_store::manifest::RowColumnExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.row_column_extents.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -960,20 +1043,21 @@ impl Engine {
                 layers: &manifest_layers,
                 tombstones: &manifest_layer_tombstones,
                 membership_extents: &manifest_membership_extents,
+                level_versions: &manifest_level_versions,
                 prefix_dir: prefix_dir.clone(),
             },
             &dict,
             &initial_deny,
             &mut vocabularies,
-            // An entity belongs to exactly one slice, so "any slice's row space holds it" is the
-            // same question as "its slice's does" — and asking it this way needs no slice lookup,
+            // An entity belongs to exactly one view, so "any view's row space holds it" is the
+            // same question as "its view's does" — and asking it this way needs no view lookup,
             // which the buffer would otherwise have to supply before it has been filtered.
             |entity| {
                 bundle.partitions.values().any(|partition| {
                     partition
-                        .slices
+                        .views
                         .values()
-                        .any(|slice| slice.row_space.row_of(entity).is_some())
+                        .any(|view| view.row_space.row_of(entity).is_some())
                 })
             },
         )?;
@@ -1084,6 +1168,60 @@ impl Engine {
         // Unbounded until `set_cache_bounds` is called. `tessera-server` calls it immediately
         // after `open`, having validated the figure; every other embedder (tests, benches,
         // examples) gets unbounded caches, which is what a read-only embedder wants.
+        // **The fold's containment partitions, adopted where their coordinate still holds.**
+        // Placed here rather than inside `reconstruct` because it is the last step of open that
+        // depends on the store: the level versions it compares against are the seeded ones *plus*
+        // whatever the WAL replayed over them, so it has to run after both. A partition whose
+        // coordinate does not match is dropped and the level recomposes on first use — see
+        // [`crate::artifacts::ArtifactProjections::adopt`], and note that the direction of the
+        // mistake this forbids is permissive.
+        let artifact_projections = Arc::new(crate::artifacts::ArtifactProjections::new());
+        artifact_projections.adopt_all(
+            &prefix_dir,
+            generation.load().prefix.as_str(),
+            &manifest_containment_extents,
+            &write_state.artifacts,
+        );
+        // **And the tile indexes beside them, at the same point and under the same rule** — the
+        // level versions have to be the seeded ones plus the replay, and the direction of a
+        // mistaken adoption is the mirror image of the partition's: a stale index is *narrow*, and
+        // a narrow extent settles an artifact whose membership is not inside the viewport.
+        artifact_projections.adopt_indexes(
+            &prefix_dir,
+            generation.load().prefix.as_str(),
+            &manifest_tile_index_extents,
+            &write_state.artifacts,
+        );
+        // **And the row-major columns, at the same point and under the same rule.** A stale column
+        // is narrow in the same way an index is: a growth added rows it does not label, and an
+        // unlabelled row is one no artifact claims — so the artifact holding it stops being a
+        // candidate there and its masked count comes back short.
+        artifact_projections.adopt_columns(
+            &prefix_dir,
+            generation.load().prefix.as_str(),
+            &manifest_row_column_extents,
+            &write_state.artifacts,
+        );
+        // **What the open actually took**, counted here rather than left to be inferred from the
+        // absence of a build later.
+        //
+        // The three lists above are written by a fold *and by `tessera build`* — the build's
+        // post-bundle artifact pass files them on the same coordinates through the same writer
+        // (`tessera_store::membership`), so a fresh bundle adopts exactly as a folded one does. That
+        // is the half of the 2026-08-22 campaign's finding 2 this line makes observable: an open
+        // reporting zero adoptions against a manifest that names extents is every coordinate being
+        // rejected, which is correct and is the expensive answer — the next request derives what
+        // this open would have mapped, and at half a million artifacts that derivation is the
+        // minute-long one the campaign found being truncated inside a response.
+        tracing::info!(
+            containment_named = manifest_containment_extents.len(),
+            containment_adopted = artifact_projections.adopted(),
+            tile_indexes_named = manifest_tile_index_extents.len(),
+            row_columns_named = manifest_row_column_extents.len(),
+            prefix = %generation.load().prefix,
+            "the engine adopted the prefix's derived artifact structures"
+        );
+
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
@@ -1101,7 +1239,9 @@ impl Engine {
             // after `open`, having validated the figure; every other embedder (tests, benches,
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
-            artifact_projections: Arc::new(crate::artifacts::ArtifactProjections::new()),
+            artifact_projections: Arc::clone(&artifact_projections),
+            masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
+            lineages: Arc::new(crate::cut::Lineages::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
             config,
@@ -1226,7 +1366,8 @@ impl Engine {
     /// including the wake: the executor draining nothing is what parks it, so unpausing must ring
     /// the doorbell.
     pub fn set_merge_publication_paused_for_test(&self, paused: bool) {
-        self.merge_publication_paused.store(paused, Ordering::SeqCst);
+        self.merge_publication_paused
+            .store(paused, Ordering::SeqCst);
         if !paused {
             self.write.wake();
         }
@@ -1338,6 +1479,28 @@ impl Engine {
                 // rebuild to recover.
                 None => unresolved_count += 1,
             }
+        }
+
+        // **`public` is added here, inside the trust boundary, and nowhere else.**
+        // It is the one label every principal holds (`per-point-attributes.md` §3.8), and where it
+        // is added decides what it is worth. Not as a grant, which would make the corpus's only
+        // universal label depend on every credential being issued correctly; not in the plugin,
+        // which is caller-supplied code deciding what a credential's bytes mean; here, after the
+        // credential has been resolved and before anything is masked with the result.
+        //
+        // **Resolved by descriptor, not asserted as term `0`.** Every build interns it first, so
+        // the two are the same number in every bundle this build writes — but a bundle whose
+        // dictionary does not carry the label at all would, under a hardcoded `0`, hand every
+        // principal whichever descriptor happened to be interned first. Looking the label up costs
+        // one dictionary probe per authorise and cannot fail open: a bundle without it adds
+        // nothing, which is the narrow direction.
+        if let Some(term) = generation.dict.lookup(tessera_authz::PUBLIC_LABEL) {
+            debug_assert_eq!(
+                term,
+                tessera_authz::PUBLIC_TERM,
+                "`public` is reserved at term 0 by every build"
+            );
+            satisfied.insert(term);
         }
 
         let mut satisfied_sorted: Vec<TermId> = satisfied.iter().copied().collect();
@@ -1555,7 +1718,47 @@ impl Engine {
     /// `revoke_prunes_the_token` asserts on. See `RowProjectionCache::prune_token` for why this is
     /// memory hygiene rather than a disclosure control, and for the cost of the pass.
     pub fn prune_token(&self, token_id: u64) -> usize {
+        // **Both per-session caches**, and the second one is not optional hygiene at the campaign's
+        // target: a masked-count histogram is ~4 B per artifact, 40 MB at 10⁷, and a revoked
+        // session's is pinned by nothing else.
+        self.masked_counts.prune_token(token_id);
         self.row_projection_cache.prune_token(token_id)
+    }
+
+    /// The masked-count cache's gauges — see [`crate::histogram::MaskedCountStats`]. Operator plane
+    /// only; a count of structures, naming no artifact and no principal.
+    pub fn masked_count_cache_stats(&self) -> crate::histogram::MaskedCountStats {
+        self.masked_counts.stats()
+    }
+
+    /// How many levels are recorded row-major and served artifact-major — see
+    /// [`crate::artifacts::ArtifactProjections::layout_fallbacks`].
+    pub fn layout_fallbacks(&self) -> u64 {
+        self.artifact_projections.layout_fallbacks()
+    }
+
+    /// How many fold-written row-major columns were claimed rather than composed.
+    pub fn columns_adopted(&self) -> u64 {
+        self.artifact_projections.columns_adopted()
+    }
+
+    /// How many row-major columns were composed from a level's row form rather than claimed — see
+    /// [`crate::artifacts::ArtifactProjections::columns_composed`].
+    pub fn columns_composed(&self) -> u64 {
+        self.artifact_projections.columns_composed()
+    }
+
+    /// The serving layout recorded for one `(layer, level)`, or `None` where no such layer is
+    /// registered. Operator plane only: it names no artifact and no principal, and nothing on the
+    /// wire carries it.
+    pub fn recorded_layout(
+        &self,
+        layer: &str,
+        level: u32,
+    ) -> Option<tessera_types::layer::ServingLayout> {
+        self.write
+            .registered_layer(layer)
+            .map(|registered| registered.layout_of(level))
     }
 
     /// Bound both caches, and the only route by which the two config keys reach them.
@@ -1580,6 +1783,17 @@ impl Engine {
             .load()
             .fragments
             .set_memory_bound(fragment_bytes);
+    }
+
+    /// Bound the masked-count cache (`serve.masked_count_cache_bytes`).
+    ///
+    /// **Its own setter rather than a third argument to [`Self::set_cache_bounds`]**, because the
+    /// two callers are different: every embedder calls that one through `tessera_server::prepare`,
+    /// and this key exists for a deployment that has a row-major layer at all — which is a property
+    /// of the corpus rather than of the box. An embedder that never calls it gets an unbounded
+    /// cache, which is what a read-only embedder over a small corpus wants.
+    pub fn set_masked_count_cache_bytes(&self, bytes: u64) {
+        self.masked_counts.set_bound_bytes(bytes);
     }
 
     /// How long a request parks on another request's in-flight row-projection build before it is
@@ -1675,7 +1889,7 @@ impl Engine {
         self.generation.load().overlay.deleted_len()
     }
 
-    /// Live segments per (partition, slice), read straight off the current generation — the gauge
+    /// Live segments per (partition, view), read straight off the current generation — the gauge
     /// decision 0049 obliges and `/control/status` publishes as `segments`.
     ///
     /// **This is a read-path constant made observable, not a maintenance counter.** A viewport pays
@@ -1693,25 +1907,25 @@ impl Engine {
     /// segment set a request actually sweeps. What a reader gets here is exactly what
     /// `viewport::tile_ranges_all` would iterate at the same instant.
     ///
-    /// Sorted by `(partition, slice)` because the generation holds them in `HashMap`s: an operator
+    /// Sorted by `(partition, view)` because the generation holds them in `HashMap`s: an operator
     /// diffing two status responses must not see a reordering that means nothing.
-    pub fn live_segment_counts(&self) -> Vec<SliceSegments> {
+    pub fn live_segment_counts(&self) -> Vec<ViewSegments> {
         let generation = self.generation.load();
-        let mut counts: Vec<SliceSegments> = generation
+        let mut counts: Vec<ViewSegments> = generation
             .bundle
             .partitions
             .iter()
             .flat_map(|(partition, data)| {
-                data.slices
+                data.views
                     .iter()
-                    .map(move |(slice, slice_data)| SliceSegments {
+                    .map(move |(view, view_data)| ViewSegments {
                         partition: partition.clone(),
-                        slice: slice.clone(),
-                        segments: slice_data.segments.len(),
+                        view: view.clone(),
+                        segments: view_data.segments.len(),
                     })
             })
             .collect();
-        counts.sort_by(|a, b| (&a.partition, &a.slice).cmp(&(&b.partition, &b.slice)));
+        counts.sort_by(|a, b| (&a.partition, &a.view).cmp(&(&b.partition, &b.view)));
         counts
     }
 
@@ -2159,6 +2373,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                lineages: Arc::clone(&self.lineages),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2215,6 +2430,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                lineages: Arc::clone(&self.lineages),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2267,6 +2483,63 @@ impl Engine {
     /// unauthenticated surface).
     pub fn write_executor_stats(&self) -> crate::write::ExecutorStats {
         self.write.health().stats()
+    }
+
+    /// How many artifact row forms, and how many lineages, this engine has built since it opened.
+    ///
+    /// **The cadence, not the cost.** Both structures are per `(layer, level)` and both are
+    /// rebuilt when that level's version moves; what these two numbers answer is how *often* that
+    /// happens, which is the question `design/artifact-serving-at-scale.md` §8.1 and §8.2 are
+    /// about and the one nothing reported while the store carried a single global version.
+    /// Operator plane only, beside [`Engine::write_executor_stats`] — they count structures a
+    /// deployment built, and name no artifact, no layer and no principal.
+    pub fn artifact_cache_builds(&self) -> (u64, u64) {
+        (self.artifact_projections.builds(), self.lineages.builds())
+    }
+
+    /// How many artifact row forms, and how many lineages, are held right now.
+    ///
+    /// The gauge beside [`Engine::artifact_cache_builds`]'s counter, and the one that moves in
+    /// both directions: a dropped layer's entries leave both caches at the drop. Operator plane
+    /// only — counts of structures, naming no artifact, no layer and no principal.
+    pub fn artifact_cache_held(&self) -> (usize, usize) {
+        (self.artifact_projections.held(), self.lineages.held())
+    }
+
+    /// How many containment partitions this engine has composed (`crate::containment`).
+    ///
+    /// **Beside [`Engine::artifact_cache_builds`] because the interesting number is the ratio.**
+    /// Under any plugin but the builtin this stays at zero while row forms keep being built, and
+    /// containment is on the masked-count route everywhere: a deliberate, fail-closed state rather
+    /// than a fault, and an operator has no other way to see it. It also stays below the row-form
+    /// count where a bundle carries several views, because the expression is view-independent and
+    /// is composed once for all of them. Operator plane only — it names no artifact, no layer and
+    /// no principal.
+    pub fn artifact_containment_partitions(&self) -> u64 {
+        self.artifact_projections.partitions()
+    }
+
+    /// How many containment partitions this engine **adopted** from the prefix at open rather than
+    /// composing (`crate::containment`).
+    ///
+    /// The other half of [`Engine::artifact_containment_partitions`]: a deployment that folded and
+    /// then restarted should see this at the number of levels it holds and that one at zero. Both
+    /// at zero with row forms being built is a foreign plugin; this at zero and that one climbing
+    /// is every coordinate rejected — correct, and the expensive answer. Operator plane only.
+    pub fn artifact_containment_partitions_adopted(&self) -> u64 {
+        self.artifact_projections.adopted()
+    }
+
+    /// How many fold-written tile indexes this engine **claimed** from the prefix rather than
+    /// deriving (`crate::tile_index`).
+    ///
+    /// Read beside [`Engine::artifact_cache_builds`]'s first number, which counts the row forms
+    /// those indexes belong to: the two equal on a deployment that folded and restarted, and this
+    /// one at zero says every coordinate was rejected or every level was published since the fold —
+    /// correct, and the expensive answer. Operator plane only; it names no artifact, no layer and
+    /// no principal.
+    pub fn artifact_tile_indexes_adopted(&self) -> u64 {
+        self.artifact_projections.indexes_adopted()
     }
 
     /// The last compaction fold's per-pass wall clock and resident set — empty before the first
@@ -2341,16 +2614,44 @@ impl Engine {
         self.write.wake();
     }
 
-    /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
-    /// assigned on the executor, at the close of the commit window this submission lands in.
+    /// Submit an ingest batch whose rows name no artifacts — the plain form, and every batch that
+    /// carries no membership column.
     ///
-    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    /// One line of delegation rather than a second implementation: what a batch says about
+    /// artifacts is a *field* of the command, and defaulting it here keeps the ordinary caller from
+    /// having to spell an empty one.
     pub fn accept_ingest(
         &self,
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
     ) -> std::result::Result<Vec<EntityId>, crate::write::AcceptError> {
+        self.accept_ingest_joining(rows, batch_id, body_hash, Default::default())
+            .map(|(entity_ids, _)| entity_ids)
+    }
+
+    /// Submit an ingest batch and wait for its receipt. Rows arrive **unallocated**: entity ids are
+    /// assigned on the executor, at the close of the commit window this submission lands in.
+    ///
+    /// `artifacts` is what a column named for a layer said — which artifacts these rows join, and
+    /// which edges the adjacency of a list column declared (`artifacts-from-points.md` §6.2). It is
+    /// resolved and grown **in the same commit as the rows**, so a batch is never half-applied: on
+    /// a **closed** layer a key naming no artifact refuses the whole batch before an id is spent,
+    /// on an **open** one it creates the artifact it names, and rows that were accepted carry their
+    /// memberships from the moment they exist.
+    ///
+    /// Returns the assigned ids and **how many artifacts this batch created** — zero for every
+    /// batch whose keys all existed, and the number a caller is owed because minting is not
+    /// undoable (`artifacts-from-points.md` §3).
+    ///
+    /// Blocking — a tokio handler must call this inside `spawn_blocking`.
+    pub fn accept_ingest_joining(
+        &self,
+        rows: Vec<UnallocatedRow>,
+        batch_id: String,
+        body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
+    ) -> std::result::Result<(Vec<EntityId>, u64), crate::write::AcceptError> {
         // **Every buffered row has a cell**, established here because this is the boundary rows
         // enter the buffer through — and it has more than one caller. A check in the HTTP handler
         // guarded one of them and left the bench arms, the tests and any future ingest route
@@ -2397,7 +2698,8 @@ impl Engine {
                 quantisation,
             });
         }
-        self.write.accept_ingest(rows, batch_id, body_hash)
+        self.write
+            .accept_ingest(rows, batch_id, body_hash, artifacts)
     }
 
     /// Submit one `/control/changes` entry and wait for its receipt.
@@ -2430,6 +2732,16 @@ impl Engine {
         self.write.submit_change(entity, op)
     }
 
+    /// One registered layer's declaration, by name — **the control plane's lookup, with no gate**.
+    ///
+    /// It answers what a *declaration* says, never what is served: the viewer plane's question is
+    /// [`Engine::visible_layers`], which resolves reachability per principal and asks the overlay
+    /// live. This one exists for `/control/ingest`, which must decide whether a column names a
+    /// layer, and for a caller already holding the operator credential that registered it.
+    pub fn registered_layer(&self, name: &str) -> Option<tessera_types::layer::RegisteredLayer> {
+        self.write.registered_layer(name)
+    }
+
     /// Register an annotation layer, returning its `tessera_id`.
     ///
     /// That identifier is the only address by which the layer can later be suppressed — entity ids
@@ -2446,9 +2758,11 @@ impl Engine {
         let generation = self.generation();
         self.identity_key
             .forward(generation.bundle.manifest.identity.shard_id, entity)
-            .map_err(|_| crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
-                detail: "the layer's entity id lies outside the identity space".to_string(),
-            }))
+            .map_err(|_| {
+                crate::write::AcceptError::Exec(tessera_lifecycle::ExecError::LayerRefused {
+                    detail: "the layer's entity id lies outside the identity space".to_string(),
+                })
+            })
     }
 
     /// Drop a layer. Its name is tombstoned and refused on recreation for ever.
@@ -2510,9 +2824,9 @@ impl Engine {
             .flat_map(|artifact| {
                 artifact.members.iter().chain(
                     artifact
-                        .variations
+                        .contents
                         .iter()
-                        .flat_map(|variation| variation.generated_from.iter()),
+                        .flat_map(|content| content.generated_from.iter()),
                 )
             })
             .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
@@ -2545,6 +2859,76 @@ impl Engine {
                 })
             })
             .collect()
+    }
+
+    /// Add points to the memberships of artifacts that already exist, each named by the key it was
+    /// published under.
+    ///
+    /// **A build reading a member table has always done this; this is the same operation at the
+    /// other entry point** ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+    /// The artifact then behaves exactly as though the point had been there all along: there is no
+    /// state in which a cluster holds some of its points because of how they arrived.
+    ///
+    /// **A suppressed artifact grows like any other and stays suppressed.** The key resolves
+    /// against the *store*, never against what is served — so a suppression cannot be defeated by
+    /// growing the artifact it hides, and cannot make the growth refuse either
+    /// (`artifacts-from-points.md` §5).
+    ///
+    /// The two member checks are `publish_artifacts`'s, unchanged and for its reasons: a member
+    /// with no row would count towards the declared size the proportional criterion divides by
+    /// while being visible to nobody, and a **deleted** member can never contribute to a count
+    /// again. A **suppressed** member joins: it is a live member temporarily outside every mask.
+    ///
+    /// **A point may also name its artifacts on the wire**, which is the same operation arriving
+    /// with the rows it is about: `/control/ingest` accepts a column named for a declared layer and
+    /// grows these memberships inside the batch's own commit window (`artifacts-from-points.md`
+    /// §6.2). This entry point stays what an operator uses for a correction against points that are
+    /// already there. An unknown key is refused on **this** route whatever the layer's value set
+    /// says — see [`tessera_lifecycle::IncomingGrowth`]; the column at `/control/ingest` is where an
+    /// open layer creates the artifact a key names.
+    pub fn grow_memberships(
+        &self,
+        layer: String,
+        level: u32,
+        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+    ) -> std::result::Result<(), crate::write::AcceptError> {
+        let high_water = self.allocator_high_water() as u32;
+        let rowless: u64 = joins
+            .iter()
+            .map(|j| j.joining.cardinality() - j.joining.range_cardinality(0..high_water))
+            .sum();
+        if rowless > 0 {
+            return Err(crate::write::AcceptError::Exec(
+                tessera_lifecycle::ExecError::LayerRefused {
+                    detail: format!(
+                        "{rowless} of these joining member(s) name no point; a membership is a set \
+                         of documents, and a member with no row would count towards the \
+                         artifact's declared size while being visible to nobody"
+                    ),
+                },
+            ));
+        }
+
+        let generation = self.generation();
+        let deleted: Vec<u64> = joins
+            .iter()
+            .flat_map(|join| join.joining.iter())
+            .filter(|entity| generation.overlay.is_deleted(EntityId::new(*entity as u64)))
+            .map(u64::from)
+            .take(16)
+            .collect();
+        if !deleted.is_empty() {
+            return Err(crate::write::AcceptError::Exec(
+                tessera_lifecycle::ExecError::LayerRefused {
+                    detail: format!(
+                        "these joins name deleted entities {deleted:?}; a deleted member contributes \
+                         to no count, so the join is refused rather than applied into silence"
+                    ),
+                },
+            ));
+        }
+
+        self.write.grow_memberships(layer, level, joins)
     }
 
     /// Which layers this principal may know exist, and which of those are currently served.
@@ -2596,14 +2980,16 @@ impl Engine {
     /// principal may not see is C8's row.
     pub fn locate_artifact(&self, entity: EntityId) -> Option<PublishedArtifactAddress> {
         let (layer, level, ordinal) = self.write.locate_artifact(entity)?;
-        let stable_key = self
-            .write
-            .with_artifacts(|store| store.get(&layer, level, ordinal).and_then(|r| r.stable_key.clone()));
+        let key = self.write.with_artifacts(|store| {
+            store
+                .get(&layer, level, ordinal)
+                .and_then(|r| r.key.clone())
+        });
         Some(PublishedArtifactAddress {
             layer,
             level,
             ordinal,
-            stable_key,
+            key,
         })
     }
 
@@ -2626,7 +3012,7 @@ pub struct PublishedArtifactAddress {
     pub layer: String,
     pub level: u32,
     pub ordinal: u32,
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
 }
 
 /// Steps 5 of compaction §4 for a prefix already committed: open it, and assemble the

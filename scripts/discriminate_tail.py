@@ -157,9 +157,9 @@ def prefault(bundle_root: Path) -> tuple[float, list[str]]:
     (`cat <file> > /dev/null` per file is sufficient per the brief -- a plain sequential read
     achieves the same page-touching effect without a subprocess per file). Returns
     `(wall_seconds, paths_touched)`; NOT counted against the viewport budget."""
-    targets = sorted(bundle_root.glob("*/partitions/*/slices/*/segments/*/columns.arrow"))
-    targets += sorted(bundle_root.glob("*/partitions/*/slices/*/segments/*/morton.u32"))
-    targets += sorted(bundle_root.glob("*/partitions/*/slices/*/permutation.bin"))
+    targets = sorted(bundle_root.glob("*/partitions/*/views/*/segments/*/columns.arrow"))
+    targets += sorted(bundle_root.glob("*/partitions/*/views/*/segments/*/morton.u32"))
+    targets += sorted(bundle_root.glob("*/partitions/*/views/*/permutation.bin"))
     if not targets:
         raise RuntimeError(f"prefault found no columns.arrow/morton.u32/permutation.bin under {bundle_root}")
     t0 = time.perf_counter()

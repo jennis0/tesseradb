@@ -195,7 +195,7 @@ standing measurement.
 | selectivity | the share of the candidate the predicate matches | the axis §6.2's route rule structurally cannot see (#100), and where rows 4 and 11 diverge |
 | **column width** | 1, 2, 4, 8 bytes | **new** — perf §3.3 |
 | **run count** | runs in the domain, held apart from rows in it | **new** — perf §3.3 |
-| **layer count** | live extents per column; live segments per slice | **new** — perf §3.2 |
+| **layer count** | live extents per column; live segments per view | **new** — perf §3.2 |
 | threads | 1 and 12, divisor measured | `÷ cores` is refuted (perf §2.3) |
 | vocabulary shape | distinct keys, prefix sharing | a prefix-free key set front-codes to nearly its raw bytes; **no such column exists in this corpus** — a fixture gap, not a measurement gap |
 
@@ -251,7 +251,7 @@ ultimately the eight-byte one.
 
 **Absence has never been timed at all.** Decision 0064's presence bitmap is what let numbers,
 datetimes and bools join the route, and its cost has a shape worth stating because it decides what
-the arm varies: the bitmap is shifted into slice row space **once per segment** and intersected
+the arm varies: the bitmap is shifted into view row space **once per segment** and intersected
 **once per run**, outside the row loop. So presence should cost per run and per segment, not per
 row — O(containers touched), the corpus's own cost model — and its price is therefore invisible in
 a sweep that varies rows while holding the run count still. **Which is exactly what every

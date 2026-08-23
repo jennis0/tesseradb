@@ -207,11 +207,46 @@ bundle_of() {
 
 # ------------------------------------------------------------------------------------ the builds
 
+# One `tessera.toml` per scale, written to the gitignored dev directory and used by **both**
+# verbs: `tessera build` reads `[bundle].path` as its output and `[build].schema` as its
+# declaration, and `tessera serve` opens exactly what the build wrote (configuration.md §3). The
+# paths are absolute because this file is generated per machine and never committed — a `source` in
+# the *declaration* is the one that has to travel.
+write_deployment() {
+  local scale="$1" bundle
+  bundle="$(bundle_of "$scale")"
+  mkdir -p "$DEV/$scale"
+  cat > "$DEV/tessera-$scale.toml" <<EOF
+[bundle]
+path  = "$bundle"
+cache = "$DEV/$scale/cache"
+wal   = "$DEV/$scale/wal.log"
+
+[build]
+schema = "$DATA/demo/config-$scale.toml"
+
+[plugin]
+module = "builtin:passthrough"
+
+[disclosure]
+token_max_lifetime = 3600
+
+[serve]
+viewer = "127.0.0.1:$(viewer_of "$scale")"
+session = "127.0.0.1:$(session_of "$scale")"
+control = "127.0.0.1:$(control_of "$scale")"
+max_k = 5000
+session_credential_env = "TESSERA_SESSION_CRED"
+operator_credential_env = "TESSERA_OPERATOR_CRED"
+dev_cors_origins = ["http://localhost:$VITE_PORT"]
+EOF
+}
+
 build_scale() {
-  local scale="$1" bundle points schema
+  local scale="$1" bundle points config
   bundle="$(bundle_of "$scale")"
   points="$DATA/demo/points-$scale.parquet"
-  schema="$DATA/demo/schema-$scale.toml"
+  config="$DATA/demo/config-$scale.toml"
 
   [[ $rebuild -eq 1 ]] && rm -rf "$bundle"
   # `CURRENT` is written last, so its presence — not the directory's — is what says the build
@@ -228,7 +263,7 @@ build_scale() {
     rm -rf "$bundle"
   fi
 
-  for f in "$points" "$schema" "$DATA/demo/archive.parquet" \
+  for f in "$points" "$config" "$DATA/demo/archive.parquet" \
            "$DATA/demo/primary_category.parquet" \
            "$DATA/scaled/pairs/categories-subclass.pairs.parquet"; do
     [[ -f "$f" ]] || {
@@ -246,6 +281,7 @@ build_scale() {
 
   say "building the $scale bundle ($(items_of "$scale") items)"
   mkdir -p "$DEV"
+  write_deployment "$scale"
 
   # **Minting is dropped above 10⁸ items, and the reason is a pass the memory budget cannot
   # reach.** `pipeline.rs`' own table bounds three passes by the corpus rather than by the plan:
@@ -272,7 +308,8 @@ build_scale() {
   # build refuses rather than silently dropping the entities it cannot place.
   # `--mint-id-key` starts a throwaway identity lineage, which is right for a demo bundle and
   # wrong for anything else — every `tessera_id` it mints is meaningless outside this directory,
-  # and in particular means nothing to the *other* scale's bundle.
+  # and in particular means nothing to the *other* scale's bundle. A real deployment puts its key
+  # in the environment (`TESSERA_IDENTITY_KEY`, or a `.env` beside `tessera.toml`) instead.
   # `TESSERA_BUILD_MEMORY_BUDGET` (e.g. `8g`) caps the build's own structures. Unset, the binary
   # sizes its batches from `MemAvailable` at the moment it starts — which is the right default on
   # a machine doing nothing else, and wrong on one where the page cache for a 51 GB points file
@@ -310,13 +347,8 @@ build_scale() {
   "${scope[@]}" \
   /usr/bin/time -v -o "$DEV/build-$scale.time" \
   ./target/release/tessera build \
-    --points "$points" \
-    --pairs  "$DATA/scaled/pairs/categories-subclass.pairs.parquet" \
-    --schema "$schema" \
-    --values "archive=$DATA/demo/archive.parquet" \
-    --values "primary_category=$DATA/demo/primary_category.parquet" \
-    --out "$bundle" --limit "$(items_of "$scale")" \
-    --extent 0,65536,0,65536 --slice s0 \
+    --deployment "$DEV/tessera-$scale.toml" \
+    --limit "$(items_of "$scale")" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
     $mint_external --mint-id-key --no-oracle-pairs
   local peak
@@ -341,37 +373,15 @@ fi
 # ----------------------------------------------------------------------------------- the servers
 
 start_scale() {
-  local scale="$1" bundle config viewer_port session_port
-  bundle="$(bundle_of "$scale")"
+  local scale="$1" viewer_port
   viewer_port="$(viewer_of "$scale")"
-  session_port="$(session_of "$scale")"
-  config="$DEV/serve-$scale.toml"
 
-  mkdir -p "$DEV/$scale"
-  cat > "$config" <<EOF
-[bundle]
-path = "$bundle"
-cache = "$DEV/$scale/cache"
-wal = "$DEV/$scale/wal.log"
-
-[plugin]
-module = "builtin:passthrough"
-
-[disclosure]
-token_max_lifetime = 3600
-
-[serve]
-viewer = "127.0.0.1:$viewer_port"
-session = "127.0.0.1:$session_port"
-control = "127.0.0.1:$(control_of "$scale")"
-max_k = 5000
-session_credential_env = "TESSERA_SESSION_CRED"
-operator_credential_env = "TESSERA_OPERATOR_CRED"
-dev_cors_origins = ["http://localhost:$VITE_PORT"]
-EOF
+  # The same file the build was invoked against — `--bundle` skips the build, so it may not exist
+  # yet, and rewriting it is idempotent either way.
+  write_deployment "$scale"
 
   say "starting tessera serve for $scale on :$viewer_port"
-  ./target/release/tessera serve -c "$config" &
+  ./target/release/tessera serve --deployment "$DEV/tessera-$scale.toml" &
   SERVE_PIDS+=($!)
   local pid=${SERVE_PIDS[-1]}
 

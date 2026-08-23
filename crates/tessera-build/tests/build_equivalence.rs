@@ -28,7 +28,7 @@
 //! `both_implementations_agree_on_keys_though_fresh_codes_differ`. Threading a seeded RNG in to
 //! close that gap is the thing that module's header exists to refuse.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,7 +37,8 @@ use arrow::array::{
     BooleanArray, Float64Array, StringArray, TimestampMicrosecondArray, UInt32Array, UInt64Array,
     UInt8Array,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema, TimeUnit};
+use arrow::datatypes::{Field, Schema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
@@ -177,26 +178,38 @@ fn write_pairs(path: &Path) {
 /// items — and a keyed postings file that disagreed on code order or on which empty postings it
 /// dropped would still open and still answer, just not the same set.
 const ATTRIBUTED_SCHEMA: &str = r#"
+[sources]
+archive_values    = "archive-values.parquet"
+department_values = "department-values.parquet"
+
+[[vocabulary]]
+name       = "archive"
+width      = "u8"
+value_set  = "closed"
+# `public` is only what a closed set can safely publish (§3.8), so this fixture covers both.
+visibility = "public"
+source     = "archive_values"
+
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+source     = "department_values"
+
 [[attribute]]
 name       = "archive"
 type       = "category"
-width      = "u8"
 render     = true
 index      = true
-vocabulary = "declared"
-values_key = "archive"
-# `public` is only reachable with `declared` (§3.8), so this fixture covers both listings.
-listing    = "public"
+vocabulary = "archive"
 
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u16"
 render     = true
 index      = true
-vocabulary = "discovered"
-listing    = "per_viewer"
-values_key = "department"
+vocabulary = "department"
 
 [[attribute]]
 name     = "author_count"
@@ -231,7 +244,7 @@ const DEPARTMENT_VALUES: &[(&str, u32)] = &[
     ("sales", 1_559),
 ];
 
-/// A `values_key` seed file: `key`/`code`, no `label` (per-point-attributes §4.4).
+/// A bound vocabulary file: `key`/`code`, no `title` (configuration.md §1).
 fn write_values(path: &Path, values: &[(&str, u32)]) {
     let schema = Arc::new(Schema::new(vec![
         Field::new("key", DataType::Utf8, false),
@@ -259,18 +272,16 @@ fn write_values(path: &Path, values: &[(&str, u32)]) {
 /// **Both vocabularies are seeded with every key the data uses**, which is what keeps this
 /// fixture byte-reproducible: a seeded key returns its pinned code without touching the draw, so
 /// nothing here consumes entropy.
-fn attributed_schema(dir: &Path) -> tessera_build::schema::Schema {
-    let archive = dir.join("archive-values.parquet");
-    let department = dir.join("department-values.parquet");
-    write_values(&archive, ARCHIVE_VALUES);
-    write_values(&department, DEPARTMENT_VALUES);
-    let schema_path = dir.join("schema.toml");
+fn attributed_schema(dir: &Path) -> tessera_build::config::Schema {
+    write_values(&dir.join("archive-values.parquet"), ARCHIVE_VALUES);
+    write_values(&dir.join("department-values.parquet"), DEPARTMENT_VALUES);
+    let schema_path = dir.join("config.toml");
     std::fs::write(&schema_path, ATTRIBUTED_SCHEMA).unwrap();
-    let values = HashMap::from([
-        ("archive".to_string(), archive),
-        ("department".to_string(), department),
-    ]);
-    tessera_build::schema::Schema::parse(&schema_path, &values).expect("the fixture schema parses")
+    // Each vocabulary names its own file, relative to this document (`configuration.md` §3), so
+    // the fixture needs no bindings at all.
+    tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .expect("the fixture schema parses")
+        .schema
 }
 
 /// `write_points`'s geometry with `ATTRIBUTED_SCHEMA`'s six columns beside it.
@@ -346,19 +357,20 @@ fn write_attributed_points(path: &Path) {
 
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
         points: points.to_path_buf(),
-        pairs: pairs.to_path_buf(),
+        attribute_sources: Vec::new(),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -454,7 +466,105 @@ fn streaming_build_is_byte_identical_to_the_reference_build() {
     assert_eq!(reference.terms, streaming.terms);
     assert_eq!(reference.pairs, streaming.pairs);
     assert_eq!(reference.bundle_bytes, streaming.bundle_bytes);
+    // **The occupancy figure is one of the report's numbers, not one path's.** It is counted at
+    // each build's own segment write, and a resolution warning that appeared on one path and not
+    // the other would be worse than none — which path ran is not something the caller chose.
+    assert_eq!(reference.occupancy, streaming.occupancy);
+    assert_eq!(reference.occupancy.points, reference.items);
     assert_bundles_identical(&reference_out, &streaming_out, "streaming vs reference");
+}
+
+/// **The same byte identity over a view whose access terms are a `list<string>` field**, where the
+/// two implementations reach the dictionary by genuinely different routes.
+///
+/// The linear build walks items in source-id order and interns each descriptor as it meets it; the
+/// streaming build ranks distinct terms by `(first ordinal, source term)` over a relation it scans
+/// twice, a source term being a position in a sorted vocabulary. Those two agree only because the
+/// vocabulary is sorted — which is the sort of premise a differential is for, since a disagreement
+/// about term numbering is a disagreement about every permanent entity id (I9) and shows up as a
+/// bundle that is well-formed and differently numbered.
+#[test]
+fn a_field_sourced_build_is_byte_identical_to_the_reference_build() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let points = temp.path().join("points.parquet");
+    write_field_sourced_points(&points);
+
+    let mut reference_args = args_for(&points, &points, temp.path().join("reference"));
+    reference_args.access = tessera_build::config::AccessInput {
+        source: tessera_build::config::AccessSource::Field("categories".to_string()),
+        default: "public".to_string(),
+    };
+    let mut streaming_args = reference_args.clone();
+    streaming_args.out = temp.path().join("streaming");
+
+    let reference = build_in_memory(&reference_args).unwrap();
+    let streaming = build(&streaming_args).unwrap();
+    assert_eq!(reference.items, streaming.items);
+    assert_eq!(reference.terms, streaming.terms);
+    assert_eq!(reference.pairs, streaming.pairs);
+    assert_bundles_identical(
+        &reference_args.out,
+        &streaming_args.out,
+        "field-sourced streaming vs reference",
+    );
+}
+
+/// The field-route fixture: a `list<string>` access column carrying terms whose **lexicographic**
+/// order and whose order of first appearance deliberately disagree, so a build ranking them by the
+/// wrong one is caught rather than coincidentally right.
+fn write_field_sourced_points(path: &Path) {
+    use arrow::array::{ArrayRef, ListArray};
+    use arrow::buffer::OffsetBuffer;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("entity_id", DataType::UInt64, false),
+        ArrowField::new("x", DataType::Float64, false),
+        ArrowField::new("y", DataType::Float64, false),
+        ArrowField::new(
+            "categories",
+            DataType::List(Arc::new(ArrowField::new("item", DataType::Utf8, true))),
+            true,
+        ),
+    ]));
+    let (ids, xs, ys) = synth_geometry();
+    let vocabulary = ["zeta", "alpha", "mu", "beta", "public"];
+    let mut offsets: Vec<i32> = vec![0];
+    let mut flat: Vec<&str> = Vec::new();
+    let mut present: Vec<bool> = Vec::new();
+    for &e in &ids {
+        // Every twelfth item carries nothing at all — null and empty alike, so the fill is on the
+        // line here too — and the rest draw from the vocabulary in an order unrelated to its sort.
+        match e % 12 {
+            0 => present.push(false),
+            1 => present.push(true),
+            group => {
+                present.push(true);
+                for k in 0..(group % 3) + 1 {
+                    flat.push(vocabulary[((group * 7 + k) % vocabulary.len() as u64) as usize]);
+                }
+            }
+        }
+        offsets.push(flat.len() as i32);
+    }
+    let values: ArrayRef = Arc::new(StringArray::from(flat));
+    let list = ListArray::new(
+        Arc::new(ArrowField::new("item", DataType::Utf8, true)),
+        OffsetBuffer::new(offsets.into()),
+        values,
+        Some(present.into()),
+    );
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(list),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
 }
 
 /// **The same byte identity over a bundle that carries a scalar tail**, which no other fixture
@@ -482,6 +592,8 @@ fn attributed_build_is_byte_identical_to_the_reference_build() {
     let make_args = |out: PathBuf, batch: Option<u64>| {
         let mut args = args_for(&points, &pairs, out);
         args.schema = attributed_schema(temp.path());
+        args.attribute_sources =
+            tessera_build::config::AttributeSource::over(points.clone(), &args.schema);
         args.batch_items = batch;
         args
     };
@@ -753,10 +865,10 @@ fn batched_build_is_byte_identical_to_the_batched_reference() {
     let single = temp.path().join("single");
     build(&args_for(&points, &pairs, single.clone())).unwrap();
     let batched_perm =
-        std::fs::read(streaming_out.join("v00000/partitions/default/slices/s0/permutation.bin"))
+        std::fs::read(streaming_out.join("v00000/partitions/default/views/s0/permutation.bin"))
             .unwrap();
     let single_perm =
-        std::fs::read(single.join("v00000/partitions/default/slices/s0/permutation.bin")).unwrap();
+        std::fs::read(single.join("v00000/partitions/default/views/s0/permutation.bin")).unwrap();
     assert_ne!(
         batched_perm, single_perm,
         "two batches must produce a different (per-batch) assignment than one"
@@ -901,8 +1013,10 @@ fn reference_build_at_scale() {
     let out = PathBuf::from("/tmp/tessera-reference-scale");
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
+        point_fields: Default::default(),
         points: PathBuf::from("data/scaled/geometry.parquet"),
-        pairs: PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet"),
+        attribute_sources: Vec::new(),
+        access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
         out,
         extent: Bounds {
             x_min: 0.0,
@@ -910,15 +1024,14 @@ fn reference_build_at_scale() {
             y_min: 0.0,
             y_max: 65536.0,
         },
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: Some(limit),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,

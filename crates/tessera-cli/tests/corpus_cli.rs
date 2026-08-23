@@ -97,7 +97,11 @@ fn census_matches_the_library_census() {
         ])
         .output()
         .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let mut got = Vec::new();
     for batch in decode_stream(&out.stdout) {
@@ -166,19 +170,58 @@ fn items_refuses_a_non_decimal_key() {
 }
 
 /// The corpus's declaration parses under the build's own `schema.toml` parser — the loop from
-/// generator to `tessera build --schema` closed with the real consumer, so a drifted spelling in
+/// generator to `tessera build --config` closed with the real consumer, so a drifted spelling in
 /// the generated declaration fails here rather than at the first suite run.
 #[test]
 fn the_corpus_schema_parses_under_the_builds_parser() {
     let corpus = Corpus::new(1, 0, grid()).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
-    std::fs::write(&path, corpus.schema_toml()).unwrap();
+    std::fs::write(&path, corpus.config_toml()).unwrap();
 
-    let schema = tessera_build::schema::Schema::parse(&path, &std::collections::HashMap::new())
+    // No bindings: the declaration names its own files, relative to itself, and the generator
+    // writes them beside it (`configuration.md` §3). Nothing here opens them — the schema half of
+    // the parse is what this case is about.
+    let config = tessera_build::config::Config::parse(&path, &Default::default())
         .expect("the corpus schema must parse");
+    // The declaration also has to *acquire*: the suite builds with `--view s0`, so the generator's
+    // view name, its geometry source and its label relation must be the ones the build asks for.
+    // Checked here rather than left to the suite, which cannot run without a corpus on disk.
+    let acquired = config
+        .acquire("s0")
+        .expect("the corpus config acquires its own inputs");
+    assert_eq!(acquired.points, dir.path().join("points.parquet"));
+    assert!(
+        matches!(
+            &acquired.access.source,
+            tessera_build::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")
+        ),
+        "{:?}",
+        acquired.access
+    );
+    assert_eq!(
+        acquired.attribute_sources.len(),
+        1,
+        "one file carries every declared column"
+    );
+    assert_eq!(
+        acquired.attribute_sources[0].path,
+        dir.path().join("points.parquet")
+    );
+    let schema = config.schema;
     let names: Vec<&str> = schema.attributes.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, ["fx_key", "weight", "seen_at", "bay", "tag", "blurb"]);
+    assert_eq!(
+        names,
+        [
+            "fx_key",
+            "weight",
+            "seen_at",
+            "bay",
+            "tag",
+            "blurb",
+            "partition"
+        ]
+    );
     let fx = &schema.attributes[0];
     assert!(fx.render, "the planted join column must be served");
 }

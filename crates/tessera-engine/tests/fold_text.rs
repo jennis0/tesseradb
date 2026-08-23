@@ -25,7 +25,7 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use common::*;
-use tessera_build::schema::Schema;
+use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::Engine;
 use tessera_lifecycle::wal::{ChangeOp, WalScalar};
@@ -138,26 +138,30 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
     write_pairs(&pairs, N);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &HashMap::new())
+        .expect("the text schema parses")
+        .schema;
     build(&BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &HashMap::new()).expect("the text schema parses"),
+        schema,
     })
     .expect("a bundle with an indexed text column builds");
 }
@@ -184,7 +188,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
         let external = format!("fresh-{i}");
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 10.0 + i as f32,
             y: 10.0 + i as f32,
@@ -536,7 +540,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
         let external = "flight-0".to_string();
         let row = UnallocatedRow {
             external_id: Some(external.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 20.0,
             y: 20.0,
@@ -608,7 +612,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
     let ingest = |engine: &Engine, name: &str, value: WalScalar| {
         let row = UnallocatedRow {
             external_id: Some(name.as_bytes().to_vec()),
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 30.0,
             y: 30.0,

@@ -48,7 +48,7 @@ pub fn extent_paths(column_dir: &Path, flush_id: &str) -> (PathBuf, PathBuf, Pat
 /// presence is partial. That is not symmetry for its own sake: a base column's missing presence
 /// file *means* the entity id is the array index, and an extent's entities are a set allocated
 /// above the build's high-water — never starting at zero, and not contiguous where a commit window
-/// interleaved slices (write-path §4.2). An extent read positionally would answer entity 0 with the
+/// interleaved views (write-path §4.2). An extent read positionally would answer entity 0 with the
 /// first flushed entity's value and every entity after it with somebody else's, with no error
 /// anywhere. So the one file whose absence carries meaning is always present here, and
 /// [`open_extent`] takes its path rather than probing for it.

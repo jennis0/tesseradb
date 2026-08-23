@@ -13,7 +13,7 @@ import zlib
 FIX='/tmp/tessera-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
 OUT='probes/2026-08-15-artifact-representation'
 
-row_entity=np.fromfile(f'{FIX}/slices/s0/row-entity.u32',dtype=np.uint32)
+row_entity=np.fromfile(f'{FIX}/views/s0/row-entity.u32',dtype=np.uint32)
 N=len(row_entity)
 entity_row=np.empty(N,np.uint32); entity_row[row_entity]=np.arange(N,dtype=np.uint32)
 
@@ -57,7 +57,7 @@ print('permutation.bin (entity -> row):')
 p_src=perm_stats(id_src,'source_id'); p_mor=perm_stats(id_mor,'morton')
 
 # spatially-correlated attribute: primary_category (a real column on this bundle)
-with pa.memory_map(f'{FIX}/slices/s0/segments/seg-0/columns.arrow','rb') as src:
+with pa.memory_map(f'{FIX}/views/s0/segments/seg-0/columns.arrow','rb') as src:
     cols=ipc.open_file(src).read_all()
 pc_by_row=cols.column('primary_category').to_numpy()
 pc_by_entity=np.empty(N,pc_by_row.dtype); pc_by_entity[row_entity]=pc_by_row

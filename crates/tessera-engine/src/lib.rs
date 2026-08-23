@@ -13,15 +13,22 @@ mod categories;
 mod coalesce;
 mod compact;
 pub mod compose;
+pub mod containment;
+pub mod cut;
 pub mod derived;
 pub mod filter;
 mod flush;
 mod geometry;
+pub mod histogram;
+pub mod layout;
 mod merge;
+pub mod ranges;
 mod refresh;
+pub mod row_column;
 pub mod select;
 pub mod session;
 mod single_flight;
+pub mod tile_index;
 pub mod timing;
 pub mod viewport;
 mod write;
@@ -48,7 +55,7 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
     default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus, Session,
-    SliceSegments,
+    ViewSegments,
 };
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers
@@ -78,7 +85,7 @@ pub use tessera_store::manifest::DeclaredScalar;
 // The ingest handler resolves category keys to codes and must name the reserved *absent* code and
 // the binding view to do it. Re-exported for the same layering reason as `DeclaredScalar`.
 pub use tessera_store::manifest::{
-    Listing, ManifestVocabulary, ManifestVocabularyValue, VocabularyKind,
+    ManifestVocabulary, ManifestVocabularyValue, Visibility, VocabularyKind,
 };
 pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE};
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
@@ -203,7 +210,7 @@ pub struct Generation {
     /// must never mint, because two handlers racing one novel key would draw two codes for it and
     /// split its rows between them.
     pub vocabularies: Arc<Vocabularies>,
-    /// **The deny mask**: per slice, the row-space image of `deleted ∪ suppressed`, subtracted
+    /// **The deny mask**: per view, the row-space image of `deleted ∪ suppressed`, subtracted
     /// from every composed mask (I1).
     ///
     /// **Derived, never persisted, never a second source of truth.** The three entity-space stores
@@ -223,7 +230,7 @@ pub struct Generation {
     /// deleted item. `publish` re-derives in debug and asserts equality, so a build site that gets
     /// it wrong fails in the test suite rather than in a viewer's map.
     ///
-    /// Keyed by slice, because row space is. A slice the bundle carries always has an entry, empty
+    /// Keyed by view, because row space is. A view the bundle carries always has an entry, empty
     /// when nothing is denied; a missing entry means the mask and the bundle disagree about what
     /// this generation holds, and the read path treats that as fail-closed rather than as "nothing
     /// denied".
@@ -243,6 +250,17 @@ impl Generation {
     pub(crate) fn bundle_identity(&self) -> [u8; 32] {
         self.fragments.bundle_identity()
     }
+
+    /// What a containment partition is composed from, for this generation — the base postings and
+    /// the manifest's declared plugin, taken together so the gate cannot be applied to one
+    /// generation's postings on another generation's manifest
+    /// (see [`crate::containment::PartitionSource`]).
+    pub(crate) fn partition_source(&self) -> crate::containment::PartitionSource<'_> {
+        crate::containment::PartitionSource {
+            postings: &self.postings,
+            data_plugin_hash: &self.bundle.manifest.data_plugin_hash,
+        }
+    }
 }
 
 /// The two [`Generation`] fields a synthetic fixture cannot meaningfully build, for the three
@@ -255,6 +273,7 @@ impl Generation {
 /// have an opinion about it, and one line at the sites that do not.
 #[cfg(test)]
 pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::ExternalIdIndex>) {
+    use tessera_plugin::Plugin;
     let manifest = tessera_store::manifest::SegmentsManifest {
         watermark: 0,
         entity_id_high_water: 0,
@@ -262,6 +281,10 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         layers: Vec::new(),
         layer_tombstones: Vec::new(),
         membership_extents: Vec::new(),
+        level_versions: Vec::new(),
+        containment_extents: Vec::new(),
+        tile_index_extents: Vec::new(),
+        row_column_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),
@@ -277,9 +300,9 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         files: std::collections::BTreeMap::new(),
     };
     let bundle_manifest = tessera_store::manifest::Manifest {
-        bundle_format: 2,
+        bundle_format: 3,
         created_at: String::new(),
-        data_plugin_hash: String::new(),
+        data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
         declared_scalars: vec![],
         vocabularies: vec![],
@@ -298,7 +321,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
             shard_id: 0,
             idset: 1,
         },
-        slices: vec![],
+        views: vec![],
         partitions: vec![],
         provenance: serde_json::json!({}),
         files: std::collections::BTreeMap::new(),
@@ -320,7 +343,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
     )
 }
 
-/// Per-slice row-space deny masks — see [`Generation::denied`].
+/// Per-view row-space deny masks — see [`Generation::denied`].
 pub type DenyMask = rustc_hash::FxHashMap<String, croaring::Bitmap>;
 
 /// The process-wide handle to the current generation. A request must load this pointer exactly

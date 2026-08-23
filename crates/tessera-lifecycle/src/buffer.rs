@@ -148,13 +148,13 @@ impl<'a> DescriptorResolver<'a> {
 /// carried by its WAL row. The geometry is kept for a flush that would give the item a row;
 /// composition reads only `terms`.
 ///
-/// `slice` is carried because a flush reads the *buffer*, not the WAL, and has to know which row
+/// `view` is carried because a flush reads the *buffer*, not the WAL, and has to know which row
 /// space each item's row belongs in — see [`crate::wal::WalRow`]'s field for why that cannot be
 /// re-derived.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BufferedItem {
     pub terms: Vec<TermId>,
-    pub slice: String,
+    pub view: String,
     pub x: f32,
     pub y: f32,
     pub scalars: Vec<WalScalar>,
@@ -236,7 +236,7 @@ impl IngestBuffer {
             Arc::new(BufferedItem {
                 terms,
                 external_id: row.external_id.clone(),
-                slice: row.slice.clone(),
+                view: row.view.clone(),
                 x: row.x,
                 y: row.y,
                 scalars: row.scalars.clone(),

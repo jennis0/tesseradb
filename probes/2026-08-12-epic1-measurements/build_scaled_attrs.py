@@ -1,10 +1,10 @@
 """Extend the attributed points file past the real corpus — the coarse-zoom cell's fixture.
 
-`records-and-search.md` §11 item 6 owes the coarse-zoom whole-slice row scan **under the sweep's
+`records-and-search.md` §11 item 6 owes the coarse-zoom whole-view row scan **under the sweep's
 real parallelism**, and the only attributed points file that exists covers the real arXiv corpus
 alone: 2,422,486 items. That is not a measurement of the cell. Both category columns fit in this
 machine's 32 MiB L3 at that scale (`archive` is 2.4 MB, `primary_category` 4.8 MB), so a
-whole-slice scan there never leaves cache and its per-row constant is not the one a 10^9 slice
+whole-view scan there never leaves cache and its per-row constant is not the one a 10^9 view
 would pay. Extrapolating from it without saying so would be the exact dishonesty
 `docs/agents/writing.md` forbids.
 

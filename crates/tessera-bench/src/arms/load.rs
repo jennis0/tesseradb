@@ -551,7 +551,7 @@ async fn issue(
             .post(url)
             .bearer_auth(token)
             .json(&serde_json::json!({
-                "slice": "s0", "zoom": zoom, "bbox": bbox, "k": k
+                "view": "s0", "zoom": zoom, "bbox": bbox, "k": k
             }))
             .send()
             .await?

@@ -127,19 +127,20 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
+        point_fields: Default::default(),
         points: points_path.to_path_buf(),
-        pairs: pairs_path.to_path_buf(),
+        attribute_sources: Vec::new(),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: FIXTURE_IDSET,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -581,7 +582,7 @@ pub struct DecodedViewport {
 pub struct ArtifactRow {
     pub layer: String,
     pub tessera_id: u64,
-    pub stable_key: Option<String>,
+    pub key: Option<String>,
     /// **How many members this principal can see** — never how many the artifact has.
     pub masked_count: u64,
     /// Derived geometry, in grid units, computed over the members this principal can see. `None`
@@ -682,7 +683,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     let batch = batch.unwrap();
                     let layer = str_col(&batch, 0);
                     let tessera_id = u64_col(&batch, 1);
-                    let stable_key = str_col(&batch, 2);
+                    let key = str_col(&batch, 2);
                     let masked_count = u64_col(&batch, 3);
                     let f64_at = |col: usize, i: usize| {
                         let a = batch
@@ -726,9 +727,9 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         rows.push(ArtifactRow {
                             layer: layer.value(i).to_string(),
                             tessera_id: tessera_id.value(i),
-                            stable_key: stable_key
+                            key: key
                                 .is_valid(i)
-                                .then(|| stable_key.value(i).to_string()),
+                                .then(|| key.value(i).to_string()),
                             masked_count: masked_count.value(i),
                             centroid: f64_at(4, i)
                                 .map(|x| [x, f64_at(5, i).expect("both axes or neither")]),

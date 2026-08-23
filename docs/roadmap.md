@@ -33,7 +33,7 @@ The third list is speculative — recorded so it is not rediscovered, and schedu
 ## 2. Release 1
 
 **Release 1 is a spine with four lanes beside it, not a fan.** The gate comes first: three epics
-wait on it and a fourth is gated by it. The slices fold-in follows, because most of its cost is
+wait on it and a fourth is gated by it. The views fold-in follows, because most of its cost is
 rework that is avoided by taking it early and paid for by taking it late. Ingest, caching and the
 client all build on the table addressing that fold-in settles, and documentation is last by
 construction because it describes what the others produce.
@@ -62,17 +62,17 @@ they need the `conformance` feature and pause points that [#11] left unbuilt. An
 ordering is still not falsifiable end to end ([#71]).
 
 Two other epics reach back into this theme. [#11] cannot close its I5 coverage until [#6] ships a
-non-trivial plugin, and the slices epic has a working suite as its stated adoption gate — so the
+non-trivial plugin, and the views epic has a working suite as its stated adoption gate — so the
 gate is not scenery around the release, it is inside it.
 
-### Slices and signature grouping
+### Views and signature grouping
 
 > [#48 Carry several coordinate systems over one corpus][#48] ·
 > [#49 Group rows by permission signature to cut authorisation cost][#49] — **merged**
 
-One epic, because they are one mechanism. A table is addressed by slice, group and flush; [#48]
-is the slice component and [#49] the group component, and sequencing them apart means building
-the addressing twice. Slices give a corpus more than one coordinate system over one identity
+One epic, because they are one mechanism. A table is addressed by view, group and flush; [#48]
+is the view component and [#49] the group component, and sequencing them apart means building
+the addressing twice. Views give a corpus more than one coordinate system over one identity
 space; grouping stores items that share a permission signature together, which is the
 highest-leverage layout property available — bitmap operations cost time proportional to blocks
 touched rather than items matched.
@@ -85,7 +85,7 @@ of which is deployment guidance this project cannot produce.
 **This epic constrains more of the release than any other, and its cost is almost entirely a
 question of when.** Three reasons to take it early:
 
-- **`segment` becomes `table`.** The design rewrites the concept to `(slice, group, flush)` and
+- **`segment` becomes `table`.** The design rewrites the concept to `(view, group, flush)` and
   amends architecture §11.2 and §13, contracts §2.1, §2.3 and §2.6, and
   [`design/write-path.md`](design/write-path.md) §4–§7 and lifecycle §5.3 to match — including
   giving the move deny its own named retirement rule. [#3], [#4], [#8] and [#9]
@@ -93,10 +93,10 @@ question of when.** Three reasons to take it early:
   of this rework is now owed rather than avoidable. It is rework of machinery that carries
   invariants, in the one part of the system where a conflation has already been caught fail-open
   twice — which raises the cost of taking the fold-in later still, not lowers it.
-- **A window closes when the clients ship.** `slices-and-multi-table.md` §12 lists six things
+- **A window closes when the clients ship.** `views-and-multi-table.md` §12 lists six things
   cheap now and expensive later — container-aligned table base offsets, the manifest `group` key,
-  prefix-qualified table references, the `{slice → (x, y)}` ingest map, resolving contracts §2.6's
-  *"row IDs are segment-local"* to the slice-global reading, and keeping the permutation behind
+  prefix-qualified table references, the `{view → (x, y)}` ingest map, resolving contracts §2.6's
+  *"row IDs are segment-local"* to the view-global reading, and keeping the permutation behind
   the reader interface. The ingest map is free **only while `api_version = 1` has no published
   reader** — and [#10] and [#47] exist to publish one, in this release.
 - **Its fold-in is seven documents' worth of rulings.** §11 of the design proposes amendments to
@@ -112,7 +112,7 @@ The design is provisional pending exactly that fold-in.
 > [#8 Add a batch of items to a running deployment][#8]
 
 An acknowledgement is a durability receipt, not a visibility promise, and **flush bounds the gap
-between them** at `flush_max_age_secs` per slice. That releases the theme's one hard sequencing
+between them** at `flush_max_age_secs` per view. That releases the theme's one hard sequencing
 constraint: [#8] no longer presupposes [#3], because landing into a *running* deployment now means
 something — publication makes the items visible.
 
@@ -137,7 +137,7 @@ repairs them afterwards. The question [#8] used to open with, whether a batch en
 bundle appended, merged or staged, is settled by what is built: appended by the flush that gives it
 geometry, merged afterwards on its own cadence.
 
-This whole theme is written against `segment`, which the slices epic renames — see above.
+This whole theme is written against `segment`, which the views epic renames — see above.
 
 ### Authorisation and sessions
 
@@ -157,7 +157,7 @@ testing it at all, and therefore for [#11] closing.
 
 [#55] makes a key rotation invalidate sessions by itself rather than by a sweep, on
 [decision 0025](decisions/0025-rotation-is-a-session-invalidation-event.md)'s ruling that a
-rotation is a session invalidation event. **It has to be sequenced with the slices fold-in**,
+rotation is a session invalidation event. **It has to be sequenced with the views fold-in**,
 which separately proposes splitting rotation into *roll* (multi-idset key retention, identifiers
 translate, no break) and *revoke* (today's 409 semantics) and weakens C17's time-bound as the
 point of the change. Two epics redefining what a rotation means: one decision, taken once, or
@@ -234,8 +234,8 @@ a general expression endpoint over arbitrary predicates could not be. New
 capability enters through the filter contract (§8.2) so that expressiveness never reaches the
 authorisation layer.
 
-[#42] declares its columns in the manifest at contracts §2.2, and the slices epic makes
-hot-column enumeration per-slice at §2.3 — adjacent sections, one schema, one release. Cheap to
+[#42] declares its columns in the manifest at contracts §2.2, and the views epic makes
+hot-column enumeration per-view at §2.3 — adjacent sections, one schema, one release. Cheap to
 reconcile as one change and tedious as two.
 
 ### Structure on the map
@@ -244,9 +244,12 @@ reconcile as one change and tedious as two.
 > [#41 Serve cluster labels only to viewers who can see what generated them][#41]
 
 Points carry cluster structure and clusters carry labels, both computed from the viewer's own
-visible set. This is where the system stops being a scatterplot. None of it exists — no cluster
-tree, no frontier, no membership structure — which is why I3 and I8 have no tests. [#41] follows
-[#13]: a label attaches to a cluster node.
+visible set. This is where the system stops being a scatterplot. Most of it now exists — memberships,
+masked counts, containment-gated labels and a tree in its edges — so I3 and I8 have no *conformance*
+tests for a different reason than they once did: not that there is nothing to test, but that the suite
+has not been extended to the machinery. There is no frontier, and there is not meant to be: it was
+withdrawn for a per-artifact test with a request-time budget. [#41] follows [#13]: a label attaches to
+a cluster node.
 
 The disclosure question is the whole difficulty in both. A cluster boundary computed over all
 items and then filtered tells a viewer about items they cannot see; a label derived from items a
@@ -269,7 +272,7 @@ owner direction the artifact work's stages, gates and status live there; [#13] a
 the capability from outside and are not the status record.
 
 One known revisit: [#12] requires cross-partition containment to merge correctly, so a router
-ignorant of an unreachable slice does not serve labels it should withhold. With [#12] in phase 2,
+ignorant of an unreachable view does not serve labels it should withhold. With [#12] in phase 2,
 [#41] will be built against the single hardcoded partition that exists today. Correct now, and
 deliberately so.
 
@@ -319,7 +322,7 @@ The SDK is checked against the contract rather than mirrored from it, so a contr
 surfaces as a test failure. The Python already in the repository is the test-only reference
 oracle and must not become the SDK — its value is precisely in not sharing code with the engine.
 
-Publishing this and [#10] is what closes the `api_version = 1` window the slices epic depends on.
+Publishing this and [#10] is what closes the `api_version = 1` window the views epic depends on.
 
 ### Deployable from the documentation alone
 

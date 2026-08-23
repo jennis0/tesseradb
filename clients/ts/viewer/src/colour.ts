@@ -73,7 +73,7 @@ export type Domain = {min: number; max: number};
 
 /**
  * Widen `held` to cover `column`, or establish it. Never narrows: a pan that happens to land on a
- * narrow slice of the data must not recolour everything that is still on screen.
+ * narrow view of the data must not recolour everything that is still on screen.
  *
  * Returns `null` for a column with no numeric reading (`bool`, `utf8`) or no marks.
  */
@@ -123,7 +123,7 @@ export type Encoding =
   | {kind: 'uniform'}
   /**
    * A column was chosen and its values cannot be named — a refused `/v1/categories`, today the
-   * `per_viewer` gate. Distinct from `uniform`, which means no column was chosen: the marks are
+   * `derived` gate. Distinct from `uniform`, which means no column was chosen: the marks are
    * still all drawn, but the map must show that their value is unknown rather than that no
    * encoding was asked for.
    */

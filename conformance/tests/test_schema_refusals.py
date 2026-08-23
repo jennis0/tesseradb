@@ -35,13 +35,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from oracle.harness import run_build
+from oracle.harness import run_build, write_deployment
 
 # Fixed, like the catalogue's: a refusal test has no served order to care about, but minting
 # would make the control build's receipt-free artefacts differ per run for no reason.
 ID_KEY_HEX = "0f0e0d0c0b0a09080706050403020100"
 
-EXTENT_ARG = "0,100,0,100"
 N = 8
 
 
@@ -73,27 +72,35 @@ def corpus_dir(tmp_path_factory) -> Path:
     return work
 
 
+# Every case's schema declares the same corpus, the same view and the same frame; only the
+# attribute half differs. The points file carries identity, geometry and the one column, so the
+# view and every attribute name one source; `[sources]` writes each path once, relative to the
+# declaration (configuration.md §3).
+SCHEMA_HEAD = """\
+[sources]
+points = "points.parquet"
+pairs  = "pairs.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "s0"
+extent           = { min = 0.0, max = 100.0 }
+point_visibility = { source = "pairs", default = "public" }
+
+"""
+
+
 def _build(corpus_dir: Path, schema_text: str, out: Path):
-    schema_path = out.parent / f"{out.name}.schema.toml"
-    schema_path.write_text(schema_text)
-    return run_build(
-        [
-            "--points",
-            str(corpus_dir / "points.parquet"),
-            "--pairs",
-            str(corpus_dir / "pairs.parquet"),
-            "--schema",
-            str(schema_path),
-            "--extent",
-            EXTENT_ARG,
-            "--slice",
-            "s0",
-            "--out",
-            str(out),
-            "--id-key",
-            ID_KEY_HEX,
-        ]
+    # Written into the corpus directory, because a `source` is a path relative to the document
+    # that declares it and these two files are what it names.
+    schema_path = corpus_dir / f"{out.name}.config.toml"
+    schema_path.write_text(SCHEMA_HEAD + schema_text)
+    deployment = write_deployment(
+        corpus_dir / f"{out.name}.tessera.toml", bundle=out, schema=schema_path
     )
+    return run_build(["--deployment", str(deployment)], key_hex=ID_KEY_HEX)
 
 
 # (case name, schema, the fragments the refusal must contain). Fragments are chosen to be the

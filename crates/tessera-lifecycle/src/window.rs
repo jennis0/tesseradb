@@ -127,7 +127,47 @@ pub struct WindowEntry<W> {
     pub rows: Vec<UnallocatedRow>,
     pub batch_id: String,
     pub body_hash: [u8; 32],
+    /// The artifacts this batch's rows join, each with the **ordinal its key resolved to at
+    /// admission** and the row positions that named it (`artifacts-from-points.md` §6.2). Empty for
+    /// a batch carrying no membership column, which is every batch that names no layer.
+    pub memberships: Vec<ResolvedMembership>,
+    /// The parent edges this batch's list column declared **whose child is to be minted** — the
+    /// rest were checked against the layer's own lineage at admission and are gone by here
+    /// (`artifacts-from-points.md` §6.3). A minted child takes its parent from these, which is the
+    /// one route by which the wire creates an edge rather than checking one.
+    pub edges: Vec<crate::command::BatchEdge>,
     pub waiters: Vec<W>,
+}
+
+/// One artifact a batch's rows join, resolved: the address the store gave its key, and which rows
+/// named it.
+///
+/// **The ordinal is resolved once, at admission, and carried rather than re-derived.** That is the
+/// rule the growth record already follows (`crate::membership::ArtifactStore::apply`) — what is
+/// applied is what was decided — and between admission and the close nothing can move an existing
+/// ordinal: a publication appends, and the two operations that remove an artifact (the fold, and a
+/// deletion on the deny lane) both close the open window before they run. An ordinal whose record
+/// has gone by then adds nothing, which is `ArtifactStore::grow`'s stated behaviour and the right
+/// one: a growth may not resurrect an artifact a fold retired.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMembership {
+    pub layer: String,
+    pub level: u32,
+    /// The key the caller's column carried, kept beside the ordinal because a key with no ordinal
+    /// is the whole of what minting has to work from.
+    pub key: String,
+    /// The ordinal the key resolved to at admission — `None` where the layer's `value_set` is
+    /// **open** and no live artifact held the key, which is the case the close mints
+    /// (`artifacts-from-points.md` §6.3).
+    ///
+    /// **An open layer's unknown key resolves at the close and not here**, deliberately: an
+    /// ordinal cannot be claimed at admission, because the record that would make the claim durable
+    /// is not appended until the window closes and a publication executing in between would take
+    /// the same one. So the key travels and the resolution is made once, on the executor, where
+    /// nothing can interleave with it.
+    pub ordinal: Option<u32>,
+    /// Indices into this entry's `rows`.
+    pub rows: Vec<u32>,
 }
 
 /// One entry after allocation: the record to append, and everything the apply and the ack need.
@@ -141,6 +181,14 @@ pub struct ClosedEntry<W> {
     pub terms: Vec<Vec<TermId>>,
     /// The assigned ids, **in the caller's submitted row order** — what the ack returns.
     pub entity_ids: Vec<EntityId>,
+    /// This entry's memberships, carried through the allocation unchanged: the ids the joins name
+    /// are `entity_ids[row]`, which is why the two travel together.
+    ///
+    /// **Mutable after the close, at exactly one site**: the mint pass resolves the keys that had
+    /// no ordinal at admission, so that what follows it sees one shape rather than two.
+    pub memberships: Vec<ResolvedMembership>,
+    /// The edges of this entry's minted children, carried through the allocation unchanged.
+    pub edges: Vec<crate::command::BatchEdge>,
     pub waiters: Vec<W>,
 }
 
@@ -658,6 +706,8 @@ impl<W> CommitWindow<W> {
                 },
                 terms,
                 entity_ids,
+                memberships: entry.memberships,
+                edges: entry.edges,
                 waiters: entry.waiters,
             });
         }
@@ -681,7 +731,7 @@ mod tests {
     fn row(external_id: Option<&str>, terms: &[u32]) -> UnallocatedRow {
         UnallocatedRow {
             external_id: external_id.map(|s| s.as_bytes().to_vec()),
-            slice: "default".to_string(),
+            view: "default".to_string(),
             descriptors: vec![b"d".to_vec()],
             x: 1.0,
             y: 2.0,
@@ -695,6 +745,8 @@ mod tests {
             rows,
             batch_id: batch.to_string(),
             body_hash: [0u8; 32],
+            memberships: Vec::new(),
+            edges: Vec::new(),
             waiters: vec!["w"],
         }
     }
@@ -815,6 +867,8 @@ mod tests {
             rows: vec![row(Some("k"), &[1])],
             batch_id: "b1".to_string(),
             body_hash: [3u8; 32],
+            memberships: Vec::new(),
+            edges: Vec::new(),
             waiters: vec!["w"],
         });
 

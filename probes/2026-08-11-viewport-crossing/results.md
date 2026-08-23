@@ -62,7 +62,7 @@ themselves, not a stalled pipeline. Attribution over a 300,000-row viewport:
 
 So the column read is free and the inversion is the whole gap between the idealised route and the
 real one. **A materialised `row_to_entity` removes it**: 6.00 → 0.68 ms on a contiguous result and
-18.5 → 11.1 ms on a scattered one, for 4 bytes per row per *slice* — shared across every filter
+18.5 → 11.1 ms on a scattered one, for 4 bytes per row per *view* — shared across every filter
 column, since it is a property of the geometry and not of any attribute. Mapped rather than read, a
 viewport touches ~1.2 MB of it.
 

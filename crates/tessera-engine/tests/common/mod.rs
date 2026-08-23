@@ -169,19 +169,20 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
+        point_fields: Default::default(),
         points: points_path.to_path_buf(),
-        pairs: pairs_path.to_path_buf(),
+        attribute_sources: Vec::new(),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
@@ -209,33 +210,131 @@ pub fn build_corpus_fixture(
     pairs_path: &Path,
     corpus: &tessera_corpus::Corpus,
 ) {
-    let schema_path = out.with_extension("schema.toml");
-    std::fs::create_dir_all(schema_path.parent().expect("the bundle has a parent")).ok();
-    std::fs::write(&schema_path, corpus.schema_toml()).expect("the generator's schema is writable");
-    let schema = tessera_build::schema::Schema::parse(&schema_path, &Default::default())
-        .expect("the generator's schema parses");
+    // **Beside the sources, not beside the bundle.** A `source` is a path relative to the
+    // document that declares it (`configuration.md` §3), and the generator's declaration names
+    // `points.parquet` and `pairs.parquet` — so the document has to sit where they do.
+    let config_path = points_path.with_file_name("corpus-config.toml");
+    std::fs::create_dir_all(config_path.parent().expect("the sources have a parent")).ok();
+    std::fs::write(&config_path, corpus.config_toml()).expect("the generator's config is writable");
+    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the generator's config parses");
     let args = BuildArgs {
+        point_fields: Default::default(),
         points: points_path.to_path_buf(),
-        pairs: pairs_path.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &config.schema,
+        ),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
         extent: corpus.extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema,
+        schema: config.schema,
     };
     build(&args).expect("the census fixture builds");
+}
+
+/// The generator's corpus built **with its layers** — the five artifact arms its declaration
+/// carries, materialised beside the points and published into the bundle.
+///
+/// Separate from [`build_corpus_fixture`] rather than a flag on it: that one exists so a census can
+/// register and publish its *own* layer against the generator's memberships, and reads none of the
+/// artifact fixtures. This one is for the cases that are about the declaration — a layer built by
+/// rule beside the same layer built by list — where what is under test is precisely what
+/// `tessera build` does with the generator's own `[[layer]]` blocks.
+pub fn build_corpus_fixture_with_layers(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &tessera_corpus::Corpus,
+) {
+    let dir = points_path.parent().expect("the sources have a parent");
+    corpus
+        .write_artifact_fixtures(dir)
+        .expect("the generator's artifact fixtures are writable");
+    let config_path = points_path.with_file_name("corpus-config.toml");
+    std::fs::write(&config_path, corpus.config_toml()).expect("the generator's config is writable");
+    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the generator's config parses");
+    let args = BuildArgs {
+        point_fields: Default::default(),
+        points: points_path.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &config.schema,
+        ),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        out: out.to_path_buf(),
+        extent: corpus.extent(),
+        view_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    };
+    build(&args).expect("the generator's own layers build");
+}
+
+/// The generator's points and access relation, under a **caller-supplied** declaration.
+///
+/// For the cases whose subject is a layer the generator does not declare — a spatial layer with
+/// boxes, say, which its boundary arm has a roster for and no geometry. The points, the pairs and
+/// the extent are the generator's, so its closed forms are still the oracle; the layers are the
+/// case's own.
+pub fn build_with_layers(
+    out: &Path,
+    points_path: &Path,
+    pairs_path: &Path,
+    corpus: &tessera_corpus::Corpus,
+    config: tessera_build::config::Config,
+) {
+    let args = BuildArgs {
+        point_fields: Default::default(),
+        points: points_path.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points_path.to_path_buf(),
+            &config.schema,
+        ),
+        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        out: out.to_path_buf(),
+        extent: corpus.extent(),
+        view_id: "s0".to_string(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: config.layers,
+        layer_inputs: config.layer_sources,
+        mint_external_ids: true,
+        emit_oracle_pairs: true,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    };
+    build(&args).expect("the fixture's own declaration builds");
 }
 
 /// Read the bundle's external-ids extent into a `source_id -> new entity_id` map — the same

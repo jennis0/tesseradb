@@ -59,6 +59,12 @@ pub enum RegistryError {
     NoSuchLevel { layer: String, level: u32 },
     /// Artifacts were offered to a layer whose membership is evaluated rather than enumerated.
     NotEnumerated { layer: String },
+    /// A caller asked for artifacts to be *derived* into a layer whose artifacts are its own to
+    /// name — the mirror of [`RegistryError::NotEnumerated`], and a defect rather than caller input.
+    NotDerived { layer: String },
+    /// An artifact's declared box and its layer's `shape` do not agree — one without the other, or
+    /// a stored membership beside a live rule.
+    Shape { layer: String, detail: String },
     /// This level already holds an artifact under that key, or the batch repeats it.
     DuplicateKey { layer: String, key: String },
     /// The batch's supplied content does not match what the layer declares.
@@ -80,6 +86,14 @@ pub enum RegistryError {
     /// replacement is refused where it would dangle a *declared* dependent, so an edge into a layer
     /// nobody declared is an edge nothing protects.
     UndeclaredAttachment { layer: String, target: String },
+    /// An artifact declares no dependency in a layer that declares one.
+    ///
+    /// **Fail-closed, because a dependency edge is a visibility term**
+    /// ([decision 0089](../../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)):
+    /// a dependent is served only where the artifact it attaches to is served, so an artifact with
+    /// no attachment has nothing for that prerequisite to gate on. Admitting it would make the
+    /// prerequisite silently optional — the caller's producer error becoming a permission.
+    MissingAttachment { layer: String, key: String },
     /// An artifact attaches to a target that does not exist — no such layer, no such level, or no
     /// artifact under that key.
     ///
@@ -91,8 +105,78 @@ pub enum RegistryError {
         level: u32,
         key: String,
     },
+    /// A parent/child edge named a parent the layer does not hold where its declared shape says
+    /// to look: the same level for a nested layer, a coarser one for a tiered layer.
+    NoSuchParent {
+        layer: String,
+        level: u32,
+        key: String,
+    },
+    /// An edge published into a layer that declares no lineage at all.
+    EdgesOnUntreedLayer { layer: String, kind: String },
+    /// A tiered layer whose parent key names an artifact in more than one coarser level.
+    /// Refused rather than resolved by search order, which would make the edge's meaning depend on
+    /// how the levels were walked.
+    AmbiguousParent { layer: String, key: String },
+    /// A growth named a key this level does not hold, on a layer whose value set is **closed**.
+    ///
+    /// Closed is declare-then-use, and the refusal is the whole of it: a mistyped id would
+    /// otherwise carry away the members it stole from a real artifact, whose masked count then goes
+    /// quietly short. Under `value_set = "open"` the same key mints instead
+    /// (`artifacts-from-points.md` §3).
+    NoSuchArtifact {
+        layer: String,
+        level: u32,
+        key: String,
+    },
+    /// An **open** layer met a key it would have minted, and the layer's own declaration says a
+    /// minted artifact could not be served: a minted artifact carries nothing but its name, and
+    /// this layer requires more of every artifact it publishes.
+    ///
+    /// **The same two refusals a publication already makes**, hoisted to admission so they refuse
+    /// the one batch rather than the window it would have joined — and the same two a build makes
+    /// over a member table, which is what keeps one declaration from meaning two things at the two
+    /// entry points ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+    Unmintable {
+        layer: String,
+        key: String,
+        why: String,
+    },
     /// The entity space could not supply the layer's entity or its reserved runs.
     Alloc(AllocError),
+    /// A list column's adjacency named one parent for an artifact and the layer holds another.
+    ///
+    /// Two spellings of one edge, disagreeing: the same refusal a build makes when two points name
+    /// different parents for one cluster. There is no correct output — choosing between them would
+    /// publish a hierarchy the caller did not write.
+    ContradictedParent {
+        layer: String,
+        level: u32,
+        child: String,
+        claimed: String,
+        held: String,
+    },
+}
+
+/// **No artifact is about to exist** — the `pending` answer every caller but the ingest route's
+/// mint pass gives [`LayerRegistry::parent_ref`] and [`LayerRegistry::prepare_publish`].
+pub fn no_pending(_: &str) -> Option<crate::wal::ParentRef> {
+    None
+}
+
+/// What [`LayerRegistry::check_edge`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EdgeCheck {
+    /// The layer holds exactly this edge.
+    Agrees,
+    /// The child exists and holds no parent at all, so there is no edge to disagree with — and the
+    /// growth route cannot create one. The caller reports it; see [`LayerRegistry::check_edge`].
+    Unrecorded,
+    /// The child does not exist yet and is one of the keys this batch is about to mint, so the edge
+    /// is the minted artifact's own parent rather than a claim about a stored one. **The one route
+    /// by which the wire creates an edge**, and it creates it where the artifact is created — which
+    /// is where lineage has always been settled.
+    Mints,
 }
 
 impl std::fmt::Display for RegistryError {
@@ -109,6 +193,15 @@ impl std::fmt::Display for RegistryError {
             RegistryError::NoSuchLevel { layer, level } => {
                 write!(f, "{layer} declares no level {level}")
             }
+            RegistryError::Shape { layer, detail } => {
+                write!(f, "layer '{layer}': {detail}")
+            }
+            RegistryError::NotDerived { layer } => write!(
+                f,
+                "layer '{layer}' does not take derived artifacts: its membership is a stored set \
+                 or a shape, so its artifacts are the caller's to publish rather than identities a \
+                 rule produces"
+            ),
             RegistryError::NotEnumerated { layer } => write!(
                 f,
                 "{layer} derives its membership from a predicate, so it cannot be published into: \
@@ -133,6 +226,12 @@ impl std::fmt::Display for RegistryError {
                  depends_on — an attached artifact is withheld with its target, and a dependency \
                  nobody declared is one no replacement checks"
             ),
+            RegistryError::MissingAttachment { layer, key } => write!(
+                f,
+                "{layer} declares depends_on, so every artifact it publishes attaches to one — and \
+                 {key} attaches to nothing. A dependent is visible only where what it depends on \
+                 is visible, so an artifact with no dependency would be gated on nothing"
+            ),
             RegistryError::NoSuchAttachmentTarget {
                 layer,
                 target,
@@ -143,6 +242,47 @@ impl std::fmt::Display for RegistryError {
                 "{layer} publishes an artifact attached to {key} in level {level} of {target}, \
                  which holds no such artifact — a target exists before the edge into it, or the \
                  edge names whatever later lands there"
+            ),
+            RegistryError::NoSuchParent { layer, level, key } => write!(
+                f,
+                "{layer} publishes an artifact in level {level} whose parent is {key}, which the \
+                 layer does not hold where its declared shape says to look — the same level for a \
+                 nested layer, a coarser level for a tiered one"
+            ),
+            RegistryError::EdgesOnUntreedLayer { layer, kind } => write!(
+                f,
+                "{layer} is declared {kind} and so has no lineage, but an artifact names a \
+                 parent: declare the layer nested if its edges run within a level, or \
+                 tiered if they run between levels"
+            ),
+            RegistryError::AmbiguousParent { layer, key } => write!(
+                f,
+                "{layer} publishes an artifact whose parent {key} exists in more than one coarser \
+                 level; which level the edge meant would depend on the search order, so it is \
+                 refused rather than resolved"
+            ),
+            RegistryError::NoSuchArtifact { layer, level, key } => write!(
+                f,
+                "{layer} level {level} holds no artifact under the key {key}, so there is \
+                 nothing for these members to join; declare `value_set = \"open\"` on the layer \
+                 for a key nothing declares to create the artifact it names"
+            ),
+            RegistryError::Unmintable { layer, key, why } => write!(
+                f,
+                "{layer} is declared open, so the key {key} would create the artifact it names — \
+                 but {why}. A minted artifact carries nothing but its name"
+            ),
+            RegistryError::ContradictedParent {
+                layer,
+                level,
+                child,
+                claimed,
+                held,
+            } => write!(
+                f,
+                "a list column names {claimed} as the parent of {child} in level {level} of \
+                 {layer}, which holds {held} as its parent. The two are spellings of one edge, so \
+                 publishing either would state a hierarchy nobody wrote"
             ),
             RegistryError::Alloc(e) => write!(f, "{e}"),
         }
@@ -294,7 +434,7 @@ impl LayerRegistry {
         let layer_entity = self.take_layer_entity(alloc)?;
 
         Ok(WalRecord::LayerCreate {
-            declaration,
+            declaration: Box::new(declaration),
             layer_entity,
             runs,
         })
@@ -317,6 +457,12 @@ impl LayerRegistry {
     /// nothing.
     ///
     /// [`prepare_create`]: LayerRegistry::prepare_create
+    /// `pending` is what [`parent_ref`] answers a parent key with when the artifact naming it does
+    /// not exist yet and is not in this batch either — empty for every caller but the ingest route's
+    /// mint pass, which fixes a tiered chain's ordinals a level at a time and has applied none of
+    /// them ([`no_pending`] is the empty answer).
+    ///
+    /// [`parent_ref`]: LayerRegistry::parent_ref
     pub fn prepare_publish(
         &self,
         layer_name: &str,
@@ -324,20 +470,114 @@ impl LayerRegistry {
         incoming: &[IncomingArtifact],
         store: &ArtifactStore,
         alloc: &mut Allocator,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
     ) -> Result<WalRecord, RegistryError> {
         let layer = self
             .layers
             .get(layer_name)
             .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
-
-        // A spatial or attribute layer's membership is *evaluated*, never enumerated — publishing
-        // one would install a frozen answer beside a live predicate, and the two would diverge at
-        // the first ingest. Refused at the boundary rather than reconciled later.
-        if layer.declaration.membership != MembershipSource::Enumerated {
+        // **An attribute layer's membership is *evaluated*, never enumerated** — publishing one
+        // would install a frozen answer beside a live predicate, and the two would diverge at the
+        // first ingest. Refused at the boundary rather than reconciled later.
+        //
+        // **A spatial layer is not refused here, and the difference is where the shape comes
+        // from.** Its artifacts *are* published — a roster of boxes an author wrote — and what is
+        // never stored is their membership, which the shape decides at request time. So the
+        // refusal below is the same rule in both cases (*a stored answer may not sit beside a live
+        // rule*) and only the attribute kind has an answer to store.
+        if matches!(layer.declaration.membership, MembershipSource::Attribute(_)) {
             return Err(RegistryError::NotEnumerated {
                 layer: layer_name.to_string(),
             });
         }
+        self.prepare_artifacts(layer_name, level, incoming, store, alloc, pending)
+    }
+
+    /// **Mint the artifacts a predicate's own rule names** — the values an attribute column
+    /// carries, one artifact per distinct value, keyed by the value's spelling.
+    ///
+    /// **The rule is the membership, so this is the only route into such a layer.**
+    /// [`prepare_publish`] refuses an attribute layer because a caller's stored answer would sit
+    /// beside a live predicate and diverge from it at the first ingest; what arrives here is not an
+    /// answer but the *identities* the rule produces, which have to exist somewhere for a
+    /// suppression to land on and for an edge to name. Each carries its key and nothing else: no
+    /// membership (the column is the membership), no content, no attachment and no parent, each of
+    /// which `LayerDeclaration::validate` already refuses such a layer from declaring.
+    ///
+    /// **Suppression-blindness carries over unchanged**, because the duplicate-key check
+    /// [`prepare_artifacts`] makes reads [`ArtifactStore::ordinal_of_key`] — the store's key index,
+    /// which loses a key at exactly one event, the fold retiring the artifact's own entity. A
+    /// suppressed value's key therefore still resolves, is refused as a duplicate, and never mints a
+    /// second unsuppressed artifact (§5's third ruling, stated in full on [`resolve_or_mint`]). A
+    /// *deleted* value's key does mint again, and the new artifact is a new object with a new
+    /// entity — which is what a deletion means.
+    ///
+    /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    /// [`prepare_artifacts`]: LayerRegistry::prepare_artifacts
+    /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
+    pub fn prepare_derive(
+        &self,
+        layer_name: &str,
+        level: u32,
+        keys: &[String],
+        store: &ArtifactStore,
+        alloc: &mut Allocator,
+    ) -> Result<WalRecord, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        // The mirror of [`prepare_publish`]'s refusal, and it exists for the same reason read the
+        // other way: an enumerated layer's artifacts are the caller's to name, so minting one from
+        // a rule would be the service inventing an identity nobody published.
+        if !matches!(layer.declaration.membership, MembershipSource::Attribute(_)) {
+            return Err(RegistryError::NotDerived {
+                layer: layer_name.to_string(),
+            });
+        }
+        let incoming: Vec<IncomingArtifact> = keys
+            .iter()
+            .map(|key| IncomingArtifact {
+                key: Some(key.clone()),
+                members: croaring::Bitmap::new(),
+                contents: Vec::new(),
+                attached_to: None,
+                parent_key: None,
+                shape: None,
+            })
+            .collect();
+        self.prepare_artifacts(
+            layer_name,
+            level,
+            &incoming,
+            store,
+            alloc,
+            &crate::no_pending,
+        )
+    }
+
+    /// The allocation and validation both entry points share — everything [`prepare_publish`] does
+    /// once the membership source has been checked.
+    ///
+    /// **One body, so a rule cannot hold at one entry point and not the other.** The two callers
+    /// differ in exactly which memberships they admit; the duplicate-key rule, the content rules,
+    /// the attachment resolution, the parent resolution and the reservation growth are one
+    /// implementation.
+    ///
+    /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    fn prepare_artifacts(
+        &self,
+        layer_name: &str,
+        level: u32,
+        incoming: &[IncomingArtifact],
+        store: &ArtifactStore,
+        alloc: &mut Allocator,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+    ) -> Result<WalRecord, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
         let runs = layer
             .runs
             .get(level as usize)
@@ -351,7 +591,7 @@ impl LayerRegistry {
         // and leave the index pointing at whichever landed last.
         let mut within_batch = BTreeSet::new();
         for artifact in incoming {
-            let Some(key) = &artifact.stable_key else {
+            let Some(key) = &artifact.key else {
                 continue;
             };
             if store.ordinal_of_key(layer_name, level, key).is_some() || !within_batch.insert(key) {
@@ -368,7 +608,9 @@ impl LayerRegistry {
         // declared kind, must never carry an undeclared one, and must never carry a generating set
         // nothing will test.
         let declared = &layer.declaration.content.supplied;
-        let corpus_derived = declared.iter().any(|s| s.corpus_derived);
+        let requires_all_members = declared
+            .iter()
+            .any(|s| s.require_member_visibility.requires_all_members());
         for (i, artifact) in incoming.iter().enumerate() {
             let refuse = |detail: String| {
                 Err(RegistryError::Content {
@@ -376,7 +618,7 @@ impl LayerRegistry {
                     detail: format!("artifact {i} of this batch: {detail}"),
                 })
             };
-            if declared.is_empty() && !artifact.variations.is_empty() {
+            if declared.is_empty() && !artifact.contents.is_empty() {
                 return refuse(
                     "carries supplied content, and this layer declares none — the kinds a client \
                      may draw come from the layer's declaration, so content under no declared kind \
@@ -384,7 +626,7 @@ impl LayerRegistry {
                         .to_string(),
                 );
             }
-            if !declared.is_empty() && artifact.variations.is_empty() {
+            if !declared.is_empty() && artifact.contents.is_empty() {
                 return refuse(format!(
                     "carries no supplied content, and this layer declares {} kind(s); an artifact \
                      served without content its layer declares cannot be told apart from one whose \
@@ -392,36 +634,84 @@ impl LayerRegistry {
                     declared.len()
                 ));
             }
-            for (v, variation) in artifact.variations.iter().enumerate() {
-                if variation.values.len() != declared.len() {
+            for (rank, content) in artifact.contents.iter().enumerate() {
+                if content.values.len() != declared.len() {
                     return refuse(format!(
-                        "variation {v} supplies {} value(s) for {} declared kind(s); every \
-                         variation is a whole description, and a viewer is served one of them \
+                        "contents[{rank}] supplies {} value(s) for {} declared kind(s); every \
+                         entry is a whole description, and a viewer is served one of them \
                          entire or no artifact at all",
-                        variation.values.len(),
+                        content.values.len(),
                         declared.len()
                     ));
                 }
-                if !corpus_derived && !variation.generated_from.is_empty() {
+                if !requires_all_members && !content.generated_from.is_empty() {
                     return refuse(format!(
-                        "variation {v} declares a generating set, and none of this layer's content \
-                         is corpus-derived; a set that is never tested is a claim the service would \
-                         carry without meaning"
+                        "contents[{rank}] declares a generating set, and none of this layer's \
+                         content requires its members visible; a set that is never tested is a \
+                         claim the service would carry without meaning"
                     ));
                 }
-                if corpus_derived && variation.generated_from.is_empty() {
+                if requires_all_members && content.generated_from.is_empty() {
                     return refuse(format!(
-                        "variation {v} declares no generating set, and this layer's content is \
-                         corpus-derived; such content is served only to a viewer who can see \
-                         everything it was generated from, and an empty set is satisfied by \
-                         everyone"
+                        "contents[{rank}] declares no generating set, and this layer's content \
+                         requires every member visible; such content is served only to a viewer \
+                         who can see everything it was generated from, and an empty set is \
+                         satisfied by everyone"
                     ));
                 }
             }
         }
 
+        // **A declared shape and a declared membership are the same statement**, so an artifact
+        // must carry exactly the one its layer names. Both halves are refusals rather than
+        // tolerated absences: an artifact of a shape layer with no box has no membership rule at
+        // all — it counts zero for every viewer and is absent under any criterion, which no client
+        // can tell from an artifact whose members are simply invisible to them — and a box on a
+        // layer that declares no shape is a region nothing evaluates, which would read on
+        // `/v1/meta` as geometry the service holds and does not.
+        let declares_shape = layer.declaration.shape.is_some();
+        for (i, artifact) in incoming.iter().enumerate() {
+            match (declares_shape, &artifact.shape) {
+                (true, None) => {
+                    return Err(RegistryError::Shape {
+                        layer: layer_name.to_string(),
+                        detail: format!(
+                            "artifact {i} of this batch carries no bounding box, and this layer's \
+                             `shape` declares one. The box is the whole of such an artifact's \
+                             membership, so one published without it would count zero for every \
+                             viewer"
+                        ),
+                    })
+                }
+                (false, Some(_)) => {
+                    return Err(RegistryError::Shape {
+                        layer: layer_name.to_string(),
+                        detail: format!(
+                            "artifact {i} of this batch carries a bounding box, and this layer \
+                             declares no `shape`. Its members come from the stored set its \
+                             membership names, so a box beside them is a region nothing evaluates"
+                        ),
+                    })
+                }
+                _ => {}
+            }
+            // A shape layer stores no membership: the tiles covering the box decide who belongs, at
+            // request time. A set beside it would be a frozen answer next to a live rule — the same
+            // thing `prepare_publish` refuses an attribute layer for.
+            if declares_shape && !artifact.members.is_empty() {
+                return Err(RegistryError::Shape {
+                    layer: layer_name.to_string(),
+                    detail: format!(
+                        "artifact {i} of this batch carries a stored membership, and this layer's \
+                         members come from its shape at request time — a set stored beside a live \
+                         rule is a frozen answer that diverges from it at the first ingest"
+                    ),
+                });
+            }
+        }
+
         // **Attachments, resolved before anything is allocated.** The caller names a target by the
-        // stable key they published it under — an ordinal is never disclosed (C8), so a key is the
+        // key they published it under — an ordinal is never disclosed (C8), so a key is the
         // only address they hold — and what is stored is the resolved `(level, ordinal, entity)`.
         // Resolving once here rather than per request is what makes the extra predicate term one
         // `verdict` lookup instead of a registry walk.
@@ -429,6 +719,19 @@ impl LayerRegistry {
             .iter()
             .map(|artifact| {
                 let Some(wanted) = &artifact.attached_to else {
+                    // **A layer that declares a dependency publishes only dependents** (decision
+                    // 0089). Refused here rather than served ungated: the serving predicate reads
+                    // the prerequisite off the attachment, so an artifact carrying none would be
+                    // the one artifact of a label layer that answered on its own conjuncts alone.
+                    if !layer.declaration.depends_on.is_empty() {
+                        return Err(RegistryError::MissingAttachment {
+                            layer: layer_name.to_string(),
+                            key: artifact
+                                .key
+                                .clone()
+                                .unwrap_or_else(|| "<no key>".to_string()),
+                        });
+                    }
                     return Ok(None);
                 };
                 if !layer.declaration.depends_on.contains(&wanted.layer) {
@@ -441,11 +744,11 @@ impl LayerRegistry {
                     layer: layer_name.to_string(),
                     target: wanted.layer.clone(),
                     level: wanted.level,
-                    key: wanted.stable_key.clone(),
+                    key: wanted.key.clone(),
                 };
                 let target = self.layers.get(&wanted.layer).ok_or_else(missing)?;
                 let ordinal = store
-                    .ordinal_of_key(&wanted.layer, wanted.level, &wanted.stable_key)
+                    .ordinal_of_key(&wanted.layer, wanted.level, &wanted.key)
                     .ok_or_else(missing)?;
                 let entity = target
                     .runs
@@ -463,6 +766,38 @@ impl LayerRegistry {
 
         let first_ordinal = store.next_ordinal(layer_name, level) as u64;
         let needed = first_ordinal + incoming.len() as u64;
+
+        // The parent each artifact names, resolved by the layer's declared edge shape — see
+        // [`LayerRegistry::parent_ref`], which the ingest route's edge check shares. A child's
+        // parent is often a **sibling in this batch** that has no ordinal until this call assigns
+        // one, which is what `batch_ordinal` answers and why the resolution takes it.
+        let batch_ordinal = |key: &str| {
+            incoming
+                .iter()
+                .position(|a| a.key.as_deref() == Some(key))
+                .map(|i| crate::wal::ParentRef {
+                    level,
+                    ordinal: first_ordinal as u32 + i as u32,
+                })
+                .or_else(|| pending(key))
+        };
+        let parents: Vec<Option<crate::wal::ParentRef>> = incoming
+            .iter()
+            .map(|artifact| {
+                let Some(key) = artifact.parent_key.as_deref() else {
+                    return Ok(None);
+                };
+                self.parent_ref(
+                    layer_name,
+                    level,
+                    artifact.key.as_deref(),
+                    key,
+                    store,
+                    &batch_ordinal,
+                )
+                .map(Some)
+            })
+            .collect::<Result<_, _>>()?;
 
         // Extend the level's reservation if the batch outgrows it. The runs are a list from the
         // start precisely so this is an append rather than a migration — see `ReservedRuns`.
@@ -496,24 +831,26 @@ impl LayerRegistry {
                 PublishedArtifact {
                     ordinal: ordinal as u32,
                     entity: EntityId::new(entity),
-                    stable_key: artifact.stable_key.clone(),
+                    key: artifact.key.clone(),
                     members: serialise_members(&artifact.members),
-                    variations: artifact
-                        .variations
+                    contents: artifact
+                        .contents
                         .iter()
-                        .map(|v| crate::wal::PublishedVariation {
+                        .map(|v| crate::wal::PublishedContent {
                             values: v.values.clone(),
                             generated_from: serialise_members(&v.generated_from),
                         })
                         .collect(),
-                    attached_to: attachments[i].as_ref().map(|a| {
-                        crate::wal::PublishedAttachment {
+                    attached_to: attachments[i]
+                        .as_ref()
+                        .map(|a| crate::wal::PublishedAttachment {
                             layer: a.layer.clone(),
                             level: a.level,
                             ordinal: a.ordinal,
                             entity: a.entity,
-                        }
-                    }),
+                        }),
+                    parent: parents[i],
+                    shape: artifact.shape.map(|b| b.as_array()),
                 }
             })
             .collect();
@@ -524,6 +861,365 @@ impl LayerRegistry {
             extend_runs,
             artifacts,
         })
+    }
+
+    /// Validates a batch of joins against the artifacts they name and returns the record that makes
+    /// them durable — on [`prepare_publish`]'s contract: the caller appends, syncs, and only then
+    /// applies.
+    ///
+    /// **It allocates nothing, and that is the difference from a publication.** A join takes no
+    /// ordinal and no entity: the artifact exists, so the identities it is addressed by exist too.
+    /// So there is no allocator here and a refusal spends nothing — where a refused publication has
+    /// to be argued about, this one is simply a refusal.
+    ///
+    /// **A key the level does not hold is refused**, whatever the layer's value set says: this is
+    /// a growth naming an artifact to add members to, not a point declaring the artifact it belongs
+    /// to, so there is nothing here for an unknown key to have created — see
+    /// [`crate::IncomingGrowth`], and [`LayerRegistry::resolve_or_mint`] for the route that does
+    /// create one. The resolution is [`ArtifactStore::ordinal_of_key`] — the *store's* index, never
+    /// the served view — which is what keeps a suppressed artifact from reading as absent and
+    /// having a second, unsuppressed artifact minted under its key (§5).
+    ///
+    /// **Nothing joining is not an error.** A caller may honestly name an artifact and add nothing
+    /// to it; `Ok(None)` says the record would be empty and no append is owed. Refusing would block
+    /// a write over an input that discloses nothing.
+    ///
+    /// [`prepare_publish`]: LayerRegistry::prepare_publish
+    pub fn prepare_grow(
+        &self,
+        layer_name: &str,
+        level: u32,
+        incoming: &[crate::membership::IncomingGrowth],
+        store: &ArtifactStore,
+    ) -> Result<Option<WalRecord>, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+
+        // A predicate layer's membership is evaluated per request, so there is nothing to grow —
+        // and a stored answer beside a live predicate is exactly what `prepare_publish` refuses for
+        // the same reason.
+        if layer.declaration.membership != MembershipSource::Enumerated {
+            return Err(RegistryError::NotEnumerated {
+                layer: layer_name.to_string(),
+            });
+        }
+        if layer.runs.get(level as usize).is_none() {
+            return Err(RegistryError::NoSuchLevel {
+                layer: layer_name.to_string(),
+                level,
+            });
+        }
+
+        // Every key resolves before anything is written: the whole batch or none of it, on
+        // `prepare_publish`'s rule. A partially applied growth would leave a caller unable to say
+        // which of their joins happened.
+        let mut growth = Vec::with_capacity(incoming.len());
+        for join in incoming {
+            let ordinal = self.resolve_growth_key(layer_name, level, &join.key, store)?;
+            if join.joining.is_empty() {
+                continue;
+            }
+            growth.push((ordinal, &join.joining));
+        }
+        Ok(crate::membership::growth_record(layer_name, level, growth))
+    }
+
+    /// The ordinal a member key names, or **`None` where the layer is open and nothing holds it**
+    /// — the resolution the ingest route makes at admission (`artifacts-from-points.md` §6.3).
+    ///
+    /// `None` is *this key will be minted at the close*, and it is returned only after the two
+    /// checks a minted artifact could not pass are made: a layer declaring supplied content kinds,
+    /// and a layer declaring a dependency, each refuse here rather than at the close, so one
+    /// caller's key refuses one batch instead of the window it would have joined.
+    ///
+    /// **Suppression is invisible to this by construction, which is §5's third ruling.** The lookup
+    /// is [`ArtifactStore::ordinal_of_key`] — the store's key index — and that index loses a key at
+    /// exactly one event, the fold retiring the artifact's own entity, which is a *deletion*. A
+    /// suppression touches no stored structure at all (write-path §5.4, Rule S), so there is
+    /// nothing here that could see one. Written against the *served* view instead, a suppressed
+    /// artifact would read as absent, its key would mint a second artifact, and the new one would
+    /// not be suppressed — a suppression defeated by ingesting a point. That is why this reads the
+    /// store, and why it must never be replaced by a `verdict` call.
+    pub fn resolve_or_mint(
+        &self,
+        layer_name: &str,
+        level: u32,
+        key: &str,
+        store: &ArtifactStore,
+    ) -> Result<Option<u32>, RegistryError> {
+        match self.resolve_growth_key(layer_name, level, key, store) {
+            Ok(ordinal) => Ok(Some(ordinal)),
+            Err(RegistryError::NoSuchArtifact { layer, level, key }) => {
+                let declaration = &self
+                    .layers
+                    .get(&layer)
+                    .expect("resolve_growth_key found the layer before it reached the key")
+                    .declaration;
+                if declaration.value_set != tessera_types::layer::ValueSet::Open {
+                    return Err(RegistryError::NoSuchArtifact { layer, level, key });
+                }
+                let unmintable = |why: &str| {
+                    Err(RegistryError::Unmintable {
+                        layer: layer.clone(),
+                        key: key.clone(),
+                        why: why.to_string(),
+                    })
+                };
+                // The two refusals `prepare_publish` would make of an artifact carrying only a key,
+                // made here where the batch can still be rejected without effect. Both are
+                // declarations about *every* artifact of the layer, so neither depends on which key
+                // arrived — a layer is mintable or it is not.
+                if !declaration.content.supplied.is_empty() {
+                    return unmintable(&format!(
+                        "the layer declares {} supplied content kind(s), and an artifact served \
+                         without content its layer declares cannot be told apart from one whose \
+                         content was withheld",
+                        declaration.content.supplied.len()
+                    ));
+                }
+                if !declaration.depends_on.is_empty() {
+                    return unmintable(
+                        "the layer declares depends_on, so every artifact it publishes attaches to \
+                         one, and an artifact with no dependency would be gated on nothing",
+                    );
+                }
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The ordinal a growth's key names, with the layer and level checked — **the resolution half
+    /// of [`prepare_grow`], shared with the ingest route through [`resolve_or_mint`].**
+    ///
+    /// A batch arriving at `/control/ingest` with a column named for a layer resolves its keys here
+    /// at admission, before the entities exist, and carries the ordinals to its window's close
+    /// (`artifacts-from-points.md` §6.2). The two callers must agree about what a key means and
+    /// about what an unknown one costs — which is why it is this function and not a second lookup.
+    ///
+    /// **The lookup is `ArtifactStore::ordinal_of_key`, never the served view**, and that is what
+    /// makes it suppression-blind by construction: a suppressed artifact resolves like any other,
+    /// grows like any other, and stays suppressed (§5's third ruling — stated in full on
+    /// [`resolve_or_mint`], where the alternative reading would mint).
+    ///
+    /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
+    pub fn resolve_growth_key(
+        &self,
+        layer_name: &str,
+        level: u32,
+        key: &str,
+        store: &ArtifactStore,
+    ) -> Result<u32, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        if layer.declaration.membership != MembershipSource::Enumerated {
+            return Err(RegistryError::NotEnumerated {
+                layer: layer_name.to_string(),
+            });
+        }
+        if layer.runs.get(level as usize).is_none() {
+            return Err(RegistryError::NoSuchLevel {
+                layer: layer_name.to_string(),
+                level,
+            });
+        }
+        store
+            .ordinal_of_key(layer_name, level, key)
+            .ok_or_else(|| RegistryError::NoSuchArtifact {
+                layer: layer_name.to_string(),
+                level,
+                key: key.to_string(),
+            })
+    }
+
+    /// Whether the edge a caller's list column declared is the edge this layer already holds.
+    ///
+    /// **A growth adds members and never lineage**, so this checks rather than writes: the edge was
+    /// settled when the artifact was published, and a point's list is a second spelling of it. The
+    /// two disagreeing is the build's `two_parents` refusal at the other entry point — there is no
+    /// correct output, and picking one would publish a hierarchy nobody wrote.
+    ///
+    /// [`EdgeCheck::Unrecorded`] is the third state and is **not** an error: the artifact exists and
+    /// holds no parent, so the column states an edge this route cannot create. Reported by the
+    /// caller and accepted, because the membership half of the same entry is unambiguous and
+    /// refusing it would block a batch over a roster published without its edges — which discloses
+    /// nothing and costs a republication.
+    ///
+    /// The two `minting` arguments answer *is this key one the batch is about to create?* — the keys
+    /// [`resolve_or_mint`] returned `None` for. They decide two of the three answers:
+    ///
+    /// - **the child is minting** → [`EdgeCheck::Mints`]: the edge is the new artifact's own
+    ///   parent, settled where every edge is settled, at the publication that creates it.
+    /// - **the parent is minting** and the child exists → the layer holds no such parent *yet*, and
+    ///   a growth adds members and never lineage. A child holding no parent is
+    ///   [`EdgeCheck::Unrecorded`] as before; a child holding a different one is the contradiction,
+    ///   because a parent that does not exist cannot be the parent it already has.
+    ///
+    /// **The child's is a fact and the parent's is a search**, which is why one is a `bool` and the
+    /// other a closure. A child's level is the edge's own; a parent's is whatever the layer's shape
+    /// says to look at — the child's level for a nested layer and any coarser one for a tiered
+    /// layer — so the question asked of a parent is *does this layer hold that key anywhere*. Asking
+    /// it of the child too would treat a key minting at one level as minting at every level, and a
+    /// levelled taxonomy legitimately carries one key at two.
+    ///
+    /// [`resolve_or_mint`]: LayerRegistry::resolve_or_mint
+    pub fn check_edge(
+        &self,
+        edge: &crate::command::BatchEdge,
+        store: &ArtifactStore,
+        child_mints: bool,
+        parent_mints: &dyn Fn(&str) -> bool,
+    ) -> Result<EdgeCheck, RegistryError> {
+        let crate::command::BatchEdge {
+            layer,
+            level,
+            child,
+            parent,
+        } = edge;
+        let (layer, level) = (layer.as_str(), *level);
+        if child_mints {
+            return Ok(EdgeCheck::Mints);
+        }
+        let ordinal = self.resolve_growth_key(layer, level, child, store)?;
+        let held = store.get(layer, level, ordinal).and_then(|r| r.parent);
+        let contradicted = |held| RegistryError::ContradictedParent {
+            layer: layer.to_string(),
+            level,
+            child: child.clone(),
+            claimed: parent.clone(),
+            held: self.key_at(layer, held, store),
+        };
+        if parent_mints(parent) {
+            return match held {
+                None => Ok(EdgeCheck::Unrecorded),
+                Some(held) => Err(contradicted(held)),
+            };
+        }
+        let claimed = self.parent_ref(layer, level, Some(child), parent, store, &no_pending)?;
+        match held {
+            None => Ok(EdgeCheck::Unrecorded),
+            Some(held) if held == claimed => Ok(EdgeCheck::Agrees),
+            Some(held) => Err(contradicted(held)),
+        }
+    }
+
+    /// The caller's own name for the artifact at a resolved position, for a refusal that has to
+    /// mention it. An artifact published without a key has none, and its address is what the caller
+    /// can act on instead.
+    fn key_at(&self, layer_name: &str, at: crate::wal::ParentRef, store: &ArtifactStore) -> String {
+        store
+            .get(layer_name, at.level, at.ordinal)
+            .and_then(|r| r.key.clone())
+            .unwrap_or_else(|| format!("the artifact at level {} ordinal {}", at.level, at.ordinal))
+    }
+
+    /// Where a parent key sits, for an artifact at `level` — **one resolution, used by the
+    /// publication that stores an edge and by the ingest route that checks one.**
+    ///
+    /// **Which direction an edge may run is the layer's declaration.** A nested layer's edges relate
+    /// artifacts of one level, and a level is normally published in one batch — so a child's parent
+    /// is usually a sibling with no ordinal until the publication assigns one, which is what
+    /// `pending` answers. A tiered layer's edges run the other way, from a **coarser level** to
+    /// this one: its parent was published in an earlier batch, so the store usually answers, and the
+    /// search runs over the levels above this one. A key found in two of them is a refusal rather
+    /// than a first match, because which one an edge meant would then depend on the search order.
+    ///
+    /// **`pending` answers for artifacts that are about to exist but do not yet**, at whatever level
+    /// they will land: the siblings of a publication's own batch, and the artifacts an ingest batch
+    /// is minting a level at a time (`artifacts-from-points.md` §6.3). It returns a whole
+    /// [`ParentRef`] rather than an ordinal because a tiered chain's parent sits at a *coarser*
+    /// level than the child, and a caller minting level *k* has already fixed the ordinals of level
+    /// *k−1* without having applied them anywhere a lookup could see.
+    ///
+    /// **A layer may not mix the two**, which is what makes the question answerable at all: the
+    /// declared kind says which shape its edges have, and an edge of the other shape refuses.
+    ///
+    /// [`ParentRef`]: crate::wal::ParentRef
+    pub fn parent_ref(
+        &self,
+        layer_name: &str,
+        level: u32,
+        child_key: Option<&str>,
+        parent_key: &str,
+        store: &ArtifactStore,
+        pending: &dyn Fn(&str) -> Option<crate::wal::ParentRef>,
+    ) -> Result<crate::wal::ParentRef, RegistryError> {
+        let layer = self
+            .layers
+            .get(layer_name)
+            .ok_or_else(|| RegistryError::NoSuchLayer(layer_name.to_string()))?;
+        let missing = || RegistryError::NoSuchParent {
+            layer: layer_name.to_string(),
+            level,
+            key: parent_key.to_string(),
+        };
+        let cross_level = matches!(
+            layer.declaration.hierarchy.kind,
+            tessera_types::layer::HierarchyKind::Tiered
+        );
+        let edges_allowed = cross_level
+            || matches!(
+                layer.declaration.hierarchy.kind,
+                tessera_types::layer::HierarchyKind::Nested
+            );
+        if !edges_allowed {
+            return Err(RegistryError::EdgesOnUntreedLayer {
+                layer: layer_name.to_string(),
+                kind: format!("{:?}", layer.declaration.hierarchy.kind).to_lowercase(),
+            });
+        }
+        // **Only a within-level edge can name itself.** A key is unique per `(layer, level)`, so a
+        // levelled taxonomy legitimately carries the same key at two levels — an arXiv archive with
+        // no subclass is `hep-ph` at both, and the level-1 artifact's parent is the level-0 one of
+        // the same name. Refusing that would force a caller to rename half their taxonomy to
+        // satisfy a check meant for a tree.
+        if !cross_level && child_key == Some(parent_key) {
+            return Err(missing());
+        }
+        let ambiguous = || RegistryError::AmbiguousParent {
+            layer: layer_name.to_string(),
+            key: parent_key.to_string(),
+        };
+        if cross_level {
+            let mut found = None;
+            // **A pending parent is a candidate beside the stored ones, not ahead of them**, so a
+            // key held at one coarser level and minted at another is the same ambiguity it would be
+            // if both were stored — which is the case the search order must not be allowed to
+            // decide.
+            for candidate in pending(parent_key)
+                .into_iter()
+                .filter(|p| p.level < level)
+                .chain((0..level).filter_map(|coarser| {
+                    store
+                        .ordinal_of_key(layer_name, coarser, parent_key)
+                        .map(|ordinal| crate::wal::ParentRef {
+                            level: coarser,
+                            ordinal,
+                        })
+                }))
+            {
+                if found.is_some_and(|held| held != candidate) {
+                    return Err(ambiguous());
+                }
+                found = Some(candidate);
+            }
+            // A key that exists only at this level or a finer one is an edge running the wrong way
+            // — refused rather than reinterpreted, since a tiered layer's whole guarantee is that
+            // lineage never runs against the levels.
+            return found.ok_or_else(missing);
+        }
+        pending(parent_key)
+            .filter(|p| p.level == level)
+            .or_else(|| {
+                store
+                    .ordinal_of_key(layer_name, level, parent_key)
+                    .map(|ordinal| crate::wal::ParentRef { level, ordinal })
+            })
+            .ok_or_else(missing)
     }
 
     /// Validates a drop and returns the record that makes it durable, on [`prepare_create`]'s
@@ -558,6 +1254,44 @@ impl LayerRegistry {
         self.tombstones.extend(tombstones.iter().cloned());
     }
 
+    /// Record one level's serving layout — the fold's re-evaluation, and the only thing that ever
+    /// changes it after a registration
+    /// ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+    ///
+    /// **Not a WAL record and not a version bump.** A layout is a latency choice that puts nothing
+    /// on the wire: both forms answer identically, so bumping [`RegisteredLayer::version`] would
+    /// make every session re-resolve a layer for a change none of them can observe, and a WAL
+    /// record would make a replay able to change one. Its durable home is the manifest the same
+    /// fold writes — which is why this must be called **before** [`LayerRegistry::snapshot`], and
+    /// why a replay that re-applies a `LayerCreate` over a seeded registry returns the level to its
+    /// declared pin or to artifact-major. That costs the fold's column its adoption and nothing
+    /// else: both routes answer identically, and the membership extents a row form is built from
+    /// are written whatever the layout.
+    ///
+    /// Returns whether the record **moved**, which is what tells the caller a flip happened: a
+    /// flipped level's cached forms in the old layout are never asked for again, so something has
+    /// to drop them explicitly (selection memo §5).
+    pub fn set_layout(
+        &mut self,
+        layer: &str,
+        level: u32,
+        layout: tessera_types::layer::ServingLayout,
+    ) -> bool {
+        let Some(registered) = self.layers.get_mut(layer) else {
+            return false;
+        };
+        // Dense over the levels the layer declares — a record shorter than `runs` reads as
+        // artifact-major for the levels past its end, and this is where it stops being short.
+        if registered.layouts.len() <= level as usize {
+            registered
+                .layouts
+                .resize(level as usize + 1, Default::default());
+        }
+        let moved = registered.layouts[level as usize] != layout;
+        registered.layouts[level as usize] = layout;
+        moved
+    }
+
     /// This registry as a manifest carries it: every live layer, and every name ever dropped.
     pub fn snapshot(&self) -> (Vec<RegisteredLayer>, Vec<String>) {
         (
@@ -583,7 +1317,21 @@ impl LayerRegistry {
                 self.layers.insert(
                     declaration.name.clone(),
                     RegisteredLayer {
-                        declaration: declaration.clone(),
+                        // **The registration's own record of the serving layout**: the declared pin
+                        // where there is one, artifact-major where there is not. A level with no
+                        // artifacts has no shape to observe — blocks per artifact and the artifact
+                        // count are both properties of where the data landed — so the automatic
+                        // pick has nothing to read here and takes the conservative answer, which is
+                        // the form every derived structure already exists for (decision 0094).
+                        //
+                        // **A fold re-evaluates it and writes the result into the manifest.** A
+                        // replay that re-applies this record over a seeded registry therefore
+                        // returns the level to artifact-major, which costs the fold's column its
+                        // adoption and nothing else: the membership extents are what a row form is
+                        // built from, they are written whatever the layout, and the two routes
+                        // answer identically.
+                        layouts: RegisteredLayer::initial_layouts(declaration),
+                        declaration: (**declaration).clone(),
                         entity: *layer_entity,
                         runs: runs.clone(),
                         version: self.version + 1,
@@ -604,7 +1352,10 @@ impl LayerRegistry {
             // invalidate every open session's resolution on every batch, which at a clustering's
             // publication rate is a re-resolve per request.
             WalRecord::ArtifactPublish {
-                layer, level, extend_runs, ..
+                layer,
+                level,
+                extend_runs,
+                ..
             } => {
                 if extend_runs.is_empty() {
                     return;
@@ -632,7 +1383,7 @@ impl LayerRegistry {
     ///
     /// Satisfaction is **intersection** with the principal's satisfied set, never a conservative
     /// label join: a join yields an empty required set for a disjunctive gate and would admit every
-    /// principal. That error has been made once already in this codebase, in the slice gate, and
+    /// principal. That error has been made once already in this codebase, in the view gate, and
     /// was caught in review.
     pub fn resolve_for(
         &self,
@@ -642,7 +1393,7 @@ impl LayerRegistry {
         let names = self
             .layers
             .iter()
-            .filter(|(_, layer)| match &layer.declaration.access.label {
+            .filter(|(_, layer)| match &layer.declaration.visibility {
                 None => true,
                 Some(label) => resolve_label(label).is_some_and(&is_satisfied),
             })
@@ -720,20 +1471,19 @@ impl LayerRegistry {
 mod tests {
     use super::*;
     use tessera_types::layer::{
-        ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, MembershipSource, RESERVED_BLOCK,
+        ExistenceCriterion, Hierarchy, HierarchyKind, MembershipSource, RESERVED_BLOCK,
     };
 
     fn declaration(name: &str) -> LayerDeclaration {
         LayerDeclaration {
             name: name.into(),
-            title: name.into(),
-            slices: vec!["default".into()],
+            title: Some(name.into()),
+            views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
-            access: LayerAccess {
-                label: None,
-                artifacts_carry_own: false,
-            },
-            visible_when: Some(ExistenceCriterion::MinVisible(50)),
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+            require_member_visibility: Some(ExistenceCriterion::Count(50)),
             hierarchy: Hierarchy {
                 kind: HierarchyKind::Flat,
                 prune_children: false,
@@ -741,12 +1491,14 @@ mod tests {
             content: Default::default(),
             depends_on: Vec::new(),
             levels: Vec::new(),
+            layout: None,
+            shape: None,
         }
     }
 
     fn gated(name: &str, label: &str) -> LayerDeclaration {
         let mut d = declaration(name);
-        d.access.label = Some(label.into());
+        d.visibility = Some(label.into());
         d
     }
 
@@ -768,7 +1520,11 @@ mod tests {
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
 
         let layer = reg.get("clusters/a").unwrap();
-        assert_eq!(layer.runs.len(), 1, "a level-less layer still holds level 0");
+        assert_eq!(
+            layer.runs.len(),
+            1,
+            "a level-less layer still holds level 0"
+        );
         assert_eq!(
             layer.runs[0].capacity(),
             tessera_types::layer::RESERVED_BLOCK
@@ -788,13 +1544,21 @@ mod tests {
         // oracle over which names exist.
         let mut reg = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
-        register(&mut reg, &mut alloc, gated("clusters/secret", "clearance:ts")).unwrap();
+        register(
+            &mut reg,
+            &mut alloc,
+            gated("clusters/secret", "clearance:ts"),
+        )
+        .unwrap();
         register(&mut reg, &mut alloc, declaration("clusters/open")).unwrap();
 
-        let resolved = reg.resolve_for(|t| t == TermId::new(7), |label| match label {
-            "clearance:ts" => Some(TermId::new(99)),
-            _ => None,
-        });
+        let resolved = reg.resolve_for(
+            |t| t == TermId::new(7),
+            |label| match label {
+                "clearance:ts" => Some(TermId::new(99)),
+                _ => None,
+            },
+        );
 
         assert!(resolved.contains("clusters/open"));
         assert!(!resolved.contains("clusters/secret"));
@@ -803,10 +1567,13 @@ mod tests {
         assert_eq!(resolved.names().collect::<Vec<_>>(), vec!["clusters/open"]);
 
         // And with the term: the same layer resolves.
-        let cleared = reg.resolve_for(|t| t == TermId::new(7) || t == TermId::new(99), |label| match label {
-            "clearance:ts" => Some(TermId::new(99)),
-            _ => None,
-        });
+        let cleared = reg.resolve_for(
+            |t| t == TermId::new(7) || t == TermId::new(99),
+            |label| match label {
+                "clearance:ts" => Some(TermId::new(99)),
+                _ => None,
+            },
+        );
         assert!(cleared.contains("clusters/secret"));
     }
 
@@ -885,7 +1652,9 @@ mod tests {
         // bookmark and suppression naming them.
         let mut live = LayerRegistry::new();
         let mut alloc = Allocator::new(0);
-        let create = live.prepare_create(declaration("clusters/a"), &mut alloc).unwrap();
+        let create = live
+            .prepare_create(declaration("clusters/a"), &mut alloc)
+            .unwrap();
         let drop_b = {
             let mut r = LayerRegistry::new();
             let mut a = Allocator::new(0);
@@ -953,10 +1722,12 @@ mod tests {
 
     fn incoming(key: &str, members: &[u32]) -> IncomingArtifact {
         IncomingArtifact {
-            stable_key: Some(key.into()),
+            key: Some(key.into()),
             members: croaring::Bitmap::of(members),
-            variations: Vec::new(),
+            contents: Vec::new(),
             attached_to: None,
+            parent_key: None,
+            shape: None,
         }
     }
 
@@ -968,7 +1739,7 @@ mod tests {
         layer: &str,
         incoming: &[IncomingArtifact],
     ) -> Result<WalRecord, RegistryError> {
-        let record = reg.prepare_publish(layer, 0, incoming, store, alloc)?;
+        let record = reg.prepare_publish(layer, 0, incoming, store, alloc, &no_pending)?;
         reg.apply(&record);
         assert_eq!(store.apply(&record, 0), 0);
         Ok(record)
@@ -992,7 +1763,7 @@ mod tests {
             artifact.attached_to = Some(crate::membership::IncomingAttachment {
                 layer: "clusters/a".into(),
                 level: 0,
-                stable_key: target.into(),
+                key: target.into(),
             });
             artifact
         };
@@ -1056,7 +1827,7 @@ mod tests {
         artifact.attached_to = Some(crate::membership::IncomingAttachment {
             layer: "clusters/a".into(),
             level: 0,
-            stable_key: "c0".into(),
+            key: "c0".into(),
         });
         assert_eq!(
             publish(&mut reg, &mut store, &mut alloc, "topics/x", &[artifact]),
@@ -1103,7 +1874,10 @@ mod tests {
         let mut seen = std::collections::BTreeSet::new();
         for ordinal in 0..3u32 {
             let record = store.get("clusters/a", 0, ordinal).unwrap();
-            assert_eq!(layer.runs[0].entity_of(ordinal as u64), Some(record.entity.raw()));
+            assert_eq!(
+                layer.runs[0].entity_of(ordinal as u64),
+                Some(record.entity.raw())
+            );
             assert!(seen.insert(record.entity));
             assert_ne!(record.entity, layer.entity);
         }
@@ -1206,17 +1980,22 @@ mod tests {
         assert_eq!(store.next_ordinal("clusters/a", 0), 1);
     }
 
+    /// **The two routes into a layer are exclusive, and which one a layer takes is its membership.**
+    ///
+    /// An attribute layer's members are evaluated, so an enumerated set beside them is a frozen
+    /// answer that diverges from the predicate at the first ingest — publication is refused and the
+    /// values are *derived* instead. An enumerated layer is the mirror: its artifacts are the
+    /// caller's to name, so deriving one would be the service inventing an identity nobody
+    /// published.
     #[test]
-    fn a_predicate_layer_cannot_be_published_into() {
-        // Its membership is evaluated, so an enumerated set beside it is a frozen answer that
-        // diverges from the predicate at the first ingest.
+    fn a_predicate_layer_is_derived_into_and_never_published_into() {
         let mut reg = LayerRegistry::new();
         let mut store = ArtifactStore::new();
         let mut alloc = Allocator::new(0);
-        let mut spatial = declaration("regions/uk");
-        spatial.membership = MembershipSource::Spatial;
-        spatial.visible_when = Some(ExistenceCriterion::MinVisible(25));
-        register(&mut reg, &mut alloc, spatial).unwrap();
+        let mut predicate = declaration("regions/uk");
+        predicate.membership = MembershipSource::Attribute("severity".into());
+        predicate.require_member_visibility = Some(ExistenceCriterion::Count(25));
+        register(&mut reg, &mut alloc, predicate).unwrap();
 
         assert_eq!(
             publish(
@@ -1230,17 +2009,61 @@ mod tests {
                 layer: "regions/uk".into()
             })
         );
+
+        // The route that *is* open: the values, minted with their keys and nothing else.
+        let record = reg
+            .prepare_derive(
+                "regions/uk",
+                0,
+                &["high".to_string(), "low".to_string()],
+                &store,
+                &mut alloc,
+            )
+            .expect("a predicate layer's values are derived into it");
+        reg.apply(&record);
+        assert_eq!(store.apply(&record, 0), 0);
+        let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
+            unreachable!()
+        };
+        assert_eq!(artifacts.len(), 2);
+        for artifact in artifacts {
+            assert!(artifact.contents.is_empty(), "a derived artifact has none");
+            assert!(artifact.attached_to.is_none());
+            assert!(artifact.parent.is_none());
+            assert!(artifact.shape.is_none());
+        }
+        assert_eq!(store.ordinal_of_key("regions/uk", 0, "high"), Some(0));
+        assert_eq!(store.ordinal_of_key("regions/uk", 0, "low"), Some(1));
+
+        // **A key the level already holds never mints a second artifact**, which is what keeps a
+        // suppressed value from being re-minted unsuppressed: the check reads the store's key
+        // index, and a suppression touches no stored structure at all.
+        assert_eq!(
+            reg.prepare_derive("regions/uk", 0, &["high".to_string()], &store, &mut alloc),
+            Err(RegistryError::DuplicateKey {
+                layer: "regions/uk".into(),
+                key: "high".into(),
+            })
+        );
+
         // And a level the layer never declared is a refusal too, not an implicit creation.
         assert_eq!(
-            reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc),
+            reg.prepare_publish("clusters/nope", 0, &[], &store, &mut alloc, &no_pending),
             Err(RegistryError::NoSuchLayer("clusters/nope".into()))
         );
         register(&mut reg, &mut alloc, declaration("clusters/a")).unwrap();
         assert_eq!(
-            reg.prepare_publish("clusters/a", 3, &[], &store, &mut alloc),
+            reg.prepare_publish("clusters/a", 3, &[], &store, &mut alloc, &no_pending),
             Err(RegistryError::NoSuchLevel {
                 layer: "clusters/a".into(),
                 level: 3
+            })
+        );
+        // The mirror refusal: an enumerated layer's artifacts are the caller's to name.
+        assert_eq!(
+            reg.prepare_derive("clusters/a", 0, &["v".to_string()], &store, &mut alloc),
+            Err(RegistryError::NotDerived {
+                layer: "clusters/a".into()
             })
         );
     }
@@ -1264,6 +2087,7 @@ mod tests {
                 &[incoming("c0", &[1, 2, 3]), incoming("c1", &[4])],
                 &store,
                 &mut alloc,
+                &no_pending,
             )
             .unwrap();
         reg.apply(&publication);
@@ -1286,7 +2110,10 @@ mod tests {
             replayed_store.get("clusters/a", 0, 0).map(|r| &r.members),
             store.get("clusters/a", 0, 0).map(|r| &r.members)
         );
-        assert_eq!(replayed_store.ordinal_of_key("clusters/a", 0, "c1"), Some(1));
+        assert_eq!(
+            replayed_store.ordinal_of_key("clusters/a", 0, "c1"),
+            Some(1)
+        );
         // And the pin comes back with it — the log may not be reclaimed past the publication.
         assert_eq!(replayed_store.oldest_wal_pos(), Some(900));
     }
@@ -1307,7 +2134,7 @@ mod tests {
             .map(|i| incoming(&format!("c{i}"), &[i as u32]))
             .collect();
         let publication = reg
-            .prepare_publish("clusters/a", 0, &full, &store, &mut alloc)
+            .prepare_publish("clusters/a", 0, &full, &store, &mut alloc, &no_pending)
             .unwrap();
         reg.apply(&publication);
         assert_eq!(store.apply(&publication, 0), 0);
@@ -1332,7 +2159,10 @@ mod tests {
         register(&mut reg, &mut alloc, declaration("b")).unwrap();
 
         // The second layer's *level* run took a block; its entity came from the block already held.
-        assert_eq!(alloc.low_water(), after_first - tessera_types::layer::RESERVED_BLOCK);
+        assert_eq!(
+            alloc.low_water(),
+            after_first - tessera_types::layer::RESERVED_BLOCK
+        );
         let a = reg.get("a").unwrap().entity.raw();
         let b = reg.get("b").unwrap().entity.raw();
         assert_eq!(b, a + 1);

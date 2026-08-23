@@ -33,7 +33,7 @@ use tessera_store::merge::{execute_merge, MergeInput, MergeSpec};
 use tessera_types::{EntityId, IdentityKey};
 
 const PARTITION: &str = "p0";
-const SLICE: &str = "s0";
+const VIEW: &str = "s0";
 const DEFAULT_ROWS: u64 = 2_000_000;
 const DEFAULT_SEGMENTS: u64 = 4;
 
@@ -80,8 +80,8 @@ fn dir_bytes(dir: &Path) -> u64 {
 fn seg_dir(root: &Path, seg_id: &str) -> PathBuf {
     root.join("partitions")
         .join(PARTITION)
-        .join("slices")
-        .join(SLICE)
+        .join("views")
+        .join(VIEW)
         .join("segments")
         .join(seg_id)
 }
@@ -105,7 +105,7 @@ fn write_inputs(root: &Path, rows: u64, segments: u64) -> Vec<MergeInput> {
             write_flush_segment(
                 root,
                 PARTITION,
-                SLICE,
+                VIEW,
                 FlushInput {
                     seg_id: &format!("in-{s}"),
                     rows: flush_rows,
@@ -151,7 +151,7 @@ fn main() {
             execute_merge(
                 &root,
                 PARTITION,
-                SLICE,
+                VIEW,
                 MergeSpec {
                     seg_id: "merged",
                     inputs: &inputs,

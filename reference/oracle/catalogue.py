@@ -17,29 +17,50 @@ of terms) whose posting list **is** the intended entity set, exactly.
 ## How the entity IDs are pinned
 
 Entity IDs are not the fixture's to choose — `tessera-build` assigns them, permanently (I9), in
-**term-signature order**: items are sorted by their sorted term-ID list, ties broken by source ID,
-and each item's entity ID is its position in that order (§11.1; `tessera_build::signature_sort_key`).
-Term IDs themselves are interned in first-appearance order over the source-ID-sorted points.
+**term-signature order**: items are sorted by their sorted term-ID list and each item's entity ID is
+its position in that order (§11.1; `tessera_build::signature_sort_key`). The minor key is the
+**Morton code**, with the source ID below it for totality
+([decision 0073](../../docs/decisions/0073-entity-ties-are-ordered-by-morton-code.md)).
 
-The corpus exploits both rules rather than working around them:
+The corpus exploits the major key rather than working around it:
 
 * every item carries **exactly one** term, so its signature is a one-element list;
 * the terms are laid out in **contiguous blocks of source ID**, block `g` carrying term `g`.
 
-First appearance then interns term `g` as term ID `g`; the signature sort orders the blocks by `g`
-and, within a block, by source ID; so the assignment collapses to the identity, `entity_id ==
-source_id`, and each block is a **contiguous entity-ID range whose bounds the fixture chose**.
+The signature sort therefore orders the blocks by `g`, and **each block is a contiguous entity-ID
+range whose bounds the fixture chose** — which is the whole of what the catalogue needs. That is
+what makes the container-boundary case constructible at all: Roaring's cost model is O(containers
+touched), a container is a 2¹⁶ span of entity space, and a mask that never crosses a multiple of
+65,536 exercises no container arithmetic whatsoever. `boundary` is a 100-entity block placed astride
+65,536 deliberately; `filler_tail` spans 131,072 for the same reason at 100% coverage.
 
-That is what makes the container-boundary case constructible at all. Roaring's cost model is
-O(containers touched), and a container is a 2¹⁶ span of entity space, so a mask that never crosses
-a multiple of 65,536 exercises no container arithmetic whatsoever. `boundary` is a 100-entity block
-placed astride 65,536 deliberately; `filler_tail` spans 131,072 for the same reason at 100%
-coverage.
+## Two equalities this module used to assume, and no longer may
 
-**None of that is assumed at test time.** `verify()` re-derives every block from the built bundle's
-own postings and refuses if any of it came out differently — a build whose assignment rule changed
-must fail here loudly rather than silently hand the suite a catalogue that no longer straddles
-anything.
+Both were true when the catalogue was designed, both were stated here as arguments rather than
+checked per item, and both are now false. They are written out because each broke **silently**: the
+corpus went on being the shape it claims, and only the per-item joins moved.
+
+**`entity_id == source_id` is gone**, with decision 0073's Morton tiebreak. Ties within a block used
+to break by source ID, so the assignment collapsed to the identity; they now break by geometry, so a
+block's entities are the same *set* in the same *range* and are internally permuted. Every join from
+a planted value to a served one must go through `Bundle.source_of_entity` — the external-ID sidecar
+is the real bridge and always was. What makes this worth a paragraph is how it hid: `verify()`
+compares each block's postings against its entity range **as a set**, and a within-block permutation
+preserves a set exactly, so the check whose comment said it re-derived the identity never tested it.
+
+**Term `g` is no longer term ID `g`.** `public` is interned first, at term `0`
+(`per-point-attributes.md` §3.8), so first appearance interns the corpus's term `g` as dictionary
+term `g + 1`. `Block.term_id` is the id the **source corpus** writes, and the descriptor is still
+`str(term_id)`; the **dictionary** id is `Block.dict_term_id(bundle)`, resolved from the bundle
+rather than computed. Anything reading the bundle's own `terms/pairs.parquet` or its postings wants
+the second — the two files spell the same fact in different numbers, and asking one with the other's
+number silently answers about a different block.
+
+**What is assumed at test time is now checked at test time.** `verify()` re-derives every block from
+the built bundle's own postings, checks the interning rule against the documented one rather than
+against an assumption, and — new — checks that every entity's source id lands in the same block the
+entity does. That last one is what a set comparison could not see: a within-block permutation passes
+it, and a cross-block reassignment does not.
 
 ## `fx_key`
 
@@ -93,24 +114,35 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .bundle import Bundle
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built, read_recipe, write_recipe
+from .harness import (
+    CLI_BIN,
+    REPO_ROOT,
+    build_env,
+    ensure_cli_built,
+    read_recipe,
+    write_deployment,
+    write_recipe,
+)
 
 # Where the corpus and its bundle live between runs. A fixed path, like `/tmp/tessera-250k`, so
 # the build is paid once per machine rather than once per session — `build_catalogue_bundle`
 # reuses whatever is already there if it was built from this module's current inputs.
 DEFAULT_WORK_DIR = Path("/tmp/tessera-catalogue")
 
+#: The view's quantisation frame — the grid's own coordinates, since this catalogue states its
+#: expected answers in cells. Written into the declaration below rather than passed at invocation:
+#: the extent belongs to the view (`configuration.md` §1).
 EXTENT = (0.0, 65536.0, 0.0, 65536.0)
-EXTENT_ARG = "0,65536,0,65536"
-SLICE_ID = "s0"
+VIEW_ID = "s0"
 SEED = 20260731
 
 POINTS_NAME = "catalogue-points.parquet"
 PAIRS_NAME = "catalogue-pairs.parquet"
-SCHEMA_NAME = "catalogue-schema.toml"
+SCHEMA_NAME = "catalogue-config.toml"
+DEPLOYMENT_NAME = "catalogue-tessera.toml"
 
 # The declaration that makes `fx_key` a served column (per-point-attributes §4.2). Written beside
-# the points parquet on the build path and bound with `--schema`.
+# the points parquet on the build path, and named by `tessera.toml`'s `build.schema`.
 #
 # **`u64` and not a category**, deliberately: `fx_key` is 64 random bits with no vocabulary and no
 # presentation, and declaring a category would need a value set enumerating every item — the
@@ -135,7 +167,7 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # would pass vacuously, and the differential would prove nothing. The decorrelation is asserted
 # by a test, not just stated here.
 #
-# `listing = "per_viewer"` on `department`, deliberately: the hidden-value/nonexistent-value
+# `visibility = "derived"` on `department`, deliberately: the hidden-value/nonexistent-value
 # outcome rule (per-point-attributes §3.8, C11) is only *about* a gated vocabulary, and `omega`
 # — planted only in `high_tail`, a block no catalogue mask case is granted — is the value a test
 # principal provably cannot see a member of. `hollow` is declared and planted nowhere: a known
@@ -144,8 +176,8 @@ SCHEMA_NAME = "catalogue-schema.toml"
 #
 # **`archive` is the `public` counterpart, and it exists to be *routed*.** Decision 0063 answers a
 # category operand from the column's derived postings where the vocabulary is `public` and from the
-# masked scan where it is `per_viewer` — two evaluation routes that must produce the same sets. A
-# corpus carrying only a `per_viewer` category exercises one of them, so the differential would
+# masked scan where it is `derived` — two evaluation routes that must produce the same sets. A
+# corpus carrying only a `derived` category exercises one of them, so the differential would
 # ratify the scan and say nothing about the route that replaced it. `archive` cycles on a fourth
 # period (`(source_id // 5) % 3`), decorrelated from the term blocks, the department cycle's 6 and
 # the title cycle's 12; `void` is declared and planted nowhere, which is the routed reading of an
@@ -155,7 +187,7 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # codes ride the hot column and today it publishes no filter operand. It exists for the row-space
 # route (records §6.2, decision 0068): when that lands, `render = true` implies filterable and
 # `/v1/meta` widens — [`filter_operands_expected`] is the one place that widening is recorded.
-# `public`, so the routed reading stays clear of the vocabulary-control ruling a `per_viewer`
+# `public`, so the routed reading stays clear of the vocabulary-control ruling a `derived`
 # rendered category waits on; a fifth period (`(source_id // 7) % 3`), decorrelated like the rest.
 #
 # **`title` and `submitter` are the two keyword columns** (records §4.3) — the only declarable
@@ -176,7 +208,65 @@ SCHEMA_NAME = "catalogue-schema.toml"
 # a present zero in `pages` (distinguishable from the absent stride), a row larger than the 256 KiB
 # block target (an oversized block of its own — records §3's "target, not a cap"), and entities
 # absent from both (absent from has-row entirely).
-SCHEMA_TOML = """\
+#: The acquisition half, built from this module's own constants rather than restated, so that
+#: `EXTENT`, `VIEW_ID` and the two file names stay the single statement of each. One points file
+#: carries identity, geometry and every declared column, so the view and every attribute name one
+#: source; the exploded `(entity_id, term_id)` relation is the other. `[sources]` writes each path
+#: once, **relative to this document**, which the generator writes beside them
+#: (`configuration.md` §3).
+#:
+#: The extent is the grid's own: the catalogue states its expected answers in cells, so a fitted
+#: box would move every one of them.
+_ACQUISITION_TOML = f"""\
+[sources]
+points = "{POINTS_NAME}"
+pairs  = "{PAIRS_NAME}"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "{VIEW_ID}"
+extent           = {{ x = [{EXTENT[0]}, {EXTENT[1]}], y = [{EXTENT[2]}, {EXTENT[3]}] }}
+point_visibility = {{ source = "pairs", default = "public" }}
+"""
+
+SCHEMA_TOML = _ACQUISITION_TOML + """\
+
+[[vocabulary]]
+name       = "department"
+width      = "u8"
+value_set  = "closed"
+visibility = "derived"
+  [vocabulary.values]
+  alpha  = 1
+  beta   = 2
+  gamma  = 3
+  omega  = 4
+  solo   = 5
+  hollow = 6
+
+[[vocabulary]]
+name       = "archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  red   = 11
+  green = 22
+  blue  = 33
+  void  = 44
+
+[[vocabulary]]
+name       = "shelf"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  north = 51
+  south = 52
+  east  = 53
+
 [[attribute]]
 name     = "fx_key"
 type     = "u64"
@@ -185,30 +275,14 @@ render   = true
 [[attribute]]
 name       = "department"
 type       = "category"
-width      = "u8"
 index      = true
-vocabulary = "declared"
-listing    = "per_viewer"
-  [attribute.values]
-  alpha  = 1
-  beta   = 2
-  gamma  = 3
-  omega  = 4
-  solo   = 5
-  hollow = 6
+vocabulary = "department"
 
 [[attribute]]
 name       = "archive"
 type       = "category"
-width      = "u8"
 index      = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  red   = 11
-  green = 22
-  blue  = 33
-  void  = 44
+vocabulary = "archive"
 
 [[attribute]]
 name     = "title"
@@ -218,14 +292,8 @@ index    = true
 [[attribute]]
 name       = "shelf"
 type       = "category"
-width      = "u8"
 render     = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
-  north = 51
-  south = 52
-  east  = 53
+vocabulary = "shelf"
 
 [[attribute]]
 name     = "submitter"
@@ -553,21 +621,27 @@ def pages_of(source_id: int) -> int | None:
     return (source_id * 37 + 11) % 4999
 
 
-def blob_entities_expected() -> set[int]:
+def blob_entities_expected(bundle) -> set[int]:
     """The entities the record blob's has-row bitmap must contain, from the generation functions
     alone: everyone with at least one blob-resident value. This is the fixture-input half of the
     blob's one licensed artefact check (records §3, review B7) — the *addressing* is what the
-    artefact walk verifies; *which entities have a row* is the fixture's own fact."""
+    artefact walk verifies; *which entities have a row* is the fixture's own fact.
+
+    The generation functions take a **source** id and has-row is in entity space, so the set is
+    carried across by the bundle's own sidecar. It used to be returned in source space and compared
+    directly, which was the same set only while the two spaces were one (decision 0073).
+    """
+    entity_of = bundle.entities_by_source()
     return {
-        e
-        for e in range(N_ITEMS)
-        if note_of(e) is not None
-        or pages_of(e) is not None
+        entity_of[source]
+        for source in range(N_ITEMS)
+        if note_of(source) is not None
+        or pages_of(source) is not None
         # **`abstract` counts here even though it is indexed**: text is blob-resident whatever its
         # flags, so an entity with prose has a blob row for it whether or not it has a `note` or
         # `pages` (records §4.4). Omitting it would make the has-row expectation short by every
         # entity whose only blob-resident value is its prose.
-        or abstract_of(e) is not None
+        or abstract_of(source) is not None
     }
 
 
@@ -669,9 +743,11 @@ ONE_TILE_TY = 17
 class Block:
     """One contiguous entity-ID range, carrying exactly one term.
 
-    `term_id` is both the source term id (so the `builtin:passthrough` descriptor is
-    `str(term_id)`) and — by the interning argument in the module doc — the bundle's own term ID.
-    `verify()` checks that rather than trusting it.
+    `term_id` is the term id the **source corpus** writes into its `(entity_id, term_id)` relation,
+    and the `builtin:passthrough` descriptor is its decimal spelling. It is **not** the bundle's own
+    dictionary id: `public` is interned first at term `0`, so the dictionary's is one higher. Use
+    [`Block.dict_term_id`] for anything read out of the bundle, and see the module doc for why
+    asking one file with the other's number is silently wrong rather than an error.
     """
 
     name: str
@@ -689,7 +765,49 @@ class Block:
 
     @property
     def entities(self) -> set[int]:
+        """The block's **entity** ids, which are its source range — as a set.
+
+        The range survives decision 0073; the order inside it does not, so this is the one thing
+        that may be read as both spaces at once. A per-item join between them goes through
+        `Bundle.source_of_entity`.
+        """
         return set(range(self.start, self.stop))
+
+    def dict_term_id(self, bundle) -> int:
+        """This block's term id **in the bundle's dictionary**, resolved rather than computed.
+
+        Resolved, because computing it would mean writing the interning rule down a second time
+        where nothing checks it — and the rule has already moved once. `verify()` is where the rule
+        is checked; this is where it is used.
+        """
+        term_id = bundle.term_id_of(self.descriptor.encode("ascii"))
+        if term_id is None:
+            raise KeyError(
+                f"block {self.name}: descriptor {self.descriptor!r} is not in the bundle's "
+                "dictionary — the corpus and the bundle disagree about what was interned"
+            )
+        return term_id
+
+
+def entity_of_fx_key(bundle) -> dict[int, int]:
+    """`fx_key -> entity id`, the suite's one legitimate handle→item join.
+
+    A served point carries its planted `fx_key` and its opaque `tessera_id`; the key is what lets a
+    differential name the item without a reverse map and without an entity id crossing the boundary
+    (I10). The keys are planted **by source id**, so the join lands in source space and has to be
+    carried the last hop by the bundle's own sidecar — which is the hop three modules used to skip,
+    back when the two spaces were one.
+
+    One implementation, because there were three and each was the same wrong line.
+    """
+    entity_of = bundle.entities_by_source()
+    return {key: entity_of[source] for source, key in enumerate(fx_keys())}
+
+
+def dict_terms(bundle, names) -> set[int]:
+    """The bundle's dictionary ids for a set of block names — what a grant set means to `postings`
+    and to the bundle's own `terms/pairs.parquet`."""
+    return {BLOCKS[name].dict_term_id(bundle) for name in names}
 
 
 # The layout. Sizes are quoted as coverage of the 150,000-item corpus the list sums to.
@@ -1074,25 +1192,20 @@ def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
     good reason (contracts §2.4 forbids manufacturing one for an item whose caller supplied none),
     and passing it here is a statement that *this fixture's* items do have caller-supplied ids —
     the source corpus is synthesised by this module, so they do.
+
+    Everything else the build once carried on the command line is in the two documents beside the
+    corpus: the declaration names its own sources and its own extent, and the deployment file names
+    the declaration. The identity key travels in the environment ([`harness.build_env`]), never in
+    an argv a CI log would keep.
     """
     return [
         str(CLI_BIN),
         "build",
-        "--points",
-        str(work_dir / POINTS_NAME),
-        "--pairs",
-        str(work_dir / PAIRS_NAME),
-        "--schema",
-        str(work_dir / SCHEMA_NAME),
-        "--extent",
-        EXTENT_ARG,
-        "--slice",
-        SLICE_ID,
+        "--deployment",
+        str(work_dir / DEPLOYMENT_NAME),
         "--out",
         str(bundle_root),
         "--mint-external-ids",
-        "--id-key",
-        CATALOGUE_ID_KEY_HEX,
     ]
 
 
@@ -1102,7 +1215,8 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
 
     The list is the point, so it is written out rather than computed: the corpus is a function of
     `_LAYOUT` (which fixes both the term IDs and the entity ranges), `SEED` (geometry and the
-    planted `fx_key`s), the `ONE_TILE_*` constants, and the CLI arguments — of which `--id-key` is
+    planted `fx_key`s), the `ONE_TILE_*` constants, the declaration, and the CLI arguments — of
+    which the identity key is
     the one that decides `tessera_id`, and therefore §7.2's entire served order. Anything that
     lands here later must be added; a recipe that omits an input is a reuse test that pins the
     suite to the older fixture, which is the failure this replaced.
@@ -1134,8 +1248,8 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "seed": SEED,
         "fx_seed": _FX_SEED,
         "geometry_seed": _GEOMETRY_SEED,
-        "extent": EXTENT_ARG,
-        "slice": SLICE_ID,
+        "extent": list(EXTENT),
+        "view": VIEW_ID,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
         "id_key": CATALOGUE_ID_KEY_HEX,
         # The filter columns' planting rules — everything `department_of`/`title_of` are a
@@ -1219,7 +1333,15 @@ def build_catalogue_bundle(work_dir: Path | None = None) -> tuple[Path, list[int
     # Written on the build path only, beside the corpus and for the same reason: writing it
     # unconditionally is what let bundle and corpus diverge before.
     (work_dir / SCHEMA_NAME).write_text(SCHEMA_TOML)
-    subprocess.run(_build_argv(work_dir, bundle_root), cwd=REPO_ROOT, check=True)
+    write_deployment(
+        work_dir / DEPLOYMENT_NAME, bundle=bundle_root, schema=work_dir / SCHEMA_NAME
+    )
+    subprocess.run(
+        _build_argv(work_dir, bundle_root),
+        cwd=REPO_ROOT,
+        env=build_env(CATALOGUE_ID_KEY_HEX),
+        check=True,
+    )
     write_recipe(bundle_root, wanted)
     return bundle_root, fx_keys()
 
@@ -1280,9 +1402,15 @@ def verify(bundle: Bundle) -> VerificationReport:
     drifted instead of the first. What is checked:
 
     1. the corpus has `N_ITEMS` rows;
-    2. each block's descriptor interned to the term ID the module assumed;
-    3. each block's postings are **exactly** its intended contiguous entity range — this is the
-       whole `entity_id == source_id` argument, checked rather than trusted;
+    2. each block's descriptor interned **by the documented rule** — `public` first at term `0`,
+       then the corpus's terms in first-appearance order, so the corpus's term `g` is the
+       dictionary's `g + 1`. Checked against the rule rather than against an assumed equality,
+       which is what this said before `public` moved;
+    3. each block's postings are **exactly** its intended contiguous entity range;
+    3b. every entity's **source id lands in the same block the entity does** — the per-item half
+       of check 3, which a set comparison cannot make. A within-block permutation (which is what
+       decision 0073's Morton tiebreak produces) passes it; a cross-block reassignment does not.
+       Without this, the day `entity_id == source_id` stopped holding, nothing here noticed;
     4. `container_boundary` really spans more than one Roaring container — entities either side of
        a multiple of 65,536, which is the only reason the case exists;
     5. `full_100pct` spans every container the corpus reaches;
@@ -1290,20 +1418,33 @@ def verify(bundle: Bundle) -> VerificationReport:
     7. the crossover cases really sit either side of 5%.
     """
     report = VerificationReport()
-    seg = bundle.segment(SLICE_ID)
+    seg = bundle.segment(VIEW_ID)
     report.row_count = seg.row_count
     if seg.row_count != N_ITEMS:
         report.failures.append(f"segment has {seg.row_count} rows, expected {N_ITEMS}")
+
+    # `public` is interned first, at term 0 (`per-point-attributes.md` §3.8), and the corpus's own
+    # terms follow it in first-appearance order over the source-ID-sorted points. So the corpus's
+    # term `g` is the dictionary's `g + 1`. Written as an offset derived from the rule rather than
+    # as a constant, so a reader can see which rule is being checked.
+    public_term = bundle.term_id_of(b"public")
+    if public_term != 0:
+        report.failures.append(
+            f"`public` interned as term {public_term}, not 0 — every block's dictionary id below "
+            "is derived from that rule, and the whole offset moves with it"
+        )
+    expected_offset = 1 if public_term == 0 else 0
 
     for block in BLOCKS.values():
         term_id = bundle.term_id_of(block.descriptor.encode("ascii"))
         if term_id is None:
             report.failures.append(f"block {block.name}: descriptor {block.descriptor!r} not interned")
             continue
-        if term_id != block.term_id:
+        if term_id != block.term_id + expected_offset:
             report.failures.append(
                 f"block {block.name}: descriptor {block.descriptor!r} interned as term {term_id}, "
-                f"not {block.term_id} — the first-appearance interning argument no longer holds"
+                f"not {block.term_id + expected_offset} — first-appearance interning after "
+                "`public` no longer holds, so a grant resolved by number names a different block"
             )
         postings = set(int(e) for e in bundle.postings(term_id).tolist())
         report.blocks[block.name] = postings
@@ -1312,8 +1453,27 @@ def verify(bundle: Bundle) -> VerificationReport:
                 f"block {block.name}: postings are not the contiguous range "
                 f"[{block.start}, {block.stop}) — got {len(postings)} entities in "
                 f"[{min(postings, default=-1)}, {max(postings, default=-1)}]. The build's "
-                f"signature-sorted assignment (§11.1) no longer collapses to the identity for "
-                f"this corpus, so no catalogue member straddles what it claims to."
+                f"signature-sorted assignment (§11.1) no longer puts this block's items in the "
+                f"entity range the fixture chose, so no catalogue member straddles what it claims to."
+            )
+            continue
+        # **Check 3b, and it is the one that was missing.** The comparison above is between sets,
+        # so it holds under any permutation *inside* the block — which is exactly what decision
+        # 0073 introduced, and exactly what made every per-item join in this suite silently wrong
+        # while this function reported green. Here the two spaces are compared item by item.
+        strayed = [
+            (entity, bundle.source_of_entity(entity))
+            for entity in sorted(postings)
+            if not (block.start <= bundle.source_of_entity(entity) < block.stop)
+        ]
+        if strayed:
+            entity, source = strayed[0]
+            report.failures.append(
+                f"block {block.name}: entity {entity} was assigned to source id {source}, which is "
+                f"outside [{block.start}, {block.stop}) — {len(strayed)} of {len(postings)} strayed. "
+                "A block's entity range and its source range must hold the same items, however the "
+                "two are ordered inside it, or every planted value this suite joins is a different "
+                "item's."
             )
 
     # Both container claims are derived from `N_ITEMS` rather than written out, so that growing the
@@ -1383,8 +1543,8 @@ def verify(bundle: Bundle) -> VerificationReport:
 
 def _tiles_of(bundle: Bundle, entities: set[int], depth: int) -> set[int]:
     """The depth-`depth` tiles the given entities' rows fall in, recomputed from geometry."""
-    seg = bundle.segment(SLICE_ID)
-    codes = bundle.row_morton_codes(SLICE_ID)
+    seg = bundle.segment(VIEW_ID)
+    codes = bundle.row_morton_codes(VIEW_ID)
     shift = 32 - 2 * depth
     out: set[int] = set()
     for row in range(seg.row_count):

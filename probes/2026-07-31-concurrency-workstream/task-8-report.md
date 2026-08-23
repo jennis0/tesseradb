@@ -7,11 +7,11 @@
 thread loads the generation pointer exactly once, at request start"). The viewer handler
 (`crates/tessera-server/src/viewer.rs::run_viewport`) was calling `state.engine.meta()`
 *afterwards*, purely to read the declared-scalar names for response assembly — a second
-`generation.load_full()` plus wholesale clones of `slices` and `declared_scalars`, both of which
+`generation.load_full()` plus wholesale clones of `views` and `declared_scalars`, both of which
 were then thrown away except for the names.
 
 Fixed by having `Engine::viewport` return the declared-scalar names in `ViewportOut`, sourced from
-the same `declared_scalars` slice `row_to_point` already reads for every point in the response. The
+the same `declared_scalars` view `row_to_point` already reads for every point in the response. The
 handler now reads `out.scalar_names` and makes no second engine call. No `declared_scalar_names()`
 accessor was added — the brief is explicit that such an accessor would just move the second load
 behind a different name rather than remove it.
@@ -25,7 +25,7 @@ behind a different name rather than remove it.
   `points`.
 - At the `Ok(ViewportOut { .. })` construction site (end of `Engine::viewport`), populated it from
   the `declared_scalars` local already bound earlier in the function
-  (`&generation.bundle.manifest.declared_scalars`, the same slice `tile_result`/`row_to_point`
+  (`&generation.bundle.manifest.declared_scalars`, the same view `tile_result`/`row_to_point`
   read for every gathered point): `declared_scalars.iter().map(|d| d.name.clone()).collect()`.
 - No second `generation.load_full()` anywhere in this path — `declared_scalars` is derived from
   the single generation snapshot taken at the top of `Engine::viewport`, unchanged from before this
@@ -106,7 +106,7 @@ may be impractical."
 - Checked the diff is minimal: 28 insertions / 11 deletions across the two files named in the
   brief, nothing else touched.
 - Confirmed `declared_scalars` (the local already bound in `Engine::viewport`, line ~527 pre-diff)
-  is exactly the same slice `row_to_point` reads per-point — so `scalar_names`' order and content
+  is exactly the same view `row_to_point` reads per-point — so `scalar_names`' order and content
   are identical to what `meta()` would have produced (manifest order, both routes), satisfying the
   brief's "names come from the same manifest in the same order either way" constraint.
 - Confirmed no other `ViewportOut` construction site exists (grep), so the `bench-timing`-gated

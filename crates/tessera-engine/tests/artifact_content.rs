@@ -13,11 +13,11 @@ mod common;
 use common::*;
 use tessera_engine::derived::DerivedContent;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
-use tessera_lifecycle::membership::IncomingVariation;
+use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_spatial::morton::fixed32;
 use tessera_types::layer::{
-    ContentDeclaration, DeclarationError, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, DeclarationError, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
 };
 use tessera_types::EntityId;
@@ -27,25 +27,26 @@ const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
 fn declaration(name: &str, derived: &[&str]) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
-        slices: vec!["s0".into()],
+        title: Some(format!("{name} (title)")),
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
-        visible_when: None,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: derived.iter().map(|d| (*d).to_string()).collect(),
+            computed: derived.iter().map(|d| (*d).to_string()).collect(),
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
+        shape: None,
     }
 }
 
@@ -256,7 +257,9 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
 fn a_layer_declaring_no_derived_content_serves_none() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(declaration("clusters/a", &[])).unwrap();
+    engine
+        .register_layer(declaration("clusters/a", &[]))
+        .unwrap();
     publish(&engine, "clusters/a", &fx, 0..300);
 
     let served = artifacts_of(&engine, &full_coverage_credential());
@@ -331,27 +334,28 @@ fn a_layer_declaring_a_property_the_engine_does_not_compute_is_refused() {
     // The declaration itself refuses before any engine state is touched.
     assert!(matches!(
         declaration("clusters/a", &["hulls"]).validate(),
-        Err(DeclarationError::UnknownDerived(name)) if name == "hulls"
+        Err(DeclarationError::UnknownComputed(name)) if name == "hulls"
     ));
 }
 
 // ---- supplied content, and the test that decides who may read it ----------------------------
 
-fn label_layer(name: &str, corpus_derived: bool) -> LayerDeclaration {
+fn label_layer(name: &str, requires_all_members: bool) -> LayerDeclaration {
     let mut d = declaration(name, &[]);
     d.content.supplied = vec![tessera_types::layer::SuppliedContent {
-        kind: "label_text".into(),
-        corpus_derived,
+        name: "topic".into(),
+        ty: "text".into(),
+        require_member_visibility: if requires_all_members {
+            tessera_types::layer::SuppliedRequirement::All
+        } else {
+            tessera_types::layer::SuppliedRequirement::Inherited
+        },
     }];
     d
 }
 
-fn variation(
-    text: &str,
-    fx: &Fixture,
-    generated_from: impl Iterator<Item = u64>,
-) -> IncomingVariation {
-    IncomingVariation::new(vec![text.to_string()], fx.members(generated_from))
+fn content(text: &str, fx: &Fixture, generated_from: impl Iterator<Item = u64>) -> IncomingContent {
+    IncomingContent::new(vec![text.to_string()], fx.members(generated_from))
 }
 
 /// **The stage's headline.** A label is served only to a viewer who can see every document it was
@@ -361,7 +365,9 @@ fn variation(
 fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(label_layer("topics/a", true)).unwrap();
+    engine
+        .register_layer(label_layer("topics/a", true))
+        .unwrap();
 
     // Generated from a sample holding documents the narrow principal cannot see: the fixture gives
     // term 1 to every third source id, so 0..30 holds twenty it cannot.
@@ -372,7 +378,7 @@ fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
             vec![IncomingArtifact::with_content(
                 Some("t0".into()),
                 fx.members(0..300),
-                vec![variation("a label from the whole sample", &fx, 0..30)],
+                vec![content("a label from the whole sample", &fx, 0..30)],
             )],
         )
         .unwrap();
@@ -389,13 +395,15 @@ fn a_label_is_served_only_to_a_viewer_who_can_see_everything_behind_it() {
     );
 }
 
-/// Ranked variations: both principals fail the same full-sample label, and both are served the
+/// Ranked contents: both principals fail the same full-sample label, and both are served the
 /// narrower one. The design's own worked example.
 #[test]
 fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(label_layer("topics/a", true)).unwrap();
+    engine
+        .register_layer(label_layer("topics/a", true))
+        .unwrap();
 
     let narrow_sample: Vec<u64> = (0..30)
         .filter(|s| terms_of(*s).contains(&SUBSET_TERM))
@@ -408,8 +416,8 @@ fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
                 Some("t0".into()),
                 fx.members(0..300),
                 vec![
-                    variation("the whole sample", &fx, 0..300),
-                    variation("one term's worth", &fx, narrow_sample.iter().copied()),
+                    content("the whole sample", &fx, 0..300),
+                    content("one term's worth", &fx, narrow_sample.iter().copied()),
                 ],
             )],
         )
@@ -420,7 +428,7 @@ fn both_principals_fail_the_same_label_and_both_satisfy_its_narrower_variant() {
     assert_eq!(
         narrow[0].content,
         vec!["one term's worth"],
-        "the first variation this principal contains entirely — never the ranked-first one they \
+        "the first content this principal contains entirely — never the ranked-first one they \
          do not"
     );
     // A principal holding nothing at all is served neither, and no artifact.
@@ -443,7 +451,7 @@ fn corpus_independent_content_is_served_to_everyone_who_reaches_the_layer() {
             vec![IncomingArtifact::with_content(
                 Some("p0".into()),
                 fx.members(0..300),
-                vec![IncomingVariation::new(vec!["An authored name".into()], [])],
+                vec![IncomingContent::new(vec!["An authored name".into()], [])],
             )],
         )
         .unwrap();
@@ -530,7 +538,9 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
     let fx = fixture();
     {
         let engine = fx.open();
-        engine.register_layer(label_layer("topics/a", true)).unwrap();
+        engine
+            .register_layer(label_layer("topics/a", true))
+            .unwrap();
         engine
             .publish_artifacts(
                 "topics/a".into(),
@@ -538,7 +548,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 vec![IncomingArtifact::with_content(
                     Some("t0".into()),
                     fx.members(0..100),
-                    vec![variation("the first label", &fx, 0..10)],
+                    vec![content("the first label", &fx, 0..10)],
                 )],
             )
             .unwrap();
@@ -551,7 +561,7 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
                 vec![IncomingArtifact::with_content(
                     Some("t1".into()),
                     fx.members(100..200),
-                    vec![variation("the second label", &fx, 100..110)],
+                    vec![content("the second label", &fx, 100..110)],
                 )],
             )
             .unwrap();
@@ -583,7 +593,9 @@ fn two_publications_of_content_both_survive_the_loss_of_the_whole_log() {
 fn content_that_disagrees_with_the_declaration_is_refused() {
     let fx = fixture();
     let engine = fx.open();
-    engine.register_layer(label_layer("topics/a", true)).unwrap();
+    engine
+        .register_layer(label_layer("topics/a", true))
+        .unwrap();
     engine
         .register_layer(declaration("clusters/plain", &[]))
         .unwrap();
@@ -598,7 +610,7 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
         IncomingArtifact::with_content(
             Some("c0".into()),
             fx.members(0..10),
-            vec![variation("a label", &fx, 0..10)],
+            vec![content("a label", &fx, 0..10)],
         ),
     )
     .is_err());
@@ -610,13 +622,13 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
     )
     .is_err());
 
-    // A variation supplying the wrong number of values.
+    // A content supplying the wrong number of values.
     assert!(publish(
         "topics/a",
         IncomingArtifact::with_content(
             Some("t2".into()),
             fx.members(0..10),
-            vec![IncomingVariation::new(
+            vec![IncomingContent::new(
                 vec!["a".into(), "b".into()],
                 fx.members(0..10)
             )],
@@ -630,7 +642,7 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
         IncomingArtifact::with_content(
             Some("t3".into()),
             fx.members(0..10),
-            vec![IncomingVariation::new(vec!["a label".into()], [])],
+            vec![IncomingContent::new(vec!["a label".into()], [])],
         ),
     )
     .is_err());

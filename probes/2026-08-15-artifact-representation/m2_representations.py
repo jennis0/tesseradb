@@ -5,7 +5,7 @@ from pyroaring import BitMap
 FIX='/tmp/tessera-bench/fixtures/2422486/attrs-both/v00000/partitions/default'
 OUT='probes/2026-08-15-artifact-representation'
 d=np.load(f'{OUT}/tier_a_assign.npz')
-row_entity=np.fromfile(f'{FIX}/slices/s0/row-entity.u32',dtype=np.uint32)
+row_entity=np.fromfile(f'{FIX}/views/s0/row-entity.u32',dtype=np.uint32)
 N=len(row_entity); rows=np.arange(N,dtype=np.uint32)
 
 def width(k): return 1 if k+1<=255 else (2 if k+1<=65535 else 4)

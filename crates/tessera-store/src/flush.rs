@@ -73,7 +73,7 @@ pub struct FlushInput<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
-    /// Where this segment's rows begin in the slice's row space — the slice's current total.
+    /// Where this segment's rows begin in the view's row space — the view's current total.
     pub row_base: u32,
 }
 
@@ -93,14 +93,14 @@ pub struct FlushOutput {
     pub entity_id_high_water: u64,
 }
 
-/// Write one flush segment under `prefix_dir`, for `(partition, slice)`.
+/// Write one flush segment under `prefix_dir`, for `(partition, view)`.
 ///
 /// Returns without fsyncing the directory: the caller's commit point is the side-manifest, and it
 /// is responsible for making every file here durable **before** writing it (§7.3).
 pub fn write_flush_segment(
     prefix_dir: &Path,
     partition: &str,
-    slice: &str,
+    view: &str,
     input: FlushInput<'_>,
 ) -> Result<FlushOutput> {
     if input.rows.is_empty() {
@@ -131,15 +131,15 @@ pub fn write_flush_segment(
 
     let rel = |name: &str| {
         format!(
-            "partitions/{partition}/slices/{slice}/segments/{}/{name}",
+            "partitions/{partition}/views/{view}/segments/{}/{name}",
             input.seg_id
         )
     };
     let seg_dir = prefix_dir
         .join("partitions")
         .join(partition)
-        .join("slices")
-        .join(slice)
+        .join("views")
+        .join(view)
         .join("segments")
         .join(input.seg_id);
     fs::create_dir_all(&seg_dir).map_err(|source| StoreError::Io {
@@ -264,7 +264,7 @@ pub fn write_flush_segment(
 
     Ok(FlushOutput {
         segment: SegmentDescriptor {
-            slice: slice.to_string(),
+            view: view.to_string(),
             seg_id: input.seg_id.to_string(),
             row_count: input.rows.len() as u32,
             entity_lo,
@@ -470,7 +470,7 @@ mod tests {
             },
         )
         .expect("flush");
-        (out, dir.join("partitions/p/slices/s/segments/seg-1"))
+        (out, dir.join("partitions/p/views/s/segments/seg-1"))
     }
 
     /// **The bitmap is in row space, and the fixture is arranged so entity space would be wrong.**
@@ -491,7 +491,7 @@ mod tests {
 
         assert!(
             out.files
-                .contains_key("partitions/p/slices/s/segments/seg-1/presence/score.roaring"),
+                .contains_key("partitions/p/views/s/segments/seg-1/presence/score.roaring"),
             "the manifest must name the bitmap, or a missing one reads as 'every row present' \
              instead of refusing"
         );

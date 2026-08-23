@@ -43,7 +43,7 @@ let absorbMs = 0;
 const replica = new Replica(
   async (req, signal) => {
     const t = performance.now();
-    const r = await client.viewport(session.token, {...req, slice: meta.slices[0]!.id}, signal);
+    const r = await client.viewport(session.token, {...req, view: meta.views[0]!.id}, signal);
     wireMs += performance.now() - t;
     requests += 1;
     bytes += r.bytes;
@@ -56,7 +56,7 @@ const replica = new Replica(
     return r;
   },
   meta.quantisation,
-  {slice: meta.slices[0]!.id}
+  {view: meta.views[0]!.id}
 );
 
 let mTarget = meta.selection.thetaTargetMarks;

@@ -69,7 +69,7 @@ The temporal shape to keep in mind, because everything else hangs from it:
   item is WAL-durable and participates in authorisation state, but it has no row in any segment,
   and every map verb asks a row-space question — so it contributes to nothing a viewer can
   observe until a **flush** gives it geometry (§11.2). The bound on that gap is
-  `flush_max_age_secs` per slice (spec §4.1).
+  `flush_max_age_secs` per view (spec §4.1).
 - A deny's **acknowledgement is coupled to its application** (§3, r23): the 200 is held until the
   entry is fsync'd *and* the generation carrying it is swapped in, so no window ever exists
   between "accepted" and "in force". Everything after the ack — manifest publication, storage
@@ -121,7 +121,7 @@ command only the executor performs; this is what closed lifecycle §1.3's "two p
 All serving state hangs off one atomically-swappable pointer to an immutable `Generation`:
 prefix, `segments_version`, watermark, the loaded bundle, the generation-scoped dictionary
 (spec §4.3), the delta postings tiers, `overlay_version`, the overlay (spec §5.3), the ingest
-buffer, and the derived row-space deny mask `denied[slice]`. Every mutation builds a new
+buffer, and the derived row-space deny mask `denied[view]`. Every mutation builds a new
 generation sharing unchanged parts by `Arc` and swaps the pointer; a request loads the pointer
 once at its start and works from that `Arc` throughout (lifecycle §1.1 — load-bearing and
 tested).
@@ -193,8 +193,8 @@ acknowledgement below depends on them:
 ### 2.1 Admission — refusals that cost nothing
 
 The request is an Arrow IPC body `(external_id?, x, y, access, node_id?, …declared scalars)`
-with headers `x-tessera-batch-id` (required) and `x-tessera-slice` (optional when the bundle has
-one slice; 422 when ambiguous). In order, before anything is owed:
+with headers `x-tessera-batch-id` (required) and `x-tessera-view` (optional when the bundle has
+one view; 422 when ambiguous). In order, before anything is owed:
 
 1. **The operator credential**, as a router layer — every control route requires it, with no
    exemption list (contracts §3.1 r11).
@@ -204,7 +204,7 @@ one slice; 422 when ambiguous). In order, before anything is owed:
 3. **An admission semaphore** (`ingest_admission`, 64), `try_acquire` only: it bounds concurrent
    ingest handlers and therefore the blocking threads ingest can hold. No queue, no timeout —
    the control plane takes the work now or refuses it with a 429.
-4. **Decode and validate**: slice resolution; the scalar tail checked against
+4. **Decode and validate**: view resolution; the scalar tail checked against
    `MANIFEST.declared_scalars` by name and type — an undeclared column, a missing declared one,
    or a wrong type is a 422 naming the column, never a silent drop. **The row cap**
    (`ingest_max_batch_rows`, 10,000) is a 422; it necessarily fires after the decode (the row
@@ -246,12 +246,12 @@ one slice; 422 when ambiguous). In order, before anything is owed:
    through the queue. Between ticks the buffer is what grows, and this is the intended
    backpressure when flush falls behind (spec §4.7).
 
-9. **Coordinates.** `Engine::accept_ingest` refuses any row outside the slice's quantisation
+9. **Coordinates.** `Engine::accept_ingest` refuses any row outside the view's quantisation
    **bounds** with a typed error naming them, before submission — nothing acked, nothing
    WAL-durable, no entity ID burned (I9). Fail-closed: a clamped item at the boundary would be
    indistinguishable from a legitimately edge-located one. Under decision 0040 the bounds are
-   index configuration, immutable for the slice's life: such data can *never* enter this slice,
-   and the remedy is a rebuilt slice, not a re-quantising compaction. (The flush-side quarantine
+   index configuration, immutable for the view's life: such data can *never* enter this view,
+   and the remedy is a rebuilt view, not a re-quantising compaction. (The flush-side quarantine
    an earlier design carried is deleted — the refusal at this boundary is what made it
    unreachable.)
 Rows then go to the executor **unallocated** — entity-ID assignment happens on the executor, per
@@ -321,7 +321,7 @@ in front of it. The response and every refusal:
 | **200** `{accepted, over_bound, over_bound_ids, tessera_ids}` | Every row is **WAL-durable** with its identity allocated; `tessera_ids` in batch order (an item with no external id is addressable by nothing else). **Not visible yet** — a durability receipt (spec §2.5) | — |
 | 401 | missing/invalid operator credential | after fixing the credential |
 | 409 `conflict` | duplicate external ids (listed in detail), or batch-id replay with different bytes. **The batch had no effect** | not unchanged — the request itself is wrong |
-| 422 `contract` | malformed Arrow, undeclared/missing/mistyped scalar column, ambiguous slice, row cap, out-of-bounds coordinates (names the bounds) | not unchanged |
+| 422 `contract` | malformed Arrow, undeclared/missing/mistyped scalar column, ambiguous view, row cap, out-of-bounds coordinates (names the bounds) | not unchanged |
 | 429 `backpressure` | three producers, each with an honest `Retry-After` + body `retry_after_s`: the admission semaphore and the command queue, each with a value derived from the executor's observed service rate (clamped 1–300 s — never a fixed 1, which is the *compute* gate's number); the buffer bound (90 s — the tick period) | yes, unchanged, after `Retry-After` |
 | 500 `fail-closed` | WAL append/fsync failure — **nothing was applied**; or the receipt was lost after the swap, in which case the batch **is** durably in force and the batch-id replay returns its IDs. Either way: retry the identical bytes; idempotency resolves it | yes, identical bytes |
 | 503 `not-ready` | executor not `Running` (posture), or a partition is serving a stepped-down manifest — refused at the engine boundary, before anything is acked (owner-ruled gate, 2026-08-04; spec §5.6) | yes, later — for step-down, after the damaged newest manifest is repaired |
@@ -346,7 +346,7 @@ naming nothing, which is what keeps Appendix C's C4 closure honest (identical ou
 work is not identical, and C4 remains scoped accordingly).
 
 So: the item **appears** at the flush that gives it geometry — within `flush_max_age_secs` of
-its ack on a healthy single-slice node (spec §4.1 for the multi-slice bound) — and its arrival
+its ack on a healthy single-view node (spec §4.1 for the multi-view bound) — and its arrival
 is announced to other viewers only as `x-tessera-stale: 1` on their next response (the broadcast
 staleness stamp; decision 0041, C15: knowing data has been ingested is not a security leak). An
 item carrying a **novel descriptor** is the one exception to "appears at the flush": its term is
@@ -394,21 +394,21 @@ publishes off it:
   A request against an empty buffer is satisfied by the tick it triggered;
 - `flush_max_items` — **deleted** (decision 0045, 2026-08-04). Its specified role — "marks the
   buffer flush-ready; publication waits for the tick" — had no consumer: the tick never skips a
-  non-empty buffer and a flush consumes everything buffered for its slice, so the key could not
+  non-empty buffer and a flush consumes everything buffered for its view, so the key could not
   have an effect. The only occupancy bound is `ingest_buffer_max_items`' 429.
 
-**The ack→visibility bound.** One slice publishes per tick (below), so the bound is
-`flush_max_age_secs` with one slice and `s × flush_max_age_secs` with `s` — the dispatched plan
+**The ack→visibility bound.** One view publishes per tick (below), so the bound is
+`flush_max_age_secs` with one view and `s × flush_max_age_secs` with `s` — the dispatched plan
 is the one holding the oldest unflushed row, so that is a bound rather than starvation. No build
-emits a second slice today; a per-dispatch side-manifest covering every plan's segment is what
-would collapse the bound back to one tick, and it is slices work, not this document's.
+emits a second view today; a per-dispatch side-manifest covering every plan's segment is what
+would collapse the bound back to one tick, and it is views work, not this document's.
 
 ### 4.2 The plan, and the three dispositions at the snapshot
 
 Planning runs on the executor against the live generation — the invariant-bearing half — and is
-pure: buffered rows for the slice, ascending by entity id (I9 issues monotonically, so each
+pure: buffered rows for the view, ascending by entity id (I9 issues monotonically, so each
 flush segment covers a contiguous ascending entity range — ascending-with-holes where deletes
-struck or where a commit window interleaved slices; merge's adjacency test is `hi < lo`, not
+struck or where a commit window interleaved views; merge's adjacency test is `hi < lo`, not
 `hi + 1 == lo`, for exactly this reason). Per disposition, relative to the plan's snapshot (spec §5.3 is why each differs):
 
 - **Deleted → never written.** No row is created; the entity ID stays burned (I9); the deny
@@ -428,21 +428,21 @@ rotates nothing until restarted, alarmed throughout — publishing from that ove
 500'd, never-acked deny permanent, contradicting what contracts §3.1's 500 promises.
 
 **One plan per dispatch.** Every plan in a dispatch would take the same side-manifest name, so
-one slice publishes per tick, chosen by oldest unflushed row; the side-manifest write **refuses
+one view publishes per tick, chosen by oldest unflushed row; the side-manifest write **refuses
 to replace** an existing `SEGMENTS-<n>.json` (`hard_link`, atomic, `AlreadyExists` on collision)
 as the guard at the format boundary.
 
 ### 4.3 Execution on the pool: the files, and descriptor promotion
 
 The pool turns the plan into durable files under the segment's own directory
-(`partitions/<phash>/slices/<slice>/segments/<seg_id>/`), the `seg_id` being
+(`partitions/<phash>/views/<view>/segments/<seg_id>/`), the `seg_id` being
 `flush-<planned_n>-<attempt>` — never reused across flushes, merges or prefixes, with the
 attempt counter making a re-planned flush write *beside* its orphaned predecessor rather than
 through files the first attempt has mapped:
 
 | File | What it is |
 |---|---|
-| `morton.u32` | the segment's sorted codes — every flush segment is internally Morton-sorted against the same slice bounds, so a tile resolves to one contiguous range per segment through the same binary search |
+| `morton.u32` | the segment's sorted codes — every flush segment is internally Morton-sorted against the same view bounds, so a tile resolves to one contiguous range per segment through the same binary search |
 | `columns.arrow` | `(tessera_id, residual, …**render** scalars)` in `(morton, tessera_id)` order (contracts §2.6; no `priority` column — decision 0046). A buffered row carries one value per *declared* column, which is what the commit window indexes a category key by, so the flush selects the render subset **by position** before it writes — the tail must match the build's, and a `filter`-only column has no slot in any row (§10.3) |
 | *(no `permutation.bin`)* | the segment's entity→row extent is built **in memory** and never written: its bounds ride the manifest's `segments` entry, and its row map is **rebuilt at open from the segment's own `tessera_id` column** by inverting the identity key — nothing on disk carries it, deliberately (a per-segment permutation file sized to the bundle's whole entity space is the wrong shape for a few thousand ids at the top of it). *Contracts §2.6's streamed-segment `permutation.bin` was stale and is corrected at r16 — caught by this document's fidelity review after r2 had laundered it* |
 | `delta.arrow` | the **sparse delta postings tier**: term → entities, only for terms present in the flushed set, tagged records as base postings. *(Contracts §2.4 names this `terms/deltas-<n>.arrow`; the built layout is the per-segment path above, with the manifest's `files` map and segment list carrying the truth — a contract correction is proposed, spec §13.3)* |
@@ -453,7 +453,7 @@ through files the first attempt has mapped:
 Two files per filterable column are written **outside** the segment directory, under
 `partitions/<phash>/attrs/<column>/extents/<seg_id>.{arrow,roaring}`: the values of the entities this
 flush published, and the presence bitmap saying which entities they belong to. The value column is
-entity space and slice-invariant, so it lives beside no segment — and one is written for every
+entity space and view-invariant, so it lives beside no segment — and one is written for every
 column the schema declares filterable, including a column no flushed entity carries a value in, so
 what a flush produces is a function of the schema rather than of the data. `filter-index.md` §2.1
 owns the artefact; what this section owes it is that the presence bitmap is **never** omitted here
@@ -539,11 +539,11 @@ completed flush already wrote), the executor:
    pool before submission, contracts §2.3's "written after every file it names is durable"
    holds.
 5. **Swaps**: the new generation shares the bundle base and adds the segment and its extent
-   (row space is base permutation + ordered extent list; `row_base` = the slice's current row
+   (row space is base permutation + ordered extent list; `row_base` = the view's current row
    total; refused if the row space moved under the flush); the buffer minus **exactly the
    consumed ids** (an O(buffered) clone on the executor — the measured head-of-line term the
    deny lane sees, spec §5.7); the delta tier appended; the promoted dictionary; the filter
-   columns composed at step 2; `segments_version + 1`; and `denied[slice]` **re-derived against the new row space** — the
+   columns composed at step 2; `segments_version + 1`; and `denied[view]` **re-derived against the new row space** — the
    moment a suppressed-or-deleted-while-buffered item acquires a row is the moment it enters the
    row-space mask.
 6. **Prunes** row-projection cache entries more than one generation back
@@ -735,7 +735,7 @@ The executor gathers up to 1,000 queued entries per window, FIFO, so `suppress X
   promotes, hiding the item from everyone behind a 200 — is **dissolved rather than patched**: a
   re-label now travels the ingest path, and flush promotion (the one promotion path there is)
   handles a novel descriptor exactly as for any new item.
-- Apply is one overlay clone and one `denied[slice]` update for the whole window; the swap is
+- Apply is one overlay clone and one `denied[view]` update for the whole window; the swap is
   one pointer store. Every waiter is then acknowledged against the same proof — the ack type
   cannot be constructed without the token minted at the swap (or by proof of idempotent replay),
   so ack-before-application is something a rewrite has to work around, not something it can
@@ -771,8 +771,8 @@ function (`verdict`) — two transcriptions of a precedence rule is how a suppre
 suppressing. The sequence `delete → suppress → unsuppress` is **structurally incapable** of
 re-exposing: the unsuppress mutates a store that does not hold the deletion.
 
-**The row-space half is a derived mask, not a walk.** `denied[slice]` =
-`{row_of(e) : e ∈ deleted ∪ suppressed}` is materialised per slice on the generation, and
+**The row-space half is a derived mask, not a walk.** `denied[view]` =
+`{row_of(e) : e ∈ deleted ∪ suppressed}` is materialised per view on the generation, and
 composition subtracts it last with one `andnot` — self-clamping, so the deny half cannot get the
 `∩ base` clamp wrong (an I2 concern; a count that does not describe `M_auth` is not cosmetic).
 Per-request work therefore does not grow with denies ever accepted — it is O(buffer depth) —
@@ -930,7 +930,7 @@ the residual is recorded at contracts §2.3, not closed.
 ### 5.8 What the viewer observes of a deny
 
 - **Disappearance is immediate at the ack.** The very next request from any session composes
-  against the swapped generation: row-space verbs subtract `denied[slice]`; entity-space verbs
+  against the swapped generation: row-space verbs subtract `denied[view]`; entity-space verbs
   (drill-down, labels, cluster visibility) consult `verdict`. No cache stands in the way *by
   construction*: the deny mask and overlay are applied after the cached row projection, the
   fragment is never patched for denies, and `segments_version` does not move — so no rebuild, no
@@ -1154,11 +1154,11 @@ copied forward verbatim, and everything accepted after the snapshot — segments
 tombstones, unfolded entries — is **carried forward verbatim** (three of the four carried
 categories were added after the rule as first written proved fail-open on each; do not
 re-derive it). It publishes a **new prefix** and flips `CURRENT`, which rotates the fragment
-identity (Rule F's safety), continues the manifest counter `n`, and re-derives `denied[slice]`.
+identity (Rule F's safety), continues the manifest counter `n`, and re-derives `denied[view]`.
 Since `tessera build` is initial-load only — it refuses a bundle root containing a `CURRENT`,
 because an overwrite after the first flush silently deletes acked, visible items — compaction is
 the deployment's **only** reorganisation path: the fold, re-ranking, a batch-grid change. Not
-re-quantisation (decision 0040: bounds are immutable per slice; a wrong extent is a migration).
+re-quantisation (decision 0040: bounds are immutable per view; a wrong extent is a migration).
 
 Obligations already accumulated against it, from this document alone: **Rule F's gaps** (spec
 §5.4 — a publication path that carries the fold's rewritten postings and rotates the fragment
@@ -1180,7 +1180,7 @@ from the manifest's `deny`/`tombstones`; **then** replay the WAL's durable prefi
 (later records win — the unsuppress case); seed the allocator from `max(manifest high-water,
 WAL high-water)` (I9 across rotation). The buffer is reconstructed as **the replayed rows whose
 entity has no row in any segment** — the exact predicate, not the watermark proxy, so it stays
-correct at any number of slices *(a deliberate strengthening of the superseded flush design's
+correct at any number of views *(a deliberate strengthening of the superseded flush design's
 watermark rule, which was exact only while allocation order and flush order coincided)*.
 `accepted_batches` and the live external-id map are replay-derived; `Engine::open` also rebuilds
 the dictionary lookup map — **measured 40–53 s at 1.17×10⁸ terms** (the FST replacement is
@@ -1232,7 +1232,7 @@ Cited, never restated; the table is the audit trail from mechanism to obligation
 
 | Invariant / row | Upheld here by |
 |---|---|
-| **I1** | composition at fetch time against the request's one generation: fragment below the watermark, direct evaluation over the overlay and buffer, `denied[slice]` subtracted last; the effective watermark is always the fragment's own |
+| **I1** | composition at fetch time against the request's one generation: fragment below the watermark, direct evaluation over the overlay and buffer, `denied[view]` subtracted last; the effective watermark is always the fragment's own |
 | **I2** | flush/merge publish only through the swap; the deny mask's `andnot` is self-clamping; V_total advances at flush boundaries — a row-space quantity, never a pre-overlay one |
 | **I4** | the extent dispatch lives inside the store's permutation module; `row_of` is the only entity→row path; a buffered entity has no row and contributes to no row-space verb |
 | **I7** | flush moves no selection route; the direct-evaluation set merely shrinks as items acquire postings |
@@ -1353,7 +1353,7 @@ nothing; 8 a deny-carrying manifest failing verification is unready, never stepp
 9 `readyz` fails while stepped down; 10 segment, tier, run **and dictionary-extent** counts
 bounded under sustained ingest, with a control showing each grows one per flush without its
 maintenance pass (exists — `soak.rs`; measured 40 flushes → 2 segments, 5 tiers, 2 runs,
-6 dict extents, **1 full projection build**); 11 ack→visibility ≤ `slices × flush_max_age_secs`;
+6 dict extents, **1 full projection build**); 11 ack→visibility ≤ `views × flush_max_age_secs`;
 12 ingest refused by buffer occupancy, not only queue depth; 13 a flush patches rather than
 rebuilds the projection, and the superseded entry survives to be patched; 14 the allocator floor
 survives rotation and restart; 15 a deleted-never-flushed entity recovers from the snapshot; 16 a flushed item answers

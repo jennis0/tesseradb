@@ -14,7 +14,7 @@ use tessera_store::{open_bundle, Bundle};
 use tessera_types::{EntityId, RowId};
 
 mod fixture;
-use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, SLICE};
+use fixture::{build_bundle, flush_segment, next_manifest, PARTITION, VIEW};
 
 /// The claim §1.4's drain-depth cost model rests on: consecutive generations share their base
 /// geometry — the mapped `permutation.bin` and every existing segment's mmaps — rather than being
@@ -29,7 +29,7 @@ fn an_incremental_bundle_shares_its_base_mappings() {
     let next = base
         .with_segment(
             PARTITION,
-            SLICE,
+            VIEW,
             seg,
             extent,
             PublishedManifest {
@@ -39,8 +39,8 @@ fn an_incremental_bundle_shares_its_base_mappings() {
         )
         .unwrap();
 
-    let a = &base.partitions[PARTITION].slices[SLICE];
-    let b = &next.partitions[PARTITION].slices[SLICE];
+    let a = &base.partitions[PARTITION].views[VIEW];
+    let b = &next.partitions[PARTITION].views[VIEW];
     assert!(
         Arc::ptr_eq(a.row_space.base(), b.row_space.base()),
         "the base permutation was re-opened, not shared"
@@ -64,7 +64,7 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
     let next = base
         .with_segment(
             PARTITION,
-            SLICE,
+            VIEW,
             seg,
             extent,
             PublishedManifest {
@@ -74,8 +74,8 @@ fn a_flushed_entity_resolves_and_the_base_is_untouched() {
         )
         .unwrap();
 
-    let before = &base.partitions[PARTITION].slices[SLICE].row_space;
-    let after = &next.partitions[PARTITION].slices[SLICE].row_space;
+    let before = &base.partitions[PARTITION].views[VIEW].row_space;
+    let after = &next.partitions[PARTITION].views[VIEW].row_space;
 
     for e in 0..50u64 {
         assert_eq!(
@@ -121,7 +121,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let one = base
         .with_segment(
             PARTITION,
-            SLICE,
+            VIEW,
             s1,
             e1,
             PublishedManifest {
@@ -134,7 +134,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let two = one
         .with_segment(
             PARTITION,
-            SLICE,
+            VIEW,
             s2,
             e2,
             PublishedManifest {
@@ -143,9 +143,9 @@ fn a_merge_substitutes_the_consumed_segments() {
             },
         )
         .unwrap();
-    assert_eq!(two.partitions[PARTITION].slices[SLICE].segments.len(), 3);
+    assert_eq!(two.partitions[PARTITION].views[VIEW].segments.len(), 3);
 
-    let consumed: Vec<String> = two.partitions[PARTITION].slices[SLICE].segments[1..]
+    let consumed: Vec<String> = two.partitions[PARTITION].views[VIEW].segments[1..]
         .iter()
         .map(|s| s.seg_id.clone())
         .collect();
@@ -153,7 +153,7 @@ fn a_merge_substitutes_the_consumed_segments() {
     let after = two
         .with_merged(
             PARTITION,
-            SLICE,
+            VIEW,
             &consumed,
             merged_seg,
             SegmentExtent {
@@ -170,20 +170,20 @@ fn a_merge_substitutes_the_consumed_segments() {
         )
         .unwrap();
 
-    let slice = &after.partitions[PARTITION].slices[SLICE];
-    assert_eq!(slice.segments.len(), 2, "two segments collapsed into one");
-    assert_eq!(slice.row_space.extent_count(), 1);
+    let view = &after.partitions[PARTITION].views[VIEW];
+    assert_eq!(view.segments.len(), 2, "two segments collapsed into one");
+    assert_eq!(view.row_space.extent_count(), 1);
     for e in 50..=53u64 {
         assert_eq!(
-            slice.row_space.row_of(EntityId::new(e)),
+            view.row_space.row_of(EntityId::new(e)),
             Some(RowId::new(e as u32)),
             "entity {e} moved under a row-count-preserving merge"
         );
     }
     assert!(
         Arc::ptr_eq(
-            &two.partitions[PARTITION].slices[SLICE].segments[0],
-            &slice.segments[0]
+            &two.partitions[PARTITION].views[VIEW].segments[0],
+            &view.segments[0]
         ),
         "the untouched build segment is still shared"
     );
@@ -202,7 +202,7 @@ fn a_merge_whose_inputs_are_absent_is_refused() {
     let (seg, extent) = flush_segment(dir.path(), &base, 50, 3);
     let err = base.with_merged(
         PARTITION,
-        SLICE,
+        VIEW,
         &["seg-that-never-existed".to_string()],
         seg,
         extent,
@@ -217,10 +217,10 @@ fn a_merge_whose_inputs_are_absent_is_refused() {
     );
 }
 
-/// An unknown partition or slice is a caller error, not a silent no-op that publishes a
+/// An unknown partition or view is a caller error, not a silent no-op that publishes a
 /// generation missing the segment it was told to add.
 #[test]
-fn an_unknown_slice_is_refused() {
+fn an_unknown_view_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     build_bundle(dir.path(), 50);
     let base = Arc::new(open_bundle(dir.path()).unwrap());
@@ -229,7 +229,7 @@ fn an_unknown_slice_is_refused() {
     assert!(base
         .with_segment(
             PARTITION,
-            "no-such-slice",
+            "no-such-view",
             seg,
             extent,
             PublishedManifest {
@@ -252,7 +252,7 @@ fn the_original_generation_is_unchanged_by_a_publication() {
     let _next = base
         .with_segment(
             PARTITION,
-            SLICE,
+            VIEW,
             seg,
             extent,
             PublishedManifest {
@@ -262,8 +262,8 @@ fn the_original_generation_is_unchanged_by_a_publication() {
         )
         .unwrap();
 
-    let slice = &base.partitions[PARTITION].slices[SLICE];
-    assert_eq!(slice.segments.len(), 1);
-    assert_eq!(slice.row_space.extent_count(), 0);
-    assert_eq!(slice.row_space.total_rows(), 50);
+    let view = &base.partitions[PARTITION].views[VIEW];
+    assert_eq!(view.segments.len(), 1);
+    assert_eq!(view.row_space.extent_count(), 0);
+    assert_eq!(view.row_space.total_rows(), 50);
 }

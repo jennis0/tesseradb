@@ -12,32 +12,33 @@ use common::*;
 use tessera_engine::Engine;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_types::layer::{
-    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration,
+    ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource, ROWLESS_CEILING,
 };
 
-fn declaration(name: &str, gate: Option<&str>) -> LayerDeclaration {
+fn declaration(name: &str, visibility: Option<&str>) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
-        slices: vec!["s0".into()],
+        title: Some(format!("{name} (title)")),
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: gate.map(str::to_string),
-            artifacts_carry_own: false,
-        },
-        visible_when: Some(ExistenceCriterion::MinVisible(50)),
+        value_set: Default::default(),
+        visibility: visibility.map(str::to_string),
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: Some(ExistenceCriterion::Count(50)),
         hierarchy: Hierarchy {
             kind: HierarchyKind::Nested,
             prune_children: true,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into(), "hull".into()],
+            computed: vec!["centroid".into(), "hull".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
+        shape: None,
     }
 }
 
@@ -104,7 +105,7 @@ fn a_gate_failed_layer_is_indistinguishable_from_one_that_was_never_registered()
     // "0" is the term the full-coverage credential holds; "1" is the subset credential's.
     engine
         .register_layer(declaration("clusters/open", None))
-        .expect("an ungated layer registers");
+        .expect("a `public` layer registers");
     engine
         .register_layer(declaration("clusters/restricted", Some("1")))
         .expect("a gated layer registers");
@@ -277,7 +278,7 @@ fn an_incoherent_declaration_is_refused_with_nothing_spent() {
     let mut treed_with_levels = declaration("clusters/bad", None);
     treed_with_levels.levels = vec![tessera_types::layer::LevelDeclaration {
         level: 0,
-        title: "L0".into(),
+        title: Some("L0".into()),
         zoom: None,
     }];
     let refused = engine

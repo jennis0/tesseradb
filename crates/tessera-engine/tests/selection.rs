@@ -937,7 +937,7 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                         &tessera_lifecycle::WalRow {
                             external_id: None,
                             entity_id: EntityId::new(row as u64),
-                            slice: "s0".to_string(),
+                            view: "s0".to_string(),
                             descriptors: Vec::new(),
                             x: 0.0,
                             y: 0.0,

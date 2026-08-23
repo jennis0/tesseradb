@@ -26,6 +26,24 @@ CI runs it on every pull request and every push to `main`, alongside the rest of
 (`.github/workflows/ci.yml`). That is conformance §6's per-PR tier; the nightly and release tiers
 it also specifies do not exist.
 
+**432 of 432 pass (2026-08-20).** They had not, for the weeks between the configuration rework and
+that date: `tessera serve` took `--deployment` in place of `-c` and `harness.spawn_server` still
+passed the old spelling, so every server-backed module died at startup and nothing noticed. With
+that fixed, 27 failed for **two causes, both the mask catalogue's own assumptions and neither a
+defect** — `public` interned at term `0`, which makes a block's dictionary id one higher than the
+corpus's own, and decision 0073's Morton tiebreak, which broke the designed
+`entity_id == source_id` identity. Both are fixed; `oracle/catalogue.py`'s header carries the
+argument and `conformance.md` §0 the account.
+
+The one to carry: **`verify()`'s block check compares posting *sets***, and a within-block
+permutation preserves a set — so the check whose comment said it re-derived the identity had never
+tested it. `verify()` now compares the two spaces item by item (check 3b), and every planted column
+is keyed by entity through `Bundle.source_of_entity` rather than by source id under an equality.
+
+⊘ `conformance/suite` needs Python 3.11+ for `tomllib`; it is the correctness suite's shared battery
+rather than a row of the invariant matrix, and it is not covered by that count.
+
+
 (`reference/.venv/bin/pytest reference/tests -v` must also stay green. It is **not** run in CI:
 two of its five modules build from the Phase 0 corpus, which is not in the repository, and
 repointing them would cost the viewport differential its realistic term distribution. Run it
@@ -56,6 +74,7 @@ deliberately *not* selected and why.
 | `tests/test_text_differential.py` | records §4.4, §4.5, §10 (the text family) | The text differential over the base build: `match`, its m-of-n form and `phrase` on `abstract`, engine against `oracle.text.TextColumn` — which holds the **prose the fixture planted** and no dictionary, no posting and no ordinal. **Both sides tokenise through `tessera tokenise`** (decision 0070's own reason for that verb): reimplementing UAX #29 in Python would compare PyICU's ICU4C against the engine's icu4x and make every marginal disagreement a research question, so what is differential here is the set-and-sequence arithmetic over one token stream. Twenty expressions × five principals, chosen for the shapes the family's catalogue entries name — a word one entity carries, a word none does, both non-Latin scripts under the real segmenter, m-of-n at every m including the unsatisfiable one, and the adjacency pair planted **both ways** so a `phrase` that returned its own conjunction fails. Also: the phrase is a strict subset of its conjunction (engine-to-engine, so it survives an oracle bug); hidden and absent are identical in **every frame but the timing trailer**, which is exactly what C25 accepts as observable; `/v1/meta` publishes `text` with `match` and `phrase` and none of the four string predicates, and a negation over a text column is a `422`; and the **suppression row on both text routes** — `match` reads the postings, `phrase` reads the postings *and* decompresses the blob, which is the only filter route in this system that reads a stored value at query time. The analyser's **golden vectors run here too**, through the CLI, so they are a conformance obligation rather than one crate's unit test. ⊘ Field-scoped semantics over multi values is not reachable: `multi = true` is refused at the schema (#87). |
 | `tests/test_schema_refusals.py` | records §2 (the refusal list) | Each schema records §2 refuses fails a **real `tessera build`** naming its reason per decision 0013 — `multi = true` names records §5; `render`+`multi` names decision 0039's permanent fence (and wins over the bare-`multi` refusal); `index` on a rendered number names decision 0064; `record` is a reserved name (review N10); a stale `used_for` key refuses loudly. The positive control: a neither-key declaration builds green and writes `attrs/record/*` — blob-resident, not tolerated. |
 | `tests/test_record_blob.py` | records §3/§10 (the blob's addressing) | The one artefact-level check the design licenses (review B7): the record blob's addressing self-consistency — blocks tile `blocks.bin`, ranks tile the rank space, rows tile their blocks, discriminants agree with has-row's rank order, fields frame exactly, tags are blob-resident columns only — walked by `oracle.record_blob` (structure only, never values; its module doc holds the licence). Plus has-row against the generation functions' presence, and the oversized-row rule on the planted > 256 KiB note. Value equality is **deliberately elsewhere**: at build level in Rust (`crates/tessera-build/tests/record_blob.rs`), and at the served surface when drill-down lands (`oracle.catalogue.record_of` is the waiting expectation). |
+| `tests/test_label_containment.py` | I3 | **Containment, both halves of conformance §4.4's row.** Over `oracle/label_fixture.py`, whose two principals are **one entity apart**: that entity is planted inside the widest generating set and nowhere else, so "one member short" is a fact about the corpus rather than a hope. Three labels of one layer over one membership, differing only in which generating sets their ranked contents were drawn from — so the same response carries an absence *and* its control. The one whose only content spans the split entity is **absent whole** for the narrower principal (no identity, no count, no stripped description — decision 0076); the ranked one falls back to the content they do contain; the third is served to both. The layer is `public` with an `inherited` artifact gate and no existence criterion, so containment is the only conjunct that can fail. Checked at four zoom tiers. The **cache half behaviourally**: warm every tier on one token, suppress that single generating-set member, re-ask on the **same token** — the label is withheld at the ack and the answer is byte-for-byte the narrower principal's, because containment is a function of the mask and not of how an entity left it. The pin is not re-presented: decision 0041 made it advisory, so it could not hold a suppression out either way. |
 | `tests/test_overlay_journal.py` | I1, I7, I2 | The overlay-heavy catalogue state: acked control operations — deletes and suppressions, which since decision 0047 withdrew the `predicate` op are the whole of what a Phase 1 overlay can hold — composed in entity space by `oracle.journal.AckedJournal` and in row space by the engine. Counts **and served points**, the latter against a **θ-live** server — the combination that catches an engine sampling from the pre-overlay mask (which serves denied items as marks while every count stays right) and one anchoring θ on the pre-overlay projection (§7.2's own I2 leak). Its negative control builds both of those engines out of the oracle and shows the comparison rejects them. Plus the journal's rules: a refused operation enters no composition and moves nothing, and an acked ingest is not an applied one. And the withdrawn `predicate` op: refused with a typed 422 in both directions, composing nothing — the pin on the novel-descriptor silent hide the withdrawal dissolved. |
 
 ## Fixtures
@@ -132,7 +151,7 @@ cost. `reference/tests` still uses that corpus and is a separate question.
   the flush it means to see is kept: it is good practice independently, and each layering module
   still asserts the principal's unfiltered corpus size at every stage, so a generation disagreement
   fails as its own precondition rather than as an unexplained filter result.
-- **`x-tessera-slice`**: unimplemented per the ledger note (Phase 1 ships exactly one slice); not
+- **`x-tessera-view`**: unimplemented per the ledger note (Phase 1 ships exactly one view); not
   exercised.
 - **Task 6's bit-flipped-`.frag`-is-a-cache-miss check**: added as a Rust unit test,
   `crates/tessera-authz/tests/fragment.rs::bit_flipped_frag_file_is_treated_as_a_cache_miss_and_rebuilds`,

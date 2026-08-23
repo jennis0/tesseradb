@@ -61,7 +61,7 @@ export function renderLegend(state: AppState): string {
 
   const error = state.categoryErrors[column.name];
   if (error) {
-    // A refusal is shown as a refusal. `per_viewer` is the expected one today: the gate is
+    // A refusal is shown as a refusal. `derived` is the expected one today: the gate is
     // specified and unbuilt, so the server declines rather than publishing an ungated set.
     return panel(
       'Colour',
@@ -93,7 +93,7 @@ function categoryBody(state: AppState, name: string): string {
       const colour = css(colourOfRank(rank));
       // The key is the identity and the label is presentation, so the key is always shown; the
       // label joins it rather than replacing it, or a renamed value becomes unrecognisable.
-      const text = value.label && value.label !== value.key ? `${value.key} — ${value.label}` : value.key;
+      const text = value.title && value.title !== value.key ? `${value.key} — ${value.title}` : value.key;
       return `<div class="row"><span class="swatch" style="background:${colour}"></span>
         <span class="v" title="code ${esc(value.code)}">${esc(text)}</span></div>`;
     })

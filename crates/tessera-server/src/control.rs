@@ -32,7 +32,9 @@ use tessera_engine::{
     AcceptError, DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE,
     DENY_WINDOW_MAX_ENTRIES,
 };
-use tessera_lifecycle::{ChangeOp, UnallocatedRow, WalScalar};
+use tessera_lifecycle::{
+    BatchArtifacts, BatchEdge, BatchMembership, ChangeOp, UnallocatedRow, WalScalar,
+};
 
 use tessera_types::{EntityId, TermId, TesseraId};
 
@@ -436,8 +438,324 @@ struct RawIngestItem {
 }
 
 /// The column names this schema gives a meaning of their own; everything else in a batch is a
-/// caller-declared scalar.
+/// caller-declared scalar **or a declared layer's name** (see [`parse_ingest_batch`]).
 const RESERVED_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
+
+/// One ingest batch, decoded: its rows, and what its membership columns said.
+struct ParsedBatch {
+    items: Vec<RawIngestItem>,
+    artifacts: BatchArtifacts,
+}
+
+/// A column named for a declared layer, and what its cells mean.
+///
+/// **Named for the layer, exactly as an attribute column is named for the attribute** — the
+/// declaration's own `name`, never an acquisition-side spelling. `fields` on `[layer.members]` maps
+/// a *file's* column name onto the canonical meaning and is build-only for that reason
+/// (`configuration.md` §2): a deployment that never builds has no file to map from, and a name a
+/// running node had to be told about could not be checked against anything.
+struct MembershipColumn<'a> {
+    layer: &'a str,
+    meaning: tessera_types::layer::ListMeaning,
+    cells: KeyCells<'a>,
+}
+
+/// A key column's shape: one artifact per row, or a list of them.
+enum KeyCells<'a> {
+    Scalar(&'a dyn Array),
+    /// A `List`, whose rows may differ in length — which is what a lineage is.
+    Variable(&'a arrow::array::ListArray),
+    /// A `FixedSizeList`, every row of the arity its own type states.
+    Fixed(&'a arrow::array::FixedSizeListArray),
+}
+
+impl KeyCells<'_> {
+    /// The element array a row's entries are read out of — the column itself where it is a scalar.
+    fn values(&self) -> &dyn Array {
+        match self {
+            KeyCells::Scalar(array) => *array,
+            KeyCells::Variable(list) => {
+                let values: &Arc<dyn Array> = list.values();
+                values.as_ref()
+            }
+            KeyCells::Fixed(list) => {
+                let values: &Arc<dyn Array> = list.values();
+                values.as_ref()
+            }
+        }
+    }
+
+    /// Whether the cells are lists — a scalar carries one artifact per row and has no arity to
+    /// disagree with a declaration.
+    fn is_list(&self) -> bool {
+        !matches!(self, KeyCells::Scalar(_))
+    }
+
+    /// The range of `values()` one row occupies, or `None` where the row named no artifact at all.
+    ///
+    /// **A null cell and an empty list are the whole row's "in no artifact"**, which is the scalar
+    /// rule applied to a cell that holds no key: a point may be in no artifact at any resolution,
+    /// and a clusterer that emitted nothing for it is the ordinary way of saying so.
+    fn entries(&self, row: usize) -> Option<std::ops::Range<usize>> {
+        let (start, end) = match self {
+            KeyCells::Scalar(_) => (row, row + 1),
+            KeyCells::Variable(list) => {
+                if list.is_null(row) {
+                    return None;
+                }
+                let offsets = list.value_offsets();
+                (offsets[row] as usize, offsets[row + 1] as usize)
+            }
+            KeyCells::Fixed(list) => {
+                if list.is_null(row) {
+                    return None;
+                }
+                let start = list.value_offset(row) as usize;
+                (start, start + list.value_length() as usize)
+            }
+        };
+        (start != end).then_some(start..end)
+    }
+}
+
+/// The key one cell names, or `None` where it names no artifact.
+///
+/// **Text or an integer, and `null` or `-1` means this point is in no artifact**
+/// (`artifacts-from-points.md` §2). An integer key is read as its decimal spelling, so `3` and `"3"`
+/// name one artifact — the rule is [`tessera_types::layer::integer_key`]'s, which is also what a
+/// build reads a member table's key column by, because a membership spelled two ways must not
+/// resolve two ways.
+fn member_key_at(values: &dyn Array, index: usize) -> Option<String> {
+    use arrow::array::{
+        Int16Array, Int32Array, Int64Array, Int8Array, StringArray, UInt16Array, UInt32Array,
+        UInt64Array, UInt8Array,
+    };
+    if values.is_null(index) {
+        return None;
+    }
+    let any = values.as_any();
+    let integer: i128 = if let Some(a) = any.downcast_ref::<StringArray>() {
+        return Some(a.value(index).to_string());
+    } else if let Some(a) = any.downcast_ref::<Int8Array>() {
+        a.value(index) as i128
+    } else if let Some(a) = any.downcast_ref::<Int16Array>() {
+        a.value(index) as i128
+    } else if let Some(a) = any.downcast_ref::<Int32Array>() {
+        a.value(index) as i128
+    } else if let Some(a) = any.downcast_ref::<Int64Array>() {
+        a.value(index) as i128
+    } else if let Some(a) = any.downcast_ref::<UInt8Array>() {
+        a.value(index) as i128
+    } else if let Some(a) = any.downcast_ref::<UInt16Array>() {
+        a.value(index) as i128
+    } else if let Some(a) = any.downcast_ref::<UInt32Array>() {
+        a.value(index) as i128
+    } else {
+        // The last arm is `u64` and the fallthrough is unreachable: `membership_column` refuses any
+        // other element type before a row is read.
+        any.downcast_ref::<UInt64Array>()?.value(index) as i128
+    };
+    tessera_types::layer::integer_key(integer)
+}
+
+/// Read one column named for a layer, at the shapes that layer may carry.
+///
+/// **Two refusals, and both are the declaration and the data disagreeing about arity.** A
+/// `FixedSizeList` states its length in its own type, so a levelled layer's is checked once here; a
+/// nested layer's lineage is as deep as each point's own branch and has no fixed arity at all. A
+/// plain list states its length a row at a time, and that check is in the row loop — reading the
+/// type alone would refuse every producer whose Arrow binding writes a plain list, which is most of
+/// them.
+fn membership_column<'a>(
+    name: &'a str,
+    column: &'a Arc<dyn Array>,
+    declaration: &tessera_types::layer::LayerDeclaration,
+) -> Result<MembershipColumn<'a>, ApiError> {
+    use arrow::array::{FixedSizeListArray, ListArray};
+    use arrow::datatypes::DataType;
+
+    // A predicate layer's membership is *evaluated* per request, so there is nothing for a column
+    // to say: a stored answer beside a live predicate is what the artifact store refuses a
+    // publication for, and this is the same refusal one step earlier, where the batch can still be
+    // rejected without effect.
+    if declaration.membership != tessera_types::layer::MembershipSource::Enumerated {
+        return Err(ApiError::Contract(format!(
+            "ingest body: column '{name}' names a layer whose membership is evaluated per \
+             request rather than enumerated — there is no stored membership for a point to join, \
+             and one written beside the predicate would diverge from it at the first write"
+        )));
+    }
+
+    let meaning = declaration.list_meaning();
+    let cells = match column.data_type() {
+        DataType::List(_) => KeyCells::Variable(
+            column
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .expect("a List column downcasts to a ListArray"),
+        ),
+        DataType::FixedSizeList(_, size) => {
+            match meaning {
+                tessera_types::layer::ListMeaning::Lineage => {
+                    return Err(ApiError::Contract(format!(
+                        "ingest body: column '{name}' is a fixed-size list of {size} and that \
+                         layer is declared nested, whose lineage is as deep as each point's own \
+                         branch — a fixed arity is one entry per level, which is the stacked and \
+                         tiered shape"
+                    )))
+                }
+                tessera_types::layer::ListMeaning::Levelled { levels, .. } if *size as usize != levels => {
+                    return Err(ApiError::Contract(format!(
+                        "ingest body: column '{name}' is a fixed-size list of {size} and that \
+                         layer declares {levels} levels. Entry k is the artifact at level k, so \
+                         the two counts are one number written twice"
+                    )))
+                }
+                _ => {}
+            }
+            KeyCells::Fixed(
+                column
+                    .as_any()
+                    .downcast_ref::<FixedSizeListArray>()
+                    .expect("a FixedSizeList column downcasts to a FixedSizeListArray"),
+            )
+        }
+        _ => KeyCells::Scalar(column.as_ref()),
+    };
+    let element = cells.values().data_type().clone();
+    if !matches!(
+        element,
+        DataType::Utf8
+            | DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    ) {
+        return Err(ApiError::Contract(format!(
+            "ingest body: column '{name}' names a layer and carries {element:?}; a member key is \
+             text or an integer — an integer key is read as its decimal spelling, so `3` and \
+             \"3\" name one artifact"
+        )));
+    }
+    Ok(MembershipColumn {
+        layer: name,
+        meaning,
+        cells,
+    })
+}
+
+/// What one batch's membership columns said, gathered as the executor takes it.
+///
+/// **Keyed by `(layer, level, key)` and carrying row positions**, because a batch's entity ids do
+/// not exist until its commit window closes. The executor resolves the key to an ordinal at
+/// admission and turns the positions into entities after the assignment — see
+/// [`tessera_lifecycle::BatchMembership`].
+#[derive(Default)]
+struct MembershipTally {
+    rows_of: std::collections::BTreeMap<(String, u32, String), Vec<u32>>,
+    edges: std::collections::BTreeSet<(String, u32, String, String)>,
+}
+
+impl MembershipTally {
+    /// One row's cells of one membership column.
+    ///
+    /// `offset` is where this batch's rows start in the request's own numbering, since an Arrow IPC
+    /// stream may carry several record batches and the executor indexes one flat list of rows.
+    fn read(
+        &mut self,
+        column: &MembershipColumn<'_>,
+        row: usize,
+        offset: usize,
+    ) -> Result<(), ApiError> {
+        let Some(entries) = column.cells.entries(row) else {
+            return Ok(());
+        };
+        // **The declaration and the data must agree — where the data is a list.** A stacked or
+        // tiered layer's list is one entry per declared level, that being what makes entry k mean
+        // level k, so a row of any other length is a lineage against a levelled declaration and
+        // guessing which of the two the caller meant would store a hierarchy they did not write.
+        //
+        // **A scalar is not a short list**: it names one artifact at level 0, which is exactly what
+        // a member table with no `level` column means on a levelled layer. Applying the arity check
+        // to it would make the two entry points read one spelling two ways, which is the drift this
+        // whole column is written against.
+        if let Some(levels) = column.meaning.arity().filter(|_| column.cells.is_list()) {
+            if entries.len() != levels {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: column '{}' names {} artifacts at row {row} and the layer \
+                     declares {levels} levels. A stacked or tiered layer's column is one entry \
+                     per level, nullable where the point is in no artifact at that resolution",
+                    column.layer,
+                    entries.len(),
+                )));
+            }
+        }
+        // **Each entry carries its own position**, so the edge below reads the child's level off
+        // the entry rather than searching for its key — a lineage may legitimately name one key
+        // twice, and a search would then charge the edge to the wrong level.
+        let values = column.cells.values();
+        let keys: Vec<Option<(u32, String)>> = entries
+            .enumerate()
+            .map(|(position, index)| {
+                member_key_at(values, index).map(|key| (column.meaning.level_of(position), key))
+            })
+            .collect();
+        for (level, key) in keys.iter().flatten() {
+            let at = self
+                .rows_of
+                .entry((column.layer.to_string(), *level, key.clone()))
+                .or_default();
+            // A row naming one artifact twice — a lineage that repeats a key — joins it once.
+            let index = (offset + row) as u32;
+            if at.last() != Some(&index) {
+                at.push(index);
+            }
+        }
+        if column.meaning.declares_edges() {
+            // The adjacency is `tessera_types::layer::parent_edges`' — the same function a build
+            // reads a member table's list column by, which is what keeps the two entry points from
+            // inferring different trees from one file.
+            for ((_, parent), (level, child)) in tessera_types::layer::parent_edges(&keys) {
+                self.edges.insert((
+                    column.layer.to_string(),
+                    *level,
+                    child.clone(),
+                    parent.clone(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn into_artifacts(self) -> BatchArtifacts {
+        BatchArtifacts {
+            memberships: self
+                .rows_of
+                .into_iter()
+                .map(|((layer, level, key), rows)| BatchMembership {
+                    layer,
+                    level,
+                    key,
+                    rows,
+                })
+                .collect(),
+            edges: self
+                .edges
+                .into_iter()
+                .map(|(layer, level, child, parent)| BatchEdge {
+                    layer,
+                    level,
+                    child,
+                    parent,
+                })
+                .collect(),
+        }
+    }
+}
 
 /// One value out of an ingest batch's column, read **at the column's declared wire type**
 /// ([`DeclaredScalar::wire_type`]) — `None` when the Arrow column is not that type, which the
@@ -592,9 +910,9 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// **This is what makes a category's value checkable at all.** A code can only be range-checked —
 /// a `u16` column accepted any `u16`, so an unassigned code, a `reserved` code or a typo was stored
 /// with no error anywhere and the row carried a code no key explains. A key can be
-/// membership-checked, and membership is the rule: an unknown key under `vocabulary = "declared"`
+/// membership-checked, and membership is the rule: an unknown key under `value_set = "closed"`
 /// is a 422 naming the column and the key, whole batch without effect (declare-then-use, §5,
-/// slices §80).
+/// views §80).
 ///
 /// It also makes a schema/client disagreement visible: a plain `u16` scalar and a `u16` category
 /// are now different types on the wire, so a client that thinks a column is one when the bundle
@@ -603,21 +921,42 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// A **null** key is *absent* — [`ABSENT_CODE`], the reserved sentinel (§3.6). The **empty string**
 /// is not: it is what an unset field and a client bug both produce, so it is refused rather than
 /// folded into absence, which would accept the same defect silently.
+///
+/// # A column named for a declared layer is that point's artifacts
+///
+/// The acceptance rule is **reserved, or a declared attribute's name, or a declared layer's name**
+/// (`artifacts-from-points.md` §6.2) — the third being what
+/// [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) obliges:
+/// a point may name its artifacts in a file, so it may name them on the wire. The cell is a key, or
+/// a list of keys, on exactly the rules a build reads a member table by — `tessera_types::layer`
+/// holds them, and holds them for both readers.
+///
+/// **The layer's own `name`, exactly as an attribute column is named for the attribute's `name`.**
+/// `fields` on `[layer.members]` renames a *file's* columns and is build-only for the same reason
+/// `source` is: it says where rows come from rather than what they mean.
+///
+/// Reserved names are matched first and declared scalars second, so a layer sharing a name with
+/// either is read as the other — a layer called `x` cannot make the geometry column mean a cluster.
 fn parse_ingest_batch(
     body: &[u8],
     declared: &[DeclaredScalar],
     vocabularies: &Vocabularies,
-) -> Result<Vec<RawIngestItem>, ApiError> {
+    layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
+) -> Result<ParsedBatch, ApiError> {
     let cursor = std::io::Cursor::new(body);
     let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).map_err(|e| {
         ApiError::Contract(format!("ingest body is not a valid Arrow IPC stream: {e}"))
     })?;
 
     let mut items = Vec::new();
+    let mut tally = MembershipTally::default();
     for batch in reader {
         let batch = batch
             .map_err(|e| ApiError::Contract(format!("ingest body: arrow decode error: {e}")))?;
         let schema = batch.schema();
+        // Where this record batch's rows start in the request's own row numbering — what a
+        // membership names, since the executor indexes one flat list of rows per batch id.
+        let offset = items.len();
 
         let ext = optional_binary_col(&batch, "external_id")?;
         let x = f32_col(&batch, "x")?;
@@ -626,19 +965,29 @@ fn parse_ingest_batch(
 
         // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
         // does not match the declaration has no effect at all, exactly as a duplicate 409 does.
+        let mut memberships: Vec<MembershipColumn> = Vec::new();
+        let mut declarations = Vec::new();
         for field in schema.fields() {
             let name = field.name().as_str();
-            if RESERVED_COLUMNS.contains(&name) {
+            if RESERVED_COLUMNS.contains(&name) || declared.iter().any(|d| d.name == name) {
                 continue;
             }
-            if !declared.iter().any(|d| d.name == name) {
+            let Some(declaration) = layer_of(name) else {
                 return Err(ApiError::Contract(format!(
-                    "ingest body: column '{name}' is not in MANIFEST.declared_scalars \
-                     (contracts §2.2). Scalars are stored positionally against the declared \
-                     order, so an undeclared column is refused rather than dropped — dropping \
-                     it would shift every later scalar by one and acknowledge that with a 200"
+                    "ingest body: column '{name}' is neither in MANIFEST.declared_scalars nor the \
+                     name of a registered layer (contracts §2.2). Scalars are stored positionally \
+                     against the declared order, so an undeclared column is refused rather than \
+                     dropped — dropping it would shift every later scalar by one and acknowledge \
+                     that with a 200"
                 )));
-            }
+            };
+            declarations.push((name.to_string(), declaration));
+        }
+        for (name, declaration) in &declarations {
+            let column = batch
+                .column_by_name(name)
+                .expect("the column was found in this batch's own schema");
+            memberships.push(membership_column(name, column, declaration)?);
         }
         for d in declared {
             let Some(col) = batch.column_by_name(&d.name) else {
@@ -667,6 +1016,12 @@ fn parse_ingest_batch(
         }
 
         for i in 0..batch.num_rows() {
+            // The artifacts this row names, read before its scalars so a malformed membership
+            // column refuses the batch with nothing decoded into `items` — the whole-batch rule
+            // every other refusal here is held to.
+            for column in &memberships {
+                tally.read(column, i, offset)?;
+            }
             // Built in DECLARED order, not schema order — the vector is read back by position and
             // nothing downstream carries a name. Every column is present and correctly typed by the
             // validation above, so neither `expect` here can fire on a caller's input.
@@ -726,12 +1081,15 @@ fn parse_ingest_batch(
             });
         }
     }
-    Ok(items)
+    Ok(ParsedBatch {
+        items,
+        artifacts: tally.into_artifacts(),
+    })
 }
 
-/// `x-tessera-slice` (contracts §3.4): optional when the bundle has one slice, `422` if ambiguous.
+/// `x-tessera-view` (contracts §3.4): optional when the bundle has one view, `422` if ambiguous.
 ///
-/// | header | slices | answer |
+/// | header | views | answer |
 /// |---|---|---|
 /// | absent | 0 or 1 | accepted — there is nothing to be ambiguous about |
 /// | absent | ≥ 2 | **422**, naming what it could have meant |
@@ -739,38 +1097,38 @@ fn parse_ingest_batch(
 /// | present, known | any | accepted |
 ///
 /// **Unknown is 404, not 422**, and the difference is not cosmetic: contracts §3.1's code list is
-/// **closed**, and its 404 row reads "unknown `tessera_id`, node, external ID **or slice**". The
-/// viewer plane already answers exactly that (`map_engine_error` maps `EngineError::UnknownSlice`
-/// to `ApiError::Unknown`), and two planes disagreeing about what an unknown slice id is would be a
+/// **closed**, and its 404 row reads "unknown `tessera_id`, node, external ID **or view**". The
+/// viewer plane already answers exactly that (`map_engine_error` maps `EngineError::UnknownView`
+/// to `ApiError::Unknown`), and two planes disagreeing about what an unknown view id is would be a
 /// contradiction inside a closed list. §3.4's 422 is licensed for *ambiguity*, which is the second
 /// row, not the third.
 ///
-/// **The resolved id is what every row of the batch is stored under** — `WalRow::slice`, and from
-/// there `BufferedItem::slice` and the flush segment's row space. Absent-with-one-slice resolves to
-/// that slice's id; it is never defaulted to a literal, because a defaulted slice is how a row
-/// silently joins the wrong row space the day partitioning lands. A bundle declaring no slice at
+/// **The resolved id is what every row of the batch is stored under** — `WalRow::view`, and from
+/// there `BufferedItem::view` and the flush segment's row space. Absent-with-one-view resolves to
+/// that view's id; it is never defaulted to a literal, because a defaulted view is how a row
+/// silently joins the wrong row space the day partitioning lands. A bundle declaring no view at
 /// all has no row space to ingest into, so it is refused here rather than accepted into nothing.
 ///
-/// No build path emits a multi-slice bundle (`tessera-build` writes exactly one `SliceDescriptor`),
+/// No build path emits a multi-view bundle (`tessera-build` writes exactly one `ViewDescriptor`),
 /// so the second row is unreachable. It is implemented rather than asserted-away because it is a
 /// contract clause and it costs one comparison.
-fn resolve_slice(slice: Option<&str>, slices: &[(String, String)]) -> Result<String, ApiError> {
-    match slice {
-        None if slices.len() > 1 => Err(ApiError::Contract(format!(
-            "this bundle has {} slices ({}), so x-tessera-slice is required — which one a batch \
+fn resolve_view(view: Option<&str>, views: &[(String, String)]) -> Result<String, ApiError> {
+    match view {
+        None if views.len() > 1 => Err(ApiError::Contract(format!(
+            "this bundle has {} views ({}), so x-tessera-view is required — which one a batch \
              belongs to is not inferable (contracts §3.4)",
-            slices.len(),
-            slices
+            views.len(),
+            views
                 .iter()
                 .map(|(id, _)| id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => slices.first().map(|(id, _)| id.clone()).ok_or_else(|| {
-            ApiError::Contract("this bundle declares no slice to ingest into".into())
+        None => views.first().map(|(id, _)| id.clone()).ok_or_else(|| {
+            ApiError::Contract("this bundle declares no view to ingest into".into())
         }),
-        Some(id) if slices.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
-        Some(id) => Err(ApiError::Unknown(format!("unknown slice '{id}'"))),
+        Some(id) if views.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
+        Some(id) => Err(ApiError::Unknown(format!("unknown view '{id}'"))),
     }
 }
 
@@ -831,6 +1189,15 @@ struct IngestResp {
     /// request batch, so a caller can correlate. Present for every accepted row, whether or not
     /// that row carried an external id.
     tessera_ids: Vec<u64>,
+    /// How many artifacts this batch's membership column **created** — a key no artifact held, on
+    /// a layer declared `value_set = "open"` (`artifacts-from-points.md` §3). Zero for every batch
+    /// that carries no membership column, and for every one whose keys all existed.
+    ///
+    /// **Reported because minting cannot be undone.** An open layer trades the roster's refusal
+    /// for a cluster existing because a point says it does, so a mistyped key now creates a
+    /// permanent object instead of being refused — and the mitigation is that the caller who made
+    /// the typo is told the number in the same 200 that took their rows.
+    minted: u64,
 }
 
 /// The Arrow decode through the WAL append/fsync: everything CPU-bound or fsync-bearing for one
@@ -844,18 +1211,27 @@ fn run_ingest(
     state: &AppState,
     body: &[u8],
     batch_id: String,
-    slice: Option<&str>,
+    view: Option<&str>,
 ) -> Result<IngestResp, ApiError> {
     let body_hash: [u8; 32] = Sha256::digest(body).into();
 
     // One `Engine::meta()` call per batch — not per row — for the two things the manifest decides
-    // about a batch: which slices exist, and what scalar tail is declared. `meta()` rather than a
+    // about a batch: which views exist, and what scalar tail is declared. `meta()` rather than a
     // narrower accessor on purpose: it is the one definition of what this bundle declares, the one
     // `/v1/meta` publishes, and a second accessor is a second definition that can drift from it.
     let meta = state.engine.meta();
-    let slice = resolve_slice(slice, &meta.slices)?;
+    let view = resolve_view(view, &meta.views)?;
 
-    let items = parse_ingest_batch(body, &meta.declared_scalars, &meta.vocabularies)?;
+    // **The layer lookup is the engine's registry, per column, not per row.** A registration is a
+    // WAL append on the executor, so a column naming a layer registered a moment ago resolves here
+    // exactly as the publication that created its artifacts did — and a name nothing registered is
+    // refused with the undeclared-column message rather than accepted into nothing.
+    let ParsedBatch { items, artifacts } = parse_ingest_batch(
+        body,
+        &meta.declared_scalars,
+        &meta.vocabularies,
+        &|name| state.engine.registered_layer(name).map(|l| l.declaration),
+    )?;
 
     // The row cap. 422 per contracts §3.1's "bounds exceeded" row, naming the bound and the
     // batch's own size.
@@ -932,6 +1308,9 @@ fn run_ingest(
                 over_bound,
                 over_bound_ids,
                 tessera_ids,
+                // A replay creates nothing: the artifacts this batch's keys named were minted when
+                // it was first accepted, and this submission had no effect at all.
+                minted: 0,
             });
         }
         return Err(ApiError::Conflict(format!(
@@ -1044,7 +1423,7 @@ fn run_ingest(
         .zip(descriptor_lists)
         .map(|((item, terms), descriptors)| UnallocatedRow {
             external_id: item.external_id,
-            slice: slice.clone(),
+            view: view.clone(),
             descriptors,
             x: item.x,
             y: item.y,
@@ -1057,9 +1436,9 @@ fn run_ingest(
     // Never 200 without fsync. Ordering is now a consequence of single ownership rather than of a
     // mutex held across four steps (see `tessera_engine`'s `write` module).
     let accepted = rows.len() as u64;
-    let entity_ids = state
+    let (entity_ids, minted) = state
         .engine
-        .accept_ingest(rows, batch_id, body_hash)
+        .accept_ingest_joining(rows, batch_id, body_hash, artifacts)
         .map_err(|e| {
             // Batch-level context, kept alongside the mapper's own `error!` rather than folded into
             // one line, so an operator sees both without the body ever carrying either.
@@ -1077,6 +1456,7 @@ fn run_ingest(
         over_bound,
         over_bound_ids,
         tessera_ids,
+        minted,
     })
 }
 
@@ -1162,17 +1542,17 @@ async fn ingest(
         .to_string();
 
     // Read here rather than inside `run_ingest` because a `HeaderMap` is the handler's, not the
-    // blocking closure's. A header whose bytes are not valid UTF-8 names no slice any manifest can
+    // blocking closure's. A header whose bytes are not valid UTF-8 names no view any manifest can
     // hold, so it is refused rather than lossily decoded — the same rule this handler applies to
     // external ids one function over.
-    let slice = match headers.get("x-tessera-slice") {
+    let view = match headers.get("x-tessera-view") {
         None => None,
         Some(value) => Some(
             value
                 .to_str()
                 .map_err(|_| {
                     ApiError::Contract(
-                        "x-tessera-slice is not valid UTF-8, so it names no slice".to_string(),
+                        "x-tessera-view is not valid UTF-8, so it names no view".to_string(),
                     )
                 })?
                 .to_string(),
@@ -1209,7 +1589,7 @@ async fn ingest(
     // handler-drop would under-count exactly when the pool is under pressure.
     let resp = tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        run_ingest(&state, &body, batch_id, slice.as_deref())
+        run_ingest(&state, &body, batch_id, view.as_deref())
     })
     .await
     .map_err(map_join_error)??;
@@ -1803,18 +2183,18 @@ struct IncomingArtifactBody {
     /// **Effectively mandatory for a layer another layer's edges will point into**: an edge names
     /// its target, and at publish time the caller holds no `tessera_id` for it.
     #[serde(default)]
-    stable_key: Option<String>,
+    key: Option<String>,
     /// Base64 external ids, or base-10 `tessera_id` strings, according to the batch's `addressing`.
     /// External ids are base64 on the same rule `/control/changes` follows — they are bytes, not
     /// text — and identifiers are strings because a bare JSON number loses a `u64` past 2⁵³ in
     /// every JavaScript client, silently.
     members: Vec<String>,
-    /// The artifact's supplied content, as **ranked variations**, most specific first. Absent on a
+    /// The artifact's supplied content, as **ranked contents**, most specific first. Absent on a
     /// layer that declares no supplied content; required on one that does, and refused on one that
     /// does not — the engine decides that, since the declaration is its state and not this
     /// handler's.
     #[serde(default)]
-    content: Vec<IncomingVariationBody>,
+    content: Vec<IncomingContentBody>,
     /// The artifact this one exists only as an attachment to — a label on a cluster.
     ///
     /// An attached artifact is withheld wherever its target is: suppress the cluster and its labels
@@ -1825,7 +2205,7 @@ struct IncomingArtifactBody {
 
 /// How a caller names an attachment's target.
 ///
-/// **By the target's own stable key, because an ordinal never crosses the boundary** — a
+/// **By the target's own key, because an ordinal never crosses the boundary** — a
 /// publication answers with a `tessera_id` per artifact and no position in a level (C8), so a key
 /// is the only address a caller holds. Refused if the target does not exist yet: an edge names a
 /// position in a dense level, and one written first would name whatever later landed there.
@@ -1836,12 +2216,12 @@ struct AttachmentBody {
     /// Defaults to the target layer's only level, as `level` does for the batch itself.
     #[serde(default)]
     level: u32,
-    stable_key: String,
+    key: String,
 }
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct IncomingVariationBody {
+struct IncomingContentBody {
     /// One value per kind the layer declares, **positionally** — the order of its
     /// `content.supplied` list.
     values: Vec<String>,
@@ -1895,7 +2275,7 @@ async fn publish_artifacts(
     // Flattened once, so each address form is resolved in a single batched call whatever the shape
     // of the batch: the external half opens each bundle extent at most once regardless of N, and
     // the tessera half takes one generation snapshot for the idset check and every inversion.
-    // **Members first, then each variation's generating set**, per artifact — one flat list, one
+    // **Members first, then each content's generating set**, per artifact — one flat list, one
     // resolution pass, whatever the shape. A generating set is resolved by the same route and at
     // the same boundary as a membership, and for the same reason: a `tessera_id` in durable state
     // would be reinterpreted by the next key rotation, and a containment test over a set that names
@@ -1968,52 +2348,52 @@ async fn publish_artifacts(
         let (artifact, member) = position_in_batch(&widths, position);
         return Err(ApiError::Unknown(format!(
             "id {member} of artifact {artifact} names nothing this deployment holds — its members \
-             first, then each variation's generating set. The batch was refused rather than \
+             first, then each content's generating set. The batch was refused rather than \
              published without it: a dropped member moves both the count a viewer is shown and the \
              size its existence criterion divides by, and a dropped generating-set entry widens \
              who may read the content"
         )));
     }
 
-    // Walked back in exactly the order it was flattened: members, then each variation's set.
+    // Walked back in exactly the order it was flattened: members, then each content's set.
     let mut entities = resolved.into_iter().flatten();
     let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
         .into_iter()
         .map(|artifact| {
             let members: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.members.len()).collect();
-            let variations: Vec<tessera_lifecycle::membership::IncomingVariation> = artifact
+            let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
                 .content
                 .into_iter()
                 .map(|v| {
                     let set: Vec<tessera_types::EntityId> =
                         entities.by_ref().take(v.generated_from.len()).collect();
-                    tessera_lifecycle::membership::IncomingVariation::new(v.values, set)
+                    tessera_lifecycle::membership::IncomingContent::new(v.values, set)
                 })
                 .collect();
             let attached_to = artifact.attached_to.map(|a| {
                 tessera_lifecycle::membership::IncomingAttachment {
                     layer: a.layer,
                     level: a.level,
-                    stable_key: a.stable_key,
+                    key: a.key,
                 }
             });
             match attached_to {
                 None => tessera_lifecycle::IncomingArtifact::with_content(
-                    artifact.stable_key,
+                    artifact.key,
                     members,
-                    variations,
+                    contents,
                 ),
                 Some(attached_to) => tessera_lifecycle::IncomingArtifact::attached(
-                    artifact.stable_key,
+                    artifact.key,
                     members,
-                    variations,
+                    contents,
                     attached_to,
                 ),
             }
         })
         .collect();
-    let keys: Vec<Option<String>> = incoming.iter().map(|a| a.stable_key.clone()).collect();
+    let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
 
     // The **shared** blocking pool, on `register_layer`'s argument: a publication is not a deny,
     // and delaying one under ingest load is backpressure working.
@@ -2027,7 +2407,7 @@ async fn publish_artifacts(
     let published: Vec<serde_json::Value> = ids
         .iter()
         .zip(keys)
-        .map(|(id, key)| serde_json::json!({ "stable_key": key, "tessera_id": id.raw().to_string() }))
+        .map(|(id, key)| serde_json::json!({ "key": key, "tessera_id": id.raw().to_string() }))
         .collect();
     Ok((
         StatusCode::CREATED,
@@ -2141,9 +2521,9 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
     let fragment_cache: tessera_engine::FragmentCacheStats = state.engine.fragment_cache_stats();
     let ingest = state.ingest_admission.status();
     let sessions = state.sessions.lock().stats();
-    // **`tessera_engine::SliceSegments`, for `FragmentCacheStats`' reason** — the server may not
+    // **`tessera_engine::ViewSegments`, for `FragmentCacheStats`' reason** — the server may not
     // depend on `tessera-store`, where the segment set actually lives.
-    let segments: Vec<tessera_engine::SliceSegments> = state.engine.live_segment_counts();
+    let segments: Vec<tessera_engine::ViewSegments> = state.engine.live_segment_counts();
     Ok(Json(serde_json::json!({
         "entity_id_high_water": state.engine.allocator_high_water(),
         // Contracts §3.4's per-partition block, and the write path's stage barrier
@@ -2247,7 +2627,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // 10⁹, so it is invisible to a soak and needs a gauge. Rising past the low hundreds means
         // merge has stopped bounding it and only a fold will reset it.
         //
-        // A fold resets it to one segment per partition-slice, and the schedule dispatches one at
+        // A fold resets it to one segment per partition-view, and the schedule dispatches one at
         // `compaction_max_segments` at any hour, or at `compaction_window_min_segments` inside the
         // nightly window (compaction §9, decision 0056). So this gauge now has a lever, and reading
         // it climbing past the ceiling means the fold is being *refused* rather than not
@@ -2255,13 +2635,13 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // below. `POST /control/compact` asks for one out of band.
         //
         // A list rather than a scalar because the trigger compaction §9 specifies is per
-        // (partition, slice); this build emits one of each, so the list has one element and will not
+        // (partition, view); this build emits one of each, so the list has one element and will not
         // always.
         "segments": segments
             .iter()
             .map(|s| serde_json::json!({
                 "partition": s.partition,
-                "slice": s.slice,
+                "view": s.view,
                 "count": s.segments,
             }))
             .collect::<Vec<_>>(),
@@ -2379,7 +2759,7 @@ async fn status(State(state): State<Arc<AppState>>) -> Result<Json<serde_json::V
         // predicate spelled out.** `> 0` is the argued threshold, not an arbitrary one: `prepare`
         // refuses at startup any bound below `expected_concurrent_sessions × the measured
         // per-entry size (see `validate_cache_bounds`), so a young eviction means the collapsing
-        // regime was entered *another* way — a second slice per session, a generation swap's
+        // regime was entered *another* way — a second view per session, a generation swap's
         // transient duplicate, or entries larger than the measured figure. That is precisely what
         // `validate_cache_bounds`' own doc says this counter is for.
         "row_projection_cache": {
@@ -2482,11 +2862,11 @@ mod tests {
                 &[tessera_engine::ManifestVocabulary {
                     name: "departments".to_string(),
                     kind,
-                    listing: tessera_engine::Listing::PerViewer,
+                    visibility: tessera_engine::Visibility::Derived,
                     values: vec![tessera_engine::ManifestVocabularyValue {
                         key: "ops".to_string(),
                         code: CODE_OPS,
-                        label: None,
+                        title: None,
                     }],
                     reserved: Vec::new(),
                 }],
@@ -2529,7 +2909,20 @@ mod tests {
             column: arrow::array::ArrayRef,
             nullable: bool,
         ) -> Result<Vec<RawIngestItem>, ApiError> {
-            parse_ingest_batch(&body(column, nullable), &declared(), &vocabularies())
+            parse_ingest_batch(
+                &body(column, nullable),
+                &declared(),
+                &vocabularies(),
+                &no_layers,
+            )
+            .map(|parsed| parsed.items)
+        }
+
+        /// These fixtures declare no layer, so every column here is a scalar or a refusal —
+        /// the membership column has its own cases in `tests/membership_column.rs`, over HTTP and
+        /// against a registry that holds one.
+        fn no_layers(_: &str) -> Option<tessera_types::layer::LayerDeclaration> {
+            None
         }
 
         /// A known key becomes its **pinned** code at the column's declared width. The code is
@@ -2545,7 +2938,7 @@ mod tests {
             );
         }
 
-        /// **Declare-then-use** (§5, slices §80): a category carries properties and a visibility
+        /// **Declare-then-use** (§5, views §80): a category carries properties and a visibility
         /// consequence, so a typo must not create one. The refusal names both the column and the
         /// key, and the whole batch is without effect.
         #[test]
@@ -2610,8 +3003,10 @@ mod tests {
                 &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
                 &declared(),
                 &vocabularies_of(VocabularyKind::Discovered),
+                &no_layers,
             )
-            .expect("a discovered vocabulary accepts a key it has not seen");
+            .expect("a discovered vocabulary accepts a key it has not seen")
+            .items;
             assert_eq!(
                 items[0].scalars[0],
                 WalScalar::Utf8("k9-unit".to_string()),
@@ -2627,8 +3022,10 @@ mod tests {
                 &body(Arc::new(StringArray::from(vec!["ops"])), false),
                 &declared(),
                 &vocabularies_of(VocabularyKind::Discovered),
+                &no_layers,
             )
-            .expect("a bound key is bound whatever the kind");
+            .expect("a bound key is bound whatever the kind")
+            .items;
             assert_eq!(items[0].scalars[0], WalScalar::U16(CODE_OPS as u16));
         }
 

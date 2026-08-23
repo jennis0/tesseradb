@@ -75,8 +75,8 @@ pub struct StageTimings {
     /// Zero on the common path — the session's own fragment is already current — and one
     /// `build_fragment_with_deltas` on the first request of each credential after a flush.
     pub fragment_forward_ns: u64,
-    /// Slice lookup, and resolving each segment's `row_base`.
-    pub slice_lookup_ns: u64,
+    /// View lookup, and resolving each segment's `row_base`.
+    pub view_lookup_ns: u64,
     /// Row-projection cache lookup — **including the `RowProjection::new` build on a miss**, which
     /// is the expensive I4 entity→row crossing. `row_projection_built` says which happened.
     pub row_projection_ns: u64,
@@ -221,7 +221,7 @@ impl StageTimings {
         let named = self.generation_resolve_ns
             + self.stamp_compare_ns
             + self.fragment_forward_ns
-            + self.slice_lookup_ns
+            + self.view_lookup_ns
             + self.row_projection_ns
             + self.compose_ns
             + self.filter_eval_ns

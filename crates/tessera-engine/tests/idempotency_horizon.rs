@@ -60,7 +60,7 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path, tick_secs: u64) -> E
 fn ingest(engine: &Engine, external_id: &str) -> EntityId {
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: vec![b"0".to_vec()],
         x: 5.0,
         y: 5.0,
@@ -132,7 +132,7 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
         let engine = engine_at(tmp.path(), &root, 1);
         let row = UnallocatedRow {
             external_id: None,
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
             x: 5.0,
             y: 5.0,

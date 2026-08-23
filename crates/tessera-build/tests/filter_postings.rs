@@ -16,7 +16,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::Schema;
+use tessera_build::config::{Config, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_filter::{ColumnPostings, ValueColumn};
 use tessera_spatial::Bounds;
@@ -165,24 +165,25 @@ fn parse_schema(text: &str) -> Schema {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
     std::fs::write(&path, text).unwrap();
-    Schema::parse(&path, &HashMap::new()).expect("schema parses")
+    Config::parse(&path, &HashMap::new()).expect("schema parses").schema
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
         points: points.to_path_buf(),
-        pairs: pairs.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -270,38 +271,50 @@ fn postings_path(out: &Path, column: &str) -> PathBuf {
 }
 
 const FILTER_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
 index = true
-vocabulary = "discovered"
-listing = "per_viewer"
+vocabulary = "department"
 "#;
 
 const RENDER_ONLY_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "derived"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "per_viewer"
+vocabulary = "department"
 "#;
 
 const PUBLIC_RENDER_ONLY_SCHEMA: &str = r#"
-[[attribute]]
-name = "department"
-type = "category"
-width = "u16"
-render = true
-vocabulary = "declared"
-listing = "public"
-  [attribute.values]
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   alpha = 11
   beta = 22
   gamma = 33
+
+[[attribute]]
+name = "department"
+type = "category"
+render = true
+vocabulary = "department"
 "#;
 
 fn build_with(schema_text: &str) -> tempfile::TempDir {
@@ -393,11 +406,11 @@ fn the_postings_file_is_under_the_manifest_digest() {
     );
 }
 
-/// A `per_viewer` category gets postings whatever its `index` says, because the listing control
+/// A `derived` category gets postings whatever its `index` says, because the visibility control
 /// is membership-derived and the member sets *are* these postings (per-point-attributes §3.3).
-/// `RENDER_ONLY_SCHEMA` declares `listing = "per_viewer"` without `filter`, so this is the case.
+/// `RENDER_ONLY_SCHEMA` declares `visibility = "derived"` without `filter`, so this is the case.
 #[test]
-fn per_viewer_owes_postings_without_a_filter_declaration() {
+fn derived_owes_postings_without_a_filter_declaration() {
     let dir = build_with(RENDER_ONLY_SCHEMA);
     let out = dir.path().join("bundle");
     let column = ColumnPostings::open_keyed(&postings_path(&out, "department")).unwrap();
@@ -504,13 +517,17 @@ fn a_universal_column_writes_no_presence_bitmap() {
 }
 
 const STRING_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "public"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "public"
+vocabulary = "department"
 
 [[attribute]]
 name = "title"
@@ -561,13 +578,17 @@ fn a_string_filter_column_emits_its_pair_and_no_postings() {
 /// build stage lands, the declaration is the column's only artefact, so the assertion is that
 /// the build accepts it, compiles it, and materialises nothing under `attrs/` for it.
 const BLOB_RESIDENT_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "department"
+width      = "u16"
+value_set  = "open"
+visibility = "public"
+
 [[attribute]]
 name = "department"
 type = "category"
-width = "u16"
 render = true
-vocabulary = "discovered"
-listing = "public"
+vocabulary = "department"
 
 [[attribute]]
 name = "title"
@@ -649,8 +670,8 @@ fn the_manifest_records_the_placement_the_tail_was_built_from() {
     assert_eq!(declared, vec!["department", "title"]);
     // Only one is in the tail, and it is exactly what the segment carries.
     assert_eq!(tail, vec!["department"]);
-    let slice = &bundle.partitions.values().next().unwrap().slices["s0"];
-    let columns = &slice.segments[0].columns;
+    let view = &bundle.partitions.values().next().unwrap().views["s0"];
+    let columns = &view.segments[0].columns;
     assert!(columns.scalar("department").is_some());
     assert!(columns.scalar("title").is_none());
 }
@@ -677,8 +698,8 @@ fn a_filter_only_column_is_absent_from_the_hot_column() {
     .unwrap();
 
     let bundle = open_bundle(&out).unwrap();
-    let slice = &bundle.partitions.values().next().unwrap().slices["s0"];
-    let columns = &slice.segments[0].columns;
+    let view = &bundle.partitions.values().next().unwrap().views["s0"];
+    let columns = &view.segments[0].columns;
     assert!(
         columns.scalar("department").is_some(),
         "a render column is in the tail"

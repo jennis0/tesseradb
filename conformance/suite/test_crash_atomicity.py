@@ -83,7 +83,7 @@ def _harness(private_catalogue_bundle, tmp_path_factory, label: str) -> SuiteHar
         bundle_root=private_catalogue_bundle(label),
         run_dir=tmp_path_factory.mktemp(f"{label}-run"),
         grants=GRANTS,
-        slice_id=cat.SLICE_ID,
+        view_id=cat.VIEW_ID,
         bbox=BBOX,
         k=K,
         filters={"department": {"eq": FILTER_DEPARTMENT}},

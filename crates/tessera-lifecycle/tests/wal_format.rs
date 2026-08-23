@@ -7,16 +7,16 @@
 use tessera_lifecycle::wal::{Wal, WalError, WalRecord, WalRow};
 use tessera_types::EntityId;
 
-/// The slice a row belongs to is durable, because a flush segment's entity range is
-/// contiguous only within one slice (§2.1) and the WAL is append-only.
+/// The view a row belongs to is durable, because a flush segment's entity range is
+/// contiguous only within one view (§2.1) and the WAL is append-only.
 #[test]
-fn a_wal_row_round_trips_its_slice() {
+fn a_wal_row_round_trips_its_view() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("wal.log");
     let row = WalRow {
         external_id: Some(b"ext-1".to_vec()),
         entity_id: EntityId::new(7),
-        slice: "default".to_string(),
+        view: "default".to_string(),
         descriptors: vec![b"dept:eng".to_vec()],
         x: 1.0,
         y: 2.0,

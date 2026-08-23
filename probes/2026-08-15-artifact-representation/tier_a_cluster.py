@@ -18,7 +18,7 @@ def demorton(c):
         y |= ((c >> np.uint64(2*i+1)) & np.uint64(1)) << np.uint64(i)
     return x.astype(np.float32), y.astype(np.float32)
 
-morton = np.fromfile(f'{FIX}/slices/s0/segments/seg-0/morton.u32', dtype=np.uint32)
+morton = np.fromfile(f'{FIX}/views/s0/segments/seg-0/morton.u32', dtype=np.uint32)
 x, y = demorton(morton)
 xy = np.stack([x, y], 1)
 N = len(xy)

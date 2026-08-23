@@ -70,11 +70,11 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::{DeltaTier, Dict, FragmentCache};
 use tessera_lifecycle::alloc::{high_water_from, low_water_from, AllocError, Allocator};
 use tessera_lifecycle::buffer::DescriptorResolver;
-use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
-use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::command::{Ack, Command, ExecError, Receipt, SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::WalMeter;
+use tessera_lifecycle::membership::{ArtifactStore, IncomingArtifact};
 use tessera_lifecycle::overlay::replay;
+use tessera_lifecycle::registry::LayerRegistry;
 use tessera_lifecycle::wal::{ChangeOp, ExecutorWal, Wal, WalError, WalRecord, WalScalar};
 use tessera_lifecycle::window::{ClosedEntry, CommitWindow, FragmentationTally, WindowEntry};
 use tessera_lifecycle::{IngestBuffer, Overlay};
@@ -654,7 +654,7 @@ pub struct ExecutorStats {
     pub merges: u64,
     pub merge_failures: u64,
     /// Compaction folds published, and the ones discarded — the observable behind "deletions
-    /// retire, orphans are reclaimed, and the bundle returns to one segment per partition-slice".
+    /// retire, orphans are reclaimed, and the bundle returns to one segment per partition-view".
     pub folds: u64,
     pub fold_failures: u64,
     /// Whether a `POST /control/compact` is awaiting the next tick.
@@ -1269,8 +1269,8 @@ mod ack {
     /// Proof that a generation carrying a command's effect is live.
     ///
     /// [`super::Responder::ack`] cannot send a *successful* receipt without one, and the only
-    /// producers are the **two** named constructors below — the same two `scripts/check-layers.sh`
-    /// pins to this file.
+    /// producers are the named constructors below — the ones `scripts/check-layers.sh` pins to this
+    /// file.
     #[must_use = "a Published token exists to be handed to `ack`; dropping it discards the proof"]
     pub(super) struct Published(());
 
@@ -1293,11 +1293,25 @@ mod ack {
             Published(())
         }
 
-        /// A registry record applied. **The registry is not carried by a generation**, which is why
-        /// this is honest without a swap: `/v1/meta` and every reachability check read it from
-        /// `LiveState` behind its own lock, so the effect is in force the instant
-        /// `LayerRegistry::apply` returns. A generation swap would prove something about row space,
-        /// which a layer has none of.
+        /// A command that resolved to **no change at all**: every key it named exists and nothing
+        /// was joining, so no record was appended and no structure moved.
+        ///
+        /// This is honest without a swap for the one reason none of the others can claim — there is
+        /// no effect whose being in force could lag the ack. It is the narrowest of the four and
+        /// the easiest to misuse: *nothing to do* and *not done yet* are the same shape from the
+        /// caller's side and opposite from the service's, so a site reaching for this must have
+        /// established the first. Takes the resolved batch, on the constructors above's rule: the
+        /// argument is the evidence that something was looked at.
+        pub(super) fn nothing_to_apply(_resolved: &[tessera_lifecycle::IncomingGrowth]) -> Self {
+            Published(())
+        }
+
+        /// A registry or artifact-store record applied. **Neither structure is carried by a
+        /// generation**, which is why this is honest without a swap: `/v1/meta`, every reachability
+        /// check and every membership read them from `LiveState` behind its own lock, so the effect
+        /// is in force the instant `LayerRegistry::apply` or `ArtifactStore::apply` returns. A
+        /// generation swap would prove something about row space, which a layer has none of and an
+        /// artifact holds only through its members.
         ///
         /// Takes the applied record for the same reason the replay constructor takes its ids: the
         /// argument is the evidence, so the token cannot be minted at a site that has applied
@@ -1528,28 +1542,40 @@ impl LiveState {
         }
     }
 
+    /// Release the log from every growth the fold's whole rewrite has just made durable — see
+    /// [`tessera_lifecycle::membership::ArtifactStore::mark_growth_packed`].
+    ///
+    /// **Called from the fold and from nowhere else.** `mark_memberships_published` is the
+    /// append-only packer's mark and covers only the tail above each level's high-water; a growth
+    /// lands below it. Releasing the pin there would leave a join durable nowhere the next restart
+    /// reads.
+    fn mark_growth_packed(&self) {
+        lock_recover(&self.artifacts).mark_growth_packed();
+    }
+
     /// Apply the fold's executed deletions to the resident artifact store — the second half of the
     /// artifact pass, run once the prefix carrying the rewritten extents is live. Retired artifacts
     /// leave their levels; retired members leave the memberships that survive; and each layer's
-    /// `on_member_deletion` declaration executes against the generating sets that lost a source.
+    /// `withdraw_on_member_deletion` declaration executes against the generating sets that lost a source.
     fn retire_artifacts(&self, retired: &croaring::Bitmap) {
         let policy = self.deletion_policy();
         lock_recover(&self.artifacts).retire(retired, &policy);
     }
 
-    /// Each layer's `on_member_deletion` declaration, resolved by name.
+    /// Each layer's `withdraw_on_member_deletion` declaration, resolved by name.
     ///
-    /// **A layer the registry cannot answer for gets the default**, which is `WithdrawContent` —
-    /// the strict one. The case is unreachable (a level exists because its layer was registered),
-    /// and the direction it fails in is the one to pick when it is not: withdrawing content nobody
-    /// asked to withdraw costs a republication, where shrinking a set nobody declared shrinkable
-    /// serves content generated from a deleted document.
-    fn deletion_policy(&self) -> impl Fn(&str) -> tessera_types::layer::OnMemberDeletion + '_ {
+    /// **A layer the registry cannot answer for gets `true`, spelled out rather than defaulted.**
+    /// `bool::default()` is `false` — the *widening* half, which shrinks the generating set and
+    /// goes on serving content generated from a deleted document — so `unwrap_or_default` here
+    /// would be a fail-open written as tidiness. The case is unreachable (a level exists because
+    /// its layer was registered), and the direction it fails in when it is not is the one that
+    /// costs a republication rather than a disclosure.
+    fn deletion_policy(&self) -> impl Fn(&str) -> bool + '_ {
         move |layer: &str| {
             lock_recover(&self.registry)
                 .get(layer)
-                .map(|registered| registered.declaration.content.on_member_deletion)
-                .unwrap_or_default()
+                .map(|registered| registered.declaration.content.withdraw_on_member_deletion)
+                .unwrap_or(true)
         }
     }
 
@@ -1580,16 +1606,51 @@ impl LiveState {
         lock_recover(&self.registry).get(name).cloned()
     }
 
-    /// A layer's own entity — where its suppression lands — without cloning its declaration.
+    /// Every `membership = { attribute = f }` layer, with the declared-scalar index of `f` and the
+    /// vocabulary that column's values are named by — `(layer, index, vocabulary)`.
     ///
-    /// The attachment term asks this per attached artifact of a response, and a declaration carries
-    /// a name, a title, a slice list and a content vocabulary; cloning all of it to read one `u64`
-    /// would put the cost of the term on the wrong side of the argument that it is one lookup.
-    pub(crate) fn layer_entity(&self, name: &str) -> Option<EntityId> {
-        lock_recover(&self.registry).get(name).map(|layer| layer.entity)
+    /// **A layer whose column this bundle does not declare is skipped**, which mints nothing: such
+    /// a declaration is refused at registration, so an absence here is one that never validated and
+    /// the fail-closed reading is that the layer holds no values.
+    ///
+    /// `column_of` is the caller's — the manifest's `declared_scalars` is a generation's, and this
+    /// holds the registry rather than a generation.
+    fn predicate_columns(
+        &self,
+        column_of: impl Fn(&str) -> Option<(usize, Option<String>)>,
+    ) -> Vec<(String, usize, Option<String>)> {
+        let registry = lock_recover(&self.registry);
+        registry
+            .iter()
+            .filter_map(|(name, registered)| {
+                let tessera_types::layer::MembershipSource::Attribute(field) =
+                    &registered.declaration.membership
+                else {
+                    return None;
+                };
+                column_of(field).map(|(index, vocabulary)| (name.to_string(), index, vocabulary))
+            })
+            .collect()
     }
 
-    fn registry_for_publication(&self) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
+    /// Record one level's re-evaluated serving layout, returning whether it **moved**.
+    ///
+    /// **Under the registry's own lock and before the snapshot**, which is the whole of the
+    /// ordering the selection memo §5 requires: the manifest is written from
+    /// [`LiveState::registry_for_publication`], so a layout recorded after that snapshot would
+    /// reach neither the files nor the record.
+    fn record_layout(
+        &self,
+        layer: &str,
+        level: u32,
+        layout: tessera_types::layer::ServingLayout,
+    ) -> bool {
+        lock_recover(&self.registry).set_layout(layer, level, layout)
+    }
+
+    fn registry_for_publication(
+        &self,
+    ) -> (Vec<tessera_types::layer::RegisteredLayer>, Vec<String>, u64) {
         let registry = lock_recover(&self.registry);
         let low_water = lock_recover(&self.allocator).low_water();
         let (layers, tombstones) = registry.snapshot();
@@ -1811,7 +1872,7 @@ impl std::error::Error for ExecutorStartError {}
 pub enum AcceptError {
     Submit(SubmitError),
     Exec(ExecError),
-    /// A row's coordinates fall outside the slice's declared quantisation extent, so the point has
+    /// A row's coordinates fall outside the view's declared quantisation extent, so the point has
     /// no cell to occupy — refused **before anything is acked or WAL-durable**, and refused rather
     /// than clamped (see [`Quantisation::contains`]).
     ///
@@ -1877,11 +1938,11 @@ impl std::fmt::Display for AcceptError {
                 quantisation: q,
             } => write!(
                 f,
-                "ingest row {index} at ({x}, {y}) is outside this slice's declared extent (x {}..{}, \
+                "ingest row {index} at ({x}, {y}) is outside this view's declared extent (x {}..{}, \
                  y {}..{}). Coordinates are quantised against that extent, which is fixed for the \
-                 slice's life (decision 0040), so an out-of-extent point has no cell to occupy; it \
+                 view's life (decision 0040), so an out-of-extent point has no cell to occupy; it \
                  is refused here rather than clamped, because a clamped point at the boundary \
-                 cannot be told from one that belongs there. The remedy is to rebuild the slice \
+                 cannot be told from one that belongs there. The remedy is to rebuild the view \
                  under a corrected extent, which is a migration",
                 q.x_min, q.x_max, q.y_min, q.y_max
             ),
@@ -1927,7 +1988,7 @@ pub(crate) struct ManifestSeed<'a> {
     /// `max(build MANIFEST, side manifests)` — the point region's floor.
     pub high_water: u64,
     /// `min(ceiling, side manifests)` — the row-less region's ceiling. A build carries a term here
-    /// whenever it was given `--layers`: the layers it registered spent row-less ids, and the mark
+    /// whenever its declaration carried layers: the layers it registered spent row-less ids, and the mark
     /// recording that has to survive into what this seeds from, or the first online registration
     /// reissues them.
     pub low_water: u64,
@@ -1936,7 +1997,94 @@ pub(crate) struct ManifestSeed<'a> {
     /// Every published membership extent, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
     pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
+    /// Every `(layer, level)`'s artifact-write counter as of the publication, across every
+    /// partition's manifest.
+    ///
+    /// **Seeded after the records and before the replay**, which is what makes a coordinate
+    /// written before a restart comparable with one after it: seeding a level's records bumps its
+    /// version once per record, so without this a level comes back at its record count rather than
+    /// at the number the publication recorded — and every derived structure keyed on the version
+    /// would be rejected on every restart. See `ArtifactStore::seed_level_version`.
+    pub level_versions: &'a [tessera_store::manifest::LevelVersion],
     pub prefix_dir: std::path::PathBuf,
+}
+
+/// The two artifact coordinates a manifest carries: every level's version, and the containment
+/// partitions whose composed-at version is still that version.
+///
+/// **Filtered, so the invariant is true by construction rather than checked at open**: every entry
+/// a manifest names is one whose coordinate equals the version list beside it, so a manifest never
+/// names a partition that has already been invalidated. An entry whose level has moved is dropped
+/// here rather than carried and rejected later — carrying it would leave the prefix naming a file
+/// nothing could ever adopt, which reads as a partition that exists.
+///
+/// `pending_retirement` is the levels this publication is *about to* change and has not yet —
+/// which is the fold's own seam, since it writes its manifest before it retires (a retirement is
+/// irreversible and a manifest that would not commit must leave it undone). For those levels the
+/// version this store reports is the pre-retirement one while the records the manifest names are
+/// the post-retirement ones, so **neither the version nor any partition is stated**: a level absent
+/// from the list is one whose version this manifest does not claim, which
+/// [`tessera_store::manifest::LevelVersion`] makes a real state rather than a defaulted zero.
+/// Every other publication passes an empty slice, having nothing pending.
+fn artifact_coordinates(
+    store: &ArtifactStore,
+    held: &[tessera_store::manifest::ContainmentExtent],
+    held_indexes: &[tessera_store::manifest::TileIndexExtent],
+    held_columns: &[tessera_store::manifest::RowColumnExtent],
+    pending_retirement: &[(String, u32)],
+) -> (
+    Vec<tessera_store::manifest::LevelVersion>,
+    Vec<tessera_store::manifest::ContainmentExtent>,
+    Vec<tessera_store::manifest::TileIndexExtent>,
+    Vec<tessera_store::manifest::RowColumnExtent>,
+) {
+    let pending = |layer: &str, level: u32| {
+        pending_retirement
+            .iter()
+            .any(|(l, v)| l == layer && *v == level)
+    };
+    let versions: Vec<tessera_store::manifest::LevelVersion> = store
+        .level_versions()
+        .filter(|(layer, level, _)| !pending(layer, *level))
+        .map(
+            |(layer, level, version)| tessera_store::manifest::LevelVersion {
+                layer: layer.to_string(),
+                level,
+                version,
+            },
+        )
+        .collect();
+    let still_true = held
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    // The tile indexes take the same filter and for the same reason. The view an entry carries is
+    // not part of it: a view is an address, not a validity term — a level's version is what says
+    // whether the extents projected through *any* row space still describe it.
+    let indexes_still_true = held_indexes
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    // The row-major columns take the same filter, and the layout tag each carries is not part of
+    // it: a tag says which *form* the file is in, and what decides whether it still describes the
+    // level is the version, exactly as it is for an extent column.
+    let columns_still_true = held_columns
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    (versions, still_true, indexes_still_true, columns_still_true)
 }
 
 impl WritePath {
@@ -2085,7 +2233,9 @@ impl WritePath {
                     continue;
                 };
                 match tessera_lifecycle::membership::decode_record(entity, blob) {
-                    Some(record) => artifacts.seed(&extent.layer, extent.level, ordinal, record),
+                    Some((record, shape)) => {
+                        artifacts.seed(&extent.layer, extent.level, ordinal, record, shape)
+                    }
                     None => undecodable += 1,
                 }
             }
@@ -2099,6 +2249,14 @@ impl WritePath {
                 extent.level,
                 extent.ordinal_lo.saturating_add(extent.count),
             );
+        }
+        // **The published version, before replay puts anything over it.** Every level the manifest
+        // names gets the counter the publication recorded, replacing whatever the seeding above
+        // bumped it to; the replay below then moves it for every record the log carries past that
+        // publication, which is exactly the signal a reader deciding whether to adopt a derived
+        // structure needs (`ArtifactStore::seed_level_version`).
+        for version in seed.level_versions {
+            artifacts.seed_level_version(&version.layer, version.level, version.version);
         }
         for (record, position) in records.iter().zip(wal.replayed_positions()) {
             undecodable += artifacts.apply(record, *position);
@@ -2138,9 +2296,9 @@ impl WritePath {
         //
         // **The test is `row_of`, not a watermark.** A watermark is a cheap scalar proxy for "has a
         // row", exact only while entity-allocation order and flush order coincide — that is, while
-        // there is one slice per partition, which write-path §4.3 records as load-bearing and unenforced.
+        // there is one view per partition, which write-path §4.3 records as load-bearing and unenforced.
         // The predicate below is what the watermark approximates, so it stays exact at any number of
-        // slices and needs no per-slice bookkeeping anywhere.
+        // views and needs no per-view bookkeeping anywhere.
         //
         // It is also what `compose::verdict` now relies on. That function used to gate rule 4 on
         // `entity < watermark` to stop a stale buffer answering for an entity the fragment already
@@ -2301,6 +2459,33 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.membership_extents.iter().cloned())
             .collect();
+        // The containment partitions the last fold wrote, seeded identically: a publication clones
+        // a stale manifest, so the list has to be held here rather than re-read from it.
+        let seeded_containment_extents: Vec<tessera_store::manifest::ContainmentExtent> =
+            generation
+                .load()
+                .bundle
+                .partitions
+                .values()
+                .flat_map(|p| p.manifest.containment_extents.iter().cloned())
+                .collect();
+        // The tile indexes the last fold wrote, seeded identically and for the identical reason.
+        let seeded_tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.tile_index_extents.iter().cloned())
+            .collect();
+        // The row-major columns the last fold wrote, seeded identically and for the identical
+        // reason.
+        let seeded_row_column_extents: Vec<tessera_store::manifest::RowColumnExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
+            .collect();
         // The content half, seeded identically and for the identical reason.
         let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
             .load()
@@ -2321,6 +2506,7 @@ impl WritePath {
                     generation,
                     row_projection_cache,
                     artifact_projections: flush.artifact_projections,
+                    lineages: flush.lineages,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -2366,6 +2552,9 @@ impl WritePath {
                     last_fold_start_unix: None,
                     superseded_sidecars: Vec::new(),
                     membership_extents: seeded_membership_extents,
+                    containment_extents: seeded_containment_extents,
+                    tile_index_extents: seeded_tile_index_extents,
+                    row_column_extents: seeded_row_column_extents,
                     artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
@@ -2504,22 +2693,29 @@ impl WritePath {
     ///
     /// Rows arrive **unallocated**: entity ids are assigned on the executor, at the close of the
     /// commit window this submission lands in.
+    ///
+    /// Returns the assigned ids and **how many artifacts this batch's membership column created**
+    /// (`Ack::Ingested::minted`).
     pub(crate) fn accept_ingest(
         &self,
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
-    ) -> Result<Vec<EntityId>, AcceptError> {
+        artifacts: tessera_lifecycle::BatchArtifacts,
+    ) -> Result<(Vec<EntityId>, u64), AcceptError> {
         let mark = StageMark::now();
         let receipt = self.handle()?.submit(Command::Ingest {
             rows,
             batch_id,
             body_hash,
+            artifacts,
         })?;
         self.health().lap(WriteStage::SubmitToReceipt, mark);
         match receipt.outcome {
-            Ok(Ack::Ingested { entity_ids }) => Ok(entity_ids),
-            Ok(other) => unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}"),
+            Ok(Ack::Ingested { entity_ids, minted }) => Ok((entity_ids, minted)),
+            Ok(other) => {
+                unreachable!("an Ingest command answers with Ack::Ingested, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -2546,12 +2742,14 @@ impl WritePath {
         &self,
         declaration: tessera_types::layer::LayerDeclaration,
     ) -> Result<EntityId, AcceptError> {
-        let receipt = self
-            .handle()?
-            .submit(Command::RegisterLayer { declaration })?;
+        let receipt = self.handle()?.submit(Command::RegisterLayer {
+            declaration: Box::new(declaration),
+        })?;
         match receipt.outcome {
             Ok(Ack::LayerRegistered { entity }) => Ok(entity),
-            Ok(other) => unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}"),
+            Ok(other) => {
+                unreachable!("a RegisterLayer command answers LayerRegistered, not {other:?}")
+            }
             Err(e) => Err(AcceptError::Exec(e)),
         }
     }
@@ -2582,11 +2780,6 @@ impl WritePath {
         self.live.registered_layer(name)
     }
 
-    /// See [`LiveState::layer_entity`] — the attachment term's lookup, without the declaration.
-    pub(crate) fn layer_entity(&self, name: &str) -> Option<EntityId> {
-        self.live.layer_entity(name)
-    }
-
     /// Publish a batch of artifacts, returning their entities in the caller's submitted order.
     pub(crate) fn publish_artifacts(
         &self,
@@ -2603,6 +2796,27 @@ impl WritePath {
             Ok(Ack::ArtifactsPublished { entities }) => Ok(entities),
             Ok(other) => {
                 unreachable!("a PublishArtifacts command answers ArtifactsPublished, not {other:?}")
+            }
+            Err(e) => Err(AcceptError::Exec(e)),
+        }
+    }
+
+    /// Grow the memberships of artifacts that already exist. See `Executor::commit_growth`.
+    pub(crate) fn grow_memberships(
+        &self,
+        layer: String,
+        level: u32,
+        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+    ) -> Result<(), AcceptError> {
+        let receipt = self.handle()?.submit(Command::GrowMemberships {
+            layer,
+            level,
+            joins,
+        })?;
+        match receipt.outcome {
+            Ok(Ack::MembershipsGrown) => Ok(()),
+            Ok(other) => {
+                unreachable!("a GrowMemberships command answers MembershipsGrown, not {other:?}")
             }
             Err(e) => Err(AcceptError::Exec(e)),
         }
@@ -3202,6 +3416,9 @@ pub(crate) struct MaintenanceDeps {
     /// per-session value, so leaving it to the first request after the flip is a stall of tens of
     /// seconds for whoever arrives first.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The lineages, shared for the half of the same warm that is theirs — see
+    /// [`Executor::warm_artifact_caches`].
+    pub(crate) lineages: Arc<crate::cut::Lineages>,
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
@@ -3290,7 +3507,7 @@ pub(crate) fn scalar_schema_of(
 /// building this from that list would read a filter column's value out of a neighbouring column's
 /// slot wherever the two differ, which is most schemas.
 ///
-/// **A `listing = "per_viewer"` category is here whether or not it is declared filterable**, and
+/// **A `visibility = "derived"` category is here whether or not it is declared filterable**, and
 /// that is the same rule the build applies when it decides which columns owe a value column and
 /// derived postings (`filter-index.md` §2.3). Its member sets are what `/v1/categories` derives
 /// value visibility from, and the postings cover the build alone — so without an extent, a value
@@ -3388,6 +3605,20 @@ pub(crate) fn record_schema_of(
 ///
 /// `is_category_width` (checked at schema parse) admits `u8`/`u16`/`u32` only, so the fallthrough is
 /// `u32` — the widest, which cannot truncate a code the other two could hold.
+/// The category-width code a row's scalar carries, or `None` where it carries none.
+///
+/// **The three category widths and nothing else** — `tessera_spatial::ScalarType::is_category_width`
+/// is what the declaration is checked against, so a wider or non-integer column never names a
+/// predicate layer and a value of one reaching here is a schema that never validated.
+fn scalar_code(scalar: &WalScalar) -> Option<u32> {
+    match scalar {
+        WalScalar::U8(v) => Some(u32::from(*v)),
+        WalScalar::U16(v) => Some(u32::from(*v)),
+        WalScalar::U32(v) => Some(*v),
+        _ => None,
+    }
+}
+
 fn code_at_declared_width(width: ScalarType, code: u32) -> WalScalar {
     match width {
         ScalarType::U8 => WalScalar::U8(code as u8),
@@ -3413,7 +3644,7 @@ impl std::fmt::Display for ManifestCommitRefused {
     }
 }
 
-/// Every slice the bundle holds, across partitions. A flush plans per slice, because a segment's
+/// Every view the bundle holds, across partitions. A flush plans per view, because a segment's
 /// entity range is contiguous only within one (§2.1).
 /// Replace a manifest's deny fields with the overlay's live state.
 ///
@@ -3485,6 +3716,7 @@ fn write_vocabulary_extensions(
 #[cfg(test)]
 mod segment_schema_tests {
     use super::*;
+    use tessera_plugin::Plugin;
     use tessera_store::manifest::DeclaredScalar;
 
     /// **A segment's writer schema is the render columns, and this guards the one line that makes
@@ -3501,9 +3733,9 @@ mod segment_schema_tests {
     #[test]
     fn a_segments_writer_schema_omits_filter_only_columns() {
         let manifest = tessera_store::manifest::Manifest {
-            bundle_format: 2,
+            bundle_format: 3,
             created_at: String::new(),
-            data_plugin_hash: String::new(),
+            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
             vocabularies: vec![],
             small_term_threshold: 32,
@@ -3521,7 +3753,7 @@ mod segment_schema_tests {
                 shard_id: 0,
                 idset: 1,
             },
-            slices: vec![],
+            views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
             files: std::collections::BTreeMap::new(),
@@ -3574,13 +3806,17 @@ mod vocabulary_extensions_tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
             dict_extents: Vec::new(),
             attr_extents: Vec::new(),
             record_extents: Vec::new(),
-        text_extents: Vec::new(),
+            text_extents: Vec::new(),
             external_id_runs: Vec::new(),
             locator_extents: Vec::new(),
             tombstones: Vec::new(),
@@ -3594,7 +3830,7 @@ mod vocabulary_extensions_tests {
         ManifestVocabulary {
             name: name.to_string(),
             kind: VocabularyKind::Discovered,
-            listing: crate::Listing::PerViewer,
+            visibility: crate::Visibility::Derived,
             values: Vec::new(),
             reserved: Vec::new(),
         }
@@ -3618,7 +3854,7 @@ mod vocabulary_extensions_tests {
             values: vec![ManifestVocabularyValue {
                 key: "held".to_string(),
                 code: 7,
-                label: None,
+                title: None,
             }],
         });
 
@@ -3646,7 +3882,7 @@ mod vocabulary_extensions_tests {
             values: vec![ManifestVocabularyValue {
                 key: "eng".to_string(),
                 code: 4,
-                label: None,
+                title: None,
             }],
         });
 
@@ -3690,7 +3926,7 @@ fn plan_to_dispatch(
 ) -> Option<(String, crate::flush::FlushPlan)> {
     plans.into_iter().min_by_key(|(_, plan)| {
         // `items` is ascending by entity id and I9 issues ids monotonically, so the first is this
-        // slice's oldest waiting row. An empty plan cannot occur (`plan_flush` returns
+        // view's oldest waiting row. An empty plan cannot occur (`plan_flush` returns
         // `NothingToFlush`), and sorting it last rather than first keeps a hypothetical one from
         // winning every tick.
         plan.items
@@ -3933,38 +4169,155 @@ fn free_disc(_path: &Path) -> Option<u64> {
     None
 }
 
-/// The largest live segment count across this generation's slices — compaction §9's segment gauge.
+/// The largest live segment count across this generation's views — compaction §9's segment gauge.
 ///
-/// The **max** rather than the sum, because the gauge is per (partition, slice): a tile resolves to
-/// one contiguous range per live segment *of the slice it is in*, so one slice at 64 segments is
+/// The **max** rather than the sum, because the gauge is per (partition, view): a tile resolves to
+/// one contiguous range per live segment *of the view it is in*, so one view at 64 segments is
 /// what a viewport there pays, whatever the others hold.
 ///
-/// ⊘ **Untestable today, and stated rather than claimed**: no build emits a second slice
+/// ⊘ **Untestable today, and stated rather than claimed**: no build emits a second view
 /// (compaction §6.3), so max and sum agree on every bundle that exists and no case here
-/// distinguishes them. It is written this way because the slices fold-in is what makes the
+/// distinguishes them. It is written this way because the views fold-in is what makes the
 /// difference real, not because a test caught it.
 fn live_segments_of(generation: &Generation) -> usize {
     generation
         .bundle
         .partitions
         .values()
-        .flat_map(|partition| partition.slices.values())
-        .map(|slice| slice.segments.len())
+        .flat_map(|partition| partition.views.values())
+        .map(|view| view.segments.len())
         .max()
         .unwrap_or(0)
 }
 
-fn slices_of(generation: &Generation) -> Vec<String> {
-    let mut slices: Vec<String> = generation
+fn views_of(generation: &Generation) -> Vec<String> {
+    let mut views: Vec<String> = generation
         .bundle
         .partitions
         .values()
-        .flat_map(|p| p.slices.keys().cloned())
+        .flat_map(|p| p.views.keys().cloned())
         .collect();
-    slices.sort_unstable();
-    slices.dedup();
-    slices
+    views.sort_unstable();
+    views.dedup();
+    views
 }
+
+/// **The growth records one closed window owes**, with the index of the entry to blame if an append
+/// fails, in the order they are to be appended.
+///
+/// **One record per `(layer, level)` for the whole window, not one per entry.** A record is a list
+/// of `(ordinal, joining)`, entries in a window are already committed together under one fsync, and
+/// several batches naming one cluster are the ordinary shape of a client ingesting in parallel — so
+/// merging costs one union and saves a record and a pin per batch. What may not merge is the
+/// address: a join carries its own `(layer, level, ordinal)` and nothing infers one from another's.
+///
+/// The entities are `entity_ids[row]` — the assignment this window just made, in the caller's own
+/// row order (`tessera_lifecycle::ClosedEntry`) — which is what puts a point's membership in the
+/// same commit as the point.
+fn growth_records<W>(closed: &[tessera_lifecycle::ClosedEntry<W>]) -> Vec<(WalRecord, usize)> {
+    use std::collections::BTreeMap;
+    /// One `(layer, level)`'s joins: the entry to blame for the append, and a bitmap per ordinal.
+    type Level = (usize, BTreeMap<u32, croaring::Bitmap>);
+    // Ordered, so the records a window appends do not depend on hash iteration order: two nodes
+    // replaying one log must read the same sequence, and a test comparing two runs is entitled to
+    // the same one.
+    let mut by_level: BTreeMap<(&str, u32), Level> = BTreeMap::new();
+    for (index, entry) in closed.iter().enumerate() {
+        for join in &entry.memberships {
+            // A key with no ordinal was minted at the close, and a minted artifact was published
+            // *carrying* these rows — one record instead of a publication and a growth against it.
+            let Some(ordinal) = join.ordinal else {
+                continue;
+            };
+            let (_, ordinals) = by_level
+                .entry((join.layer.as_str(), join.level))
+                .or_insert_with(|| (index, BTreeMap::new()));
+            let joining = ordinals.entry(ordinal).or_default();
+            for row in &join.rows {
+                let entity = entry.entity_ids[*row as usize];
+                // Entity space is `u32` by I9, so the narrowing is total.
+                joining.add(entity.raw() as u32);
+            }
+        }
+    }
+    by_level
+        .into_iter()
+        .filter_map(|((layer, level), (index, ordinals))| {
+            let joins = ordinals
+                .iter()
+                .map(|(ordinal, joining)| (*ordinal, joining));
+            tessera_lifecycle::membership::growth_record(layer, level, joins)
+                .map(|record| (record, index))
+        })
+        .collect()
+}
+
+/// **The artifacts a closed window's rows named and no artifact holds** — the records that create
+/// them, in the order they must be appended, and how many each entry is to be told it created.
+///
+/// **Minting is a publication, and it happens here rather than at admission.** An ordinal is claimed
+/// from the level's own cursor and is durable only in the record that claims it, so a claim made at
+/// admission would be held, unappended, across everything the executor does before the window
+/// closes — including a `PublishArtifacts` command, which reads the same cursor and would take the
+/// same ordinal. Here there is nothing to interleave with: the window is closed, the allocation is
+/// made, and the record is appended a few statements later inside the window's own fsync.
+///
+/// **One artifact per key per level, for the whole window** (`artifacts-from-points.md` §5's second
+/// ruling). The keys are gathered into one map before anything is prepared, so two points in one
+/// batch — or two batches in one window — naming the same unknown key mint once and join the one
+/// artifact. A key a *live* artifact already holds is not minted at all: it is re-resolved here
+/// against `ArtifactStore::ordinal_of_key`, because a publication may have landed between the
+/// batch's admission and this close, and it grows instead.
+///
+/// **A minted artifact is published carrying its members**, not published empty and then grown. The
+/// entities exist by this point — the allocation is the statement above the caller — so the one
+/// record says the whole of what happened, and the join needs no second record and no log pin of
+/// its own. That is why `growth_records` skips a membership whose ordinal is `None`.
+///
+/// **The edges are created, and this is the one route by which the wire creates one.** A growth adds
+/// members and never lineage, so a lineage naming an artifact that already exists can only be
+/// checked; a lineage naming one that does not yet exist is settled where every edge is settled, at
+/// the publication that creates the artifact. The chain arrives **parent before child** — the
+/// ordering constraint `annotation-representation.md` §5.0.4 puts on edges, applied to a batch — in
+/// the only two shapes a column can spell: a nested lineage is one level and one record, where
+/// `prepare_publish` resolves a sibling's ordinal within its own batch whatever order the artifacts
+/// sit in; and a tiered chain is a record per level, coarse first, where the parent's ordinal was
+/// fixed by the record before and is answered by `pending`.
+fn mint_plan<W>(
+    closed: &[tessera_lifecycle::ClosedEntry<W>],
+) -> Option<(MintPlan, Vec<tessera_lifecycle::BatchEdge>)> {
+    use std::collections::BTreeMap;
+    let mut wanted: MintPlan = BTreeMap::new();
+    for (index, entry) in closed.iter().enumerate() {
+        for join in &entry.memberships {
+            if join.ordinal.is_some() {
+                continue;
+            }
+            let (_, members) = wanted
+                .entry((join.layer.clone(), join.level, join.key.clone()))
+                // **The first entry that named the key owns the mint**, which is what makes the
+                // per-batch count sum to the window's: `growth_records` blames an append the same
+                // way, and one convention for both keeps a report from double-counting.
+                .or_insert_with(|| (index, croaring::Bitmap::new()));
+            for row in &join.rows {
+                // Entity space is `u32` by I9, so the narrowing is total.
+                members.add(entry.entity_ids[*row as usize].raw() as u32);
+            }
+        }
+    }
+    if wanted.is_empty() {
+        return None;
+    }
+    let edges = closed
+        .iter()
+        .flat_map(|e| e.edges.iter().cloned())
+        .collect();
+    Some((wanted, edges))
+}
+
+/// What one window is about to mint: `(layer, level, key)` → the entry that first named it, and the
+/// entities joining it.
+type MintPlan = std::collections::BTreeMap<(String, u32, String), (usize, croaring::Bitmap)>;
 
 /// A second is short against the interval an operator or an orchestrator would take to notice, and
 /// long enough that a genuinely dead device is retried sixty times a minute rather than continuously.
@@ -3982,7 +4335,13 @@ struct DenyEntry {
     record: WalRecord,
     entity: EntityId,
     op: ChangeOp,
-    respond: Responder,
+    /// The waiter, or `None` for an entry nobody asked for.
+    ///
+    /// **`None` is the cascade** (`Executor::cascade_dependents`): deleting an artifact deletes
+    /// the artifacts depending on it, and those deletions have no caller to answer. They are
+    /// entries in every other respect — their own WAL record, applied in the same window, retired
+    /// at the same fold — so the ack is the only thing that distinguishes them.
+    respond: Option<Responder>,
 }
 
 /// The single writer. One per partition, on its own thread, owning the WAL by value.
@@ -3999,6 +4358,8 @@ struct Executor {
     /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
     /// [`MaintenanceDeps::artifact_projections`].
     artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The lineages, rebuilt beside them and for the same reason.
+    lineages: Arc<crate::cut::Lineages>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
@@ -4179,6 +4540,27 @@ struct Executor {
     /// The deny list solves the identical problem by writing complete state from the live overlay;
     /// this is that posture for a list the overlay does not hold.
     membership_extents: Vec<tessera_store::manifest::MembershipExtent>,
+    /// Every containment partition the current prefix holds — one per `(layer, level)` the last
+    /// fold wrote one for. **Held rather than read from the manifest**, for
+    /// [`Executor::membership_extents`]' reason: a publication clones a stale manifest.
+    ///
+    /// **What reaches a manifest is this list filtered**, at every commit, to the entries the
+    /// store's level versions still make adoptable ([`artifact_coordinates`]) — so a manifest never
+    /// names a partition that has already been invalidated, whatever this list happens to hold. The
+    /// fold replaces it wholesale, its paths being relative to the prefix the fold publishes.
+    containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
+    /// Every tile-index extent column the current prefix holds — one per `(view, layer, level)` the
+    /// last fold wrote one for. Held, filtered and replaced exactly as
+    /// [`Executor::containment_extents`] is, and by the same code
+    /// ([`artifact_coordinates`]); the only difference is that a view is part of the address,
+    /// because an extent is a pair of rows and a row space is per view.
+    tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
+    /// Every row-major column the current prefix holds — one per `(view, layer, level)` the last
+    /// fold wrote one for. Held, filtered and replaced exactly as
+    /// [`Executor::tile_index_extents`] is, and by the same code ([`artifact_coordinates`]); the
+    /// only difference is the layout tag each entry carries, which says which form the file is in
+    /// and is checked against the file's own magic at open.
+    row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
     /// Every artifact **content** extent this node has published, complete current state, held for
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
@@ -4363,23 +4745,23 @@ impl Executor {
         // this tick, which stays at zero on a gated node and grows on one whose flush is failing.
         let mut flushable = 0usize;
         let mut plans: Vec<(String, crate::flush::FlushPlan)> = Vec::new();
-        for slice in slices_of(&generation) {
+        for view in views_of(&generation) {
             match crate::flush::plan_flush(
                 &generation,
-                &slice,
+                &view,
                 self.wal.is_poisoned(),
                 self.health.overlay_diverged.load(Ordering::SeqCst),
             ) {
                 Ok(plan) => {
                     flushable += plan.items.len();
-                    plans.push((slice, plan));
+                    plans.push((view, plan));
                 }
                 Err(crate::flush::NoFlush::NothingToFlush) => {}
                 Err(gate) => {
                     // Per tick, and deliberately: a gated node is gated until an operator acts, and
                     // the tick is the interval at which that is worth repeating.
                     tracing::warn!(
-                        slice = %slice,
+                        view = %view,
                         gate = ?gate,
                         "flush skipped: this node publishes no geometry in this state"
                     );
@@ -4635,7 +5017,11 @@ impl Executor {
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
-            &manifest,
+            &mut manifest,
+            &self.containment_extents,
+            &self.tile_index_extents,
+            &self.row_column_extents,
+            &[],
         ) {
             self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
@@ -4654,7 +5040,7 @@ impl Executor {
             .collect();
         let next_bundle = match live.bundle.with_merged(
             &completed.plan.partition,
-            &completed.plan.slice,
+            &completed.plan.view,
             &consumed,
             completed.segment,
             completed.output.extent,
@@ -4721,7 +5107,7 @@ impl Executor {
     ///
     /// Every gauge is read off the generation this tick loaded, so they agree with each other and
     /// with the plan the dispatch is about to take. **Three of the four are field reads** — a `len`
-    /// per slice, a bitmap cardinality, a sum of row counts — which is what lets this run at every
+    /// per view, a bitmap cardinality, a sum of row counts — which is what lets this run at every
     /// tick rather than on a cadence of its own.
     ///
     /// **The fourth is a directory walk, and it is a closure for that reason.** `due` calls it only
@@ -5081,19 +5467,18 @@ impl Executor {
         // fails this — which the suspension in `dispatch_merge`/`dispatch_coalesce` makes a
         // crash-and-race path rather than the steady one.
         let consumed_segments: FxHashSet<(&str, &str)> = plan
-            .slices
+            .views
             .iter()
-            .flat_map(|slice| {
-                slice
-                    .segments
+            .flat_map(|view| {
+                view.segments
                     .iter()
-                    .map(move |segment| (slice.slice.as_str(), segment.seg_id.as_str()))
+                    .map(move |segment| (view.view.as_str(), segment.seg_id.as_str()))
             })
             .collect();
         let listed_segments: FxHashSet<(&str, &str)> = live_manifest
             .segments
             .iter()
-            .map(|d| (d.slice.as_str(), d.seg_id.as_str()))
+            .map(|d| (d.view.as_str(), d.seg_id.as_str()))
             .collect();
         if !consumed_segments.is_subset(&listed_segments)
             || !plan.tiers.iter().all(|t| live_manifest.deltas.contains(t))
@@ -5138,7 +5523,7 @@ impl Executor {
         let carried_segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
             .segments
             .iter()
-            .filter(|d| !consumed_segments.contains(&(d.slice.as_str(), d.seg_id.as_str())))
+            .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
             .collect();
         let carried_tiers: Vec<String> = live_manifest
             .deltas
@@ -5208,7 +5593,7 @@ impl Executor {
             .cloned()
             .collect();
 
-        // **Every carried-forward extent must begin at or above the fold's own base**, per slice.
+        // **Every carried-forward extent must begin at or above the fold's own base**, per view.
         // `RowSpace::with_extent` refuses an extent below the base permutation's bound and
         // `ExternalIdSidecar` gives the base locator absolute priority below its own length — so a
         // violation here is a prefix that either will not open or answers "this item has no
@@ -5217,22 +5602,22 @@ impl Executor {
         // checked before anything is written. The relation holds for every publication that
         // cleared the live row space's own floor; this refuses to be the place it is assumed.
         for descriptor in &carried_segments {
-            let Some(slice) = plan.slices.iter().find(|s| s.slice == descriptor.slice) else {
-                discard("a carried-forward segment names a slice the fold has no base for");
+            let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
+                discard("a carried-forward segment names a view the fold has no base for");
                 return;
             };
-            if descriptor.entity_lo < slice.permutation_bound {
+            if descriptor.entity_lo < view.permutation_bound {
                 discard("a carried-forward segment begins below the fold's own base permutation");
                 return;
             }
         }
-        // **Partition-wide here where the segment loop above is per-slice, and that is correct
+        // **Partition-wide here where the segment loop above is per-view, and that is correct
         // rather than a coarsening.** `ext-locator.u32` is one array per partition (§3, pass 3), so
-        // there is no per-slice bound to compare against — but the reason it cannot falsely fire is
+        // there is no per-view bound to compare against — but the reason it cannot falsely fire is
         // the allocator, not the file: entity ids are issued monotonically from **one** bundle-wide
         // high-water (I9), so a locator extent published after the fold's snapshot begins above
-        // every entity that had a row at it, in every slice. `plan.entity_bound` is the maximum of
-        // those per-slice bounds and is therefore at or below that high-water. A slice whose own
+        // every entity that had a row at it, in every view. `plan.entity_bound` is the maximum of
+        // those per-view bounds and is therefore at or below that high-water. A view whose own
         // bound is lower cannot produce an extent beneath the maximum, because it does not get to
         // choose its ids.
         if carried_locators
@@ -5317,10 +5702,78 @@ impl Executor {
         ) {
             Ok(repacked) => repacked,
             Err(e) => {
-                discard(&format!("its artifact memberships would not be rewritten ({e})"));
+                discard(&format!(
+                    "its artifact memberships would not be rewritten ({e})"
+                ));
                 return;
             }
         };
+
+        // **The containment partitions, in the same pass and against the prefix just written.**
+        // They are derived, so an empty list is a cost and not a fault — see
+        // `write_containment_partitions`.
+        // **The levels this fold is about to change and has not yet.** `repack_all` above wrote the
+        // post-retirement records into the prefix while the store still holds the pre-retirement
+        // ones, so a partition composed from the store would describe a level the prefix does not
+        // contain — under `WithdrawContent` a content is dropped whole, which *shifts the ranks*,
+        // and a partition read at the wrong rank is a containment answer for another content's
+        // generating set. Those levels get no partition and no stated version; they recompose on
+        // first use, which is what every request did before this structure existed.
+        let pending_retirement = self
+            .live
+            .with_artifacts(|store| store.levels_moved_by(&executed));
+        let containment = self.write_containment_partitions(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &live.bundle.manifest.data_plugin_hash,
+            &pending_retirement,
+        );
+        // **The row spaces every derived structure below is computed over**, opened once: base
+        // only, against the permutations this fold just wrote.
+        let index_views: Vec<(String, u32)> = completed
+            .segments
+            .iter()
+            .map(|segment| (segment.view.clone(), segment.row_count))
+            .collect();
+        let spaces = self.fold_row_spaces(&to_prefix_dir, &plan.partition, &index_views);
+        // **The layout re-evaluation, here and not later** (selection memo §5). The fold writes the
+        // membership files first and snapshots the registry after, so a choice taken after the
+        // snapshot would reach neither the files nor the manifest — and the fold would publish a
+        // level in the old layout with a record claiming the new one. Taken before either.
+        //
+        // **A flip drops the level's held forms explicitly.** The cached row form is
+        // replace-on-mismatch and this fold moves the prefix, so it would go anyway; the *held*
+        // tile index and column would not, because a level that flipped is never asked for its old
+        // form again and nothing would ever claim the entry.
+        let layouts = self.choose_layouts(&spaces, &pending_retirement);
+        for (layer, level, chosen) in &layouts {
+            if self.live.record_layout(layer, *level, *chosen) {
+                self.artifact_projections.forget_level(layer, *level);
+            }
+        }
+        // **The tile indexes, in the same pass and omitting the same levels** — and omitting the
+        // levels now recorded row-major, which have nothing to index. Their extents are rows, so
+        // they are per view and are projected against the base permutation this fold just wrote.
+        let tile_indexes = self.write_tile_indexes(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &spaces,
+            &layouts,
+            &pending_retirement,
+        );
+        // **And the columns for the levels that do**, in the same pass and under the same
+        // omissions. A level whose column will not compose gets no entry, and is served
+        // artifact-major.
+        let row_columns = self.write_row_columns(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &spaces,
+            &layouts,
+            &pending_retirement,
+        );
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
         //
@@ -5341,8 +5794,8 @@ impl Executor {
 
         // ---- step 2: assemble `SEGMENTS-<n>` from the live partition manifest ------------------
         //
-        // Each slice's fold base first and its carried extents after it, because the reader takes
-        // the first segment listed for a slice as the one `permutation.bin` addresses and every
+        // Each view's fold base first and its carried extents after it, because the reader takes
+        // the first segment listed for a view as the one `permutation.bin` addresses and every
         // later one as an extent above it.
         let mut segments = Vec::with_capacity(completed.segments.len() + carried_segments.len());
         for base in &completed.segments {
@@ -5350,7 +5803,7 @@ impl Executor {
             segments.extend(
                 carried_segments
                     .iter()
-                    .filter(|d| d.slice == base.slice)
+                    .filter(|d| d.view == base.view)
                     .map(|d| (*d).clone()),
             );
         }
@@ -5402,6 +5855,14 @@ impl Executor {
             // files this prefix contains. The content extents beside it are carried by link, their
             // bytes being the same inodes under a second name.
             membership_extents: repacked.clone(),
+            // **Stamped by `commit_side_manifest`, from the store and the list above.** Placed
+            // here as the empty pair the assembly needs and replaced at the commit, so the version
+            // list and the partitions beside it come from one borrow rather than from two points
+            // in the fold's flight.
+            level_versions: Vec::new(),
+            containment_extents: Vec::new(),
+            tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -5484,8 +5945,8 @@ impl Executor {
         let mut carried_rels: BTreeSet<String> = BTreeSet::new();
         for descriptor in &carried_segments {
             let segment_prefix = format!(
-                "partitions/{}/slices/{}/segments/{}",
-                plan.partition, descriptor.slice, descriptor.seg_id
+                "partitions/{}/views/{}/segments/{}",
+                plan.partition, descriptor.view, descriptor.seg_id
             );
             for name in ["morton.u32", "columns.arrow"] {
                 carried_rels.insert(format!("{segment_prefix}/{name}"));
@@ -5620,7 +6081,11 @@ impl Executor {
             &to_prefix_dir,
             &plan.partition,
             manifest_n,
-            &segments_manifest,
+            &mut segments_manifest,
+            &containment,
+            &tile_indexes,
+            &row_columns,
+            &pending_retirement,
         ) {
             discard(&format!(
                 "its SEGMENTS-{manifest_n}.json would not commit ({e})"
@@ -5669,7 +6134,19 @@ impl Executor {
         let retired = executed.clone();
         self.live.retire_artifacts(&retired);
         self.live.mark_memberships_published();
+        // **And the growths, which only a whole rewrite reaches.** `rewrite_membership_extents`
+        // wrote every level entire, from the resident store, so a membership that grew since the
+        // last fold is in the prefix `CURRENT` now names — the one publication that carries a
+        // record sitting below its level's high-water. Until this point the log was holding those
+        // records as the only copy.
+        self.live.mark_growth_packed();
         self.membership_extents = repacked;
+        // The partitions this fold wrote replace whatever the previous prefix held: their paths are
+        // prefix-relative and the fold publishes a new prefix, so the old entries name files this
+        // prefix does not contain.
+        self.containment_extents = segments_manifest.containment_extents.clone();
+        self.tile_index_extents = segments_manifest.tile_index_extents.clone();
+        self.row_column_extents = segments_manifest.row_column_extents.clone();
         *lock_recover(&self.health.last_fold_report) = degraded;
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
@@ -5761,7 +6238,7 @@ impl Executor {
         // for; built before the store retires, every projection would be keyed to a store version
         // the retire is about to bump, and the whole warm would be discarded on the first request —
         // paying the stall it exists to prevent, having already paid for the warm.
-        self.warm_artifact_projections();
+        self.warm_artifact_caches();
 
         // ---- step 7: rotate the WAL ------------------------------------------------------------
         //
@@ -5833,7 +6310,7 @@ impl Executor {
             staircase_rss,
             attr_bytes_read = completed.attr_bytes_read,
             attr_bytes_written = completed.attr_bytes_written,
-            "a compaction fold published: the bundle is one base segment per partition-slice, one \
+            "a compaction fold published: the bundle is one base segment per partition-view, one \
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"
         );
@@ -6083,7 +6560,11 @@ impl Executor {
             &self.prefix_dir(&live),
             &completed.plan.partition,
             manifest_n,
-            &manifest,
+            &mut manifest,
+            &self.containment_extents,
+            &self.tile_index_extents,
+            &self.row_column_extents,
+            &[],
         ) {
             self.health
                 .coalesce_failures
@@ -6276,38 +6757,38 @@ impl Executor {
         // behind it at the format boundary. The rest re-plan at the next tick, against a
         // `segments_version` the winner has advanced.
         //
-        // **Chosen by oldest unflushed row, not by slice name.** `slices_of` sorts
+        // **Chosen by oldest unflushed row, not by view name.** `views_of` sorts
         // lexicographically, so taking the first would let a continuously-fed `s0` deny `s1` a
         // flush for ever. `items` is ascending by entity id and I9 issues ids monotonically, so
         // `items.first()` is an age key needing no cursor state — which turns starvation into a
-        // bound: with `s` slices, ack→visibility is at most `s × flush_max_age_secs`.
+        // bound: with `s` views, ack→visibility is at most `s × flush_max_age_secs`.
         //
-        // **Unreachable today**: `tessera build` emits one slice, and a plan naming a slice this
+        // **Unreachable today**: `tessera build` emits one view, and a plan naming a view this
         // bundle does not carry is dropped just below.
         let deferred = plans.len().saturating_sub(1);
-        let Some((slice, plan)) = plan_to_dispatch(plans) else {
+        let Some((view, plan)) = plan_to_dispatch(plans) else {
             return;
         };
         if deferred > 0 {
             tracing::warn!(
                 deferred,
-                dispatched = %slice,
-                "a flush unit is per slice and every plan in a dispatch shares one side-manifest \
-                 name, so one slice publishes per tick; the rest re-plan at the next one"
+                dispatched = %view,
+                "a flush unit is per view and every plan in a dispatch shares one side-manifest \
+                 name, so one view publishes per tick; the rest re-plan at the next one"
             );
         }
 
         let mut contexts = Vec::with_capacity(1);
         {
-            let Some(slice_data) = partition_data.slices.get(&slice) else {
+            let Some(view_data) = partition_data.views.get(&view) else {
                 return;
             };
-            let Ok(row_base) = u32::try_from(slice_data.row_space.total_rows()) else {
-                // Row ids are `u32` (bundle_format 1). A slice that has crossed 2^32 rows cannot
+            let Ok(row_base) = u32::try_from(view_data.row_space.total_rows()) else {
+                // Row ids are `u32` (bundle_format 1). A view that has crossed 2^32 rows cannot
                 // take another segment, and saying so is better than wrapping into row 0.
                 tracing::error!(
-                    slice = %slice,
-                    "ALARM: this slice's row space has reached the u32 ceiling; no further flush \
+                    view = %view,
+                    "ALARM: this view's row space has reached the u32 ceiling; no further flush \
                      can address it. The deployment must be compacted or re-sharded"
                 );
                 return;
@@ -6341,7 +6822,7 @@ impl Executor {
                 crate::flush::FlushContext {
                     prefix_dir: self.prefix_dir(generation),
                     partition: partition.clone(),
-                    slice: slice.clone(),
+                    view: view.clone(),
                     // **`seg_id`s are never reused** (contracts §2.1), which is what makes the
                     // merge rebase ABA-safe — and the attempt counter is not decoration. `next_n`
                     // alone repeats whenever a flush is planned twice before it publishes, and the
@@ -6607,15 +7088,60 @@ impl Executor {
                 },
                 entity,
                 op,
-                respond,
+                respond: Some(respond),
             });
         }
 
         if entries.is_empty() {
             return false;
         }
+        self.cascade_dependents(&mut entries);
         self.commit_denies(entries);
         true
+    }
+
+    /// Add a deletion for every artifact that depends on one this window deletes
+    /// ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md),
+    /// rule 1).
+    ///
+    /// **Extra entries in the window, and nothing else.** A cascaded deletion is a deletion: it
+    /// gets its own `ChangeByEntity` record in the same append, is applied to the same overlay
+    /// clone, hides its artifact at the same ack, and retires at the compaction fold that executes
+    /// it — Rule F (write-path §5.4), by the same route as the deletion that caused it. There is no
+    /// second removal rule here and there must never be one; a cascade that retired anywhere else
+    /// is the fail-open two removal rules have been conflated into twice already.
+    ///
+    /// **Before the append, so a restart agrees with the live node.** The records are in the log,
+    /// so replay rebuilds the same overlay rather than re-deriving the cascade from a store whose
+    /// edges a later publication may have changed.
+    ///
+    /// Only `Delete` cascades. A suppression is reversible and retires only on unsuppress (Rule S),
+    /// so cascading one would need an inverse nothing carries — and the dependent is withheld while
+    /// its target is suppressed anyway, by the serving predicate's dependency term rather than by
+    /// any state.
+    fn cascade_dependents(&mut self, entries: &mut Vec<DenyEntry>) {
+        let deleted: Vec<EntityId> = entries
+            .iter()
+            .filter(|e| matches!(e.op, ChangeOp::Delete))
+            .map(|e| e.entity)
+            .collect();
+        if deleted.is_empty() {
+            return;
+        }
+        let cascade = self
+            .live
+            .with_artifacts(|store| store.cascade_from(&deleted));
+        for entity in cascade {
+            entries.push(DenyEntry {
+                record: WalRecord::ChangeByEntity {
+                    entity_id: entity,
+                    op: ChangeOp::Delete,
+                },
+                entity,
+                op: ChangeOp::Delete,
+                respond: None,
+            });
+        }
     }
 
     /// `append × k → one fsync → apply → one swap → ack × k`, with lifecycle §4's deny-op
@@ -6730,7 +7256,9 @@ impl Executor {
                 } else {
                     WalError::Poisoned
                 };
-                self.ack_failed(&entry.respond, ExecError::Wal(e));
+                if let Some(respond) = &entry.respond {
+                    self.ack_failed(respond, ExecError::Wal(e));
+                }
             }
             return;
         }
@@ -6760,7 +7288,9 @@ impl Executor {
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its change is durably in force.
         for entry in entries {
-            self.ack(&entry.respond, Ack::Changed, &published);
+            if let Some(respond) = &entry.respond {
+                self.ack(respond, Ack::Changed, &published);
+            }
         }
     }
 
@@ -6959,17 +7489,27 @@ impl Executor {
                 rows,
                 batch_id,
                 body_hash,
+                artifacts,
             } = command
             else {
-                // Unreachable while the lane follows the command (`Command::is_never_shed`): a
-                // `Change` rides the deny queue. Executed rather than dropped, so a future variant
-                // that lands here is answered instead of silently losing its waiter.
+                // **Every command but `Ingest` and `Change` arrives here**, which is the layer
+                // registrations, the publications and the growths: the lane follows the command
+                // (`Command::is_never_shed`) and only a `Change` takes the deny queue. A `Change`
+                // itself is therefore unreachable, and is executed rather than dropped so that a
+                // future variant is answered instead of silently losing its waiter.
                 //
-                // **This arm is order-unsafe as written, and must close the window first if it is
-                // ever made reachable.** It applies immediately while a window holding
-                // earlier-arriving ingest is still open, so WAL append order stops equalling
-                // submission order — and for a deny-shaped variant that is the out-of-order apply
-                // lifecycle §4 is written against. Do not make it reachable to save a close.
+                // **This arm applies immediately, while a window holding earlier-arriving ingest is
+                // still open**, so WAL append order stops equalling submission order. That is
+                // tolerable for the four variants that reach it — each appends, fsyncs and applies
+                // its own record, none touches the buffer or swaps the generation, and neither
+                // registry nor artifact state depends on ingest that has not been allocated. It is
+                // **not** tolerable for a deny-shaped variant, whose out-of-order apply is what
+                // lifecycle §4 is written against: such a variant must close the window first.
+                //
+                // One consequence is load-bearing elsewhere: a publication executing here **claims
+                // ordinals from a level's cursor while a window is open**, which is why an ingest
+                // batch's minted key claims its own at the *close* and not at admission
+                // (`Executor::mint_records`).
                 self.execute(Job { command, respond });
                 // This job was counted at submission on the work lane and `execute` counts nothing,
                 // so it is counted here or `work_depth` drifts up one per occurrence forever — the
@@ -6981,7 +7521,8 @@ impl Executor {
 
             let admitted;
             let m = StageMark::now();
-            (window, admitted) = self.admit_ingest(window, rows, batch_id, body_hash, respond);
+            (window, admitted) =
+                self.admit_ingest(window, rows, batch_id, body_hash, artifacts, respond);
             self.health.lap(WriteStage::AdmitWindow, m);
             did_work = true;
             if admitted == Admission::YieldedAfterClose {
@@ -7080,14 +7621,45 @@ impl Executor {
     /// (see [`crate::geometry::check_manifest_publishable`] for what is compared and why). A
     /// refusal leaves each caller its usual failure posture: nothing written, files orphaned,
     /// the next tick re-plans.
+    ///
+    /// **The artifact coordinates are stamped here rather than by each caller**, which is the same
+    /// argument the watermark check above rests on: every publication converges on this function,
+    /// and a level's version list assembled at five call sites is one that goes stale at whichever
+    /// of them nobody thought about. `containment` and `tile_indexes` are the derived-structure
+    /// lists the caller wants named — the fold's freshly written ones, everyone else's held ones —
+    /// and what lands in the manifest is each list filtered to the entries the store's versions
+    /// still make adoptable ([`artifact_coordinates`]). Read `next.containment_extents` and
+    /// `next.tile_index_extents` back after a success to keep the held lists in step.
+    // Eight, plus the manifest being written. Every one of them is a thing this publication *is* —
+    // where it goes, what it replaces, and the three artifact coordinates it has to stamp.
+    // Bundling them would name the same nine things one call earlier.
+    #[allow(clippy::too_many_arguments)]
     fn commit_side_manifest(
         &self,
         live_manifest: &tessera_store::manifest::SegmentsManifest,
         prefix_dir: &std::path::Path,
         partition: &str,
         n: u64,
-        next: &tessera_store::manifest::SegmentsManifest,
+        next: &mut tessera_store::manifest::SegmentsManifest,
+        containment: &[tessera_store::manifest::ContainmentExtent],
+        tile_indexes: &[tessera_store::manifest::TileIndexExtent],
+        row_columns: &[tessera_store::manifest::RowColumnExtent],
+        pending_retirement: &[(String, u32)],
     ) -> Result<(), ManifestCommitRefused> {
+        let (level_versions, containment_extents, tile_index_extents, row_column_extents) =
+            self.live.with_artifacts(|store| {
+                artifact_coordinates(
+                    store,
+                    containment,
+                    tile_indexes,
+                    row_columns,
+                    pending_retirement,
+                )
+            });
+        next.level_versions = level_versions;
+        next.containment_extents = containment_extents;
+        next.tile_index_extents = tile_index_extents;
+        next.row_column_extents = row_column_extents;
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
@@ -7126,6 +7698,7 @@ impl Executor {
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
         respond: Responder,
     ) -> (CommitWindow<Responder>, Admission) {
         match BatchState::of(&self.live, &window, &batch_id) {
@@ -7135,7 +7708,17 @@ impl Executor {
             } => {
                 if prev_hash == body_hash {
                     let proof = Published::already_in_force(&entity_ids);
-                    self.ack(&respond, Ack::Ingested { entity_ids }, &proof);
+                    // **A replay mints nothing, and the zero says so**: the artifacts this batch's
+                    // keys created were created when it was first accepted, and this submission
+                    // created none.
+                    self.ack(
+                        &respond,
+                        Ack::Ingested {
+                            entity_ids,
+                            minted: 0,
+                        },
+                        &proof,
+                    );
                 } else {
                     self.ack_failed(&respond, ExecError::BatchConflict { batch_id });
                 }
@@ -7207,7 +7790,7 @@ impl Executor {
                     // joins rather than closing.
                     admission = Admission::YieldedAfterClose;
                 }
-                if let Some(entry) = self.admit(rows, batch_id, body_hash, respond) {
+                if let Some(entry) = self.admit(rows, batch_id, body_hash, artifacts, respond) {
                     if window.is_empty() {
                         // The in-flight gauge is armed at the **first entry**, never at window
                         // construction: an empty window is never closed, so a gauge armed there
@@ -7230,11 +7813,31 @@ impl Executor {
     ///
     /// This check reads state written at **apply**, which is why an entry naming an external id the
     /// *open window* holds must close it before reaching here (see the caller).
+    ///
+    /// ## The membership column's keys resolve here too, and a bad one refuses this batch alone
+    ///
+    /// A batch naming an artifact that does not exist **on a closed layer** is refused naming the
+    /// key, and nothing it carried is admitted — the standard `/control/ingest` refusals are held
+    /// to, and the standard one for a growth (`artifacts-from-points.md` §6.1: the whole batch or
+    /// none of it). It happens **here** rather than at the close because a window holds several
+    /// callers' batches: one caller's typo may not refuse another caller's rows, and after the
+    /// allocation there is no per-entry refusal left to make.
+    ///
+    /// **On an open layer the same key mints**, and the ordinal it will hold is *not* claimed here:
+    /// see `Executor::mint_records` for why the claim belongs at the close. What is decided here is
+    /// everything about that key which can still refuse one batch on its own — whether the layer's
+    /// declaration admits an artifact carrying nothing but a name, and whether the batch's own
+    /// column named one child under two parents.
+    ///
+    /// An ordinal a key already resolves to is carried from here rather than re-derived at the
+    /// close — see [`tessera_lifecycle::ResolvedMembership`] for why that is safe and what it means
+    /// when the artifact has gone by then.
     fn admit(
         &mut self,
         rows: Vec<UnallocatedRow>,
         batch_id: String,
         body_hash: [u8; 32],
+        artifacts: tessera_lifecycle::BatchArtifacts,
         respond: Responder,
     ) -> Option<WindowEntry<Responder>> {
         // The fail-closed backstop for the widened check-to-apply race — see
@@ -7255,12 +7858,414 @@ impl Executor {
             return None;
         }
 
+        let (memberships, edges) = match self.resolve_memberships(&artifacts) {
+            Ok(resolved) => resolved,
+            Err(detail) => {
+                self.ack_failed(&respond, ExecError::LayerRefused { detail });
+                self.health.note_work_refused();
+                return None;
+            }
+        };
+
         Some(WindowEntry {
             rows,
             batch_id,
             body_hash,
+            memberships,
+            edges,
             waiters: vec![respond],
         })
+    }
+
+    /// Resolve one batch's membership keys, and check the edges its adjacency declared.
+    ///
+    /// Returns the memberships — each carrying the ordinal it resolved to, or `None` where an open
+    /// layer will mint it at the close — and the edges whose **child** is one of those mints, which
+    /// are the only edges this route creates rather than checks.
+    ///
+    /// `Err` is the refusal text the caller is answered with, whole batch without effect.
+    ///
+    /// **The memberships resolve first, and that order is what the edge checks rest on**: a key is
+    /// created only by being a membership (every entry of a list column names an artifact the point
+    /// belongs to — `artifacts-from-points.md` §4), so the set of keys this batch is about to mint
+    /// is known once they are done, and neither a child nor a parent can be minted without
+    /// appearing there.
+    fn resolve_memberships(
+        &self,
+        artifacts: &tessera_lifecycle::BatchArtifacts,
+    ) -> Result<
+        (
+            Vec<tessera_lifecycle::ResolvedMembership>,
+            Vec<tessera_lifecycle::BatchEdge>,
+        ),
+        String,
+    > {
+        if artifacts.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        // **One line per batch, not one per edge.** A lineage over a 10⁵-cluster tree whose roster
+        // was published without parents would otherwise emit 10⁵ formatted writes on the write
+        // path, which is the shape that makes a log a second bottleneck. The count is the signal
+        // and the examples are what an operator acts on.
+        let mut unrecorded: Vec<String> = Vec::new();
+        let mut unrecorded_total = 0usize;
+        let resolved = self.live.with_publication_state(|registry, store, _| {
+            let memberships: Vec<tessera_lifecycle::ResolvedMembership> = artifacts
+                .memberships
+                .iter()
+                .map(|join| {
+                    registry
+                        .resolve_or_mint(&join.layer, join.level, &join.key, store)
+                        .map(|ordinal| tessera_lifecycle::ResolvedMembership {
+                            layer: join.layer.clone(),
+                            level: join.level,
+                            key: join.key.clone(),
+                            ordinal,
+                            rows: join.rows.clone(),
+                        })
+                        .map_err(|e| e.to_string())
+                })
+                .collect::<Result<_, String>>()?;
+            // **Two indexes of one set, because an edge asks two different questions of it.** A
+            // *child*'s level is the edge's own, so it is asked precisely; a *parent*'s is whatever
+            // the layer's shape says to look at, so it is asked of the layer. A levelled taxonomy
+            // legitimately carries one key at two levels, and one index would treat a key minting
+            // at one of them as minting at both.
+            let minting: std::collections::BTreeSet<(&str, u32, &str)> = memberships
+                .iter()
+                .filter(|m| m.ordinal.is_none())
+                .map(|m| (m.layer.as_str(), m.level, m.key.as_str()))
+                .collect();
+            let anywhere: std::collections::BTreeSet<(&str, &str)> = minting
+                .iter()
+                .map(|(layer, _, key)| (*layer, *key))
+                .collect();
+
+            // **A child named under two parents refuses the batch**, which is the build's own
+            // refusal at the other entry point (`artifacts-from-points.md` §4): two rows naming
+            // different parents for one artifact are two hierarchies, and which of them was
+            // published would be the batch's row order rather than anything the caller wrote. It is
+            // made here, over the batch's own column, because that is where the two rows are — and
+            // it is the whole check for a minted child, whose parent nothing else has an opinion
+            // about yet.
+            let mut claimed: std::collections::BTreeMap<(&str, u32, &str), &str> =
+                Default::default();
+            for edge in &artifacts.edges {
+                let at = (edge.layer.as_str(), edge.level, edge.child.as_str());
+                if let Some(first) = claimed.insert(at, edge.parent.as_str()) {
+                    if first != edge.parent {
+                        return Err(format!(
+                            "{} in level {} of {} is named as a child of both {first} and {}. A \
+                             list column declares the edges, so two rows naming different parents \
+                             for one artifact are two hierarchies — and which of them was \
+                             published would be the batch's row order rather than anything the \
+                             caller wrote",
+                            edge.child, edge.level, edge.layer, edge.parent
+                        ));
+                    }
+                }
+            }
+
+            let mut mints = Vec::new();
+            for edge in &artifacts.edges {
+                let layer = edge.layer.as_str();
+                match registry.check_edge(
+                    edge,
+                    store,
+                    minting.contains(&(layer, edge.level, edge.child.as_str())),
+                    &|key| anywhere.contains(&(layer, key)),
+                ) {
+                    Ok(tessera_lifecycle::EdgeCheck::Agrees) => {}
+                    // The child does not exist yet, so this edge is its parent rather than a claim
+                    // about a stored one — carried to the close, where the artifact is created and
+                    // where lineage has always been settled.
+                    Ok(tessera_lifecycle::EdgeCheck::Mints) => mints.push(edge.clone()),
+                    // **Reported, not refused** — see `LayerRegistry::check_edge`. The membership
+                    // half of the same entry is unambiguous and lands; what is lost is an edge this
+                    // route cannot create, and an operator who published a roster without its
+                    // parents needs to be told rather than blocked.
+                    Ok(tessera_lifecycle::EdgeCheck::Unrecorded) => {
+                        unrecorded_total += 1;
+                        if unrecorded.len() < 5 {
+                            unrecorded.push(format!(
+                                "{} of {} under {}",
+                                edge.child, edge.layer, edge.parent
+                            ));
+                        }
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            }
+            Ok((memberships, mints))
+        });
+        if unrecorded_total > 0 {
+            tracing::warn!(
+                count = unrecorded_total,
+                examples = ?unrecorded,
+                "an ingest batch's list column names parent edges these layers do not hold; the \
+                 memberships are applied and the edges are not — a growth adds members, and \
+                 lineage is declared where the artifact is published"
+            );
+        }
+        resolved
+    }
+
+    /// **The artifacts this window's *values* named and nothing holds** — one per
+    /// `membership = { attribute = f }` layer whose column carried a value the level has no
+    /// artifact for.
+    ///
+    /// **A value exists because a point carries it**, at both entry points: a build mints from the
+    /// column it has just read, and an ingest mints from the rows that have just arrived. The two
+    /// use the same rule for the key (`tessera_types::layer::attribute_value_key`), which is what
+    /// makes them agree about which artifact a value names — a key that could be written two ways
+    /// would let one route mint a second artifact for a value the other already named.
+    ///
+    /// **After the vocabulary mint, and that ordering is load-bearing.** A novel category key is a
+    /// string in the row until the pass above draws it a code; reading the row before that would
+    /// name the artifact after a code nobody had assigned yet.
+    ///
+    /// **Suppression-blindness carries over unchanged.** The lookup is
+    /// [`ArtifactStore::ordinal_of_key`] — the store's key index, which loses a key at exactly one
+    /// event, the fold retiring the artifact's own entity. A *suppressed* value's key therefore
+    /// still resolves and mints nothing, so a suppression cannot be defeated by ingesting a point
+    /// carrying the value; a *deleted* one does mint again, and the new artifact is a new object
+    /// with a new entity, which is what a deletion means.
+    ///
+    /// **Publication into such a layer stays refused** — this is not that route. What is created
+    /// here is an identity the rule produces, carrying its key and nothing else, on
+    /// `LayerRegistry::prepare_derive`'s own contract.
+    fn derive_records(
+        &mut self,
+        closed: &[tessera_lifecycle::ClosedEntry<Responder>],
+        vocabularies: &Vocabularies,
+    ) -> Result<Vec<WalRecord>, String> {
+        use tessera_types::layer::attribute_value_key;
+
+        // Which declared scalar each predicate layer reads, resolved once. A layer naming a column
+        // this bundle does not declare is refused at registration, so an absence here is a
+        // declaration that never validated — skipped rather than guessed at, which mints nothing.
+        let generation = self.generation.load();
+        let declared = &generation.bundle.manifest.declared_scalars;
+        let predicates: Vec<(String, usize, Option<String>)> =
+            self.live.predicate_columns(|field| {
+                let index = declared.iter().position(|scalar| scalar.name == field)?;
+                Some((index, declared[index].vocabulary.clone()))
+            });
+        if predicates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut records = Vec::new();
+        for (layer, index, vocabulary) in predicates {
+            // `code → key`, for the values this window actually carried. Walked from the live
+            // bindings rather than inverted per row: a vocabulary is a map from key to code, so a
+            // per-row reverse lookup would rebuild this per point.
+            let mut key_of_code: std::collections::BTreeMap<u32, String> = Default::default();
+            if let Some(name) = &vocabulary {
+                if let Some(minter) = vocabularies.get(name) {
+                    for (key, code) in minter.bindings() {
+                        key_of_code.insert(code, key.to_string());
+                    }
+                }
+            }
+            let mut wanted: std::collections::BTreeSet<String> = Default::default();
+            for entry in closed {
+                for row in entry.rows() {
+                    let Some(code) = row.scalars.get(index).and_then(scalar_code) else {
+                        continue;
+                    };
+                    // Code 0 is a category code space's reserved *absent* sentinel and names no
+                    // value; a plain integer column has no such reservation.
+                    if vocabulary.is_some() && code == tessera_store::vocabulary::ABSENT_CODE {
+                        continue;
+                    }
+                    wanted.insert(attribute_value_key(
+                        code,
+                        key_of_code.get(&code).map(String::as_str),
+                    ));
+                }
+            }
+            if wanted.is_empty() {
+                continue;
+            }
+            let prepared = self.live.with_publication_state(|registry, store, alloc| {
+                let fresh: Vec<String> = wanted
+                    .iter()
+                    .filter(|key| store.ordinal_of_key(&layer, 0, key).is_none())
+                    .cloned()
+                    .collect();
+                if fresh.is_empty() {
+                    return Ok(None);
+                }
+                registry
+                    .prepare_derive(&layer, 0, &fresh, store, alloc)
+                    .map(Some)
+                    .map_err(|e| e.to_string())
+            })?;
+            if let Some(record) = prepared {
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    /// Prepare the publications that create every artifact this window's rows named and nothing
+    /// holds — see [`mint_plan`] for what is minted and why it is minted here.
+    ///
+    /// Patches the memberships whose key resolved *since* admission to the ordinal it resolved to,
+    /// so they grow rather than mint; leaves a minted key's ordinal `None`, which is what tells
+    /// [`growth_records`] the publication carried the join.
+    ///
+    /// `Err` is the refusal text every waiter in the window is answered with. It costs the window,
+    /// which is the price of a decision that can only be made once the batches are together — and
+    /// the two shapes that reach it are a lineage two *batches* disagree about, and an allocator
+    /// that could not supply the reserved run. Everything a single batch can be refused for on its
+    /// own was refused at its admission.
+    fn mint_records(
+        &mut self,
+        closed: &mut [tessera_lifecycle::ClosedEntry<Responder>],
+    ) -> Result<(Vec<WalRecord>, Vec<u64>), String> {
+        use std::collections::BTreeMap;
+        let mut minted_per_entry = vec![0u64; closed.len()];
+        let Some((wanted, edges)) = mint_plan(closed) else {
+            return Ok((Vec::new(), minted_per_entry));
+        };
+
+        // **A child named under two parents refuses**, across the window as it does within a batch:
+        // two entries naming different parents for one artifact are two hierarchies, and there is no
+        // correct output. Checked before anything is prepared, so a refusal spends nothing.
+        let mut parents: BTreeMap<(String, u32, String), String> = BTreeMap::new();
+        for edge in &edges {
+            let at = (edge.layer.clone(), edge.level, edge.child.clone());
+            match parents.get(&at) {
+                Some(first) if *first != edge.parent => {
+                    return Err(format!(
+                        "{} in level {} of {} is named as a child of both {first} and {}. A list \
+                         column declares the edges, so two rows naming different parents for one \
+                         artifact are two hierarchies — and which of them was published would be \
+                         the order the batches arrived in rather than anything the caller wrote",
+                        edge.child, edge.level, edge.layer, edge.parent
+                    ))
+                }
+                Some(_) => {}
+                None => {
+                    parents.insert(at, edge.parent.clone());
+                }
+            }
+        }
+
+        type Prepared = Result<
+            (
+                Vec<WalRecord>,
+                std::collections::BTreeMap<(String, u32, String), u32>,
+                std::collections::BTreeSet<(String, u32, String)>,
+            ),
+            String,
+        >;
+        let prepared: Prepared = self.live.with_publication_state(|registry, store, alloc| {
+            // Re-resolved here and not trusted from admission: a publication executes between an
+            // admission and this close (it takes the work lane, and the window is open across it),
+            // so a key that named nothing then may name an artifact now — and §5's second ruling is
+            // that a key a live artifact holds is never minted again.
+            let mut resolved: BTreeMap<(String, u32, String), u32> = BTreeMap::new();
+            let mut to_mint: BTreeMap<(&str, u32), Vec<(&str, &croaring::Bitmap)>> =
+                BTreeMap::new();
+            for ((layer, level, key), (_, members)) in &wanted {
+                match store.ordinal_of_key(layer, *level, key) {
+                    Some(ordinal) => {
+                        resolved.insert((layer.clone(), *level, key.clone()), ordinal);
+                    }
+                    None => to_mint
+                        .entry((layer.as_str(), *level))
+                        .or_default()
+                        .push((key.as_str(), members)),
+                }
+            }
+
+            // **Ascending level, one record each, coarse first.** A tiered chain's parent sits one
+            // level up and is fixed by the record before this one; a nested lineage is level 0
+            // alone, one record, and `prepare_publish` resolves a parent that is a sibling of its
+            // own batch.
+            let mut assigned: BTreeMap<(&str, u32, &str), u32> = BTreeMap::new();
+            let mut records = Vec::new();
+            for ((layer, level), keys) in &to_mint {
+                let incoming: Vec<tessera_lifecycle::IncomingArtifact> = keys
+                    .iter()
+                    .map(|(key, members)| tessera_lifecycle::IncomingArtifact {
+                        key: Some((*key).to_string()),
+                        members: (*members).clone(),
+                        // **Nothing but its name.** A layer declaring supplied content or a
+                        // dependency refuses the key at admission rather than minting an artifact
+                        // that could not be served — `LayerRegistry::resolve_or_mint` makes both
+                        // refusals, in the words `prepare_publish` would have made them in.
+                        contents: Vec::new(),
+                        attached_to: None,
+                        parent_key: parents
+                            .get(&((*layer).to_string(), *level, (*key).to_string()))
+                            .cloned(),
+                        // A layer declaring a `shape` publishes boxes an author wrote, so a point
+                        // naming a key on such a layer has nothing to mint one from — the layer is
+                        // a predicate and `resolve_or_mint` refuses the key at admission.
+                        shape: None,
+                    })
+                    .collect();
+                // **One level up and no further.** Entry *k* of a list is the parent of entry
+                // *k+1*, so a chain minted from one names its parent exactly one level coarser;
+                // searching the levels above that would invent an edge across a gap the reader
+                // deliberately does not read past (`tessera_types::layer::parent_edges`).
+                let pending = |key: &str| {
+                    let coarser = level.checked_sub(1)?;
+                    assigned.get(&(*layer, coarser, key)).map(|ordinal| {
+                        tessera_lifecycle::wal::ParentRef {
+                            level: coarser,
+                            ordinal: *ordinal,
+                        }
+                    })
+                };
+                let record = registry
+                    .prepare_publish(layer, *level, &incoming, store, alloc, &pending)
+                    .map_err(|e| e.to_string())?;
+                let WalRecord::ArtifactPublish { artifacts, .. } = &record else {
+                    unreachable!("prepare_publish returns an ArtifactPublish");
+                };
+                // Read back off the record rather than recomputed from the level's cursor: what a
+                // finer level's parent resolves to is what this record actually claimed. The order
+                // is `incoming`'s, which is `keys`', which is why the two zip.
+                for ((key, _), artifact) in keys.iter().zip(artifacts) {
+                    debug_assert_eq!(artifact.key.as_deref(), Some(*key));
+                    assigned.insert((*layer, *level, key), artifact.ordinal);
+                }
+                records.push(record);
+            }
+            let minted = assigned
+                .keys()
+                .map(|(layer, level, key)| ((*layer).to_string(), *level, (*key).to_string()))
+                .collect();
+            Ok((records, resolved, minted))
+        });
+        let (records, resolved, minted) = prepared?;
+
+        // A key that acquired an artifact between its batch's admission and this close is an
+        // ordinary growth, and `growth_records` takes it from there. Usually none did — that needs
+        // a publication to have executed inside the window — so the pass is skipped rather than
+        // walked.
+        if !resolved.is_empty() {
+            for entry in closed.iter_mut() {
+                for join in entry.memberships.iter_mut() {
+                    if join.ordinal.is_some() {
+                        continue;
+                    }
+                    let at = (join.layer.clone(), join.level, join.key.clone());
+                    join.ordinal = resolved.get(&at).copied();
+                }
+            }
+        }
+        for ((layer, level, key), (index, _)) in &wanted {
+            if minted.contains(&(layer.clone(), *level, key.clone())) {
+                minted_per_entry[*index] += 1;
+            }
+        }
+        Ok((records, minted_per_entry))
     }
 
     /// **Close a commit window**: one signature-sorted allocation run, one WAL record per entry, one
@@ -7389,6 +8394,29 @@ impl Executor {
             return;
         }
 
+        // **The artifacts this window's rows named and nothing holds, created here** — see
+        // `Executor::mint_records`. Prepared before anything is appended, on `prepare_publish`'s own
+        // rule that every check runs before the first allocation, so a refusal spends nothing. A
+        // failure past that point has spent reserved ids, exactly as a failed window's rows have.
+        let (mut mint_records, minted_per_entry) = match self.mint_records(&mut closed) {
+            Ok(minted) => minted,
+            Err(detail) => {
+                self.fail_window_layer(closed, detail, entries, started);
+                return;
+            }
+        };
+        // **The artifacts this window's *values* named**, one per attribute-predicate layer whose
+        // column carried a value nothing holds — see `Executor::derive_records`. It runs after the
+        // vocabulary mint above, because a novel category key is a code only once that pass has
+        // drawn it, and the key an artifact is named by is the value's key.
+        match self.derive_records(&closed, &vocabularies) {
+            Ok(records) => mint_records.extend(records),
+            Err(detail) => {
+                self.fail_window_layer(closed, detail, entries, started);
+                return;
+            }
+        }
+
         // One record per entry — batch identity is preserved through the window, which is what a
         // joined retry is answered off — appended in entries order, which is also apply order.
         let mut failed_at: Option<(usize, WalError)> = None;
@@ -7425,6 +8453,46 @@ impl Executor {
                 positions.push(at);
             }
         }
+
+        // **The joins this window's rows declared, in the same commit as the rows** — one record
+        // per `(layer, level)` over every entry, appended behind the batch records and inside the
+        // one fsync below (`artifacts-from-points.md` §6.2). Built after the allocation because
+        // that is the first moment a row has an entity to join with, and the ordinals were resolved
+        // at admission.
+        //
+        // Each record's position is read before its append and carried to the apply: a growth below
+        // its level's published high-water is held in the log by that position until a fold rewrites
+        // the level whole, and releasing it early is the silent loss `ArtifactStore::grow`'s own doc
+        // is written against.
+        //
+        // **The publications that minted come first**, because a growth of the same window may name
+        // an ordinal one of them claimed — not today, a minted artifact being published with its
+        // members, but replay applies this sequence in order and an artifact must exist before
+        // anything addresses it.
+        let mut minted: Vec<(WalRecord, u64)> = Vec::new();
+        if failed_at.is_none() {
+            for record in mint_records {
+                let at = self.wal.position();
+                if let Err(e) = self.wal.append(&record) {
+                    // No entry is more to blame than another for a record the whole window's keys
+                    // produced; the first waiter gets the real error, as the fsync arm does.
+                    failed_at = Some((0, e));
+                    break;
+                }
+                minted.push((record, at));
+            }
+        }
+        let mut growth: Vec<(WalRecord, u64)> = Vec::new();
+        if failed_at.is_none() {
+            for (record, i) in growth_records(&closed) {
+                let at = self.wal.position();
+                if let Err(e) = self.wal.append(&record) {
+                    failed_at = Some((i, e));
+                    break;
+                }
+                growth.push((record, at));
+            }
+        }
         mark = self.health.lap(WriteStage::WalAppend, mark);
         // **One fsync for the whole window.** This is the amortisation half of group commit; the
         // allocation scope above is the point of it.
@@ -7451,6 +8519,39 @@ impl Executor {
         // merely its rows.
         let published = self.apply_window(&mut closed, &positions, vocabularies);
 
+        // **After the rows are in force, never before.** A membership is projected through rows, so
+        // a store that held the join while the generation still lacked the row would describe an
+        // artifact by a point nothing could yet see. The reverse order costs nothing: both are
+        // durable by this line, and the log is what a restart reads.
+        if !minted.is_empty() || !growth.is_empty() {
+            let undecodable = self.live.with_publication_state(|registry, store, _| {
+                let mut undecodable = 0;
+                // The registry half first, per record: a mint may have extended its level's
+                // reserved runs, and the store's own apply resolves ordinals against them.
+                for (record, position) in &minted {
+                    registry.apply(record);
+                    undecodable += store.apply(record, *position);
+                }
+                for (record, position) in &growth {
+                    undecodable += store.apply(record, *position);
+                }
+                undecodable
+            });
+            if undecodable > 0 {
+                // Unreachable in practice — these bytes were serialised from a live bitmap moments
+                // ago — and alarmed rather than asserted, because the alternative to noticing is an
+                // artifact that is quietly the size it was before.
+                tracing::error!(
+                    count = undecodable,
+                    "ALARM: a membership growth did not survive its own round trip"
+                );
+            }
+            // A growth against an artifact **above** its level's high-water is carried by the next
+            // tail pack like any other unpublished record; one below it waits for the fold, held in
+            // the log by the pin. Marking the manifest dirty is what gets the first case published.
+            self.deny_dirty = true;
+        }
+
         // Recorded after the swap, so a concurrent replay of a batch id can never observe a window
         // where the generation has swapped but the idempotency index has not caught up.
         let m = StageMark::now();
@@ -7465,11 +8566,36 @@ impl Executor {
         self.health.lap(WriteStage::RecordBatch, m);
         self.observe_wal();
 
+        // **What a batch minted is reported to the batch that minted it.** Under
+        // `value_set = "open"` a typo creates a permanent object rather than being refused — the
+        // trade the declaration makes knowingly — and the mitigation is that it is visible: the
+        // caller is told the count in its own 200, and the operator gets this line.
+        let created: u64 = minted_per_entry.iter().sum();
+        if created > 0 {
+            tracing::info!(
+                minted = created,
+                artifacts = ?minted
+                    .iter()
+                    .flat_map(|(record, _)| match record {
+                        WalRecord::ArtifactPublish { layer, level, artifacts, .. } => artifacts
+                            .iter()
+                            .filter_map(|a| a.key.as_ref())
+                            .map(|key| format!("{key} in level {level} of {layer}"))
+                            .take(8)
+                            .collect::<Vec<_>>(),
+                        _ => Vec::new(),
+                    })
+                    .collect::<Vec<_>>(),
+                "an ingest batch named keys no artifact held, and this layer's value set is open, \
+                 so they were created carrying nothing but their names"
+            );
+        }
+
         // **N waiters, one proof.** A death partway through this loop leaves some waiters acked and
         // some not; every un-acked one gets `SubmitError::ReceiptLost` → 500, never `ExecutorDead`
         // → 503, because its ingest is durably in force. That is the widening `ReceiptLost`'s own
         // doc predicts for this task.
-        for entry in closed {
+        for (entry, minted) in closed.into_iter().zip(minted_per_entry) {
             let ClosedEntry {
                 entity_ids,
                 mut waiters,
@@ -7485,9 +8611,9 @@ impl Executor {
                 .expect("an entry always has at least one waiter");
             for waiter in waiters {
                 let entity_ids = entity_ids.clone();
-                self.ack(&waiter, Ack::Ingested { entity_ids }, &published);
+                self.ack(&waiter, Ack::Ingested { entity_ids, minted }, &published);
             }
-            self.ack(&last, Ack::Ingested { entity_ids }, &published);
+            self.ack(&last, Ack::Ingested { entity_ids, minted }, &published);
         }
 
         self.health
@@ -7554,6 +8680,30 @@ impl Executor {
     /// requires — naming the vocabulary and its width, both the deployment's own schema. Mapping it
     /// to a WAL or allocator failure instead would answer a bodyless 500 for a refusal the caller
     /// can act on, and would tell an operator the log was at fault when it was not.
+    /// A window whose **artifact** mint could not be prepared: nothing was appended, nothing
+    /// applied. Every waiter gets the same refusal, which is the cost of a decision that can only be
+    /// made once the window's batches are together — see `Executor::mint_records`.
+    fn fail_window_layer(
+        &self,
+        closed: Vec<ClosedEntry<Responder>>,
+        detail: String,
+        entries: u64,
+        started: std::time::Instant,
+    ) {
+        for entry in closed {
+            for waiter in entry.waiters {
+                self.ack_failed(
+                    &waiter,
+                    ExecError::LayerRefused {
+                        detail: detail.clone(),
+                    },
+                );
+            }
+        }
+        self.health
+            .record_window_service(entries, started.elapsed().as_nanos() as u64);
+    }
+
     fn fail_window_mint(
         &self,
         closed: Vec<ClosedEntry<Responder>>,
@@ -7590,26 +8740,35 @@ impl Executor {
                 rows,
                 batch_id,
                 body_hash,
+                artifacts,
             } => {
                 let window = CommitWindow::new(self.next_window_seq());
-                let (window, _) = self.admit_ingest(window, rows, batch_id, body_hash, respond);
+                let (window, _) =
+                    self.admit_ingest(window, rows, batch_id, body_hash, artifacts, respond);
                 if !window.is_empty() {
                     self.close_window(window);
                 }
             }
             // A window of one entry is exactly the per-command semantics this path used to have,
             // which is why there is no second deny implementation to keep in step with the first.
-            Command::Change { entity, op } => self.commit_denies(vec![DenyEntry {
-                record: WalRecord::ChangeByEntity {
-                    entity_id: entity,
+            Command::Change { entity, op } => {
+                let mut entries = vec![DenyEntry {
+                    record: WalRecord::ChangeByEntity {
+                        entity_id: entity,
+                        op,
+                    },
+                    entity,
                     op,
-                },
-                entity,
-                op,
-                respond,
-            }]),
+                    respond: Some(respond),
+                }];
+                // The cascade rides this path too — a window of one is still a window, and a
+                // deletion admitted here that skipped it would strand every artifact depending on
+                // the one deleted.
+                self.cascade_dependents(&mut entries);
+                self.commit_denies(entries)
+            }
             Command::RegisterLayer { declaration } => self.commit_registry(
-                |registry, alloc| registry.prepare_create(declaration, alloc),
+                |registry, alloc| registry.prepare_create(*declaration, alloc),
                 |record| match record {
                     WalRecord::LayerCreate { layer_entity, .. } => Ack::LayerRegistered {
                         entity: *layer_entity,
@@ -7628,6 +8787,11 @@ impl Executor {
                 level,
                 artifacts,
             } => self.commit_artifacts(layer, level, artifacts, respond),
+            Command::GrowMemberships {
+                layer,
+                level,
+                joins,
+            } => self.commit_growth(layer, level, joins, respond),
         }
     }
 
@@ -7648,7 +8812,14 @@ impl Executor {
         respond: Responder,
     ) {
         let prepared = self.live.with_publication_state(|registry, store, alloc| {
-            registry.prepare_publish(&layer, level, &incoming, store, alloc)
+            registry.prepare_publish(
+                &layer,
+                level,
+                &incoming,
+                store,
+                alloc,
+                &tessera_lifecycle::no_pending,
+            )
         });
         let record = match prepared {
             Ok(record) => record,
@@ -7703,6 +8874,95 @@ impl Executor {
         respond.ack(Ack::ArtifactsPublished { entities }, &published);
     }
 
+    /// Grow the memberships of artifacts that already exist — `commit_artifacts`'s sequence
+    /// (validate, append, sync, apply) with nothing allocated, because a join takes no ordinal and
+    /// no entity.
+    ///
+    /// **This is the second way state enters the artifact store, and the first that is not a whole
+    /// record.** It is a *growth* path, which is why it is admissible at all: write-path §5.4's two
+    /// removal rules govern how a bit **leaves** a membership, and this adds bits that are then
+    /// retired by exactly the routes every other member is retired by — `ArtifactStore::grow`
+    /// carries the argument in full, and there is one such method rather than one per caller.
+    ///
+    /// **Nothing is applied before the record is durable**, on `commit_artifacts`'s reason, one
+    /// step sharper: a join applied and then lost is an artifact that comes back from a restart
+    /// *without* the point, which nothing distinguishes from an artifact that failed its existence
+    /// criterion. The same failure is what the pin `ArtifactStore::mark_growth_packed` releases
+    /// exists against, on the packing side.
+    ///
+    /// **This is the control plane's route into growth, and it is no longer the only one.** An
+    /// ingest batch carrying a column named for a layer grows the same memberships through
+    /// `Executor::close_window` instead (`artifacts-from-points.md` §6.2) — resolved at admission,
+    /// appended inside the window's own fsync, and applied through the same `ArtifactStore::grow`
+    /// this command reaches. The two share the record and the store method rather than the command,
+    /// because a batch's entities do not exist until its window allocates and a command cannot wait
+    /// inside one.
+    ///
+    /// **Minting is that close's and not this command's** (§6.3). An unknown key here is refused
+    /// whatever the layer's value set says: this route names an artifact to add members to, where a
+    /// membership column names the artifact a *point* belongs to and may therefore create it. Where
+    /// the two do agree is the thread — a mint claims ordinals serially on this executor, exactly as
+    /// `commit_artifacts` does, which is why neither claim is made in a handler.
+    fn commit_growth(
+        &mut self,
+        layer: String,
+        level: u32,
+        joins: Vec<tessera_lifecycle::IncomingGrowth>,
+        respond: Responder,
+    ) {
+        let prepared = self.live.with_publication_state(|registry, store, _| {
+            registry.prepare_grow(&layer, level, &joins, store)
+        });
+        let record = match prepared {
+            // Every key resolved and nothing was joining. No record is owed for a no-op, and
+            // appending an empty one would pin the log at a growth that changed nothing.
+            Ok(None) => {
+                respond.ack(Ack::MembershipsGrown, &Published::nothing_to_apply(&joins));
+                return;
+            }
+            Ok(Some(record)) => record,
+            Err(e) => {
+                respond.fail(ExecError::LayerRefused {
+                    detail: e.to_string(),
+                });
+                return;
+            }
+        };
+
+        // The position the record will occupy, read **before** the append — `commit_artifacts`'s
+        // reason, and here it is the bound that holds the log until the fold rewrites the level
+        // whole, since a grown record sits below the high-water the tail pack starts from.
+        let position = self.wal.position();
+
+        if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
+            tracing::error!(
+                error = %e,
+                "ALARM: a membership growth could not be made durable; the entities did not join"
+            );
+            respond.fail(ExecError::Wal(e));
+            return;
+        }
+
+        let undecodable = self
+            .live
+            .with_publication_state(|_, store, _| store.apply(&record, position));
+        if undecodable > 0 {
+            // Unreachable in practice — these bytes were serialised from a live bitmap moments ago
+            // — and alarmed rather than asserted, because the alternative to noticing is an
+            // artifact that is quietly the size it was before.
+            tracing::error!(
+                count = undecodable,
+                "ALARM: a membership growth did not survive its own round trip"
+            );
+        }
+        let published = Published::registry_applied(&record);
+        // A growth against an artifact **above** its level's high-water is carried by the next
+        // tail pack like any other unpublished record; one below it waits for the fold, held in the
+        // log by the pin. Marking the manifest dirty is what gets the first case published.
+        self.deny_dirty = true;
+        respond.ack(Ack::MembershipsGrown, &published);
+    }
+
     /// Validate, allocate, append, sync, apply — in that order, which is the whole of the
     /// registry's durability contract.
     ///
@@ -7718,7 +8978,8 @@ impl Executor {
         prepare: impl FnOnce(
             &mut LayerRegistry,
             &mut Allocator,
-        ) -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
+        )
+            -> std::result::Result<WalRecord, tessera_lifecycle::RegistryError>,
         ack_of: impl FnOnce(&WalRecord) -> Ack,
         respond: Responder,
     ) {
@@ -7749,6 +9010,21 @@ impl Executor {
 
         let ack = ack_of(&record);
         self.live.apply_registry_record(&record);
+        // **A dropped layer's derived structures go with it.** Neither cache had a removal path,
+        // so each was bounded by the triples a process had ever seen rather than the ones it
+        // holds — gigabytes a level at the campaign's target, pinned for the life of the process.
+        // Retention only, never correctness: a tombstoned name never resolves through the registry
+        // again, so nothing held here was reachable to be served.
+        //
+        // ⊘ **The store's own copy of a dropped layer's memberships is not released**, because
+        // `ArtifactStore::remove_layer` is reached from nowhere — a drop touches the registry and
+        // stops there. That is the larger half of the same retention, and it is a write-path
+        // question rather than a caching one: releasing it changes what the next fold repacks and
+        // how far back the rotation pin holds the log.
+        if let WalRecord::LayerDrop { name } = &record {
+            self.artifact_projections.forget(name);
+            self.lineages.forget(name);
+        }
         let published = Published::registry_applied(&record);
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the
         // log. Marking the manifest dirty is what gets it published at the next flush, on the same
@@ -7881,9 +9157,9 @@ impl Executor {
     /// ([`ExecutorHealth::apply_nanos_total`], already on `/control/status`, so no counter is added
     /// for this).
     ///
-    /// Changes are applied in slice order, which is the window's entries order, which is the deny
+    /// Changes are applied in view order, which is the window's entries order, which is the deny
     /// lane's FIFO arrival order — so a `suppress` and a later `unsuppress` of the same item resolve
-    /// as they would have as two separate commands. The slice is iterated once, forwards.
+    /// as they would have as two separate commands. The view is iterated once, forwards.
     ///
     /// Pins are never invalidated by this (I11): a pin fixes `(prefix, segments_version)`, and this
     /// bumps `overlay_version`. That is lifecycle §2.3's rule that a suppression applies to a
@@ -7948,12 +9224,12 @@ impl Executor {
         } else {
             let mut denied = (*generation.denied).clone();
             for partition in generation.bundle.partitions.values() {
-                for (slice, slice_data) in &partition.slices {
-                    let Some(rows) = denied.get_mut(slice) else {
+                for (view, view_data) in &partition.views {
+                    let Some(rows) = denied.get_mut(view) else {
                         continue;
                     };
                     for entity in &newly_denied {
-                        if let Some(row) = slice_data.row_space.row_of(*entity) {
+                        if let Some(row) = view_data.row_space.row_of(*entity) {
                             rows.add(row.raw());
                         }
                     }
@@ -8092,12 +9368,8 @@ impl Executor {
             // in extents of its own but on the same list and behind the same reader. Artifact and
             // point entities are disjoint by construction — two regions, growing towards each other
             // — so the rows never collide and each side reads its tags against its own declaration.
-            match self.write_content_extent(
-                &prefix_dir,
-                partition,
-                live.bundle.partitions.len(),
-                n,
-            ) {
+            match self.write_content_extent(&prefix_dir, partition, live.bundle.partitions.len(), n)
+            {
                 // **Assigned from the held list, never pushed onto the clone.** The manifest this
                 // publication started from is the *stale* generation's, so extending it drops
                 // every earlier publication's entry — and an artifact whose content extent is
@@ -8136,7 +9408,11 @@ impl Executor {
                 &self.prefix_dir(&live),
                 partition,
                 n,
-                &manifest,
+                &mut manifest,
+                &self.containment_extents,
+                &self.tile_index_extents,
+                &self.row_column_extents,
+                &[],
             ) {
                 tracing::error!(
                     error = %e,
@@ -8191,7 +9467,7 @@ impl Executor {
         // Refused rather than guessed. Which partition should own an artifact's content, or whether
         // the rows should be split across them by some rule, is a layout question a multi-partition
         // bundle has to answer and nothing here can: writing to the first partition alone would
-        // leave the content unreadable from a slice carried by another, and writing to all of them
+        // leave the content unreadable from a view carried by another, and writing to all of them
         // is the overlap above. No such bundle exists today (nothing splits one), which is why this
         // is a refusal with an alarm rather than a design.
         if partitions > 1 {
@@ -8217,7 +9493,10 @@ impl Executor {
         };
         let io = |path: &std::path::Path| {
             let path = path.to_path_buf();
-            move |source| tessera_store::StoreError::Io { path: path.clone(), source }
+            move |source| tessera_store::StoreError::Io {
+                path: path.clone(),
+                source,
+            }
         };
         let blocks = prefix_dir.join(&extent.blocks);
         let hasrow = prefix_dir.join(&extent.hasrow);
@@ -8291,13 +9570,13 @@ impl Executor {
                     "layer": d.layer,
                     "level": d.level,
                     "ordinal": d.ordinal,
-                    "stable_key": d.stable_key,
+                    "key": d.key,
                     "members_lost": d.members_lost,
                     "declared_members": d.declared_members,
-                    "variations_lost": d
-                        .variations_lost
+                    "contents_lost": d
+                        .contents_lost
                         .iter()
-                        .map(|(index, lost)| serde_json::json!({"variation": index, "lost": lost}))
+                        .map(|(index, lost)| serde_json::json!({"rank": index, "lost": lost}))
                         .collect::<Vec<_>>(),
                 })
             })
@@ -8345,7 +9624,10 @@ impl Executor {
             return Ok(Vec::new());
         }
 
-        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("members");
         std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
             path: dir.clone(),
             source,
@@ -8370,16 +9652,489 @@ impl Executor {
         Ok(entries)
     }
 
-    /// Rebuild every level's row-space membership against the live generation.
+    /// Compose and write this prefix's containment partitions, one file per `(layer, level)`.
+    ///
+    /// **Against the prefix being published, not the one being left.** A fold rewrites the term
+    /// index, so a partition composed from the old postings would name a table the new prefix's
+    /// entities are not in. The new file is on disk by the time this runs — compaction's pass 2
+    /// writes it — so the reader is opened over the prefix this is writing into.
+    ///
+    /// **Inside the artifact pass, before the registry snapshot the manifest is written from**
+    /// (`2026-08-21-artifact-layout-selection.md` §5): the coordinate each entry carries is the
+    /// level version at the moment it was composed, and the version list beside it comes from the
+    /// same borrow, so the two cannot disagree about a publication landing between them.
+    ///
+    /// **Every failure is an empty list, not a discarded fold.** A partition is derived — the level
+    /// recomposes it on first use — so refusing to publish over one would be a refusal outside the
+    /// disclosure surface, and the thing being refused has a correct fallback.
+    fn write_containment_partitions(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        data_plugin_hash: &str,
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<tessera_store::manifest::ContainmentExtent> {
+        // The gate: under any plugin but the builtin the partition is not sound at all, so nothing
+        // is composed and nothing is written (`crate::containment`).
+        if !crate::containment::signature_shaped(data_plugin_hash) {
+            return Vec::new();
+        }
+        let postings_path = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("terms")
+            .join("postings.arrow");
+        let postings = match tessera_authz::PostingsReader::open(&postings_path, true) {
+            Ok(postings) => postings,
+            Err(error) => {
+                tracing::warn!(
+                    path = %postings_path.display(),
+                    %error,
+                    "the fold could not read the prefix it just wrote to compose containment                      partitions; every level recomposes on first use"
+                );
+                return Vec::new();
+            }
+        };
+
+        // Composed under one borrow with the versions they are composed at, and written outside it:
+        // composing is the dear part and needs the store, writing a file does not.
+        let composed: Vec<(String, u32, u64, Vec<u8>)> = self.live.with_artifacts(|store| {
+            let levels: Vec<(String, u32)> = store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .collect();
+            levels
+                .into_iter()
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .filter_map(|(layer, level)| {
+                    let version = store.level_version(&layer, level);
+                    match crate::containment::ContainmentPartition::compose(
+                        store, &layer, level, &postings,
+                    ) {
+                        Ok(partition) => {
+                            Some((layer, level, version, partition.as_bytes().to_vec()))
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                layer = %layer,
+                                level,
+                                %error,
+                                "a containment partition would not compose at the fold; that level                                  recomposes on first use"
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect()
+        });
+        if composed.is_empty() {
+            return Vec::new();
+        }
+
+        // **Filed by the shared writer**, which is the same one `tessera build`'s artifact pass
+        // calls: one naming rule, one durability sequence, one manifest-entry shape.
+        tessera_store::derived::file_containment(
+            prefix_dir,
+            partition,
+            n,
+            composed
+                .into_iter()
+                .map(
+                    |(layer, level, level_version, bytes)| tessera_store::derived::Filed {
+                        // A partition is a function of the level's records and the prefix's
+                        // postings, so it is not per view and the entry carries none.
+                        view: String::new(),
+                        layer,
+                        level,
+                        level_version,
+                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        bytes,
+                    },
+                )
+                .collect(),
+        )
+    }
+
+    /// Project and write this prefix's tile-index extent columns, one file per
+    /// `(view, layer, level)`.
+    ///
+    /// **Against the prefix being published, and against its base permutation.** A fold renumbers
+    /// row space wholesale, so an extent projected through the old one names other people's
+    /// documents. Pass 3 has already written the new `permutation.bin` for each view, so the row
+    /// space is opened over what this fold is publishing — base only, with no extents, which is
+    /// exactly what the row form holds ([`tessera_store::RowSpace::project_base`]) and therefore
+    /// what its extents are computed over. A flush landing during the flight appends rows above the
+    /// base and moves none of these.
+    ///
+    /// **Inside the artifact pass, before the registry snapshot**, and omitting the levels a
+    /// retirement is about to move — [`Executor::write_containment_partitions`] argues both, and
+    /// the argument is the same one: the coordinate an entry carries and the version list beside it
+    /// come from the same borrow, and a level whose records the prefix already holds in
+    /// post-retirement form is not the level the store would project.
+    ///
+    /// ⊘ **What this adds to the fold's artifact pass is unpriced**
+    /// (`2026-08-21-artifact-layout-selection.md` §9's constraint 9), and it is not small: an extent
+    /// is `minimum` and `maximum` over the same `project_base` the row form is built from, so this
+    /// is a **second** pass of the projection §8.1 measures at 376 s over 10⁷ artifacts — paid here
+    /// so that `warm_artifact_caches` below claims the column instead of deriving one, and so that a
+    /// restart maps it rather than deriving it. The same function rather than a cheaper min/max walk
+    /// deliberately: it is what the row form is built with, so the column written here and the
+    /// column derived from that form are equal by construction rather than by an argument, and
+    /// `tests/artifact_tile_index.rs` asserts them byte for byte.
+    ///
+    /// What it does **not** add is residency: [`crate::tile_index::TileIndex::project`] holds one
+    /// membership at a time, so this pass is eight bytes an artifact where the row form it is
+    /// deriving the same extents from would be gigabytes — and the fold runs before the flip, with
+    /// the outgoing generation's forms still resident.
+    ///
+    /// **Every failure is an empty list, not a discarded fold** — the index is derived, so refusing
+    /// to publish over one would be a refusal outside the disclosure surface.
+    /// The base row space of every view this fold just wrote, opened once for the whole artifact
+    /// pass.
+    ///
+    /// **Against the prefix being published, and base only** — with no extents, which is exactly
+    /// what a row form holds ([`tessera_store::RowSpace::project_base`]) and therefore what every
+    /// structure derived from one is computed over. A flush landing during the flight appends rows
+    /// above the base and moves none of these.
+    ///
+    /// A view whose permutation will not load is simply absent: its structures are derived on first
+    /// use, which is what every request did before the fold wrote anything.
+    fn fold_row_spaces(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        views: &[(String, u32)],
+    ) -> Vec<(String, tessera_store::RowSpace)> {
+        let mut spaces: Vec<(String, tessera_store::RowSpace)> = Vec::new();
+        for (view, row_count) in views {
+            let path = prefix_dir
+                .join("partitions")
+                .join(partition)
+                .join("views")
+                .join(view)
+                .join("permutation.bin");
+            match tessera_store::Permutation::load(&path) {
+                Ok(permutation) => spaces.push((
+                    view.clone(),
+                    tessera_store::RowSpace::new(std::sync::Arc::new(permutation), *row_count),
+                )),
+                Err(error) => tracing::warn!(
+                    view = %view,
+                    path = %path.display(),
+                    %error,
+                    "the fold could not read the permutation it just wrote, so this view's derived \
+                     artifact structures are built on first use"
+                ),
+            }
+        }
+        spaces
+    }
+
+    /// **The fold's layout re-evaluation** — decision 0094's step 4, taken inside the artifact pass
+    /// and before a derived byte is written.
+    ///
+    /// The observations it reads are **post-retirement**: `repack_all` above has already written
+    /// the surviving memberships into the prefix, and this reads the store, so a level the fold
+    /// retired most of is observed as the level it is about to become. That is exactly the case the
+    /// re-evaluation exists for.
+    ///
+    /// **The record is per `(layer, level)` and the observation is per view**, which is a
+    /// mismatch the levels themselves create: a layer drawn in two views has two row spaces and so
+    /// two localities. The shape is taken in the **first** view the fold wrote, deterministically,
+    /// because the record has one slot and a level is one level however many views draw it. Where
+    /// two views disagree sharply the pick follows the first and the other view's column is written
+    /// in that layout, which is correct and may be slower than that view would have chosen.
+    ///
+    /// **A pin is read, never re-derived**, and it reaches here as `declaration.layout` — see
+    /// [`crate::layout::choose`].
+    ///
+    /// **What this adds to the fold's artifact pass, coarsely measured** (selection memo §9's
+    /// constraint 9): on this crate's largest fixture — 700 000 rows, 1 100 artifacts of a hundred
+    /// members each, `tests/artifact_layout_flip.rs` — the pass runs at **2.5 s** with the
+    /// re-evaluation and the column write removed and **3.1 s** with them, so the layout machinery
+    /// is about **0.6 s, a quarter of the pass**. One debug-build run on one fixture: an order of
+    /// magnitude rather than a measurement, and it is what it is because this is a whole extra
+    /// projection of one view — `RowSpace::project_base` per record, the same call the row form and
+    /// the tile index each already make. ⊘ At the campaign's 10⁷ artifacts it is a third pass over
+    /// the 376 s §8.1 prices one at, which is modelled rather than measured.
+    fn choose_layouts(
+        &self,
+        spaces: &[(String, tessera_store::RowSpace)],
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<(String, u32, tessera_types::layer::ServingLayout)> {
+        let Some((_, space)) = spaces.first() else {
+            return Vec::new();
+        };
+        let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
+            store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .collect()
+        });
+        let mut out = Vec::with_capacity(levels.len());
+        for (layer, level) in levels {
+            let Some(registered) = self.live.registered_layer(&layer) else {
+                continue;
+            };
+            // **One membership at a time, never the level's row form.** The observation is the same
+            // `project_base` per artifact either way; what differs is what is held while it runs,
+            // and at ten million artifacts a row form here is the gigabytes §7.3 prices — held
+            // beside the outgoing generation's own forms, because the fold runs before the flip.
+            let shape = self.live.with_artifacts(|store| {
+                tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
+                    for (ordinal, record) in store.level(&layer, level) {
+                        visit(ordinal, &space.project_base(&record.members));
+                    }
+                })
+            });
+            let chosen = crate::layout::choose(&registered.declaration, shape);
+            tracing::info!(
+                layer = %layer,
+                level,
+                artifacts = shape.artifacts,
+                // **The trigger**, and the figure beside it is reported rather than read —
+                // decision 0092's (c), and the axis the 2026-08-22 bracket moved the pick onto.
+                everywhere_fraction = shape.everywhere_fraction,
+                blocks_per_artifact = shape.blocks_per_artifact,
+                partitions = shape.partitions,
+                pinned = ?registered.declaration.layout,
+                was = ?registered.layout_of(level),
+                now = ?chosen,
+                "the fold re-evaluated a level's serving layout"
+            );
+            out.push((layer, level, chosen));
+        }
+        out
+    }
+
+    /// Write this prefix's row-major columns, one file per `(view, layer, level)` whose chosen
+    /// layout has one.
+    ///
+    /// **A level whose label column will not compose gets no file**, and the manifest then names
+    /// none for it — so the level is served artifact-major on the reader's side, loudly
+    /// (`ArtifactProjections::get_or_build`). That is the fold-time half of the refusal the
+    /// declaration could not make: whether an attribute is single-valued is a property of the data.
+    ///
+    /// **Every failure is an empty entry, not a discarded fold** — a column is derived, and the
+    /// artifact-major route answers every question it would have.
+    #[allow(clippy::too_many_arguments)]
+    fn write_row_columns(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        spaces: &[(String, tessera_store::RowSpace)],
+        layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<tessera_store::manifest::RowColumnExtent> {
+        let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
+            .iter()
+            .filter(|(layer, level, layout)| {
+                layout.is_row_major()
+                    && !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                    // **A predicate level's column is not this fold's to write**, and the reason is
+                    // what it is a column *of*: an attribute layer's labels come from the value
+                    // column the predicate names, and this pass composes from the level's stored
+                    // memberships — which such a level has none of. Composing anyway would write a
+                    // file of nothing but holes, name it in the manifest, and leave the reader
+                    // adopting a column no request will ever claim.
+                    && self
+                        .live
+                        .registered_layer(layer)
+                        .is_some_and(|registered| {
+                            matches!(
+                                registered.declaration.membership,
+                                tessera_types::layer::MembershipSource::Enumerated
+                            )
+                        })
+            })
+            .cloned()
+            .collect();
+        if wanted.is_empty() || spaces.is_empty() {
+            return Vec::new();
+        }
+
+        // Projected under one borrow with the versions they are written at, and serialised outside
+        // it, exactly as the tile indexes are.
+        let written: Vec<(
+            String,
+            String,
+            u32,
+            u64,
+            tessera_types::layer::ServingLayout,
+            Vec<u8>,
+        )> = self.live.with_artifacts(|store| {
+            let mut out = Vec::with_capacity(wanted.len() * spaces.len());
+            for (layer, level, layout) in &wanted {
+                let version = store.level_version(layer, *level);
+                let ordinals = store.level(layer, *level).count() as u32;
+                for (view, space) in spaces {
+                    let column =
+                        crate::row_column::RowColumn::project(ordinals, space, *layout, || {
+                            store.level(layer, *level)
+                        });
+                    match column {
+                        Some(column) => out.push((
+                            view.clone(),
+                            layer.clone(),
+                            *level,
+                            version,
+                            *layout,
+                            column.as_bytes().to_vec(),
+                        )),
+                        None => tracing::warn!(
+                            layer = %layer,
+                            level,
+                            view = %view,
+                            layout = ?layout,
+                            "a row-major column would not compose at the fold — this level's \
+                             memberships do not partition — so it is served artifact-major. \
+                             Every answer is unchanged; the layout is not"
+                        ),
+                    }
+                }
+            }
+            out
+        });
+        if written.is_empty() {
+            return Vec::new();
+        }
+
+        // **Filed by the shared writer** — see `write_containment_partitions` above.
+        tessera_store::derived::file_row_columns(
+            prefix_dir,
+            partition,
+            n,
+            written
+                .into_iter()
+                .map(|(view, layer, level, level_version, layout, bytes)| {
+                    tessera_store::derived::Filed {
+                        view,
+                        layer,
+                        level,
+                        level_version,
+                        layout,
+                        bytes,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn write_tile_indexes(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        spaces: &[(String, tessera_store::RowSpace)],
+        layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
+        pending_retirement: &[(String, u32)],
+    ) -> Vec<tessera_store::manifest::TileIndexExtent> {
+        if spaces.is_empty() {
+            return Vec::new();
+        }
+
+        // Projected under one borrow with the versions they are projected at, and written outside
+        // it: projecting is the dear part and needs the store, writing a file does not.
+        let projected: Vec<(String, String, u32, u64, Vec<u8>)> =
+            self.live.with_artifacts(|store| {
+                let levels: Vec<(String, u32)> = store
+                    .levels_and_extents()
+                    .map(|(layer, level, _)| (layer.to_string(), level))
+                    .filter(|(layer, level)| {
+                        !pending_retirement
+                            .iter()
+                            .any(|(l, v)| l == layer && v == level)
+                    })
+                    // **A row-major level has nothing to index** (selection memo §1): its candidacy
+                    // is a scan of `viewport ∩ M_auth`, which the viewport already bounds. Writing
+                    // one would be writing a file no reader on that route opens — and a level that
+                    // falls back derives its index on first use, which is the same answer at the
+                    // cost this pass was trying to save.
+                    .filter(|(layer, level)| {
+                        !layouts
+                            .iter()
+                            .any(|(l, v, layout)| l == layer && v == level && layout.is_row_major())
+                    })
+                    .collect();
+                let mut out = Vec::with_capacity(levels.len() * spaces.len());
+                for (layer, level) in &levels {
+                    let version = store.level_version(layer, *level);
+                    // **The level's own length, holes included** — a column sized by the last live
+                    // ordinal is short, and a short one is dropped at open rather than adopted.
+                    let ordinals = store.level(layer, *level).count() as u32;
+                    for (view, space) in spaces {
+                        let index = crate::tile_index::TileIndex::project(
+                            ordinals,
+                            || store.level(layer, *level),
+                            space,
+                        );
+                        out.push((
+                            view.clone(),
+                            layer.clone(),
+                            *level,
+                            version,
+                            index.as_bytes().to_vec(),
+                        ));
+                    }
+                }
+                out
+            });
+        if projected.is_empty() {
+            return Vec::new();
+        }
+
+        // **Filed by the shared writer** — see `write_containment_partitions` above.
+        tessera_store::derived::file_tile_indexes(
+            prefix_dir,
+            partition,
+            n,
+            projected
+                .into_iter()
+                .map(|(view, layer, level, level_version, bytes)| {
+                    tessera_store::derived::Filed {
+                        view,
+                        layer,
+                        level,
+                        level_version,
+                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        bytes,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Rebuild every level's row-space membership, and every lineage this fold moved, against the
+    /// live generation.
     ///
     /// Called at the fold's own publication, on this thread, for the reason §5.0.3 gives: the
     /// alternative is not a cache miss but a stall, and it lands on a request rather than on
     /// maintenance. Cheap everywhere else — a deployment with no artifacts iterates nothing.
     ///
-    /// **Errors are impossible to have here and absences are not**: a slice the generation does not
+    /// **The lineages are warmed here for the same reason and not the same extent.** A row form is
+    /// invalid at every level because the prefix renumbered row space; a lineage is invalid only
+    /// where this fold retired an artifact, because it holds ordinals. So this asks for all of
+    /// both and pays for one of each per level that moved — and what it is buying is the ~96 ms at
+    /// a level of ten million that would otherwise land on whichever request arrived first.
+    ///
+    /// **Errors are impossible to have here and absences are not**: a view the generation does not
     /// carry is simply not warmed, and its first request builds what it needs, which is the same
     /// outcome this method exists to avoid but not a wrong one.
-    fn warm_artifact_projections(&self) {
+    fn warm_artifact_caches(&self) {
         let generation = self.generation.load_full();
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
             store
@@ -8391,28 +10146,77 @@ impl Executor {
             return;
         }
         let started = std::time::Instant::now();
-        let store_version = self.live.with_artifacts(|store| store.version());
-        let mut built = 0usize;
+        let before_projections = self.artifact_projections.builds();
+        let before_lineages = self.lineages.builds();
         for partition in generation.bundle.partitions.values() {
-            for (slice, slice_data) in &partition.slices {
+            for (view, view_data) in &partition.views {
                 for (layer, level) in &levels {
+                    // The layout the fold has just recorded, so the warm builds the form the next
+                    // request will ask for rather than one it would immediately replace.
+                    let layout = self
+                        .live
+                        .registered_layer(layer)
+                        .map(|registered| registered.layout_of(*level))
+                        .unwrap_or_default();
+                    // ⊘ **A predicate level is not warmed here**, and skipping it is the honest
+                    // answer rather than a gap: its membership is evaluated against the geometry,
+                    // so a form built now is filed under this fold's `segments_version` and the
+                    // first flush after it rebuilds anyway. The pieces a rule needs — the column's
+                    // value layers, the view's quantisation, the segment list — are the request
+                    // path's, and reaching for them here would be a second place the membership is
+                    // assembled. What such a level pays instead is one derivation on the first
+                    // request after the fold, which is what every level paid before this warm
+                    // existed.
+                    let predicate_backed =
+                        self.live.registered_layer(layer).is_some_and(|registered| {
+                            !matches!(
+                                registered.declaration.membership,
+                                tessera_types::layer::MembershipSource::Enumerated
+                            )
+                        });
+                    if predicate_backed {
+                        continue;
+                    }
                     self.live.with_artifacts(|store| {
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
-                            slice,
+                            view,
                             layer,
                             *level,
                             store,
-                            store_version,
-                            &slice_data.row_space,
+                            &view_data.row_space,
+                            Some(&generation.partition_source()),
+                            layout,
+                            None,
+                            generation.segments_version,
                         )
                     });
-                    built += 1;
                 }
             }
         }
+        for (layer, level) in &levels {
+            self.live.with_artifacts(|store| {
+                self.lineages.get_or_build(
+                    layer,
+                    *level,
+                    store.level_version(layer, *level),
+                    || {
+                        crate::cut::Lineage::new(store.level(layer, *level).map(
+                            |(ordinal, record)| {
+                                let within = record
+                                    .parent
+                                    .filter(|parent| parent.level == *level)
+                                    .map(|parent| parent.ordinal);
+                                (ordinal, within)
+                            },
+                        ))
+                    },
+                )
+            });
+        }
         tracing::info!(
-            projections = built,
+            projections = self.artifact_projections.builds() - before_projections,
+            lineages = self.lineages.builds() - before_lineages,
             elapsed_ms = started.elapsed().as_millis() as u64,
             "the fold's artifact pass rebuilt every level's row form"
         );
@@ -8446,7 +10250,10 @@ impl Executor {
             return Ok(Vec::new());
         }
 
-        let dir = prefix_dir.join("partitions").join(partition).join("members");
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("members");
         std::fs::create_dir_all(&dir).map_err(|source| tessera_store::StoreError::Io {
             path: dir.clone(),
             source,
@@ -8584,11 +10391,11 @@ impl Executor {
                 presence: record_dir.join(&e.presence),
             })
             .collect();
-        let filter_columns =
-            match live
-                .filter_columns
-                .with_extents(&extents, &record_paths, &text_paths)
-            {
+        let filter_columns = match live.filter_columns.with_extents(
+            &extents,
+            &record_paths,
+            &text_paths,
+        ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -8679,7 +10486,11 @@ impl Executor {
             &self.prefix_dir(&live),
             &completed.partition,
             manifest_n,
-            &manifest,
+            &mut manifest,
+            &self.containment_extents,
+            &self.tile_index_extents,
+            &self.row_column_extents,
+            &[],
         ) {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
             tracing::error!(
@@ -8692,7 +10503,7 @@ impl Executor {
 
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
-            &completed.slice,
+            &completed.view,
             completed.segment,
             completed.extent,
             tessera_store::read::PublishedManifest {
@@ -9370,7 +11181,7 @@ mod retry_after_tests {
 }
 
 /// The two rules the promotion design added to publication (`2026-08-03-descriptor-promotion-design`
-/// §2), tested where they are decided rather than through a second slice no build produces.
+/// §2), tested where they are decided rather than through a second view no build produces.
 #[cfg(test)]
 mod dispatch_rules_tests {
     use super::*;
@@ -9379,7 +11190,7 @@ mod dispatch_rules_tests {
     fn plan_from(oldest: u64) -> crate::flush::FlushPlan {
         let item = BufferedItem {
             terms: Vec::new(),
-            slice: "s".to_string(),
+            view: "s".to_string(),
             x: 0.5,
             y: 0.5,
             scalars: Vec::new(),
@@ -9392,8 +11203,8 @@ mod dispatch_rules_tests {
     }
 
     /// **Obligation 9.** Every context a dispatch builds shares `next_n`, so only one can commit
-    /// its side-manifest. The one sent is the slice whose oldest waiting row is oldest — not the
-    /// first by name, which is what `slices_of`'s lexicographic sort would give and which would
+    /// its side-manifest. The one sent is the view whose oldest waiting row is oldest — not the
+    /// first by name, which is what `views_of`'s lexicographic sort would give and which would
     /// let a continuously-fed `s0` deny `s1` a flush for ever.
     ///
     /// **Mutation:** replace this with `plans.into_iter().next()` and the assertion below fails —
@@ -9405,8 +11216,8 @@ mod dispatch_rules_tests {
             ("s1".to_string(), plan_from(100)),
             ("s2".to_string(), plan_from(500)),
         ];
-        let (slice, plan) = plan_to_dispatch(plans).expect("one of three");
-        assert_eq!(slice, "s1", "oldest row wins, not lowest slice id");
+        let (view, plan) = plan_to_dispatch(plans).expect("one of three");
+        assert_eq!(view, "s1", "oldest row wins, not lowest view id");
         assert_eq!(plan.items[0].0.raw(), 100);
     }
 

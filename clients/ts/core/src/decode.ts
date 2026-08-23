@@ -272,7 +272,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   if (parts.artifacts) {
     const t = tableFromIPC(parts.artifacts);
     const layer = t.getChild('layer')!;
-    const stableKey = t.getChild('stable_key')!;
+    const key = t.getChild('key')!;
     const tesseraId = u64Column(t, 'tessera_id');
     const maskedCount = u64Column(t, 'masked_count');
     // Derived geometry, in the same grid units as `codes` — no extent needed to draw it. A null is
@@ -286,10 +286,15 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     const boxMaxY = t.getChild('box_max_y')!;
     const hullX = t.getChild('hull_x')!;
     const hullY = t.getChild('hull_y')!;
-    // One variation, entire, positional to the layer's declared kinds. Empty means the layer
+    // One content, entire, positional to the layer's declared kinds. Empty means the layer
     // declares no supplied content — never that content was withheld, because an artifact whose
     // content this principal may not read does not appear at all.
     const content = t.getChild('content')!;
+    // **Present only where the parent is also in this response.** A null is a root *or* a parent
+    // this principal was not served, and the two are deliberately one value: naming the second
+    // would disclose that a coarser artifact exists which they may not see. Read it as "no parent
+    // here", never as "no parent".
+    const parentId = t.getChild('parent_id');
     for (let i = 0; i < tesseraId.length; i++) {
       const cx = centroidX.get(i);
       const bx = boxMinX.get(i);
@@ -304,7 +309,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
         layer: String(layer.get(i)),
         tesseraId: tesseraId[i]!,
         // A publisher need not supply a key.
-        stableKey: stableKey.get(i) === null ? null : String(stableKey.get(i)),
+        key: key.get(i) === null ? null : String(key.get(i)),
         maskedCount: maskedCount[i]!,
         centroid: cx === null ? null : [Number(cx), Number(centroidY.get(i))],
         box:
@@ -312,7 +317,10 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
             ? null
             : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
         hull,
-        content: Array.from(content.get(i) ?? [], (v) => String(v))
+        content: Array.from(content.get(i) ?? [], (v) => String(v)),
+        // Absent on a server older than the field, which reads the same as a root — the
+        // fail-closed direction, and the only one available without inventing a parent.
+        parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i))
       });
     }
   }

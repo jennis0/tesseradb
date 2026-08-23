@@ -132,8 +132,10 @@ def _served_entities(raw: bytes, entity_of_fx: dict[int, int]) -> set[int]:
 
 
 @pytest.fixture(scope="module")
-def entity_of_fx() -> dict[int, int]:
-    return {key: e for e, key in enumerate(cat.fx_keys())}
+def entity_of_fx(catalogue_bundle) -> dict[int, int]:
+    """`fx_key -> entity id`. It used to be `enumerate(fx_keys())`, which is `fx_key -> **source**
+    id` — the same number only while the build's tiebreak was the source id (decision 0073)."""
+    return cat.entity_of_fx_key(catalogue_bundle)
 
 
 @pytest.fixture(scope="module")
@@ -154,7 +156,7 @@ def unfiltered(catalogue_server, cases):
         if case_name not in baseline:
             case = cases[case_name]
             token = catalogue_server.authorise(list(case.grants))["token"]
-            raw = catalogue_server.viewport(token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+            raw = catalogue_server.viewport(token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
             baseline[case_name] = _tiles_by_id(decode_viewport(raw)[0])
         return baseline[case_name]
 
@@ -254,7 +256,7 @@ def test_meta_publishes_the_keyword_family_and_never_a_range(catalogue_server, c
     session = catalogue_server.authorise(list(case.grants))["token"]
     resp = catalogue_server.viewport_request(
         session,
-        cat.SLICE_ID,
+        cat.VIEW_ID,
         ZOOM,
         cat.FULL_VIEWPORT,
         filters={"submitter": {"range": {"gte": 0, "lte": 10}}},
@@ -288,7 +290,7 @@ def test_every_operator_agrees_with_the_oracle_over_the_base_build(
     case = cases[case_name]
     token = catalogue_server.authorise(list(case.grants))["token"]
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
     )
 
     m_auth = set(case.entities)
@@ -330,11 +332,11 @@ def test_a_keyword_leaf_composes_with_the_other_families(
     assert m_sel < m_auth, "the composed expression selects everything — composition is untested"
 
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=COMPOSED_EXPR
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=COMPOSED_EXPR
     )
     assert _served_entities(raw, entity_of_fx) == m_sel
 
-    expected = vp.counts(catalogue_bundle, m_sel, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT)
+    expected = vp.counts(catalogue_bundle, m_sel, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT)
     tiles = _tiles_by_id(decode_viewport(raw)[0])
     assert {t: m for t, (_v, m, _s) in tiles.items() if m} == expected
 
@@ -345,7 +347,7 @@ def test_a_keyword_leaf_composes_with_the_other_families(
 
 
 def test_the_dictionary_s_first_and_last_values_are_served_exactly(
-    catalogue_server, catalogue_filter_columns, cases, entity_of_fx
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, cases, entity_of_fx
 ):
     """**The ordinal boundaries** (records §10). The base build's dictionary is sorted, so the
     fixture's two anchors are its ordinal 0 and its ordinal `len - 1`.
@@ -364,15 +366,17 @@ def test_the_dictionary_s_first_and_last_values_are_served_exactly(
     token = catalogue_server.authorise(list(case.grants))["token"]
     m_auth = set(case.entities)
 
-    for label, entity, value in [
+    # The anchors are planted on **source** ids; every set below is in entity space.
+    for label, source, value in [
         ("first", cat.SUBMITTER_FIRST_ID, cat.SUBMITTER_FIRST),
         ("last", cat.SUBMITTER_LAST_ID, cat.SUBMITTER_LAST),
     ]:
+        entity = catalogue_bundle.entity_of_source(source)
         assert entity in m_auth, f"{label}: this principal cannot see the anchor at all"
         for operator in ("eq", "prefix"):
             expr = {"submitter": {operator: value}}
             raw = catalogue_server.viewport(
-                token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+                token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
             )
             served = _served_entities(raw, entity_of_fx)
             assert served == filt.evaluate(expr, catalogue_filter_columns, m_auth)
@@ -383,7 +387,7 @@ def test_the_dictionary_s_first_and_last_values_are_served_exactly(
 
 
 def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
-    catalogue_server, catalogue_filter_columns, cases, entity_of_fx, unfiltered
+    catalogue_bundle, catalogue_server, catalogue_filter_columns, cases, entity_of_fx, unfiltered
 ):
     """**The sentinel** (records §4.3, §10). A needle absent from every layer's dictionary is an
     ordinal no slot holds, and the scan runs anyway.
@@ -412,7 +416,7 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
         ("contains", {"submitter": {"contains": ABSENT_NEEDLE}}),
     ]:
         resp = catalogue_server.viewport_request(
-            token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
+            token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=expr
         )
         assert resp.status_code == 200, (
             f"{label}: {resp.status_code} — a needle no dictionary holds is answered, never "
@@ -429,9 +433,10 @@ def test_a_needle_no_dictionary_holds_still_answers_and_answers_empty(
 
     control = {"submitter": {"eq": SINGLE_CARRIER}}
     raw = catalogue_server.viewport(
-        token, cat.SLICE_ID, ZOOM, cat.FULL_VIEWPORT, filters=control
+        token, cat.VIEW_ID, ZOOM, cat.FULL_VIEWPORT, filters=control
     )
-    assert _served_entities(raw, entity_of_fx) == {SINGLE_CARRIER_ID}, (
+    carrier = catalogue_bundle.entity_of_source(SINGLE_CARRIER_ID)
+    assert _served_entities(raw, entity_of_fx) == {carrier}, (
         "the control failed — a value one visible entity holds was not served, so the four empty "
         "answers above may be a column that matches nothing at all"
     )

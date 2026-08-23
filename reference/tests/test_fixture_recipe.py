@@ -47,8 +47,8 @@ def _stamped(bundle_root: Path, recipe: dict) -> None:
         ("ONE_TILE_TX", 3),
         ("ONE_TILE_TY", 3),
         ("ONE_TILE_DEPTH", 5),
-        ("EXTENT_ARG", "0,1024,0,1024"),
-        ("SLICE_ID", "s9"),
+        ("EXTENT", (0.0, 1024.0, 0.0, 1024.0)),
+        ("VIEW_ID", "s9"),
         ("CATALOGUE_ID_KEY_HEX", "0102030405060708090a0b0c0d0e0f10"),
         ("N_ITEMS", 1234),
         ("_LAYOUT", [("only", 10)]),
@@ -170,8 +170,9 @@ def test_regenerating_an_input_in_place_changes_the_recipe(work_dir: Path):
                 pairs=str(pairs),
                 limit=250_000,
                 extent="0,65536,0,65536",
-                slice_id="s0",
-            )
+                view_id="s0",
+            ),
+            declaration=harness._fixture_config_text("s0", "0,65536,0,65536"),
         )
 
     before = recipe_now()
@@ -201,30 +202,36 @@ def test_the_250k_fixture_recipe_covers_every_build_argument(work_dir: Path):
     to address an item *by*). Under the old predicate, a bundle built before either flag existed
     was reused and the failure surfaced as a `KeyError` deep inside the oracle.
     """
-    argv = harness._fixture_build_argv(
-        work_dir / "bundle",
-        points="p.parquet",
-        pairs="q.parquet",
-        limit=250_000,
-        extent="0,65536,0,65536",
-        slice_id="s0",
-    )
-    recipe = harness.fixture_recipe(argv)["build_argv"]
+    def recipe_for(*, limit: int | None, extent: str = "0,65536,0,65536") -> dict:
+        return harness.fixture_recipe(
+            harness._fixture_build_argv(
+                work_dir / "bundle",
+                points="p.parquet",
+                pairs="q.parquet",
+                limit=limit,
+                extent=extent,
+                view_id="s0",
+            ),
+            declaration=harness._fixture_config_text("s0", extent),
+        )
+
+    full = recipe_for(limit=250_000)
+    recipe = full["build_argv"]
 
     assert "--out" not in recipe and str(harness.CLI_BIN) not in recipe
+    assert "--deployment" not in recipe, "the deployment file's path differs per worktree"
     for expected in ("p.parquet", "q.parquet", "250000", "--mint-id-key", "--mint-external-ids"):
         assert expected in recipe, f"{expected} is not in the recipe, so a change to it is silent"
 
-    without_limit = harness.fixture_recipe(
-        harness._fixture_build_argv(
-            work_dir / "bundle",
-            points="p.parquet",
-            pairs="q.parquet",
-            limit=None,
-            extent="0,65536,0,65536",
-            slice_id="s0",
-        )
+    # **The extent is in the declaration now, not the invocation**, so the recipe has to stamp the
+    # declaration: a bundle quantised against a different frame has every stored cell wrong and is
+    # otherwise indistinguishable from the right one.
+    assert recipe_for(limit=250_000, extent="0,1024,0,1024") != full, (
+        "a changed extent left the recipe unchanged, so a bundle quantised against another frame "
+        "would be reused and reported as a match"
     )
+
+    without_limit = recipe_for(limit=None)
     assert without_limit["build_argv"] != recipe, (
         "an unlimited build and a 250k build share a recipe, so the 10^9 fixture and the small "
         "one would be reused for each other"

@@ -71,7 +71,7 @@ use crate::Generation;
 /// **Three answers rather than two, because a prefix change is neither "skip" nor "derive".** A
 /// compaction publishes into a new prefix and rewrites `permutation.bin`, so every row-space
 /// artefact in the process is invalid — but the *session* is not, and its entry still names the
-/// grant, the auth hash and the slice a rebuild needs. Refusing to refresh it is the failure
+/// grant, the auth hash and the view a rebuild needs. Refusing to refresh it is the failure
 /// compaction §6.2 records: the pass produces nothing, clears `refresh_in_flight`, and every
 /// resident session takes an inline 1 277 ms rebuild instead of the bounded 429 the ladder's rung 3
 /// exists to give — the stampede decision 0043 forbids, arriving through the mechanism written to
@@ -127,11 +127,11 @@ pub(crate) fn refresh_resident(
         if carry == Carry::Skip {
             continue;
         }
-        let Some(slice_data) = generation
+        let Some(view_data) = generation
             .bundle
             .partitions
             .values()
-            .find_map(|partition| partition.slices.get(&key.slice))
+            .find_map(|partition| partition.views.get(&key.view))
         else {
             continue;
         };
@@ -170,7 +170,7 @@ pub(crate) fn refresh_resident(
             prefix: generation.prefix.clone(),
             ..key.clone()
         };
-        let space = &slice_data.row_space;
+        let space = &view_data.row_space;
         let previous_projection = Arc::clone(&previous.projection);
         // **Does not wait, and this is the one caller for which that is not a policy choice**
         // (decision 0058 gives the request path the waiting entry point). This pass runs on a
@@ -322,6 +322,7 @@ mod tests {
     use tessera_lifecycle::{IngestBuffer, Overlay};
     use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
     use tessera_store::Bundle;
+    use tessera_plugin::Plugin;
 
     use super::*;
 
@@ -336,9 +337,9 @@ mod tests {
     /// real one would make this a test about the fixture. Same shape as `geometry::tests`'.
     fn generation_at(prefix: &str, segments_version: u64) -> Generation {
         let manifest = Manifest {
-            bundle_format: 2,
+            bundle_format: 3,
             created_at: "2026-07-31T00:00:00Z".to_string(),
-            data_plugin_hash: "builtin:passthrough:1".to_string(),
+            data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
             declared_bounds: serde_json::json!({}),
             declared_scalars: vec![],
             vocabularies: vec![],
@@ -357,7 +358,7 @@ mod tests {
                 shard_id: 0,
                 idset: 1,
             },
-            slices: vec![],
+            views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
             files: BTreeMap::new(),
@@ -389,7 +390,7 @@ mod tests {
     fn key_at(prefix: &str, segments_version: u64) -> RowProjectionKey {
         RowProjectionKey {
             token_id: 1,
-            slice: "s0".to_string(),
+            view: "s0".to_string(),
             segments_version,
             prefix: prefix.to_string(),
         }

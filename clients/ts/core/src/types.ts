@@ -31,7 +31,7 @@ export type ArrowType =
  */
 export type CategoryDescriptor = {
   /**
-   * The value set this column's codes index. Two columns may share one — keys, codes and labels
+   * The value set this column's codes index. Two columns may share one — keys, codes and titles
    * are shared with it, so a resolved palette may be reused across them.
    *
    * **Visibility may not be reused across them.** Member sets are per column, so a value visible
@@ -41,17 +41,18 @@ export type CategoryDescriptor = {
   /** Whether the value set is closed at build (`declared`) or grows from the corpus. */
   kind: 'declared' | 'discovered';
   /**
-   * Whether the *existence* of a value is sensitive. `per_viewer` means `/v1/categories` filters
-   * the set per principal — and today refuses it, the predicate being unbuilt.
+   * Whether the *existence* of a value is sensitive. `derived` means `/v1/categories` filters the
+   * set per principal — the value is offered only where the viewer can already see a point
+   * carrying it.
    */
-  listing: 'per_viewer' | 'public';
+  visibility: 'derived' | 'public';
 };
 
 /** One declared per-item column. `category` is present only for a category column. */
 export type DeclaredScalar = {
   /**
    * The column's name, which is also its **identifier**: it addresses the column in
-   * `/v1/categories/{column}`. Unique bundle-wide, and not slice-qualified.
+   * `/v1/categories/{column}`. Unique bundle-wide, and not view-qualified.
    */
   name: string;
   arrowType: ArrowType;
@@ -132,8 +133,8 @@ export type Layer = {
   /** The layer's identity, and what a viewport request names to select it. */
   name: string;
   title: string;
-  /** Which slices the layer appears in. A layer is not answerable in a slice it does not name. */
-  slices: string[];
+  /** Which views the layer appears in. A layer is not answerable in a view it does not name. */
+  views: string[];
   membership: 'enumerated' | 'spatial' | 'attribute';
   /**
    * Where the layer's lineage lives, and the **default** cut depth — not its only setting, since a
@@ -157,7 +158,7 @@ export type Layer = {
 export type Meta = {
   apiVersion: number;
   idset: number;
-  slices: {id: string; displayName: string}[];
+  views: {id: string; displayName: string}[];
   quantisation: Quantisation;
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
@@ -195,14 +196,14 @@ export type Meta = {
 /** One category value: what a code stands for, and how to show it. */
 export type CategoryValue = {
   code: number;
-  /** The stable key the code is bound to. The display fallback when there is no label. */
+  /** The stable key the code is bound to. The display fallback when there is no title. */
   key: string;
   /** Presentation, amendable without a build. Absent for every value a discovered vocabulary mints. */
-  label: string | null;
+  title: string | null;
 };
 
 export type ViewportRequest = {
-  slice: string;
+  view: string;
   zoom: number;
   /**
    * The region to answer for. Send exactly one of this and {@link ViewportRequest.tiles} — the
@@ -235,7 +236,7 @@ export type ViewportRequest = {
    *
    * **A filter narrows what is served without changing the response's identity key**, which is the
    * one thing a caller holding a replica has to know: the key partitions by principal, credential,
-   * mask and slice, so bands held under one filter are *renderable* under another and will be
+   * mask and view, so bands held under one filter are *renderable* under another and will be
    * served as if they belonged. A client that changes this must drop what it holds itself — the
    * server cannot tell it to.
    */
@@ -294,7 +295,7 @@ export type Artifact = {
   /** Wire identity, u64 — never narrowed to a number. Stable across principals and sessions. */
   tesseraId: bigint;
   /** The publisher's own key, when they supplied one. */
-  stableKey: string | null;
+  key: string | null;
   maskedCount: bigint;
   /**
    * Derived geometry, recomputed **for this principal** from the members they can see — in the
@@ -314,7 +315,8 @@ export type Artifact = {
   hull: [number, number][] | null;
   /**
    * The publisher's supplied content — label text, an authored name, a polygon — as **one
-   * variation, entire**, positional to the layer's `suppliedContent` kinds from `/v1/meta`.
+   * entry of the artifact's ranked contents, entire**, positional to the layer's `suppliedContent`
+   * kinds from `/v1/meta`.
    *
    * Empty means the layer declares none. It never means *withheld*: a viewer who may not read an
    * artifact's content is not served the artifact, so there is no state to render as "label
@@ -323,6 +325,21 @@ export type Artifact = {
    * different text against the same `tesseraId`.
    */
   content: string[];
+  /**
+   * This artifact's parent, **and only ever one that is in the same response**.
+   *
+   * The structure to nest what you draw, or to filter to one subtree while still drawing the rest
+   * of the map — which is what a levelled layer's edges are for, since its resolution comes from
+   * choosing a level rather than from coarsening along them.
+   *
+   * **`null` means "no parent in this response", not "no parent".** It covers a root and a parent
+   * this principal was not served — below its own criterion for them, suppressed, or dropped by
+   * the layer's frontier — and the two are one value deliberately: distinguishing them would
+   * disclose that a coarser artifact exists which they may not see. Build the tree from what you
+   * were given and treat unlinked artifacts as roots of it; do not model a "hidden parent" state,
+   * because there is nothing to fill it from.
+   */
+  parentId: bigint | null;
 };
 
 export type ViewportResult = {
@@ -418,7 +435,7 @@ export type ViewportResponse = {
   /**
    * Whether a held band may be **rendered at all** — the replica's partition key.
    *
-   * Over the idset, the credential, the mask fragment's identity and the slice. A cache keyed more
+   * Over the idset, the credential, the mask fragment's identity and the view. A cache keyed more
    * loosely than this serves one principal's authorised data to another, which is a disclosure and
    * not a staleness bug (decision 0029), so a client drops everything held when it changes.
    */
@@ -468,4 +485,4 @@ export type ItemDetail = {fields: Record<string, unknown>; externalId: string | 
  * declared size**: what a drill-down adds over the wire's own row is a name for the layer, not a
  * way behind the count.
  */
-export type ArtifactDetail = {layer: string; stableKey: string | null; maskedCount: bigint};
+export type ArtifactDetail = {layer: string; key: string | null; maskedCount: bigint};

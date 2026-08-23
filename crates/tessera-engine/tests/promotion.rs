@@ -40,6 +40,9 @@ impl Plugin for CappedTerms {
     fn terms_of_label(&self, access: &[u8]) -> Result<Vec<Descriptor>, PluginError> {
         Passthrough::new().terms_of_label(access)
     }
+    fn terms_of_labels(&self, labels: &[Descriptor]) -> Result<Vec<Descriptor>, PluginError> {
+        Passthrough::new().terms_of_labels(labels)
+    }
     fn terms_of_auth(&self, auth_data: &[u8]) -> Result<AuthTerms, PluginError> {
         Passthrough::new().terms_of_auth(auth_data)
     }
@@ -111,7 +114,7 @@ fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> Ent
     let descriptors: Vec<Vec<u8>> = descriptors.iter().map(|d| d.to_vec()).collect();
     let row = UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
-        slice: "s0".to_string(),
+        view: "s0".to_string(),
         descriptors: descriptors.clone(),
         x: 5.0,
         y: 5.0,
@@ -133,7 +136,13 @@ fn flushes_reach(engine: &Engine, n: u64) {
 /// positions in the concatenation of the extents in listed order, so a promotion appends after
 /// this and never disturbs it — which is exactly what these tests are checking.
 fn base_extent() -> Vec<Vec<u8>> {
-    vec![b"0".to_vec(), b"1".to_vec()]
+    // `public` first: every build reserves it at term 0 (`per-point-attributes.md` §3.8), so it is
+    // the build extent's first record whether or not any item carries it.
+    vec![
+        tessera_authz::PUBLIC_LABEL.to_vec(),
+        b"0".to_vec(),
+        b"1".to_vec(),
+    ]
 }
 
 /// The descriptors a partition's dict extents carry, in listed order — read off disk, so this
@@ -176,9 +185,11 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
 
     let credential = br#"{"terms": ["dept:secret"]}"#.to_vec();
     let before = engine.authorise(&credential).expect("authorises");
-    assert!(
-        before.satisfied.is_empty(),
-        "the descriptor does not exist yet, so this session satisfies nothing"
+    assert_eq!(
+        before.satisfied,
+        [tessera_authz::PUBLIC_TERM].into_iter().collect(),
+        "the descriptor does not exist yet, so this session satisfies nothing but the reserved \
+         `public` term every session holds"
     );
 
     let id = ingest_with(&engine, "ext-1", &[NOVEL]);
@@ -207,7 +218,8 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
 
     // And it means something: the item is visible through the promoted term.
     let after = reopened.authorise(&credential).expect("authorises");
-    assert_eq!(after.satisfied.len(), 1, "the descriptor now resolves");
+    // Two: the promoted descriptor, and the reserved `public` term every session holds.
+    assert_eq!(after.satisfied.len(), 2, "the descriptor now resolves");
     let tessera_id = reopened.tessera_id_of(id).expect("identity is computable");
     assert!(
         reopened.item(&after, tessera_id, None).unwrap().is_some(),
@@ -215,8 +227,9 @@ fn a_novel_descriptor_becomes_a_durable_ordinal_and_the_item_becomes_visible() {
     );
 
     // §3.2's first consequence, preserved: the older session never gains it.
-    assert!(
-        before.satisfied.is_empty(),
+    assert_eq!(
+        before.satisfied,
+        [tessera_authz::PUBLIC_TERM].into_iter().collect(),
         "`satisfied` is fixed at authorise; a promotion never reaches back into a live session"
     );
 }
@@ -280,7 +293,9 @@ fn an_ingest_and_a_tick_flip_the_staleness_hint() {
     let session = engine
         .authorise(br#"{"terms": ["0", "dept:secret"]}"#)
         .expect("authorises");
-    assert_eq!(session.satisfied.len(), 1, "one resolved, one did not");
+    // Two: the credential's own `0`, and the reserved `public` term the engine adds. `dept:secret`
+    // is the one that did not resolve.
+    assert_eq!(session.satisfied.len(), 2, "one resolved, one did not");
     assert!(!session.is_stale(&engine.generation()));
 
     ingest_with(&engine, "ext-1", &[NOVEL]);

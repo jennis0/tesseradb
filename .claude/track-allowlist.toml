@@ -1,12 +1,8 @@
-# Epic 1 file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
+# Artifact scale campaign file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
 #
-# Rewritten 2026-08-12 for records-and-search epic 1 (#84), replacing the stage-2.1 map whose
-# campaign closed. Transcribed from the epic-1 brief's "Parallel-work seams"
-# (.superpowers/sdd/2026-08-12-records-and-search/brief-1.md), with one controller correction
-# recorded here: `crates/tessera-build/src/{lib.rs,pipeline.rs}` are `[shared]` rather than one
-# track's, because track A's mechanical rename of the compiled placement field crosses the same
-# files track B's blob build stage extends — the stage-2.1 `session.rs` precedent: an expected
-# textual conflict, reviewed at integration, never a licence to edit the other track's logic.
+# Rewritten 2026-08-21 for the artifact scale campaign (controller), replacing the records-and-
+# search epic map whose campaign closed. Tracks branch from `artifacts/scale` (5948b83) and merge
+# back into it; the campaign's plan is docs/evidence/memos/2026-08-21-artifact-scale-plan.md.
 #
 # The rule this file gives teeth to: ownership is an allowlist, not an intention. A track that
 # needs a file outside its list **stops and reports** — the controller reassigns or sequences.
@@ -15,271 +11,122 @@
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Wave 1 tracks: a (declaration surface + used_for migration, T4), b (record blob core, T6).
-# Wave 2 tracks: b2 (blob lifecycle, T7 + T8's engine half), c (render-column route, T9/T10 +
-# T8's serve half), d (conformance + oracle, T11). Waves are sequential; a wave-2 track listing
-# a file a wave-1 track owned is not an overlap, because wave 2 branches from wave 1's merged
-# seam.
+# Wave 1 tracks: interleave (the write-path interleaving battery — one NEW test file, the
+# deltest precedent: a new file cannot conflict with anything), cadence (the two cache-cadence
+# defects, scale memo §8.1/§8.2), generator (the seeded generator's artifact arm reaches disk).
 
-# FROZEN (controller, 2026-08-12; narrowed 2026-08-13). The seams are spent; the authz, wire and
-# plugin crates are outside this work; decisions and the normative designs change only through the
-# owner; scripts are the checks themselves.
-#
-# `crates/tessera-spatial/*` came off the freeze when the keyword family needed a `ScalarType`
-# variant: the freeze was scoped to epic 1, where the spatial crate was genuinely outside the
-# work, and a stale freeze is worse than none — it refuses a legitimate change and teaches the
-# next reader that the list is noise rather than a decision.
+# FROZEN (controller, 2026-08-21). The authz, wire and plugin crates are outside this campaign;
+# decisions and the normative designs change only through the owner; scripts are the checks
+# themselves. `manifest.rs` stays frozen this wave — the route-recording work that will need it
+# is not yet dispatched, and unfreezing happens with that dispatch, recorded here.
+# `crates/tessera-store/src/manifest.rs` came OFF the freeze 2026-08-22 (controller): the serving
+# track's durable containment coordinate is a manifest field, and the freeze's own precedent —
+# tessera-spatial coming off when the keyword family needed it — says a stale freeze is worse than
+# none. Note `check-track-allowlist.sh --selftest` predates this campaign's tracks and fails on 20
+# of 38 cases independently of this change; the script is itself frozen, so its selftest is stale
+# by design until the owner sweeps it.
 [frozen]
 paths = [
-  "crates/tessera-store/src/manifest.rs",
-  "crates/tessera-store/src/render_presence.rs",
-  "crates/tessera-filter/src/dict.rs",
   "crates/tessera-authz/*",
   "crates/tessera-wire/*",
   "crates/tessera-plugin/*",
   "docs/decisions/*",
   "docs/design/architecture.md",
   "docs/design/write-path.md",
-  "docs/design/records-and-search.md",
   "scripts/*",
 ]
 
 # Files more than one track legitimately touches; expected to conflict textually at merge and
-# reviewed at integration. `tessera-build/src/{lib.rs,pipeline.rs}`: track A's edits are the
-# mechanical placement rename and `used_for` doc sweeps ONLY; track B's are the blob build
-# stage. `tessera-types`: controller-approved edits in practice — say so in the report.
+# reviewed at integration. `tessera-types`: controller-approved edits in practice — say so in
+# the report.
 [shared]
 paths = [
   "Cargo.toml",
   "Cargo.lock",
   "crates/tessera-types/*",
-  "crates/tessera-build/src/lib.rs",
-  "crates/tessera-build/src/pipeline.rs",
 ]
 
-# Wave 1 — the declaration surface and the used_for migration sweep (T4).
-[track.a]
+# Wave 1 — the write-path interleaving battery. A NEW file only, deliberately (the deltest
+# precedent): the cadence track owns the engine sources and is running, and a new file cannot
+# conflict with its edits.
+[track.interleave]
 paths = [
-  "crates/tessera-build/src/schema.rs",
-  "crates/tessera-build/src/observer.rs",
-  "crates/tessera-build/tests/*",
+  "crates/tessera-engine/tests/artifact_interleavings.rs",
+]
+
+# Wave 1 — the cache-cadence defects (scale memo §8.1: the global artifact store version; §8.2:
+# the lineage rebuilt per request). Owns the serving/caching seam and the artifact test files
+# that pin it. Does NOT own the write path's commit-window logic — write.rs is here for the
+# fold's warm/invalidation sites only; the interleaving battery's territory is behavioural, not
+# textual, so the boundary is reviewed at integration.
+[track.cadence]
+paths = [
+  "crates/tessera-engine/src/artifacts.rs",
   "crates/tessera-engine/src/session.rs",
   "crates/tessera-engine/src/write.rs",
-  "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/src/categories.rs",
-  "crates/tessera-engine/tests/*",
-  "crates/tessera-server/src/control.rs",
-  "crates/tessera-server/tests/*",
-  "crates/tessera-cli/src/main.rs",
-  "crates/tessera-bench/src/arms/*",
-  "reference/oracle/catalogue.py",
-]
-
-# Wave 1 — the record blob: format, writer, reader, build stage (T6).
-[track.b]
-paths = [
-  "crates/tessera-filter/*",
-  "crates/tessera-filter-write/*",
-  "crates/tessera-build/tests/record_blob.rs",
-]
-
-# Wave 2 — blob lifecycle: flush extent, coalesce repack, fold rewrite (T7, T8's engine half).
-# Owns tessera-filter/** in this wave (track b's wave-1 tenure ended at the merge): the record
-# reader, stack and writer evolve with the lifecycle that exercises them.
-[track.b2]
-paths = [
-  "crates/tessera-filter/*",
-  "crates/tessera-engine/src/flush.rs",
-  "crates/tessera-engine/src/write.rs",
-  "crates/tessera-engine/src/coalesce.rs",
-  "crates/tessera-engine/src/compact.rs",
-  "crates/tessera-filter-write/*",
-  "crates/tessera-engine/tests/fold.rs",
-  "crates/tessera-engine/tests/merge.rs",
-  "crates/tessera-engine/tests/attribute_tail.rs",
-  "crates/tessera-engine/tests/coalesce.rs",
-]
-
-# Wave 2 — the render-column route and the widened meta surface (T9, T10, T8's serve half).
-[track.c]
-paths = [
   "crates/tessera-engine/src/viewport.rs",
-  "crates/tessera-engine/src/compose.rs",
-  "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/src/session.rs",
-  "crates/tessera-server/src/viewer.rs",
-  "crates/tessera-engine/tests/filtering.rs",
-  "crates/tessera-server/tests/*",
+  "crates/tessera-engine/src/cut.rs",
+  "crates/tessera-lifecycle/src/*",
+  "crates/tessera-engine/tests/artifact_serving.rs",
+  "crates/tessera-engine/tests/artifact_fold.rs",
+  "crates/tessera-engine/tests/artifact_growth.rs",
+  "crates/tessera-engine/tests/artifact_hierarchy.rs",
+  "crates/tessera-engine/tests/artifact_cache_cadence.rs",
 ]
 
-# Wave 2 — conformance and oracle capability (T11).
-[track.d]
+# Wave 1 — the seeded generator's artifact arm reaches disk: the partition arm, attribute-column
+# and members-file emission, spatial boundary layers, the census verb. Owns the corpus crate and
+# the CLI's corpus verbs; a probe campaign it runs is the record of a measurement, so it owns
+# probes/* for the same reason [track.dict] did in the last campaign.
+[track.generator]
 paths = [
-  "reference/*",
-  "conformance/*",
+  "crates/tessera-corpus/*",
+  "crates/tessera-cli/src/main.rs",
+  "crates/tessera-cli/tests/*",
+  "probes/*",
 ]
 
-# Wave 3 — the epic's tail, dispatched after wave 2 merged (controller, 2026-08-12).
-# `docs` owns the amendment slice records §13 enumerates: the corpus documents that describe the
-# declaration surface and now contradict the landed one. The three normative designs stay frozen
-# above — an amendment to those is the owner's, through the design process, not a track's.
-[track.docs]
-paths = [
-  "docs/design/per-point-attributes.md",
-  "docs/design/filter-index.md",
-  "docs/design/filter-surface.md",
-  "docs/design/contracts.md",
-  "docs/design/README.md",
-  "docs/roadmap.md",
-]
-
-# `bench` owns the measurement arms and the memo they produce. It writes no engine code: a
-# measurement task that edits what it measures has stopped being one.
-[track.bench]
+# Wave 2 — the probe corrections the adversarial review found (controller, 2026-08-21): the
+# masked candidacy test restored to the routes the headline figures come from, the fixture
+# decorrelated, contents ranked, the members rule fixed at 10^9, medians reported, every quoted
+# table recorded. Owns the serving-scale probe campaign's directory, not probes/ wholesale —
+# the generator track owns its own campaign records beside it.
+[track.probe]
 paths = [
   "crates/tessera-bench/*",
-  "docs/evidence/memos/*",
-  "probes/*",
+  "probes/2026-08-20-artifact-serving-scale/*",
 ]
 
-# 0064's render half, server side (#101) — dispatched 2026-08-13. The seam is
-# `crates/tessera-store/src/render_presence.rs`, frozen above once landed.
-# `write` owns the three render paths and the lifecycle that carries the bitmap; `read` owns the
-# scan, the parse refusal it lifts, and the surface that publishes the result.
-[track.write]
+# Wave 3 — the serving-path build (controller, 2026-08-22): the design's structures reach the
+# engine, in the plan's serialised order. `crates/tessera-store/src/manifest.rs` comes OFF the
+# freeze for this track and this track alone: the layout tag on `MembershipExtent` is the review's
+# finding 5 fix, and a stale freeze refusing it would be worse than none. `docs/decisions/*` and
+# the normative designs stay the owner's.
+[track.serving]
 paths = [
-  "crates/tessera-build/src/input.rs",
-  "crates/tessera-build/src/pipeline.rs",
-  "crates/tessera-build/src/lib.rs",
-  "crates/tessera-spatial/*",
-  "crates/tessera-store/src/flush.rs",
-  "crates/tessera-store/src/merge.rs",
-  "crates/tessera-store/src/fold.rs",
-  "crates/tessera-store/src/read.rs",
-  "crates/tessera-engine/src/flush.rs",
-  "crates/tessera-engine/src/merge.rs",
-  "crates/tessera-engine/src/compact.rs",
-  "crates/tessera-engine/tests/merge.rs",
-  "crates/tessera-engine/tests/fold.rs",
-  "crates/tessera-build/tests/*",
-]
-
-[track.read]
-paths = [
-  "crates/tessera-engine/src/viewport.rs",
-  "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/src/compose.rs",
-  "crates/tessera-build/src/schema.rs",
-  "crates/tessera-server/src/viewer.rs",
-  "crates/tessera-engine/tests/filtering.rs",
-  "crates/tessera-server/tests/*",
-]
-
-# Epic 2 (#85), the keyword family — dispatched 2026-08-13. `dict` builds the seam every other
-# track consumes: the front-coded dictionary's format, writer and reader.
-# `probes/*` is here as well as in `[track.bench]`, and the overlap is deliberate: a probe
-# campaign is the record of a measurement, and the track that takes the measurement is the one
-# that must be able to commit it. `[shared]` would be wrong — it would permit every track — and
-# the alternative, a measurement landing through the controller, is how a figure comes to be
-# quoted without its raw output (controller, 2026-08-13, on the dict track's report).
-[track.dict]
-paths = [
-  "crates/tessera-filter/src/dict.rs",
-  "crates/tessera-filter/src/lib.rs",
-  "crates/tessera-filter/tests/*",
-  "probes/*",
-]
-
-# Epic 2's three pairs, dispatched 2026-08-13 against the dictionary seam (#102, landed).
-# `kwbuild` writes the family (parse, base build, flush); `kwread` reads it (resolve, the
-# operators, contains' two routes); `kwlife` transforms it (coalesce's remap, the fold's rebuild).
-# `crates/tessera-filter/src/dict.rs` is frozen above — the seam is spent.
-[track.kwbuild]
-paths = [
-  "crates/tessera-build/src/schema.rs",
-  "crates/tessera-build/src/pipeline.rs",
-  "crates/tessera-build/src/input.rs",
-  "crates/tessera-build/tests/*",
-  "crates/tessera-spatial/src/tiler.rs",
-  "crates/tessera-engine/src/flush.rs",
-  "crates/tessera-filter/src/extent.rs",
-  "crates/tessera-store/src/flush.rs",
-]
-
-[track.kwread]
-paths = [
-  "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/src/viewport.rs",
-  "crates/tessera-engine/tests/filtering.rs",
-  "crates/tessera-server/src/viewer.rs",
-  "crates/tessera-server/src/filter_dto.rs",
-  "crates/tessera-server/tests/*",
-]
-
-[track.kwlife]
-paths = [
-  "crates/tessera-filter-write/*",
-  "crates/tessera-engine/src/coalesce.rs",
-  "crates/tessera-engine/tests/coalesce.rs",
-  "crates/tessera-engine/tests/fold.rs",
-  "crates/tessera-engine/tests/merge.rs",
-]
-
-# Epic 2's tail, dispatched 2026-08-13. `kwsent` owns the work-indistinguishability counter and
-# its test (#109); `kwconf` owns the conformance fixture and catalogue (#110). The `utf8`
-# retirement (#111) is a barrier and the controller's, after both are green.
-[track.kwsent]
-paths = [
-  "crates/tessera-filter/src/values.rs",
-  "crates/tessera-filter/src/lib.rs",
-  "crates/tessera-engine/src/filter.rs",
-  "crates/tessera-engine/tests/filtering.rs",
-]
-
-[track.kwconf]
-paths = [
-  "reference/*",
-  "conformance/*",
-]
-
-# Epic 2's barrier (#111), dispatched 2026-08-13 alongside the fence measurement. Wide by
-# necessity: retiring a declared type touches every layer that named it. Disjoint from
-# `[track.bench]`, which owns the fence and shares no path.
-[track.retire]
-paths = [
-  "crates/tessera-filter/src/*",
-  "crates/tessera-filter/tests/*",
-  "crates/tessera-filter-write/*",
-  "crates/tessera-engine/src/filter.rs",
+  "crates/tessera-engine/src/*",
   "crates/tessera-engine/tests/*",
-  "crates/tessera-build/src/*",
-  "crates/tessera-build/tests/*",
+  "crates/tessera-lifecycle/src/*",
+  "crates/tessera-store/src/membership.rs",
+  "crates/tessera-store/src/manifest.rs",
+  "crates/tessera-store/src/derived.rs",
+  "crates/tessera-store/src/lib.rs",
   "crates/tessera-server/src/*",
   "crates/tessera-server/tests/*",
-  "crates/tessera-spatial/src/tiler.rs",
-  "crates/tessera-store/src/*",
-  "reference/*",
-  "conformance/*",
-  "docs/design/filter-index.md",
-  "docs/design/filter-surface.md",
+  "crates/tessera-build/src/*",
+  "crates/tessera-build/tests/*",
+  "crates/tessera-store/tests/*",
+  "docs/design/configuration.md",
   "docs/design/contracts.md",
-  "docs/design/conformance.md",
-  "docs/design/per-point-attributes.md",
 ]
 
-# The performance-suite design (owner ask, 2026-08-13): what the new surface must measure, at
-# what scales, against which budget. A design task, so it owns its own new document and nothing
-# else — the suite it specifies is built afterwards, by tracks that own code.
-[track.perfdesign]
+# Wave 4 — the Stage 7 validation campaign (controller, 2026-08-22): fixtures materialised, served
+# and measured against the built engine. A measurement track owns its bench arms and its probe
+# record and writes no engine code.
+[track.campaign]
 paths = [
-  "docs/design/performance-suite.md",
-  "docs/design/README.md",
-]
-
-# The all-homes deletion test (owner ask, 2026-08-13). A NEW file only, deliberately: the
-# retirement track owns the existing engine tests and is running, and a new file cannot conflict
-# with its edits.
-[track.deltest]
-paths = [
-  "crates/tessera-engine/tests/deletion_reaches_every_home.rs",
+  "crates/tessera-bench/*",
+  "crates/tessera-corpus/*",
+  "probes/*",
+  "docs/evidence/memos/*",
 ]

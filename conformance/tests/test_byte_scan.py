@@ -252,7 +252,7 @@ from oracle.harness import open_bundle_with_source, spawn_server, stop_server
 from oracle import wire
 from oracle.wire import decode_viewport_with_subcells, split_frames
 
-SLICE = "s0"
+VIEW = "s0"
 GRID_MAX = 65536.0
 ZOOM_RANGE = range(0, 5)  # shallow — see module doc for why this bounds the decimal-scan floor
 K = 20
@@ -421,7 +421,7 @@ def test_the_catalogue_bundles_identity_column_agrees_with_its_key(catalogue_bun
     otherwise have quietly turned a live citation into a reference to a check nobody performs on
     the bundle under test. It runs here instead.
     """
-    catalogue_bundle.verify_identity_cross_check(SLICE)
+    catalogue_bundle.verify_identity_cross_check(VIEW)
 
 
 def _points_stream(tessera_ids: list[int], codes: list[int]) -> bytes:
@@ -600,14 +600,18 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     # spanning more than one Roaring container.
     granted_blocks = ("boundary", "cross_hi", "high_tail")
     granted_descriptors = [catalogue.BLOCKS[n].descriptor.encode("ascii") for n in granted_blocks]
-    granted_terms = {catalogue.BLOCKS[n].term_id for n in granted_blocks}
+    # **The bundle's dictionary ids, not the corpus's own.** `mask_of` below reads the bundle's
+    # `terms/pairs.parquet`, whose `term_id` column is the dictionary's — and `public` is interned
+    # first at term 0, so the corpus's term `g` is the dictionary's `g + 1`. Asking with the wrong
+    # one names entirely different blocks and answers without complaining.
+    granted_terms = catalogue.dict_terms(oracle_bundle, granted_blocks)
 
     auth = server.authorise([d.decode("ascii") for d in granted_descriptors])
     token = auth["token"]
 
     admitted = mask_mod.mask_of(granted_terms, oracle_bundle.pairs_path())
 
-    seg = oracle_bundle.segment(SLICE)
+    seg = oracle_bundle.segment(VIEW)
     all_entities = {int(e) for e in seg.entity_id.tolist()}
     denied = all_entities - admitted
 
@@ -643,7 +647,7 @@ def test_no_entity_id_key_or_misplaced_external_id_crosses_the_wire_or_appears_i
     for zoom in ZOOM_RANGE:
         # Ask for the §3.3 underlay on every request, so the appended third stream is actually
         # produced and swept. Without this the stream never existed during the scan at all.
-        raw = server.viewport(token, SLICE, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
+        raw = server.viewport(token, VIEW, zoom, bbox, k=K, underlay_offset=UNDERLAY_OFFSET)
         all_raw_responses.append(raw)
         # The framed body (contracts §3.2 r26): every frame is tagged and length-prefixed, and
         # `split_frames` REFUSES an unknown kind — that refusal is what replaced the old "nothing

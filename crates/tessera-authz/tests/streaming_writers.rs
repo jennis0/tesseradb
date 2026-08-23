@@ -169,7 +169,7 @@ fn the_bitmap_and_slice_encoders_agree_byte_for_byte() {
 
     for entities in cases {
         let from_slice = encode_posting(0, &entities, THRESHOLD)
-            .expect("the slice encoder accepts sorted input");
+            .expect("the view encoder accepts sorted input");
         let from_bitmap = encode_posting_bitmap(&Bitmap::of(&entities), THRESHOLD)
             .expect("the bitmap encoder accepts any bitmap");
         assert_eq!(

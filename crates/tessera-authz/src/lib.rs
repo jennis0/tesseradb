@@ -5,7 +5,9 @@ mod single_flight;
 pub mod term_sweep;
 pub mod tier;
 
-pub use dict::{coalesce_dict_extents, Dict, DictStreamWriter, DictWriter};
+pub use dict::{
+    coalesce_dict_extents, Dict, DictStreamWriter, DictWriter, PUBLIC_LABEL, PUBLIC_TERM,
+};
 pub use fragment::{
     build_fragment, build_fragment_with_deltas, FragmentCache, FragmentCacheError, FrozenFragment,
 };

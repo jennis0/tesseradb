@@ -524,7 +524,7 @@ def _discard_unflipped_prefixes(bundle_root: Path) -> tuple[str, ...]:
 class SuiteHarness:
     """One suite run's server, session and battery — the mutable context a plan walks.
 
-    The battery principal's grants, the slice and the (full-extent) bbox are the caller's; the
+    The battery principal's grants, the view and the (full-extent) bbox are the caller's; the
     battery itself is established once, immediately after the establishing stage, and never
     changes for the life of the plan — §12.2's rule that there is one definition of what we ask.
     """
@@ -532,7 +532,7 @@ class SuiteHarness:
     bundle_root: Path
     run_dir: Path
     grants: tuple[str, ...]
-    slice_id: str
+    view_id: str
     bbox: tuple[float, float, float, float]
     k: int
     filters: dict | None = None
@@ -807,7 +807,7 @@ class SuiteHarness:
         """
         meta = self.server.meta(self.token)
         raw = self.server.viewport(
-            self.token, self.slice_id, 3, self.bbox, k=self.k, underlay_offset=2
+            self.token, self.view_id, 3, self.bbox, k=self.k, underlay_offset=2
         )
         points = wire.decode_viewport_points(raw)
         self.fx_by_tessera = dict(
@@ -819,7 +819,7 @@ class SuiteHarness:
         self.item_ids = tuple(sorted(self.fx_by_tessera)[:3])
         battery = build_battery(
             meta,
-            slice_id=self.slice_id,
+            view_id=self.view_id,
             item_ids=list(self.item_ids),
             bbox=self.bbox,
             zooms=self.zooms,
@@ -828,7 +828,7 @@ class SuiteHarness:
             filters=self.filters,
         )
         tiles_form = Viewport(
-            self.slice_id, 1, tiles=(0, 1, 2, 3), k=self.k, underlay_offset=self.underlay_offset
+            self.view_id, 1, tiles=(0, 1, 2, 3), k=self.k, underlay_offset=self.underlay_offset
         )
         self.battery = battery + (tiles_form,)
 

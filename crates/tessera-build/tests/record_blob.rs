@@ -19,7 +19,7 @@ use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
-use tessera_build::schema::{Attribute, Schema};
+use tessera_build::config::{Attribute, Schema};
 use tessera_build::{build, BuildArgs};
 use tessera_filter::{Access, RecordBlob, RecordValue};
 use tessera_spatial::tiler::ScalarType;
@@ -129,11 +129,13 @@ fn write_empty_pairs(path: &Path) {
 /// position: note 0, score 1, count 2, flag 3.
 fn blob_schema() -> Schema {
     let neither = |name: &str, ty: ScalarType| Attribute {
+        field: None,
         name: name.to_string(),
+        title: None,
         ty,
         analyser: None,
         vocabulary: None,
-        vocabulary_kind: None,
+        value_set: None,
         index: false,
         render: false,
     };
@@ -143,11 +145,13 @@ fn blob_schema() -> Schema {
             neither("score", ScalarType::F64),
             neither("count", ScalarType::I64),
             Attribute {
+                field: None,
                 name: "flag".to_string(),
+                title: None,
                 ty: ScalarType::I64,
                 analyser: None,
                 vocabulary: None,
-                vocabulary_kind: None,
+                value_set: None,
                 index: false,
                 render: true,
             },
@@ -172,8 +176,10 @@ fn no_blob_schema() -> Schema {
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
+        point_fields: Default::default(),
         points: points.to_path_buf(),
-        pairs: pairs.to_path_buf(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
+        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
         extent: Bounds {
             x_min: 0.0,
@@ -181,15 +187,14 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
             y_min: 0.0,
             y_max: 1000.0,
         },
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,

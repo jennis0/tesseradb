@@ -1,6 +1,11 @@
 import {describe, expect, it} from 'vitest';
 import type {Artifact} from '@tessera/client';
-import {placedArtifacts, type ArtifactPlaces} from '../src/artifacts.js';
+import {
+  placedArtifacts,
+  servedLineage,
+  subtreeOf,
+  type ArtifactPlaces
+} from '../src/artifacts.js';
 
 /**
  * The join between what the service served and where the publisher said it was.
@@ -12,10 +17,10 @@ import {placedArtifacts, type ArtifactPlaces} from '../src/artifacts.js';
  * scaffolding must not be able to cause.
  */
 
-const artifact = (stableKey: string | null, maskedCount: bigint, id = 1n): Artifact => ({
+const artifact = (key: string | null, maskedCount: bigint, id = 1n): Artifact => ({
   layer: 'clusters/x',
   tesseraId: id,
-  stableKey,
+  key,
   maskedCount
 });
 
@@ -28,7 +33,7 @@ const places: ArtifactPlaces = new Map([
 describe('placedArtifacts', () => {
   it('draws only what the response carried, whatever else the sidecar knows about', () => {
     const placed = placedArtifacts([artifact('c-0001', 42n)], places);
-    expect(placed.map((p) => p.artifact.stableKey)).toEqual(['c-0001']);
+    expect(placed.map((p) => p.artifact.key)).toEqual(['c-0001']);
     expect(placed[0]!).toMatchObject({x: 300, y: 400});
   });
 
@@ -45,5 +50,56 @@ describe('placedArtifacts', () => {
       places
     );
     expect(placed.map((p) => p.artifact.maskedCount)).toEqual([5n, 40n, 900n]);
+  });
+});
+
+/**
+ * The tree, assembled from what one response carried.
+ *
+ * What these hold is the one rule the wire field has: **a link that does not resolve is no link.**
+ * A parent this principal was not served arrives as null, identically to no parent at all, and
+ * anything that tried to tell the two apart would be reporting the existence of a coarser artifact
+ * the server declined to show.
+ */
+
+const node = (id: bigint, parentId: bigint | null, maskedCount = 10n): Artifact => ({
+  ...artifact(`k-${id}`, maskedCount, id),
+  parentId
+});
+
+describe('servedLineage', () => {
+  it('nests a child under the parent that was served with it', () => {
+    const lineage = servedLineage([node(1n, null), node(2n, 1n), node(3n, 1n)]);
+    expect(lineage.roots.map((a) => a.tesseraId)).toEqual([1n]);
+    expect(lineage.childrenOf.get(1n)?.map((a) => a.tesseraId)).toEqual([2n, 3n]);
+    expect(lineage.linked).toBe(true);
+  });
+
+  it('treats a parent that was not served as no parent at all', () => {
+    // 7 was withheld — below its own criterion for this principal, suppressed, or dropped by the
+    // cut. The response cannot say which, and this must not invent a state for it: 2 is simply a
+    // root of what this viewer was given.
+    const lineage = servedLineage([node(2n, 7n), node(3n, null)]);
+    expect(lineage.roots.map((a) => a.tesseraId)).toEqual([2n, 3n]);
+    expect(lineage.linked).toBe(false);
+  });
+
+  it('reports a flat response as unlinked rather than as a forest of one-node trees', () => {
+    expect(servedLineage([node(1n, null), node(2n, null)]).linked).toBe(false);
+  });
+});
+
+describe('subtreeOf', () => {
+  it('collects an artifact and everything served beneath it', () => {
+    const lineage = servedLineage([node(1n, null), node(2n, 1n), node(4n, 2n), node(3n, null)]);
+    expect([...subtreeOf(lineage, 1n)].sort()).toEqual([1n, 2n, 4n]);
+    expect([...subtreeOf(lineage, 3n)]).toEqual([3n]);
+  });
+
+  it('terminates on a response that names a cycle', () => {
+    // Not tidiness about a server that would not do this: it is what makes a walk over data from
+    // outside the program safe to run inside the frame loop.
+    const lineage = servedLineage([node(1n, 2n), node(2n, 1n)]);
+    expect(subtreeOf(lineage, 1n).size).toBe(2);
   });
 });

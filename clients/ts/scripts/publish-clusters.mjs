@@ -120,12 +120,12 @@ async function authorise(terms) {
  * than being skipped, because skipping is how a future frame's data goes silently missing.
  */
 function frames(buf) {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const out = [];
   let at = 0;
   while (at < buf.byteLength) {
-    const kind = view.getUint8(at);
-    const length = view.getUint32(at + 1, true);
+    const kind = frame.getUint8(at);
+    const length = frame.getUint32(at + 1, true);
     if (kind < 1 || kind > 5) throw new Error(`unknown frame kind ${kind} at byte ${at}`);
     out.push({kind, payload: buf.subarray(at + 5, at + 5 + length)});
     at += 5 + length;
@@ -183,12 +183,12 @@ const token = await authorise(publisherTerms);
 const metaResp = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bearer ${token}`}});
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
-const slice = meta.slices[0].id;
+const view = meta.views[0].id;
 const q = meta.quantisation;
 
 console.log(`sampling points at depth ${SAMPLE_DEPTH}, k=${SAMPLE_K}, as the publishing principal`);
 const sampled = await viewport(token, {
-  slice,
+  view,
   zoom: SAMPLE_DEPTH,
   bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
   k: SAMPLE_K,
@@ -272,7 +272,7 @@ for (let c = 0; c < CLUSTERS; c++) {
   // count of zero for everyone, which is a row on every wire that can never be anything but noise.
   if (members[c].length === 0) continue;
   clusters.push({
-    stableKey: `c-${String(c).padStart(4, '0')}`,
+    key: `c-${String(c).padStart(4, '0')}`,
     // Cell space, `[0, 65536)` per axis — the same units the points frame decodes into, so the
     // viewer places a cluster with the transform it already applies to every mark.
     x: cx[c],
@@ -293,7 +293,7 @@ console.log(
 const declaration = {
   name: layerName,
   title: args.title ?? `k-means over ${ids.length.toLocaleString()} sampled points`,
-  slices: [slice],
+  views: [view],
   membership: 'enumerated',
   // `artifacts_carry_own: true` would serve nothing at this stage — the per-artifact label arrives
   // with content at Stage 3, so a layer declaring it has nothing to satisfy and every artifact is
@@ -332,7 +332,7 @@ const publish = async () => {
       addressing: 'tessera',
       idset: meta.idset,
       artifacts: batch.map((c) => ({
-        stable_key: c.stableKey,
+        key: c.key,
         members: c.members.map((id) => id.toString())
       }))
     })
@@ -376,7 +376,7 @@ if (labelLayer) {
   console.log(`sampling as the term-${labelTerm} principal, for the per-term variation`);
   const termToken = await authorise([labelTerm]);
   const termSample = await viewport(termToken, {
-    slice,
+    view,
     zoom: SAMPLE_DEPTH,
     bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
     k: SAMPLE_K,
@@ -391,7 +391,7 @@ if (labelLayer) {
   const labelDeclaration = {
     name: labelLayer,
     title: args['labels-title'] ?? `toponymy over ${layerName}`,
-    slices: [slice],
+    views: [view],
     membership: 'enumerated',
     access: {label: null, artifacts_carry_own: false},
     visible_when: null,
@@ -420,12 +420,12 @@ if (labelLayer) {
     // variation would serve to nobody, which is a row on the wire that can never be anything else.
     if (seen.length === 0) continue;
     labels.push({
-      stableKey: `l-${cluster.stableKey}`,
-      cluster: cluster.stableKey,
+      key: `l-${cluster.key}`,
+      cluster: cluster.key,
       members: cluster.members,
       variations: [
-        {values: [`${cluster.stableKey} · whole cluster`], generated_from: cluster.members},
-        {values: [`${cluster.stableKey} · term ${labelTerm}`], generated_from: seen}
+        {values: [`${cluster.key} · whole cluster`], generated_from: cluster.members},
+        {values: [`${cluster.key} · term ${labelTerm}`], generated_from: seen}
       ]
     });
   }
@@ -444,7 +444,7 @@ if (labelLayer) {
         addressing: 'tessera',
         idset: meta.idset,
         artifacts: pending.map((l) => ({
-          stable_key: l.stableKey,
+          key: l.key,
           members: l.members.map((id) => id.toString()),
           content: l.variations.map((v) => ({
             values: v.values,
@@ -452,7 +452,7 @@ if (labelLayer) {
           })),
           // The target is named by its own stable key: an ordinal never crosses the boundary, so a
           // key is the only address a caller holds for it.
-          attached_to: {layer: layerName, level: 0, stable_key: l.cluster}
+          attached_to: {layer: layerName, level: 0, key: l.cluster}
         }))
       })
     });
@@ -469,9 +469,9 @@ if (labelLayer) {
   await publishLabels();
   console.log(`published ${labels.length} labels into ${labelLayer}`);
 
-  const centroid = new Map(clusters.map((c) => [c.stableKey, c]));
+  const centroid = new Map(clusters.map((c) => [c.key, c]));
   labelPlaces = labels.map((l) => ({
-    stableKey: l.stableKey,
+    key: l.key,
     x: centroid.get(l.cluster).x,
     y: centroid.get(l.cluster).y
   }));
@@ -487,7 +487,7 @@ try {
 } catch {
   // No file yet, which is the first run.
 }
-sidecar.layers[layerName] = clusters.map((c) => ({stableKey: c.stableKey, x: c.x, y: c.y}));
+sidecar.layers[layerName] = clusters.map((c) => ({key: c.key, x: c.x, y: c.y}));
 // The label layer gets its own entry, or the labels are served and never drawn: placement is by
 // layer, and a label carries no position of its own.
 if (labelLayer) sidecar.layers[labelLayer] = labelPlaces;
@@ -506,14 +506,14 @@ console.log(`wrote ${OUT}`);
  * nothing in the response saying why.
  */
 if (presets) {
-  const declaredSize = new Map(clusters.map((c) => [c.stableKey, c.members.length]));
+  const declaredSize = new Map(clusters.map((c) => [c.key, c.members.length]));
   /** One cluster followed across every principal — the largest, so it survives a criterion longest. */
-  const WITNESS = clusters.reduce((a, b) => (a.members.length >= b.members.length ? a : b)).stableKey;
+  const WITNESS = clusters.reduce((a, b) => (a.members.length >= b.members.length ? a : b)).key;
   const rows = [];
   for (const preset of presets) {
     const t = await authorise(preset.terms);
     const served = await viewport(t, {
-      slice,
+      view,
       zoom: 3,
       bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
       k: 1,
@@ -524,7 +524,7 @@ if (presets) {
     if (frame) {
       const table = tableFromIPC(frame.payload);
       const masked = table.getChild('masked_count').toArray();
-      const keys = table.getChild('stable_key');
+      const keys = table.getChild('key');
       for (let i = 0; i < masked.length; i++) counts.set(String(keys.get(i)), Number(masked[i]));
     }
     const shown = [...counts.values()].sort((a, b) => a - b);

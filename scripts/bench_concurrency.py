@@ -166,7 +166,7 @@ def warm_viewport(srv, token: str, zoom: int, k: int) -> bool:
         resp = requests.post(
             f"{srv.viewer_base}/v1/viewport",
             headers={"Authorization": f"Bearer {token}"},
-            json={"slice": "s0", "zoom": zoom, "bbox": [0, 0, 65536, 65536], "k": k},
+            json={"view": "s0", "zoom": zoom, "bbox": [0, 0, 65536, 65536], "k": k},
             timeout=60,
         )
         return resp.status_code == 200
@@ -409,7 +409,7 @@ def run_cpu_saturation_cell(args, descriptors: list[str], srv, proc, summary: di
         )
         try:
             tok = build_tokens(s, descriptors, 1, False, args.w, args.seed)
-            # Warms the token's row projection ONCE (keyed on (token, slice, segments_version),
+            # Warms the token's row projection ONCE (keyed on (token, view, segments_version),
             # not on bbox/zoom -- `tessera-engine/src/viewport.rs`'s cache-key comment), so both
             # measured cells below reuse it rather than each paying a fresh warm-up cost.
             warm_viewport(s, tok[0], args.zoom, args.k)

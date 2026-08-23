@@ -61,12 +61,12 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .harness import CLI_BIN, REPO_ROOT, ensure_cli_built
+from .harness import CLI_BIN, REPO_ROOT, build_env, ensure_cli_built, write_deployment
 
 N_BASE_ITEMS = 400
 N_TERMS = 6
 EXTENT = "0,65536,0,65536"
-SLICE_ID = "s0"
+VIEW_ID = "s0"
 SEED = 20260729
 # One fixed identity key for BOTH bundles. See the build-args comment below for why an independent
 # per-bundle key made the point-set comparison vacuous under identity-ordered selection. The value
@@ -168,23 +168,37 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
 
     import subprocess
 
+    # One view, its frame, its geometry and the relation its labels are in — the whole declaration
+    # this fixture needs. Three corpora share it, so each build overrides the two sources by their
+    # own names (`configuration.md` §8); the declaration itself is written once.
+    config_path = work_dir / "canary-config.toml"
+    x_min, x_max, y_min, y_max = EXTENT.split(",")
+    config_path.write_text(
+        '[sources]\npoints = "points.parquet"\npairs = "pairs.parquet"\n\n'
+        f'[[view]]\nname = "{VIEW_ID}"\n'
+        f"extent = {{ x = [{x_min}, {x_max}], y = [{y_min}, {y_max}] }}\n"
+        'source = "points"\n'
+        'point_visibility = { source = "pairs", default = "public" }\n'
+    )
+
     for points_path, pairs_path, out_dir in (
         (free_points_path, free_pairs_path, free_bundle),
         (canary_points_path, canary_pairs_path, canary_bundle),
         (visible_points_path, visible_pairs_path, visible_bundle),
     ):
+        deployment = write_deployment(
+            work_dir / f"{out_dir.name}-tessera.toml", bundle=out_dir, schema=config_path
+        )
         subprocess.run(
             [
                 str(CLI_BIN),
                 "build",
-                "--points",
-                str(points_path),
-                "--pairs",
-                str(pairs_path),
-                "--extent",
-                EXTENT,
-                "--slice",
-                SLICE_ID,
+                "--deployment",
+                str(deployment),
+                "--file",
+                f"points={points_path}",
+                "--file",
+                f"pairs={pairs_path}",
                 "--out",
                 str(out_dir),
                 # Contracts r6 refuses to build unless a human names the identity key's lineage.
@@ -200,9 +214,8 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
                 # order is key-dependent: a key rotation reorders tied rows".
                 #
                 # Fixing the key isolates the variable this canary is actually about: the presence
-                # of one extra item carrying an ungranted term.
-                "--id-key",
-                CANARY_ID_KEY_HEX,
+                # of one extra item carrying an ungranted term. It travels in the environment
+                # below, never in an argv: there is no flag that takes a key.
                 # Allocation rule 5 (see the module doc): the canary gets its own commit window.
                 # `--batch-items` is the build-side name for the window §11.1 r23 scopes
                 # signature-sorted assignment to. At `N_BASE_ITEMS` the canary-free corpus is
@@ -216,6 +229,7 @@ def build_canary_states(work_dir: Path) -> tuple[Path, Path, Path]:
                 str(N_BASE_ITEMS),
             ],
             cwd=REPO_ROOT,
+            env=build_env(CANARY_ID_KEY_HEX),
             check=True,
         )
 
@@ -250,8 +264,8 @@ def verify_allocation_rules(free_bundle: Path, canary_bundle: Path) -> list[str]
     # pay for a bundle read they are not doing.
 
     failures: list[str] = []
-    free = Bundle(free_bundle).segment(SLICE_ID)
-    canary = Bundle(canary_bundle).segment(SLICE_ID)
+    free = Bundle(free_bundle).segment(VIEW_ID)
+    canary = Bundle(canary_bundle).segment(VIEW_ID)
     if free.tessera_id is None or canary.tessera_id is None:
         return ["a canary bundle has no stored tessera_id column (pre-r6 build)"]
 

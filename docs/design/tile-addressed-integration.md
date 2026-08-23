@@ -64,7 +64,7 @@ tile-addressed answer is still owed.
 ### 4.2 **Build:** a stateful, session-scoped, coalescing adapter inside the trust boundary
 
 The **view key**, which the adapter's cache validity is expressed against, is client-interaction
-§6's composite of mask, overlay version, slice, *k* and idset — the coordinate within which a
+§6's composite of mask, overlay version, view, *k* and idset — the coordinate within which a
 served viewport is stable. **The viewport is not one of its components**, which is exactly what
 lets one cached evaluation answer every tile inside its extent.
 
@@ -77,9 +77,9 @@ lets one cached evaluation answer every tile inside its extent.
   tile triggers one internal viewport evaluation over the covering region at `d_eff`; the other five
   concurrent fetches join it. **The machinery exists** — `crates/tessera-authz/src/single_flight.rs`,
   built for mask builds; this is its second use;
-- caches the evaluation keyed by **(grant set, overlay version, segments_version, slice, content
+- caches the evaluation keyed by **(grant set, overlay version, segments_version, view, content
   version, k)** — the view key spelled out, and §8.3's rule verbatim, mask identity alone being insufficient because suppressions live in
-  the overlay — and serves each arriving tile as a **slice** of it, which is arithmetic (tiles are
+  the overlay — and serves each arriving tile as a **view** of it, which is arithmetic (tiles are
   contiguous Morton ranges), not selection;
 - serves counts for the MVT cells layer from per-tile `range_cardinality`, which touches no data
   file (§2.6 step 6).
@@ -145,7 +145,7 @@ measurement will reasonably conclude the product is slow.
 
 ## 6. Invariants and the leak register
 
-- **I2 / I7.** The adapter computes nothing and slices only; served sets are the engine's. Serving a
+- **I2 / I7.** The adapter computes nothing and views only; served sets are the engine's. Serving a
   deeper superset in a shallow tile is derivable under P3 — it is the answer to a request the
   principal could issue.
 - **I10.** MVT feature ids are JS numbers in practice (§8.3), so `tessera_id` rides as a string
@@ -190,7 +190,7 @@ they point in the same direction once the alias is a facade rather than a front 
 ## 9. Provenance
 
 **r2 (2026-08-01) applies decision [0029](../decisions/0029-view-key.md).** What §4.2 called an
-"epoch" is the **view key** — mask, overlay version, slice, *k*, idset. The viewport is not one of
+"epoch" is the **view key** — mask, overlay version, view, *k*, idset. The viewport is not one of
 its components, which is what makes §3's answer-store property expressible at all: one cached
 evaluation stays valid across every tile and every pan within a view key. §4.2's cache-key list
 names the **content version** rather than the whole key, because the list already enumerates the

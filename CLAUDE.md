@@ -70,9 +70,48 @@ broken by a plausible-looking change:
   suppression applies to every request the moment it is accepted, whatever stamp was presented.
 
 The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
-machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Six
-of the thirteen invariants are currently covered as designed; five have no coverage, three of them
-for want of an implementation to test rather than for want of a test.
+machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Seven
+rows of the matrix are covered; **five have no coverage — I5, I6, I8, I11 and I13b — and only one
+of them, I6, is uncovered for want of an implementation to test**. There is no wasmtime host, so
+nothing can be asked of a guest plugin. The rest are a testing gap: the annotation machinery I8
+needs is built and enforced, I12's frontier half is built in the form that replaced the frontier
+(every artifact tested on its own — decisions 0080, 0082, 0083), and I11's cover was deleted with
+the pin that carried it. I5 and I13b sit between the two, each needing a second partition or a
+genuinely divergent plugin before an oracle could disagree at all.
+
+*We cannot test this* and *we have not tested this* are different claims, and only the first is an
+excuse — a register that records built machinery as absent understates its own gap. Corrected
+2026-08-19; **I3 then moved to covered 2026-08-20**, the first row to move because a test was
+written rather than because machinery arrived. `conformance.md` r15 carries the per-row reasons, and
+its §0 carries the other half of that day: the suite had not run at all since the configuration
+rework changed a CLI flag under it, and the 27 failures that surfaced when it could were the mask
+catalogue's own assumptions about term ids and entity ids. Both are fixed; it is **432 of 432**.
+
+## What the strictness is for
+
+**This is a secure database, not an assured system.** The fail-closed posture above is real and it
+is narrow. Three questions decide how strict to be, and only the first two earn a refusal.
+
+- **Does it leak?** Anything a principal can observe — masks, gates, membership requirements, a
+  disclosure control accepted and never enforced. Fail closed, no defaults, refuse the
+  unenforceable. This boundary is small and enumerable, which is the point: §4's invariants and
+  Appendix C are its whole extent.
+- **Is it irreversible?** Entity ids are permanent, term ids determine them, a published identity is
+  tombstoned. A rerun does not undo these, so they get the strict treatment though they leak
+  nothing.
+- **Everything else is recoverable and discloses nothing** — frames, joins, coverage, roster shape,
+  config ergonomics, defaults. **Report loudly, let the operator decide, and do not block a build.**
+  The operator is present and the loop is fast: a wrong extent costs a rerun, not a mission.
+
+Refusing outside the first two cases is not the safe option, it is *an* option — one that moves the
+cost onto the caller while looking principled in a way that "this is now harder to use" does not.
+Before adding a refusal outside the disclosure surface, say why it is worth blocking a build; if
+the answer is only *it might be wrong*, make it a warning that prints the numbers, and choose a
+denominator that means something (entities covered, not rows dropped). Prefer **ignore-and-report**
+over **refuse** for joins and inputs.
+
+This is the same rule as *keep emphasis proportionate*, applied to behaviour rather than prose: if
+everything is a refusal, the refusals protecting the invariants stop standing out.
 
 ## Working method
 
@@ -97,6 +136,14 @@ own: compatibility with a **past** does not exist, defences for the **present** 
 guards, the contracts a second reader depends on (the Python oracle, the conformance suite), and
 the format-stability rules of a *running* process — `seg_id` never reused, dictionary extents
 positional — all stay.
+
+**Build is ingest into an empty database** ([decision 0091](docs/decisions/0091-build-is-ingest-into-an-empty-database.md)).
+There is no difference in functionality or user experience between the two entry points; what
+differs is cost and acquisition. A feature that works at a build and not at ingest is unfinished
+rather than staged, and a build-only refusal is a bug unless it is about where rows come from. The
+rule is about functionality and client experience; internals may differ freely, and two do —
+entity ids are assigned in signature-sorted order at a build and above the high-water at ingest,
+and a build packs in one pass because nothing is being served.
 
 **Design for audit before performance.** Prefer the construction that is obviously correct; keep
 modules readable in isolation; keep the query surface narrow — the leak register is exhaustive
@@ -135,64 +182,73 @@ of removing it, and backlogs of issues for things that should just have been fix
 
 ## Talking to the owner
 
-**The house style below is for the corpus. A message is not a document, and writing one in the
-other's register is the recurring failure.** `§4.4`, `I2`, `C25`, `decision 0067` and a type name
-are correct in a design document and near-useless in a chat message: they compress for a reader who
-has the corpus loaded, and the owner is not holding it in his head at the moment of reading. A
-message built out of them transmits nothing and has to be asked again.
+Joe knows this system better than you do. When he asks a question he is usually thinking out loud
+and wants a peer to think with, not a verdict with the reasoning arranged behind it. Answer what he
+asked and leave the decision with him. Agreement is a complete reply.
 
-- **Lead with the consequence, not the mechanism.** *"Searches would silently return nothing — no
-  error, just wrong answers"* beats *"the analyser identity is resolved from the manifest"*.
-- **Identifiers go in brackets, or not at all.** Never open a paragraph with one; never make one the
-  subject of a sentence. The owner can ask for the reference.
-- **A concrete example earns its space.** One real string segmented two ways says more than a
-  paragraph about segmentation agreement.
-- **Bold only around plain-language claims.** A bolded line of jargon looks like a summary and
-  carries none — it is the specific shape that has failed here.
-- **Prefer a few short paragraphs to a wall of headed sections**, and offer the depth at the end
-  rather than supplying it unasked.
+Four constructions do not belong in a message. Predecessor models produced none of them across
+1,200 messages in this repository, so these are things to drop, not habits to moderate.
 
-Everything below governs what is written **into the repository** — design documents, module docs,
-decisions, commit messages — where precision, citations and the established vocabulary are exactly
-right.
+- **Commentary on your own messages** — "I was wrong", "what I should have said", "to be precise".
+  If an earlier answer was wrong, just say the right thing now.
+- **Filler that announces importance** — "the real question", "the key thing", "importantly",
+  "worth noting". If a sentence's only job is to say the next one matters, cut it.
+- **Rules invented from a conversation.** A question about a column gets an answer about that
+  column, not a principle that has to be unpicked later.
+- **Uniform urgency.** Save *fail-open*, *silent* and *breaks* for the things that are.
+
+State uncertainty once and plainly — "I don't know whether X", or just ask — rather than hedging
+spread through every paragraph.
+
+Match structure to content: a list when the content is a list, lettered options when a decision is
+needed so he can reply with a letter, plain paragraphs otherwise. Do not impose headed sections on
+prose. Length follows the question — a long answer he can skip through beats a short one that costs
+him three follow-ups.
+
+Identifiers go in brackets or not at all. He is not holding the corpus in his head when he reads.
 
 ## House style
 
-Full guide in [docs/agents/writing.md](docs/agents/writing.md). The rules that matter most:
+This governs what is written **into the repository** — design documents, module docs, decisions,
+commit messages. It does not govern messages, which the section above covers; a summary of it here
+is read every session and ends up in chat, which is why the summary is a pointer.
 
-- **Describe the system, not its construction.** What it is and why — not which revision changed
-  it or which phase built it. That archaeology belongs in `docs/decisions/` and git. A design
-  document that is mostly revision history has stopped being a design document.
-- **Length follows substance.** Cover what the reader needs and stop. No padding, no restated
-  summaries, no section that exists because the template had one. Most design documents here
-  should be shorter than the one you are about to write.
-- **Module docs carry the design argument**, and run long here where that is warranted: an
-  invariant upheld in a way the code does not show, an obvious construction rejected for a
-  non-obvious reason, a measurement driving a shape that otherwise looks arbitrary, or a
-  deliberate duplication a reader would otherwise "fix". Restating the code is never warranted.
-- **Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
-  `FIXME` markers here. Open work is an issue.
-- **State negative results.** "F3: NOT confirmed by measurement — do not claim it is" is the form.
-  Distinguish measured from modelled from assumed, every time.
+Read [docs/agents/writing.md](docs/agents/writing.md) before writing corpus prose. Four rules are
+repeated here because they are violated silently rather than visibly:
+
 - **Mark specified-but-unbuilt machinery at the claim**, with what happens instead. Present tense
   about absent machinery reads as an assurance
   ([decision 0013](docs/decisions/0013-mark-specified-vs-implemented.md)).
+- **State negative results.** "F3: NOT confirmed by measurement — do not claim it is" is the form.
+  Distinguish measured from modelled from assumed, every time.
+- **Comments record decisions and evidence, not backlog.** There are essentially no `TODO` or
+  `FIXME` markers here. Open work is an issue.
 - **Prefer stable citations** — `§4`, `contracts §2.5` — over `file.rs:184`, which drifts.
   `scripts/check-doc-links.py` warns on the ones that have visibly rotted.
-- **State load-bearing assumptions at the site**, and prefer a test to a comment.
-- **Keep emphasis proportionate.** If everything is critical, the reader cannot tell which things
-  are — and a small number here genuinely are.
-- British spelling, and the established security vocabulary — *conservative label join*, *boolean
-  expression indexing*, *partial evaluation*, *Non-Truman model*, *compartmented MAC* — over
-  invented terms.
+
+British spelling throughout, and the established security vocabulary — *conservative label join*,
+*boolean expression indexing*, *partial evaluation*, *Non-Truman model*, *compartmented MAC* —
+over invented terms.
 
 ## The gate
 
 ```bash
-cargo test --workspace
+cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/check-layers.sh
+bash scripts/check-clients.sh
 python3 scripts/check-doc-links.py
 ```
 
 Run them and read the output before claiming anything passes.
+
+**`--no-fail-fast`, and read the count.** Without it cargo stops at the first failing binary and
+skips the rest, so a run that reports no failures alongside a *smaller* passing total reads as
+success. That has already been mistaken for a green gate here.
+
+**The TypeScript client is in the gate**, and is there because one rename shipped three defects
+into `clients/` — two app-state fields collapsed onto one name, a `.slice()` call renamed to
+`.view()`, and a shadowed `const` that threw before its initialiser ran — none caught, each found
+later by a separate investigation. A client that does not compile is not a smaller failure than a
+crate that does not compile. The operator `.mjs` scripts are typechecked with `checkJs` rather than
+parsed, because the third defect is a type error and not a syntax one.

@@ -698,7 +698,7 @@ mod tests {
     fn a_coalesced_extent_carries_its_inputs_triples_and_coalesces_again() {
         let dir = tempfile::tempdir().expect("tempdir");
         // Four extents, disjoint and ascending, with a gap between each — the shape a flush
-        // publishes, where the ids are issued from a high-water other slices also draw on.
+        // publishes, where the ids are issued from a high-water other views also draw on.
         let extent = |base: u32| {
             let entities: Vec<u32> = (0..3).map(|k| base + k * 2).collect();
             ValueColumn::partial(codes_u32(entities.clone()), bitmap(entities)).expect("an extent")

@@ -37,7 +37,7 @@ use parquet::arrow::ArrowWriter;
 
 use common::*;
 use tessera_authz::{PostingRef, PostingsReader};
-use tessera_build::schema::Schema;
+use tessera_build::config::Config;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::{Engine, EngineConfig, ViewportRequest};
 use tessera_lifecycle::wal::ChangeOp;
@@ -78,18 +78,22 @@ const IDSET: u32 = 1;
 /// - `note` has neither key set and no vocabulary, so its only home is the record blob (records
 ///   §3).
 const SCHEMA_TOML: &str = r#"
-[[attribute]]
+[[vocabulary]]
 name       = "band"
-type       = "category"
 width      = "u8"
-render     = true
-index      = true
-vocabulary = "declared"
-listing    = "public"
-  [attribute.values]
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
   low = 1
   mid = 2
   high = 3
+
+[[attribute]]
+name       = "band"
+type       = "category"
+render     = true
+index      = true
+vocabulary = "band"
 
 [[attribute]]
 name   = "score"
@@ -105,12 +109,14 @@ index = true
 # Blob-resident: a type with neither placement key, so its only home is the record blob. The
 # type is `keyword` because `utf8` is retired as a declarable one — placement is orthogonal to
 # type, and a blob row stores the value's bytes whatever family declared it.
+
 [[attribute]]
 name = "note"
 type = "keyword"
 
 # The only family with **two** homes at once: its prose is a blob row and its words are a token
 # dictionary plus postings over it. Both have to be reached, and by different passes.
+
 [[attribute]]
 name     = "prose"
 type     = "text"
@@ -236,27 +242,30 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema_path = tmp.join("schema.toml");
     std::fs::write(&schema_path, SCHEMA_TOML).unwrap();
+    let schema = Config::parse(&schema_path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the every-home fixture schema parses");
     let args = BuildArgs {
+        point_fields: Default::default(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
-        pairs,
+        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: IDSET,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: true,
         emit_oracle_pairs: false,
         batch_items: None,
         memory_budget: None,
         band_rows: None,
-        schema: Schema::parse(&schema_path, &std::collections::HashMap::new())
-            .expect("the every-home fixture schema parses"),
+        schema,
     };
     build(&args).expect("a build carrying all three homes succeeds");
 }
@@ -335,8 +344,8 @@ fn segment_dirs(root: &Path) -> Vec<PathBuf> {
         .iter()
         .map(|segment| {
             prefix
-                .join("partitions/default/slices")
-                .join(&segment.slice)
+                .join("partitions/default/views")
+                .join(&segment.view)
                 .join("segments")
                 .join(&segment.seg_id)
         })
@@ -407,10 +416,10 @@ impl Home {
         let attrs = partition.join("attrs");
         match self {
             Home::Row => {
-                let slice = partition.join("slices/s0");
+                let view = partition.join("views/s0");
                 vec![
-                    slice.join("permutation.bin"),
-                    slice.join(tessera_store::ROW_ENTITY_FILE),
+                    view.join("permutation.bin"),
+                    view.join(tessera_store::ROW_ENTITY_FILE),
                 ]
             }
             Home::RenderColumn => segment_dirs(root)
@@ -483,7 +492,7 @@ fn every_home_byte(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 /// `Home::Row`: the row this entity resolves to, through the only legal entity → row path (I4).
 fn row_of(root: &Path, entity: EntityId) -> Option<u32> {
     let bundle = open_bundle(root).expect("the bundle opens");
-    bundle.partitions["default"].slices["s0"]
+    bundle.partitions["default"].views["s0"]
         .row_space
         .row_of(entity)
         .map(|row| row.raw())
@@ -633,6 +642,28 @@ fn sidecar_bindings(root: &Path) -> BTreeMap<u64, u64> {
 }
 
 /// `Home::TermPostings`: whether the base term index still names `entity` under `term`.
+/// The term id `ALL_TERM`'s descriptor was interned at, read from the bundle's own dictionary.
+///
+/// **Resolved, not assumed.** `public` is reserved at term 0 by every build, so a descriptor's
+/// ordinal is a fact about the corpus rather than a constant a test may spell — and a test that
+/// spelled one would fail the day another reservation moved it, for a reason unrelated to what it
+/// asserts.
+fn all_term(root: &Path) -> TermId {
+    let prefix = root.join(current_prefix(root));
+    let bundle = open_bundle(root).expect("the bundle opens");
+    let paths: Vec<PathBuf> = bundle
+        .partitions["default"]
+        .manifest
+        .dict_extents
+        .iter()
+        .map(|extent| prefix.join(&extent.path))
+        .collect();
+    tessera_authz::Dict::load(&paths)
+        .expect("the dictionary loads")
+        .lookup(ALL_TERM.to_string().as_bytes())
+        .expect("every item carries ALL_TERM")
+}
+
 fn term_names(root: &Path, term: TermId, entity: EntityId) -> bool {
     let path = partition_dir(root).join("terms/postings.arrow");
     let postings = PostingsReader::open(&path, false).expect("the term postings open");
@@ -761,7 +792,7 @@ fn a_deletion_reaches_every_home() {
         "Home::ExternalIdSidecar"
     );
     assert!(
-        term_names(&root, TermId::new(ALL_TERM as u32), deleted),
+        term_names(&root, all_term(&root), deleted),
         "Home::TermPostings"
     );
 
@@ -1105,11 +1136,11 @@ fn a_deletion_reaches_every_home() {
     // postings left standing survives Rule F's retirement and is served to every authorised
     // principal afterwards.
     assert!(
-        !term_names(&root, TermId::new(ALL_TERM as u32), deleted),
+        !term_names(&root, all_term(&root), deleted),
         "Home::TermPostings: the deleted entity is still named by a term"
     );
     assert!(
-        term_names(&root, TermId::new(ALL_TERM as u32), survivor),
+        term_names(&root, all_term(&root), survivor),
         "Home::TermPostings: a suppressed entity left the term index, so the sweep took more than \
          the executed set"
     );

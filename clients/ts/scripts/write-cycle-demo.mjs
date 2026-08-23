@@ -80,12 +80,12 @@ async function metaOf(token) {
 }
 
 function frames(buf) {
-  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+  const frame = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
   const out = [];
   let at = 0;
   while (at < buf.byteLength) {
-    const kind = view.getUint8(at);
-    const length = view.getUint32(at + 1, true);
+    const kind = frame.getUint8(at);
+    const length = frame.getUint32(at + 1, true);
     out.push({kind, payload: buf.subarray(at + 5, at + 5 + length)});
     at += 5 + length;
   }
@@ -99,7 +99,7 @@ async function viewport(token, body) {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
     body: JSON.stringify({
-      slice: meta.slices[0].id,
+      view: meta.views[0].id,
       zoom: 0,
       bbox: [q.x_min, q.y_min, q.x_max, q.y_max],
       ...body
@@ -118,7 +118,7 @@ async function artifacts(token, layers) {
   if (!frame) return out;
   const table = tableFromIPC(frame.payload);
   const layerCol = table.getChild('layer');
-  const keys = table.getChild('stable_key');
+  const keys = table.getChild('key');
   const ids = table.getChild('tessera_id').toArray();
   const masked = table.getChild('masked_count').toArray();
   const content = table.getChild('content');
@@ -210,7 +210,7 @@ if (dryRun) {
 await register({
   name: clusterLayer,
   title: 'write-cycle demo clusters',
-  slices: [meta.slices[0].id],
+  views: [meta.views[0].id],
   membership: 'enumerated',
   content: {derived: ['centroid'], supplied: [], on_member_deletion: 'withdraw_content'},
   access: {label: null, artifacts_carry_own: false},
@@ -220,7 +220,7 @@ await register({
 await register({
   name: labelLayer,
   title: 'write-cycle demo labels',
-  slices: [meta.slices[0].id],
+  views: [meta.views[0].id],
   membership: 'enumerated',
   content: {
     derived: [],
@@ -236,13 +236,13 @@ await register({
   depends_on: [clusterLayer]
 });
 
-await publish(clusterLayer, [{stable_key: 'c0', members: members.map(String)}]);
+await publish(clusterLayer, [{key: 'c0', members: members.map(String)}]);
 await publish(labelLayer, [
   {
-    stable_key: 'l-c0',
+    key: 'l-c0',
     members: members.map(String),
     content: [{values: ['written from three documents'], generated_from: sources.map(String)}],
-    attached_to: {layer: clusterLayer, level: 0, stable_key: 'c0'}
+    attached_to: {layer: clusterLayer, level: 0, key: 'c0'}
   }
 ]);
 

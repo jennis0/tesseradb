@@ -118,10 +118,10 @@ fn main() {
         .unwrap_or_default();
 
     let part_dir = prefix_dir.join("partitions/default");
-    let slice_dir = part_dir.join("slices/s0");
-    let permutation = Permutation::load(&slice_dir.join("permutation.bin")).expect("permutation");
+    let view_dir = part_dir.join("views/s0");
+    let permutation = Permutation::load(&view_dir.join("permutation.bin")).expect("permutation");
     let columns =
-        ColumnsRef::load(&slice_dir.join("segments/seg-0/columns.arrow")).expect("columns.arrow");
+        ColumnsRef::load(&view_dir.join("segments/seg-0/columns.arrow")).expect("columns.arrow");
 
     let codes: Vec<u32> = match columns.scalar(&column) {
         Some(ScalarSlice::U8(v)) => v.iter().map(|c| *c as u32).collect(),
@@ -143,7 +143,7 @@ fn main() {
     let mut placed = 0u64;
     for entity in 0..bound {
         let Some(row) = permutation.row_of(EntityId::new(entity)) else {
-            continue; // no row in this slice
+            continue; // no row in this view
         };
         let code = codes[row.raw() as usize];
         // Code 0 is the *absent* sentinel: a row carrying it is a member of nothing, not a member

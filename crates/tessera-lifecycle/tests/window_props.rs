@@ -19,7 +19,7 @@ use tessera_types::TermId;
 fn row(key: &str, terms: &[u32]) -> UnallocatedRow {
     UnallocatedRow {
         external_id: Some(key.as_bytes().to_vec()),
-        slice: "default".to_string(),
+        view: "default".to_string(),
         descriptors: Vec::new(),
         x: 0.0,
         y: 0.0,
@@ -71,6 +71,8 @@ proptest! {
                     rows,
                     batch_id: format!("w{w}-e{e}"),
                     body_hash: [0u8; 32],
+                    memberships: Vec::new(),
+                edges: Vec::new(),
                     waiters: vec![()],
                 });
             }
@@ -121,6 +123,8 @@ proptest! {
                 rows: part.to_vec(),
                 batch_id: format!("c{c}"),
                 body_hash: [0u8; 32],
+                memberships: Vec::new(),
+                edges: Vec::new(),
                 waiters: vec![()],
             });
         }
@@ -137,6 +141,8 @@ proptest! {
             rows,
             batch_id: "one".into(),
             body_hash: [0u8; 32],
+            memberships: Vec::new(),
+                edges: Vec::new(),
             waiters: vec![()],
         });
         let whole_ids: Vec<u64> = whole
@@ -194,6 +200,8 @@ fn the_window_run_ratio_against_the_full_sort_ceiling() {
                 rows: group.to_vec(),
                 batch_id: "b".into(),
                 body_hash: [0u8; 32],
+                memberships: Vec::new(),
+                edges: Vec::new(),
                 waiters: vec![()],
             });
             for entry in window.allocate(&mut alloc).unwrap().0 {
@@ -283,6 +291,8 @@ fn the_emitted_run_ratio_rises_with_the_window_and_stays_under_the_full_sort_cei
                 rows: group.to_vec(),
                 batch_id: "b".into(),
                 body_hash: [0u8; 32],
+                memberships: Vec::new(),
+                edges: Vec::new(),
                 waiters: vec![()],
             });
             let (_, tally) = window.allocate(&mut alloc).unwrap();

@@ -5,21 +5,29 @@
 //! section that carries it across a build, and the gate-filtered `/v1/meta` view all read this one
 //! type, so a field cannot mean one thing on disk and another on the wire.
 //!
-//! ## Two declarations decide whether a disclosure control runs at all
+//! ## Two axes, and only two
 //!
-//! [`LayerAccess::artifacts_carry_own`] and [`SuppliedContent::corpus_derived`] are the two fields
-//! the leak register watches (C27, C28). Both are **explicit and required**: neither has a default
-//! to fall through, because the failure in each case is silent. A corpus-derived clustering
-//! declared as carrying its own terms serves the existence and count of every cluster down to one
-//! member; corpus-derived content declared corpus-independent is served with no containment test at
-//! all, which is the disclosure the containment rule exists to prevent.
+//! Every question about who may see a layer or an artifact in it answers one of two
+//! ([decision 0088](../../../docs/decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)):
+//! [`LayerDeclaration::visibility`] asks which access label the viewer must hold, and
+//! [`LayerDeclaration::require_member_visibility`] asks how much of the object's own membership the
+//! viewer must already see. The second **requires** members to be visible and never *sets* their
+//! visibility — a container grants its members nothing, and the reverse reading inverts the
+//! direction the system exists to protect.
 //!
-//! **The absence of a rule is itself a declaration.** [`LayerDeclaration::visible_when`] being
-//! `None` says *this layer needs no existence criterion* — a claim a reviewer can check — rather
-//! than *nobody filled this in*. That is why it has no default and why a criterion is never
-//! inherited from a deployment-wide setting: a control that can be arrived at by accident from an
-//! unrelated choice is the shape that shipped a fail-open once already, in the three gate modes
-//! this replaced (decision 0079).
+//! [`ArtifactVisibility::field`] and [`SuppliedContent::require_member_visibility`] are the two the
+//! leak register watches (C27, C28). Both are **explicit and required**: neither has a default to
+//! fall through, because the failure in each case is silent. A corpus-derived clustering declared as
+//! carrying its own labels serves the existence and count of every cluster down to one member;
+//! corpus-derived content declared corpus-independent is served with no containment test at all,
+//! which is the disclosure the containment rule exists to prevent.
+//!
+//! **The absence of a rule is itself a declaration.** [`LayerDeclaration::require_member_visibility`]
+//! being `None` — the word `none` in the config — says *this layer needs no membership requirement*,
+//! a claim a reviewer can check, rather than *nobody filled this in*. That is why it has no default
+//! and why a criterion is never inherited from a deployment-wide setting: a control that can be
+//! arrived at by accident from an unrelated choice is the shape that shipped a fail-open once
+//! already, in the three gate modes this replaced (decision 0079).
 //!
 //! ## No `skip_serializing_if` on anything here, ever
 //!
@@ -38,7 +46,7 @@
 //! [`Hierarchy::kind`] says where a layer's lineage lives; [`LayerDeclaration::levels`] says what
 //! resolutions it declares. **Neither carries the other** (decision 0082). A clustering is a tree in
 //! its edges and declares no levels, because a condensed tree is unbalanced and a level number would
-//! say nothing about position in the lineage. An administrative geography declares both, and they
+//! say nothing about position in the lineage. A tiered geography declares both, and they
 //! agree, because a ward is a ward everywhere on the map — which is the only shape in which reading
 //! one as the other is safe.
 
@@ -49,7 +57,7 @@ use serde::{Deserialize, Serialize};
 /// Where a layer's artifacts get their membership. Levels inherit it — a layer is enumerated or
 /// predicate-backed as a whole, never per level, because the membership source decides what a write
 /// invalidates and a layer is the unit of lifecycle.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MembershipSource {
     /// A stored set of entities per artifact. Stale between the write and the refresh that rebuilds
@@ -57,50 +65,236 @@ pub enum MembershipSource {
     Enumerated,
     /// A shape, decomposed to Morton ranges at request time. Never stale — a point ingested inside
     /// a boundary is a member on the next request with nothing rebuilt.
+    ///
+    /// **What the shape *is* lives beside this, on [`LayerDeclaration::shape`]**, and a layer that
+    /// declares none holds no artifacts: the depth a box is covered at is part of the membership
+    /// (ruling R3 — the ranges *are* the membership, the polygon is content), so a shape kind with
+    /// no depth would be a rule with nothing to evaluate. The two are separate fields because this
+    /// one says *what invalidates a write* and that one says *what the shape is drawn from*, and
+    /// only the second has anything a caller could get wrong per artifact.
     Spatial,
-    /// A predicate over an existing value column. Never stale, for the same reason.
-    Attribute,
+    /// A predicate over an existing value column, which the variant names: the membership is
+    /// defined by that field's value, so the field is part of the declaration rather than
+    /// something a reader could infer. Never stale, for the same reason `Spatial` is not.
+    Attribute(String),
 }
 
-/// Whether an artifact's existence is gated on its own access label or on the visibility of its
-/// members. **The register watches this field** (C27).
+/// How a level's membership is **stored and scanned** at serving time
+/// ([decision 0094](../../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)).
+///
+/// **Not a contract, and nothing on the wire names one.** Both forms answer identically — the same
+/// served set, the same counts, the same ranks and parents — so no request field selects one, no
+/// response reports one, and a fold may change one freely. What it decides is what a request
+/// *costs*: an artifact-major level is walked through the tile index and probed per artifact; a
+/// row-major level is one scan of `viewport ∩ M_auth` over a column addressed by **row**.
+///
+/// **Recorded per `(layer, level)`** on [`RegisteredLayer::layouts`], because the levels differ: a
+/// treed layer's coarse level holds ten thousand nodes and its leaf level ten million, and one
+/// record for the layer would average two different problems. The **pin** on
+/// [`LayerDeclaration::layout`] is per *layer*, because that is where a declaration lives.
+///
+/// **The label/list split follows from the membership**, not from a preference: a level whose
+/// memberships are disjoint has exactly one label per row, and one whose memberships overlap does
+/// not. A level pinned [`RowMajorLabel`](ServingLayout::RowMajorLabel) whose memberships turn out to
+/// overlap is composed **artifact-major**, loudly — see `tessera_engine::layout`.
+///
+/// **The fourth form is not stored at all.** [`SpatialRanges`](ServingLayout::SpatialRanges) is a
+/// level whose membership is a declared shape: the ranges are recomputed from the generation's own
+/// segments on every request, so there is no file, no adoption coordinate and nothing for a fold to
+/// write. It is here because it is now producible; it was deliberately absent while it was not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServingLayout {
+    /// One row-space bitmap per artifact — what the engine has always built. Candidacy is the tile
+    /// index's walk, then the extent test, then the composed probe at the viewport's edge; the
+    /// count is `|membership ∩ M_auth|` per served artifact.
+    ///
+    /// **The default, and deliberately so.** It is the form every derived structure already exists
+    /// for, and the automatic pick is conservative in its direction (`tessera_engine::layout`).
+    #[default]
+    ArtifactMajor,
+    /// One artifact label per **row**, for a level whose memberships partition the corpus.
+    /// Candidacy is one scan of `viewport ∩ M_auth` marking labels; the count comes from the
+    /// per-`(session, layer)` masked-count histogram
+    /// ([decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
+    /// one named exception).
+    RowMajorLabel,
+    /// A **list** of labels per row, for a level whose memberships overlap. The same scan and the
+    /// same histogram at a larger constant.
+    RowMajorList,
+    /// **Row ranges, derived from a declared shape** — a `membership = { spatial = … }` level and
+    /// nothing else.
+    ///
+    /// Membership is the shape's Morton decomposition at the declared depth, resolved against this
+    /// generation's segments; candidacy is range-against-viewport arithmetic and the count is a sum
+    /// of [`range_cardinality`](https://docs.rs/croaring)-shaped mask questions, one per range. It
+    /// uses the tile index not at all, so *everywhere* is empty for such a level by construction
+    /// rather than by measurement.
+    ///
+    /// **Never chosen and never pinned.** It follows from the membership source, which is why
+    /// [`ServingLayout::parse_pin`] does not admit its word: a level is served this way because its
+    /// members are a shape, and a level whose members are not a shape has no ranges to serve.
+    SpatialRanges,
+}
+
+impl ServingLayout {
+    /// Whether this layout is scanned by row rather than probed by artifact — the one question the
+    /// serving path asks of it.
+    pub fn is_row_major(self) -> bool {
+        matches!(
+            self,
+            ServingLayout::RowMajorLabel | ServingLayout::RowMajorList
+        )
+    }
+
+    /// Whether this level's membership is a set of row **ranges** rather than a stored set — see
+    /// [`ServingLayout::SpatialRanges`].
+    pub fn is_ranges(self) -> bool {
+        matches!(self, ServingLayout::SpatialRanges)
+    }
+
+    /// The word a `[[layer]]` block spells this layout with (`configuration.md` §1).
+    ///
+    /// **Three words for three variants**, rather than the two-word `row-major` family the selection
+    /// memo proposed: an operator pinning a level has a reason, and `column` against `list` is the
+    /// difference between *I assert this partitions* and *I assert it does not*. The first is
+    /// checkable at the fold and falls back loudly when it is wrong, which is what makes stating it
+    /// worth more than having it inferred.
+    pub fn pin_word(self) -> &'static str {
+        match self {
+            ServingLayout::ArtifactMajor => "rows",
+            ServingLayout::RowMajorLabel => "column",
+            ServingLayout::RowMajorList => "list",
+            // **Deliberately outside [`ServingLayout::PIN_VOCABULARY`]**, which is what
+            // [`ServingLayout::parse_pin`] admits. The word exists so a trace and the disclosure
+            // report can name the form; it is not a word an operator may write, because the form
+            // follows from the membership rather than from a preference.
+            ServingLayout::SpatialRanges => "ranges",
+        }
+    }
+
+    /// The layout a `layout = "…"` key names, or `None` for a word outside the vocabulary.
+    pub fn parse_pin(word: &str) -> Option<Self> {
+        match word {
+            "rows" => Some(ServingLayout::ArtifactMajor),
+            "column" => Some(ServingLayout::RowMajorLabel),
+            "list" => Some(ServingLayout::RowMajorList),
+            _ => None,
+        }
+    }
+
+    /// Every word a `layout` key may carry.
+    pub const PIN_VOCABULARY: [&'static str; 3] = ["rows", "column", "list"];
+}
+
+/// Whether a key nothing declares is refused, or creates the object it names
+/// (`artifacts-from-points.md` §3, `per-point-attributes.md` §3.4).
+///
+/// **Closed**: an unknown key is refused — declare-then-use. On a layer that is the roster rule a
+/// member source has always had: a mistyped id would otherwise publish a phantom artifact carrying
+/// the members it stole from a real one, whose masked count then goes quietly short.
+///
+/// **Open**: an unknown key creates the object, carrying nothing but its name. On a layer that is
+/// *a cluster exists because points say it does*: the artifacts source becomes enrichment — titles,
+/// parents, contents for the clusters somebody knows something about — rather than the roster, and
+/// a cluster it omits exists without a title.
+///
+/// One type for a layer and for a vocabulary because it is one question, asked of two objects that
+/// both mint identities from keys arriving in data.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueSet {
+    #[default]
+    Closed,
+    Open,
+}
+
+/// Where each artifact's own access label is, and what one carrying none gets.
+/// **The register watches this** (C27).
+///
+/// **The presence of [`ArtifactVisibility::field`] is the declaration that artifacts carry their
+/// own labels** — what the retired `artifacts_carry_own` said, spelled as the thing that makes it
+/// true rather than as a second flag beside it (decision 0088). A layer that names no field has
+/// artifacts whose existence is derived from their members' visibility, which is the
+/// membership-derivation rule points already obey.
+///
+/// **No default on either half.** Mis-declared as carrying its own labels, a corpus-derived layer
+/// serves the existence of every artifact to every principal who reaches it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LayerAccess {
-    /// The gate on the layer itself — whether a viewer may know this layer exists at all,
-    /// independent of any member. `None` is reachable by every principal.
+#[serde(deny_unknown_fields)]
+pub struct ArtifactVisibility {
+    /// The field each artifact's own access label is read from. `None` — no field, so no artifact
+    /// carries a label of its own.
     ///
-    /// Reachability is resolved once per session and keyed on the layer version, with a live
-    /// suppression check on the layer's own entity ahead of the cached resolution. A gate-failed
-    /// name and a never-registered name are indistinguishable in outcome **and in work**.
-    pub label: Option<String>,
-    /// `true` — each artifact carries its own access label, and that label gates it. A boundary
-    /// exists whether or not this viewer can see a document inside it.
-    ///
-    /// `false` — an artifact's existence is derived from its members' visibility, which is the
-    /// membership-derivation rule points already obey.
-    ///
-    /// **No default.** Mis-declared `true` on a corpus-derived layer, this serves the existence of
-    /// every artifact to every principal who reaches the layer.
-    pub artifacts_carry_own: bool,
+    /// ⊘ **Acquisition, and nothing reads it yet**: the build has no artifact-label column and the
+    /// control plane takes no label per artifact, so today only its *presence* is consulted
+    /// ([`ArtifactVisibility::carries_own_labels`]). Naming a field therefore declares the shape without yet
+    /// filling it — which is fail-closed, an artifact with no label being withheld.
+    pub field: Option<String>,
+    /// What an artifact carrying no label of its own gets.
+    pub default: MemberDefault,
+}
+
+/// What a member carrying no label of its own gets — the fallback half of an
+/// [`ArtifactVisibility`] or of a view's point visibility.
+///
+/// **Filling never overrides**: a member carrying its own label keeps exactly that, and this lands
+/// only where the field is null or empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemberDefault {
+    /// The container's own gate is the whole of it. Legal for artifacts and **not** for points: a
+    /// point carrying no terms is in no posting list and so in no principal's mask, and a gate
+    /// narrows rather than widens.
+    Inherited,
+    /// An access label, `public` included — `public` is a label rather than a reserved absence
+    /// (`per-point-attributes.md` §3.8).
+    Label(String),
+}
+
+impl ArtifactVisibility {
+    /// Whether artifacts on this layer carry access labels of their own — the field's presence,
+    /// which is the whole of what C27 watches.
+    pub fn carries_own_labels(&self) -> bool {
+        self.field.is_some()
+    }
+
+    /// Artifacts carry no labels; the layer's own gate is the whole of it.
+    pub fn inherited() -> Self {
+        ArtifactVisibility {
+            field: None,
+            default: MemberDefault::Inherited,
+        }
+    }
+
+    /// Artifacts carry their own labels in `field`, and one carrying none inherits the layer's
+    /// gate.
+    pub fn carried(field: impl Into<String>) -> Self {
+        ArtifactVisibility {
+            field: Some(field.into()),
+            default: MemberDefault::Inherited,
+        }
+    }
 }
 
 /// The masked count an artifact must clear to be **served at all**.
 ///
 /// It never modifies a number: the count beside a served artifact is the masked count, unmodified.
 /// What it decides is whether the artifact exists for this viewer (decision 0075), and it is
-/// independent of [`LayerAccess::artifacts_carry_own`] — a layer may declare both, either or
-/// neither.
+/// independent of [`ArtifactVisibility`] — a layer may declare both, either or neither.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExistenceCriterion {
-    /// Serve iff the masked count is at least this many visible members.
+    /// Serve iff the masked count is at least this many visible members. The config spells it
+    /// `require_member_visibility = { count = n }`, and `"any"` is this at `n = 1`.
     ///
     /// **The form under which rollup is guaranteed.** A child's members are a subset of its
     /// parent's, so its masked count is never larger: a child that fails while its parent passes
     /// leaves the parent served, and nobody is left with a blank region.
-    MinVisible(u64),
+    Count(u64),
     /// Serve iff the masked count is at least this fraction of the artifact's **declared**
-    /// membership size. `0.0 < p <= 1.0`.
+    /// membership size. `0.0 < p <= 1.0`. The config spells it
+    /// `require_member_visibility = { fraction = p }`, and `"all"` is this at `p = 1.0`.
     ///
     /// **The form that scales** — a fixed bar of fifty protects a cluster of a hundred and does
     /// nothing for a cluster of ten thousand — and the form that ⊘ **breaks rollup**: a ratio does
@@ -111,7 +305,7 @@ pub enum ExistenceCriterion {
     /// ⊘ **It has no denominator for predicate membership** and is refused on such a layer until
     /// the owner rules: *"the points inside this shape"* declares no member set, and its size
     /// changes at every write.
-    MinFraction(f64),
+    Fraction(f64),
 }
 
 /// Where a layer's lineage lives.
@@ -126,6 +320,31 @@ pub enum HierarchyKind {
     /// different analysis rather than an ancestor, so switching to it replaces one claim with
     /// another rather than coarsening the first.
     Stacked,
+    /// Levels **and** containment edges between them: each tier sits inside the one above it. A
+    /// ward is a ward everywhere on the map, so the resolution is semantic and balanced, and an
+    /// edge always runs from a coarser level to a finer one.
+    ///
+    /// **Named for the structure rather than for a domain.** Administrative boundaries are the
+    /// motivating case and the map industry's own word for their levels is *admin level* — but a
+    /// subject taxonomy and a biological classification are the same shape, and the first layer
+    /// published against this one is arXiv's category tree. `stacked` and `tiered` are the two
+    /// levelled shapes, and the difference is audible: piled up independently, against ordered
+    /// strata that relate.
+    ///
+    /// **Its edges are information, not roll-up** *(owner ruling, 2026-08-18)*, and that is the
+    /// whole difference from [`Nested`](HierarchyKind::Nested). A treed layer's edges are what a
+    /// budget climbs: substituting a parent cluster for its children is an honest coarsening,
+    /// because a cluster is an abstract blob. Substituting a state for its counties is not — it
+    /// draws one large polygon across a region whose neighbours are still drawn as counties, an
+    /// inconsistent map from a server trying to be helpful. So the cut never climbs these edges,
+    /// **resolution is the client choosing a level**, and what the edges are for is telling a
+    /// client what contains what: nesting the features it draws, or filtering to one subtree while
+    /// still drawing the rest.
+    ///
+    /// A budget is therefore **inert** on such a layer, exactly as it is on a flat one — there is
+    /// no depth to trade. An over-large response is the artifact ceiling's business, which refuses
+    /// rather than truncating; the cut must never start sampling to reach a number.
+    Tiered,
 }
 
 /// How a layer's artifacts relate to each other, and what a response does when several pass.
@@ -144,43 +363,44 @@ pub struct Hierarchy {
     pub prune_children: bool,
 }
 
-/// What happens to an artifact's supplied content when one of the members it was generated from is
-/// deleted. Only **corpus-derived** supplied content is at stake; derived content is recomputed and
-/// corpus-independent content asserts nothing about the corpus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OnMemberDeletion {
-    /// **The default, and the safe one.** Containment is all-or-nothing, so a generating set that
-    /// loses a member fails for every principal for ever; the content and the set are dropped
-    /// together at the fold, and the caller regenerates. Where the exact membership *is* the object
-    /// — a curated set, a case file — this is the correct declaration.
-    #[default]
-    WithdrawContent,
-    /// The fold removes the deleted member from the generating set and the content goes on serving.
-    /// A caller's declaration, never a service behaviour (C7): a principal satisfying the survivors
-    /// may read content generated from the deleted item, which is a channel the caller chose for an
-    /// object whose membership is statistical.
-    ShrinkGeneratingSet,
-}
-
 /// One kind of content a caller supplies on this layer's artifacts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SuppliedContent {
-    /// What it is — `label_text`, `polygon`, `name`, `circle`. Published in `/v1/meta` so a client
-    /// knows what to draw; publishing the *kinds* is safe because an artifact failing containment is
+    /// Distinguishes two contents of one type on one layer — a curated boundary and a statistical
+    /// label may both be `polygon`.
+    pub name: String,
+    /// What it is — `text`, `polygon`, `extent`, `point`. Published in `/v1/meta` so a client knows
+    /// what to draw; publishing the *types* is safe because an artifact failing containment is
     /// absent whole, so no served artifact ever lacks a content its layer declares.
-    pub kind: String,
-    /// Whether this content was computed from corpus items. **The register watches this field**
-    /// (C28), and it has no default.
-    ///
-    /// `true` — the content asserts something about documents, so it is served only to a viewer who
-    /// can see everything it was generated from. Such content **must** arrive with a generating set;
+    #[serde(rename = "type")]
+    pub ty: String,
+    /// How much of the generating set a viewer must already see. **The register watches this
+    /// field** (C28), and it has no default.
+    pub require_member_visibility: SuppliedRequirement,
+}
+
+/// The membership requirement one supplied content carries — the second axis, at the only two
+/// settings supplied content admits (`configuration.md` §1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppliedRequirement {
+    /// The content asserts something about documents, so it is served only to a viewer who can see
+    /// **everything** it was generated from. Such content **must** arrive with a generating set;
     /// one that does not is refused.
-    ///
-    /// `false` — the content is true whether or not a single document exists, so containment is
-    /// vacuous and it serves unconditionally. Such content must **not** declare a generating set: a
-    /// set that is never tested is a claim the service would carry without meaning.
-    pub corpus_derived: bool,
+    All,
+    /// The content is true whether or not a single document exists, so containment is vacuous and
+    /// it serves on the container's own gate alone. Such content must **not** declare a generating
+    /// set: a set that is never tested is a claim the service would carry without meaning (C28).
+    Inherited,
+}
+
+impl SuppliedRequirement {
+    /// Whether this content requires **every** member of its generating set to be visible — the
+    /// `"all"` setting, and the reason such content must arrive with a generating set at all.
+    pub fn requires_all_members(self) -> bool {
+        matches!(self, SuppliedRequirement::All)
+    }
 }
 
 /// One member of the closed vocabulary of properties the engine recomputes per viewer.
@@ -199,7 +419,7 @@ pub struct SuppliedContent {
 /// served without it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DerivedProperty {
+pub enum ComputedProperty {
     /// The mean position of the visible members.
     Centroid,
     /// The axis-aligned bounds of the visible members.
@@ -208,21 +428,21 @@ pub enum DerivedProperty {
     Hull,
 }
 
-impl DerivedProperty {
+impl ComputedProperty {
     pub fn parse(name: &str) -> Option<Self> {
         match name {
-            "centroid" => Some(DerivedProperty::Centroid),
-            "box" => Some(DerivedProperty::Box),
-            "hull" => Some(DerivedProperty::Hull),
+            "centroid" => Some(ComputedProperty::Centroid),
+            "box" => Some(ComputedProperty::Box),
+            "hull" => Some(ComputedProperty::Hull),
             _ => None,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            DerivedProperty::Centroid => "centroid",
-            DerivedProperty::Box => "box",
-            DerivedProperty::Hull => "hull",
+            ComputedProperty::Centroid => "centroid",
+            ComputedProperty::Box => "box",
+            ComputedProperty::Hull => "hull",
         }
     }
 
@@ -231,26 +451,61 @@ impl DerivedProperty {
 }
 
 /// What a layer's artifacts carry.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContentDeclaration {
     /// Properties recomputed per viewer from `membership ∩ M_auth` and nothing else — `centroid`,
-    /// `hull`, `box`, `extractive_terms`. Contained by construction, so they need no gate and pass
-    /// containment automatically. The masked count is intrinsic and is never declared here.
+    /// `hull`, `box`, `extractive_terms`. Contained by construction, so they take no visibility
+    /// declaration and pass containment automatically. The masked count is intrinsic and is never
+    /// declared here.
     #[serde(default)]
-    pub derived: Vec<String>,
+    pub computed: Vec<String>,
     #[serde(default)]
     pub supplied: Vec<SuppliedContent>,
-    #[serde(default)]
-    pub on_member_deletion: OnMemberDeletion,
+    /// Drop supplied content when one of its generating set is deleted, rather than shrinking the
+    /// set. **Defaulted `true`**, and that is the one direction a disclosure control may default
+    /// in: the widening half is the one that must be typed (C7).
+    ///
+    /// `true` — the content and its generating set are dropped together at the fold and the caller
+    /// regenerates. Right where the exact membership *is* the object: a curated set, a case file.
+    /// Containment being all-or-nothing, a set that loses a member would otherwise fail for every
+    /// principal for ever.
+    ///
+    /// `false` — the fold removes the deleted member and the content goes on serving. Right where
+    /// the membership is statistical, and it means a principal satisfying the survivors may read
+    /// content generated from the deleted item.
+    #[serde(default = "yes")]
+    pub withdraw_on_member_deletion: bool,
+}
+
+/// [`ContentDeclaration::withdraw_on_member_deletion`]'s default, which is **not** `bool::default`.
+/// Deriving `Default` on the struct would give it `false` — the widening half — so the derive is
+/// replaced by the impl below rather than left to be silently wrong.
+fn yes() -> bool {
+    true
+}
+
+impl Default for ContentDeclaration {
+    fn default() -> Self {
+        ContentDeclaration {
+            computed: Vec::new(),
+            supplied: Vec::new(),
+            withdraw_on_member_deletion: true,
+        }
+    }
 }
 
 /// One declared resolution. Present only on layers whose resolutions are semantic and balanced —
-/// an administrative geography — or whose levels are independent analyses. **A treed layer declares
+/// a tiered geography — or whose levels are independent analyses. **A treed layer declares
 /// none** and sits entirely at level 0 (decision 0082).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LevelDeclaration {
     pub level: u32,
-    pub title: String,
+    /// Human-readable, served as metadata. **Optional, like every other title in the surface**: a
+    /// title discloses nothing a name does not, and the name is already served, so requiring one
+    /// buys nothing. Absent is served as absent rather than as the name — choosing to display an
+    /// identity like `clusters/hdbscan` is a client's call, not something the service manufactures.
+    pub title: Option<String>,
     /// Advisory min/max zoom, as every tile schema carries. **It bounds no work** — what bounds a
     /// treed layer's response is the request's artifact budget, and what bounds a levelled layer's
     /// is the level asked for.
@@ -265,25 +520,144 @@ pub struct LayerDeclaration {
     /// something must not come to mean something else, since bookmarks, edges and suppressions all
     /// travel by it.
     pub name: String,
-    /// Human-readable, served as metadata.
-    pub title: String,
-    /// Which slices this layer appears in.
-    pub slices: Vec<String>,
+    /// Human-readable, served as metadata. Optional — see [`LevelDeclaration::title`].
+    pub title: Option<String>,
+    /// Which views this layer appears in.
+    pub views: Vec<String>,
     pub membership: MembershipSource,
-    pub access: LayerAccess,
+    /// Whether a member key no artifact declares is refused, or creates one
+    /// (`artifacts-from-points.md` §3). Defaults to [`ValueSet::Closed`], which is the roster rule
+    /// the build has always had.
+    ///
+    /// **On the layer rather than on the acquisition block**, because ingest has no member block: a
+    /// key living in a build-only block could not govern what the write path does with an unknown
+    /// id, and governing both entry points is the point of it — and it now does. A build mints from
+    /// a member source; an ingest batch mints from a column named for the layer, at the close of the
+    /// commit window that allocates the points, carrying them as the new artifact's membership
+    /// ([decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) is
+    /// discharged: the two entry points say the same things).
+    ///
+    /// **What `open` costs is that a typo is no longer a refusal.** A mistyped key creates a
+    /// permanent object rather than failing, which is the trade the declaration makes knowingly; the
+    /// mitigation is that the number is reported — in the build's own report, and in the 200 that
+    /// accepted the batch.
+    #[serde(default)]
+    pub value_set: ValueSet,
+    /// The access label a viewer must hold to know this layer exists at all, independent of any
+    /// member. `None` is the config's `visibility = "public"` — reachable by every principal.
+    ///
+    /// Reachability is resolved once per session and keyed on the layer version, with a live
+    /// suppression check on the layer's own entity ahead of the cached resolution. A gate-failed
+    /// name and a never-registered name are indistinguishable in outcome **and in work**.
+    ///
+    /// ⊘ `public` is spelled as an absence here and is specified as a **term**, reserved at `0` and
+    /// satisfied inside the trust boundary (decision 0088). Until the dictionary carries it, the
+    /// absence is what makes the layer reachable — same outcome, and nothing evaluates a term for
+    /// it yet.
+    pub visibility: Option<String>,
+    pub artifact_visibility: ArtifactVisibility,
+    /// How much of an artifact's own membership a viewer must already see for it to exist for them.
     /// `None` declares *no such rule*, which is a statement rather than an omission.
-    pub visible_when: Option<ExistenceCriterion>,
+    pub require_member_visibility: Option<ExistenceCriterion>,
     pub hierarchy: Hierarchy,
     #[serde(default)]
     pub content: ContentDeclaration,
-    /// The layers this one's edges point into. A layer named here needs stable keys, because an
+    // ⊘ **`withdraw_on_member_deletion` on the *layer* is not a field here**, and its absence is
+    // the point (`annotation-write-cycle.md` §6.1, decision 0013). It would drop the whole
+    // artifact when one member is deleted, and the fold has no such path — so the declaration
+    // surface refuses `true` at parse rather than carrying a field the fold would silently ignore.
+    // The **content**-level key of the same name is real and lives on `ContentDeclaration`.
+    /// The layers this one's edges point into. A layer named here needs keys, because an
     /// edge names its target and at publish time the caller has no `tessera_id` for it.
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Empty for a treed or flat layer.
     #[serde(default)]
     pub levels: Vec<LevelDeclaration>,
+    /// **The layout pin**: serve every level of this layer in the named form, at the build and at
+    /// every fold after it. `None` — the automatic pick, which is the normal state.
+    ///
+    /// **`#[serde(default)]`, and that is not the register's exception being taken lightly.** The
+    /// two fields with no default are disclosure controls whose absent value would be a grant (C27,
+    /// C28). A layout is neither: both forms compute the same quantities from inside `M_auth`, no
+    /// request field names one and no response reports one, so a declaration that omits this is a
+    /// declaration that has no opinion about storage — which is a complete statement rather than an
+    /// unfilled one.
+    ///
+    /// **An override a fold could overturn is not an override** (decision 0094). A pinned layer is
+    /// rebuilt in its declared form at every fold, and the observations the automatic pick *would*
+    /// have read are recorded beside it so an operator can see what they were.
+    #[serde(default)]
+    pub layout: Option<ServingLayout>,
+    /// **What a `membership = "spatial"` layer's shapes are, and how deep they are drawn.**
+    ///
+    /// `None` on every other membership source, and refused there. `None` on a spatial layer is the
+    /// state that has always existed — a layer declared for a shape it does not yet carry, which
+    /// holds no artifacts because publication into it is refused.
+    ///
+    /// **`#[serde(default)]` on [`LayerDeclaration::layout`]'s argument, and it is not a
+    /// disclosure control.** The membership is `spatial` either way; what this adds is the shape,
+    /// and a layer without it serves nothing rather than serving something wider.
+    #[serde(default)]
+    pub shape: Option<ShapeDeclaration>,
 }
+
+/// What a spatial layer's artifacts are shaped like, and at what resolution their membership is
+/// drawn ([decision R3](../../../docs/design/artifact-serving-at-scale.md): the ranges *are* the
+/// membership, and the polygon is content).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShapeDeclaration {
+    /// ⊘ **One kind, and the field exists so the second one has somewhere to land.** A bounding box
+    /// is the whole of what is decoded: each artifact declares `min_x`, `min_y`, `max_x`, `max_y`
+    /// on its own row, and a polygon, a radius or a multi-part shape is refused at parse rather
+    /// than covered approximately — an approximate cover is a membership wider than the
+    /// declaration, which is the direction a mistake here must never take.
+    pub kind: ShapeKind,
+    /// The Morton depth the shape is covered at, `1..=`[`MAX_SHAPE_DEPTH`].
+    ///
+    /// **This is the membership, not a tuning key.** The tiles that cover a box at this depth are
+    /// exactly its members — a point inside such a tile is a member whether or not it is inside the
+    /// box — so a deeper decomposition is a *different* member set rather than a better
+    /// approximation of the same one. It is disclosed beside the layer for that reason.
+    pub depth: u8,
+}
+
+/// The shapes a [`ShapeDeclaration`] may name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShapeKind {
+    /// An axis-aligned bounding box, four `f64` columns on the artifact's own row.
+    #[default]
+    Bbox,
+}
+
+/// **The artifact key a `membership = { attribute = f }` layer mints for one value of `f`.**
+///
+/// One rule read twice. A **category**'s value has a key the author wrote — `finance`, `amber` —
+/// and that key is what the value *is*, so it is what the artifact is named; a **plain** integer
+/// column has no vocabulary and its value is the number, so the key is that number's canonical
+/// decimal spelling. Passing the vocabulary's key or `None` is therefore not a choice at the call
+/// site: it is whether the column has a vocabulary.
+///
+/// **Canonical decimal, so a key is a function of the value and not of who spelled it.** The two
+/// entry points mint from different places — a build from the column it has just read, an ingest
+/// from the row that has just arrived — and a key that could be written two ways would let one of
+/// them mint a second artifact for a value the other already named.
+pub fn attribute_value_key(code: u32, vocabulary_key: Option<&str>) -> String {
+    match vocabulary_key {
+        Some(key) => key.to_string(),
+        None => code.to_string(),
+    }
+}
+
+/// The deepest Morton decomposition a `membership = { spatial = … }` layer may declare.
+///
+/// **Sixteen, because that is where the code space ends.** A Morton code interleaves two 16-bit
+/// cell coordinates (`tessera_spatial::interleave_bits`), so a depth-16 tile is one cell and a
+/// deeper one names a subdivision the geometry cannot express — every tile below it would resolve
+/// to the same range as its parent, which is a membership silently wider than the declaration.
+pub const MAX_SHAPE_DEPTH: u8 = 16;
 
 /// The width a reserved run is aligned and sized to: one Roaring container.
 ///
@@ -397,8 +771,16 @@ impl ReservedRuns {
     /// property; this asserts it rather than enforcing it, because a misaligned run here means the
     /// allocator is wrong and a silent fixup would hide that.
     pub fn push(&mut self, run: EntityRun) {
-        debug_assert_eq!(run.start % RESERVED_BLOCK, 0, "reserved runs are block-aligned");
-        debug_assert_eq!(run.len() % RESERVED_BLOCK, 0, "reserved runs are whole blocks");
+        debug_assert_eq!(
+            run.start % RESERVED_BLOCK,
+            0,
+            "reserved runs are block-aligned"
+        );
+        debug_assert_eq!(
+            run.len() % RESERVED_BLOCK,
+            0,
+            "reserved runs are whole blocks"
+        );
         self.runs.push(run);
     }
 }
@@ -420,6 +802,58 @@ pub struct RegisteredLayer {
     /// Bumped by any edit that changes who may reach this layer, so a session's cached resolution
     /// is invalidated rather than outliving the gate it was computed from.
     pub version: u64,
+    /// The serving layout **per level**, parallel to [`RegisteredLayer::runs`] — decision 0094's
+    /// record.
+    ///
+    /// Set at registration from the pin, or [`ServingLayout::ArtifactMajor`] where there is none: a
+    /// level with no artifacts has no shape to observe, and the conservative pick is the form every
+    /// derived structure already exists for. **Re-evaluated inside every fold's artifact pass**,
+    /// before the registry snapshot the manifest is written from, so the record and the files the
+    /// same fold wrote cannot disagree.
+    ///
+    /// **A flip does not bump [`RegisteredLayer::version`]** (selection memo §5). That version gates
+    /// reachability and is a fail-closed guard against a reader holding a stale idea of a layer;
+    /// a layout is not a client-visible fact, so bumping it would make every session re-resolve a
+    /// layer for a change none of them can observe.
+    ///
+    /// Shorter than `runs` is read as [`ServingLayout::ArtifactMajor`] for the levels past its end
+    /// — see [`RegisteredLayer::layout_of`] — which is the fail-safe direction: the worst outcome
+    /// is a row-major column nothing adopts, and the level is served the way it always was.
+    pub layouts: Vec<ServingLayout>,
+}
+
+impl RegisteredLayer {
+    /// The layout recorded for one level. Absent is [`ServingLayout::ArtifactMajor`] — see
+    /// [`RegisteredLayer::layouts`].
+    pub fn layout_of(&self, level: u32) -> ServingLayout {
+        self.layouts
+            .get(level as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// The record every level of a freshly registered layer starts at: the form the membership
+    /// forces where it forces one, the pin where there is one, and artifact-major otherwise.
+    ///
+    /// **A predicate layer's form is not a pick and not a pin.** A shape's membership is a set of
+    /// row ranges and an attribute's *is* the column, so neither has an alternative to be chosen
+    /// between — which is why `validate` refuses a pin on either and why the fold's re-evaluation
+    /// leaves both alone. The registration records the form the serving path will actually take,
+    /// rather than recording artifact-major and having every request disagree with the manifest.
+    pub fn initial_layouts(declaration: &LayerDeclaration) -> Vec<ServingLayout> {
+        let forced = match declaration.membership {
+            // ⊘ A spatial layer with no `shape` has no ranges to serve and holds no artifacts, so
+            // it is recorded in the form every derived structure already exists for.
+            MembershipSource::Spatial if declaration.shape.is_none() => None,
+            MembershipSource::Spatial => Some(ServingLayout::SpatialRanges),
+            // **The membership is the column** (`design/artifact-serving-at-scale.md` §5.1): a
+            // single-valued attribute partitions the corpus, so one label per row is the only form
+            // its membership has — there is no per-artifact bitmap to fall back to.
+            MembershipSource::Attribute(_) => Some(ServingLayout::RowMajorLabel),
+            MembershipSource::Enumerated => None,
+        };
+        vec![forced.or(declaration.layout).unwrap_or_default(); declaration.run_count()]
+    }
 }
 
 /// Why a declaration was refused. Every one of these is a fail-closed refusal at registration: the
@@ -437,27 +871,43 @@ pub enum DeclarationError {
     TreeWithLevels,
     /// A stacked layer with no levels — its levels *are* its analyses, so it has declared nothing.
     StackedWithoutLevels,
+    /// A tiered layer with no levels. Its edges run *between* levels, so with none declared there
+    /// is nowhere for one to run.
+    TieredWithoutLevels,
     /// Levels that repeat a number or do not start at 0 and run consecutively. Ordinals are
     /// level-local over a contiguous entity run, so a gap would reserve a run nothing addresses.
     LevelsNotDense,
-    /// `min_fraction` outside `(0, 1]`.
+    /// `require_member_visibility = { fraction = p }` with `p` outside `(0, 1]`.
     FractionOutOfRange(f64),
     /// A proportional criterion on a predicate layer. ⊘ Refused until the owner rules on the
     /// denominator: *"the points inside this shape"* declares no member set and its size changes at
     /// every write, so the ratio has nothing stable to divide by.
     ProportionalOnPredicate,
+    /// A spatial layer's declared Morton depth is outside `1..=`[`MAX_SHAPE_DEPTH`].
+    ShapeDepthOutOfRange(u8),
+    /// A layer declares a `shape` and its membership is not `spatial`, so nothing would read it.
+    ShapeWithoutSpatialMembership,
+    /// A predicate layer declares something its derived artifacts cannot carry — content, a
+    /// dependency, levels, its own access labels, or a layout pin. Carries the spelling, so the
+    /// message names the key an operator has to remove.
+    PredicateDeclares(String),
     /// A layer naming itself in `depends_on`.
     SelfDependency,
-    /// The same slice, level title or supplied-content kind declared twice.
+    /// The same view, level title or supplied-content name declared twice.
     Duplicate(String),
-    /// A derived property outside [`DerivedProperty::VOCABULARY`].
+    /// A row-major layout pinned on a layer whose membership is a **shape**. A spatial predicate
+    /// has no per-row source, and inverting its ranges into a column would materialise the very
+    /// membership the ranges exist to avoid — so the pin names a form this layer cannot be stored
+    /// in, and is refused rather than ignored (selection memo §4.1).
+    LayoutWithoutRowSource,
+    /// A computed property outside [`ComputedProperty::VOCABULARY`].
     ///
     /// **Refused rather than ignored**, and that is a fail-closed choice rather than tidiness: a
     /// served artifact missing content its layer declared is indistinguishable, to a client, from
     /// one whose content was withheld — and nothing is ever withheld from a served artifact
     /// (decision 0076). Accepting an unknown name would put the client in the position of guessing
     /// which of the two it was looking at.
-    UnknownDerived(String),
+    UnknownComputed(String),
 }
 
 impl std::fmt::Display for DeclarationError {
@@ -473,30 +923,63 @@ impl std::fmt::Display for DeclarationError {
                 f,
                 "a stacked layer's levels are its analyses, so it must declare at least one"
             ),
+            DeclarationError::TieredWithoutLevels => write!(
+                f,
+                "a tiered layer's edges run between its levels, so it must declare them: declare \
+                 the levels, or declare the layer nested if its lineage is a tree at one resolution"
+            ),
             DeclarationError::LevelsNotDense => write!(
                 f,
                 "levels must be numbered 0..n consecutively with no repeats — an ordinal is its \
                  entity minus the level's base, so a gap reserves a run nothing addresses"
             ),
             DeclarationError::FractionOutOfRange(p) => {
-                write!(f, "min_fraction must be in (0, 1]; got {p}")
+                write!(f, "require_member_visibility fraction must be in (0, 1]; got {p}")
             }
+            DeclarationError::ShapeDepthOutOfRange(d) => write!(
+                f,
+                "a spatial layer's `depth` is {d}; it must be between 1 and {MAX_SHAPE_DEPTH}. \
+                 The depth is the membership — a shape is covered by tiles of exactly that depth — \
+                 so there is no safe value for this to default to"
+            ),
+            DeclarationError::ShapeWithoutSpatialMembership => write!(
+                f,
+                "a layer declares a `shape` and its `membership` is not `spatial`, so the shape is \
+                 a rule nothing evaluates — the members come from the stored set or the predicate \
+                 the membership names, and the box beside them would decide nothing"
+            ),
+            DeclarationError::PredicateDeclares(what) => write!(
+                f,
+                "a layer whose membership is a predicate declares {what}, which its artifacts \
+                 cannot carry: they are derived from the rule, not published with properties \
+                 beside them. A layer registered with this would be reachable and serve nothing, \
+                 which no client can tell from one whose artifacts were all withheld"
+            ),
             DeclarationError::ProportionalOnPredicate => write!(
                 f,
                 "a proportional criterion needs a declared membership size to divide by, and \
-                 predicate membership declares none; use min_visible or no criterion"
+                 predicate membership declares none; use `require_member_visibility = {{ count = n }}` \
+                 or `\"none\"`"
             ),
             DeclarationError::SelfDependency => {
                 write!(f, "a layer may not name itself in depends_on")
             }
-            DeclarationError::Duplicate(what) => write!(f, "declared twice: {what}"),
-            DeclarationError::UnknownDerived(name) => write!(
+            DeclarationError::LayoutWithoutRowSource => write!(
                 f,
-                "'{name}' is not a derived property this service computes; the vocabulary is {} — \
+                "a row-major layout ('column' or 'list') needs a per-row source, and \
+                 `membership = \"spatial\"` has none: a shape is decomposed to row ranges at \
+                 request time, and inverting those ranges into a column would materialise the \
+                 membership the ranges exist to avoid. Use `layout = \"rows\"`, or drop the key \
+                 and let the pick be automatic"
+            ),
+            DeclarationError::Duplicate(what) => write!(f, "declared twice: {what}"),
+            DeclarationError::UnknownComputed(name) => write!(
+                f,
+                "'{name}' is not a computed property this service computes; the vocabulary is {} — \
                  a name outside it is refused rather than ignored, because an artifact served \
                  without content its layer declared cannot be told apart from one whose content \
                  was withheld",
-                DerivedProperty::VOCABULARY.join(", ")
+                ComputedProperty::VOCABULARY.join(", ")
             ),
         }
     }
@@ -516,12 +999,20 @@ impl LayerDeclaration {
             return Err(DeclarationError::SelfDependency);
         }
 
+        // **A layer's edges are all within a level or all between levels, never a mix**, and which
+        // it is follows from the declared kind rather than from inspecting the edges (§6.2: a layer
+        // declares its structure, and it is never inferred from whether edges happen to exist).
+        // The publish path and the build both enforce the direction; this is where the shape that
+        // makes the question answerable at all is checked.
         match self.hierarchy.kind {
             HierarchyKind::Nested if !self.levels.is_empty() => {
                 return Err(DeclarationError::TreeWithLevels)
             }
             HierarchyKind::Stacked if self.levels.is_empty() => {
                 return Err(DeclarationError::StackedWithoutLevels)
+            }
+            HierarchyKind::Tiered if self.levels.is_empty() => {
+                return Err(DeclarationError::TieredWithoutLevels)
             }
             _ => {}
         }
@@ -539,42 +1030,119 @@ impl LayerDeclaration {
             return Err(DeclarationError::LevelsNotDense);
         }
 
-        if let Some(ExistenceCriterion::MinFraction(p)) = self.visible_when {
+        if let Some(ExistenceCriterion::Fraction(p)) = self.require_member_visibility {
             if !(p > 0.0 && p <= 1.0) {
                 return Err(DeclarationError::FractionOutOfRange(p));
             }
             if matches!(
                 self.membership,
-                MembershipSource::Spatial | MembershipSource::Attribute
+                MembershipSource::Spatial | MembershipSource::Attribute(_)
             ) {
                 return Err(DeclarationError::ProportionalOnPredicate);
             }
         }
 
-        let mut slices: BTreeSet<&str> = BTreeSet::new();
-        for slice in &self.slices {
-            if !slices.insert(slice.as_str()) {
-                return Err(DeclarationError::Duplicate(format!("slice {slice}")));
+        // **The one layout combination that is refused at parse.** A shape has no per-row source,
+        // so the pin names a form this layer cannot be stored in at all. The other refusal the
+        // selection memo names — `column` on a level whose memberships overlap — is *not* checkable
+        // here: whether an attribute is single-valued is a property of the data rather than of the
+        // declaration. It is checked at the fold, where a double claim is observable, and the level
+        // falls back to artifact-major with a loud trace rather than composing a column whose
+        // labels would each be whichever artifact happened to write last.
+        if self.membership == MembershipSource::Spatial && self.layout.is_some() {
+            return Err(DeclarationError::LayoutWithoutRowSource);
+        }
+
+        // **What a predicate layer may not declare, and why each one is a refusal rather than a
+        // warning.** Every item here would leave the layer registered, reachable and serving
+        // nothing — which is exactly the state the build already refuses for a layer declared in a
+        // view it does not write, and which no client can tell from a layer whose artifacts were
+        // all withheld. The membership is a rule, so the artifacts it names carry their key and
+        // nothing else.
+        // **The shape declaration and the membership are one statement in two fields**, and each
+        // half without the other is a declaration that cannot serve: a `shape` on a layer whose
+        // members are a stored set or a predicate is a rule nothing reads, and the depth is the
+        // membership rather than a tuning key — a box covered at depth 4 and the same box at
+        // depth 8 hold different points — so there is no value for it to default to.
+        match (&self.membership, &self.shape) {
+            (MembershipSource::Spatial, Some(shape)) => {
+                if shape.depth == 0 || shape.depth > MAX_SHAPE_DEPTH {
+                    return Err(DeclarationError::ShapeDepthOutOfRange(shape.depth));
+                }
+            }
+            // ⊘ A spatial layer with no `shape` is the state this surface has always had: declared,
+            // registered, and holding nothing, because publication into it is refused. It stays
+            // expressible rather than becoming a refusal — it is what a fixture declares while the
+            // shape it will carry is still being written — and the *build* is where it is reported,
+            // beside the artifacts it would have had.
+            (MembershipSource::Spatial, None) => {}
+            (_, Some(_)) => return Err(DeclarationError::ShapeWithoutSpatialMembership),
+            (_, None) => {}
+        }
+        if matches!(
+            self.membership,
+            MembershipSource::Spatial | MembershipSource::Attribute(_)
+        ) {
+            let refuse = |what: &str| Err(DeclarationError::PredicateDeclares(what.to_string()));
+            if !self.content.supplied.is_empty() {
+                // A derived artifact has no publication to carry content bytes, and one served
+                // without content its layer declares cannot be told from one whose content was
+                // withheld (decision 0076) — the same refusal `resolve_or_mint` makes of a minted
+                // key, made where the declaration is.
+                return refuse("supplied content");
+            }
+            if !self.content.computed.is_empty() {
+                // ⊘ A computed property is a function of `membership ∩ M_auth`, and reaching one
+                // artifact's membership on a predicate level costs a scan of the whole column
+                // (attribute) — so it is refused here rather than served at a cost the declaration
+                // does not show. A shape's ranges would make it cheap; refusing both keeps one rule.
+                return refuse("computed content");
+            }
+            if !self.depends_on.is_empty() {
+                return refuse("depends_on");
+            }
+            if !self.levels.is_empty() {
+                // The rule produces one artifact per value or per shape, at one resolution. A
+                // second level would be a second rule nobody wrote.
+                return refuse("levels");
+            }
+            if self.hierarchy.kind != HierarchyKind::Flat {
+                return refuse("a hierarchy other than `flat`");
+            }
+            if self.artifact_visibility.carries_own_labels() {
+                // A derived artifact carries no row of its own to read a label off, so naming the
+                // field would withhold every artifact of the layer for every principal.
+                return refuse("`artifact_visibility.field`");
+            }
+            if matches!(self.membership, MembershipSource::Attribute(_)) && self.layout.is_some() {
+                return refuse("a layout pin");
             }
         }
-        let mut derived: BTreeSet<&str> = BTreeSet::new();
-        for name in &self.content.derived {
-            if DerivedProperty::parse(name).is_none() {
-                return Err(DeclarationError::UnknownDerived(name.clone()));
+
+        let mut views: BTreeSet<&str> = BTreeSet::new();
+        for view in &self.views {
+            if !views.insert(view.as_str()) {
+                return Err(DeclarationError::Duplicate(format!("view {view}")));
             }
-            if !derived.insert(name.as_str()) {
+        }
+        let mut computed: BTreeSet<&str> = BTreeSet::new();
+        for name in &self.content.computed {
+            if ComputedProperty::parse(name).is_none() {
+                return Err(DeclarationError::UnknownComputed(name.clone()));
+            }
+            if !computed.insert(name.as_str()) {
                 return Err(DeclarationError::Duplicate(format!(
-                    "derived property {name}"
+                    "computed property {name}"
                 )));
             }
         }
 
-        let mut kinds: BTreeSet<&str> = BTreeSet::new();
+        let mut names: BTreeSet<&str> = BTreeSet::new();
         for supplied in &self.content.supplied {
-            if !kinds.insert(supplied.kind.as_str()) {
+            if !names.insert(supplied.name.as_str()) {
                 return Err(DeclarationError::Duplicate(format!(
-                    "supplied content kind {}",
-                    supplied.kind
+                    "supplied content {}",
+                    supplied.name
                 )));
             }
         }
@@ -587,6 +1155,118 @@ impl LayerDeclaration {
     pub fn run_count(&self) -> usize {
         self.levels.len().max(1)
     }
+
+    /// What a **list** of keys naming this layer's artifacts means, position by position
+    /// ([`ListMeaning`]).
+    pub fn list_meaning(&self) -> ListMeaning {
+        ListMeaning::of(self.hierarchy.kind, self.levels.len())
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// A membership column's reading rule — shared by the build and the wire
+// ---------------------------------------------------------------------------------------------
+
+/// What the positions in a list of member keys mean (`artifacts-from-points.md` §4).
+///
+/// **The rule lives here because two implementations read it.** A build reads a member source's
+/// key column out of Parquet; `/control/ingest` reads a column named for a layer out of an Arrow
+/// batch. The *decode* cannot be shared — this crate carries no `arrow` dependency and is not
+/// getting one — but the meaning must be, or the two entry points come to disagree about what a
+/// caller's data says, which is exactly what
+/// [decision 0091](../../../docs/decisions/0091-build-is-ingest-into-an-empty-database.md) forbids.
+/// So the transport stays with each reader and the rule — which positions carry which level, which
+/// adjacencies are edges, what a fixed arity must equal — is this type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListMeaning {
+    /// `stacked` and `tiered`: entry *k* is the artifact at level *k*, one entry per declared
+    /// level. `edges` is `tiered`'s containment between consecutive entries; `stacked`'s levels are
+    /// independent analyses and carry none.
+    Levelled { levels: usize, edges: bool },
+    /// `nested`: a lineage, entry *k* the parent of entry *k+1*, **every artifact at level 0** — a
+    /// nested layer's hierarchy is its edges and it declares no levels (decision 0082).
+    Lineage,
+    /// `flat`: a membership each, at level 0, in no order. A flat layer has no positions for a list
+    /// to index, so the entries are a set and nothing is read from their adjacency.
+    Unordered,
+}
+
+impl ListMeaning {
+    pub fn of(kind: HierarchyKind, levels: usize) -> Self {
+        match kind {
+            HierarchyKind::Flat => ListMeaning::Unordered,
+            HierarchyKind::Nested => ListMeaning::Lineage,
+            HierarchyKind::Stacked => ListMeaning::Levelled {
+                levels,
+                edges: false,
+            },
+            HierarchyKind::Tiered => ListMeaning::Levelled {
+                levels,
+                edges: true,
+            },
+        }
+    }
+
+    /// The level the artifact at `position` belongs to.
+    pub fn level_of(&self, position: usize) -> u32 {
+        match self {
+            ListMeaning::Levelled { .. } => position as u32,
+            ListMeaning::Lineage | ListMeaning::Unordered => 0,
+        }
+    }
+
+    /// Whether consecutive entries declare a parent edge.
+    pub fn declares_edges(&self) -> bool {
+        match self {
+            ListMeaning::Levelled { edges, .. } => *edges,
+            ListMeaning::Lineage => true,
+            ListMeaning::Unordered => false,
+        }
+    }
+
+    /// The length every row's list must have, where the declaration fixes one. `None` for a lineage
+    /// and for plain multi-membership, whose rows are as long as each point's own branch.
+    pub fn arity(&self) -> Option<usize> {
+        match self {
+            ListMeaning::Levelled { levels, .. } => Some(*levels),
+            ListMeaning::Lineage | ListMeaning::Unordered => None,
+        }
+    }
+}
+
+/// **This point is in no artifact** — the sentinel every clusterer emits for noise
+/// (`artifacts-from-points.md` §2).
+///
+/// Exactly `-1`, and not any negative: a negative id is otherwise unusual enough that swallowing
+/// `-7` would more likely be eating data than handling noise.
+pub const NOISE_KEY: i128 = -1;
+
+/// The key an integer cell names, or `None` where it names no artifact.
+///
+/// **The decimal spelling is the key**, so `3` and `"3"` name one artifact whichever column type a
+/// producer wrote — which is what lets a member table and an ingest batch spell one membership two
+/// ways.
+pub fn integer_key(value: i128) -> Option<String> {
+    (value != NOISE_KEY).then(|| value.to_string())
+}
+
+/// The parent edges one row's entries declare: entry *k* is the parent of entry *k+1*.
+///
+/// **Adjacent entries only, and both of them present.** An entry naming no artifact is a point that
+/// is noise at that resolution, not a link across it — reading past it would invent an edge from a
+/// level to one two below, which is a containment claim the caller never made and which the next
+/// point, clustered at that resolution, would contradict.
+///
+/// Generic in the entry, because the two readers hold different things at this point: the build
+/// holds an interned address and the wire holds a key. The adjacency is the same rule either way,
+/// and it is the half most likely to drift if each wrote its own.
+pub fn parent_edges<T>(entries: &[Option<T>]) -> impl Iterator<Item = (&T, &T)> {
+    entries
+        .windows(2)
+        .filter_map(|pair| match (&pair[0], &pair[1]) {
+            (Some(parent), Some(child)) => Some((parent, child)),
+            _ => None,
+        })
 }
 
 #[cfg(test)]
@@ -596,14 +1276,13 @@ mod tests {
     fn decl(kind: HierarchyKind, levels: Vec<u32>) -> LayerDeclaration {
         LayerDeclaration {
             name: "clusters/x".into(),
-            title: "X".into(),
-            slices: vec!["default".into()],
+            title: Some("X".into()),
+            views: vec!["default".into()],
             membership: MembershipSource::Enumerated,
-            access: LayerAccess {
-                label: None,
-                artifacts_carry_own: false,
-            },
-            visible_when: None,
+            value_set: Default::default(),
+            visibility: None,
+            artifact_visibility: ArtifactVisibility::inherited(),
+            require_member_visibility: None,
             hierarchy: Hierarchy {
                 kind,
                 prune_children: false,
@@ -614,11 +1293,217 @@ mod tests {
                 .into_iter()
                 .map(|level| LevelDeclaration {
                     level,
-                    title: format!("L{level}"),
+                    title: Some(format!("L{level}")),
                     zoom: None,
                 })
                 .collect(),
+            layout: None,
+            shape: None,
         }
+    }
+
+    /// **The three words are three variants**, and a word outside them is not a layout.
+    #[test]
+    fn the_pin_vocabulary_round_trips_and_admits_nothing_else() {
+        for layout in [
+            ServingLayout::ArtifactMajor,
+            ServingLayout::RowMajorLabel,
+            ServingLayout::RowMajorList,
+        ] {
+            assert_eq!(ServingLayout::parse_pin(layout.pin_word()), Some(layout));
+            assert!(ServingLayout::PIN_VOCABULARY.contains(&layout.pin_word()));
+        }
+        assert_eq!(ServingLayout::parse_pin("row-major"), None);
+        assert_eq!(ServingLayout::parse_pin("artifact-major"), None);
+        assert_eq!(ServingLayout::parse_pin(""), None);
+        assert!(!ServingLayout::ArtifactMajor.is_row_major());
+        assert!(ServingLayout::RowMajorLabel.is_row_major());
+        assert!(ServingLayout::RowMajorList.is_row_major());
+    }
+
+    /// **A predicate layer's serving form follows from its membership, so a pin is refused** —
+    /// every pin, in both directions. A shape's members are row ranges and an attribute's members
+    /// *are* the column: neither has a second form for a pin to select between, so a pin here names
+    /// a storage the layer cannot be put in rather than a preference between two that work.
+    #[test]
+    fn a_layout_pin_on_a_predicate_layer_is_refused() {
+        for pin in [
+            ServingLayout::ArtifactMajor,
+            ServingLayout::RowMajorLabel,
+            ServingLayout::RowMajorList,
+        ] {
+            let mut shape = decl(HierarchyKind::Flat, vec![]);
+            shape.membership = MembershipSource::Spatial;
+            shape.layout = Some(pin);
+            assert_eq!(
+                shape.validate(),
+                Err(DeclarationError::LayoutWithoutRowSource)
+            );
+
+            let mut attribute = decl(HierarchyKind::Flat, vec![]);
+            attribute.membership = MembershipSource::Attribute("severity".into());
+            attribute.layout = Some(pin);
+            assert_eq!(
+                attribute.validate(),
+                Err(DeclarationError::PredicateDeclares("a layout pin".into()))
+            );
+        }
+        // Both are fine with no pin at all, which is the only thing either may say.
+        for source in [
+            MembershipSource::Spatial,
+            MembershipSource::Attribute("severity".into()),
+        ] {
+            let mut d = decl(HierarchyKind::Flat, vec![]);
+            d.membership = source;
+            d.layout = None;
+            assert!(d.validate().is_ok());
+        }
+    }
+
+    /// **The form a predicate layer is registered in is the form it is served in**, recorded at
+    /// registration rather than left at the default for every request to disagree with.
+    #[test]
+    fn a_predicate_layers_recorded_form_follows_its_membership() {
+        let mut shape = decl(HierarchyKind::Flat, vec![]);
+        shape.membership = MembershipSource::Spatial;
+        shape.shape = Some(ShapeDeclaration {
+            kind: ShapeKind::Bbox,
+            depth: 4,
+        });
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&shape),
+            vec![ServingLayout::SpatialRanges]
+        );
+        // ⊘ And a spatial layer that declares no shape has no ranges to serve — it holds nothing,
+        // so it is recorded in the form every derived structure already exists for.
+        shape.shape = None;
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&shape),
+            vec![ServingLayout::ArtifactMajor]
+        );
+        let mut attribute = decl(HierarchyKind::Flat, vec![]);
+        attribute.membership = MembershipSource::Attribute("severity".into());
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&attribute),
+            vec![ServingLayout::RowMajorLabel]
+        );
+    }
+
+    /// **A depth is the membership, so there is no value for it to default to** — and the ceiling
+    /// is where the code space ends rather than a tuning limit.
+    #[test]
+    fn a_shape_depth_outside_the_code_space_is_refused() {
+        let spatial = |depth: u8| {
+            let mut d = decl(HierarchyKind::Flat, vec![]);
+            d.membership = MembershipSource::Spatial;
+            d.shape = Some(ShapeDeclaration {
+                kind: ShapeKind::Bbox,
+                depth,
+            });
+            d
+        };
+        for depth in [0u8, MAX_SHAPE_DEPTH + 1, u8::MAX] {
+            assert_eq!(
+                spatial(depth).validate(),
+                Err(DeclarationError::ShapeDepthOutOfRange(depth))
+            );
+        }
+        for depth in [1u8, 6, MAX_SHAPE_DEPTH] {
+            assert!(spatial(depth).validate().is_ok(), "depth {depth}");
+        }
+        // A shape beside a membership that reads none is a rule nothing evaluates.
+        for source in [
+            MembershipSource::Enumerated,
+            MembershipSource::Attribute("severity".into()),
+        ] {
+            let mut d = spatial(6);
+            d.membership = source;
+            assert_eq!(
+                d.validate(),
+                Err(DeclarationError::ShapeWithoutSpatialMembership)
+            );
+        }
+    }
+
+    /// **What a predicate layer may not declare.** Each of these would register a layer that is
+    /// reachable and serves nothing — the state the build already refuses for a layer declared in a
+    /// view it does not write, and which no client can tell from one whose artifacts were all
+    /// withheld.
+    #[test]
+    fn a_predicate_layer_declaring_what_it_cannot_carry_is_refused() {
+        for source in [
+            MembershipSource::Spatial,
+            MembershipSource::Attribute("severity".into()),
+        ] {
+            let base = || {
+                let mut d = decl(HierarchyKind::Flat, vec![]);
+                d.membership = source.clone();
+                d
+            };
+            assert!(base().validate().is_ok(), "the bare declaration is fine");
+
+            let mut d = base();
+            d.content.supplied = vec![SuppliedContent {
+                name: "label".into(),
+                ty: "text".into(),
+                require_member_visibility: SuppliedRequirement::Inherited,
+            }];
+            assert!(matches!(
+                d.validate(),
+                Err(DeclarationError::PredicateDeclares(_))
+            ));
+
+            let mut d = base();
+            d.content.computed = vec!["centroid".into()];
+            assert!(matches!(
+                d.validate(),
+                Err(DeclarationError::PredicateDeclares(_))
+            ));
+
+            let mut d = base();
+            d.depends_on = vec!["clusters/y".into()];
+            assert!(matches!(
+                d.validate(),
+                Err(DeclarationError::PredicateDeclares(_))
+            ));
+
+            let mut d = base();
+            d.hierarchy.kind = HierarchyKind::Stacked;
+            d.levels = vec![LevelDeclaration {
+                level: 0,
+                title: None,
+                zoom: None,
+            }];
+            assert!(matches!(
+                d.validate(),
+                Err(DeclarationError::PredicateDeclares(_))
+            ));
+
+            let mut d = base();
+            d.artifact_visibility = ArtifactVisibility::carried("visibility");
+            assert!(matches!(
+                d.validate(),
+                Err(DeclarationError::PredicateDeclares(_))
+            ));
+        }
+    }
+
+    /// A layer with no pin records artifact-major for every level it declares — one entry per
+    /// level, and one for a layer that declares none.
+    #[test]
+    fn the_initial_record_is_one_entry_per_level() {
+        let flat = decl(HierarchyKind::Flat, vec![]);
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&flat),
+            vec![ServingLayout::ArtifactMajor]
+        );
+        let mut stacked = decl(HierarchyKind::Stacked, vec![0, 1, 2]);
+        stacked.layout = Some(ServingLayout::RowMajorList);
+        assert_eq!(
+            RegisteredLayer::initial_layouts(&stacked),
+            vec![ServingLayout::RowMajorList; 3],
+            "a pin is per layer and reaches every level of it"
+        );
     }
 
     #[test]
@@ -634,17 +1519,18 @@ mod tests {
             decl(HierarchyKind::Stacked, vec![]).validate(),
             Err(DeclarationError::StackedWithoutLevels)
         );
-        assert!(decl(HierarchyKind::Stacked, vec![0, 1, 2]).validate().is_ok());
+        assert!(decl(HierarchyKind::Stacked, vec![0, 1, 2])
+            .validate()
+            .is_ok());
     }
 
     #[test]
-    fn an_administrative_layer_declares_edges_and_levels_together() {
+    fn a_tiered_layer_declares_edges_and_levels_together() {
         // The case the two-name shorthand does not cover: a ward is a ward everywhere, so the
         // resolution is semantic *and* the containment lineage exists. Validation must not force a
         // caller to throw one of them away.
         let mut d = decl(HierarchyKind::Stacked, vec![0, 1, 2]);
-        d.membership = MembershipSource::Spatial;
-        d.access.artifacts_carry_own = true;
+        d.artifact_visibility = ArtifactVisibility::carried("visibility");
         assert!(d.validate().is_ok());
     }
 
@@ -668,45 +1554,70 @@ mod tests {
     fn a_proportional_criterion_is_refused_on_a_predicate_layer() {
         // ⊘ Until the denominator is ruled: "the points inside this shape" declares no member set,
         // and its size changes at every write, so there is nothing stable to divide by.
-        for source in [MembershipSource::Spatial, MembershipSource::Attribute] {
+        for source in [
+            MembershipSource::Spatial,
+            MembershipSource::Attribute("severity".into()),
+        ] {
             let mut d = decl(HierarchyKind::Flat, vec![]);
             d.membership = source;
-            d.visible_when = Some(ExistenceCriterion::MinFraction(0.1));
+            d.require_member_visibility = Some(ExistenceCriterion::Fraction(0.1));
             assert_eq!(d.validate(), Err(DeclarationError::ProportionalOnPredicate));
 
             // The absolute form is fine on the same layer — the refusal is about the denominator,
             // not about predicates having no criterion.
-            d.visible_when = Some(ExistenceCriterion::MinVisible(50));
+            d.require_member_visibility = Some(ExistenceCriterion::Count(50));
             assert!(d.validate().is_ok());
         }
 
         let mut d = decl(HierarchyKind::Flat, vec![]);
-        d.visible_when = Some(ExistenceCriterion::MinFraction(1.5));
+        d.require_member_visibility = Some(ExistenceCriterion::Fraction(1.5));
         assert_eq!(d.validate(), Err(DeclarationError::FractionOutOfRange(1.5)));
-        d.visible_when = Some(ExistenceCriterion::MinFraction(0.0));
+        d.require_member_visibility = Some(ExistenceCriterion::Fraction(0.0));
         assert_eq!(d.validate(), Err(DeclarationError::FractionOutOfRange(0.0)));
-        d.visible_when = Some(ExistenceCriterion::MinFraction(1.0));
+        d.require_member_visibility = Some(ExistenceCriterion::Fraction(1.0));
         assert!(d.validate().is_ok());
     }
 
     #[test]
     fn the_two_register_watched_fields_have_no_default() {
-        // C27 and C28: `artifacts_carry_own` and `corpus_derived` decide whether a disclosure
-        // control runs at all, so a declaration omitting either must fail to parse rather than
-        // acquire a value nobody wrote. `deny_unknown_fields` plus the absence of `#[serde(default)]`
-        // is what enforces it, and this test is what stops someone adding a default later.
-        let missing_flag = serde_json::json!({
-            "name": "l", "title": "L", "slices": [], "membership": "enumerated",
-            "access": {},
+        // C27 and C28: the artifact-label declaration and supplied content's membership
+        // requirement decide whether a disclosure control runs at all, so a declaration omitting
+        // either must fail to parse rather than acquire a value nobody wrote. `deny_unknown_fields`
+        // plus the absence of `#[serde(default)]` is what enforces it, and this test is what stops
+        // someone adding a default later.
+        let complete = serde_json::json!({
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
             "hierarchy": { "kind": "flat" }
         });
-        assert!(serde_json::from_value::<LayerDeclaration>(missing_flag).is_err());
+        assert!(serde_json::from_value::<LayerDeclaration>(complete).is_ok());
+
+        let missing_artifact_visibility = serde_json::json!({
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
+            "visibility": null,
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat" }
+        });
+        assert!(serde_json::from_value::<LayerDeclaration>(missing_artifact_visibility).is_err());
+
+        let missing_member_default = serde_json::json!({
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
+            "visibility": null,
+            "artifact_visibility": { "field": null },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat" }
+        });
+        assert!(serde_json::from_value::<LayerDeclaration>(missing_member_default).is_err());
 
         let missing_provenance = serde_json::json!({
-            "name": "l", "title": "L", "slices": [], "membership": "enumerated",
-            "access": { "artifacts_carry_own": false },
+            "name": "l", "title": "L", "views": [], "membership": "enumerated",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
             "hierarchy": { "kind": "flat" },
-            "content": { "supplied": [{ "kind": "label_text" }] }
+            "content": { "supplied": [{ "name": "topic", "type": "text" }] }
         });
         assert!(serde_json::from_value::<LayerDeclaration>(missing_provenance).is_err());
     }
@@ -727,7 +1638,13 @@ mod tests {
         let runs = ReservedRuns::from_runs(vec![a, b]);
         assert_eq!(runs.capacity(), 3 * RESERVED_BLOCK);
 
-        for ordinal in [0, 1, RESERVED_BLOCK - 1, RESERVED_BLOCK, 3 * RESERVED_BLOCK - 1] {
+        for ordinal in [
+            0,
+            1,
+            RESERVED_BLOCK - 1,
+            RESERVED_BLOCK,
+            3 * RESERVED_BLOCK - 1,
+        ] {
             let entity = runs.entity_of(ordinal).expect("within capacity");
             assert_eq!(runs.ordinal_of(entity), Some(ordinal));
         }
@@ -766,11 +1683,11 @@ mod tests {
         // matters — a *positional* encoding, where absence cannot be signalled — using serde's own
         // tuple form via `serde_json` on a sequence.
         let mut d = decl(HierarchyKind::Flat, vec![]);
-        d.access.label = None;
-        d.visible_when = None;
+        d.visibility = None;
+        d.require_member_visibility = None;
         d.levels = vec![LevelDeclaration {
             level: 0,
-            title: "only".into(),
+            title: Some("only".into()),
             zoom: None,
         }];
         d.hierarchy.kind = HierarchyKind::Stacked;
@@ -779,11 +1696,20 @@ mod tests {
         let object = json.as_object().expect("a struct serialises as an object");
         // Every `Option` in the whole shape, at each nesting level it appears.
         assert!(
-            object.contains_key("visible_when"),
-            "visible_when was omitted — a positional encoding cannot express that, so every field \
-             after it would decode from the wrong bytes"
+            object.contains_key("require_member_visibility"),
+            "require_member_visibility was omitted — a positional encoding cannot express that, so \
+             every field after it would decode from the wrong bytes"
         );
-        assert!(object["access"].as_object().unwrap().contains_key("label"));
+        assert!(object.contains_key("visibility"));
+        assert!(
+            object.contains_key("layout"),
+            "the layout pin is an Option like any other here — `#[serde(default)]` is fine and \
+             `skip_serializing_if` is not"
+        );
+        assert!(object["artifact_visibility"]
+            .as_object()
+            .unwrap()
+            .contains_key("field"));
         assert!(object["levels"][0]
             .as_object()
             .unwrap()
@@ -799,5 +1725,77 @@ mod tests {
         assert_eq!(decl(HierarchyKind::Nested, vec![]).run_count(), 1);
         assert_eq!(decl(HierarchyKind::Flat, vec![]).run_count(), 1);
         assert_eq!(decl(HierarchyKind::Stacked, vec![0, 1, 2]).run_count(), 3);
+    }
+
+    /// **§4's table, as the two readers read it.** A build reads a member table's key column and
+    /// `/control/ingest` reads a column named for the layer; both ask this one type what a
+    /// position means, so the table is asserted here rather than twice over Arrow.
+    #[test]
+    fn a_list_means_what_the_declared_hierarchy_says_it_means() {
+        let levelled = ListMeaning::of(HierarchyKind::Tiered, 3);
+        assert_eq!(levelled.arity(), Some(3), "one entry per declared level");
+        assert_eq!(
+            levelled.level_of(2),
+            2,
+            "entry k is the artifact at level k"
+        );
+        assert!(
+            levelled.declares_edges(),
+            "tiered entries contain one another"
+        );
+
+        let stacked = ListMeaning::of(HierarchyKind::Stacked, 3);
+        assert_eq!(stacked.arity(), Some(3));
+        assert!(
+            !stacked.declares_edges(),
+            "stacked levels are independent analyses, so adjacency states nothing"
+        );
+
+        let lineage = ListMeaning::of(HierarchyKind::Nested, 0);
+        assert_eq!(
+            lineage.arity(),
+            None,
+            "a lineage is as deep as its own branch"
+        );
+        assert_eq!(
+            lineage.level_of(2),
+            0,
+            "a nested layer holds every artifact at level 0"
+        );
+        assert!(lineage.declares_edges());
+
+        let flat = ListMeaning::of(HierarchyKind::Flat, 0);
+        assert_eq!(flat.arity(), None);
+        assert_eq!(flat.level_of(7), 0);
+        assert!(
+            !flat.declares_edges(),
+            "a flat list is plain multi-membership — a set, with no positions to read"
+        );
+    }
+
+    /// **The gap is not an edge.** An entry naming no artifact is a point that is noise at that
+    /// resolution, and reading past it would state a containment no row makes.
+    #[test]
+    fn an_entry_naming_nothing_links_nothing_across_itself() {
+        let full = [Some("a"), Some("b"), Some("c")];
+        assert_eq!(
+            parent_edges(&full).collect::<Vec<_>>(),
+            vec![(&"a", &"b"), (&"b", &"c")]
+        );
+
+        let gapped = [Some("a"), None, Some("c")];
+        assert!(
+            parent_edges(&gapped).next().is_none(),
+            "a point clustered at level 0 and level 2 and noise between declares no edge at all"
+        );
+    }
+
+    /// `-1` and nothing else: a negative id is otherwise unusual enough that swallowing `-7` would
+    /// more likely be eating data than handling noise.
+    #[test]
+    fn only_minus_one_means_this_point_is_in_no_artifact() {
+        assert_eq!(integer_key(-1), None);
+        assert_eq!(integer_key(-7), Some("-7".to_string()));
+        assert_eq!(integer_key(3), Some("3".to_string()));
     }
 }

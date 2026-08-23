@@ -22,7 +22,7 @@ deferred edit pass (Stage 7) and the proportional criterion's denominator for pr
 (Stage 6).
 **Reads against:** design §4 (I1, I2, I3, I7, I8, I9, I10, I12), §7.6–§7.8, §11.2, Appendix C;
 [`write-path.md`](write-path.md) §2–§5 (**normative** for the write path); [`compaction.md`](compaction.md)
-§3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`slices-and-multi-table.md`](slices-and-multi-table.md) §3;
+§3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`views-and-multi-table.md`](views-and-multi-table.md) §3;
 decisions [0047](../decisions/0047-edit-is-delete-plus-reingest.md),
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
 [0043](../decisions/0043-geometry-maintenance-never-blocks-a-request.md),
@@ -30,9 +30,14 @@ decisions [0047](../decisions/0047-edit-is-delete-plus-reingest.md),
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`;
 `rep §n` is `annotation-representation.md`; this document's own sections are **spec §n**.
 
-> **⊘ None of this is built.** No artifacts, no layers, no generating sets, no fold artifact pass.
-> Every claim describes a mechanism. Figures are marked *measured*, *modelled* or *assumed* at each
-> site; most of this document's own quantities are assumed, and spec §8 names them.
+> **Most of this is built** *(r10; it was none of it when this document was written)*. Layers,
+> artifacts, generating sets, containment, the dependency edge and the fold's artifact pass all
+> exist and are enforced, through Stage 5 of
+> [`artifact-delivery.md`](../artifact-delivery.md). What is not built is named at its own site:
+> the **edit pass** (deferred to Stage 7), **membership by predicate** (Stage 6), content
+> reclamation, and the notification *feed* — the fold writes its report, and nothing subscribes.
+> Figures are marked *measured*, *modelled* or *assumed* at each site; most of this document's own
+> quantities are still assumed, and spec §8 names them.
 
 ---
 
@@ -227,9 +232,9 @@ the deleted member is outside every mask and containment fails for everyone — 
 identical under both declarations. They diverge only at the fold, where strict makes the withholding
 permanent by dropping the content and permissive ends it. **And what the interim withholds is the
 artifact's service, not merely its text**
-([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)): the variation
+([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)): the content
 whose generating set lost the member is unservable, so the **artifact** is absent to any viewer no
-other variation covers. Fail-closed and deliberate — the artifact's *identity* is never destroyed
+other entry of the ranked contents covers. Fail-closed and deliberate — the artifact's *identity* is never destroyed
 by a point event; its service resumes at the fold under either declaration. ⊘ **A caller reading
 "permissive" as "nothing changes" will be surprised by that gap**, which is up to one fold long.
 
@@ -287,16 +292,16 @@ unsuppress) × membership source (rep §2.0: enumerated, spatial predicate, attr
 content kind (model §4.1: derived; supplied corpus-derived with `G`; supplied corpus-independent) ×
 the two gate controls (model §5: the own-terms flag and the existence criterion, independent
 conjuncts — [decision 0079](../decisions/0079-the-gate-is-one-flag-not-three-modes.md)).
-**Variations are a fifth axis and
-they change exactly one cell** (§3.2's delete row): each variation carries its own generating set, so
-a deletion consumes the variations it touches and a viewer falls through the ranking — to the next
-variation they satisfy, or to no artifact at all
+**Ranked contents are a fifth axis and
+they change exactly one cell** (§3.2's delete row): each entry carries its own generating set, so
+a deletion consumes the entries it touches and a viewer falls through the ranking — to the next
+entry they satisfy, or to no artifact at all
 ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). Content kind is
 orthogonal to
 membership source: `G` is always an enumerated entity set, whatever the membership is.
 
 The vocabulary of answers: **nothing** (and why nothing is safe), **recompute** (per request, by
-construction), **withdraw the artifact from viewers the surviving variations do not cover**,
+construction), **withdraw the artifact from viewers the surviving contents do not cover**,
 **refuse the write**, **notify the caller**. No cell destroys an artifact's identity: a point event
 may withhold an artifact's service, never end the object.
 
@@ -305,7 +310,7 @@ may withhold an artifact's service, never end the object.
 | Event | Enumerated | Spatial predicate | Attribute predicate |
 |---|---|---|---|
 | **Ingest** | **nothing** — membership is frozen at declaration (I8's shape); the point is in no artifact until the layer is refreshed. Safe: counts only ever *understate* what a refresh would show — fail-closed, stale-not-unsafe (rep §2.2.1) | **nothing stored; the point is a member at its flush** — membership is derived per request from the geometry, so the row's arrival is the whole event (rep §2.0). Earlier than flush is impossible: counts are row-space and the point has no row | as spatial: the value column's flush extents carry it; the filter machinery answers per request ([`filter-index.md`](filter-index.md)) |
-| **Delete** | at accept: the entity leaves every composed mask, so every masked count, hull and criterion test is correct with no artifact work. At the fold: the row form drops the member's bit in translation (spec §4.1) | at accept: the row leaves `denied[slice]`'s complement; `range_cardinality` over the mask is correct immediately. At the fold: rows renumber and the ranges re-derive per request — nothing stored, nothing stale | at accept: composed verdict excludes it (filter-index §6.1). At the fold: the attribute pass blanks the slot (filter-index §6.2). All existing machinery |
+| **Delete** | at accept: the entity leaves every composed mask, so every masked count, hull and criterion test is correct with no artifact work. At the fold: the row form drops the member's bit in translation (spec §4.1) | at accept: the row leaves `denied[view]`'s complement; `range_cardinality` over the mask is correct immediately. At the fold: rows renumber and the ranges re-derive per request — nothing stored, nothing stale | at accept: composed verdict excludes it (filter-index §6.1). At the fold: the attribute pass blanks the slot (filter-index §6.2). All existing machinery |
 | **Suppress** | **nothing artifact-side** — the member leaves the composed mask at accept; counts fall, hulls recompute without it, an artifact may drop below its criterion and vanish. Rule S: no stored structure changes, postings and membership untouched | same — the mask is the only operand that moves | same |
 | **Unsuppress** | **nothing** — the member returns to the composed mask at accept; counts restore. Reappearance above a *cached* criterion decision lags fail-closed (spec §4.4) | same | same |
 | **Update** (delete + re-ingest) | the union of the two rows: the old life leaves masks at accept and leaves the row form at the fold; the new life is a new entity, in no enumerated membership until the layer is refreshed. **A caller must expect enumerated counts to drift down under churn** — a refresh is the repair (⊘ by replacement today, by edit once that pass lands) | the old row leaves, the new life's row is inside or outside the shape on its own coordinates from its flush — a point that moved across a boundary changes membership correctly, no artifact work | same, via the new value |
@@ -329,7 +334,7 @@ Two rules the enumerated column rests on, stated because each is one slip from a
 | Event | Derived (count, centroid, hull, extractive terms) | Supplied, corpus-derived (`G` declared) | Supplied, corpus-independent (`G` empty) |
 |---|---|---|---|
 | **Ingest** | **recompute per request** — nothing stored, so nothing to do; the new member (predicate sources) or non-member (enumerated) is simply in or out of `membership ∩ M_auth` | **nothing** — later arrivals are never in `G` (I8); the content is stale, not unsafe (§7.6) | **nothing** — the content asserts nothing about the corpus |
-| **Delete** of a member | correct at accept via the mask; nothing stored | withheld at accept — emergent from containment, no stored state. Then the layer's declaration decides (spec §2.1): **strict** *(default)* drops that content and its set at the fold, **permissive** removes the member and resumes serving. **Where the artifact carries ranked variations** (model §2.3), the withholding applies to the variation whose set lost the member and the viewer **falls through to the next variation they satisfy**; a viewer no surviving variation covers sees **no artifact** until the fold ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). **Notify the caller at the fold** either way (spec §4.2) | **nothing** — an empty `G` intersects nothing |
+| **Delete** of a member | correct at accept via the mask; nothing stored | withheld at accept — emergent from containment, no stored state. Then the layer's declaration decides (spec §2.1): **strict** *(default)* drops that content and its set at the fold, **permissive** removes the member and resumes serving. **Where the artifact carries ranked contents** (model §2.3), the withholding applies to the entry whose set lost the member and the viewer **falls through to the next entry they satisfy**; a viewer no surviving entry covers sees **no artifact** until the fold ([decision 0076](../decisions/0076-an-artifact-is-served-whole-or-not-at-all.md)). **Notify the caller at the fold** either way (spec §4.2) | **nothing** — an empty `G` intersects nothing |
 | **Suppress** of a member | correct at accept | **withhold content while the suppression stands** — containment fails for every principal; resumes on unsuppress. No stored change (Rule S) | **nothing** |
 | **Unsuppress** | correct at accept | content serves again, to exactly those satisfying `G` — every source visible again | **nothing** |
 | **Update** of a member — *not an operation; delete + an unrelated ingest* | correct at accept / at the new life's flush | **exactly the delete row**, because that is all the write path performs (spec §2.1). Under **strict** the content is dropped at the fold; under **permissive** the member leaves `G`. Notified at the fold | **nothing** |
@@ -357,7 +362,7 @@ both takes both columns.
 | A denied point leaves every count, hull, criterion and containment test | **accept** | the ack asserts the disposition is in force (write-path §5.2); any later point serves a hidden item inside an aggregate — fail-open |
 | A **permissive** layer's `G` loses the deleted member, and its content serves again | **the fold** (spec §2.1) | the interim is fail-closed — containment fails for everyone while the member is denied — so the only cost of waiting is availability. Earlier is the deny lane, where finding the affected sets is the inverted lookup §4.5 exists to avoid; the fold already computes the list for §4.2's report |
 | An ingested point enters predicate membership | **its flush** | counts are row-space questions and the point has no row before flush (§11.2); earlier is impossible, later is a gratuitous staleness |
-| An ingested point enters enumerated membership | **never** — a layer refresh (⊘ by replacement today) | I8; the caller declared the set |
+| An ingested point enters enumerated membership | **its flush**, as a predicate membership does — the point joins and the artifact then behaves as though it had been there all along ([decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)) | a build reading a member table has always entered points into an enumerated membership, so a build is the same operation at the other entry point. This row read **never** and cited I8; I8 governs a *generating set*, which is a different set, is never grown either way, and was not at stake. The growth mechanism is built (`artifacts-from-points.md` §6.1): a delta record, one store method taken by both the live path and replay, and a log pin that only the fold's whole rewrite releases — the packing rule is what keeps a grown record reachable after a restart, since a level is packed only above its published high-water. **The wire carries it too** (§6.2, contracts r36): an ingest batch may name a point's artifacts in a column named for the layer, and the join is appended inside the batch's own commit window, so the membership is durable in the same fsync as the row. **And a key naming no artifact creates one** where the layer's `value_set` is open (§6.3, contracts r37) — at the window's close, as a publication carrying the points that named it, its lineage linked parent before child in the same batch. Nothing a member table can say is now unsayable on the wire, which is what this row waited on |
 | An artifact's row operator is rebased over the merged span | **the merge that publishes it** | a merge permutes row space inside its span, so a row id there names a different entity afterwards (lifecycle §2.1); an operator holding extent rows is wrong from the publication until it is rebased. Entity space is untouched, so the ground truth needs nothing |
 | Membership row forms reconcile with executed deletes | **the fold** (rep §5.0.3's pass, minus `G`) | the interim is already enforced by the overlay — the fold changes what is *stored*, never what is *served*, so its timing is an efficiency, not a safety property |
 | A deleted `G` member's exclusion becomes structural (postings blanked) | **the fold** | the deny entry enforces it until the flip; Rule F retires the entry in the same publication that blanks the postings — no gap (compaction §4) |
@@ -390,7 +395,7 @@ merged span at a merge, rebuild at the fold — and named the merge arm as the o
 out, fail-open when left out because a merged span's row ids name different entities afterwards. A
 form that references no extent row has no such state: a flush appends rows it does not hold and a
 merge renumbers rows it does not hold, so **the fold is the only operation that invalidates it**,
-and the fold rebuilds it inline (rep §5.0.3). The projection is therefore keyed by prefix, slice and
+and the fold rebuilds it inline (rep §5.0.3). The projection is therefore keyed by prefix, view and
 store version and *not* by the segments version — keying on the version a flush moves would rebuild
 every level on every flush, tens of seconds per level at 10⁷ artifacts, for a set of bits that did
 not move.
@@ -400,7 +405,7 @@ not move.
 The fold already holds `D₀` (the plan's tombstone clone) in entity space, and `G` is now entity
 space, so *which supplied content lost a member* is one small `and_cardinality(G, D₀)` per
 `G`-bearing artifact — no traversal coupling, no inverted index (superseding rep §5.0.3's by-product
-construction, which needed the artifact pass to visit every pair). The report — artifact stable key
+construction, which needed the artifact pass to visit every pair). The report — artifact key
 or address, per lost-member content — is written as part of the fold's own publication, which is
 what discharges write-path §5.8's rule that a deletion is not retired before the notification
 obligation is; it is the first concrete content of §2.5's label-invalidation feed (⊘ the feed
@@ -471,7 +476,7 @@ in this document.
 
 | Operation | Route | Atomic unit | Durable record | Caller told | Refused when |
 |---|---|---|---|---|---|
-| **Create** (runtime — a selection, a correction) | its own control verb (rep §5.1; ⊘ contracts work): `(layer, membership, gate, content, stable key?)`, members named by `external_id` or `tessera_id`+idset, resolved to entities at admission exactly as `/control/changes` resolves (write-path §5.1) | one artifact | WAL record carrying the resolved entity forms | 200 with the artifact's `tessera_id` — a durability receipt that is also **eligibility at ack**: an artifact has no geometry of its own, so no flush stands between it and visibility; when a given session first surfaces it is bounded by the resolved set's refresh (spec §4.4), fail-closed | member validation (spec §3.1); layer gate unevaluable; corpus-derived supplied content without a `G`; corpus-independent content declaring one; edge target absent (rep §5.0.4); the level's reserved entity run exhausted — extended by appending the next block **downward**, which cannot interleave with point segments ([decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md)), refused only if allocation fails |
+| **Create** (runtime — a selection, a correction) | its own control verb (rep §5.1; ⊘ contracts work): `(layer, membership, gate, content, key?)`, members named by `external_id` or `tessera_id`+idset, resolved to entities at admission exactly as `/control/changes` resolves (write-path §5.1) | one artifact | WAL record carrying the resolved entity forms | 200 with the artifact's `tessera_id` — a durability receipt that is also **eligibility at ack**: an artifact has no geometry of its own, so no flush stands between it and visibility; when a given session first surfaces it is bounded by the resolved set's refresh (spec §4.4), fail-closed | member validation (spec §3.1); layer gate unevaluable; corpus-derived supplied content without a `G`; corpus-independent content declaring one; edge target absent (rep §5.0.4); the level's reserved entity run exhausted — extended by appending the next block **downward**, which cannot interleave with point segments ([decision 0074](../decisions/0074-row-less-entities-are-allocated-downward.md)), refused only if allocation fails |
 | **Edit** — ⊘ **deferred to its own design pass** ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md)); until it lands the routes here are create, suppress, delete and layer replacement, and the shape below is what the pass inherits | rep §5.0.1's table: content in place (content and `G` together — spec §2.3); membership in place + version bump; gate widening in place + bump; gate narrowing = suppress, re-grant, unsuppress | one artifact | WAL record; **the version bump rides the same record** — a replayed edit without its bump would leave sessions on stale resolutions, so the two are one durable fact | 200 after fsync | a `G` edit without a content edit; membership edits fail spec §3.1's validation |
 | **Suppress / unsuppress** | `/control/changes`, by the artifact's entity — no new API | the deny window | `ChangeByEntity`, snapshot at rotation — all existing | write-path §5.7's table verbatim | never for load (the lane's rule) |
 | **Delete** | `/control/changes` | the deny window | as above; **Rule F's artifact arm** at the fold: membership file, `artifacts.arrow` slot, and every edge naming it are dropped (rep §5.0.3) | as above | — |
@@ -495,8 +500,8 @@ exists for every entity (I10). Contradicts the model's addressing as read; rulin
 
 | Operation | Route | What is durable | Refused when |
 |---|---|---|---|
-| **Layer create** | control verb; the slice lifecycle's shape verbatim ([`slices-and-multi-table.md`](slices-and-multi-table.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay. **Or a build input** — `tessera build --layers` writes the registry section directly, running the same registry and allocator so both routes refuse and place identically; a build has no WAL, its manifest being the durable output | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
-| **Level publish** (bulk) | build plane, `--attach-slice`'s shape: `tessera build --artifacts`/`--artifact-members`, members named by source id and resolved through the build's own assignment, packed into the same membership and record extents a control-plane publication writes | the files, digested; the publication record | per-artifact validation (spec §3.1, §5); a level is **not atomic** — publishing artifacts is monotone and a partial level is coherent, merely incomplete (rep §5.0) |
+| **Layer create** | control verb; the view lifecycle's shape verbatim ([`views-and-multi-table.md`](views-and-multi-table.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay. **Or a build input** — a `[[layer]]` block in the corpus declaration `tessera build` reads writes the registry section directly, running the same registry and allocator so both routes refuse and place identically; a build has no WAL, its manifest being the durable output | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
+| **Level publish** (bulk) | build plane, `--attach-view`'s shape: `tessera build` reading a layer's `source` and its `[layer.members]` source, members named by source id and resolved through the build's own assignment, packed into the same membership and record extents a control-plane publication writes | the files, digested; the publication record | per-artifact validation (spec §3.1, §5); a level is **not atomic** — publishing artifacts is monotone and a partial level is coherent, merely incomplete (rep §5.0) |
 | **Layer suppress / unsuppress** | `/control/changes` **on the layer's own entity** — which is why it has one. Rule S applies; the reachability check gains one live `verdict` lookup ahead of the session's resolved set | the existing deny machinery, end to end | never for load |
 | **Layer drop** | WAL'd registry tombstone; vanishes from discovery at ack; artifacts reclaimed at the fold; **the name stays tombstoned for ever** | the tombstone | — |
 | **Replace** (wholesale — changing the analysis, not refreshing it; [decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) | create successor, then drop predecessor — never 10⁷ denies through a lane sized for trickle (rep §5). **Nothing carries across**: new identities are new objects, so suppressions, edges and bookmarks end with the predecessor, correctly — a replacement that strands live suppressions is **reported**, not refused (rep §5.0.2; ⊘ the report is unbuilt). **Not atomic, deliberately**: if the drop fails after the create, both generations serve — each individually gated and sound, so the intermediate state is duplication, never disclosure, and the caller retries the drop. The reverse order has an outage window and is not used. ⊘ Until the edit pass lands this is the only refresh, and callers should be told what it loses | the two registry records | the dangling-dependent refusal (rep §5.0.4), which binds replacement only |
@@ -506,26 +511,103 @@ exists for every entity (I10). Contradicts the model's addressing as read; rulin
 
 ### 6.1 The build-plane inputs
 
-Three files, and the split is by grain rather than by kind — one artifact's declaration is a line, a
-10⁷-artifact level's membership is a column.
+**The full configuration surface is enumerated once**, in
+[`configuration.md`](configuration.md) §1 — every block, every key and every
+enumerated value word, including this section's layer keys. It is a closed set, and adding a key
+without an entry there is adding a control nobody has reasoned about.
 
-- **`--layers <toml>`**, a list of declarations in registration order (a layer follows what it
-  `depends_on`). **The two disclosure controls are stated either way round and always explicitly** —
-  `gate = "<descriptor>"` or `ungated = true`, and `visible_when = { min_visible = … }` or
-  `visible_when = "none"` — because TOML has no null and, more to the point, the value a default
-  would supply is in both cases the widest one there is. The control plane's JSON requires both
-  fields for the same reason and can write `null`; the words stand in for it.
-- **`--artifacts <parquet>`**, one row per `(artifact, variation)`: `layer`, `stable_key`, and
-  optionally `level`, `variation`, `values` (the layer's declared content kinds, in declared order)
-  and `attached_layer`/`attached_level`/`attached_key`.
-- **`--artifact-members <parquet>`**, one row per `(artifact, member)`: `layer`, `stable_key`,
-  `member`, and optionally `level` and `variation` — a null variation being the artifact's
-  membership, `k` being variation *k*'s generating set.
+**One config file and one source per object.** The declaration `tessera build` reads declares the corpus,
+its views, its vocabularies, its attributes and its layers together; every object that has data
+names its own source, as a path relative to that document. [`configuration.md`](configuration.md) owns the declaration surface; what this section owns is the artifact and member grains and the rules
+peculiar to them.
 
-**Members are source ids**, resolved through the build's own assignment exactly as the pairs file's
-are; an id the build did not assign refuses the build. **Ordinals are assigned in
-`(layer, level, stable_key)` order**, so identity does not depend on how a Parquet file happened to
-be written, and a stable key is required — it is what an edge into the layer names.
+**A layer names its own source, and one file holds one layer.** That is what removes the
+discriminator: there is no `layer` column to select on, no filter to configure, and no way for a
+layer to ingest another's rows.
+
+**A layer's `fields` map moves a field and the readers take the name it moved it to**, as every
+other object's does. The two exceptions are `level` and `attached_level`, read under their own
+names because [`configuration.md`](configuration.md) §1's tables do not name them — a level is an
+address rather than a value, and the map's key set is that closed one.
+
+```toml
+[[layer]]
+source     = "hdbscan"
+fields     = { members = "members", parent = "parent_id" }
+name       = "clusters/hdbscan"
+views      = ["s0"]
+membership = "enumerated"
+hierarchy  = { kind = "nested", prune_children = true }
+
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { fraction = 0.05 }
+```
+
+**A layer names one artifact source, and — where its memberships are too large to carry as a list
+field — a second source for members** (`[layer.members]`, `configuration.md` §1). Two grains, and
+the asymmetry is cardinality. An artifact source is **one row per artifact**,
+carrying `contents` as a list ordered best first — the fallback chain, of which the viewer is
+served the first entry whose sources they can see entirely, or nothing. A member source is **one
+row per `(artifact, entity)`**: `key`, `entity`, and an optional `rank`, where a null rank is the
+artifact's own membership and *k* is the generating set of `contents[k]`. Contents fold into the
+artifact row because a fallback chain is two or three entries; members do not, because a condensed
+tree's root holds the whole corpus and one cell carrying it can neither stream nor be materialised
+by a producer.
+
+Collapsing the artifact source to one row each is what retires the agreement refusal the old
+`(artifact, rank)` grain needed: `key`, `parent` and the attachment were repeated on every row of
+one artifact so that a single column could differ, and the build had to check the copies matched.
+The refusal is *retired* rather than moved — with one row per artifact there are no copies to
+disagree — and what the grain still admits, one key on two rows, is refused as two artifacts under
+one name.
+The member source's entity column is `entity` rather than `member`, a column named `member` on a
+long source reading as though it should hold the whole membership.
+
+**Membership by exclusion is an input spelling.** `fields = { excluding = … }` names the entities a
+membership leaves out; the build complements once against the view's entity set and materialises
+exactly the membership the included form would have produced, so the segment, the manifest and
+every read path are byte-identical and never learn which way the source was written. It exists for
+the producer: a tree's root is empty as an exclusion and the whole corpus as an inclusion, and the
+clusters with large exclusion sets are the ones with short member lists. **Not** a complement taken
+at request time, which would be a fourth membership source with the *"never stale"* character
+`spatial` and `attribute` have — an artifact gaining members with nobody publishing to it.
+
+**A layer may declare that a member deletion withdraws the whole artifact**
+(`configuration.md` §1, `withdraw_on_member_deletion` on `[[layer]]`, default `false`). It is the
+stronger form of the content-level rule this document's §3.1 already carries: where that one drops
+supplied content and keeps the artifact, this drops the artifact at the same fold. It is a caller's
+semantic declaration rather than a disclosure control — an artifact carries no residue of a deleted
+member, its computed properties being recomputed per viewer — so the default is to keep it, and
+`true` is for the artifact whose exact membership *is* the object. Withdrawal is a removal like any
+other: what is attached to the artifact is governed by the dependency rules below — a replacement
+refused rather than repaired, a deletion cascaded.
+
+**Labels are declarable where they are used.** `[layer.labels]` expands to a layer of its own —
+same views, flat, `depends_on` the parent, the content wrapper — because a label is a first-class
+artifact with its own visibility and its own suppression, a synthesis being able to outrank its
+sources in sensitivity. The expansion happens **before anything compiles**, so the sugared
+declaration and the same layer written out produce a **byte-identical bundle** and nothing below
+the parser has a label layer to treat differently. What the sugar supplies is mechanical; what it
+never supplies is the gate, the membership requirement, or the existence of membership data, all of
+which are written out. The label layer's `visibility` defaults to its parent's — a default on a
+disclosure control, admissible because it is the parent's value rather than the widest one — and a
+gate declared there is taken as written, nothing comparing it against the parent's. It does not
+need to: a label is served only where the cluster it attaches to is served
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)), so a
+gate declared here narrows what a principal sees and cannot widen it, `public` included
+(`configuration.md` §1).
+
+**Members are source ids**, resolved through the build's own assignment exactly as the access
+relation's are; an id the build did not assign refuses the build. **Ordinals are assigned in
+`(layer, level, key)` order**, so identity does not depend on how a source happened to be written,
+and a key is required — it is what an edge into the layer names.
+
+**Small layers need no data file at all**: `artifacts = [{ key = …, contents = [ … ] }]` inline, for
+what a person authors rather than what a pipeline produces. It is a spelling and never a second kind
+of layer, which the build asserts the hard way: an inline layer and the same layer read from a file
+produce a **byte-identical bundle**, as do `excluding` and the inclusion it complements to, and a
+membership on the artifact row and the same one in `[layer.members]`.
 
 The layer entity exists for one reason: an operator discovering a leaking layer needs immediate,
 reversible, fail-closed hiding, and a gate re-evaluated only at authorise cannot give it — a layer
@@ -543,13 +625,21 @@ exists to close, arriving through the cache instead of the gate. Layer suppressi
 emergency path: it acts at the ack, ahead of any resolution, and holds while the gate is edited
 underneath it.
 
-**Why the dangling-dependent case is refused rather than repaired:** repointing edges automatically
-fails open exactly when the caller reshaped the layer — a renamed artifact, a split cluster — and
-each such failure attaches a label to a cluster it was not generated from (I8's class). A refusal
-makes the operator perform the reconciliation the service cannot verify. Suppressions take the
-other posture: a replacement ends the entities they address, so they end too — the meaning of the
-operation, not an accident — and the operator is told by the report rather than blocked. (Rep
-§5.0.2 and §5.0.4 carry the full arguments; this table only inherits them.)
+**Why a dangling dependent is refused rather than repaired, and why a deleted one is not:** the two
+operations are different, and the boundary is the whole of the rule. **A replacement** mints new
+identities, so repointing its dependents automatically fails open exactly when the caller reshaped
+the layer — a renamed artifact, a split cluster — and each such failure attaches a label to a
+cluster it was not generated from (I8's class). It is refused, and the operator performs the
+reconciliation the service cannot verify. **A deletion** leaves nothing to point at, so nothing can
+be mispointed: it cascades, deleting the artifacts that depend on the one deleted
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md), rule 1) —
+which is the manual sequence the refusal already directs a caller to, performed by the service. A
+cascaded deletion is a deletion in every respect: its own record, applied in the same window as the
+deletion that caused it, retiring at the compaction fold that executes it (Rule F, write-path §5.4)
+and by no other route. Suppressions take a third posture: a replacement ends the entities they
+address, so they end too — the meaning of the operation, not an accident — and the operator is told
+by the report rather than blocked. (Rep §5.0.2 and §5.0.4 carry the full arguments; this table only
+inherits them.)
 
 **Recovery**, stated once for the whole surface: registry ops and artifact records replay from the
 WAL under the durable-prefix rules (write-path §1.3); artifact deny state rides the overlay
@@ -634,7 +724,7 @@ Nothing here is measured; each figure names what would refute it.
   reversibly, with deny-grade durability, for one ID and one bitmap check per request.
 
   The ruling raised a wider question, **deliberately not answered here**: whether *every* addressable
-  object — slices, levels, edges — should carry an entity ID, so that one deny lane, one WAL and one
+  object — views, levels, edges — should carry an entity ID, so that one deny lane, one WAL and one
   removal rule serve all of them, and so that mixed object types can share a single bitmap. It is
   attractive and it is not this document's to settle, because the binding constraint is neither
   layout nor uniformity but **budget**: entity IDs are `u32`, reuse is settled and unbuilt
@@ -644,7 +734,7 @@ Nothing here is measured; each figure names what would refute it.
   edit, once that pass lands, spends nothing
   ([decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)). Daily
   replacement spends the space in about a
-  year *before* levels, edges and slices are added to it, and widening past `u32` leaves the 32-bit
+  year *before* levels, edges and views are added to it, and widening past `u32` leaves the 32-bit
   Roaring substrate every figure in the campaign was measured on. ⊘ **Needs its own design pass, and
   the question to put to it is what the entity budget is, not where type bits go.**
 
@@ -687,6 +777,112 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**2026-08-20 — the growth the ruled row promised is built, and §3.4's unbuilt marker moves to the wire.** What
+an ingested point needed in order to join an enumerated membership was machinery that did not exist:
+a durable record carrying a **delta** rather than a restated set (a restatement costs ~12 MB per
+batch naming a 10⁸-member cluster, on the fsync path), one store method that grows a membership, and
+the packing bookkeeping that keeps a grown record reachable. The third is the one that decides it:
+a level is packed only above its published high-water, so releasing the log at the mark that covers
+a packed *tail* would leave the join durable nowhere and the artifact back at its pre-growth size
+after a restart — acked, silent, indistinguishable from an artifact below its criterion. The fold's
+whole rewrite is what reaches it, so the pin it releases is a separate call with a separate
+precondition. `artifacts-from-points.md` §6.1 is the mechanism.
+
+**2026-08-20, later still — the row's last unbuilt half is built.** A key naming no artifact creates one where the
+layer's `value_set` is open (`artifacts-from-points.md` §6.3): at the commit window's close, on the
+write executor, as a publication carrying the points that named it — and a lineage naming clusters
+that do not exist yet mints the chain and links it parent before child in the same batch. That was
+[decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)'s last obligation, so
+§3.4's row now states a built rule with nothing marked absent, and the timing it states — the flush,
+because a masked count is a row-space question — is unchanged by any of it.
+
+**2026-08-20, later the same day — the wire carries it, and the row's ⊘ narrows to minting.**
+`/control/ingest` accepts a column named for a declared layer (`artifacts-from-points.md` §6.2,
+contracts r36), so a point names its artifacts beside its coordinates and the join is appended inside
+the batch's own commit window rather than arriving through a separate call. What the row still marks
+unbuilt is minting: a key naming no artifact is refused, at both entry points bar the build.
+
+Two things this document said that the building qualified. **§4.1's base-row rule is about the
+member, not about the membership**: a point that already holds a base row joins and is counted at
+the ack, because the row-space projection is keyed on the artifact store's version — so the interval
+before the fold is observable and correct, not merely unobservable, and the fold's role is where the
+membership is *stored*. And growth is a second way state enters the artifact store, which is why the
+one method says at the site how it stands to write-path §5.4's two removal rules: it adds bits and
+removes none, and a member that joined has no separate provenance once it is in the set.
+
+**2026-08-20 — the contested membership row is ruled, and the rule is larger than the row**
+([decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md)). §3.4 said an
+ingested point enters an enumerated membership *never*, citing I8 and *the caller declared the
+set*; `artifacts-from-points.md` §5 said it joins. §3.4 was wrong, and the argument that settles it
+is that a build reading a member table has always entered points into an enumerated membership — so
+the two documents were describing one operation at two entry points and disagreeing about it. I8
+governs a generating set, which is a different set and is never grown either way. The growth
+mechanism is marked ⊘ at the row.
+
+**r11 — 2026-08-20. §3.4's enumerated-membership row is marked contested, and nothing else moves.**
+[`artifacts-from-points.md`](artifacts-from-points.md) §5 rules that a point carrying an artifact's
+key joins that artifact's membership at ingest; this document's timing table rules the same
+consequence **never**, citing I8. Both are normative for artifact semantics. The marker records the
+disagreement where the next reader meets it rather than resolving it — the resolution is a ruling,
+and the stage that ran into it stopped there (§6.1 of that document carries what the attempt
+found). Worth stating plainly because the row's reason does not quite reach its claim: I8 governs a
+**generating set**, and a membership is a different object with a different owner.
+
+**r10 — 2026-08-19. The banner said none of this is built.** A correction, not a design change: no
+claim in the body moves. Through Stage 5 the spine of this document is built — layers, artifacts,
+generating sets, containment, the dependency edge and the fold's artifact pass with its report — so
+a reader who took the banner at its word would have read a built mechanism as a proposal. What is
+genuinely unbuilt is now named rather than covered by a blanket ⊘.
+
+**r9 — 2026-08-19. A deletion cascades where a replacement refuses.** `depends_on` said what an
+edge constrains and nothing about what it means, leaving a label whose cluster is deleted, and a
+label whose cluster the viewer cannot see, both undefined. Both are answered
+([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)): a
+dependent is deleted with its dependency and served only where its dependency is served. The
+boundary against §5.0.4 is the operation, and it is now stated at the site rather than left to be
+inferred — replacement mints identities and so refuses rather than repointing; deletion leaves
+nothing to point at and so cascades rather than stranding, taking the deletion lane and retiring at
+the fold that executes it. The label sugar's `public`-under-a-gated-parent refusal goes with it: a
+gate declared on a label layer can no longer widen anything, so there is nothing left to check.
+
+**r8 — 2026-08-19. The label sugar builds, and its one default is bounded.** `[layer.labels]`
+expands to a `[[layer]]` block before anything compiles, and the two spellings are asserted to
+produce a byte-identical bundle — so this section's claim that a label is a first-class artifact is
+now structural rather than aspirational: there is no label layer below the parser to treat
+differently. The sugar needs a member source of its own (`[layer.labels.members]`), a ranked
+content's generating set being a `(artifact, rank, entity)` row and nothing else. **Its
+`visibility` default is the parent's actual value**, and the *never wider* half is enforced only at
+`public`, marked as unbuilt above: access labels are opaque terms and the build has no ordering over two of
+them.
+
+**r7 — 2026-08-19. §6.1's build inputs are built.** One source per layer, one row per artifact with
+`contents` as a ranked list, inline `artifacts`, membership by exclusion, and a layer's `fields` map
+reaching its readers — all of which this section already specified and none of which the build did.
+Three consequences worth stating. The **cross-row agreement refusal is retired, not moved**: with
+one row per artifact the disagreement it detected cannot be written, and what the grain still admits
+— one key on two rows — is refused as two artifacts under one name. The **complement happens once,
+at the build**, and no type below it carries the spelling, which is what makes *no request-time
+complement* structural; an excluded id the build did not assign refuses it, an exclusion resolving
+to nothing being a silent widening. And each pair of spellings is asserted to produce a
+**byte-identical bundle**. No rule of the write cycle moved.
+
+**r6 — 2026-08-19. Vocabulary only.** The renames §6.1 announced are performed workspace-wide:
+`rank` and `entity` are what the artifact and member readers spell, and an artifact's caller-supplied
+name is `key` rather than `stable_key`. Prose that called a ranked content a *variation* names it as
+what it is — an entry of the artifact's `contents`. No operation table row changed.
+
+**r5 — 2026-08-18.** §6.1 is rebuilt on
+[decision 0088](../decisions/0088-visibility-is-two-axes-and-the-membership-test-is-one.md)'s two
+axes and the per-object sources that come with them
+([`../evidence/memos/2026-08-18-configuration-surface.md`](../evidence/memos/2026-08-18-configuration-surface.md)).
+No rule of the write cycle moved. What moved is the shape of what a build reads: one config file
+rather than three flags, one source per layer rather than a shared file with a discriminator, an
+artifact source of one row per artifact carrying `contents` as a ranked list — which retires the
+cross-row agreement refusal the `(artifact, variation)` grain needed — and `variation`/`member`
+renamed to `rank`/`entity`. Membership by exclusion is added as an input spelling with the
+request-time reading explicitly excluded. `[layer.labels]` is added as sugar over a layer that is
+still a layer.
 
 **r4 — 2026-08-16.** §6 gains the build plane, which the operations table had allocated to layer
 creation's control verb alone: `tessera build` now takes a declaration file and two artifact files

@@ -270,8 +270,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|s| s.name.clone())
         .collect();
     let partition = bundle.partitions.values().next().ok_or("no partition")?;
-    let slice = partition.slices.values().next().ok_or("no slice")?;
-    let segment = slice.segments.first().ok_or("no segment")?;
+    let view = partition.views.values().next().ok_or("no view")?;
+    let segment = view.segments.first().ok_or("no segment")?;
     let total = segment.columns.row_count() as usize;
     let n = want_rows.min(total);
 

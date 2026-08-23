@@ -1,9 +1,14 @@
 {
   "name": "tessera-clients",
   "private": true,
-  "workspaces": ["spike", "core", "viewer"],
+  "workspaces": [
+    "spike",
+    "core",
+    "viewer"
+  ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
-    "build": "npm run build --workspaces --if-present"
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present && tsc -p scripts/tsconfig.json"
   }
 }

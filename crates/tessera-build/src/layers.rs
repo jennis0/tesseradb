@@ -2,12 +2,13 @@
 //!
 //! A layer registered on the control plane and a layer written by a build are the same object:
 //! both end as a `RegisteredLayer` in `SEGMENTS-<n>.json`, and the engine seeds its registry from
-//! that section before it replays a single WAL record. What this module adds is the route — a
-//! declaration file and two Parquet files the build reads, so a bundle comes up with its layers
-//! already there.
+//! that section before it replays a single WAL record. What this module adds is the route — the
+//! config's `[[layer]]` blocks and the sources they name, so a bundle comes up with its layers
+//! already there. **Each layer names its own source** — a Parquet of one row per artifact, or the
+//! rows written into the declaration itself — so no row anywhere carries the layer it belongs to.
 //!
 //! **Why the build plane exists for this at all.** A 10⁷-artifact level is a build job for the same
-//! reason `--attach-slice` is: volume that must not ride the trickle path, where every batch is an
+//! reason `--attach-view` is: volume that must not ride the trickle path, where every batch is an
 //! fsync and the log is pinned from the first publication until a manifest carries it
 //! (`annotation-representation.md` §5.0). The control plane stays the route for a correction, an
 //! interactive selection, and anything that must take effect against a running node.
@@ -39,288 +40,433 @@
 //!
 //! Ordinals are identity (an artifact's entity is `run.start + ordinal`), so their assignment may
 //! not depend on the order rows happen to sit in a Parquet file. Artifacts are therefore published
-//! in `(layer, level, stable_key)` order, and a stable key is **required** for a build-published
-//! artifact — the caller's own name for it is the only address that survives a rebuild, and it is
-//! what an edge into the layer names.
+//! in `(layer, level, key)` order, and a key is **required** for a build-published artifact — the
+//! caller's own name for it is the only address that survives a rebuild, and it is what an edge
+//! into the layer names.
+//!
+//! ## The declarations are not read here
+//!
+//! [`crate::config`] parses them, out of the one document that also carries the attributes, the
+//! vocabularies and the views. What is left in this module is the *data* path: each layer's own
+//! artifacts and members, the publication order, and the hierarchy checks that need every artifact
+//! in hand.
 
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow::array::{Array, ListArray, StringArray, UInt32Array, UInt64Array};
+use arrow::array::{
+    Array, FixedSizeListArray, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    ListArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
 use tessera_lifecycle::membership::{
-    ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingVariation,
+    ArtifactStore, Bbox, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
 use tessera_types::layer::RegisteredLayer;
-use tessera_types::layer::LayerDeclaration;
+use tessera_types::layer::{parent_edges, LayerDeclaration, ListMeaning, ValueSet};
 use tessera_types::EntityId;
 
+use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
 use crate::error::{BuildError, Result};
-
-/// The `--layers` file: a list of declarations, in registration order.
-///
-/// Registration order is the caller's and is not sorted: a layer must be registered after every
-/// layer it declares in `depends_on`, which is the ordering constraint an edge's target-before-edge
-/// rule imposes one level up (`annotation-representation.md` §5.0.4).
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LayersFile {
-    #[serde(default)]
-    layer: Vec<LayerEntry>,
-}
-
-/// One layer as the file writes it, which is not quite the wire's declaration.
-///
-/// **Two differences, and both are about the gate.** TOML has no null, so a layer that is reachable
-/// by everyone cannot be written as `label = null`; and the gate is exactly the field that must not
-/// acquire a default, since the defaultable value — *no gate* — is the widest one there is (§4.3:
-/// performance knobs default, disclosure controls do not). So the file states it either way round
-/// and **states it explicitly**: `gate = "<term descriptor>"`, or `ungated = true`. Neither, or
-/// both, is a refusal naming the choice rather than a bundle whose layer is public because a line
-/// was mistyped.
-///
-/// Everything else is the declaration's own type, so a field's meaning here is the field's meaning
-/// there: `artifacts_carry_own` and each supplied kind's `corpus_derived` keep having no default,
-/// which is what the register watches them for (C27, C28).
-#[derive(serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct LayerEntry {
-    name: String,
-    title: String,
-    slices: Vec<String>,
-    membership: tessera_types::layer::MembershipSource,
-    /// The access label a viewer must satisfy to know this layer exists at all.
-    #[serde(default)]
-    gate: Option<String>,
-    /// Reachable by every principal — the explicit form of *no gate*.
-    #[serde(default)]
-    ungated: bool,
-    /// Whether each artifact carries its own access label. **No default** (C27).
-    artifacts_carry_own: bool,
-    /// The masked count an artifact must clear to be served at all — `{ min_visible = 1000 }`,
-    /// `{ min_fraction = 0.1 }`, or the word `"none"`.
-    ///
-    /// **Required, for the gate's reason**: the value an absent line would supply is *no
-    /// criterion*, which serves the existence and count of every artifact down to a single member
-    /// — the outcome decision 0079 exists to keep one schema word from producing. The control
-    /// plane's JSON demands the field too, and can write `null`; TOML cannot, so the word stands
-    /// in for it.
-    visible_when: CriterionEntry,
-    #[serde(default)]
-    hierarchy: Option<tessera_types::layer::Hierarchy>,
-    #[serde(default)]
-    content: tessera_types::layer::ContentDeclaration,
-    #[serde(default)]
-    depends_on: Vec<String>,
-    #[serde(default)]
-    levels: Vec<tessera_types::layer::LevelDeclaration>,
-}
-
-/// A declared criterion, or the word that declares none.
-///
-/// Untagged, and the table is tried first: `{ min_visible = … }` is a table and `"none"` is a
-/// string, so no input can satisfy both.
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
-enum CriterionEntry {
-    Declared(tessera_types::layer::ExistenceCriterion),
-    None(NoCriterion),
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum NoCriterion {
-    None,
-}
-
-impl From<CriterionEntry> for Option<tessera_types::layer::ExistenceCriterion> {
-    fn from(entry: CriterionEntry) -> Self {
-        match entry {
-            CriterionEntry::Declared(criterion) => Some(criterion),
-            CriterionEntry::None(NoCriterion::None) => None,
-        }
-    }
-}
-
-impl LayerEntry {
-    fn into_declaration(self, path: &Path) -> Result<LayerDeclaration> {
-        let label = match (self.gate, self.ungated) {
-            (Some(label), false) => Some(label),
-            (None, true) => None,
-            (Some(_), true) => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: layer {} declares both a gate and ungated = true",
-                    path.display(),
-                    self.name
-                )))
-            }
-            (None, false) => {
-                return Err(BuildError::Invalid(format!(
-                    "{}: layer {} declares no gate; write the access label as gate = \"...\", or                      ungated = true to say every principal reaches it. There is no default,                      because the default would be the widest one",
-                    path.display(),
-                    self.name
-                )))
-            }
-        };
-        Ok(LayerDeclaration {
-            name: self.name,
-            title: self.title,
-            slices: self.slices,
-            membership: self.membership,
-            access: tessera_types::layer::LayerAccess {
-                label,
-                artifacts_carry_own: self.artifacts_carry_own,
-            },
-            visible_when: self.visible_when.into(),
-            hierarchy: self.hierarchy.unwrap_or(tessera_types::layer::Hierarchy {
-                kind: tessera_types::layer::HierarchyKind::Flat,
-                prune_children: false,
-            }),
-            content: self.content,
-            depends_on: self.depends_on,
-            levels: self.levels,
-        })
-    }
-}
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
 struct PlannedArtifact {
-    members: Vec<u64>,
-    /// Indexed by variation, dense — a gap would silently renumber the caller's ranking.
-    variations: Vec<PlannedVariation>,
+    membership: PlannedMembership,
+    /// Indexed by rank, dense — a gap would silently renumber the caller's ranking.
+    contents: Vec<PlannedContent>,
     attached_to: Option<IncomingAttachment>,
+    /// Parent artifact in a hierarchy, named by the parent's own key.
+    parent_key: Option<String>,
+    /// The artifact's declared bounding box, on a layer whose `shape` declares one — which *is* its
+    /// membership there, so `membership` stays empty beside it.
+    shape: Option<Bbox>,
+}
+
+/// How a source spelled one artifact's membership.
+///
+/// **The only place the exclusion spelling exists, and it ends at [`resolve_artifact`].** A
+/// membership declared by exclusion is complemented once, against the entity space this build
+/// assigned, and everything downstream of that call — the store, the packed extents, the manifest,
+/// every read path — receives the same materialised set an inclusion would have produced. That is
+/// what makes *no request-time complement* structural rather than a rule to remember: there is no
+/// type below this one that can carry the spelling, so no serving path can learn it and none can
+/// evaluate a complement against a viewer's mask, which would disclose the existence of items
+/// outside it (`annotation-write-cycle.md` §6.1).
+#[derive(Debug, Clone)]
+enum PlannedMembership {
+    /// Rows from a `[layer.members]` source, accumulated — and the empty membership of an artifact
+    /// no source named.
+    Rows(Vec<u64>),
+    /// The artifact row's own `members` list.
+    Included(Vec<u64>),
+    /// The artifact row's `excluding` list: the entities the membership leaves out.
+    Excluded(Vec<u64>),
+}
+
+impl Default for PlannedMembership {
+    fn default() -> Self {
+        PlannedMembership::Rows(Vec::new())
+    }
 }
 
 #[derive(Debug, Default, Clone)]
-struct PlannedVariation {
+struct PlannedContent {
     values: Vec<String>,
     generated_from: Vec<u64>,
+}
+
+/// One artifact with every source id resolved to the entity this build assigned it, and every
+/// membership materialised — the complement included.
+#[derive(Debug)]
+struct ResolvedArtifact {
+    members: Vec<EntityId>,
+    contents: Vec<IncomingContent>,
+    attached_to: Option<IncomingAttachment>,
+    parent_key: Option<String>,
+    shape: Option<Bbox>,
 }
 
 /// What the build reads: declarations, and the artifacts to publish into them.
 pub struct LayerPlan {
     declarations: Vec<LayerDeclaration>,
-    /// Keyed `(layer, level, stable_key)`, which is also the publication order — see the module
-    /// doc on determinism.
+    /// Keyed `(layer, level, key)`, which is also the publication order — see the module doc on
+    /// determinism.
     artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
+    /// Member rows whose key said *this point is in no artifact*, per source.
+    unclustered: Vec<UnclusteredRows>,
+    /// How many artifacts each layer's member source **created** — a key the artifacts source did
+    /// not declare, under `value_set = "open"` (`artifacts-from-points.md` §3). Counted because a
+    /// typo creates a permanent object rather than being refused, which is the trade open makes
+    /// knowingly, and the mitigation is that the number is printed. The wire says the same thing in
+    /// its own 200.
+    minted: BTreeMap<String, u64>,
+}
+
+/// How many rows of one member source named no artifact.
+///
+/// **Skipped, counted and printed** (`artifacts-from-points.md` §2, §7). A condensed tree drops a
+/// fifth to a quarter of its points as noise at each split, so refusing a null or `-1` key would
+/// fail the build on the ordinary output of every clusterer — and dropping them silently is the
+/// failure this build has shipped once already. The number is the report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnclusteredRows {
+    pub layer: String,
+    pub source: PathBuf,
+    /// Rows carrying a null key, or exactly `-1`.
+    pub rows: u64,
+}
+
+/// One parent/child edge whose child holds a member its parent does not.
+///
+/// **A report, not a refusal.** Containment is what makes rollup sound under an absolute criterion
+/// — a child's masked count can never exceed its parent's, so a passing child never sits beneath a
+/// failing parent — and an edge that breaks it silently withdraws that guarantee for its branch.
+/// Naming the edge at build time is what lets an operator see it before a viewer does; deciding
+/// what to do about it is theirs, since a corpus may legitimately carry one (an analysis rerun
+/// against a moved corpus, a hand-corrected assignment).
+///
+/// **Not to be confused with a non-covering hierarchy**, which is not a violation at all: HDBSCAN's
+/// children are subsets of their parents and do *not* exhaust them, 20–25% of a parent's members
+/// falling out as noise at each split. Stray members in the parent are the normal case; members in
+/// the child that the parent lacks are this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainmentViolation {
+    pub layer: String,
+    pub level: u32,
+    pub child: String,
+    pub parent: String,
+    /// How many of the child's members its parent does not hold.
+    pub escaping_members: u64,
+}
+
+/// How much of one parent's membership its children between them hold.
+///
+/// **The normal case is that they do not hold all of it**, and this is the report that says so in
+/// advance. HDBSCAN loses a fifth to a quarter of a parent's points as noise at each split, so a
+/// parent keeps members no child holds — and those members are the ones that make the parent
+/// visible *alone*, with none of its children, to a principal who can see them and nothing else.
+/// That is a correct answer and a surprising one, and an operator should meet it here rather than
+/// in a support question about why a cluster has no children on the map.
+///
+/// It decides nothing. A split that loses nine tenths of its parent is published exactly as one
+/// that loses none.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitCoverage {
+    pub layer: String,
+    pub level: u32,
+    pub parent: String,
+    pub children: u32,
+    /// The parent's own membership size.
+    pub members: u64,
+    /// How many of them no child holds — the stray.
+    pub stray_members: u64,
 }
 
 /// What a build's layer pass produced, for the manifest and for the digest map.
 pub struct PublishedLayers {
     pub layers: Vec<RegisteredLayer>,
+    /// Edges whose child escapes its parent's membership — reported, never acted on.
+    pub containment_violations: Vec<ContainmentViolation>,
+    /// Per-parent coverage: how much of each split its children hold between them.
+    pub split_coverage: Vec<SplitCoverage>,
     /// One past the lowest entity the layers and their artifacts claimed. **The mark that must
     /// reach the manifest**: the WAL carries the same one in its records and rotation reclaims
     /// those, so a mark that lived only there is lost at the first rotation and the next
     /// registration is handed ids a live layer already holds (decision 0074).
     pub low_water: u64,
     pub membership_extents: Vec<MembershipExtent>,
+    /// Every `(layer, level)`'s artifact-write counter as this build leaves it.
+    ///
+    /// **Emitted rather than left empty, and the difference is not cosmetic.** A level absent from
+    /// the list is a level whose version is *unknown* to the reader that opens the bundle, which
+    /// is not the same as zero (`manifest::LevelVersion`) — and a build that published artifacts
+    /// and said nothing about their versions would make the first restart's coordinates
+    /// unrelatable to the ones the build's own store held.
+    ///
+    /// **The build now writes every derived structure a fold does** — see `crate::artifact_pass`,
+    /// which runs after the segment write and fills the three extent lists below. It composes
+    /// through `tessera_store::membership`, beside the formats, rather than through the engine: a
+    /// build-side edge on `tessera-engine` is what an earlier revision of this comment ruled out,
+    /// and moving the writer down to the format's own crate is what made the edge unnecessary
+    /// rather than merely avoided.
+    pub level_versions: Vec<tessera_store::manifest::LevelVersion>,
     pub artifact_record_extents: Vec<RecordExtent>,
     /// Every file written here, for `MANIFEST.files` — an undigested file is one a torn write
     /// cannot be attributed to.
     pub paths: Vec<PathBuf>,
+    /// Member rows that named no artifact, per source — carried out of the plan so the build's own
+    /// report can state the number rather than leaving it on stderr alone.
+    pub unclustered: Vec<UnclusteredRows>,
+    /// Artifacts each layer's member keys **created**, per layer, carried out for the same reason.
+    pub minted: BTreeMap<String, u64>,
+    /// **The store this pass published into, carried out for the post-bundle artifact pass**
+    /// (`crate::artifact_pass`).
+    ///
+    /// The pass has to observe where each membership *landed in row space*, and row space does not
+    /// exist yet at this stage — the tiler sort is two stages away. So the records travel to the end
+    /// of the build rather than being read back off the extents this just wrote, which would parse
+    /// every membership a second time to reach a structure that is already in hand.
+    ///
+    /// It is carried across the build's residency peak, and that is a real cost stated rather than
+    /// hidden: the memberships are one bitmap per artifact over the corpus, tens of megabytes at
+    /// the campaign's 10⁵ artifacts against a peak measured in gigabytes.
+    pub store: ArtifactStore,
+    /// The derived structures the post-bundle pass wrote, for `SEGMENTS-0.json`. Empty until it
+    /// runs.
+    pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
+    pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
+    pub containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
 }
 
 impl Default for PublishedLayers {
     fn default() -> Self {
         PublishedLayers {
             layers: Vec::new(),
+            containment_violations: Vec::new(),
+            split_coverage: Vec::new(),
             low_water: tessera_types::layer::ROWLESS_CEILING,
             membership_extents: Vec::new(),
+            level_versions: Vec::new(),
             artifact_record_extents: Vec::new(),
             paths: Vec::new(),
+            unclustered: Vec::new(),
+            minted: BTreeMap::new(),
+            store: ArtifactStore::new(),
+            tile_index_extents: Vec::new(),
+            row_column_extents: Vec::new(),
+            containment_extents: Vec::new(),
         }
     }
 }
 
-/// Read the declaration file and, if given, the two artifact files.
+/// Take the config's layer declarations and read each layer's own artifacts against them.
 ///
-/// The artifact files are refused without a declaration file: an artifact names the layer it
-/// belongs to, and a layer this build does not register is a name the manifest cannot carry.
-pub fn read(
-    layers: &Path,
-    artifacts: Option<&Path>,
-    members: Option<&Path>,
-) -> Result<LayerPlan> {
-    let text = std::fs::read_to_string(layers).map_err(|e| BuildError::io(layers, e))?;
-    let file: LayersFile = toml::from_str(&text).map_err(|e| {
-        BuildError::Invalid(format!("{}: {e}", layers.display()))
-    })?;
-    if file.layer.is_empty() {
-        return Err(BuildError::Invalid(format!(
-            "{}: declares no layer; omit --layers rather than passing an empty file, so a \
-             mis-typed path is a refusal instead of a bundle with no layers in it",
-            layers.display()
-        )));
-    }
+/// **One source per layer, so no row names the layer it belongs to.** The layer is the input's
+/// own, which is what retires the discriminator column: there is no second layer's rows in the
+/// file to tell apart, no filter to configure, and no way for a layer to ingest another's rows
+/// (`annotation-write-cycle.md` §6.1).
+pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Result<LayerPlan> {
     let mut plan = LayerPlan {
-        declarations: file
-            .layer
-            .into_iter()
-            .map(|entry| entry.into_declaration(layers))
-            .collect::<Result<Vec<_>>>()?,
+        declarations: declarations.to_vec(),
         artifacts: BTreeMap::new(),
+        unclustered: Vec::new(),
+        minted: BTreeMap::new(),
     };
-    if let Some(path) = artifacts {
-        read_artifacts(path, &mut plan)?;
-    }
-    match (members, artifacts) {
-        (Some(path), Some(_)) => read_members(path, &mut plan)?,
-        // **Which artifacts exist is the artifacts file's to say.** Without it a members file
-        // would be both the roster and the population, and a mistyped key would publish an
-        // artifact rather than fail to find one.
-        (Some(path), None) => {
+    for input in inputs {
+        // An artifact source names artifacts *in a layer*, and a layer this build does not
+        // register is a name the manifest cannot carry. The config produces these parallel to the
+        // declarations; a caller assembling them by hand gets the refusal instead of a silently
+        // unpublished file.
+        let Some(declaration) = declarations.iter().find(|d| d.name == input.name) else {
             return Err(BuildError::Invalid(format!(
-                "{}: members were given without an artifacts file, which is what declares the \
-                 artifacts they belong to; a key with no artifact behind it must be a refusal \
-                 rather than a new artifact",
-                path.display()
-            )))
+                "artifacts are bound for layer '{}', which this build declares no `[[layer]]` \
+                 block for",
+                input.name
+            )));
+        };
+        let enumerated =
+            declaration.membership == tessera_types::layer::MembershipSource::Enumerated;
+        match &input.artifacts {
+            Some(ArtifactSource::File { path, fields }) => {
+                read_artifacts(&input.name, path, fields, enumerated, &mut plan)?
+            }
+            Some(ArtifactSource::Inline(rows)) => plan_inline(&input.name, rows, &mut plan)?,
+            // **Which artifacts exist is the layer's own artifact source's to say** — while the
+            // layer's value set is closed. Without one a member source would be both the roster and
+            // the population, and a mistyped key would publish an artifact rather than fail to find
+            // one. An **open** layer asks for exactly that: a cluster exists because points say it
+            // does, and a bare clustering declares no artifacts at all
+            // (`artifacts-from-points.md` §3).
+            None => {
+                if let Some(members) = &input.members {
+                    if declaration.value_set == ValueSet::Closed {
+                        return Err(BuildError::Invalid(format!(
+                            "{}: layer '{}' binds members with no artifacts of its own, which is \
+                             what declares the artifacts they belong to; a key with no artifact \
+                             behind it must be a refusal rather than a new artifact. Declare \
+                             `value_set = \"open\"` on the layer to have every key its points \
+                             name be an artifact",
+                            members.path.display(),
+                            input.name
+                        )));
+                    }
+                }
+            }
         }
-        (None, _) => {}
+        if let Some(members) = &input.members {
+            let before = plan.artifacts.len();
+            let (rows, read) = read_members(
+                &input.name,
+                &members.path,
+                &members.fields,
+                declaration,
+                &mut plan,
+            )?;
+            let minted = (plan.artifacts.len() - before) as u64;
+            if minted > 0 {
+                // Printed on §7's posture, beside the unclustered count and for the same reason: a
+                // mistyped key under an open value set creates an artifact instead of refusing, and
+                // what tells that apart from a clustering the artifacts source simply does not
+                // enumerate is the number.
+                eprintln!(
+                    "layer '{}': {minted} artifact(s) created by keys in {} that no artifacts \
+                     source declares",
+                    input.name,
+                    members.path.display()
+                );
+                *plan.minted.entry(input.name.clone()).or_default() += minted;
+            }
+            if rows > 0 {
+                // Printed here, where the source and its layer are both in hand, on §7's posture:
+                // the operator is present, the numbers are what tell a noisy clustering from a
+                // wrong column, and neither is a reason to block a build. **Against the rows read**,
+                // because that is the denominator that separates the two: a quarter is a condensed
+                // tree's noise and all of them is the wrong column.
+                eprintln!(
+                    "layer '{}': {rows} of {read} rows in {} are in no artifact (a null key, or -1)",
+                    input.name,
+                    members.path.display()
+                );
+                plan.unclustered.push(UnclusteredRows {
+                    layer: input.name.clone(),
+                    source: members.path.clone(),
+                    rows,
+                });
+            }
+        }
     }
     Ok(plan)
 }
 
-/// One row per `(artifact, variation)`: the artifact's scalars, its content values, and the edge it
-/// hangs from.
+/// One row per artifact: its scalars, its ranked `contents`, its membership and the edges it hangs
+/// from.
 ///
-/// An artifact with no supplied content is one row with a null `variation` and no `values`; an
-/// artifact with content is one row per variation. The attachment repeats on each of an artifact's
-/// rows and must agree across them — a caller writing two different targets for one artifact has
-/// written something nobody can act on, so it is a refusal rather than a last-row-wins.
-fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
-    // Which artifacts a row has already been seen for, so a second row can be checked against the
-    // first rather than overwriting it.
-    let mut seen: std::collections::BTreeSet<(String, u32, String)> = std::collections::BTreeSet::new();
+/// **One row, so there is nothing to agree with.** The earlier grain was one row per
+/// `(artifact, rank)`, which repeated the key, the parent and the attachment on every row of one
+/// artifact so that a single column could differ — and the build had to check the copies matched,
+/// including the case where a later row named none. A ranked list in one cell removes the
+/// disagreement rather than detecting it. What one row per artifact *does* admit is the same
+/// artifact written twice, which is refused below: two rows for one key are two artifacts as far
+/// as the file is concerned, and taking either would be taking the file's row order for an answer.
+fn read_artifacts(
+    layer: &str,
+    path: &Path,
+    fields: &Fields,
+    enumerated: bool,
+    plan: &mut LayerPlan,
+) -> Result<()> {
     for batch in batches(path)? {
         let batch = batch?;
-        let layer = utf8(path, &batch, "layer")?;
-        let level = optional_u32(path, &batch, "level")?;
-        let key = utf8(path, &batch, "stable_key")?;
-        let variation = optional_u32(path, &batch, "variation")?;
-        let values = optional_string_list(path, &batch, "values")?;
-        let target_layer = optional_utf8(path, &batch, "attached_layer")?;
-        let target_level = optional_u32(path, &batch, "attached_level")?;
-        let target_key = optional_utf8(path, &batch, "attached_key")?;
+        let key = key_column(path, &batch, fields, "key")?;
+        let level = optional_u32(path, &batch, LEVEL)?;
+        let contents = optional_ranked_values(path, &batch, fields, "contents")?;
+        let members = optional_u64_list(path, &batch, fields, "members")?;
+        let excluding = optional_u64_list(path, &batch, fields, "excluding")?;
+        let target_layer = optional_utf8(path, &batch, fields, "attached_layer")?;
+        let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
+        let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
+        let parent = optional_utf8(path, &batch, fields, "parent")?;
+        let bounds = [
+            optional_f64(path, &batch, fields, "min_x")?,
+            optional_f64(path, &batch, fields, "min_y")?,
+            optional_f64(path, &batch, fields, "max_x")?,
+            optional_f64(path, &batch, fields, "max_y")?,
+        ];
+
+        // **A stored membership on a layer whose members are computed is a refusal**, not a
+        // column read anyway: `membership` decides what a write invalidates, and a spatial or
+        // predicate layer's members come from the shape or the predicate at request time — so a
+        // set stored beside it is one nothing would read, or worse, one that quietly did.
+        if !enumerated && (members.is_some() || excluding.is_some()) {
+            return Err(BuildError::Invalid(format!(
+                "{}: layer '{layer}' carries a stored membership column, and its `membership` is \
+                 not `enumerated` — its members are computed from a shape or a predicate, so a \
+                 stored set here is one nothing declared",
+                path.display()
+            )));
+        }
+        // **A membership is included or excluded, never both.** The config refuses a `fields` map
+        // naming both; this is the file carrying both columns under their own names, which no map
+        // has to mention.
+        if members.is_some() && excluding.is_some() {
+            return Err(BuildError::Invalid(format!(
+                "{}: layer '{layer}' carries both a '{}' and an '{}' column. They are two \
+                 spellings of one membership — the entities in it, or the entities it leaves out — \
+                 so a row carrying each has two memberships, and every masked count divides by one \
+                 of them",
+                path.display(),
+                fields.of("members"),
+                fields.of("excluding"),
+            )));
+        }
 
         for row in 0..batch.num_rows() {
-            let address = address(path, layer, &level, key, row)?;
-            let entry = plan.artifacts.entry(address.clone()).or_default();
+            let address = address(path, layer, &level, &key, row)?;
+            if plan.artifacts.contains_key(&address) {
+                return Err(BuildError::Invalid(format!(
+                    "{}: artifact {} is declared on more than one row. One row is one artifact, so \
+                     a second row for a key is a second artifact under one name — which of the two \
+                     was published would be the file's row order rather than anything the caller \
+                     wrote",
+                    path.display(),
+                    address.2
+                )));
+            }
 
             let attachment = match (
                 target_layer.as_ref().and_then(|c| value_at(c, row)),
                 target_key.as_ref().and_then(|c| value_at(c, row)),
             ) {
-                (Some(layer), Some(stable_key)) => Some(IncomingAttachment {
+                (Some(layer), Some(key)) => Some(IncomingAttachment {
                     layer,
                     level: target_level.as_ref().map_or(0, |c| number_at(c, row)),
-                    stable_key,
+                    key,
                 }),
                 (None, None) => None,
                 _ => {
@@ -332,102 +478,454 @@ fn read_artifacts(path: &Path, plan: &mut LayerPlan) -> Result<()> {
                     )))
                 }
             };
-            // **Every row of an artifact carries the same attachment, and silence is a
-            // disagreement too.** Keeping the first row's target when a later row names none
-            // would make an artifact's edge depend on which of its rows the reader saw first.
-            if seen.contains(&address) && entry.attached_to != attachment {
-                return Err(BuildError::Invalid(format!(
-                    "{}: artifact {} does not name the same attachment on all of its rows",
-                    path.display(),
-                    address.2
-                )));
-            }
-            entry.attached_to = attachment;
-            seen.insert(address.clone());
 
-            let Some(index) = variation.as_ref().and_then(|c| value_index(c, row)) else {
-                continue;
+            // **The lineage is read upward only.** A `children_keys` column beside `parent` was
+            // read, checked for cross-row agreement and never walked: containment, coverage and
+            // cycle detection all derive children by inverting the parent edges. Two spellings of
+            // one edge is one more place for them to disagree, so the column is gone rather than
+            // carried.
+            let membership = match (&members, &excluding) {
+                (Some(column), _) => {
+                    PlannedMembership::Included(u64s_at(path, column, row, &address.2)?)
+                }
+                (_, Some(column)) => {
+                    PlannedMembership::Excluded(u64s_at(path, column, row, &address.2)?)
+                }
+                (None, None) => PlannedMembership::default(),
             };
-            let slot = variation_slot(entry, index);
-            slot.values = match values.as_ref() {
-                None => Vec::new(),
-                Some(column) => strings_at(path, column, row, &address.2)?,
-            };
+            plan.artifacts.insert(
+                address.clone(),
+                PlannedArtifact {
+                    membership,
+                    contents: match contents.as_ref() {
+                        None => Vec::new(),
+                        Some(column) => ranked_at(path, column, row, &address.2)?,
+                    },
+                    attached_to: attachment,
+                    parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
+                    shape: bbox_at(path, &bounds, row, &address.2)?,
+                },
+            );
         }
     }
     Ok(())
 }
 
-/// One row per `(artifact, member)`: the memberships, and the generating sets beside them.
+/// The same artifacts, written out in the declaration itself rather than read from a file.
 ///
-/// A null `variation` is the artifact's **membership**; `variation = k` is variation *k*'s
+/// **A spelling, not a second kind of layer.** It produces exactly what [`read_artifacts`] does
+/// from the same rows, which is what makes an authored layer and a generated one byte-identical in
+/// the bundle — the inline route exists so a handful of curated sets need no Parquet file
+/// (`annotation-write-cycle.md` §6.1).
+fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Result<()> {
+    for row in rows {
+        let address = (layer.to_string(), row.level, row.key.clone());
+        if plan.artifacts.contains_key(&address) {
+            return Err(BuildError::Invalid(format!(
+                "layer '{layer}': artifact {} is written twice in the declaration. One entry is \
+                 one artifact, so a second is a second artifact under one name",
+                row.key
+            )));
+        }
+        let attached_to = match (&row.attached_layer, &row.attached_key) {
+            (Some(layer), Some(key)) => Some(IncomingAttachment {
+                layer: layer.clone(),
+                level: row.attached_level,
+                key: key.clone(),
+            }),
+            (None, None) => None,
+            _ => {
+                return Err(BuildError::Invalid(format!(
+                    "layer '{layer}': artifact {} names half an attachment — an edge needs both \
+                     attached_layer and attached_key",
+                    row.key
+                )))
+            }
+        };
+        plan.artifacts.insert(
+            address,
+            PlannedArtifact {
+                membership: match (&row.members, &row.excluding) {
+                    // Both is refused at parse, where the declaration can name the artifact.
+                    (Some(members), _) => PlannedMembership::Included(members.clone()),
+                    (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
+                    (None, None) => PlannedMembership::default(),
+                },
+                contents: row
+                    .contents
+                    .iter()
+                    .map(|values| PlannedContent {
+                        values: values.clone(),
+                        generated_from: Vec::new(),
+                    })
+                    .collect(),
+                attached_to,
+                parent_key: row.parent.clone(),
+                shape: inline_bbox(layer, &row.key, row.bbox.as_deref())?,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// `bbox = [min_x, min_y, max_x, max_y]` on an inline artifact.
+///
+/// **Four values in a stated order, and a transposition is a refusal rather than a correction.**
+/// Swapping an inverted box silently would publish a membership the author did not write — the
+/// tiles covering the corrected box, over a region they may not have meant to name at all — so the
+/// constructor that refuses it is the one the WAL decode also goes through.
+fn inline_bbox(layer: &str, key: &str, bbox: Option<&[f64]>) -> Result<Option<Bbox>> {
+    let Some(values) = bbox else {
+        return Ok(None);
+    };
+    let [min_x, min_y, max_x, max_y] = values else {
+        return Err(BuildError::Invalid(format!(
+            "layer '{layer}': artifact {key} declares a `bbox` of {} value(s); it is exactly four \
+             — [min_x, min_y, max_x, max_y]",
+            values.len()
+        )));
+    };
+    Bbox::new(*min_x, *min_y, *max_x, *max_y)
+        .map(Some)
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "layer '{layer}': artifact {key} declares `bbox = [{min_x}, {min_y}, {max_x}, \
+                 {max_y}]`, which is not a box this build will store — every bound must be finite \
+                 and each maximum at or above its minimum. A transposed box is refused rather than \
+                 swapped: correcting it would publish a membership over a region nobody wrote"
+            ))
+        })
+}
+
+/// One row per `(artifact, entity)`: the memberships, and the generating sets beside them.
+///
+/// A null `rank` is the artifact's **membership**; `rank = k` is `contents[k]`'s
 /// generating set — the documents a viewer must be able to see *entirely* before that description
-/// is served to them. One file rather than two because the two are the same shape and the same
-/// scale, and a build at 10⁷ artifacts reads whichever is larger the same way.
-fn read_members(path: &Path, plan: &mut LayerPlan) -> Result<()> {
+/// is served to them. It is a source of its own rather than a cell on the artifact row because a
+/// condensed tree's root holds the whole corpus, which one cell can neither stream nor be
+/// materialised by a producer.
+///
+/// **A point table with a cluster column is this shape already**, which is why membership from a
+/// clusterer needed no surface of its own (`artifacts-from-points.md` §2): `fields` names the
+/// cluster column as `key` and the id column as `entity`, and the file the build reads its geometry
+/// from is also the file it reads its memberships from.
+///
+/// **A list key column is one row per `(artifact, entity)` as well** — several of them
+/// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point, and what the
+/// list means is the hierarchy kind the layer already declares: one entry per level for `stacked`
+/// and `tiered`, a lineage for `nested`. The entries name the artifacts the point belongs to,
+/// exactly as a scalar names the one, and `tiered` and `nested` read their **edges** from the
+/// adjacency the list itself carries.
+///
+/// Returns the rows that named no artifact, and the rows read — the numerator and the denominator
+/// the caller prints.
+fn read_members(
+    layer: &str,
+    path: &Path,
+    fields: &Fields,
+    declaration: &LayerDeclaration,
+    plan: &mut LayerPlan,
+) -> Result<(u64, u64)> {
+    let value_set = declaration.value_set;
+    let (mut unclustered, mut read) = (0u64, 0u64);
+    // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
+    // layer of 10⁷ artifacts pays once rather than per point.
+    let mut roster: Option<IntegerRoster> = None;
+    // The edges a list column declared, child address → parent key. **One entry per child, not one
+    // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
+    // and the second statement onward is a comparison rather than an insertion. Applied once the
+    // whole source has been read, so a conflict is found wherever in the file it sits.
+    let mut lineage: BTreeMap<Address, String> = BTreeMap::new();
+    // Reused across rows rather than allocated per point: one slot per position in the row's list,
+    // `None` where the entry named no artifact.
+    let mut entries: Vec<Option<Member>> = Vec::new();
+    let mut said_level_is_ignored = false;
     for batch in batches(path)? {
         let batch = batch?;
-        let layer = utf8(path, &batch, "layer")?;
-        let level = optional_u32(path, &batch, "level")?;
-        let key = utf8(path, &batch, "stable_key")?;
-        let variation = optional_u32(path, &batch, "variation")?;
-        let member = u64s(path, &batch, "member")?;
+        let key = member_keys(path, &batch, fields, layer, declaration)?;
+        let level = optional_u32(path, &batch, LEVEL)?;
+        let rank = optional_u32_field(path, &batch, fields, "rank")?;
+        let entity = u64s(path, &batch, fields, "entity")?;
+        read += batch.num_rows() as u64;
+
+        // **Ignored and said so**, rather than refused or read: the positions in a list are what
+        // carry the levels, so a `level` column beside one is a second answer to a question the
+        // column has already answered. Reading it would place a point at a level its list did not
+        // name; refusing would block a build over an input that discloses nothing and costs a
+        // rerun.
+        if level.is_some() && matches!(key, MemberKeys::Listed(_)) && !said_level_is_ignored {
+            said_level_is_ignored = true;
+            eprintln!(
+                "layer '{layer}': {} carries a `level` column beside a list key column, whose own \
+                 positions are what carry the levels — the column is ignored",
+                path.display()
+            );
+        }
 
         for row in 0..batch.num_rows() {
-            let address = address(path, layer, &level, key, row)?;
-            // **The artifacts file is the roster, and a key not on it is a refusal.** A
-            // mistyped key would otherwise publish a phantom artifact carrying the members it
-            // stole from a real one — an extra cluster nobody wrote, beside a real cluster
-            // whose masked count is quietly short and which may fall below its own criterion
-            // and vanish. Neither has an error anywhere to notice.
-            let Some(entry) = plan.artifacts.get_mut(&address) else {
+            match &key {
+                MemberKeys::Scalar(column) => {
+                    let at_level = level.map_or(0, |c| number_at(c, row));
+                    let Some(member) = resolve_member(
+                        layer,
+                        at_level,
+                        column.read_at(row),
+                        value_set,
+                        path,
+                        plan,
+                        &mut roster,
+                    )?
+                    else {
+                        unclustered += 1;
+                        continue;
+                    };
+                    let address = member.address(&roster);
+                    // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the
+                    // values buffer whatever the validity bitmap says, and a Parquet writer leaves
+                    // a zero there — so a producer whose join missed a row would publish the
+                    // corpus's lowest-numbered document into the cluster, moving its masked count
+                    // for every viewer who can see that one document.
+                    if entity.is_null(row) {
+                        return Err(null_entity(path, &address.2));
+                    }
+                    attach_member(
+                        plan,
+                        address,
+                        path,
+                        entity.value(row),
+                        rank.as_ref().and_then(|c| value_index(c, row)),
+                    )?;
+                }
+                MemberKeys::Listed(listed) => {
+                    let Some(positions) = listed.entries(path, layer, row)? else {
+                        unclustered += 1;
+                        continue;
+                    };
+                    if entity.is_null(row) {
+                        return Err(null_entity(path, &format!("row {row}")));
+                    }
+                    let source = entity.value(row);
+                    let rank = rank.as_ref().and_then(|c| value_index(c, row));
+
+                    entries.clear();
+                    for (position, index) in positions.enumerate() {
+                        entries.push(resolve_member(
+                            layer,
+                            listed.meaning.level_of(position),
+                            listed.values.read_at(index),
+                            value_set,
+                            path,
+                            plan,
+                            &mut roster,
+                        )?);
+                    }
+                    // **A row whose every entry is noise is one row in no artifact**, counted
+                    // exactly as a null scalar key is: the denominator the report divides by is
+                    // rows, and a list naming nothing is one of them.
+                    if entries.iter().all(Option::is_none) {
+                        unclustered += 1;
+                        continue;
+                    }
+                    for member in entries.iter().flatten() {
+                        attach_member(plan, member.address(&roster), path, source, rank)?;
+                    }
+                    if listed.meaning.declares_edges() {
+                        record_lineage(&entries, &roster, &mut lineage, path)?;
+                    }
+                }
+            }
+        }
+    }
+    apply_lineage(plan, lineage, path)?;
+    Ok((unclustered, read))
+}
+
+/// One member row's key, resolved against the plan — **minting where the value set is open**, and
+/// `None` where the key said the point is in no artifact.
+///
+/// **The artifacts are the roster, and a key not on them is a refusal** — while the layer's value
+/// set is closed. A mistyped key would otherwise publish a phantom artifact carrying the members it
+/// stole from a real one: an extra cluster nobody wrote, beside a real cluster whose masked count is
+/// quietly short and which may fall below its own criterion and vanish. Neither has an error
+/// anywhere to notice.
+///
+/// **Open lifts exactly that refusal** (`artifacts-from-points.md` §3): the key creates an artifact
+/// carrying no title, no parent and no contents — the cluster exists because a point says it does,
+/// and the artifacts source, if there is one, is enrichment. A list column mints from the same call,
+/// so an interior parent no artifact declares is minted on the same rule as a leaf.
+fn resolve_member(
+    layer: &str,
+    level: u32,
+    read: KeyRead<'_>,
+    value_set: ValueSet,
+    path: &Path,
+    plan: &mut LayerPlan,
+    roster: &mut Option<IntegerRoster>,
+) -> Result<Option<Member>> {
+    Ok(match read {
+        KeyRead::Unclustered => None,
+        KeyRead::Named(name) => {
+            let address = (layer.to_string(), level, name.to_string());
+            if !plan.artifacts.contains_key(&address) {
+                if value_set == ValueSet::Closed {
+                    return Err(undeclared_key(path, &address));
+                }
+                plan.artifacts
+                    .insert(address.clone(), PlannedArtifact::default());
+            }
+            Some(Member::Named(address))
+        }
+        KeyRead::Numbered(value) => {
+            let roster = roster.get_or_insert_with(|| IntegerRoster::of_layer(layer, plan));
+            match roster.get(level, value) {
+                Some(index) => Some(Member::Interned(index)),
+                None => {
+                    // The one decimal string an integer key ever costs: once per artifact minted,
+                    // never once per point. The spelling is the one
+                    // `tessera_types::layer::integer_key` states for the wire — `3` and "3" name
+                    // one artifact — taken here without allocating for the point that matched.
+                    let address = (layer.to_string(), level, value.to_string());
+                    if value_set == ValueSet::Closed {
+                        return Err(undeclared_key(path, &address));
+                    }
+                    // **Minted into the plan, never over it.** Absent from the roster is not absent
+                    // from the plan — the roster is built once and indexes only the keys that spell
+                    // an integer exactly — so an insert here would replace an artifact that already
+                    // holds members with an empty one.
+                    plan.artifacts.entry(address.clone()).or_default();
+                    Some(Member::Interned(roster.insert(level, value, address)))
+                }
+            }
+        }
+    })
+}
+
+/// Put one source entity into an artifact — its membership, or the generating set of one rank.
+fn attach_member(
+    plan: &mut LayerPlan,
+    address: &Address,
+    path: &Path,
+    source: u64,
+    rank: Option<u32>,
+) -> Result<()> {
+    let entry = plan
+        .artifacts
+        .get_mut(address)
+        .expect("resolved against the plan, or minted into it");
+    match rank {
+        None => match &mut entry.membership {
+            PlannedMembership::Rows(members) => members.push(source),
+            // **Two answers to what an artifact's members are.** The config refuses the two
+            // declarations together; this is the same rule for a caller who bound the sources by
+            // hand, and it is fail-closed either way — taking one would make a masked count, and
+            // the criterion that divides by it, depend on which source the reader happened to read
+            // first.
+            _ => {
                 return Err(BuildError::Invalid(format!(
-                    "{}: names {} in level {} of {}, which the artifacts file does not declare",
-                    path.display(),
-                    address.2,
-                    address.1,
-                    address.0
-                )));
-            };
-            // **A null member is a refusal, not entity zero.** Arrow's `value` reads the values
-            // buffer whatever the validity bitmap says, and a Parquet writer leaves a zero
-            // there — so a producer whose join missed a row would publish the corpus's
-            // lowest-numbered document into the cluster, moving its masked count for every
-            // viewer who can see that one document.
-            if member.is_null(row) {
-                return Err(BuildError::Invalid(format!(
-                    "{}: {} has a null member; a null is not entity zero, and publishing it as \
-                     one puts a document nobody named into the artifact",
+                    "{}: {} has a membership on its own row and another in this member source. \
+                     They are two shapes of one thing, so which one a masked count divides by \
+                     would be the order the sources were read",
                     path.display(),
                     address.2
-                )));
+                )))
             }
-            let source = member.value(row);
-            match variation.as_ref().and_then(|c| value_index(c, row)) {
-                None => entry.members.push(source),
-                Some(index) => variation_slot(entry, index).generated_from.push(source),
+        },
+        Some(index) => content_at_rank(entry, index).generated_from.push(source),
+    }
+    Ok(())
+}
+
+fn null_entity(path: &Path, what: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: {what} has a null entity; a null is not entity zero, and publishing it as one puts a \
+         document nobody named into the artifact",
+        path.display()
+    ))
+}
+
+/// The edges one row's list declares, folded into the map of what each child's parent is.
+///
+/// The adjacency itself is [`parent_edges`]'s — the wire reads the same rule off the same function
+/// — and what is added here is the conflict: **one entry per child, not one per row**, so a cluster
+/// of a hundred thousand points states its parent a hundred thousand times and the second statement
+/// onward is a comparison rather than an insertion.
+fn record_lineage(
+    entries: &[Option<Member>],
+    roster: &Option<IntegerRoster>,
+    lineage: &mut BTreeMap<Address, String>,
+    path: &Path,
+) -> Result<()> {
+    for (parent, child) in parent_edges(entries) {
+        let parent = parent.address(roster).2.as_str();
+        let child = child.address(roster);
+        match lineage.get(child) {
+            Some(first) if first != parent => return Err(two_parents(path, child, first, parent)),
+            Some(_) => {}
+            None => {
+                lineage.insert(child.clone(), parent.to_string());
             }
         }
     }
     Ok(())
 }
 
-/// The variation at `index`, growing the ranking to reach it.
+/// Hang every child the column named under the parent it named.
+///
+/// **A parent already on the artifact row must be the same one**: a `parent` column and a lineage
+/// column are two spellings of one edge, and an artifact holding a different parent in each is the
+/// same conflict as two points disagreeing.
+fn apply_lineage(
+    plan: &mut LayerPlan,
+    lineage: BTreeMap<Address, String>,
+    path: &Path,
+) -> Result<()> {
+    for (child, parent) in lineage {
+        let artifact = plan
+            .artifacts
+            .get_mut(&child)
+            .expect("a child of the lineage was resolved against the plan, or minted into it");
+        match &artifact.parent_key {
+            Some(declared) if *declared != parent => {
+                return Err(two_parents(path, &child, declared, &parent))
+            }
+            _ => artifact.parent_key = Some(parent),
+        }
+    }
+    Ok(())
+}
+
+/// **A child naming two different parents is refused** (`artifacts-from-points.md` §4). The data is
+/// not the tree the layer declared: there is no correct output, and choosing a parent would publish
+/// a hierarchy the caller did not write.
+fn two_parents(path: &Path, child: &Address, first: &str, second: &str) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: {} in level {} of {} is named as a child of both {first} and {second}. A list key \
+         column declares the edges, so two rows naming different parents for one artifact are two \
+         hierarchies — and which of them was published would be the file's row order rather than \
+         anything the caller wrote",
+        path.display(),
+        child.2,
+        child.1,
+        child.0
+    ))
+}
+
+/// The content at `rank`, growing the ranking to reach it.
 ///
 /// **Dense, and a gap is refused.** A ranking is the caller's ordering and the service takes no
-/// opinion on it (decision 0078), so a missing variation 1 under a present variation 2 would either
+/// opinion on it (decision 0078), so a missing rank 1 under a present rank 2 would either
 /// renumber the caller's ranking or publish an empty description; both are answers nobody wrote.
-fn variation_slot(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedVariation {
+fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedContent {
     let index = index as usize;
-    if index >= artifact.variations.len() {
-        // Grown rather than refused here: rows arrive in file order, so a variation 2 seen before
-        // a variation 1 is ordinary. A gap that is still a gap when the artifact is published is
-        // caught there, over the whole ranking, by the empty-variation refusal.
+    if index >= artifact.contents.len() {
+        // Grown rather than refused here: rows arrive in file order, so a rank 2 seen before
+        // a rank 1 is ordinary. A gap that is still a gap when the artifact is published is
+        // caught there, over the whole ranking, by the empty-content refusal.
         artifact
-            .variations
-            .resize_with(index + 1, PlannedVariation::default);
+            .contents
+            .resize_with(index + 1, PlannedContent::default);
     }
-    &mut artifact.variations[index]
+    &mut artifact.contents[index]
 }
 
 /// Register every declaration, publish every artifact, and write the extents that carry them.
@@ -435,13 +933,15 @@ fn variation_slot(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedVar
 /// `resolve` maps a **source** entity id to the entity this build assigned it, and `high_water` is
 /// the point region's mark — passed so the allocator refuses rather than letting the two regions
 /// meet unnoticed.
+#[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &LayerPlan,
     resolve: &dyn Fn(u64) -> Option<u64>,
     high_water: u64,
     prefix_dir: &Path,
     partition: &str,
-    slice: &str,
+    view: &str,
+    derived: &BTreeMap<String, Vec<String>>,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
     let mut alloc = Allocator::new(high_water);
@@ -449,13 +949,15 @@ pub fn publish(
 
     for declaration in &plan.declarations {
         let name = declaration.name.clone();
-        // **A slice this build does not write is a refusal, not a layer that waits.** A layer
-        // appears only in the slices it declares, so a mistyped slice name would produce a bundle
+        // **A view this build does not write is a refusal, not a layer that waits.** A layer
+        // appears only in the views it declares, so a mistyped view name would produce a bundle
         // whose layer is registered, reachable, and serves nothing — indistinguishable, from every
         // client, from a layer whose artifacts all failed their existence criterion.
-        if let Some(unknown) = declaration.slices.iter().find(|s| s.as_str() != slice) {
+        if let Some(unknown) = declaration.views.iter().find(|s| s.as_str() != view) {
             return Err(BuildError::Invalid(format!(
-                "layer {name} declares slice {unknown}, and this build writes slice {slice}; a                  layer in a slice that does not exist is registered, reachable and empty, which no                  client can tell from one whose artifacts were all withheld"
+                "layer {name} declares view {unknown}, and this build writes view {view}. A layer \
+                 in a view this build does not write is registered, reachable and empty, which no \
+                 client can tell from one whose artifacts were all withheld"
             )));
         }
         let record = registry
@@ -464,11 +966,56 @@ pub fn publish(
         registry.apply(&record);
     }
 
-    // Grouped by `(layer, level)`, each level's artifacts in stable-key order — so a level's
+    verify_dependencies(plan)?;
+
+    // **A predicate layer's artifacts are minted from its own column, before anything else is
+    // published** (`design/artifact-serving-at-scale.md` §5.1). The keys arrive already in
+    // value-code order, which is what makes an ordinal a function of the *value* rather than of
+    // when the build happened to see it — the same determinism rule the key ordering below gives
+    // an enumerated layer, read over the vocabulary instead of over a file.
+    //
+    // ⊘ A predicate layer sits at level 0 and nowhere else: `LayerDeclaration::validate` refuses it
+    // levels, because the rule produces one artifact per value at one resolution.
+    for declaration in &plan.declarations {
+        let Some(keys) = derived.get(&declaration.name) else {
+            continue;
+        };
+        if keys.is_empty() {
+            continue;
+        }
+        let record = registry
+            .prepare_derive(&declaration.name, 0, keys, &store, &mut alloc)
+            .map_err(|e| BuildError::Invalid(format!("deriving into {}: {e}", declaration.name)))?;
+        registry.apply(&record);
+        let refused = store.apply(&record, 0);
+        if refused > 0 {
+            // The membership publication's finding, at the derived layers' own site: what this
+            // catches is a bitmap that was already malformed, not a format that lost it.
+            return Err(BuildError::Invalid(format!(
+                "{refused} derived artifact(s) of {} were not well-formed bitmaps when this build \
+                 encoded them",
+                declaration.name
+            )));
+        }
+    }
+
+    // **Every membership is materialised here, before anything else looks at one.** A membership
+    // declared by exclusion is complemented against the entity space this build assigned, once, so
+    // the hierarchy checks below and the store beneath them see the same set an inclusion would
+    // have written — and no later stage has a spelling left to learn.
+    let mut resolved: BTreeMap<Address, ResolvedArtifact> = BTreeMap::new();
+    for ((layer, level, key), artifact) in &plan.artifacts {
+        resolved.insert(
+            (layer.clone(), *level, key.clone()),
+            resolve_artifact(layer, *level, key, artifact, resolve, high_water)?,
+        );
+    }
+
+    // Grouped by `(layer, level)`, each level's artifacts in key order — so a level's
     // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
     // row order.
-    let mut batched: BTreeMap<(&str, u32), Vec<(&str, &PlannedArtifact)>> = BTreeMap::new();
-    for ((layer, level, key), artifact) in &plan.artifacts {
+    let mut batched: BTreeMap<(&str, u32), Vec<(&str, &ResolvedArtifact)>> = BTreeMap::new();
+    for ((layer, level, key), artifact) in &resolved {
         batched
             .entry((layer.as_str(), *level))
             .or_default()
@@ -482,12 +1029,7 @@ pub fn publish(
     let mut order: Vec<(&str, u32)> = Vec::with_capacity(batched.len());
     for declaration in &plan.declarations {
         let name = declaration.name.as_str();
-        order.extend(
-            batched
-                .keys()
-                .filter(|(layer, _)| *layer == name)
-                .copied(),
-        );
+        order.extend(batched.keys().filter(|(layer, _)| *layer == name).copied());
     }
 
     for address in order {
@@ -497,42 +1039,428 @@ pub fn publish(
             .expect("every address came from the map a statement ago");
         let mut incoming = Vec::with_capacity(artifacts.len());
         for (key, artifact) in artifacts {
-            incoming.push(resolved(layer, level, key, artifact, resolve)?);
+            incoming.push(incoming_artifact(key, artifact));
         }
         let record = registry
-            .prepare_publish(layer, level, &incoming, &store, &mut alloc)
+            .prepare_publish(
+                layer,
+                level,
+                &incoming,
+                &store,
+                &mut alloc,
+                &tessera_lifecycle::no_pending,
+            )
             .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
         registry.apply(&record);
         let refused = store.apply(&record, 0);
         if refused > 0 {
-            // Unreachable: the memberships were serialised from bitmaps two calls ago. It is a
-            // refusal rather than an assertion because the alternative is a level published with
+            // **Reached once, and not by a fault in the encoding.** The 5×10⁷ tier of
+            // `probes/2026-08-22-artifact-serving-e2e/` stopped here on one membership of
+            // `generator/treed`; the bytes carried exactly what the container held, and what the
+            // decoder's validation rejected was a container whose array was already out of order
+            // when it was serialised. The message says that rather than blaming the format,
+            // because an operator told the encoding failed will look at the wrong half.
+            //
+            // A refusal rather than an assertion because the alternative is a level published with
             // artifacts silently missing, which serves as *absent* with nothing reporting a fault.
             return Err(BuildError::Invalid(format!(
-                "{refused} membership(s) of {layer} did not survive their own encoding"
+                "{refused} membership(s) of {layer} were not well-formed bitmaps when this build \
+                 encoded them — the bytes decode to nothing, so the level is refused rather than \
+                 published with those artifacts absent"
             )));
         }
     }
 
+    let (violations, coverage) = verify_hierarchies(&plan.declarations, &resolved)?;
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
+        containment_violations: violations,
+        split_coverage: coverage,
         low_water: alloc.low_water(),
+        unclustered: plan.unclustered.clone(),
+        minted: plan.minted.clone(),
         ..PublishedLayers::default()
     };
+    published.level_versions = store
+        .level_versions()
+        .map(
+            |(layer, level, version)| tessera_store::manifest::LevelVersion {
+                layer: layer.to_string(),
+                level,
+                version,
+            },
+        )
+        .collect();
     write_membership_extents(&store, prefix_dir, partition, &mut published)?;
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
+    published.store = store;
     Ok(published)
 }
 
-/// One planned artifact with every source id resolved to the entity this build assigned it.
-fn resolved(
+/// **The artifacts a `membership = { attribute = f }` layer holds**, keyed by layer name — one per
+/// distinct value the column carries, in value-code order.
+///
+/// **The values are the roster, and the roster is what the column turned out to hold.** A predicate
+/// layer publishes nothing, so its artifacts have to come from somewhere: they are the values, and
+/// a value exists because a point carries it. That makes this a scan of the column rather than a
+/// read of the declaration — an authored vocabulary value no point carries mints no artifact here,
+/// exactly as an ingested value that has never appeared mints none until it does.
+///
+/// **Value-code order, so an ordinal is a function of the value.** Entity ids follow ordinals and
+/// ordinals are identity, so an assignment that depended on which entity the scan met first would
+/// move every artifact of the layer when a row moved in the input file. Ascending code is the same
+/// stability rule `(layer, level, key)` order gives an enumerated layer's publication.
+///
+/// `codes_of` is *the distinct codes present in the attribute at this index*, which the two builds
+/// answer from different structures — one holds typed entity columns and the other a scalar vector
+/// per item — and which is the only thing about them this rule depends on.
+pub fn predicate_artifact_keys(
+    layers: &[LayerDeclaration],
+    schema: &crate::config::Schema,
+    minters: &std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    codes_of: &dyn Fn(usize) -> std::collections::BTreeSet<u32>,
+) -> Result<BTreeMap<String, Vec<String>>> {
+    use tessera_types::layer::{attribute_value_key, MembershipSource};
+    let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for declaration in layers {
+        let MembershipSource::Attribute(field) = &declaration.membership else {
+            continue;
+        };
+        // The config refuses a membership naming a column no `[[attribute]]` declares, so reaching
+        // here with one is a declaration that never validated rather than reachable input.
+        let index = schema
+            .attributes
+            .iter()
+            .position(|a| &a.name == field)
+            .ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "layer '{}': `membership = {{ attribute = \"{field}\" }}` names no declared \
+                     attribute",
+                    declaration.name
+                ))
+            })?;
+        let attribute = &schema.attributes[index];
+        // `code → key`, from the declaration's own bindings **and** from whatever this run minted
+        // into them: an open vocabulary's newest values live in the minter and its authored ones
+        // do not, and an artifact named by a code where a key exists would be a second name for a
+        // value the ingest route already knows by its key.
+        let mut key_of_code: BTreeMap<u32, &str> = BTreeMap::new();
+        if let Some(name) = &attribute.vocabulary {
+            if let Some(vocabulary) = schema.vocabularies.get(name) {
+                for (key, code) in &vocabulary.codes {
+                    key_of_code.insert(*code, key.as_str());
+                }
+            }
+            if let Some(minter) = minters.get(name) {
+                for (key, code) in minter.bindings() {
+                    key_of_code.insert(code, key);
+                }
+            }
+        }
+        let mut codes = codes_of(index);
+        // **Code 0 is a category code space's reserved *absent* sentinel** and is never bound to a
+        // key, so it names no value and no artifact. A plain integer column has no such
+        // reservation and 0 is an ordinary value there.
+        if attribute.vocabulary.is_some() {
+            codes.remove(&tessera_store::vocabulary::ABSENT_CODE);
+        }
+        out.insert(
+            declaration.name.clone(),
+            codes
+                .iter()
+                .map(|code| attribute_value_key(*code, key_of_code.get(code).copied()))
+                .collect(),
+        );
+    }
+    Ok(out)
+}
+
+/// Every artifact of a layer that declares a dependency must declare one, into a layer that
+/// layer named ([decision 0089](../../../docs/decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)).
+///
+/// **The same two refusals the control plane makes, made here where the input is a file.** A
+/// dependent is served only where the artifact it attaches to is served, so an artifact carrying no
+/// attachment has nothing for that prerequisite to gate on — and a build that admitted what an
+/// ingest refuses is the fail-open half of one rule stated twice. What this adds over the registry's
+/// own refusal is the address: the layer and key an operator has to go and fix, before the first
+/// entity is allocated.
+fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
+    let declared: BTreeMap<&str, &[String]> = plan
+        .declarations
+        .iter()
+        .map(|d| (d.name.as_str(), d.depends_on.as_slice()))
+        .collect();
+    for ((layer, _, key), artifact) in &plan.artifacts {
+        let Some(depends_on) = declared.get(layer.as_str()) else {
+            continue;
+        };
+        match &artifact.attached_to {
+            None if !depends_on.is_empty() => {
+                return Err(BuildError::Invalid(format!(
+                    "layer '{layer}' declares depends_on {depends_on:?}, so every artifact it \
+                     publishes attaches to one — and {key} attaches to nothing. A dependent is \
+                     visible only where what it depends on is visible, so an artifact with no \
+                     dependency would be gated on nothing: give it attached_layer and \
+                     attached_key, or drop depends_on from the layer"
+                )));
+            }
+            Some(attachment) if !depends_on.contains(&attachment.layer) => {
+                return Err(BuildError::Invalid(format!(
+                    "layer '{layer}' publishes {key} attached into '{}', which it does not declare \
+                     in depends_on {depends_on:?} — a dependency nobody declared is one no \
+                     replacement checks, and one the publication order does not honour",
+                    attachment.layer
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Check every declared parent/child edge, refusing the malformed and reporting the uncontained.
+///
+/// **The split between the two is which one a caller could have meant.** A parent key naming an
+/// artifact that does not exist, a child claimed by two parents, a cycle — none of these describes
+/// a tree at all, so there is nothing to publish and they refuse. A child holding a member its
+/// parent does not is a *tree*, just one whose rollup guarantee does not hold on that branch; the
+/// corpus may legitimately be that way, so it is named and published.
+///
+/// Edges relate artifacts **within one level** — a hierarchy's lineage lives in its edges and a
+/// level is a resolution, so the two never carry each other
+/// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)).
+/// An edge naming a key in another level is therefore an unknown key here, and refuses.
+type Address = (String, u32, String);
+
+fn verify_hierarchies(
+    declarations: &[LayerDeclaration],
+    artifacts: &BTreeMap<Address, ResolvedArtifact>,
+) -> Result<(Vec<ContainmentViolation>, Vec<SplitCoverage>)> {
+    // Which parent has claimed each child, so a second claim is a refusal rather than a silent
+    // reparenting: a child with two parents has two lineages, and which one a cut walks would
+    // depend on iteration order.
+    let mut claimed: BTreeMap<(&str, u32, &str), &str> = BTreeMap::new();
+    // Children grouped under their parent, so containment and coverage are one pass over each
+    // parent's membership rather than one per edge. **Each child by its full address**, because an
+    // tiered layer's child sits at a different level from its parent and a bare key would
+    // then be looked up in the wrong one.
+    let mut children_of: BTreeMap<Address, Vec<Address>> = BTreeMap::new();
+
+    // Which shape each layer's edges have, from its declaration and never from the edges
+    // themselves. A layer that declares no lineage may carry none; a nested layer's edges stay
+    // within a level; a tiered layer's run from a coarser level to a finer one, and it is
+    // the levels that carry the resolution rather than the edges.
+    let kind_of: BTreeMap<&str, tessera_types::layer::HierarchyKind> = declarations
+        .iter()
+        .map(|d| (d.name.as_str(), d.hierarchy.kind))
+        .collect();
+
+    for ((layer, level, key), artifact) in artifacts {
+        let Some(parent_key) = artifact.parent_key.as_deref() else {
+            continue;
+        };
+        let kind = kind_of
+            .get(layer.as_str())
+            .copied()
+            .unwrap_or(tessera_types::layer::HierarchyKind::Flat);
+        let cross_level = matches!(kind, tessera_types::layer::HierarchyKind::Tiered);
+        if !cross_level && !matches!(kind, tessera_types::layer::HierarchyKind::Nested) {
+            return Err(BuildError::Invalid(format!(
+                "{layer} is declared {kind:?} and so has no lineage, but {key} names a parent — \
+                 declare it nested if its edges run within a level, or tiered if they run between \
+                 levels"
+            )));
+        }
+
+        // **Where to look for the parent is the declared shape's to say.** A layer may not mix the
+        // two directions, which is what makes an edge's meaning independent of the data: an
+        // tiered layer's parent is in a strictly coarser level, and a key that resolves
+        // only at this level or a finer one is an edge running against the resolution — refused
+        // rather than reinterpreted.
+        let parent_address = if cross_level {
+            let mut found = None;
+            for coarser in 0..*level {
+                let candidate = (layer.clone(), coarser, parent_key.to_string());
+                if artifacts.contains_key(&candidate) {
+                    if found.is_some() {
+                        return Err(BuildError::Invalid(format!(
+                            "{layer} artifact {key} names parent {parent_key}, which exists in \
+                             more than one coarser level; which level the edge meant would depend \
+                             on the search order, so it is refused rather than resolved"
+                        )));
+                    }
+                    found = Some(candidate);
+                }
+            }
+            match found {
+                Some(address) => address,
+                None => {
+                    return Err(BuildError::Invalid(format!(
+                        "{layer} level {level} artifact {key} names parent {parent_key}, which no \
+                         coarser level declares — a tiered layer's edges run from a coarser \
+                         level to a finer one, so a parent at this level or below is an \
+                         edge running against the resolution"
+                    )))
+                }
+            }
+        } else {
+            let address = (layer.clone(), *level, parent_key.to_string());
+            if !artifacts.contains_key(&address) {
+                return Err(BuildError::Invalid(format!(
+                    "{layer} level {level} artifact {key} names parent {parent_key}, which this \
+                     level does not declare — a nested layer's edges relate two artifacts of one \
+                     level, and a parent that does not exist would leave the child a root of a \
+                     tree nobody wrote"
+                )));
+            }
+            address
+        };
+        // **Only a within-level edge can name itself.** A key is unique per `(layer,
+        // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
+        // arXiv archive with no subclass is `hep-ph` at both, and the level-1 artifact's parent is
+        // the level-0 one of the same name.
+        if !cross_level && parent_key == key {
+            return Err(BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key} names itself as its parent"
+            )));
+        }
+        if let Some(first) = claimed.insert((layer, *level, key), parent_key) {
+            return Err(BuildError::Invalid(format!(
+                "{layer} level {level} artifact {key} is claimed by both {first} and {parent_key}; \
+                 a child has one lineage or the cut that walks it depends on iteration order"
+            )));
+        }
+        children_of
+            .entry(parent_address)
+            .or_default()
+            .push((layer.clone(), *level, key.clone()));
+    }
+
+    let mut violations = Vec::new();
+    let mut coverage = Vec::new();
+    for (address, children) in &children_of {
+        let (layer, level, parent_key) = address;
+        let parent = &artifacts[address];
+        // **A set per parent, not a scan per member.** The membership test is the inner loop of
+        // both checks below, and a linear `contains` over a parent holding the whole corpus makes
+        // this pass quadratic in the level's largest artifact.
+        let held: std::collections::HashSet<u64> = parent.members.iter().map(|e| e.raw()).collect();
+        let mut covered: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(held.len());
+
+        for child_address in children {
+            let child = &artifacts[child_address];
+            let (_, child_level, child_key) = child_address;
+            let mut escaping = 0u64;
+            for member in child.members.iter().map(|e| e.raw()) {
+                if held.contains(&member) {
+                    covered.insert(member);
+                } else {
+                    // Reported, not refused: the tree is real, its rollup guarantee is not.
+                    escaping += 1;
+                }
+            }
+            if escaping > 0 {
+                violations.push(ContainmentViolation {
+                    layer: layer.clone(),
+                    // The **child's** level, which is the one an operator needs to find it; for a
+                    // nested layer it is the parent's too, and for a tiered one it is not.
+                    level: *child_level,
+                    child: child_key.clone(),
+                    parent: parent_key.clone(),
+                    escaping_members: escaping,
+                });
+            }
+        }
+
+        coverage.push(SplitCoverage {
+            layer: layer.clone(),
+            level: *level,
+            parent: parent_key.clone(),
+            children: children.len() as u32,
+            members: held.len() as u64,
+            stray_members: (held.len() - covered.len()) as u64,
+        });
+    }
+
+    detect_cycles(artifacts, &kind_of)?;
+    Ok((violations, coverage))
+}
+
+/// Refuse a hierarchy holding a cycle, which is not a tree and has no root to descend from.
+///
+/// Walks each artifact's ancestry to the root, bounded by the level's own artifact count — a chain
+/// longer than that has revisited a node, whatever the shape of the loop.
+///
+/// **Only a nested layer can hold one, and only its edges are walked.** A tiered layer's
+/// edges each step to a strictly coarser level, and the levels are finite and bounded below by
+/// zero, so a cycle is not expressible there.
+///
+/// **Skipping such a layer is required, not an optimisation.** Its keys are unique per level and
+/// may legitimately repeat across them — an arXiv archive with no subclass is `hep-ph` at both —
+/// so the same-level walk below would follow `hep-ph` at level 1 back to itself and report the
+/// taxonomy as a cycle. That is exactly what it did before this guard existed, and the demo corpus
+/// is what found it.
+fn detect_cycles(
+    artifacts: &BTreeMap<Address, ResolvedArtifact>,
+    kind_of: &BTreeMap<&str, tessera_types::layer::HierarchyKind>,
+) -> Result<()> {
+    for (layer, level, key) in artifacts.keys() {
+        if !matches!(
+            kind_of.get(layer.as_str()),
+            Some(tessera_types::layer::HierarchyKind::Nested)
+        ) {
+            continue;
+        }
+        let bound = artifacts
+            .keys()
+            .filter(|(l, v, _)| l == layer && v == level)
+            .count();
+        let mut node = key.clone();
+        for _ in 0..=bound {
+            let Some(artifact) = artifacts.get(&(layer.clone(), *level, node.clone())) else {
+                break;
+            };
+            match artifact.parent_key.as_deref() {
+                None => break,
+                Some(parent) => node = parent.to_string(),
+            }
+        }
+        if artifacts
+            .get(&(layer.clone(), *level, node.clone()))
+            .and_then(|a| a.parent_key.as_deref())
+            .is_some()
+        {
+            return Err(BuildError::Invalid(format!(
+                "{layer} level {level}: the lineage above {key} does not reach a root within the \
+                 level's own artifact count, so the edges hold a cycle — a tree has a root to \
+                 descend a cut from and a cycle has none"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// One planned artifact with every source id resolved to the entity this build assigned it — and
+/// its membership materialised, whichever way the source spelled it.
+///
+/// **The complement happens here and nowhere else.** `excluding` names the entities a membership
+/// leaves out, and the set it means is *this build's entity space minus those* — `0..high_water`,
+/// which is exactly the points this build assigned. Complementing once, here, is what makes the two
+/// spellings produce the same bundle down to the byte: the store below is handed a list of members
+/// either way, and nothing it writes records which way the caller wrote it. **There is no
+/// request-time complement, and none is expressible**: a complement evaluated against a viewer's
+/// mask rather than against the corpus would tell that viewer about the existence of items outside
+/// it, so the spelling must not survive the build (`annotation-write-cycle.md` §6.1).
+fn resolve_artifact(
     layer: &str,
     level: u32,
     key: &str,
     artifact: &PlannedArtifact,
     resolve: &dyn Fn(u64) -> Option<u64>,
-) -> Result<IncomingArtifact> {
+    high_water: u64,
+) -> Result<ResolvedArtifact> {
     let entities = |ids: &[u64], what: &str| -> Result<Vec<EntityId>> {
         ids.iter()
             .map(|&source| {
@@ -548,27 +1476,66 @@ fn resolved(
             .collect()
     };
 
-    let members = entities(&artifact.members, "membership")?;
-    let mut variations = Vec::with_capacity(artifact.variations.len());
-    for (index, variation) in artifact.variations.iter().enumerate() {
-        if variation.values.is_empty() && variation.generated_from.is_empty() {
+    let members = match &artifact.membership {
+        PlannedMembership::Rows(ids) => entities(ids, "membership")?,
+        PlannedMembership::Included(ids) => entities(ids, "membership")?,
+        // **An excluded id this build did not assign refuses the build**, on the same rule an
+        // unknown member does and for a sharper reason: an exclusion that resolves to nothing
+        // silently *widens* the membership by the item it was meant to keep out.
+        PlannedMembership::Excluded(ids) => {
+            let excluded: std::collections::HashSet<u64> = entities(ids, "exclusion")?
+                .into_iter()
+                .map(|e| e.raw())
+                .collect();
+            (0..high_water)
+                .filter(|entity| !excluded.contains(entity))
+                .map(EntityId::new)
+                .collect()
+        }
+    };
+
+    let mut contents = Vec::with_capacity(artifact.contents.len());
+    for (rank, content) in artifact.contents.iter().enumerate() {
+        if content.values.is_empty() && content.generated_from.is_empty() {
             return Err(BuildError::Invalid(format!(
-                "{layer} level {level} artifact {key}: variation {index} is empty, so the ranking \
+                "{layer} level {level} artifact {key}: contents[{rank}] is empty, so the ranking \
                  above it names a description that was never supplied"
             )));
         }
-        variations.push(IncomingVariation::new(
-            variation.values.clone(),
-            entities(&variation.generated_from, &format!("variation {index}"))?,
+        contents.push(IncomingContent::new(
+            content.values.clone(),
+            entities(&content.generated_from, &format!("contents[{rank}]"))?,
         ));
     }
 
-    Ok(match artifact.attached_to.clone() {
-        None => IncomingArtifact::with_content(Some(key.to_string()), members, variations),
-        Some(attached_to) => {
-            IncomingArtifact::attached(Some(key.to_string()), members, variations, attached_to)
-        }
+    Ok(ResolvedArtifact {
+        members,
+        contents,
+        attached_to: artifact.attached_to.clone(),
+        parent_key: artifact.parent_key.clone(),
+        shape: artifact.shape,
     })
+}
+
+/// The same artifact as the registry takes it. A membership is a list of entities by this point,
+/// so there is nothing here to decide.
+fn incoming_artifact(key: &str, artifact: &ResolvedArtifact) -> IncomingArtifact {
+    let mut result = match artifact.attached_to.clone() {
+        None => IncomingArtifact::with_content(
+            Some(key.to_string()),
+            artifact.members.iter().copied(),
+            artifact.contents.clone(),
+        ),
+        Some(attached_to) => IncomingArtifact::attached(
+            Some(key.to_string()),
+            artifact.members.iter().copied(),
+            artifact.contents.clone(),
+            attached_to,
+        ),
+    };
+    result.parent_key = artifact.parent_key.clone();
+    result.shape = artifact.shape;
+    result
 }
 
 /// Pack every level's memberships into one extent and fsync it — the same format, one file per
@@ -593,7 +1560,10 @@ fn write_membership_extents(
     if ready.is_empty() {
         return Ok(());
     }
-    let dir = prefix_dir.join("partitions").join(partition).join("members");
+    let dir = prefix_dir
+        .join("partitions")
+        .join(partition)
+        .join("members");
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
     for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
         // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
@@ -693,9 +1663,22 @@ fn write_content_extent(
 
 // ---- Parquet column access ----------------------------------------------------------------
 //
-// Narrow helpers rather than a general reader: these two files have six and five columns, every
-// one of which is named here, so a mistyped column is a refusal naming the column rather than a
-// silent absence.
+// Narrow helpers rather than a general reader: these two files have a handful of columns each,
+// every one of which is named here, so a mistyped column is a refusal naming the column rather
+// than a silent absence.
+//
+// **Every field is read under the name the declaration resolved** ([`Fields`]), and the split
+// between the two kinds of miss is `configuration.md` §8's. A field the map *named* and the file
+// does not carry is a refusal spelling out the object, the field, the column looked for and the
+// columns the file has — the reader's half of the rule, needing the file open. A field nothing
+// named and the file does not carry is simply absent, which is what an optional column of the
+// artifact grain is.
+
+/// The two fields no `fields` map may move, because `configuration.md` §1's table does not name
+/// them: a level is an address rather than a value, and the map's key set is the closed one that
+/// table states.
+const LEVEL: &str = "level";
+const ATTACHED_LEVEL: &str = "attached_level";
 
 fn batches(
     path: &Path,
@@ -708,17 +1691,57 @@ fn batches(
     Ok(reader.map(move |batch| batch.map_err(|e| BuildError::arrow(path, e))))
 }
 
-fn column<'a>(
+/// Every column the batch carries, for a refusal to spell out.
+fn column_names(batch: &arrow::record_batch::RecordBatch) -> String {
+    let schema = batch.schema();
+    let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// A required field, under the name the declaration resolved.
+fn required<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
+    fields: &Fields,
+    canonical: &str,
 ) -> Result<&'a std::sync::Arc<dyn Array>> {
+    let name = fields.of(canonical);
     batch.column_by_name(name).ok_or_else(|| {
-        BuildError::Invalid(format!("{}: no column named {name}", path.display()))
+        BuildError::Invalid(format!(
+            "{}: {} reads field `{canonical}` from a column named '{name}', which this file does \
+             not carry. Its columns are: {}",
+            path.display(),
+            fields.object(),
+            column_names(batch)
+        ))
     })
 }
 
-fn typed<'a, T: 'static>(path: &Path, array: &'a std::sync::Arc<dyn Array>, name: &str) -> Result<&'a T> {
+/// A field that may be absent — unless the declaration named it, in which case its absence is the
+/// refusal `configuration.md` §8 puts on the readers.
+fn optional<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<Option<&'a std::sync::Arc<dyn Array>>> {
+    let name = fields.of(canonical);
+    match batch.column_by_name(name) {
+        Some(array) => Ok(Some(array)),
+        None if fields.names(canonical) => Ok(Some(required(path, batch, fields, canonical)?)),
+        None => Ok(None),
+    }
+}
+
+fn typed<'a, T: 'static>(
+    path: &Path,
+    array: &'a std::sync::Arc<dyn Array>,
+    name: &str,
+) -> Result<&'a T> {
     array.as_any().downcast_ref::<T>().ok_or_else(|| {
         BuildError::Invalid(format!(
             "{}: column {name} is {:?}, which this reader cannot take",
@@ -728,33 +1751,32 @@ fn typed<'a, T: 'static>(path: &Path, array: &'a std::sync::Arc<dyn Array>, name
     })
 }
 
-fn utf8<'a>(
-    path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-) -> Result<&'a StringArray> {
-    typed(path, column(path, batch, name)?, name)
-}
-
 fn optional_utf8<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
+    fields: &Fields,
+    canonical: &str,
 ) -> Result<Option<&'a StringArray>> {
-    match batch.column_by_name(name) {
+    match optional(path, batch, fields, canonical)? {
         None => Ok(None),
-        Some(array) => typed(path, array, name).map(Some),
+        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
     }
 }
 
 fn u64s<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
+    fields: &Fields,
+    canonical: &str,
 ) -> Result<&'a UInt64Array> {
-    typed(path, column(path, batch, name)?, name)
+    typed(
+        path,
+        required(path, batch, fields, canonical)?,
+        fields.of(canonical),
+    )
 }
 
+/// A `u32` column read under its own name — the two the field map may not move.
 fn optional_u32<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
@@ -766,15 +1788,104 @@ fn optional_u32<'a>(
     }
 }
 
-fn optional_string_list<'a>(
+fn optional_u32_field<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
-    name: &str,
-) -> Result<Option<&'a ListArray>> {
-    match batch.column_by_name(name) {
+    fields: &Fields,
+    canonical: &str,
+) -> Result<Option<&'a UInt32Array>> {
+    match optional(path, batch, fields, canonical)? {
         None => Ok(None),
-        Some(array) => typed(path, array, name).map(Some),
+        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
     }
+}
+
+fn optional_list<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<Option<&'a ListArray>> {
+    match optional(path, batch, fields, canonical)? {
+        None => Ok(None),
+        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
+    }
+}
+
+/// The membership list on an artifact row, included or excluded.
+fn optional_u64_list<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<Option<&'a ListArray>> {
+    optional_list(path, batch, fields, canonical)
+}
+
+/// The ranked `contents` on an artifact row: a list of entries, each a list of values.
+fn optional_ranked_values<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<Option<&'a ListArray>> {
+    optional_list(path, batch, fields, canonical)
+}
+
+/// One bound of an artifact's bounding box, under the canonical name the `fields` map may move.
+///
+/// `Float64Array` only, and a `Float32` column is a refusal rather than a widening: a box read at
+/// single precision covers different tiles at the deep end of the Morton space from the one the
+/// author wrote, and the tiles *are* the membership.
+fn optional_f64<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<Option<&'a Float64Array>> {
+    match optional(path, batch, fields, canonical)? {
+        None => Ok(None),
+        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
+    }
+}
+
+/// The four bounds on one artifact row, or `None` where the row declares none.
+///
+/// **All four or none**, and a row carrying some is a refusal: a box assembled from two present
+/// bounds and two defaults is a region nobody wrote, and on a spatial layer that region *is* the
+/// membership.
+fn bbox_at(
+    path: &Path,
+    columns: &[Option<&Float64Array>; 4],
+    row: usize,
+    key: &str,
+) -> Result<Option<Bbox>> {
+    let present: Vec<Option<f64>> = columns
+        .iter()
+        .map(|column| column.filter(|c| !c.is_null(row)).map(|c| c.value(row)))
+        .collect();
+    if present.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [Some(min_x), Some(min_y), Some(max_x), Some(max_y)] = present[..] else {
+        return Err(BuildError::Invalid(format!(
+            "{}: artifact {key} declares some of min_x/min_y/max_x/max_y and not all four. A box \
+             assembled from the ones that are there is a region nobody wrote, and on a layer whose \
+             `shape` declares one that region is the membership",
+            path.display()
+        )));
+    };
+    Bbox::new(min_x, min_y, max_x, max_y)
+        .map(Some)
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "{}: artifact {key} declares the box [{min_x}, {min_y}, {max_x}, {max_y}], which \
+                 is not one this build will store — every bound must be finite and each maximum at \
+                 or above its minimum. A transposed box is refused rather than swapped: correcting \
+                 it would publish a membership over a region nobody wrote",
+                path.display()
+            ))
+        })
 }
 
 fn value_at(column: &StringArray, row: usize) -> Option<String> {
@@ -793,7 +1904,84 @@ fn value_index(column: &UInt32Array, row: usize) -> Option<u32> {
     (!column.is_null(row)).then(|| column.value(row))
 }
 
-/// One row's content values.
+/// One row's membership, as source entity ids.
+///
+/// **A null element is a refusal rather than entity zero**, on the member source's own rule: Arrow
+/// reads the values buffer whatever the validity bitmap says, so a producer whose join missed a row
+/// would otherwise publish the corpus's lowest-numbered document into the artifact.
+fn u64s_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<Vec<u64>> {
+    if column.is_null(row) {
+        return Ok(Vec::new());
+    }
+    let values = column.value(row);
+    let ids = values
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+            "{}: the membership of {key} is a list of {:?}, and this reader takes a list of uint64",
+            path.display(),
+            values.data_type()
+        ))
+        })?;
+    (0..ids.len())
+        .map(|i| {
+            if ids.is_null(i) {
+                return Err(BuildError::Invalid(format!(
+                    "{}: {key} has a null entity in its membership; a null is not entity zero, and \
+                     publishing it as one puts a document nobody named into the artifact",
+                    path.display()
+                )));
+            }
+            Ok(ids.value(i))
+        })
+        .collect()
+}
+
+/// One row's ranked contents: entry *k* is `contents[k]`'s values, one per supplied kind.
+///
+/// **The ranking is one cell, so there is no rank column and no gap to detect.** Its position in
+/// the list *is* the rank, which is what the `(artifact, rank)` grain needed a dense integer column
+/// to say — and what a missing row in that grain could silently renumber.
+fn ranked_at(
+    path: &Path,
+    column: &ListArray,
+    row: usize,
+    key: &str,
+) -> Result<Vec<PlannedContent>> {
+    if column.is_null(row) {
+        return Ok(Vec::new());
+    }
+    let entries = column.value(row);
+    let entries = entries
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+            "{}: the contents of {key} are a list of {:?}, and this reader takes a list of lists \
+             of utf8 — one entry per rank, each carrying a value per supplied kind",
+            path.display(),
+            entries.data_type()
+        ))
+        })?;
+    (0..entries.len())
+        .map(|rank| {
+            if entries.is_null(rank) {
+                return Err(BuildError::Invalid(format!(
+                    "{}: contents[{rank}] of {key} is null, so the ranking above it names a \
+                     description that was never supplied",
+                    path.display()
+                )));
+            }
+            Ok(PlannedContent {
+                values: strings_at(path, entries, rank, key)?,
+                generated_from: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+/// One entry's content values.
 ///
 /// **Every failure here is a refusal rather than a shorter list.** A null element read as `""`
 /// serves an artifact with an empty description — the in-between state decision 0076 forbids,
@@ -805,13 +1993,16 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
         return Ok(Vec::new());
     }
     let values = column.value(row);
-    let strings = values.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-        BuildError::Invalid(format!(
-            "{}: the values of {key} are a list of {:?}, and this reader takes a list of utf8",
-            path.display(),
-            values.data_type()
-        ))
-    })?;
+    let strings = values
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "{}: the values of {key} are a list of {:?}, and this reader takes a list of utf8",
+                path.display(),
+                values.data_type()
+            ))
+        })?;
     (0..strings.len())
         .map(|i| {
             if strings.is_null(i) {
@@ -827,28 +2018,401 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
         .collect()
 }
 
-/// One row's `(layer, level, stable_key)`.
+// ---------------------------------------------------------------------------------------------
+// Key columns: text, or an integer spelling one
+// ---------------------------------------------------------------------------------------------
+
+/// A `key` column at the two types a producer has — UTF-8, or an integer canonicalised to its
+/// decimal string, so `3` and `"3"` name one artifact.
 ///
-/// **A stable key is required**, and its absence is a refusal rather than a generated name: an
-/// artifact published without one can be named by no edge and matched by no later build, and the
-/// caller is the only party who knows what it should be called.
+/// **A key is one type below this reader**: the plan, the store and the manifest all hold a string,
+/// so an integer column is converted rather than carried. *Where* the conversion happens is the
+/// whole of this type's design — **once per artifact, never once per point.** Formatting a member
+/// row's key costs ~54 s at 10⁹ against ~15 s for an integer hash and ~0.5 s where the value is
+/// already an interned code (measured, 10⁵ distinct ids, single-threaded), and cluster ids are
+/// integers, so the common case would pay the worst of the three. The member pass therefore
+/// converts the **roster** once into [`IntegerRoster`] and looks each point up by the integer it
+/// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
+/// the only decimal string an open layer writes is the one it mints an artifact under, once per
+/// cluster.
+#[derive(Clone, Copy)]
+enum KeyColumn<'a> {
+    Text(&'a StringArray),
+    I8(&'a Int8Array),
+    I16(&'a Int16Array),
+    I32(&'a Int32Array),
+    I64(&'a Int64Array),
+    U8(&'a UInt8Array),
+    U16(&'a UInt16Array),
+    U32(&'a UInt32Array),
+    U64(&'a UInt64Array),
+}
+
+/// What one **member** row's key says.
+enum KeyRead<'a> {
+    /// **This point is in no artifact** — a null key, or exactly `-1`, the sentinel every clusterer
+    /// emits for noise (`artifacts-from-points.md` §2). Exactly `-1` and not any negative: a
+    /// negative id is otherwise unusual enough that swallowing `-7` would more likely be eating
+    /// data than handling noise. For a text column, null only.
+    Unclustered,
+    Named(&'a str),
+    Numbered(i128),
+}
+
+impl<'a> KeyColumn<'a> {
+    fn array(&self) -> &dyn Array {
+        match self {
+            KeyColumn::Text(a) => *a as &dyn Array,
+            KeyColumn::I8(a) => *a as &dyn Array,
+            KeyColumn::I16(a) => *a as &dyn Array,
+            KeyColumn::I32(a) => *a as &dyn Array,
+            KeyColumn::I64(a) => *a as &dyn Array,
+            KeyColumn::U8(a) => *a as &dyn Array,
+            KeyColumn::U16(a) => *a as &dyn Array,
+            KeyColumn::U32(a) => *a as &dyn Array,
+            KeyColumn::U64(a) => *a as &dyn Array,
+        }
+    }
+
+    fn integer_at(&self, row: usize) -> Option<i128> {
+        match self {
+            KeyColumn::Text(_) => None,
+            KeyColumn::I8(a) => Some(a.value(row) as i128),
+            KeyColumn::I16(a) => Some(a.value(row) as i128),
+            KeyColumn::I32(a) => Some(a.value(row) as i128),
+            KeyColumn::I64(a) => Some(a.value(row) as i128),
+            KeyColumn::U8(a) => Some(a.value(row) as i128),
+            KeyColumn::U16(a) => Some(a.value(row) as i128),
+            KeyColumn::U32(a) => Some(a.value(row) as i128),
+            KeyColumn::U64(a) => Some(a.value(row) as i128),
+        }
+    }
+
+    /// The canonical key at `row` — **the allocating read, for one row per artifact.**
+    fn key_at(&self, row: usize) -> Option<String> {
+        if self.array().is_null(row) {
+            return None;
+        }
+        Some(match self {
+            KeyColumn::Text(a) => a.value(row).to_string(),
+            _ => self.integer_at(row).expect("an integer column").to_string(),
+        })
+    }
+
+    /// What one member row's key says — **the non-allocating read, for one row per point.**
+    ///
+    /// The noise sentinel is [`tessera_types::layer::NOISE_KEY`]'s, not a literal here: the wire
+    /// reads the same cell out of an Arrow batch and the two must agree about what `-1` means.
+    fn read_at(&self, row: usize) -> KeyRead<'a> {
+        if self.array().is_null(row) {
+            return KeyRead::Unclustered;
+        }
+        match self {
+            KeyColumn::Text(a) => KeyRead::Named(a.value(row)),
+            _ => match self.integer_at(row).expect("an integer column") {
+                tessera_types::layer::NOISE_KEY => KeyRead::Unclustered,
+                value => KeyRead::Numbered(value),
+            },
+        }
+    }
+}
+
+fn key_column<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    canonical: &str,
+) -> Result<KeyColumn<'a>> {
+    let name = fields.of(canonical);
+    scalar_key_column(
+        path,
+        required(path, batch, fields, canonical)?,
+        name,
+        "column",
+    )
+}
+
+/// One array read as a key column — the member source's own, or the elements of its list.
+fn scalar_key_column<'a>(
+    path: &Path,
+    array: &'a std::sync::Arc<dyn Array>,
+    name: &str,
+    what: &str,
+) -> Result<KeyColumn<'a>> {
+    Ok(match array.data_type() {
+        arrow::datatypes::DataType::Utf8 => KeyColumn::Text(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int8 => KeyColumn::I8(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int16 => KeyColumn::I16(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int32 => KeyColumn::I32(typed(path, array, name)?),
+        arrow::datatypes::DataType::Int64 => KeyColumn::I64(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt8 => KeyColumn::U8(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt16 => KeyColumn::U16(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt32 => KeyColumn::U32(typed(path, array, name)?),
+        arrow::datatypes::DataType::UInt64 => KeyColumn::U64(typed(path, array, name)?),
+        other => {
+            return Err(BuildError::Invalid(format!(
+                "{}: {what} {name} is {other:?}, and a key is text or an integer — an integer key \
+                 is read as its decimal spelling, so `3` and \"3\" name one artifact",
+                path.display()
+            )))
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------------------------
+// A list key column: the artifacts a point belongs to, and the edges between them
+// ---------------------------------------------------------------------------------------------
+
+/// A member source's `key` column: one artifact per row, or a list of them.
+///
+/// **The list's meaning is the hierarchy kind the layer already declares**
+/// (`artifacts-from-points.md` §4). A hierarchical clusterer emits a list per point and nothing in
+/// the list says what its positions mean, so the kind is declared as it always was and only the
+/// edges are read from the data.
+enum MemberKeys<'a> {
+    Scalar(KeyColumn<'a>),
+    Listed(ListedKeys<'a>),
+}
+
+/// A list key column, its elements, and what its positions mean.
+struct ListedKeys<'a> {
+    shape: ListShape<'a>,
+    /// The list's child array, read as a key column: an element is a key on exactly the rule a
+    /// scalar is, integer or text, with the roster converted once rather than per element.
+    values: KeyColumn<'a>,
+    meaning: ListMeaning,
+}
+
+enum ListShape<'a> {
+    /// A `List`: its rows may differ in length, which is what a lineage is.
+    Variable(&'a ListArray),
+    /// A `FixedSizeList`: every row has the arity the type states.
+    Fixed(&'a FixedSizeListArray),
+}
+
+impl ListedKeys<'_> {
+    /// The row's entries, as a range into the element array — `None` where the row named no
+    /// artifact at all.
+    ///
+    /// **A null cell and an empty one are the whole row's `Unclustered`**, which is §2's rule for a
+    /// scalar key applied to a cell that holds no key: a point may be in no artifact at any
+    /// resolution, and a clusterer that emitted nothing for it is the ordinary way of saying so.
+    fn entries(
+        &self,
+        path: &Path,
+        layer: &str,
+        row: usize,
+    ) -> Result<Option<std::ops::Range<usize>>> {
+        let (start, end) = match &self.shape {
+            ListShape::Variable(list) => {
+                if list.is_null(row) {
+                    return Ok(None);
+                }
+                let offsets = list.value_offsets();
+                (offsets[row] as usize, offsets[row + 1] as usize)
+            }
+            ListShape::Fixed(list) => {
+                if list.is_null(row) {
+                    return Ok(None);
+                }
+                let start = list.value_offset(row) as usize;
+                (start, start + list.value_length() as usize)
+            }
+        };
+        if start == end {
+            return Ok(None);
+        }
+        // **The declaration and the data must agree.** A `stacked` or `tiered` layer's list is one
+        // entry per declared level — that is what makes entry *k* mean level *k* — so a row of any
+        // other length is a lineage against a levelled declaration, and guessing which of the two
+        // the caller meant would publish a hierarchy they did not write.
+        if let ListMeaning::Levelled { levels, .. } = self.meaning {
+            if end - start != levels {
+                return Err(BuildError::Invalid(format!(
+                    "{}: row {row} names {} artifacts and layer '{layer}' declares {levels} \
+                     levels. A stacked or tiered layer's key column is one entry per level, \
+                     nullable where the point is in no artifact at that resolution, so a row of \
+                     another length is a variable-length list against a levelled declaration — \
+                     declare `hierarchy.kind = \"nested\"` if the column is a lineage",
+                    path.display(),
+                    end - start,
+                )));
+            }
+        }
+        Ok(Some(start..end))
+    }
+}
+
+/// The member source's key column, at the shapes a layer of this kind may carry.
+fn member_keys<'a>(
+    path: &Path,
+    batch: &'a arrow::record_batch::RecordBatch,
+    fields: &Fields,
+    layer: &str,
+    declaration: &LayerDeclaration,
+) -> Result<MemberKeys<'a>> {
+    let name = fields.of("key");
+    let array = required(path, batch, fields, "key")?;
+    let fixed = match array.data_type() {
+        arrow::datatypes::DataType::List(_) => None,
+        arrow::datatypes::DataType::FixedSizeList(_, size) => Some(*size as usize),
+        _ => return Ok(MemberKeys::Scalar(key_column(path, batch, fields, "key")?)),
+    };
+    // **The meaning of the positions is the layer's own declaration**, read through the one rule
+    // both entry points share ([`ListMeaning`]). What is left here is the *type* half of the arity
+    // check: an Arrow `FixedSizeList` states its length in its own type, which a plain list does
+    // not, so it is the one place a disagreement can be caught before a row is read.
+    let meaning = declaration.list_meaning();
+    if let Some(size) = fixed {
+        match meaning {
+            ListMeaning::Lineage => {
+                return Err(BuildError::Invalid(format!(
+                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' is \
+                     declared nested, whose lineage is as deep as each point's own branch — a \
+                     fixed arity is one entry per level, which is the stacked and tiered shape. \
+                     Write the column as a list, or declare the layer tiered and its levels",
+                    path.display()
+                )))
+            }
+            ListMeaning::Levelled { levels, .. } if size != levels => {
+                return Err(BuildError::Invalid(format!(
+                    "{}: column {name} is a fixed-size list of {size} and layer '{layer}' \
+                     declares {levels} levels. Entry k is the artifact at level k, so the two \
+                     counts are one number written twice",
+                    path.display()
+                )))
+            }
+            _ => {}
+        }
+    }
+    let shape = match array.data_type() {
+        arrow::datatypes::DataType::List(_) => {
+            ListShape::Variable(typed::<ListArray>(path, array, name)?)
+        }
+        _ => ListShape::Fixed(typed::<FixedSizeListArray>(path, array, name)?),
+    };
+    let values = match &shape {
+        ListShape::Variable(list) => list.values(),
+        ListShape::Fixed(list) => list.values(),
+    };
+    Ok(MemberKeys::Listed(ListedKeys {
+        values: scalar_key_column(path, values, name, "the elements of column")?,
+        shape,
+        meaning,
+    }))
+}
+
+/// One member row's key, resolved to the artifact it names.
+///
+/// **An integer key resolves to an index and never to a string.** The roster is converted once per
+/// layer ([`IntegerRoster`]) and a point's key is looked up as the integer it already is, so a
+/// point whose cluster is known formats nothing and allocates nothing — which is the whole reason
+/// the reader takes an integer column at all. A text key allocates its address exactly as it always
+/// has, there being nothing to intern it against.
+enum Member {
+    Interned(usize),
+    Named(Address),
+}
+
+impl Member {
+    fn address<'a>(&'a self, roster: &'a Option<IntegerRoster>) -> &'a Address {
+        match self {
+            Member::Named(address) => address,
+            Member::Interned(index) => roster
+                .as_ref()
+                .expect("an interned member came from the roster it is read against")
+                .address(*index),
+        }
+    }
+}
+
+/// The layer's artifacts, indexed by the integer their keys spell.
+///
+/// **Built once, before the first member row is read**, which is what keeps the per-point path free
+/// of formatting: a point's integer key is looked up as an integer, and the address it finds is the
+/// one the roster was planned under. The addresses sit in an arena and are named by index, so a
+/// row's several keys can be held at once without cloning one of them.
+struct IntegerRoster {
+    by_key: BTreeMap<(u32, i128), usize>,
+    addresses: Vec<Address>,
+}
+
+impl IntegerRoster {
+    fn of_layer(layer: &str, plan: &LayerPlan) -> IntegerRoster {
+        let mut roster = IntegerRoster {
+            by_key: BTreeMap::new(),
+            addresses: Vec::new(),
+        };
+        for address in plan.artifacts.keys().filter(|a| a.0 == layer) {
+            if let Some(value) = canonical_integer(&address.2) {
+                roster.insert(address.1, value, address.clone());
+            }
+        }
+        roster
+    }
+
+    fn get(&self, level: u32, value: i128) -> Option<usize> {
+        self.by_key.get(&(level, value)).copied()
+    }
+
+    fn insert(&mut self, level: u32, value: i128, address: Address) -> usize {
+        let index = self.addresses.len();
+        self.addresses.push(address);
+        self.by_key.insert((level, value), index);
+        index
+    }
+
+    fn address(&self, index: usize) -> &Address {
+        &self.addresses[index]
+    }
+}
+
+/// The integer a key spells, where it spells one **exactly**.
+///
+/// `007` and ` 7` are keys that no integer column can produce, so they index nothing here and are
+/// matched by nothing — which is the property that keeps one artifact from having two addresses.
+fn canonical_integer(key: &str) -> Option<i128> {
+    let value: i128 = key.parse().ok()?;
+    (value.to_string() == key).then_some(value)
+}
+
+/// A member key the layer's artifacts do not declare, under a closed value set.
+fn undeclared_key(path: &Path, address: &Address) -> BuildError {
+    BuildError::Invalid(format!(
+        "{}: names {} in level {} of {}, which the layer's artifacts do not declare. Declare \
+         `value_set = \"open\"` on the layer for a key the artifacts omit to create one",
+        path.display(),
+        address.2,
+        address.1,
+        address.0
+    ))
+}
+
+/// One row's `(layer, level, key)`.
+///
+/// **The layer is the source's own**, never a column: one file holds one layer, which is what
+/// removes the discriminator and with it any way for a layer to ingest another's rows.
+///
+/// **A key is required**, and its absence is a refusal rather than a generated name: an artifact
+/// published without one can be named by no edge and matched by no later build, and the caller is
+/// the only party who knows what it should be called.
 fn address(
     path: &Path,
-    layer: &StringArray,
+    layer: &str,
     level: &Option<&UInt32Array>,
-    key: &StringArray,
+    key: &KeyColumn,
     row: usize,
-) -> Result<(String, u32, String)> {
-    if layer.is_null(row) || key.is_null(row) {
+) -> Result<Address> {
+    let Some(key) = key.key_at(row) else {
         return Err(BuildError::Invalid(format!(
-            "{}: row {row} names no layer or no stable_key; a build-published artifact carries \
-             the caller's own name for it, which is what an edge into it names",
+            "{}: row {row} names no key; a build-published artifact carries the caller's own name \
+             for it, which is what an edge into it names",
             path.display()
         )));
-    }
+    };
     Ok((
-        layer.value(row).to_string(),
+        layer.to_string(),
         level.map_or(0, |c| number_at(c, row)),
-        key.value(row).to_string(),
+        key,
     ))
 }

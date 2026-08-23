@@ -132,7 +132,7 @@ async fn meta(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // Authenticated like every other route on this plane (R5: bearer auth on every plane). It is
-    // not a public endpoint: it discloses the bundle's extents, slices and declared-scalar schema,
+    // not a public endpoint: it discloses the bundle's extents, views and declared-scalar schema,
     // so an unauthenticated `/v1/meta` would hand the corpus shape to anyone who can reach the
     // viewer listener. The bearer here is a session token, so a valid, unexpired session is
     // required exactly as for `/v1/viewport`.
@@ -155,7 +155,7 @@ async fn meta(
         // in any response, log line or metric label (I10, Appendix C C17) -- this is the idset
         // only, which is meaningless without the key and is what `POST /v1/items` checks against.
         "idset": meta.idset,
-        "slices": meta.slices.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
+        "views": meta.views.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
         "quantisation": {
             "x_min": meta.quantisation.x_min,
             "x_max": meta.quantisation.x_max,
@@ -163,16 +163,16 @@ async fn meta(
             "y_max": meta.quantisation.y_max,
         },
         // The column schema, and the **whole** of it: name, storage type, and — for a category —
-        // the vocabulary it draws from, that vocabulary's kind and its `listing`. Without the
+        // the vocabulary it draws from, that vocabulary's kind and its `visibility`. Without the
         // `category` block a client cannot tell a `u16` category from a `u16` integer, since the
         // hot path ships the code and nothing else.
         //
         // **The name is the column's identifier**, here and in `/v1/categories/{column}`. It is
-        // unique bundle-wide (`tessera_build::schema` refuses a duplicate) and restricted to a
+        // unique bundle-wide (`tessera_build::config` refuses a duplicate) and restricted to a
         // path-safe character set for that reason, so no second identifier is minted for it.
         //
         // **Values are not here.** A large vocabulary is megabytes against a measured 79 KB
-        // viewport response, and `per_viewer` filtering means no shared cache — so values are a
+        // viewport response, and `derived` filtering means no shared cache — so values are a
         // separate, paged, per-principal endpoint and this stays a small shared document
         // (per-point-attributes §3.8).
         "declared_scalars": meta.declared_scalars.iter().map(|s| {
@@ -184,7 +184,7 @@ async fn meta(
                         tessera_engine::VocabularyKind::Declared => "declared",
                         tessera_engine::VocabularyKind::Discovered => "discovered",
                     },
-                    "listing": vocabulary.listing().as_str(),
+                    "visibility": vocabulary.visibility().as_str(),
                 }))
             });
             serde_json::json!({
@@ -270,7 +270,7 @@ async fn meta(
         //
         // They disclose nothing. All of them are deployment constants, identical for every
         // principal. Publishing `theta_target_marks` lets a client solve for theta's anchor, which
-        // is the composed cardinality of its OWN mask over the whole slice -- precisely what a
+        // is the composed cardinality of its OWN mask over the whole view -- precisely what a
         // `zoom = 0`, full-bbox request already returns as `visible` in a single call (§7.1).
         // Already obtainable, exactly.
         //
@@ -307,7 +307,7 @@ async fn meta(
         // noticed. Nothing on this document says how big a layer is.
         //
         // What *is* published is the declaration: identity, structure, the derived vocabulary a
-        // client must know to draw anything, which slices the layer appears in, and what kinds of
+        // client must know to draw anything, which views the layer appears in, and what kinds of
         // supplied content its artifacts carry. Publishing the supplied *kinds* is safe because an
         // artifact failing containment is absent whole, so no served artifact ever lacks a content
         // its layer declared — there is no shell to be distinguishable from absence.
@@ -321,7 +321,7 @@ async fn meta(
             serde_json::json!({
                 "name": d.name,
                 "title": d.title,
-                "slices": d.slices,
+                "views": d.views,
                 "membership": d.membership,
                 "hierarchy": {
                     "kind": d.hierarchy.kind,
@@ -338,9 +338,13 @@ async fn meta(
                     "title": l.title,
                     "zoom": l.zoom.map(|(lo, hi)| serde_json::json!([lo, hi])),
                 })).collect::<Vec<_>>(),
-                "derived_content": d.content.derived,
+                "computed_content": d.content.computed,
+                // The **types**, as before: a client draws from them, and publishing them is safe
+                // because an artifact failing containment is absent whole. ⊘ Each entry's `name`
+                // — which distinguishes two contents of one type on one layer — is declared and
+                // not yet published; the wire shape is contracts', not this stage's, to widen.
                 "supplied_content": d.content.supplied.iter()
-                    .map(|s| s.kind.clone()).collect::<Vec<_>>(),
+                    .map(|s| s.ty.clone()).collect::<Vec<_>>(),
                 "depends_on": d.depends_on,
                 // The version a client echoes to notice a gate edit, in the same shape as every
                 // other version coordinate it holds.
@@ -367,7 +371,7 @@ struct CategoriesQuery {
 ///
 /// **Two forms, one gate.** `?codes=` resolves the codes a caller already holds — the viewer's
 /// normal path, since it knows exactly which codes it drew — and the bare form pages the whole
-/// value set. Both run `Engine::categories`, which applies `listing` before the forms diverge; a
+/// value set. Both run `Engine::categories`, which applies `visibility` before the forms diverge; a
 /// gate reached by one door and not the other is the existence oracle by another route.
 ///
 /// **404 `unknown` covers three cases and distinguishes none of them**: no such column, a column
@@ -440,7 +444,7 @@ async fn categories(
             "key": v.key,
             // Omitted rather than null when no author wrote one — which is every value a
             // discovered vocabulary mints. The key is the display fallback (§3.1).
-            "label": v.label,
+            "title": v.title,
         })).collect::<Vec<_>>(),
         "next": page.next,
     })))
@@ -457,7 +461,7 @@ fn family_of(d: &tessera_engine::DeclaredScalar) -> tessera_engine::filter::Fami
 
 #[derive(Debug, Deserialize)]
 struct ViewportReq {
-    slice: String,
+    view: String,
     zoom: u8,
     /// Absent exactly when `tiles` is present — the two are alternatives, not a pair.
     #[serde(default)]
@@ -562,9 +566,35 @@ struct WireSink {
     deadline: Duration,
     /// Set at the first flush; the whole-stream deadline is measured from it.
     first_flush_at: Option<Instant>,
+    /// **Why this sink stopped accepting frames**, where it stopped for a reason of its own.
+    ///
+    /// A refusal reaches the engine as `SinkClosed` and comes back as `EngineError::Cancelled`,
+    /// which the mid-body arm treats as *the client went away* and deliberately does not log. That
+    /// is right for a disconnect and wrong for a shed: the 2026-08-22 campaign found a first
+    /// request truncated at 111 s with **neither** `viewport stream aborted` line firing, because
+    /// the server's own deadline had fired and had no way to say so. This is that way.
+    shed: Option<Shed>,
     arrow_serialise_ns: u64,
     points_total: u64,
     flushes: u64,
+}
+
+/// A sink refusal the **server** chose, told apart from the client going away.
+#[derive(Debug, Clone, Copy)]
+enum Shed {
+    /// The whole-stream budget from first flush, `serve.stream_deadline_ms`.
+    Deadline,
+    /// The per-send stall budget, `serve.stream_write_stall_ms` — a reader that stopped reading.
+    Stall,
+}
+
+impl Shed {
+    fn detail(self) -> &'static str {
+        match self {
+            Shed::Deadline => "the whole-stream deadline fired: the response was committed and the                                work behind its next frame outran serve.stream_deadline_ms. A cold                                request over a level whose derived structures the prefix does not                                carry is the shape to check first — the build's artifact pass                                writes them, and an open reporting no adoptions says they were not                                taken",
+            Shed::Stall => "the per-send stall budget fired: the client stopped reading and                             serve.stream_write_stall_ms elapsed with the body channel full",
+        }
+    }
 }
 
 impl WireSink {
@@ -580,12 +610,14 @@ impl WireSink {
                 .first_flush_at
                 .is_some_and(|t| t.elapsed() >= self.deadline)
             {
+                self.shed = Some(Shed::Deadline);
                 return Err(SinkClosed);
             }
             match self.tx.try_send(item) {
                 Ok(()) => return Ok(()),
                 Err(mpsc::error::TrySendError::Full(back)) => {
                     if send_started.elapsed() >= self.stall {
+                        self.shed = Some(Shed::Stall);
                         return Err(SinkClosed);
                     }
                     item = back;
@@ -664,12 +696,13 @@ impl ViewportSink for WireSink {
             .map(|a| ArtifactRow {
                 layer: a.layer.as_str(),
                 tessera_id: a.tessera_id.raw(),
-                stable_key: a.stable_key.as_deref(),
+                key: a.key.as_deref(),
                 masked_count: a.masked_count,
                 centroid: a.derived.centroid,
                 bbox: a.derived.bbox,
                 hull: a.derived.hull.as_deref(),
                 content: &a.content,
+                parent_id: a.parent_id.map(|id| id.raw()),
             })
             .collect();
         let frame = artifacts_frame(&rows);
@@ -782,12 +815,24 @@ fn run_viewport_stream(
         }
     };
 
+    // **Owned copies of what names the request**, taken before the engine borrows `req`, so the
+    // shed log below can say which request it was without extending a borrow across the call.
+    // Three coordinates and no principal: a view id, a zoom and the layer names the caller asked
+    // for, all of them the caller's own words back.
+    let named_view = req.view.clone();
+    let named_zoom = req.zoom;
+    let named_layers = req
+        .layers
+        .as_ref()
+        .map(|names| names.join(","))
+        .unwrap_or_default();
+
     // Borrowed as `&[&str]` for the engine's request, which holds the list rather than owning it.
     let layer_names: Option<Vec<&str>> = req
         .layers
         .as_ref()
         .map(|names| names.iter().map(String::as_str).collect());
-    let mut request = ViewportRequest::new(&req.slice, req.zoom, bbox, k)
+    let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
         .underlay_offset(req.underlay_offset)
@@ -843,7 +888,28 @@ fn run_viewport_stream(
             // (`streamed-serving.md` §6). Cancellation here is the client's own disconnect or
             // shed and logs nothing; anything else is a server fault worth a line.
             None => {
-                if !matches!(e, tessera_engine::EngineError::Cancelled) {
+                // **A shed the server chose is not a client disconnect**, and until this branch
+                // existed the two were the same silence — see [`WireSink::shed`]. Named loudly and
+                // with the elapsed figure, because the elapsed figure is the diagnosis: a whole
+                // number of seconds past the deadline is a client that stopped reading, and a
+                // multiple of it is work behind the next frame.
+                if let Some(shed) = sink.shed {
+                    tracing::warn!(
+                        view = %named_view,
+                        zoom = named_zoom,
+                        layers = %named_layers,
+                        elapsed_ms = sink.start.elapsed().as_millis() as u64,
+                        since_first_flush_ms = sink
+                            .first_flush_at
+                            .map(|t| t.elapsed().as_millis() as u64)
+                            .unwrap_or(0),
+                        deadline_ms = sink.deadline.as_millis() as u64,
+                        stall_ms = sink.stall.as_millis() as u64,
+                        flushes = sink.flushes,
+                        "viewport stream SHED mid-body by the server — {}",
+                        shed.detail()
+                    );
+                } else if !matches!(e, tessera_engine::EngineError::Cancelled) {
                     tracing::warn!(error = %e, "viewport stream aborted mid-body");
                 }
                 shared.store(STREAM_ABORTED, Ordering::SeqCst);
@@ -1013,6 +1079,7 @@ async fn viewport(
         stall: Duration::from_millis(state.stream_write_stall_ms),
         deadline: Duration::from_millis(state.stream_deadline_ms),
         first_flush_at: None,
+        shed: None,
         arrow_serialise_ns: 0,
         points_total: 0,
         flushes: 0,
@@ -1149,7 +1216,7 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
         "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
         t.stamp_compare_ns,
-        t.slice_lookup_ns,
+        t.view_lookup_ns,
         t.row_projection_ns,
         t.compose_ns,
         t.tiles_for_bbox_ns,
@@ -1316,10 +1383,10 @@ fn run_item(
 
 #[derive(Debug, Deserialize)]
 struct ArtifactReq {
-    /// Which slice's row space the count is taken in. **Required, unlike `/v1/items`'s absence of
+    /// Which view's row space the count is taken in. **Required, unlike `/v1/items`'s absence of
     /// one**: a point's record is the same wherever it is read from, but a masked count is an
-    /// intersection in row space, and row space is per slice.
-    slice: String,
+    /// intersection in row space, and row space is per view.
+    view: String,
     /// Optional, on [`ItemReq::idset`]'s argument.
     #[serde(default)]
     idset: Option<u32>,
@@ -1330,7 +1397,7 @@ struct ArtifactResp {
     layer: String,
     /// The publisher's own key, if they supplied one. Absent rather than `null` when they did not.
     #[serde(skip_serializing_if = "Option::is_none")]
-    stable_key: Option<String>,
+    key: Option<String>,
     /// **How many of this artifact's members the asking principal can see** — never how many it
     /// has. There is deliberately no ordinal, no membership and no declared size here; see
     /// `tessera_engine::ArtifactOut`.
@@ -1344,7 +1411,7 @@ struct ArtifactResp {
     r#box: Option<[u32; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hull: Option<Vec<[u32; 2]>>,
-    /// The publisher's supplied content — one variation, entire, positional to the layer's declared
+    /// The publisher's supplied content — one entry of the ranked `contents`, entire, positional to the layer's declared
     /// kinds. Empty where the layer declares none; never partial, because an artifact whose content
     /// this principal may not read is a `404`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -1381,7 +1448,7 @@ async fn artifact(
         let _gate_permits = gate_permits;
         state
             .engine
-            .artifact(&entry.session, TesseraId::new(raw), req.idset, &req.slice)
+            .artifact(&entry.session, TesseraId::new(raw), req.idset, &req.view)
             .map_err(crate::error::map_engine_error)
     })
     .await
@@ -1393,7 +1460,7 @@ async fn artifact(
     let served = served.ok_or_else(|| ApiError::Unknown("unknown artifact".to_string()))?;
     Ok(Json(ArtifactResp {
         layer: served.layer,
-        stable_key: served.stable_key,
+        key: served.key,
         masked_count: served.masked_count,
         centroid: served.derived.centroid,
         r#box: served.derived.bbox,

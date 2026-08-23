@@ -27,7 +27,8 @@ use tessera_engine::{
     default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
 };
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use tessera_plugin::Passthrough;
+use sha2::Digest;
+use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
 use tessera_store::read::open_bundle;
 use tessera_store::StoreError;
@@ -165,9 +166,14 @@ fn c_zero_term_session_sees_nothing() {
         &tmp.path().join("wal.log"),
     );
     let session = engine.authorise(&zero_credential()).unwrap();
-    assert!(
-        session.satisfied.is_empty(),
-        "zero-term credential grants nothing"
+    // The reserved `public` term is the whole of what a zero-term credential holds — added by the
+    // engine, never by the credential — and this fixture's points carry `0` and `1` and nothing
+    // else, so it names no item. That is the shape of the reservation: a universal *label*, not a
+    // universal grant.
+    assert_eq!(
+        session.satisfied,
+        [tessera_authz::PUBLIC_TERM].into_iter().collect(),
+        "zero-term credential grants nothing but the reserved label"
     );
 
     let out = engine
@@ -269,7 +275,7 @@ fn f_selection_returns_the_lowest_tessera_ids_not_the_first_rows() {
     );
 
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+    let segment = &bundle.partitions["default"].views["s0"].segments[0];
     let ids = segment.columns.tessera_id();
 
     // The definition's answer, computed independently of the engine: the three smallest identities
@@ -604,7 +610,7 @@ fn response_tile_order_and_point_concatenation_follow_tiles_for_bbox_not_morton_
         .unwrap();
 
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+    let segment = &bundle.partitions["default"].views["s0"].segments[0];
     let tessera_ids = segment.columns.tessera_id();
 
     let tiles = tiles_for_bbox(bbox, ZOOM, &extent());
@@ -777,19 +783,20 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
+        point_fields: Default::default(),
         points: tmp.path().join("points.parquet"),
-        pairs: tmp.path().join("pairs.parquet"),
+        attribute_sources: Vec::new(),
+        access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
         out: bundle_root.clone(),
         extent: extent(),
-        slice_id: "s0".to_string(),
+        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
         idset: 1,
         shard_id: 0,
-        layers: None,
-        artifacts: None,
-        artifact_members: None,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,
@@ -1017,7 +1024,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
             rows: vec![tessera_lifecycle::WalRow {
                 external_id: None,
                 entity_id: tessera_types::EntityId::new(u32::MAX as u64 - 1),
-                slice: "s0".to_string(),
+                view: "s0".to_string(),
                 descriptors: Vec::new(),
                 x: 0.5,
                 y: 0.5,
@@ -1041,6 +1048,155 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
     assert!(
         matches!(err, EngineError::Malformed(ref d) if d.contains("allocator")),
         "expected a typed refusal naming the allocator, got {err:?}"
+    );
+}
+
+/// A `Passthrough` in every respect but the hash it declares — the shape of a plugin whose label
+/// rule was changed and whose identity was bumped with it.
+struct RelabellingPlugin;
+
+impl tessera_plugin::Plugin for RelabellingPlugin {
+    fn terms_of_label(
+        &self,
+        access: &[u8],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        Passthrough::new().terms_of_label(access)
+    }
+
+    fn terms_of_labels(
+        &self,
+        labels: &[tessera_plugin::Descriptor],
+    ) -> Result<Vec<tessera_plugin::Descriptor>, tessera_plugin::PluginError> {
+        Passthrough::new().terms_of_labels(labels)
+    }
+
+    fn terms_of_auth(
+        &self,
+        auth_data: &[u8],
+    ) -> Result<tessera_plugin::AuthTerms, tessera_plugin::PluginError> {
+        Passthrough::new().terms_of_auth(auth_data)
+    }
+
+    fn declared_bounds(&self) -> tessera_plugin::DeclaredBounds {
+        Passthrough::new().declared_bounds()
+    }
+
+    fn data_plugin_hash(&self) -> String {
+        // Derived from the real one so this stays a *different* value however the identity moves,
+        // rather than a literal that could one day collide with the passthrough's own.
+        format!("{}ff", &Passthrough::new().data_plugin_hash()[2..])
+    }
+
+    fn auth_plugin_hash(&self) -> String {
+        Passthrough::new().auth_plugin_hash()
+    }
+}
+
+/// Rewrite `MANIFEST.json`'s `data_plugin_hash` to `value` and re-point `CURRENT` at the new
+/// digest, so the bundle still verifies and the hash is the only thing that changed.
+fn rewrite_data_plugin_hash(bundle_root: &Path, value: serde_json::Value) {
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(bundle_root.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().unwrap().to_string();
+
+    let manifest_path = bundle_root.join(&prefix).join("MANIFEST.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["data_plugin_hash"] = value;
+    let bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    std::fs::write(&manifest_path, &bytes).unwrap();
+
+    let digest = sha2::Sha256::digest(&bytes);
+    let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+    std::fs::write(
+        bundle_root.join("CURRENT"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "prefix": prefix,
+            "manifest_digest": hex,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+/// **A bundle may only be served by the plugin that labelled it.** `MANIFEST.json` records the
+/// build's `data_plugin_hash` for exactly this check, and nothing downstream of open would notice
+/// its absence: postings written under one label rule are read back intact and resolved against
+/// another, so every item is mislabelled and no error is raised anywhere. `Engine::open` is the
+/// only place the recorded hash and the serving plugin meet.
+///
+/// The check is the *data* hash alone. The auth module's hash keys the mask cache and is not in
+/// the manifest, so there is no equivalent open-time enforcement for it.
+#[test]
+fn engine_open_refuses_a_plugin_whose_data_hash_is_not_the_bundles() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    // The same bundle opens under the plugin that built it — without this the case would pass on
+    // a fixture that was broken for some unrelated reason.
+    Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache-ok"),
+        &tmp.path().join("wal-ok.log"),
+        Passthrough::new(),
+        config(),
+    )
+    .expect("the bundle opens under the plugin that built it");
+
+    let opened = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        RelabellingPlugin,
+        config(),
+    );
+    let Err(err) = opened else {
+        panic!("a bundle labelled by another plugin must be refused, not served mislabelled");
+    };
+    let EngineError::Malformed(detail) = err else {
+        panic!("expected a typed Malformed refusal, got {err:?}");
+    };
+    assert!(
+        detail.contains(&Passthrough::new().data_plugin_hash())
+            && detail.contains(&RelabellingPlugin.data_plugin_hash()),
+        "the refusal must name BOTH hashes so an operator can tell which end is wrong: {detail}"
+    );
+}
+
+/// **Fail closed on a manifest that does not say what labelled it.** An empty `data_plugin_hash`
+/// is a mismatch, not a pass: a bundle that names no labelling rule cannot be shown to have been
+/// labelled by this plugin, and treating "unknown" as agreement would exempt exactly the
+/// hand-written or half-migrated manifest the check exists for.
+#[test]
+fn engine_open_refuses_a_manifest_whose_data_plugin_hash_is_empty() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+
+    rewrite_data_plugin_hash(&bundle_root, serde_json::json!(""));
+
+    let opened = Engine::open(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+        Passthrough::new(),
+        config(),
+    );
+    let Err(err) = opened else {
+        panic!("an empty manifest hash must be refused, not treated as agreement");
+    };
+    assert!(
+        matches!(err, EngineError::Malformed(ref d) if d.contains("<empty>")),
+        "the refusal must say the manifest names nothing, not print a blank: {err:?}"
     );
 }
 
@@ -1135,8 +1291,10 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     let bundle_root = PathBuf::from("/tmp/tessera-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
+            point_fields: Default::default(),
             points: PathBuf::from("data/scaled/geometry.parquet"),
-            pairs: PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet"),
+            attribute_sources: Vec::new(),
+            access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
             // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes, not
             // coordinates (`read_points`'s Morton branch requires this exact extent).
@@ -1146,15 +1304,14 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
                 y_min: 0.0,
                 y_max: 65536.0,
             },
-            slice_id: "s0".to_string(),
+            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
             idset: 1,
             shard_id: 0,
-            layers: None,
-            artifacts: None,
-            artifact_members: None,
+            layers: Vec::new(),
+            layer_inputs: Vec::new(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,
@@ -1638,7 +1795,7 @@ fn the_zoom_zero_count_equals_the_anchor_a_client_could_solve_for() {
             .unwrap();
         assert_eq!(
             narrow.tiles[0].visible, expected,
-            "zoom 0 must report the whole slice's composed total regardless of bbox"
+            "zoom 0 must report the whole view's composed total regardless of bbox"
         );
     }
 }
@@ -1656,7 +1813,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
         &tmp.path().join("pairs.parquet"),
     );
     let bundle = open_bundle(&bundle_root).unwrap();
-    let segment = &bundle.partitions["default"].slices["s0"].segments[0];
+    let segment = &bundle.partitions["default"].views["s0"].segments[0];
 
     for parent_depth in 0..5u8 {
         for offset in 1..=3u8 {
@@ -1706,7 +1863,7 @@ fn a_restricted_tile_range_search_agrees_with_the_full_column_search() {
 // thread-wake jitter.
 
 /// D-G / decision 0058: every concurrent arrival on the same
-/// `(token_id, slice, segments_version)` key is served, off **one** build.
+/// `(token_id, view, segments_version)` key is served, off **one** build.
 ///
 /// **This test asserted the opposite until 0058**, and the shape of the change is the point. It
 /// used to require that losers received `EngineError::ProjectionBuilding`, and it could not assert

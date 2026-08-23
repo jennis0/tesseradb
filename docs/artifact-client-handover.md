@@ -44,7 +44,7 @@ know the kind-5 artifacts frame:
 | Python oracle | `reference/oracle/wire.py` |
 
 `decodeViewport` returns `artifacts: Artifact[]` on `ViewportResult` — `{layer, tesseraId,
-stableKey, maskedCount}`, typed in `core/src/types.ts` with the rules that matter on the type
+key, maskedCount}`, typed in `core/src/types.ts` with the rules that matter on the type
 itself. **Empty is the only "nothing here" state**: the server omits the frame when nothing
 qualifies, so there is no absent-versus-empty distinction to model.
 
@@ -71,7 +71,7 @@ only address by which the layer can later be suppressed.
 {
   "name": "clusters/hdbscan-2026-08",
   "title": "HDBSCAN clusters",
-  "slices": ["s0"],
+  "views": ["s0"],
   "membership": "enumerated",
   "access": { "label": null, "artifacts_carry_own": false },
   "visible_when": { "min_visible": 25 },
@@ -80,7 +80,7 @@ only address by which the layer can later be suppressed.
 ```
 
 `content`, `depends_on` and `levels` default; everything else is required and unknown fields are
-refused. `slices` must name a slice the bundle actually carries — read it from `/v1/meta`, don't
+refused. `views` must name a view the bundle actually carries — read it from `/v1/meta`, don't
 assume `"s0"`.
 
 - `access.label` gates the layer: a principal whose terms do not satisfy it is told the layer does
@@ -106,8 +106,8 @@ route already works this way.
   "level": 0,
   "addressing": "external",
   "artifacts": [
-    { "stable_key": "c-0001", "members": ["<base64 external id>", "..."] },
-    { "stable_key": "c-0002", "members": ["..."] }
+    { "key": "c-0001", "members": ["<base64 external id>", "..."] },
+    { "key": "c-0002", "members": ["..."] }
   ]
 }
 ```
@@ -119,7 +119,7 @@ route already works this way.
   `external_id_of` in the server's test fixtures).
 - `"tessera"` addressing additionally requires `"idset"`, from `/v1/meta`. It is refused beside
   external ids.
-- Response is `201` with one `{"stable_key", "tessera_id"}` per artifact, in submitted order.
+- Response is `201` with one `{"key", "tessera_id"}` per artifact, in submitted order.
 
 Three refusals you will meet:
 
@@ -127,7 +127,7 @@ Three refusals you will meet:
   deliberate: a silently dropped member shrinks both the count a viewer is shown and the size the
   proportional criterion divides by, so a typo would move clusters across their own threshold in the
   direction of hiding them.
-- **A repeated `stable_key` is refused** (`422`). Publication is append-only; an edit is a delete
+- **A repeated `key` is refused** (`422`). Publication is append-only; an edit is a delete
   plus a re-publish, and the delete half is Stage 7's. To re-run a clustering during development,
   drop the layer and register a new name — names are never reused, so pick `…-v2`.
 - **A member that is not a point is refused.** Members are documents. Another artifact or a layer
@@ -138,7 +138,7 @@ cluster (one fsync each).
 
 ### Reading it back — `GET /v1/meta`
 
-Already carries a **per-principal** `layers` array: `name`, `title`, `slices`, `membership`,
+Already carries a **per-principal** `layers` array: `name`, `title`, `views`, `membership`,
 `hierarchy{kind, prune_children}`, `levels`, `derived_content`, `supplied_content`, `depends_on`,
 `version`. It never carries the artifact count and never the gate label. This is the right place for
 the client to learn which layers to offer as toggles.
@@ -150,7 +150,7 @@ the client to learn which layers to offer as toggles.
 Two new optional request fields:
 
 ```json
-{ "slice": "s0", "zoom": 4, "bbox": [...], "k": 200,
+{ "view": "s0", "zoom": 4, "bbox": [...], "k": 200,
   "layers": ["clusters/hdbscan-2026-08"],
   "artifact_budget": 500 }
 ```
@@ -173,7 +173,7 @@ points frame**:
 |---|---|---|
 | `layer` | utf8, non-null | the layer's name |
 | `tessera_id` | uint64, non-null | the artifact's opaque identifier |
-| `stable_key` | utf8, **nullable** | the publisher's own key, if they supplied one |
+| `key` | utf8, **nullable** | the publisher's own key, if they supplied one |
 | `masked_count` | uint64, non-null | **how many members this principal can see** |
 
 **The frame is absent when nothing is served** — same rule as the points frame. A deployment with no
@@ -216,12 +216,12 @@ server does not send them and it should stay that way.
 
 ### Drilling down — `POST /v1/artifacts/{tessera_id}`
 
-Session token, body `{"slice": "s0", "idset": <optional>}`. The slice is **required**, unlike
+Session token, body `{"view": "s0", "idset": <optional>}`. The view is **required**, unlike
 `/v1/items`: a point's record is the same wherever it is read from, but a masked count is an
-intersection in row space and row space is per slice.
+intersection in row space and row space is per view.
 
 ```json
-{ "layer": "clusters/hdbscan-2026-08", "stable_key": "c-0001", "masked_count": 143 }
+{ "layer": "clusters/hdbscan-2026-08", "key": "c-0001", "masked_count": 143 }
 ```
 
 A separate route from `/v1/items` because they answer about different things — a document and its

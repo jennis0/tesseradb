@@ -31,7 +31,7 @@ use tessera_engine::Engine;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
-    ContentDeclaration, Hierarchy, HierarchyKind, LayerAccess, LayerDeclaration, MembershipSource,
+    ContentDeclaration, Hierarchy, HierarchyKind, LayerDeclaration, MembershipSource,
 };
 use tessera_types::EntityId;
 
@@ -100,33 +100,34 @@ fn corpus() -> Corpus {
 fn declaration(name: &str) -> LayerDeclaration {
     LayerDeclaration {
         name: name.into(),
-        title: format!("{name} (title)"),
-        slices: vec!["s0".into()],
+        title: Some(format!("{name} (title)")),
+        views: vec!["s0".into()],
         membership: MembershipSource::Enumerated,
-        access: LayerAccess {
-            label: None,
-            artifacts_carry_own: false,
-        },
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
         // **No criterion on the layer**, so every published artifact is served and the census is a
         // statement about memberships rather than about which artifacts cleared a bar. The
         // generator's own criterion cycle is Stage 5's to exercise, where the tree makes it mean
         // something.
-        visible_when: None,
+        require_member_visibility: None,
         hierarchy: Hierarchy {
             kind: HierarchyKind::Flat,
             prune_children: false,
         },
         content: ContentDeclaration {
-            derived: vec!["centroid".into()],
+            computed: vec!["centroid".into()],
             supplied: Vec::new(),
-            on_member_deletion: Default::default(),
+            withdraw_on_member_deletion: true,
         },
         depends_on: Vec::new(),
         levels: Vec::new(),
+        layout: None,
+        shape: None,
     }
 }
 
-/// The engine's answer: every served artifact's masked count, by stable key.
+/// The engine's answer: every served artifact's masked count, by key.
 ///
 /// **Read through the viewport**, which is the surface a viewer actually gets, rather than through
 /// a store accessor: a census against the store would agree with itself about a projection that
@@ -141,7 +142,12 @@ fn served_counts(engine: &Engine) -> BTreeMap<String, u64> {
         .expect("a viewport over the whole map")
         .artifacts
         .into_iter()
-        .map(|a| (a.stable_key.expect("the census publishes keyed artifacts"), a.masked_count))
+        .map(|a| {
+            (
+                a.key.expect("the census publishes keyed artifacts"),
+                a.masked_count,
+            )
+        })
         .collect()
 }
 
