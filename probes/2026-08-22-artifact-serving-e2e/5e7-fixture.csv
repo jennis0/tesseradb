@@ -1,0 +1,2 @@
+tier,n,terms_per_level,materialise_seconds,materialise_peak_rss_bytes,materialise_reused,memory_budget,dropped_layers,input_bytes,build_seconds,build_peak_rss_bytes,bundle_bytes,flat_artifacts,partition_artifacts,boundary_artifacts,boundary_depth,treed_artifacts
+5e7,50000000,65536,,,True,12g,generator/treed,7373915260,445.34,27961040896,6172950106,499997,499997,37,4,4998

@@ -1,0 +1,80 @@
+{
+  "before_fold": [
+    {
+      "layer": "generator/flat",
+      "level": "0",
+      "ordinals": "99997",
+      "everywhere": "99997",
+      "adopted": "false",
+      "layout": "ArtifactMajor",
+      "blocks": "107.99026970809125"
+    },
+    {
+      "layer": "generator/partition-enumerated",
+      "level": "0",
+      "ordinals": "99997",
+      "everywhere": "99997",
+      "adopted": "false",
+      "layout": "ArtifactMajor",
+      "blocks": "73.29772893186795"
+    },
+    {
+      "layer": "generator/partition-attribute",
+      "level": "0",
+      "ordinals": "99997",
+      "everywhere": "0",
+      "adopted": "false",
+      "layout": "RowMajorLabel",
+      "blocks": "0.0"
+    },
+    {
+      "layer": "generator/treed",
+      "level": "0",
+      "ordinals": "998",
+      "everywhere": "998",
+      "adopted": "false",
+      "layout": "ArtifactMajor",
+      "blocks": "153.0"
+    }
+  ],
+  "at_fold": [
+    {
+      "layer": "generator/flat",
+      "level": "0",
+      "ordinals": "99997",
+      "everywhere": "99997",
+      "adopted": "false",
+      "layout": "RowMajorList",
+      "blocks": "113.47098412952388"
+    },
+    {
+      "layer": "generator/partition-enumerated",
+      "level": "0",
+      "ordinals": "99997",
+      "everywhere": "99997",
+      "adopted": "false",
+      "layout": "RowMajorLabel",
+      "blocks": "75.26092782783483"
+    },
+    {
+      "layer": "generator/treed",
+      "level": "0",
+      "ordinals": "998",
+      "everywhere": "998",
+      "adopted": "false",
+      "layout": "ArtifactMajor",
+      "blocks": "168.0"
+    }
+  ],
+  "after_fold": [
+    {
+      "layer": "generator/partition-attribute",
+      "level": "0",
+      "ordinals": "99997",
+      "everywhere": "0",
+      "adopted": "false",
+      "layout": "RowMajorLabel",
+      "blocks": "0.0"
+    }
+  ]
+}
