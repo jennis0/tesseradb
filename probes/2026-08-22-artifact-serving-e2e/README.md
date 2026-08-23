@@ -571,6 +571,18 @@ server**, which is the part worth fixing. Recorded, not fixed: this is a measure
 campaign's harness steps past it rather than raising the deadline (`campaign.warm`), so every figure
 outside §7 is on the shipped configuration.
 
+### 10. The bracket re-run (`bracket-a1e6-blocks{6,8,10,12}-medians.csv`)
+
+The 2026-08-20 campaign left a negative result it could not explain: its layout sweep's `blocks = 8`
+point broke an otherwise clean trend — 61/103, 111/126 and 159/174 ms whole-map/worst at 2, 4 and 6
+blocks per artifact, with 8 coming back *below* 6 and nothing in the fixture's own statistics
+accounting for it. The threshold `layout::ROW_MAJOR_BLOCKS_PER_ARTIFACT` sits in that band and is
+marked provisional pending this. `run-bracket.sh` re-runs the `dispersed` arm at **6, 8, 10 and 12
+blocks per artifact with the iteration count doubled** (`--iters 6`), three processes per
+configuration, on an otherwise idle box.
+
+*(results below)*
+
 ---
 
 ## Appendix R — review trail
