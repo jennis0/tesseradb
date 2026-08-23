@@ -180,38 +180,52 @@ def main() -> None:
             for r in rows for b, v in r["per_breadth"].items()
         ], ["tier", "concurrency", "breadth", "requests", "p50_ms", "p99_ms"])
 
-    fold = work / "fold-under-load.json"
-    if fold.exists():
+    for label, name in (("fold-under-load", "fold-under-load.json"),
+                        ("fold-unloaded", "fold-unloaded.json")):
+        fold = work / name
+        if not fold.exists():
+            continue
         r = json.loads(fold.read_text())
-        write_csv(out / f"{tier}-fold-under-load.csv", [{
+        passes = {e["kind"]: e for e in r.get("fold_log", [])}
+        write_csv(out / f"{tier}-{label}.csv", [{
             "tier": tier,
             "sessions": r["sessions"],
+            "unloaded": r.get("unloaded", False),
             "layer": r["layer"],
-            "fold_seconds": (r.get("fold") or {}).get("duration_seconds"),
+            "fold_wall_seconds": (r.get("fold") or {}).get("wall_seconds"),
+            "fold_elapsed_ms": (passes.get("fold") or {}).get("elapsed_ms"),
+            "fold_secs_logged": (passes.get("fold") or {}).get("fold_secs"),
+            "fold_staircase_rss": (passes.get("fold") or {}).get("staircase_rss"),
+            "artifact_pass_ms": (passes.get("artifact_pass") or {}).get("elapsed_ms"),
+            "artifact_pass_projections": (passes.get("artifact_pass") or {}).get("projections"),
             "fold_completed": (r.get("fold") or {}).get("completed"),
             "ingest_rows": (r.get("ingest") or {}).get("rows_accepted"),
             "ingest_rows_per_second": (r.get("ingest") or {}).get("rows_per_second"),
             "count_before_attribute": (r.get("before") or {}).get("attribute"),
             "count_after_flush_attribute": (r.get("after_flush") or {}).get("attribute"),
+            "seconds_after_flush_request": (r.get("after_flush") or {}).get("seconds_after_flush_request"),
             "count_after_fold_attribute": (r.get("after_fold") or {}).get("attribute"),
             "count_before_enumerated": (r.get("before") or {}).get("enumerated"),
             "count_after_flush_enumerated": (r.get("after_flush") or {}).get("enumerated"),
             "count_after_fold_enumerated": (r.get("after_fold") or {}).get("enumerated"),
             **{f"{w}_{k}": v for w, stats in (r.get("windows") or {}).items()
                for k, v in stats.items()},
-            "errors": r.get("errors"),
+            "shed_during_run": r.get("shed_during_run"),
             "peak_rss_bytes": r.get("peak_rss_bytes"),
         }], [
-            "tier", "sessions", "layer", "fold_seconds", "fold_completed", "ingest_rows",
+            "tier", "sessions", "unloaded", "layer", "fold_wall_seconds", "fold_elapsed_ms",
+            "fold_secs_logged", "fold_staircase_rss", "artifact_pass_ms",
+            "artifact_pass_projections", "fold_completed", "ingest_rows",
             "ingest_rows_per_second",
-            "count_before_attribute", "count_after_flush_attribute", "count_after_fold_attribute",
+            "count_before_attribute", "count_after_flush_attribute", "seconds_after_flush_request",
+            "count_after_fold_attribute",
             "count_before_enumerated", "count_after_flush_enumerated", "count_after_fold_enumerated",
             "before_requests", "before_p50_ms", "before_p99_ms", "before_max_ms",
             "ingest_and_flush_requests", "ingest_and_flush_p50_ms", "ingest_and_flush_p99_ms",
             "ingest_and_flush_max_ms",
             "during_fold_requests", "during_fold_p50_ms", "during_fold_p99_ms", "during_fold_max_ms",
             "after_requests", "after_p50_ms", "after_p99_ms", "after_max_ms",
-            "errors", "peak_rss_bytes",
+            "shed_during_run", "peak_rss_bytes",
         ])
 
     ingest = work / "ingest-during-serving.json"
@@ -226,22 +240,26 @@ def main() -> None:
             "batch_p50_ms": (r.get("ingest") or {}).get("batch_p50_ms"),
             "batch_p99_ms": (r.get("ingest") or {}).get("batch_p99_ms"),
             "batch_max_ms": (r.get("ingest") or {}).get("batch_max_ms"),
-            "read_quiet_p50_ms": r["read_path"]["quiet"].get("p50_ms"),
-            "read_quiet_p99_ms": r["read_path"]["quiet"].get("p99_ms"),
-            "read_loaded_p50_ms": r["read_path"]["under_ingest"].get("p50_ms"),
-            "read_loaded_p99_ms": r["read_path"]["under_ingest"].get("p99_ms"),
+            "read_quiet_requests": r.get("read_path", {}).get("quiet", {}).get("requests"),
+            "read_quiet_p50_ms": r.get("read_path", {}).get("quiet", {}).get("p50_ms"),
+            "read_quiet_p99_ms": r.get("read_path", {}).get("quiet", {}).get("p99_ms"),
+            "read_loaded_requests": r.get("read_path", {}).get("under_ingest", {}).get("requests"),
+            "read_loaded_p50_ms": r.get("read_path", {}).get("under_ingest", {}).get("p50_ms"),
+            "read_loaded_p99_ms": r.get("read_path", {}).get("under_ingest", {}).get("p99_ms"),
             "count_before_attribute": (r.get("before") or {}).get("attribute"),
             "count_after_flush_attribute": (r.get("after_flush") or {}).get("attribute"),
+            "seconds_after_flush_request": (r.get("after_flush") or {}).get("seconds_after_flush_request"),
             "count_before_enumerated": (r.get("before") or {}).get("enumerated"),
             "count_after_flush_enumerated": (r.get("after_flush") or {}).get("enumerated"),
-            "errors": r.get("errors"),
+            "shed_during_run": r.get("shed_during_run"),
             "peak_rss_bytes": r.get("peak_rss_bytes"),
         }], [
             "tier", "sessions", "layer", "rows_accepted", "rows_per_second", "batch_p50_ms",
-            "batch_p99_ms", "batch_max_ms", "read_quiet_p50_ms", "read_quiet_p99_ms",
-            "read_loaded_p50_ms", "read_loaded_p99_ms", "count_before_attribute",
-            "count_after_flush_attribute", "count_before_enumerated",
-            "count_after_flush_enumerated", "errors", "peak_rss_bytes",
+            "batch_p99_ms", "batch_max_ms", "read_quiet_requests", "read_quiet_p50_ms",
+            "read_quiet_p99_ms", "read_loaded_requests", "read_loaded_p50_ms",
+            "read_loaded_p99_ms", "count_before_attribute",
+            "count_after_flush_attribute", "seconds_after_flush_request", "count_before_enumerated",
+            "count_after_flush_enumerated", "shed_during_run", "peak_rss_bytes",
         ])
 
     print(f"collated tier {tier} -> {out}")

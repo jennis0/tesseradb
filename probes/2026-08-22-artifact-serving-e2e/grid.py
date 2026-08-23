@@ -43,6 +43,13 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=9)
     ap.add_argument("--layers", nargs="*", default=LAYERS)
     ap.add_argument("--principals", nargs="*", default=None)
+    ap.add_argument(
+        "--viewports", nargs="*", default=None,
+        help="restrict the zoom ladder by name — how the enumerated arms are sampled at a tier "
+             "where a whole grid of them would cost hours rather than minutes",
+    )
+    ap.add_argument("--append", type=Path, default=None,
+                    help="merge into an existing grid file rather than replacing it")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--k", type=int, default=0, help="points asked for beside the artifacts")
     args = ap.parse_args()
@@ -52,6 +59,10 @@ def main() -> None:
     grants = {str(g["target"]): g for g in fixture["grants"]}
     if args.principals:
         grants = {k: v for k, v in grants.items() if k in args.principals}
+
+    ladder = C.viewports()
+    if args.viewports:
+        ladder = [vp for vp in ladder if vp.name in args.viewports]
 
     ports = (C.free_port(), C.free_port(), C.free_port())
     C.write_deployment(work, ports)
@@ -63,7 +74,7 @@ def main() -> None:
         for principal, spec in grants.items():
             token, auth_seconds = server.authorise(spec["grant"].split(","))
             for layer in args.layers:
-                for vp in C.viewports():
+                for vp in ladder:
                     samples = []
                     server_us: list[int] = []
                     stream_us: list[int] = []
@@ -119,6 +130,13 @@ def main() -> None:
         server.stop()
 
     out = args.out or (work / "grid.json")
+    if args.append and args.append.exists():
+        # A tier measured in passes — the cheap layers over the whole ladder, the dear ones at a
+        # sample of it — is still one grid, so the passes merge into one file rather than becoming
+        # two records a reader has to join by hand.
+        prior = json.loads(args.append.read_text())
+        seen = {(r["layer"], r["principal"], r["viewport"]) for r in rows}
+        rows = [r for r in prior["rows"] if (r["layer"], r["principal"], r["viewport"]) not in seen] + rows
     out.write_text(json.dumps({
         "boot_rss_bytes": boot_rss,
         "final_rss_bytes": final_rss,

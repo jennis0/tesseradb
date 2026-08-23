@@ -159,6 +159,7 @@ fn main() {
     let mut minted = 0u64;
     let mut batches = 0u64;
     let mut refusals: Vec<String> = Vec::new();
+    let mut refused = 0u64;
     let mut latencies: Vec<f64> = Vec::new();
 
     let mut cursor = start;
@@ -188,8 +189,11 @@ fn main() {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
                 minted += json.get("minted").and_then(|m| m.as_u64()).unwrap_or(0);
             }
-        } else if refusals.len() < 5 {
-            refusals.push(format!("{status}: {}", &text[..text.len().min(300)]));
+        } else {
+            refused += 1;
+            if refusals.len() < 5 {
+                refusals.push(format!("{status}: {}", &text[..text.len().min(300)]));
+            }
         }
         sent += end - cursor;
         cursor = end;
@@ -211,6 +215,10 @@ fn main() {
             "rows_sent": sent,
             "rows_accepted": accepted,
             "batches": batches,
+            // A refused batch is backpressure, not a failure: the write queue answers 429 with a
+            // retry_after. This driver does not retry, so the accepted rate below is the rate the
+            // path sustained and the refusals say how far the offered load ran ahead of it.
+            "batches_refused": refused,
             "minted": minted,
             "seconds": elapsed,
             "rows_per_second": if elapsed > 0.0 { sent as f64 / elapsed } else { 0.0 },

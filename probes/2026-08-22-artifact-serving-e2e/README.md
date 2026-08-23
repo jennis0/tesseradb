@@ -98,7 +98,261 @@ quoting only warm medians would describe a state no first viewport is ever in.
 
 ## Results
 
-*(filled below, per tier, with the raw CSV named beside each table)*
+### The tiers, and the one that did not fit
+
+| tier | points | artifacts (partition / flat) | materialise | build | peak build RSS | inputs | bundle | data |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| **10⁷** | 10 000 000 | 99 997 | 8.8 s | 89.6 s | 5.51 GB | 1.46 GB | 1.21 GB | `1e7-fixture.csv` |
+| **2.5×10⁸** | 250 000 000 | 2 499 998 | — | — | — | — | — | `2.5e8-fixture.csv` |
+
+⊘ **The 10⁹ tier does not fit on this box, and the arithmetic is not close.** Both figures scale
+linearly in *n* and both are measured at 10⁷: the materialised inputs are 1.46 GB and the built
+bundle 1.21 GB, so at 10⁹ they are **146 GB and 121 GB**. The build reads every input while writing
+the bundle, so the transient requirement is their **sum, 267 GB**, against **147 GB free**. Deleting
+the three member files (36% of the inputs) leaves 214 GB; `--no-oracle-pairs` takes another 22 GB
+off the bundle and leaves 192 GB. Nothing available brings it under the floor, so the tier is
+**recorded as a disk refusal rather than attempted** — starting a build that will die two hours in
+with a full disk costs the tier twice and tells nobody anything.
+
+That is a *different* limit from the one the probe campaign hit at the same corner: that one was
+memory (45 GB resident with all 12 GB of swap gone, killed after three hours with no phase
+progress). Two independent walls at the same cell, on the same box.
+
+### The principal ladder as measured (`1e7-principals.csv`)
+
+| rung | terms | visible at 10⁷ | measured fraction | analytic |
+|---|---:|---:|---:|---:|
+| broad | 131 072 | 9 375 624 | 0.93756 | 0.93750 |
+| — | 65 536 | 7 501 541 | 0.75015 | 0.75000 |
+| — | 38 390 | 4 999 670 | 0.49997 | 0.50000 |
+| — | 17 560 | 2 500 555 | 0.25006 | 0.25000 |
+| — | 6 312 | 940 803 | 0.09408 | 0.09399 |
+| narrow | 2 048 | 311 288 | 0.03113 | 0.03101 |
+| single term | 1 | 160 | 0.000016 | 0.000015 |
+
+The construction and the corpus agree to four figures at every rung, which is what licenses quoting
+the ladder by its target names in the tables below.
+
+### 1. Census exactness at 10⁷ — **35 of 35 cells exact** (`1e7-census.csv`)
+
+Served counts against `tessera corpus artifact-census`, at the whole map, **every artifact, both
+directions, exact equality**. Five layer shapes × seven principals.
+
+| principal | terms | visible | flat | partition-enumerated | partition-attribute | boundary | treed |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| broad | 131 072 | 9 375 624 | 99 997 ✓ | 99 997 ✓ | 99 997 ✓ | 37 ✓ | 998 ✓ |
+| — | 65 536 | 7 501 541 | 99 997 ✓ | 99 997 ✓ | 99 997 ✓ | 37 ✓ | 998 ✓ |
+| — | 38 390 | 4 999 670 | 99 997 ✓ | 99 997 ✓ | 99 997 ✓ | 37 ✓ | 998 ✓ |
+| — | 17 560 | 2 500 555 | 99 997 ✓ | 99 997 ✓ | 99 997 ✓ | 37 ✓ | 998 ✓ |
+| — | 6 312 | 940 803 | 99 997 ✓ | 99 989 ✓ | 99 989 ✓ | 37 ✓ | 998 ✓ |
+| narrow | 2 048 | 311 288 | 98 883 ✓ | 95 478 ✓ | 95 478 ✓ | 37 ✓ | 998 ✓ |
+| single term | 1 | 160 | 325 ✓ | 159 ✓ | 159 ✓ | 18 ✓ | 128 ✓ |
+
+**The counts move with the principal, which is what makes this a census of the masked surface.** A
+grant seeing 3.1% of the corpus is served 95 478 of the partition layer's 99 997 artifacts — the
+other 4 519 have no member it can see and are absent, not zero — and a single-term principal is
+served 159. The two spellings of the partition relation agree artifact for artifact at every rung,
+which is Stage 6's twin-equality check taken at scale over HTTP rather than in a unit test.
+
+**The same is true at 10⁶** (`tessera corpus materialise --n 1000000`), run first as the pipeline's
+smoke: 35 of 35 exact over the same five shapes.
+
+### 2. The serving grid at 10⁷ (`1e7-grid.csv`)
+
+p50 in milliseconds, nine iterations after one discarded cold request, single client, `k = 0`.
+
+**`generator/partition-attribute` — the row-major predicate route:**
+
+| principal sees \ viewport | 100% | 75% | 50% | 25% | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **93.8%** | 135.5 | 143.1 | 147.7 | 116.5 | 88.9 | 25.3 | 3.3 |
+| **75.0%** | 124.4 | 121.7 | 122.2 | 105.7 | 87.3 | 23.6 | 2.8 |
+| **50.0%** | 111.9 | 118.7 | 113.1 | 102.5 | 92.0 | 18.4 | 2.3 |
+| **25.0%** | 97.9 | 98.2 | 96.7 | 91.7 | 83.7 | 10.2 | 1.8 |
+| **9.4%** | 94.9 | 89.8 | 90.4 | 84.5 | 64.2 | 5.0 | 1.3 |
+| **3.1%** | 84.9 | 85.7 | 84.9 | 72.0 | 31.5 | 2.0 | 1.0 |
+| **0.0016%** | 1.2 | 1.0 | 1.1 | 1.1 | 1.1 | 1.0 | 1.1 |
+
+**`generator/partition-enumerated` — the same relation as a stored member list:**
+
+| principal sees \ viewport | 100% | 75% | 50% | 25% | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **93.8%** | 243.3 | 228.6 | 222.8 | 714.1 | 376.9 | 121.3 | 58.2 |
+| **75.0%** | 224.2 | 222.2 | 224.7 | 736.1 | 381.9 | 112.4 | 58.7 |
+| **50.0%** | 233.8 | 236.0 | 231.3 | 749.5 | 396.5 | 103.2 | 59.1 |
+| **25.0%** | 235.0 | 240.8 | 236.2 | 717.2 | 383.7 | 85.6 | 56.2 |
+| **9.4%** | 250.1 | 247.1 | 247.6 | 715.4 | 334.2 | 74.8 | 54.9 |
+| **3.1%** | **1 054.1** | 1 064.2 | 1 059.4 | **1 463.9** | 546.3 | 74.3 | 55.6 |
+| **0.0016%** | 148.4 | 149.5 | 148.2 | 335.8 | 147.3 | 63.5 | 53.6 |
+
+**`generator/flat` — an overlapping enumerated membership** (interval plus scatter): the same shape
+again and dearer, worst cell **2 430 ms** at the narrow principal and the 25% viewport, 281 ms at
+the broad principal and the whole map.
+
+**`generator/treed` — a `nested` lineage over 998 nodes:** 15.7 ms at the broad principal and the
+whole map, 134 ms at its worst cell (narrow principal, 25% viewport), 1.4 ms at its best.
+
+**`campaign/boundary` — the spatial predicate:** **1.0–1.5 ms at every one of its 49 cells.** 37
+artifacts, each a `count_range` over the covering Morton ranges; neither the mask nor the viewport
+moves it measurably.
+
+Four things this grid says, and two of them disagree with the probe-side one.
+
+**The row-major predicate route is the best-behaved of the five, and it is the only one monotone in
+both axes.** Cost falls as the principal narrows (135 → 85 ms) and as the viewport closes
+(135 → 3.3 ms), which is the shape the design argues for. The two enumerated routes are neither.
+
+**The cost inversion is *not* fixed on the artifact-major routes.** At 3.1% visible the enumerated
+twin pays 1 054 ms where the broad principal pays 243, and the flat layer pays 1 646 against 281 —
+a narrow `M_auth` is a more fragmented row-space set and the artifact-major walk pays per container.
+`artifact-serving-at-scale.md` §7.1 records this inversion as *fixed* for the hoisted route; what is
+measured here is that it is fixed **for the row-major layout and not for the artifact-major one**,
+and the campaign's layers are served by whichever the heuristic picked (`ArtifactMajor` for flat,
+partition-enumerated and treed; `RowMajorLabel` for partition-attribute — the server's own log
+records the decision at every level build).
+
+**The grid is not monotone in viewport area on any artifact-major layer: the ridge is at 25%, not at
+the whole map.** Every enumerated cell at zoom 2 is 3× its zoom-0 neighbour — 714 against 243 on the
+enumerated twin, 985 against 281 on flat, 41 against 16 on treed. A whole-map request resolves to
+one tile and the extent test is trivially satisfied; a 25% request at zoom 2 resolves to sixteen and
+every artifact's extent is intersected against them. §7.1's "the worst cell is a ridge just inside
+the grid … at a mask below one and the widest viewport" holds for the mask axis and **not** for the
+viewport axis on this path.
+
+**The wire is a sixth of a wide request and no more.** The whole-map broad cell on the predicate
+route is 135.5 ms total, of which the trailer reports **21.6 ms** of Arrow serialisation for an
+11.2 MB body carrying 99 997 artifacts. `x-tessera-server-us` — post-admission to first-flush-ready
+— is 5.6 ms, so the artifact channel's own work sits between the tiles frame and the trailer and is
+the remaining ~108 ms.
+
+**Cold is one to two orders above warm and belongs in the record** (whole map, broad principal):
+
+| layer | cold | warm p50 | ratio |
+|---|---:|---:|---:|
+| `generator/flat` | 13 879 ms | 281.5 ms | 49× |
+| `generator/partition-enumerated` | 9 617 ms | 243.3 ms | 40× |
+| `generator/partition-attribute` | 1 877 ms | 135.5 ms | 14× |
+| `generator/treed` | 571.8 ms | 15.7 ms | 36× |
+| `campaign/boundary` | 1.9 ms | 1.1 ms | 1.7× |
+
+The first request at a (layer, level) builds the row form and the tile index; every one after it
+reuses them. A deployment's first viewport after a restart or a fold pays this, and on the two
+enumerated layers it is ten to fourteen seconds.
+
+**Against the probe's grid** (`ratio_to_probe` and `over_2x_probe` in the CSV, compared against
+§7.1's 10⁹/10⁶ table as the nearest published configuration): 107 of 245 cells run above 2× their
+probe-side neighbour — **37 of 49 on flat, 32 on the enumerated twin, 21 on the predicate route, 17
+on treed and 0 on the spatial one**. The comparison is loose and the README says so: the probe's
+grid is `hoisted` over a synthetic membership at ten times the artifact count and a hundred times
+the corpus, measured inside a bench binary with no HTTP, no session, no frame encoding and no
+gather. What the flags are good for is the *shape* — the layers that clear it are the two that do
+not walk artifacts.
+
+### 3. The concurrency envelope at 10⁷ (`1e7-concurrency.csv`)
+
+45 seconds of sustained panning per level on `generator/partition-attribute`, mixed breadths, one
+`M_auth` per session, driven by the Rust load arm.
+
+| sessions | mix (broad/median/narrow) | throughput | p50 | p99 | server cores | peak RSS | shed |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| **1** | 1 / 0 / 0 | 6.7 rps | 145 ms | 185 ms | 1.00 | 2.06 GB | 0 |
+| **8** | 1 / 1 / 6 | **28.9 rps** | 354 ms | 553 ms | 4.84 | 2.75 GB | 0 |
+| **32** | 2 / 6 / 24 | **29.1 rps** | 1 535 ms | 2 072 ms | **9.39** | 5.19 GB | 0 |
+| **128** | 8 / 25 / 95 | 16.5 rps | 9 821 ms | 13 691 ms | 7.36 | **11.76 GB** | 7 |
+
+**The knee is at 32 sessions and the binding resource is the machine.** Throughput rises 4.3× from
+one session to eight and then stops; at 32 the server is using 9.4 of 12 cores and every further
+session is queueing. Beyond that it **regresses** — 16.5 rps at 128, with cores *falling* to 7.4 —
+and the compute gate sheds 7 requests, which is its 48-permit admission and 96-deep queue working
+rather than failing. Latency past the knee is pure queueing: p50 rises 6.4× from 32 to 128 sessions
+while the work done falls.
+
+**Memory is ~76 MB per session and it is the resource that will bind first at a larger tier.**
+2.06 GB at one session, 11.76 GB at 128, on a bundle of 1.21 GB — the difference is 128 principals'
+`M_auth` over 10⁷ entities plus their cached row projections (169 entries, 133 MB, no evictions
+against a 2 GB bound; the fragment cache never rose above 3 entries).
+
+**Session establishment is not the cost the term space made it look like.** A 131 072-term grant
+authorises in **0.06 s**; 128 sessions establish in 0.5 s in total.
+
+⊘ **The first sweep of this campaign was wrong and the wrong numbers are in the git history**
+(commit `6631ec8`). A Python driver with a thread per session reported 4.5 rps at 128 sessions with
+the server using 1.6 of 12 cores; both halves were the harness, which was decoding every 11 MB
+artifacts frame into a hundred thousand tuples under the GIL. It was caught by sampling the
+**driver's** CPU beside the server's — 1.4 cores at eight sessions, which is Python's ceiling — and
+the load arm was rewritten in Rust. Every load figure above comes from the Rust arm.
+
+### 4. Serving during a fold at 10⁷ (`1e7-fold-under-load.csv`, `1e7-fold-unloaded.csv`)
+
+32 mixed sessions panning; 500 000 rows ingested carrying both a `partition` value and a membership
+column; `POST /control/flush`; `POST /control/compact`. The unloaded run is the identical sequence
+with no sessions at all.
+
+| | loaded (32 sessions) | unloaded | ratio |
+|---|---:|---:|---:|
+| fold wall time, `POST` → counter | 102.6 s | 101.0 s | 1.02× |
+| the fold's own `elapsed_ms` | **82.7 s** | **84.1 s** | **0.98×** |
+| the artifact pass inside it | 22.8 s | 23.0 s | 0.99× |
+| `staircase_rss` | 7.56 GB | 3.86 GB | 1.96× |
+| requests shed | 0 | — | — |
+
+**The fold under load costs what the fold costs.** 0.98× of its unloaded duration, and the artifact
+pass inside it 0.99× — against an acceptance bar of 2×. The memory is the part that moves: the
+staircase peak is 1.96× higher with 32 sessions live, and that difference is the sessions' own
+resident state rather than the fold's.
+
+**The median request does not notice the fold; the tail notices it enormously** — latency by window,
+from the load arm's own per-request record:
+
+| window | requests | p50 | p99 | max |
+|---|---:|---:|---:|---:|
+| before | 1 062 | 1 302 ms | 1 683 ms | 1 735 ms |
+| ingest and flush | 678 | 1 060 ms | 10 247 ms | 10 355 ms |
+| **during the fold** | 762 | **1 290 ms** | **58 924 ms** | 59 130 ms |
+| after | 1 134 | 1 298 ms | 1 714 ms | 1 759 ms |
+
+p50 is flat to within 1% across all four windows. p99 goes from 1.68 s to **58.9 s** during the
+fold — a 35× tail excursion, with the worst single request at 59.1 s — and returns to 1.71 s
+immediately afterwards. Nothing was shed and nothing errored: the requests waited. **This is the
+named gap's answer and it is two answers**: the fold's own cost is unaffected by load, and a live
+session's tail is not.
+
+**Freshness across the sequence**, watching one artifact's masked count for the broad principal:
+
+| | before | after the flush | after the fold |
+|---|---:|---:|---:|
+| `generator/partition-attribute` (predicate) | 92 | **500 092** | 500 092 |
+| `generator/partition-enumerated` (stored) | 92 | 92 | **500 092** |
+
+Both are correct and the difference is the documented one. A predicate layer reads a value column,
+so a point ingested with value *v* counts at its flush — **12.2 s after the `POST /control/flush`
+with 32 sessions live, 5.6 s unloaded**. An enumerated membership projects through *base* rows, so a
+growth counts at the fold that makes them base rows and **understates until then** — fail-closed,
+`annotation-write-cycle.md` §4.1's posture, and the count is exactly right on the far side.
+
+### 5. Ingest during serving at 10⁷ (`1e7-ingest-during-serving.csv`)
+
+32 sessions panning for two minutes, sustained ingest through the second half.
+
+| | quiet | under ingest |
+|---|---:|---:|
+| requests | 2 138 | 1 424 |
+| p50 | 1 284 ms | 961 ms |
+| p99 | 1 682 ms | 1 696 ms |
+
+**The read path does not degrade.** p99 moves by 0.8% and p50 falls, which is the viewport mix
+rather than the ingest; nothing was shed and nothing errored while the server ran at 10.6 of 12
+cores serving 34.4 requests a second.
+
+**The write path stays inside its posture and says so when it is full.** 1 000 000 rows accepted at
+**47 421 rows/s**, batch p50 **21.4 ms**, p99 202 ms, max 790 ms — three orders inside the
+seconds-level write-latency budget. The offered load was 2 000 000 rows, and **500 of the 1 000
+batches were refused with `429 backpressure` and a `retry_after_s` of 90**. That is the write
+queue's admission control working: the driver does not retry, so the accepted rate above is the rate
+the path sustained under a full serving load, and the refusals say how far the offer ran ahead of
+it.
+
+Freshness: the same 92 → 1 000 092 on the predicate layer, **7.3 s after the flush request**.
 
 ---
 

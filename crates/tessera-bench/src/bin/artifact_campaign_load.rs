@@ -65,6 +65,11 @@ struct Args {
     server_pid: Option<u32>,
     #[arg(long)]
     out: Option<std::path::PathBuf>,
+    /// Write every request as `start_seconds,latency_seconds,rung` — the per-request record the
+    /// fold and ingest arms window against events of their own. Offsets are from this process's
+    /// own start, which it prints as `load_started_unix` in the report so a caller can align.
+    #[arg(long)]
+    samples_out: Option<std::path::PathBuf>,
 }
 
 fn parse_mix(raw: &str) -> Result<(String, usize), String> {
@@ -155,11 +160,16 @@ async fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let errors = Arc::new(AtomicU64::new(0));
     let before = args.server_pid.and_then(proc_sample);
+    let started_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs_f64();
     let peak_rss = Arc::new(AtomicU64::new(before.map(|(_, r)| r).unwrap_or(0)));
     let began = Instant::now();
 
     let mut handles = Vec::new();
     for (index, (rung, token)) in tokens.into_iter().enumerate() {
+        let began = began;
         let client = client.clone();
         let viewer = args.viewer.clone();
         let layer = args.layer.clone();
@@ -179,12 +189,14 @@ async fn main() {
                 })
                 .collect();
             let mut latencies: Vec<f64> = Vec::new();
+            let mut starts: Vec<f64> = Vec::new();
             let mut bytes = 0u64;
             let mut step = 0usize;
             while !stop.load(Ordering::Relaxed) {
                 let (x0, y0, x1, y1, zoom) = route[step % route.len()];
                 step += 1;
                 let at = Instant::now();
+                let offset = at.duration_since(began).as_secs_f64();
                 let response = client
                     .post(format!("{viewer}/v1/viewport"))
                     .bearer_auth(&token)
@@ -198,6 +210,7 @@ async fn main() {
                     Ok(r) if r.status().as_u16() == 200 => match r.bytes().await {
                         Ok(body) => {
                             latencies.push(at.elapsed().as_secs_f64());
+                            starts.push(offset);
                             bytes += body.len() as u64;
                         }
                         Err(_) => {
@@ -209,7 +222,7 @@ async fn main() {
                     }
                 }
             }
-            (rung, latencies, bytes)
+            (rung, latencies, starts, bytes)
         }));
     }
 
@@ -230,18 +243,40 @@ async fn main() {
         })
     };
 
-    tokio::time::sleep(Duration::from_secs_f64(args.seconds)).await;
+    // **SIGTERM ends the run cleanly rather than killing it**, so a caller whose own experiment
+    // finishes early — the fold arm, which cannot know in advance how long a fold under load will
+    // take — can stop the load and still get its per-request record. Without this the choice is
+    // between a `--seconds` guessed too long (and a run that waits out the guess) and one guessed
+    // too short (and windows with no requests in them, which is what the first fold run produced).
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("a SIGTERM handler");
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs_f64(args.seconds)) => {}
+        _ = terminate.recv() => {}
+    }
     stop.store(true, Ordering::Relaxed);
     let _ = sampler.await;
 
     let mut per_rung: std::collections::BTreeMap<String, Vec<f64>> = Default::default();
     let mut all: Vec<f64> = Vec::new();
+    let mut samples: Vec<(f64, f64, String)> = Vec::new();
     let mut total_bytes = 0u64;
     for handle in handles {
-        let (rung, latencies, bytes) = handle.await.expect("a session task");
+        let (rung, latencies, starts, bytes) = handle.await.expect("a session task");
         all.extend(latencies.iter().copied());
+        for (start, latency) in starts.iter().zip(latencies.iter()) {
+            samples.push((*start, *latency, rung.clone()));
+        }
         per_rung.entry(rung).or_default().extend(latencies);
         total_bytes += bytes;
+    }
+    if let Some(path) = &args.samples_out {
+        samples.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let mut text = String::from("start_s,latency_s,rung\n");
+        for (start, latency, rung) in &samples {
+            text.push_str(&format!("{start:.6},{latency:.6},{rung}\n"));
+        }
+        std::fs::write(path, text).expect("writing the sample record");
     }
     let elapsed = began.elapsed().as_secs_f64();
     let after = args.server_pid.and_then(proc_sample);
@@ -253,6 +288,7 @@ async fn main() {
     all.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let report = serde_json::json!({
         "layer": args.layer,
+        "load_started_unix": started_unix,
         "sessions": args.mix.iter().map(|(_, c)| c).sum::<usize>(),
         "mix": args.mix.iter().map(|(r, c)| (r.clone(), *c)).collect::<std::collections::BTreeMap<_, _>>(),
         "seconds": elapsed,
