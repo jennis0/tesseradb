@@ -989,8 +989,11 @@ pub fn publish(
         registry.apply(&record);
         let refused = store.apply(&record, 0);
         if refused > 0 {
+            // The membership publication's finding, at the derived layers' own site: what this
+            // catches is a bitmap that was already malformed, not a format that lost it.
             return Err(BuildError::Invalid(format!(
-                "{refused} derived artifact(s) of {} did not survive their own encoding",
+                "{refused} derived artifact(s) of {} were not well-formed bitmaps when this build \
+                 encoded them",
                 declaration.name
             )));
         }
@@ -1051,11 +1054,19 @@ pub fn publish(
         registry.apply(&record);
         let refused = store.apply(&record, 0);
         if refused > 0 {
-            // Unreachable: the memberships were serialised from bitmaps two calls ago. It is a
-            // refusal rather than an assertion because the alternative is a level published with
+            // **Reached once, and not by a fault in the encoding.** The 5×10⁷ tier of
+            // `probes/2026-08-22-artifact-serving-e2e/` stopped here on one membership of
+            // `generator/treed`; the bytes carried exactly what the container held, and what the
+            // decoder's validation rejected was a container whose array was already out of order
+            // when it was serialised. The message says that rather than blaming the format,
+            // because an operator told the encoding failed will look at the wrong half.
+            //
+            // A refusal rather than an assertion because the alternative is a level published with
             // artifacts silently missing, which serves as *absent* with nothing reporting a fault.
             return Err(BuildError::Invalid(format!(
-                "{refused} membership(s) of {layer} did not survive their own encoding"
+                "{refused} membership(s) of {layer} were not well-formed bitmaps when this build \
+                 encoded them — the bytes decode to nothing, so the level is refused rather than \
+                 published with those artifacts absent"
             )));
         }
     }
