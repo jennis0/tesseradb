@@ -110,6 +110,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=SEED)
     ap.add_argument("--terms-per-level", type=int, default=TERMS_PER_LEVEL)
     ap.add_argument("--keep-inputs", action="store_true")
+    ap.add_argument("--reuse-inputs", action="store_true",
+                    help="skip the materialise where its output is already on disk")
     ap.add_argument(
         "--ceiling",
         action="store_true",
@@ -141,22 +143,34 @@ def main() -> None:
     report: dict = {"seed": args.seed, "n": args.n, "terms_per_level": args.terms_per_level}
 
     started = time.monotonic()
-    proc = subprocess.run(
+    if args.reuse_inputs and (work / "fixture" / "points.parquet").exists():
+        # **Only when the inputs are demonstrably whole.** Re-materialising 2.5x10^8 points costs
+        # four minutes and, once in this campaign's four runs at that size, panicked inside the
+        # parquet crate's dictionary encoder (`dict_encoder.rs:48`, `index is 4294914058` — a u32
+        # sentinel used as an index) — flaky rather than reproducible, and a reason not to redo the
+        # step when the previous one is still on disk and verified.
+        report["materialise"] = {
+            "reused": True,
+            "input_bytes": sum(p.stat().st_size for p in (work / "fixture").iterdir()),
+        }
+        print("reusing the materialised inputs already on disk")
+    else:
+      proc = subprocess.run(
         ["/usr/bin/time", "-f", "%e %M", str(C.CLI), "corpus", "materialise",
          "--seed", str(args.seed), "--n", str(args.n), "--out", str(work / "fixture"),
          "--terms-per-level", str(args.terms_per_level)],
         capture_output=True, text=True, env={**__import__("os").environ},
-    )
-    if proc.returncode != 0:
+      )
+      if proc.returncode != 0:
         raise SystemExit(f"materialise failed:\n{proc.stdout}\n{proc.stderr}")
-    wall, rss = proc.stderr.strip().splitlines()[-1].split()
-    report["materialise"] = {
+      wall, rss = proc.stderr.strip().splitlines()[-1].split()
+      report["materialise"] = {
         "seconds": float(wall),
         "peak_rss_bytes": int(rss) * 1024,
         "report": proc.stdout.strip(),
         "input_bytes": sum(p.stat().st_size for p in (work / "fixture").iterdir()),
-    }
-    print(f"materialised in {wall}s, {report['materialise']['input_bytes'] / 1024**3:.2f} GB of inputs")
+      }
+      print(f"materialised in {wall}s, {report['materialise']['input_bytes'] / 1024**3:.2f} GB of inputs")
 
     fixture_bin = C.REPO_ROOT / "target" / "release" / "artifact_campaign_fixture"
     argv = [str(fixture_bin), "--seed", str(args.seed), "--n", str(args.n),

@@ -100,25 +100,70 @@ quoting only warm medians would describe a state no first viewport is ever in.
 
 ## Results
 
-### The tiers, and the one that did not fit
+### The tiers, and the three walls above 10⁷
 
-| tier | points | artifacts (partition / flat) | materialise | build | peak build RSS | inputs | bundle | data |
+| tier | points | artifacts | materialise | build | peak build RSS | inputs | bundle | outcome |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
-| **10⁷** | 10 000 000 | 99 997 | 8.8 s | 89.6 s | 5.51 GB | 1.46 GB | 1.21 GB | `1e7-fixture.csv` |
-| **2.5×10⁸** | 250 000 000 | 2 499 998 | — | — | — | — | — | `2.5e8-fixture.csv` |
+| **10⁷** | 10 000 000 | 99 997 | 8.8 s | 89.6 s | 5.51 GB | 1.46 GB | 1.21 GB | **built**, all six layers (`1e7-fixture.csv`) |
+| 10⁷ + ceiling | 10 000 000 | + 9 832 352 | 9.1 s | 118.4 s | 11.0 GB | 1.36 GB | 1.57 GB | **built** (`ceiling-fixture.csv`) |
+| **5×10⁷** | 50 000 000 | 499 998 | 41.4 s | 445.3 s | 26.0 GB | 6.87 GB | 5.75 GB | **built without `generator/treed`** (`5e7-fixture.csv`) |
+| 5×10⁷ | 50 000 000 | — | — | — | 30.2 GB | — | — | ⊘ **refused** — `1 membership(s) of generator/treed did not survive their own encoding` |
+| 10⁸ | 100 000 000 | — | 92.3 s | — | **47.6 GB** | 13.79 GB | — | ⊘ **OOM-killed** after 518 s |
+| 2.5×10⁸ | 250 000 000 | — | 233 s | — | **47.3–47.6 GB** | 34.59 GB | — | ⊘ **OOM-killed** three times — auto budget, `12g`, and `12g` with two layers dropped |
+| 10⁹ | 1 000 000 000 | — | — | — | — | (146 GB) | (121 GB) | ⊘ **not attempted** — disk |
 
-⊘ **The 10⁹ tier does not fit on this box, and the arithmetic is not close.** Both figures scale
-linearly in *n* and both are measured at 10⁷: the materialised inputs are 1.46 GB and the built
-bundle 1.21 GB, so at 10⁹ they are **146 GB and 121 GB**. The build reads every input while writing
-the bundle, so the transient requirement is their **sum, 267 GB**, against **147 GB free**. Deleting
-the three member files (36% of the inputs) leaves 214 GB; `--no-oracle-pairs` takes another 22 GB
-off the bundle and leaves 192 GB. Nothing available brings it under the floor, so the tier is
-**recorded as a disk refusal rather than attempted** — starting a build that will die two hours in
-with a full disk costs the tier twice and tells nobody anything.
+Four separate walls, and only the last is the one the plan expected.
 
-That is a *different* limit from the one the probe campaign hit at the same corner: that one was
-memory (45 GB resident with all 12 GB of swap gone, killed after three hours with no phase
-progress). Two independent walls at the same cell, on the same box.
+⊘ **The build's peak resident size is not bounded by its memory budget.** `tessera build` at
+2.5×10⁸ points over this declaration is OOM-killed at **47.3 GB** with the budget auto-derived and
+at **47.5 GB** with `--memory-budget 12g` — and at **47.55 GB** with the same 12 GB budget and the
+two largest member sources dropped from the declaration. Three runs, three kills, one number: the
+peak is the machine. `detect_memory_budget` takes 80% of `MemAvailable` and the residency model it
+feeds (`plan_build`) covers the batch loop's own structures — packed bucket, recs, starts, the
+entity map, per-term counters, the join chunk and a fixed slack — so whatever else the build
+allocates is outside the model and is what binds. At 10⁸ the same thing happens at 47.6 GB after
+518 s. Every kill lands immediately after the attribute pass's summary line. **It is recoverable
+and discloses nothing** — the operator's move is a smaller corpus or a bigger box — but a build
+that is *killed* rather than *refused* is the failure the pre-flight exists to prevent, and the
+flag that exists to prevent it does not.
+
+⊘ **A 5×10⁷-member enumerated membership is refused by a path documented as unreachable.**
+`generator/treed`'s root holds the whole corpus, and at 5×10⁷ the build stops with
+
+```
+build FAILED: invalid input: 1 membership(s) of generator/treed did not survive their own encoding
+```
+
+which is `tessera-build`'s `layers.rs` reporting a non-zero refusal count from `store.apply` — the
+site whose own comment reads *"Unreachable: the memberships were serialised from bitmaps two calls
+ago."* The refusal is `deserialise_members` returning `None`, i.e. a Roaring bitmap that did not
+survive its own `Portable` round trip **in the same process that wrote it**. It is fail-closed —
+the alternative is a level published with an artifact silently missing — and it reproduces on a
+build that otherwise had 21 GB of headroom (26.0 GB peak against a 47 GB box). The same layer at
+10⁷ builds and serves and censuses exactly. Dropping the layer, the tier builds; that is how the
+5×10⁷ tier below exists.
+
+⊘ **The 10⁹ tier was not attempted, on disk.** Inputs and bundle both scale linearly and both are
+measured at 10⁷ — 1.46 GB and 1.21 GB — so at 10⁹ they are **146 GB and 121 GB**, and the build
+reads every input while writing the bundle. The transient requirement is their **sum, 267 GB**,
+against **147 GB free**. Dropping the three member files leaves 214 GB; `--no-oracle-pairs` leaves
+192 GB. Nothing available brings it under, and starting a build that would die hours in with a full
+disk costs the tier twice and tells nobody anything. It is a *different* wall from the one the probe
+campaign hit at the same corner — that one was memory, 45 GB resident with all 12 GB of swap gone —
+and the two are independent.
+
+⊘ **And `tessera corpus materialise` panicked once in four runs at 2.5×10⁸**, inside the parquet
+crate's dictionary encoder:
+
+```
+thread 'main' panicked at parquet-59.1.0/src/encodings/encoding/dict_encoder.rs:48:22:
+index out of bounds: the len is 3052 but the index is 4294914058
+```
+
+`4 294 914 058` is `2³² − 53 238`, which is a `u32` sentinel used as an index. Flaky rather than
+reproducible — the same command at the same seed and size succeeded three times — and it is in a
+third-party writer on the fixture path, not in anything Tessera serves. Recorded because a campaign
+that met it once should say so.
 
 ### The principal ladder as measured (`1e7-principals.csv`)
 
