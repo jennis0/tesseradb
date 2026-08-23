@@ -12,12 +12,20 @@
 //! Until it existed, a membership's only durable home was the WAL, and rotation was pinned from the
 //! first publication onwards so the log could never be reclaimed.
 //!
-//! # This module knows nothing about bitmaps
+//! # The extent format knows nothing about bitmaps
 //!
-//! A membership is an opaque byte blob here, and deliberately: `tessera-lifecycle` owns the Roaring
-//! form and does not depend on this crate, so a layout that understood the payload would put the
-//! bitmap library on both sides of a boundary that currently has it on one. What this owns is
-//! **addressing** — which bytes belong to which ordinal — and nothing else.
+//! A membership is an opaque byte blob in the extent format, and deliberately: `tessera-lifecycle`
+//! owns the Roaring form and does not depend on this crate, so a layout that understood the payload
+//! would put the bitmap library on both sides of a boundary that currently has it on one. What the
+//! format owns is **addressing** — which bytes belong to which ordinal — and nothing else.
+//!
+//! That is true of this file without qualification. The one part of the prefix's artifact
+//! machinery that *does* read bitmaps — the pass producing the inputs to the formats below — is
+//! [`crate::derived`], a file of its own for exactly this reason: a module whose doc claims it
+//! knows nothing about the payload should not hold nine hundred lines that do. The two stay in one
+//! crate on `tessera-build`'s own rule for the filter artefact — the format's owner owns both
+//! halves, so the writer and the reader cannot drift — and the boundary [`crate::derived`] keeps
+//! is the other one: it never sees an `ArtifactRecord`.
 //!
 //! # The format
 //!

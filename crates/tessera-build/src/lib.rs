@@ -19,6 +19,7 @@
 //! optimisation added later. The rule lives in [`signature_sort_key`] as a free function so the
 //! serving allocator applies exactly the same rule to appended items.
 
+pub mod artifact_pass;
 pub mod check;
 pub mod config;
 pub mod deep;
@@ -28,6 +29,7 @@ pub mod input;
 pub mod layers;
 pub mod observer;
 mod pipeline;
+mod residency;
 pub(crate) mod spill;
 
 use rayon::prelude::*;
@@ -1104,7 +1106,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // Entity ids are assigned by now — an item's entity is its position in `staged` — so a member
     // named by source id resolves, and the row-less region can be allocated against a settled
     // point mark.
-    let published_layers = if args.layers.is_empty() {
+    let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
         {
@@ -1139,6 +1141,35 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     write_containment_report(&args.out, &published_layers)?;
 
+    // ---- 8b. the post-bundle artifact pass ---------------------------------------------
+    //
+    // **Both builds run it, and that is not optional**: `tests/build_equivalence.rs` asserts the
+    // two produce byte-identical bundles, and the pass writes files and edits the layer records the
+    // manifest carries. The linear build writes its permutation at step 7, so row space already
+    // exists here — the batched build has to wait for its tiler sort, which is the only reason the
+    // two call sites sit at different step numbers. See `crate::artifact_pass`.
+    let artifact_store = std::mem::take(&mut published_layers.store);
+    let artifact_pass = crate::artifact_pass::run(
+        &mut published_layers,
+        &artifact_store,
+        &args.out.join(PREFIX),
+        PHASH,
+        &args.view_id,
+        n as u32,
+        &plugin.data_plugin_hash(),
+    );
+    drop(artifact_store);
+    crate::artifact_pass::report(&artifact_pass);
+    published_layers
+        .tile_index_extents
+        .clone_from(&artifact_pass.tile_index_extents);
+    published_layers
+        .row_column_extents
+        .clone_from(&artifact_pass.row_column_extents);
+    published_layers
+        .containment_extents
+        .clone_from(&artifact_pass.containment_extents);
+
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([
         permutation_path,
@@ -1149,6 +1180,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     other_paths.extend(presence_paths);
     other_paths.extend(filter_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
+    other_paths.extend(artifact_pass.paths.iter().cloned());
     write_manifests(
         args,
         &BundleFiles {
@@ -1262,12 +1294,12 @@ fn write_manifests(
         layer_tombstones: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
         level_versions: published_layers.level_versions.clone(),
-        // ⊘ Empty out of a build — see `PublishedLayers::level_versions`. The first fold writes
-        // them; until then every level composes its partition on first use, which is what every
-        // request did before the structure existed.
-        containment_extents: Vec::new(),
-        tile_index_extents: Vec::new(),
-        row_column_extents: Vec::new(),
+        // **The post-bundle artifact pass's output** (`crate::artifact_pass`). Empty only where
+        // the build published no artifacts, or where a derived structure would not compose — each
+        // of which leaves the level composing it on first use, exactly as before the pass existed.
+        containment_extents: published_layers.containment_extents.clone(),
+        tile_index_extents: published_layers.tile_index_extents.clone(),
+        row_column_extents: published_layers.row_column_extents.clone(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
             view: args.view_id.clone(),

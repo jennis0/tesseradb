@@ -90,7 +90,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
 use tessera_plugin::Plugin;
-use tessera_store::membership::{pack_containment, ContainmentPack};
+use tessera_store::membership::ContainmentPack;
+use tessera_store::derived::{
+    compose_containment, generating_entities, PostingSlice, SignatureIndex,
+};
 use tessera_types::TermId;
 
 /// Whether a bundle's declared data plugin is the builtin one, and so whether authorisation is
@@ -123,137 +126,24 @@ impl PartitionSource<'_> {
     }
 }
 
-/// Every entity's term signature, for the entities one level's generating sets name.
+/// Build a [`SignatureIndex`] over `postings` — the one adapter between the postings format and
+/// the composer.
 ///
-/// **Built by one pass over the postings, not one probe per entity.** The inverse direction —
-/// entity to terms — is not stored anywhere, so the only route is to walk each term's posting and
-/// intersect it with the entities wanted. Done per entity that would be `O(terms)` each; done once
-/// for the whole level it is `O(terms)` in total, which is why this is a level-scale object and
-/// not a lookup.
-struct SignatureIndex {
-    /// `entity → its term ids, ascending`. Absent means *no term reaches this entity*, which is a
-    /// real and fail-closed answer rather than a missing one.
-    by_entity: FxHashMap<u32, Vec<u32>>,
-}
-
-impl SignatureIndex {
-    fn build(wanted: &Bitmap, postings: &PostingsReader) -> io::Result<Self> {
-        let mut by_entity: FxHashMap<u32, Vec<u32>> = FxHashMap::default();
-        if wanted.is_empty() {
-            return Ok(SignatureIndex { by_entity });
-        }
-        for term in 0..postings.term_count() {
-            let Some(posting) = postings.posting_at(term)? else {
-                continue;
-            };
+/// **A type shuffle, not a decode.** `tessera-authz` owns `postings.arrow` and `tessera-store`
+/// does not depend on it, so the posting arrives here in whichever of its two shapes it is stored
+/// in and is handed straight across; the walk that turns postings into signatures is written once,
+/// beside the containment format. `tessera build` holds the identical six lines, which is what a
+/// crate boundary costs when neither side may depend on the other.
+pub fn signature_index(wanted: &Bitmap, postings: &PostingsReader) -> io::Result<SignatureIndex> {
+    SignatureIndex::build(wanted, postings.term_count(), &|term, visit| {
+        if let Some(posting) = postings.posting_at(term)? {
             match posting {
-                // Ascending `u32` little-endian, so the walk is the decode. Tested against
-                // `wanted` one at a time because the array form is the *small* terms, and
-                // materialising a bitmap to intersect would cost more than the probe.
-                PostingRef::Array(bytes) => {
-                    for chunk in bytes.chunks_exact(4) {
-                        let entity = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        if wanted.contains(entity) {
-                            by_entity.entry(entity).or_default().push(term);
-                        }
-                    }
-                }
-                // The intersection first: a large term's posting may be the whole corpus, and
-                // `and` is O(containers touched) against a generating-set union that is not.
-                PostingRef::Roaring(view) => {
-                    for entity in view.and(wanted).iter() {
-                        by_entity.entry(entity).or_default().push(term);
-                    }
-                }
+                PostingRef::Array(bytes) => visit(PostingSlice::Array(bytes)),
+                PostingRef::Roaring(view) => visit(PostingSlice::Roaring(&view)),
             }
         }
-        // Terms are walked in ascending ordinal, so every signature is already ascending and
-        // duplicate-free — a term's posting names an entity at most once. Asserted rather than
-        // sorted: re-sorting would hide a postings file that had stopped being a set.
-        debug_assert!(by_entity
-            .values()
-            .all(|sig| sig.windows(2).all(|w| w[0] < w[1])));
-        Ok(SignatureIndex { by_entity })
-    }
-
-    fn signature(&self, entity: u32) -> &[u32] {
-        self.by_entity
-            .get(&entity)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
-}
-
-/// The interning state, alive only while a level is being composed.
-///
-/// **It builds exactly the arrays the durable form holds**, so composing and opening a file are
-/// the same structure reached two ways rather than two encodings that have to be kept in step.
-#[derive(Default)]
-struct Interner {
-    /// Every expression's canonical encoding, concatenated: `nclauses, (len, terms…)*`.
-    words: Vec<u32>,
-    /// `at[e]..at[e + 1]` is expression `e`'s words, with the trailing sentinel — so the last
-    /// expression needs no special case, the case a reader gets wrong.
-    at: Vec<u32>,
-    seen: FxHashMap<Vec<u32>, u32>,
-}
-
-impl Interner {
-    fn intern(&mut self, canonical: Vec<u32>) -> u32 {
-        if let Some(id) = self.seen.get(&canonical) {
-            return *id;
-        }
-        if self.at.is_empty() {
-            self.at.push(0);
-        }
-        let id = (self.at.len() - 1) as u32;
-        self.words.extend_from_slice(&canonical);
-        self.at.push(self.words.len() as u32);
-        self.seen.insert(canonical, id);
-        id
-    }
-
-    fn finish(self) -> (Vec<u32>, Vec<u32>) {
-        let Interner { words, mut at, .. } = self;
-        if at.is_empty() {
-            at.push(0);
-        }
-        (words, at)
-    }
-}
-
-/// One expression identifier per `(artifact, rank)`, with the width the durable form will use.
-///
-/// **`u16` with a checked promotion to `u32`, never a byte and never a truncation**
-/// (`2026-08-21-artifact-layout-selection.md` §9, constraint 4). The census measures ~10⁶ distinct
-/// expressions on a real signature distribution, so the narrow width is a saving on the layers
-/// that share and not an assumption about layers in general; the promotion is what stops the
-/// saving becoming a wrong answer. A truncated identifier does not fail — it names a *different*
-/// expression, which is a containment verdict for another artifact's generating set.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct IdColumn {
-    ids: Vec<u32>,
-    wide: bool,
-}
-
-impl IdColumn {
-    fn push(&mut self, id: u32) {
-        self.wide |= u16::try_from(id).is_err();
-        self.ids.push(id);
-    }
-
-    fn len(&self) -> usize {
-        self.ids.len()
-    }
-
-    /// Bytes per identifier, for the durable form's header and for a residency line.
-    fn width(&self) -> u8 {
-        if self.wide {
-            4
-        } else {
-            2
-        }
-    }
+        Ok(())
+    })
 }
 
 /// One level's containment partition: an interned expression per `(artifact, rank)`.
@@ -292,40 +182,23 @@ impl ContainmentPartition {
         level: u32,
         postings: &PostingsReader,
     ) -> io::Result<Self> {
-        let mut wanted = Bitmap::new();
-        for (_, record) in store.level(layer, level) {
-            for content in &record.contents {
-                wanted.or_inplace(&content.generated_from);
+        let contents = |visit: &mut dyn FnMut(u32, &[&Bitmap])| {
+            for (ordinal, record) in store.level(layer, level) {
+                let generating: Vec<&Bitmap> =
+                    record.contents.iter().map(|c| &c.generated_from).collect();
+                visit(ordinal, &generating);
             }
-        }
-        let signatures = SignatureIndex::build(&wanted, postings)?;
-
-        let mut interner = Interner::default();
-        let mut at: Vec<u32> = vec![0];
-        let mut ids = IdColumn::default();
-        for (ordinal, record) in store.level(layer, level) {
-            let idx = ordinal as usize;
-            // A level is dense over its ordinals and this walk is in ordinal order, but a hole
-            // between two artifacts yields no record at all — so the offsets are carried forward
-            // to the ordinal being written rather than pushed once per record.
-            while at.len() <= idx {
-                at.push(ids.len() as u32);
-            }
-            for content in &record.contents {
-                ids.push(interner.intern(canonicalise(&content.generated_from, &signatures)));
-            }
-            at.push(ids.len() as u32);
-        }
-        Ok(Self::packed(at, ids, interner))
+        };
+        let wanted = generating_entities(&contents);
+        let signatures = signature_index(&wanted, postings)?;
+        Ok(Self::of_bytes(compose_containment(&contents, &signatures)))
     }
 
-    /// Frame the composed arrays into the durable form, and read them back through the same
-    /// checks a mapped file takes. **The round trip is not ceremony**: it is what makes the two
-    /// routes one reader, so a framing rule can never hold for a file and not for the form a
-    /// publication built.
-    fn packed(at: Vec<u32>, ids: IdColumn, interner: Interner) -> Self {
-        let (words, expr_at) = interner.finish();
-        let bytes = pack_containment(ids.width(), &at, &ids.ids, &expr_at, &words);
+    /// Frame composed bytes into the durable form, and read them back through the same checks a
+    /// mapped file takes. **The round trip is not ceremony**: it is what makes the two routes one
+    /// reader, so a framing rule can never hold for a file and not for the form a publication
+    /// built.
+    fn of_bytes(bytes: Vec<u8>) -> Self {
         let pack = ContainmentPack::from_bytes(bytes)
             .expect("a partition this crate just composed frames by construction");
         ContainmentPartition {
@@ -462,16 +335,16 @@ impl ContainmentPartition {
     /// served; the inversion has its own cases, and `tests/artifact_containment.rs` drives both
     /// together against the masked-count route.
     pub(crate) fn of_clauses(ordinals: &[&[&[&[u32]]]]) -> Self {
-        let mut interner = Interner::default();
-        let mut at = vec![0u32];
-        let mut ids = IdColumn::default();
-        for ranks in ordinals {
-            for clauses in *ranks {
-                ids.push(interner.intern(encode(clauses.to_vec())));
-            }
-            at.push(ids.len() as u32);
+        let mut builder = tessera_store::derived::ContainmentBuilder::new();
+        for (ordinal, ranks) in ordinals.iter().enumerate() {
+            builder.push(
+                ordinal as u32,
+                ranks
+                    .iter()
+                    .map(|clauses| tessera_store::derived::encode_expression(clauses.to_vec())),
+            );
         }
-        Self::packed(at, ids, interner)
+        Self::of_bytes(builder.finish())
     }
 }
 
@@ -538,33 +411,6 @@ impl ContainmentAnswers<'_> {
     }
 }
 
-/// One generating set's canonical expression: the distinct signatures of its members, each sorted,
-/// the set of them sorted.
-///
-/// Encoded as `nclauses, (len, terms…)*` — the form the table stores and the durable file writes,
-/// so the canonical key and the stored expression are the same bytes and cannot drift.
-fn canonicalise(generated_from: &Bitmap, signatures: &SignatureIndex) -> Vec<u32> {
-    encode(
-        generated_from
-            .iter()
-            .map(|entity| signatures.signature(entity))
-            .collect(),
-    )
-}
-
-/// The canonical encoding of a clause list — sorted and deduplicated, then framed. One function so
-/// the interning key and the stored expression cannot be produced by two different rules.
-fn encode(mut clauses: Vec<&[u32]>) -> Vec<u32> {
-    clauses.sort_unstable();
-    clauses.dedup();
-    let mut words = Vec::with_capacity(1 + clauses.len() * 2);
-    words.push(clauses.len() as u32);
-    for clause in clauses {
-        words.push(clause.len() as u32);
-        words.extend_from_slice(clause);
-    }
-    words
-}
 #[cfg(test)]
 mod tests {
     use super::*;

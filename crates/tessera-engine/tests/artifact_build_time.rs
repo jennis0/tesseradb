@@ -433,6 +433,49 @@ fn a_later_online_registration_does_not_reissue_the_builds_ids() {
     }
 }
 
+/// **A build writes the containment partitions a fold writes**, and the first request that gates a
+/// description claims one rather than composing it.
+///
+/// Composing a partition is a pass over every term's posting for the entities a level's generating
+/// sets name — level-scale work that used to land on whichever request arrived first after a boot
+/// (`docs/evidence/memos/2026-08-22-artifact-scale-campaign.md`, finding 2's family). The build has
+/// the store, the postings and the prefix in hand, so it does it once.
+#[test]
+fn a_built_bundle_carries_its_containment_partitions_and_the_first_request_claims_one() {
+    let fx = fixture();
+    let engine = fx.open();
+    let generation = engine.generation();
+    let manifest = &generation
+        .bundle
+        .partitions
+        .values()
+        .next()
+        .expect("one partition")
+        .manifest;
+    assert!(
+        manifest
+            .containment_extents
+            .iter()
+            .any(|e| e.layer == LABELS),
+        "the label layer's generating sets have a partition the build composed: {:?}",
+        manifest.containment_extents
+    );
+
+    // The gauges: one adopted at the open, none composed by the request that used it.
+    let served = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(
+        of_layer(&served, LABELS)[0].content,
+        vec!["the whole cluster".to_string()],
+        "the same answer the composed partition gives"
+    );
+    assert!(engine.artifact_containment_partitions_adopted() > 0);
+    assert_eq!(
+        engine.artifact_containment_partitions(),
+        0,
+        "a partition the build already composed was composed a second time on the request path"
+    );
+}
+
 /// The label layer's file with its edge columns left out — one label, attached to nothing.
 fn write_topics_without_edges(path: &Path) {
     let schema = Arc::new(Schema::new(vec![

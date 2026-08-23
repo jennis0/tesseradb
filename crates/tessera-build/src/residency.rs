@@ -1,0 +1,625 @@
+//! **What the build holds when it is not in the batch loop** — and the refusal that fires before
+//! the first pass rather than after the second hour.
+//!
+//! # Why this exists
+//!
+//! [`crate::pipeline::plan_build`] models the signature batch loop: the packed bucket, the records,
+//! the starts, the entity map, the per-term counters, the join chunk and a fixed slack. That model
+//! is complete for the stages it covers and it is the whole of what `--memory-budget` reached.
+//!
+//! The stages *after* the loop were outside it entirely, and they are the larger peak. The
+//! campaign at `probes/2026-08-22-artifact-serving-e2e/` measured it: builds at 10⁸ and 2.5×10⁸
+//! points were OOM-killed at **47.3–47.6 GB** with `--memory-budget 12g`, three runs, one number —
+//! the peak was the machine and the flag reached none of it. Every kill landed immediately after
+//! the attribute pass's summary line, which is where the entity-order tail below is fully resident.
+//!
+//! # What is resident there, and why none of it batches
+//!
+//! From the attribute pass to the segment write the build holds, all at once:
+//!
+//! - the **sorted source ids** and the **ordinal→entity map**, 12 bytes an item, because a member
+//!   and an attribute row are both named by source id and both have to resolve;
+//! - every **declared column in entity order**, which for a fixed-width type is its width and for
+//!   a `text`, `keyword` or `utf8` one is a `String` *per entity* — 24 bytes of header before a
+//!   character is stored — plus a presence bit per column;
+//! - the **layer member tables**, whole: one `Vec<u64>` of source ids per artifact as the plan is
+//!   read, the same rows again as resolved entities, and the published memberships in the store.
+//!
+//! **None of it is a batch.** The loop's residency shrinks when the stride does; this does not
+//! shrink at all, because a column in entity order is *n* values by construction and a member table
+//! is its own size. So the honest answer is not a smaller batch, it is a refusal that names the
+//! number — which is what this module computes and `plan_build` acts on.
+//!
+//! # What the numbers are, and what they are not
+//!
+//! Every term below is arithmetic over things known before the first pass: the item count, the
+//! declared schema, and two figures read from Parquet footers — a member table's row count and a
+//! column's *uncompressed* byte size. No data is read.
+//!
+//! ⊘ **This is a lower bound, and measured to be about half the real peak.** Transients inside a
+//! stage — a Parquet decode buffer, an analyser's scratch, the allocator's own slack — are not
+//! enumerated, and [`SLACK`] is one constant standing in for all of them. The one build it has been
+//! checked against ([`tests::the_model_is_checked_against_an_observed_peak`], 10⁶ items, one `text`
+//! column, 10⁶ member rows) read **190 MiB against an observed 407 MiB**, and the trace shows why:
+//! the process was already at 331 MiB in its first stage, reading the points file, before a single
+//! term below existed.
+//!
+//! So the bound is used the way a lower bound can be: **over budget refuses**, because a lower bound
+//! that already exceeds the budget settles it, and the band below refuses nothing and prints the
+//! numbers instead. What this buys is the difference between *refused in the first second with the
+//! arithmetic printed* and *killed at hour two with nothing written* — and it does not claim to
+//! catch every build that will not fit. At the campaign's own corner it catches the headline one:
+//! 2.5×10⁸ points over the generator's declaration models at tens of gigabytes against the 12 GB
+//! budget those runs passed, where 10⁸ under an auto-derived budget still slips through.
+
+use tessera_spatial::ScalarType;
+
+/// The unenumerated transients: decode buffers, a stage's scratch, the allocator's slack. The
+/// batch loop's own model carries a constant of the same size and for the same reason.
+pub(crate) const SLACK: u64 = 64 << 20;
+
+/// A `String` in a `Vec<String>`: pointer, length, capacity. Paid **per entity** by every
+/// variable-width column before a single character is stored, which is what makes a text column at
+/// 2.5×10⁸ items six gigabytes of headers on its own.
+const STRING_HEADER: u64 = 24;
+
+/// One named term of the residency, so a refusal prints where the bytes are rather than a total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Term {
+    pub what: String,
+    pub bytes: u64,
+}
+
+/// The entity-order residency, term by term.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Residency {
+    pub terms: Vec<Term>,
+}
+
+impl Residency {
+    pub fn total(&self) -> u64 {
+        self.terms.iter().map(|t| t.bytes).sum()
+    }
+
+    /// The terms, largest first, as one line each — the form a refusal prints. Largest first
+    /// because the operator's next move is to drop or narrow whatever is at the top.
+    pub fn describe(&self) -> String {
+        let mut terms = self.terms.clone();
+        terms.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+        terms
+            .iter()
+            .filter(|t| t.bytes > 0)
+            .map(|t| format!("\n  {:>9} MiB  {}", t.bytes >> 20, t.what))
+            .collect()
+    }
+}
+
+/// What one declared column costs per entity, and where the variable part came from.
+///
+/// `payload_bytes` is the column's **uncompressed** size in its Parquet source, read from the
+/// footer. It is the closest thing to the in-memory string payload that can be had without reading
+/// the file, and it is an under-read rather than an over-read: Parquet's uncompressed size is the
+/// encoded page size, and a dictionary-encoded column of repeated strings expands when it is
+/// materialised into one `String` per entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ColumnCost {
+    pub ty: ScalarType,
+    pub payload_bytes: u64,
+}
+
+/// Whether one entity's value is a `String` in [`crate::pipeline::EntityColumn`]'s storage — which
+/// is what makes the column's characters a term of their own rather than part of its width.
+fn is_variable_width(ty: ScalarType) -> bool {
+    matches!(
+        ty,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text
+    )
+}
+
+/// The fixed width one entity's value occupies in [`crate::pipeline::EntityColumn`]'s typed
+/// storage. A variable-width type answers [`STRING_HEADER`] here and carries its characters in
+/// [`ColumnCost::payload_bytes`].
+fn fixed_width(ty: ScalarType) -> u64 {
+    match ty {
+        ScalarType::Bool => 1,
+        ScalarType::U8 | ScalarType::I8 => 1,
+        ScalarType::U16 | ScalarType::I16 => 2,
+        ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
+        ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => STRING_HEADER,
+    }
+}
+
+/// What one layer member row costs, held **three times over** across the publication:
+///
+/// - 8 bytes as the plan's `Vec<u64>` of source ids, read from the member table and alive until the
+///   publication is over;
+/// - 8 bytes again as the resolved `Vec<EntityId>`, built from the plan rather than replacing it,
+///   because an unresolvable id has to refuse the build with the plan still in hand;
+/// - about 4 more as Roaring — the incoming bitmap, the durable record's bytes and the store's own
+///   decoded copy, at the ~2 bytes an array container spends on a scattered member and less on a
+///   dense one.
+///
+/// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
+/// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
+/// to be wrong in the direction that costs a rerun rather than a kill.
+const BYTES_PER_MEMBER_ROW: u64 = 20;
+
+/// The residency of everything the batch loop's model does not cover.
+///
+/// `member_rows` is the total across every layer's member table, and `n` the item count.
+pub(crate) fn entity_order_residency(
+    n: u64,
+    columns: &[ColumnCost],
+    member_rows: u64,
+) -> Residency {
+    let mut terms = vec![
+        Term {
+            what:
+                "the sorted source ids, 8 B/item (input.rs; released after the layer publication)"
+                    .into(),
+            bytes: 8 * n,
+        },
+        Term {
+            what: "the ordinal→entity map, 4 B/item".into(),
+            bytes: 4 * n,
+        },
+    ];
+    for (index, column) in columns.iter().enumerate() {
+        let width = fixed_width(column.ty);
+        let presence = n.div_ceil(8);
+        let bytes = width
+            .saturating_mul(n)
+            .saturating_add(presence)
+            .saturating_add(column.payload_bytes);
+        let ty = column.ty.arrow_type_name();
+        terms.push(Term {
+            what: if column.payload_bytes > 0 {
+                format!(
+                    "declared column {index} ({ty}): {width} B/item of header plus \
+                     {} MiB of characters",
+                    column.payload_bytes >> 20
+                )
+            } else {
+                format!("declared column {index} ({ty}): {width} B/item")
+            },
+            bytes,
+        });
+    }
+    if member_rows > 0 {
+        terms.push(Term {
+            what: format!(
+                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the plan, the \
+                 resolved entities and the published memberships, all three resident at once"
+            ),
+            bytes: member_rows.saturating_mul(BYTES_PER_MEMBER_ROW),
+        });
+    }
+    terms.push(Term {
+        what: "slack for decode buffers, stage scratch and the allocator".into(),
+        bytes: SLACK,
+    });
+    Residency { terms }
+}
+
+/// The whole tail's residency for this build, with the two Parquet figures read from footers.
+///
+/// **Footers only.** A row count and a column's uncompressed size both live in the file's metadata,
+/// so this opens every input and reads none of them. A file that cannot be opened, or a column that
+/// is not in it, contributes zero rather than refusing: the pre-flight is an estimate, and a build
+/// blocked because a footer would not parse is a worse outcome than one that under-reads.
+pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
+    let mut payloads = vec![0u64; args.schema.attributes.len()];
+    for source in &args.attribute_sources {
+        let Some(metadata) = footer(&source.path) else {
+            continue;
+        };
+        for &index in &source.attributes {
+            let Some(attribute) = args.schema.attributes.get(index) else {
+                continue;
+            };
+            if !is_variable_width(attribute.ty) {
+                continue;
+            }
+            payloads[index] = payloads[index]
+                .saturating_add(uncompressed_column_bytes(&metadata, attribute.column()));
+        }
+    }
+    let columns: Vec<ColumnCost> = args
+        .schema
+        .attributes
+        .iter()
+        .zip(payloads)
+        .map(|(attribute, payload_bytes)| ColumnCost {
+            ty: attribute.ty,
+            payload_bytes,
+        })
+        .collect();
+    let member_rows = args
+        .layer_inputs
+        .iter()
+        .filter_map(|layer| layer.members.as_ref())
+        .filter_map(|members| footer(&members.path))
+        .map(|metadata| metadata.file_metadata().num_rows().max(0) as u64)
+        .sum();
+    entity_order_residency(n, &columns, member_rows)
+}
+
+/// One Parquet file's metadata, or `None` where it cannot be had.
+fn footer(
+    path: &std::path::Path,
+) -> Option<std::sync::Arc<parquet::file::metadata::ParquetMetaData>> {
+    let file = std::fs::File::open(path).ok()?;
+    let builder =
+        parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+    Some(builder.metadata().clone())
+}
+
+/// The uncompressed bytes one named column occupies across every row group.
+fn uncompressed_column_bytes(
+    metadata: &parquet::file::metadata::ParquetMetaData,
+    column: &str,
+) -> u64 {
+    let mut total = 0u64;
+    for group in metadata.row_groups() {
+        for chunk in group.columns() {
+            if chunk.column_path().parts().first().map(String::as_str) == Some(column) {
+                total = total.saturating_add(chunk.uncompressed_size().max(0) as u64);
+            }
+        }
+    }
+    total
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn column(ty: ScalarType, payload: u64) -> ColumnCost {
+        ColumnCost {
+            ty,
+            payload_bytes: payload,
+        }
+    }
+
+    /// **The campaign's own schema at its own scales.** Seven declared columns — `u64`, `u32`,
+    /// `timestamp_us`, a `u8` category, a `keyword`, a `text` and a `u32` — over the generator's
+    /// three member tables (2n + 3.4n + n rows). The point of the test is the shape: the tail is
+    /// linear in `n` and dominated by the two variable-width columns and the member tables, not by
+    /// anything the batch stride can reach.
+    fn campaign_residency(n: u64, text_bytes_per_item: u64) -> Residency {
+        let columns = [
+            column(ScalarType::U64, 0),
+            column(ScalarType::U32, 0),
+            column(ScalarType::TimestampUs, 0),
+            column(ScalarType::U8, 0),
+            column(ScalarType::Keyword, 8 * n),
+            column(ScalarType::Text, text_bytes_per_item * n),
+            column(ScalarType::U32, 0),
+        ];
+        entity_order_residency(n, &columns, (2 * n) + (34 * n / 10) + n)
+    }
+
+    #[test]
+    fn the_tail_is_linear_in_the_item_count_and_the_batch_stride_reaches_none_of_it() {
+        let small = campaign_residency(10_000_000, 200);
+        let large = campaign_residency(50_000_000, 200);
+        // Five times the corpus, five times the residency to within the fixed slack.
+        let ratio = large.total() as f64 / small.total() as f64;
+        assert!(
+            (4.9..5.1).contains(&ratio),
+            "the tail should scale with the corpus, got {ratio}"
+        );
+    }
+
+    /// A `text` column is a `String` per entity **before a character is stored**, and that header
+    /// alone is three times the widest fixed-width column the schema can declare.
+    #[test]
+    fn a_variable_width_column_costs_a_string_header_per_entity() {
+        let n = 10_000_000;
+        let bare = entity_order_residency(n, &[], 0).total();
+        let text = entity_order_residency(n, &[column(ScalarType::Text, 0)], 0).total() - bare;
+        let widest = entity_order_residency(n, &[column(ScalarType::U64, 0)], 0).total() - bare;
+        assert_eq!(text, 24 * n + n.div_ceil(8));
+        assert!(
+            text > 2 * widest,
+            "{text} B of string headers should dwarf {widest} B of the widest fixed column"
+        );
+    }
+
+    /// Member rows are charged three times because they are resident three times, and a build's
+    /// member tables can outweigh its whole attribute tail.
+    #[test]
+    fn member_rows_are_charged_for_every_copy_that_is_resident() {
+        let n = 10_000_000;
+        let without = entity_order_residency(n, &[], 0);
+        let with = entity_order_residency(n, &[], 64_000_000);
+        assert_eq!(
+            with.total() - without.total(),
+            64_000_000 * BYTES_PER_MEMBER_ROW
+        );
+    }
+
+    /// The description leads with the largest term, because that is the one the operator acts on.
+    #[test]
+    fn the_breakdown_leads_with_the_term_worth_acting_on() {
+        let described = campaign_residency(50_000_000, 200).describe();
+        let first = described
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or_default();
+        assert!(
+            first.contains("text"),
+            "the text column is the largest term at this schema; got {first}"
+        );
+    }
+
+    /// **The measurement the model is checked against.** Writes a corpus of `N` items with a text
+    /// column and a member table, builds it with an observer, and prints each stage's peak RSS
+    /// beside the model's prediction.
+    ///
+    /// `#[ignore]`d because it writes and builds a real corpus — minutes and gigabytes, which is
+    /// not a gate's business. Run it by name when the model's constants are in question:
+    ///
+    /// ```text
+    /// cargo test -p tessera-build --release residency::tests::the_model -- --ignored --nocapture
+    /// ```
+    /// A corpus of `n` items with one `u32` and one `text` column, and a flat layer whose member
+    /// table names every item — the smallest fixture that has each term of the model in it.
+    ///
+    /// Returns the args and the temp dir, which the caller must hold: the inputs live in it.
+    fn fixture(n: u64) -> (crate::BuildArgs, tempfile::TempDir) {
+        use arrow::array::{ArrayRef, Float64Array, StringArray, UInt32Array, UInt64Array};
+        use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
+        use arrow::record_batch::RecordBatch;
+        use parquet::arrow::ArrowWriter;
+        use std::sync::Arc;
+
+        const MEMBERS_PER_ARTIFACT: u64 = 64;
+        let temp = tempfile::TempDir::new().unwrap();
+        let dir = temp.path();
+        let write = |path: &std::path::Path, schema: Arc<ArrowSchema>, columns: Vec<ArrayRef>| {
+            let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
+            let mut writer =
+                ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            writer.close().unwrap();
+        };
+
+        let points = dir.join("points.parquet");
+        let ids: Vec<u64> = (0..n).collect();
+        let blurbs: Vec<String> = ids
+            .iter()
+            .map(|e| format!("item {e} of the residency fixture, prose enough to have a payload"))
+            .collect();
+        write(
+            &points,
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("entity_id", DataType::UInt64, false),
+                Field::new("x", DataType::Float64, false),
+                Field::new("y", DataType::Float64, false),
+                Field::new("weight", DataType::UInt32, false),
+                Field::new("blurb", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(UInt64Array::from(ids.clone())) as ArrayRef,
+                Arc::new(Float64Array::from(
+                    ids.iter().map(|e| (e % 1000) as f64).collect::<Vec<_>>(),
+                )),
+                Arc::new(Float64Array::from(
+                    ids.iter().map(|e| (e % 997) as f64).collect::<Vec<_>>(),
+                )),
+                Arc::new(UInt32Array::from(
+                    ids.iter().map(|e| (e % 64) as u32).collect::<Vec<_>>(),
+                )),
+                Arc::new(StringArray::from(blurbs)),
+            ],
+        );
+
+        let pairs = dir.join("pairs.parquet");
+        write(
+            &pairs,
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("entity_id", DataType::UInt64, false),
+                Field::new("term_id", DataType::UInt32, false),
+            ])),
+            vec![
+                Arc::new(UInt64Array::from(ids.clone())) as ArrayRef,
+                Arc::new(UInt32Array::from(
+                    ids.iter().map(|e| (e % 512) as u32).collect::<Vec<_>>(),
+                )),
+            ],
+        );
+
+        let artifacts = dir.join("artifacts.parquet");
+        let keys: Vec<String> = (0..n.div_ceil(MEMBERS_PER_ARTIFACT))
+            .map(|a| a.to_string())
+            .collect();
+        write(
+            &artifacts,
+            Arc::new(ArrowSchema::new(vec![Field::new(
+                "key",
+                DataType::Utf8,
+                false,
+            )])),
+            vec![Arc::new(StringArray::from(keys)) as ArrayRef],
+        );
+        let members = dir.join("members.parquet");
+        write(
+            &members,
+            Arc::new(ArrowSchema::new(vec![
+                Field::new("key", DataType::Utf8, false),
+                Field::new("entity", DataType::UInt64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(
+                    ids.iter()
+                        .map(|e| (e / MEMBERS_PER_ARTIFACT).to_string())
+                        .collect::<Vec<_>>(),
+                )) as ArrayRef,
+                Arc::new(UInt64Array::from(ids.clone())),
+            ],
+        );
+
+        let config = format!(
+            r#"
+[sources]
+points = "{points}"
+pairs = "{pairs}"
+artifacts = "{artifacts}"
+members = "{members}"
+
+[defaults]
+source = "points"
+
+[[view]]
+name = "s0"
+extent = {{ min = 0.0, max = 1024.0 }}
+point_visibility = {{ source = "pairs", default = "public" }}
+
+[[attribute]]
+name = "weight"
+type = "u32"
+render = true
+
+[[attribute]]
+name = "blurb"
+type = "text"
+index = true
+analyser = "unicode"
+
+[[layer]]
+name = "fixture/flat"
+source = "artifacts"
+views = ["s0"]
+membership = "enumerated"
+hierarchy = {{ kind = "flat" }}
+visibility = "public"
+artifact_visibility = {{ default = "inherited" }}
+require_member_visibility = "none"
+
+  [layer.members]
+  source = "members"
+"#,
+            points = "points.parquet",
+            pairs = "pairs.parquet",
+            artifacts = "artifacts.parquet",
+            members = "members.parquet",
+        );
+        let config_path = dir.join("corpus.toml");
+        std::fs::write(&config_path, &config).unwrap();
+        let parsed = crate::config::Config::parse(&config_path, &Default::default()).unwrap();
+        let args = crate::BuildArgs {
+            points: points.clone(),
+            point_fields: parsed.views[0].fields.clone(),
+            attribute_sources: parsed.attribute_sources.clone(),
+            access: crate::config::AccessInput::relation(pairs.clone()),
+            out: dir.join("bundle"),
+            extent: tessera_spatial::Bounds {
+                x_min: 0.0,
+                x_max: 1024.0,
+                y_min: 0.0,
+                y_max: 1024.0,
+            },
+            view_id: "s0".into(),
+            limit: None,
+            identity_key: tessera_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
+                .unwrap(),
+            identity_key_hex: "000102030405060708090a0b0c0d0e0f".into(),
+            idset: 1,
+            shard_id: 0,
+            layers: parsed.layers.clone(),
+            layer_inputs: parsed.layer_sources.clone(),
+            mint_external_ids: false,
+            emit_oracle_pairs: false,
+            batch_items: None,
+            memory_budget: None,
+            band_rows: None,
+            schema: parsed.schema.clone(),
+        };
+
+        (args, temp)
+    }
+
+    /// **The refusal, before the first pass.** A budget under the tail's own floor stops the build
+    /// at the plan rather than at the OOM killer, and the message names the flag and the terms.
+    #[test]
+    fn a_budget_under_the_tail_refuses_before_the_build_starts() {
+        let (mut args, _temp) = fixture(20_000);
+        args.memory_budget = Some(32 << 20);
+        let error = crate::build(&args).expect_err("a 32 MiB budget cannot hold this tail");
+        let message = error.to_string();
+        assert!(
+            message.contains("entity-order stages"),
+            "the refusal should name the stages that do not batch; got {message}"
+        );
+        assert!(
+            message.contains("--memory-budget"),
+            "the refusal should name the flag that moves the bound; got {message}"
+        );
+        // Refused at the plan, which is before the pairs relation is packed and long before a
+        // segment exists: the whole point is not paying for the work first.
+        let mut written = Vec::new();
+        let mut stack = vec![args.out.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry.path().is_dir() {
+                    stack.push(entry.path());
+                } else {
+                    written.push(entry.file_name().to_string_lossy().into_owned());
+                }
+            }
+        }
+        assert!(
+            !written
+                .iter()
+                .any(|f| f == "columns.arrow" || f == "postings.arrow"),
+            "the refusal should land before any segment is written; found {written:?}"
+        );
+    }
+
+    /// And the same build fits under a budget that covers it, so the pre-flight is a bound and not
+    /// a blanket.
+    #[test]
+    fn the_same_build_fits_under_a_budget_that_covers_the_tail() {
+        let (mut args, _temp) = fixture(20_000);
+        args.memory_budget = Some(2 << 30);
+        crate::build(&args).expect("2 GiB covers a twenty-thousand-item tail");
+    }
+
+    #[test]
+    #[ignore = "writes and builds a real corpus to check the model's constants against a peak"]
+    fn the_model_is_checked_against_an_observed_peak() {
+        const N: u64 = 1_000_000;
+
+        struct Trace;
+        impl crate::observer::BuildObserver for Trace {
+            fn stage_end(
+                &self,
+                stage: crate::observer::BuildStage,
+                elapsed: std::time::Duration,
+                rows: u64,
+                peak_rss_kib: u64,
+            ) {
+                println!(
+                    "{:>16}  {:>8.2}s  rows={rows:<12} peak={:>6} MiB",
+                    stage.name(),
+                    elapsed.as_secs_f64(),
+                    peak_rss_kib / 1024
+                );
+            }
+        }
+
+        let (args, _temp) = fixture(N);
+        let model = model(&args, N);
+        println!("model: {} MiB{}", model.total() >> 20, model.describe());
+        crate::build_observed(&args, &Trace).unwrap();
+        println!(
+            "observed build peak: {} MiB",
+            crate::observer::peak_rss_kib() / 1024
+        );
+    }
+}

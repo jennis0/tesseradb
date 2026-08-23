@@ -49,51 +49,20 @@ use tessera_store::membership::{
 use crate::artifacts::MembershipRows;
 use crate::compose::MaskedSet;
 
-/// The finest row range a node addresses: **ten bits, a thousand rows.**
-///
-/// ⊘ **The probe's constant, measured at no other value** (`design/artifact-serving-at-scale.md`
-/// §4.4's closing note, carried into `2026-08-21-artifact-layout-selection.md` §9's constraint 6).
-/// It is kept rather than re-chosen, and what it is doing is worth stating so a later measurement
-/// knows what it is arguing with. The floor trades settling granularity against the index's own
-/// size: nodes are bounded at `rows / 2¹⁰`, which is the 4.2 MB §3 measures at 10⁸ rows and the
-/// 25.8 MB at 10⁹. Below it the node count starts to dominate what the index costs to hold, and a
-/// viewport narrower than a thousand rows has so few candidates that the per-candidate probe is
-/// already the cheap route — there is nothing left for a finer node to save.
-const FINEST_SHIFT: u32 = 10;
-
-/// Bits per level: **four, a sixteen-way fan-out.**
-///
-/// ⊘ The probe's other constant, and measured at no other value either. Morton over two dimensions
-/// makes a quadtree level two bits, so four bits is *two* quad levels per index level — half the
-/// depth, hence half the nodes a narrow viewport's descent visits, at the cost of a coarser
-/// alignment for the settle test. The extent beside the tree is what makes that trade affordable:
-/// it settles an artifact the walk handed back on an alignment boundary
-/// ([`TileIndex::inside`]), so widening the fan-out costs candidates rather than answers.
-const LEVEL_STEP: u32 = 4;
-
-/// **What is corpus-relative here and what is not.** §4.4's first bullet — *a hierarchy, not a
-/// granularity* — is about a flat index at a fixed block size, which settles nothing at mid-zoom
-/// because the viewport is then made of tiles smaller than the block. The *set* of levels answers
-/// that and is derived from the corpus: shifts run from the coarsest one the row count actually
-/// reaches down to [`FINEST_SHIFT`], so there is a level matching every zoom a viewer can be at.
-/// What stays fixed is the floor and the step above, and neither is measured at another value.
-///
-/// Coarse to fine. The first entry is the largest shift with `row_count >> shift > 0`, so there
-/// are at most `2^LEVEL_STEP` roots however large the corpus is.
-fn shifts_for(row_count: u32) -> Vec<u32> {
-    let mut shifts = Vec::new();
-    let mut shift = 32;
-    while shift > FINEST_SHIFT {
-        shift -= LEVEL_STEP;
-        if (row_count as u64) >> shift > 0 || shift <= FINEST_SHIFT {
-            shifts.push(shift.max(FINEST_SHIFT));
-        }
-    }
-    if shifts.is_empty() {
-        shifts.push(FINEST_SHIFT);
-    }
-    shifts
-}
+// **What is corpus-relative here and what is not.** §4.4's first bullet — *a hierarchy, not a
+// granularity* — is about a flat index at a fixed block size, which settles nothing at mid-zoom
+// because the viewport is then made of tiles smaller than the block. The *set* of levels answers
+// that and is derived from the corpus: shifts run from the coarsest one the row count actually
+// reaches down to the floor, so there is a level matching every zoom a viewer can be at. What
+// stays fixed is the floor and the step above, and neither is measured at another value — both are
+// argued at [`tessera_store::derived::FINEST_SHIFT`] and
+// [`tessera_store::derived::LEVEL_STEP`].
+//
+// **The ladder is one crate down** because the layout pick reads it too: the fraction of a level
+// no node can hold is now the trigger, and a build has to compute it without building this
+// hierarchy at all ([`tessera_store::derived::is_everywhere`]). Two definitions of where the
+// nodes are would make the pick and the walk disagree about which artifacts are placeable.
+use tessera_store::derived::tile_index_shifts as shifts_for;
 
 /// One ordinal's row-space extent. **Three states and not two**, which is the layout memo's
 /// constraint 3 and the sentinel rule the durable column encodes.
@@ -170,26 +139,22 @@ impl TileIndex {
     /// whose members are outside the viewport: the collapse the settled half rests on would no
     /// longer be true, and the probe would answer a different question from the one recorded.
     pub fn build(membership: &MembershipRows, row_count: u32) -> Self {
-        let mut spans = Vec::with_capacity(membership.len());
-        for ordinal in 0..membership.len() as u32 {
-            spans.push(match membership.get(ordinal) {
-                // A hole: the row form's `None`, which is a slot no record occupies.
-                None => TILE_INDEX_HOLE,
-                // A live artifact whose projection is empty. `minimum`/`maximum` are `None`
-                // together or not at all, so one test settles it.
-                Some(rows) => match (rows.minimum(), rows.maximum()) {
-                    (Some(lo), Some(hi)) => (lo, hi),
-                    _ => TILE_INDEX_EMPTY,
-                },
-            });
-        }
         // Framed and read back through the same checks a mapped file takes, for the reason
         // `ContainmentPartition::packed` gives: the two routes are one reader, so a framing rule
         // can never hold for a file and not for the form a publication built.
-        Self::from_pack(
-            TileIndexPack::from_bytes(pack_tile_index(row_count, &spans))
-                .expect("a column this crate just packed frames by construction"),
-        )
+        Self::of_bytes(tessera_store::derived::project_tile_index(
+            membership.len() as u32,
+            row_count,
+            &|visit| {
+                for ordinal in 0..membership.len() as u32 {
+                    // A hole — the row form's `None`, a slot no record occupies — yields no visit
+                    // at all, exactly as a level's own iteration skips one.
+                    if let Some(rows) = membership.get(ordinal) {
+                        visit(ordinal, rows);
+                    }
+                }
+            },
+        ))
     }
 
     /// The same column, projected straight from a level's records without building the row form
@@ -204,24 +169,30 @@ impl TileIndex {
     /// residency it would otherwise be holding twice.
     ///
     /// A skipped ordinal is a **hole**, exactly as the row form's `resize_with(|| None)` makes it.
-    pub fn project<'a>(
-        artifacts: impl Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
+    pub fn project<'a, I>(
+        ordinals: u32,
+        artifacts: impl Fn() -> I,
         space: &tessera_store::permutation::RowSpace,
-    ) -> Self {
-        let mut spans: Vec<(u32, u32)> = Vec::new();
-        for (ordinal, record) in artifacts {
-            let idx = ordinal as usize;
-            if spans.len() <= idx {
-                spans.resize(idx + 1, TILE_INDEX_HOLE);
-            }
-            let rows = space.project_base(&record.members);
-            spans[idx] = match (rows.minimum(), rows.maximum()) {
-                (Some(lo), Some(hi)) => (lo, hi),
-                _ => TILE_INDEX_EMPTY,
-            };
-        }
+    ) -> Self
+    where
+        I: Iterator<Item = (u32, &'a tessera_lifecycle::membership::ArtifactRecord)>,
+    {
+        Self::of_bytes(tessera_store::derived::project_tile_index(
+            ordinals,
+            space.base_rows(),
+            &|visit| {
+                for (ordinal, record) in artifacts() {
+                    visit(ordinal, &space.project_base(&record.members));
+                }
+            },
+        ))
+    }
+
+    /// Frame a column this process just produced and read it back through the same checks a mapped
+    /// file takes.
+    pub fn of_bytes(bytes: Vec<u8>) -> Self {
         Self::from_pack(
-            TileIndexPack::from_bytes(pack_tile_index(space.base_rows(), &spans))
+            TileIndexPack::from_bytes(bytes)
                 .expect("a column this crate just packed frames by construction"),
         )
     }
@@ -643,22 +614,37 @@ mod tests {
         assert!(index.inside(0, &whole, whole.cardinality()));
     }
 
-    /// **The level set is corpus-relative and the floor is not.** A small corpus builds one level;
-    /// a large one builds a level for every zoom down to a thousand rows, with at most sixteen
-    /// roots however large it is.
+    /// **The `everywhere` set is exactly what the walk cannot place**, which is what licenses the
+    /// layout pick reading it from the extents alone: the one-shift test in
+    /// [`tessera_store::derived::is_everywhere`] and this hierarchy's own placement have to agree
+    /// artifact for artifact, or the trigger is reading a different quantity from the one it is
+    /// named after.
+    ///
+    /// The level-set cases themselves moved with the ladder — `tessera_store::membership`'s own
+    /// tests.
     #[test]
-    fn the_hierarchy_has_a_level_for_every_zoom_and_sixteen_roots_at_most() {
-        assert_eq!(shifts_for(0), vec![10]);
-        assert_eq!(shifts_for(500), vec![10]);
-        assert_eq!(shifts_for(100_000_000), vec![24, 20, 16, 12, 10]);
-        assert_eq!(shifts_for(1_000_000_000), vec![28, 24, 20, 16, 12, 10]);
-        for rows in [1_000u32, 1_000_000, 100_000_000, u32::MAX] {
-            let top = shifts_for(rows)[0];
-            assert!(
-                (rows as u64) >> top < (1 << LEVEL_STEP),
-                "{rows} rows would give more than a fan-out of roots"
-            );
-        }
+    fn the_everywhere_set_and_the_one_shift_test_agree() {
+        let sets: Vec<Vec<u32>> = (0..400u32)
+            .map(|i| match i % 4 {
+                0 => vec![i * 13, i * 13 + 1],
+                1 => vec![1_023 + i, 1_024 + i],
+                2 => vec![i, 8_000 + i],
+                _ => vec![i * 7],
+            })
+            .collect();
+        let refs: Vec<Option<&[u32]>> = sets.iter().map(|s| Some(s.as_slice())).collect();
+        let membership = rows_of(&refs);
+        let index = TileIndex::build(&membership, 16_384);
+        assert!(index.everywhere() > 0, "the fixture must exercise the set");
+
+        let shift = tessera_store::derived::coarsest_shift(16_384);
+        let by_test = (0..membership.len() as u32)
+            .filter(|&ordinal| match index.extent(ordinal) {
+                Extent::Span { lo, hi } => tessera_store::derived::is_everywhere(lo, hi, shift),
+                _ => false,
+            })
+            .count() as u64;
+        assert_eq!(index.everywhere(), by_test);
     }
 
     /// The walk touches the viewport's perimeter among the **occupied** nodes, not the population.

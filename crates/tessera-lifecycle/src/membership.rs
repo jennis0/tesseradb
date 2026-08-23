@@ -184,18 +184,36 @@ pub struct IncomingContent {
     pub generated_from: Bitmap,
 }
 
+/// One membership, built from resolved entities — **sorted once, then appended**.
+///
+/// Every caller below took the same loop of `Bitmap::add` over whatever order its source happened
+/// to hand it, and that is the expensive shape: an out-of-order value lands in the middle of its
+/// container's array, so a container of *c* elements pays a `memmove` of *c* per insertion. Sorting
+/// first means every value is larger than the container's last, which is Roaring's append path.
+/// **Measured at the campaign's own membership shape** — 3.1×10⁶ scattered entities over a 5×10⁷
+/// row space, 763 containers of ~4 000 — 458 ms scattered against 72 ms sorted, a factor of 6.4,
+/// with the two bitmaps compared equal (`probes/2026-08-22-artifact-serving-e2e/README.md` finding
+/// 3's follow-up).
+///
+/// The order a set is built in is not observable in the set, so this changes no result.
+fn bitmap_of_entities(entities: impl IntoIterator<Item = EntityId>) -> Bitmap {
+    // Entity space is `u32` by I9, so the narrowing is total.
+    let mut values: Vec<u32> = entities.into_iter().map(|e| e.raw() as u32).collect();
+    values.sort_unstable();
+    values.dedup();
+    let mut bitmap = Bitmap::new();
+    bitmap.add_many(&values);
+    bitmap
+}
+
 impl IncomingContent {
     /// Builds one from resolved entities — the constructor exists for
     /// [`IncomingArtifact::from_entities`]'s reason: `tessera-server` names a set without being
     /// able to do arithmetic on one.
     pub fn new(values: Vec<String>, generated_from: impl IntoIterator<Item = EntityId>) -> Self {
-        let mut bitmap = Bitmap::new();
-        for entity in generated_from {
-            bitmap.add(entity.raw() as u32);
-        }
         IncomingContent {
             values,
-            generated_from: bitmap,
+            generated_from: bitmap_of_entities(generated_from),
         }
     }
 }
@@ -208,14 +226,9 @@ impl IncomingArtifact {
     /// `check-layers.sh` holds, and one worth holding: the request plane should be able to name a
     /// membership without being able to do arithmetic on one.
     pub fn from_entities(key: Option<String>, members: impl IntoIterator<Item = EntityId>) -> Self {
-        let mut bitmap = Bitmap::new();
-        for entity in members {
-            // Entity space is `u32` by I9, so the narrowing is total.
-            bitmap.add(entity.raw() as u32);
-        }
         IncomingArtifact {
             key,
-            members: bitmap,
+            members: bitmap_of_entities(members),
             contents: Vec::new(),
             attached_to: None,
             parent_key: None,
@@ -275,14 +288,9 @@ impl IncomingGrowth {
     /// bitmap type stays inside this crate, so a request plane can name a set without being able
     /// to do arithmetic on one.
     pub fn from_entities(key: String, joining: impl IntoIterator<Item = EntityId>) -> Self {
-        let mut bitmap = Bitmap::new();
-        for entity in joining {
-            // Entity space is `u32` by I9, so the narrowing is total.
-            bitmap.add(entity.raw() as u32);
-        }
         IncomingGrowth {
             key,
-            joining: bitmap,
+            joining: bitmap_of_entities(joining),
         }
     }
 }
@@ -1826,6 +1834,154 @@ mod tests {
              that restarted at zero would let a form built over the artifacts that are gone \
              compare equal to the level that replaced them"
         );
+    }
+
+    /// A membership of `span` entities scattered over a `rows`-wide entity space, which is the
+    /// shape a treed node's interval takes once signature order has permuted it.
+    fn scattered_membership(span: std::ops::Range<u64>, rows: u64) -> Bitmap {
+        let scramble = |e: u64| -> u32 {
+            let mut x = e.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            x ^= x >> 29;
+            x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            x ^= x >> 32;
+            (x % rows) as u32
+        };
+        let mut b = Bitmap::new();
+        let mut values: Vec<u32> = span.map(scramble).collect();
+        values.sort_unstable();
+        values.dedup();
+        b.add_many(&values);
+        b
+    }
+
+    /// Every array container's payload, strictly increasing? Parsed out of the portable bytes here
+    /// rather than asked of the decoder, so a failure says *the writer emitted an out-of-order
+    /// container* and not merely *the decoder refused*.
+    fn out_of_order_containers(bytes: &[u8]) -> Vec<(usize, u32, usize)> {
+        let cookie = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let hasrun = (cookie & 0xFFFF) == 12347;
+        let (containers, mut at) = if hasrun {
+            (((cookie >> 16) + 1) as usize, 4usize)
+        } else {
+            (
+                u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+                8usize,
+            )
+        };
+        let run_flags = at;
+        if hasrun {
+            at += containers.div_ceil(8);
+        }
+        let descriptors = at;
+        at += containers * 4;
+        if !hasrun || containers >= 4 {
+            at += containers * 4; // the offset header
+        }
+        let mut out = Vec::new();
+        for k in 0..containers {
+            let card = u16::from_le_bytes(
+                bytes[descriptors + 4 * k + 2..descriptors + 4 * k + 4]
+                    .try_into()
+                    .unwrap(),
+            ) as u32
+                + 1;
+            let isrun = hasrun && (bytes[run_flags + k / 8] & (1 << (k % 8))) != 0;
+            if isrun {
+                let runs = u16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) as usize;
+                at += 2 + runs * 4;
+            } else if card > 4096 {
+                at += 8192;
+            } else {
+                let word = |i: usize| {
+                    u16::from_le_bytes(bytes[at + 2 * i..at + 2 * i + 2].try_into().unwrap())
+                };
+                for i in 1..card as usize {
+                    if word(i) <= word(i - 1) {
+                        out.push((k, card, i));
+                        break;
+                    }
+                }
+                at += 2 * card as usize;
+            }
+        }
+        out
+    }
+
+    fn check_round_trip(members: &Bitmap) {
+        let bytes = serialise_members(members);
+        let broken = out_of_order_containers(&bytes);
+        assert!(
+            broken.is_empty(),
+            "a container was written out of order — (container, cardinality, index): {broken:?}"
+        );
+        assert_eq!(
+            deserialise_members(&bytes).as_ref(),
+            Some(members),
+            "a membership of {} did not survive its own encoding",
+            members.cardinality()
+        );
+    }
+
+    /// **The shape the 5×10⁷ tier refused, pinned** — `probes/2026-08-22-artifact-serving-e2e/`
+    /// finding 3: `tessera build` stopped with *"1 membership(s) of generator/treed did not survive
+    /// their own encoding"*, a bitmap failing its own `Portable` round trip in the process that
+    /// wrote it.
+    ///
+    /// What the campaign met was not an encoding fault. The bytes carry what the container held;
+    /// what the decoder's validation rejected was *"array elements not strictly increasing"* — a
+    /// container that was **already out of order before it was serialised**. This test therefore
+    /// checks both halves at the shape that produced it: an array container's payload is strictly
+    /// increasing in the bytes we wrote, and the bytes decode.
+    ///
+    /// ⊘ **The corruption itself was not attributed.** It appeared under repeated `Bitmap::add` of
+    /// out-of-order values — the insert-into-the-middle path this crate no longer uses
+    /// ([`bitmap_of_entities`]) — at a rate of a few per thousand memberships, bursty, and not a
+    /// function of the data: the same input corrupted a different membership on each run and none
+    /// at all on most. It is below this crate, in CRoaring or in the machine, and stopped
+    /// reproducing before it could be told which. The check that caught it stays.
+    ///
+    /// Two memberships of that shape — 3.1×10⁶ entities scattered over a 5×10⁷ row space, which
+    /// is 763 array containers of about four thousand each.
+    #[test]
+    fn a_scattered_membership_of_the_campaigns_shape_survives_its_own_encoding() {
+        for block in 0..2u64 {
+            let lo = block * 3_125_000;
+            check_round_trip(&scattered_membership(lo..lo + 3_125_000, 50_000_000));
+        }
+    }
+
+    /// The whole treed level the 5×10⁷ tier refused — five thousand memberships, 1.8×10⁸ member
+    /// rows, the root holding the corpus.
+    ///
+    /// `#[ignore]`d for its runtime: it builds every membership of the level and takes tens of
+    /// seconds, where the un-ignored test above exercises the same construction and the same two
+    /// checks at eight of them.
+    #[test]
+    #[ignore = "builds a whole 5x10^7 treed level; the eight-membership variant covers the path"]
+    fn the_refusing_tiers_whole_treed_level_survives_its_own_encoding() {
+        const ROWS: u64 = 50_000_000;
+        const BRANCH: u64 = 3;
+        let count = ROWS / 10_000;
+        let child_span = |(lo, hi): (u64, u64), index: u64| {
+            let each = (hi - lo) * 3 / 4 / BRANCH;
+            let start = lo + index * each;
+            (start.min(hi), (start + each).min(hi))
+        };
+        for a in 0..count {
+            let mut chain = Vec::new();
+            let mut node = a;
+            while node > 0 {
+                node = (node - 1) / BRANCH;
+                chain.push(node);
+            }
+            chain.reverse();
+            chain.push(a);
+            let mut span = (0, ROWS);
+            for pair in chain.windows(2) {
+                span = child_span(span, pair[1] - pair[0] * BRANCH - 1);
+            }
+            check_round_trip(&scattered_membership(span.0..span.1, ROWS));
+        }
     }
 
     #[test]

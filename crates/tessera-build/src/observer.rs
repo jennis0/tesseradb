@@ -46,6 +46,15 @@ pub enum BuildStage {
     ///    stage rather than a rider on `PostingsWrite`, which runs before the attribute values
     ///    have been read; zero-length for a schema that declares no filterable column.
     FilterPostings,
+    /// 8c. The declared layers and their artifacts: the member tables read, resolved against the
+    ///    entity ids this build assigned, and published through the same registry the control
+    ///    plane runs.
+    ///
+    ///    **Its own stage because it owned an unattributed share of the peak.** It ran inside
+    ///    [`BuildStage::AttributeTail`], which is where the campaign's OOM kills landed
+    ///    (`probes/2026-08-22-artifact-serving-e2e/` finding 4) — and a stage boundary is what lets
+    ///    an observer say which of the two it was.
+    Layers,
     /// 9. The tiler sort: `(morton, tessera_id)` ascending.
     TilerSort,
     /// 10. Segment files: `morton.u32`, `permutation.bin`, `columns.arrow`, and their fsyncs.
@@ -67,13 +76,14 @@ impl BuildStage {
             BuildStage::ExternalIds => "external_ids",
             BuildStage::AttributeTail => "attribute_tail",
             BuildStage::FilterPostings => "filter_postings",
+            BuildStage::Layers => "layers",
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
             BuildStage::Manifests => "manifests",
         }
     }
 
-    pub const ALL: [BuildStage; 12] = [
+    pub const ALL: [BuildStage; 14] = [
         BuildStage::SourceIds,
         BuildStage::Dictionary,
         BuildStage::PairsPack,
@@ -83,6 +93,8 @@ impl BuildStage {
         BuildStage::PostingsWrite,
         BuildStage::ExternalIds,
         BuildStage::AttributeTail,
+        BuildStage::Layers,
+        BuildStage::FilterPostings,
         BuildStage::TilerSort,
         BuildStage::SegmentWrite,
         BuildStage::Manifests,

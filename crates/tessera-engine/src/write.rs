@@ -9736,42 +9736,28 @@ impl Executor {
             return Vec::new();
         }
 
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("containment");
-        if let Err(source) = std::fs::create_dir_all(&dir) {
-            tracing::warn!(path = %dir.display(), %source, "the containment directory would not be created");
-            return Vec::new();
-        }
-        let mut entries = Vec::with_capacity(composed.len());
-        for (index, (layer, level, version, bytes)) in composed.into_iter().enumerate() {
-            // The naming rule the membership extents follow: a layer name is path-shaped and never
-            // reaches a filename; the publication that introduced the file does.
-            let name = format!("containment-{n:06}-{index:03}.tscp");
-            if let Err(error) = tessera_store::write_and_fsync(&dir.join(&name), &bytes) {
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    %error,
-                    "a containment partition would not be written; that level recomposes on first                      use"
-                );
-                continue;
-            }
-            entries.push(tessera_store::manifest::ContainmentExtent {
-                path: format!("partitions/{partition}/containment/{name}"),
-                layer,
-                level,
-                level_version: version,
-            });
-        }
-        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
-        // whose name was never written — the rule every other publication here follows.
-        if let Err(error) = tessera_store::fsync_dir(&dir) {
-            tracing::warn!(%error, "the containment directory would not be fsynced; its partitions are dropped");
-            return Vec::new();
-        }
-        entries
+        // **Filed by the shared writer**, which is the same one `tessera build`'s artifact pass
+        // calls: one naming rule, one durability sequence, one manifest-entry shape.
+        tessera_store::derived::file_containment(
+            prefix_dir,
+            partition,
+            n,
+            composed
+                .into_iter()
+                .map(
+                    |(layer, level, level_version, bytes)| tessera_store::derived::Filed {
+                        // A partition is a function of the level's records and the prefix's
+                        // postings, so it is not per view and the entry carries none.
+                        view: String::new(),
+                        layer,
+                        level,
+                        level_version,
+                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        bytes,
+                    },
+                )
+                .collect(),
+        )
     }
 
     /// Project and write this prefix's tile-index extent columns, one file per
@@ -9900,14 +9886,25 @@ impl Executor {
             let Some(registered) = self.live.registered_layer(&layer) else {
                 continue;
             };
+            // **One membership at a time, never the level's row form.** The observation is the same
+            // `project_base` per artifact either way; what differs is what is held while it runs,
+            // and at ten million artifacts a row form here is the gigabytes §7.3 prices — held
+            // beside the outgoing generation's own forms, because the fold runs before the flip.
             let shape = self.live.with_artifacts(|store| {
-                crate::artifacts::MembershipRows::build(store.level(&layer, level), space).shape()
+                tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
+                    for (ordinal, record) in store.level(&layer, level) {
+                        visit(ordinal, &space.project_base(&record.members));
+                    }
+                })
             });
             let chosen = crate::layout::choose(&registered.declaration, shape);
             tracing::info!(
                 layer = %layer,
                 level,
                 artifacts = shape.artifacts,
+                // **The trigger**, and the figure beside it is reported rather than read —
+                // decision 0092's (c), and the axis the 2026-08-22 bracket moved the pick onto.
+                everywhere_fraction = shape.everywhere_fraction,
                 blocks_per_artifact = shape.blocks_per_artifact,
                 partitions = shape.partitions,
                 pinned = ?registered.declaration.layout,
@@ -10015,51 +10012,25 @@ impl Executor {
             return Vec::new();
         }
 
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("row-column");
-        if let Err(source) = std::fs::create_dir_all(&dir) {
-            tracing::warn!(path = %dir.display(), %source, "the row-column directory would not be created");
-            return Vec::new();
-        }
-        let mut entries = Vec::with_capacity(written.len());
-        for (index, (view, layer, level, version, layout, bytes)) in written.into_iter().enumerate()
-        {
-            // The naming rule the membership extents follow: a layer name and a view id are
-            // caller-shaped and never reach a filename; the publication that introduced the file
-            // does. The extension names the form, so a directory listing says which is which.
-            let extension = match layout {
-                tessera_types::layer::ServingLayout::RowMajorList => "tsll",
-                _ => "tslb",
-            };
-            let name = format!("row-column-{n:06}-{index:03}.{extension}");
-            if let Err(error) = tessera_store::write_and_fsync(&dir.join(&name), &bytes) {
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    %error,
-                    "a row-major column would not be written; that level is composed on first use"
-                );
-                continue;
-            }
-            entries.push(tessera_store::manifest::RowColumnExtent {
-                path: format!("partitions/{partition}/row-column/{name}"),
-                view,
-                layer,
-                level,
-                level_version: version,
-                layout,
-            });
-        }
-        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
-        // whose name was never written — the rule every other publication here follows.
-        if let Err(error) = tessera_store::fsync_dir(&dir) {
-            tracing::warn!(%error, "the row-column directory would not be fsynced; its columns are dropped");
-            return Vec::new();
-        }
-        entries
+        // **Filed by the shared writer** — see `write_containment_partitions` above.
+        tessera_store::derived::file_row_columns(
+            prefix_dir,
+            partition,
+            n,
+            written
+                .into_iter()
+                .map(|(view, layer, level, level_version, layout, bytes)| {
+                    tessera_store::derived::Filed {
+                        view,
+                        layer,
+                        level,
+                        level_version,
+                        layout,
+                        bytes,
+                    }
+                })
+                .collect(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -10102,9 +10073,13 @@ impl Executor {
                 let mut out = Vec::with_capacity(levels.len() * spaces.len());
                 for (layer, level) in &levels {
                     let version = store.level_version(layer, *level);
+                    // **The level's own length, holes included** — a column sized by the last live
+                    // ordinal is short, and a short one is dropped at open rather than adopted.
+                    let ordinals = store.level(layer, *level).count() as u32;
                     for (view, space) in spaces {
                         let index = crate::tile_index::TileIndex::project(
-                            store.level(layer, *level),
+                            ordinals,
+                            || store.level(layer, *level),
                             space,
                         );
                         out.push((
@@ -10122,45 +10097,25 @@ impl Executor {
             return Vec::new();
         }
 
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("tile-index");
-        if let Err(source) = std::fs::create_dir_all(&dir) {
-            tracing::warn!(path = %dir.display(), %source, "the tile-index directory would not be created");
-            return Vec::new();
-        }
-        let mut entries = Vec::with_capacity(projected.len());
-        for (index, (view, layer, level, version, bytes)) in projected.into_iter().enumerate() {
-            // The naming rule the membership extents follow: a layer name and a view id are
-            // caller-shaped and never reach a filename; the publication that introduced the file
-            // does.
-            let name = format!("tile-index-{n:06}-{index:03}.tsti");
-            if let Err(error) = tessera_store::write_and_fsync(&dir.join(&name), &bytes) {
-                tracing::warn!(
-                    layer = %layer,
-                    level,
-                    view = %view,
-                    %error,
-                    "a tile index would not be written; that level's index is derived on first use"
-                );
-                continue;
-            }
-            entries.push(tessera_store::manifest::TileIndexExtent {
-                path: format!("partitions/{partition}/tile-index/{name}"),
-                view,
-                layer,
-                level,
-                level_version: version,
-            });
-        }
-        // The directory entry itself has to be durable, or a crash leaves a manifest naming a file
-        // whose name was never written — the rule every other publication here follows.
-        if let Err(error) = tessera_store::fsync_dir(&dir) {
-            tracing::warn!(%error, "the tile-index directory would not be fsynced; its columns are dropped");
-            return Vec::new();
-        }
-        entries
+        // **Filed by the shared writer** — see `write_containment_partitions` above.
+        tessera_store::derived::file_tile_indexes(
+            prefix_dir,
+            partition,
+            n,
+            projected
+                .into_iter()
+                .map(|(view, layer, level, level_version, bytes)| {
+                    tessera_store::derived::Filed {
+                        view,
+                        layer,
+                        level,
+                        level_version,
+                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        bytes,
+                    }
+                })
+                .collect(),
+        )
     }
 
     /// Rebuild every level's row-space membership, and every lineage this fold moved, against the
