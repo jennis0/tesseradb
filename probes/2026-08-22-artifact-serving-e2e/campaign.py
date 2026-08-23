@@ -146,6 +146,7 @@ operator_credential_env = "TESSERA_CAMPAIGN_OPERATOR_CRED"
 max_k = 1000000
 k_max_marks = 1000000
 theta_target_marks = 1099511627776
+stream_deadline_ms = {stream_deadline_ms}
 
 [ingest]
 flush_max_age_secs = 86400
@@ -153,7 +154,18 @@ compaction_window_start = "off"
 """
 
 
-def write_deployment(work: Path, ports: tuple[int, int, int]) -> Path:
+def write_deployment(
+    work: Path, ports: tuple[int, int, int], stream_deadline_ms: int = 60_000
+) -> Path:
+    """The campaign's `tessera.toml`.
+
+    `stream_deadline_ms` is the shipped default (60 000) everywhere except the design-ceiling probe,
+    which raises it and says so. At 9.8 million artifacts the cold row-form build takes 111 s and
+    happens **after** the response's first flush, so the shipped deadline fires on the first send
+    after it and the client gets a truncated body — see the README's defect note. The probe raises
+    the deadline in order to be able to measure the cold cost at all; every other run in this
+    campaign uses the default, and the truncation is reported rather than configured away.
+    """
     viewer, session, control = ports
     path = work / "tessera.toml"
     # The WAL's directory has to exist before `serve` opens it — a missing parent is an io error
@@ -168,6 +180,7 @@ def write_deployment(work: Path, ports: tuple[int, int, int]) -> Path:
             viewer=viewer,
             session=session,
             control=control,
+            stream_deadline_ms=stream_deadline_ms,
         )
     )
     return path

@@ -59,7 +59,11 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--work", required=True, type=Path)
     ap.add_argument("--tier", required=True, help="the tier's label, e.g. 1e7")
-    ap.add_argument("--out", type=Path, default=Path(__file__).parent / "data")
+    # **Beside the README, not under `data/`.** The repository's `.gitignore` carries `data/`, so a
+    # probe campaign that collated into one would have a record whose figures had no raw file in the
+    # repository at all — which is the state the 2026-08-20 campaign's README is in. The tracked
+    # convention is a CSV in the campaign's own directory (61 of them across `probes/`).
+    ap.add_argument("--out", type=Path, default=Path(__file__).parent)
     args = ap.parse_args()
 
     work: Path = args.work

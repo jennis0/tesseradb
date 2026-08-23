@@ -69,7 +69,7 @@ the grant from a file and calls the same `tessera-corpus` methods the verb calls
 
 ## Method
 
-Every driver is in this directory and every figure has a CSV in `data/` beside it.
+Every driver is in this directory and every figure has a CSV in the campaign directory beside it.
 
 | step | script | what it measures |
 |---|---|---|
@@ -353,6 +353,115 @@ the path sustained under a full serving load, and the refusals say how far the o
 it.
 
 Freshness: the same 92 → 1 000 092 on the predicate layer, **7.3 s after the flush request**.
+
+### 6. The build's layout, and what the first fold does to it (`layout-after-fold-1e7.json`, `1e7-postfold-grid.csv`)
+
+**The grid in §2 is measured on a bundle whose enumerated layers are served by the wrong layout, and
+that is not a mistake in the measurement — it is the state a freshly built bundle is in.**
+
+The 10⁷ grid's two enumerated layers cost three to twelve times their predicate twin, and the
+server's own log says why: it is serving them `ArtifactMajor`. `layout::choose`'s rule says they
+should not be. `layout_after_fold.py` asks directly — read the layout off the log, fold, read it
+again:
+
+| layer | after the build | at the first fold | blocks/artifact | the rule's answer |
+|---|---|---|---:|---|
+| `generator/flat` | `ArtifactMajor` | **`RowMajorList`** | 108.0 | row-major (overlapping ⇒ list) |
+| `generator/partition-enumerated` | `ArtifactMajor` | **`RowMajorLabel`** | 73.3 | row-major (disjoint ⇒ label) |
+| `generator/treed` | `ArtifactMajor` | `ArtifactMajor` | 153.0 | **artifact-major — 998 artifacts, below `ROW_MAJOR_MIN_ARTIFACTS` (1 000)** |
+| `generator/partition-attribute` | `RowMajorLabel` | `RowMajorLabel` | — | a predicate's form is never re-derived |
+
+The treed row is the rule working: 153 blocks per artifact is well over the locality threshold, and
+the level has **998** artifacts against a floor of 1 000, so it stays artifact-major. The other two
+are the finding: the build reports 108.0 and 73.3 blocks per artifact — decision 0092's figure — and
+records a layout that its own reported figure contradicts. `RowMajorLabel`/`RowMajorList` arrive at
+the first fold, which is
+[0094](../../docs/decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)'s
+re-evaluation doing what it says. What 0094 also says is that the layout is *chosen at the build*,
+and on this evidence the build does not choose it. **It is a report, not a fix** — the campaign
+writes no engine code.
+
+**What the fold is worth, measured.** The same fixture, rebuilt, folded once with nothing ingested,
+and the grid re-run — p50 in milliseconds:
+
+| layer | pre-fold worst cell | post-fold worst cell | pre-fold broad/whole-map | post-fold broad/whole-map |
+|---|---:|---:|---:|---:|
+| `generator/flat` | **2 430** | **221** | 281 | 221 |
+| `generator/partition-enumerated` | **1 464** | **139** | 243 | 133 |
+| `generator/treed` | 134 | 114 | 15.7 | 13.5 |
+
+**11× and 10.5×**, and the shape changes as well as the size: post-fold both layers are **monotone
+in both axes**, the 25% ridge is gone, and the cost inversion is gone with it — the narrow principal
+is now the cheap one on every layer. That is the design's claim, reproduced end to end on the built
+engine. Cold stays expensive: 11 957 ms and 8 424 ms for the first whole-map request.
+
+The post-fold enumerated twin at 132.9 ms and the predicate spelling at 135.5 ms are **the same
+number**, which is what one relation served two ways should cost. The list form's larger constant is
+visible beside it: `generator/flat`, whose memberships overlap, pays 221 ms for the same work.
+
+### 7. The design ceiling — 9 832 352 artifacts (`ceiling-grid.csv`)
+
+The generator scales every closed-form arm at one artifact per hundred points, so 10⁷ artifacts
+would want the 10⁹ tier that does not fit. `campaign/ceiling` reaches the artifact axis without the
+corpus axis: an attribute predicate over `weight`, a keyed `u32`, which at 10⁷ rows has very nearly
+10⁷ distinct values. The build minted **9 832 352 artifacts** in one level, served `RowMajorLabel`,
+in a 1.57 GB bundle built in 118 s at 11.0 GB peak RSS.
+
+**It has no census** — nothing in `tessera-corpus` states this relation — so it reports latency and
+residency and claims nothing about correctness. p50 in milliseconds, three iterations:
+
+| principal sees \ viewport | 100% | 25% | 6.25% | 0.024% |
+|---|---:|---:|---:|---:|
+| **93.8%** | **12 489** | 7 265 | 2 004 | 6.9 |
+| **25.0%** | 3 480 | 2 015 | 430 | 4.4 |
+| **3.1%** | 395 | 207 | 56.4 | 3.6 |
+| **0.0016%** | 3.9 | 3.5 | 3.4 | 3.2 |
+
+Artifacts served at the top-left cell: **9 219 239**, in a **954 MB** body, of which **2 843 ms** is
+Arrow serialisation. Server RSS 5.52 GB at boot, 9.32 GB after the sweep.
+
+**The one-second budget does not hold at ten million artifacts and a wide viewport**, and the reason
+is not the counting. The route is flat in the mask below about 3% — 395 ms for a principal seeing
+three percent of a ten-million-artifact layer is exactly the row-major route working — and the
+dear cells are dear because the response *is* nine million artifacts. `artifact-serving-at-scale.md`
+§7.1 models the unmeasured 10⁹/10⁷ cell at ~550–900 ms; that model is about the **count**, and this
+measurement says the count is not what a request at that size pays for.
+
+⊘ **There is nothing that bounds such a response.** `artifact_budget` is accepted and inert on a
+flat layer (the wire contract says so — a budget is met by serving ancestors, and a flat layer has
+none), measured here: at `artifact_budget = 100` the same request returns the same **254.6 MB**.
+Whether a wide request over a ten-million-artifact flat layer should be answerable at all is an
+owner question the campaign does not settle.
+
+### 8. ⊘ A defect, with its reproduction — a cold request is truncated and nothing says so
+
+**What happens.** The first `/v1/viewport` after boot naming a level whose row form is not yet built
+is aborted mid-body when that build outruns the whole-stream deadline. The client receives a `200`
+with a truncated chunked body and no trailer; **the server logs nothing** — neither
+`viewport stream aborted mid-body` nor `viewport stream aborted before its trailer` fires.
+
+**Reproduction**, from a clean boot on the ceiling bundle (10⁷ points, one attribute-predicate layer
+over `weight`, 9 832 352 artifacts):
+
+```
+POST /v1/viewport  {"view":"s0","zoom":0,"bbox":[0,0,65536,65536],"k":0,
+                    "layers":["campaign/ceiling"]}
+```
+
+| pass | shipped `stream_deadline_ms = 60000` | `stream_deadline_ms = 600000` |
+|---|---|---|
+| 1 (cold) | **fails at 111 356 ms**, `Response ended prematurely` | **succeeds at 110 719 ms** |
+| 2 (warm) | 4.2 ms | 4.1 ms |
+| 3 (warm) | 3.7 ms | — |
+
+Raising the deadline is what identifies the cause: the level's row form and tile index take ~111 s
+to build over 9.83M artifacts, that build happens **after** the response's first flush, and the
+60-second whole-stream deadline therefore fires on the first send after it. It reproduces on every
+boot and, by §6, after every fold that rebuilds a row form.
+
+It is fail-closed at the client — `reference/oracle/wire.py` raises on a truncated stream rather
+than decoding a plausible shorter response, which is what turned this up — and it is **silent on the
+server**, which is the part worth fixing. Recorded, not fixed: this is a measurement track.
 
 ---
 

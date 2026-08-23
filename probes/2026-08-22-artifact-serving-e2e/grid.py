@@ -52,6 +52,9 @@ def main() -> None:
                     help="merge into an existing grid file rather than replacing it")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--k", type=int, default=0, help="points asked for beside the artifacts")
+    ap.add_argument("--stream-deadline-ms", type=int, default=60_000,
+                    help="the shipped default; raised only by the design-ceiling probe, which "
+                         "cannot measure its cold cell under it")
     args = ap.parse_args()
 
     work: Path = args.work
@@ -65,7 +68,7 @@ def main() -> None:
         ladder = [vp for vp in ladder if vp.name in args.viewports]
 
     ports = (C.free_port(), C.free_port(), C.free_port())
-    C.write_deployment(work, ports)
+    C.write_deployment(work, ports, stream_deadline_ms=args.stream_deadline_ms)
     server = C.Server(work, *ports)
     server.spawn()
     rows = []

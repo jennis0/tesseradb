@@ -76,6 +76,14 @@ def main() -> None:
         help="add the design-ceiling layer — an attribute predicate over `weight`, ~10^7 artifacts",
     )
     ap.add_argument(
+        "--memory-budget",
+        default=None,
+        help="`tessera build --memory-budget`, e.g. `12g`. **Needed above about 10^8 points on a "
+             "47 GB box**: the automatic derivation takes 80%% of MemAvailable and models the "
+             "batch loop's own structures, and at 2.5x10^8 over this declaration the real peak ran "
+             "past it — the build was OOM-killed at 47.3 GB after 24 minutes with no budget given.",
+    )
+    ap.add_argument(
         "--no-measure",
         action="store_true",
         help="skip the ladder's O(n) measuring pass (the 10^9 tier, where it costs minutes)",
@@ -119,8 +127,12 @@ def main() -> None:
     ports = (C.free_port(), C.free_port(), C.free_port())
     C.write_deployment(work, ports)
 
+    build_argv = ["/usr/bin/time", "-f", "%e %M", str(C.CLI), "build",
+                  "--deployment", str(work / "tessera.toml")]
+    if args.memory_budget:
+        build_argv += ["--memory-budget", args.memory_budget]
     proc = subprocess.run(
-        ["/usr/bin/time", "-f", "%e %M", str(C.CLI), "build", "--deployment", str(work / "tessera.toml")],
+        build_argv,
         cwd=work, capture_output=True, text=True,
         env={**__import__("os").environ, "TESSERA_IDENTITY_KEY": C.IDENTITY_KEY},
     )
@@ -129,6 +141,7 @@ def main() -> None:
     wall, rss = proc.stderr.strip().splitlines()[-1].split()
     bundle_bytes = sum(p.stat().st_size for p in (work / "bundle").rglob("*") if p.is_file())
     report["build"] = {
+        "memory_budget": args.memory_budget,
         "seconds": float(wall),
         "peak_rss_bytes": int(rss) * 1024,
         "bundle_bytes": bundle_bytes,
