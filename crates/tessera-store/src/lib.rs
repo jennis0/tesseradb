@@ -3,20 +3,21 @@
 //! only legal EntityId→RowId path in the codebase (invariant I4).
 
 pub mod coalesce;
+pub mod derived;
 pub mod error;
 pub mod flush;
 pub mod fold;
 mod locator;
 pub mod manifest;
-pub mod membership;
 pub mod manifest_write;
+pub mod membership;
 pub mod merge;
 pub mod pairs;
 pub mod permutation;
-pub mod render_presence;
 pub mod read;
-pub mod row_entity;
 pub mod reclaim;
+pub mod render_presence;
+pub mod row_entity;
 mod segment_cursor;
 mod sidecar;
 pub mod vocabulary;
@@ -33,10 +34,10 @@ pub use manifest_write::{
 };
 pub use pairs::PairsParquetWriter;
 pub use permutation::{Permutation, RowSpace, SegmentExtent};
-pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 pub use read::{
     open_bundle, open_written_prefix, tile_ranges, tile_ranges_all, tile_ranges_within, Bundle,
     ColumnsRef, MortonSlice, PartitionData, ScalarSlice, SegmentData, ViewData,
 };
 pub use reclaim::{hard_link_forward, reclaim_prefix};
+pub use row_entity::{write_row_entity, RowToEntity, ROW_ENTITY_FILE};
 pub use sidecar::ExternalIdSidecar;

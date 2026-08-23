@@ -91,7 +91,7 @@ use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
 use tessera_plugin::Plugin;
 use tessera_store::membership::ContainmentPack;
-use tessera_store::membership::{
+use tessera_store::derived::{
     compose_containment, generating_entities, PostingSlice, SignatureIndex,
 };
 use tessera_types::TermId;
@@ -335,13 +335,13 @@ impl ContainmentPartition {
     /// served; the inversion has its own cases, and `tests/artifact_containment.rs` drives both
     /// together against the masked-count route.
     pub(crate) fn of_clauses(ordinals: &[&[&[&[u32]]]]) -> Self {
-        let mut builder = tessera_store::membership::ContainmentBuilder::new();
+        let mut builder = tessera_store::derived::ContainmentBuilder::new();
         for (ordinal, ranks) in ordinals.iter().enumerate() {
             builder.push(
                 ordinal as u32,
                 ranks
                     .iter()
-                    .map(|clauses| tessera_store::membership::encode_expression(clauses.to_vec())),
+                    .map(|clauses| tessera_store::derived::encode_expression(clauses.to_vec())),
             );
         }
         Self::of_bytes(builder.finish())

@@ -27,7 +27,7 @@
 //! above the band where artifact-major was measured *improving*, rather than inside it — the
 //! argument is at [`ROW_MAJOR_EVERYWHERE_FRACTION`].
 
-pub use tessera_store::membership::{
+pub use tessera_store::derived::{
     choose, LevelShape, ROW_MAJOR_EVERYWHERE_FRACTION, ROW_MAJOR_MIN_ARTIFACTS,
 };
 

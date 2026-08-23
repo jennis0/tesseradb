@@ -424,9 +424,9 @@ impl MembershipRows {
     /// data rather than of the declaration, so there is no cheaper way to learn it than to look.
     ///
     /// `row_count` is the view's base row space, which the `everywhere` test needs: the node ladder
-    /// is derived from it ([`tessera_store::membership::observe_shape`]).
+    /// is derived from it ([`tessera_store::derived::observe_shape`]).
     pub fn shape(&self, row_count: u32) -> crate::layout::LevelShape {
-        tessera_store::membership::observe_shape(row_count, &|visit| {
+        tessera_store::derived::observe_shape(row_count, &|visit| {
             for ordinal in 0..self.len() as u32 {
                 if let Some(rows) = self.get(ordinal) {
                     visit(ordinal, rows);

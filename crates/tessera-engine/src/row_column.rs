@@ -56,13 +56,13 @@ use tessera_types::layer::ServingLayout;
 use crate::artifacts::MembershipRows;
 
 /// One walk of a level's live artifacts, handing each ordinal its **projected** rows — and the
-/// bytes are produced by [`tessera_store::membership::project_row_column`], beside the format.
+/// bytes are produced by [`tessera_store::derived::project_row_column`], beside the format.
 ///
 /// **A callback rather than an iterator**, because the caller has to be able to run it more than
 /// once: a list column is an offset table sized by one pass and filled by a second, and the fold's
 /// walk holds one membership at a time rather than the level's. An iterator would have to be
 /// re-created, which is what this type is.
-type LevelWalk<'a> = tessera_store::membership::LevelWalk<'a>;
+type LevelWalk<'a> = tessera_store::derived::LevelWalk<'a>;
 use crate::compose::WholeMask;
 
 /// One `(view, layer, level)`'s row-addressed membership — mapped where a fold wrote it, a buffer
@@ -471,7 +471,7 @@ impl RowColumn {
         each: LevelWalk<'_>,
     ) -> Option<Self> {
         let bytes =
-            tessera_store::membership::project_row_column(ordinals, row_count, layout, each)?;
+            tessera_store::derived::project_row_column(ordinals, row_count, layout, each)?;
         Some(Self::of_bytes(bytes, layout))
     }
 

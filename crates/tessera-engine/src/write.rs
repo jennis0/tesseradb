@@ -9738,14 +9738,14 @@ impl Executor {
 
         // **Filed by the shared writer**, which is the same one `tessera build`'s artifact pass
         // calls: one naming rule, one durability sequence, one manifest-entry shape.
-        tessera_store::membership::file_containment(
+        tessera_store::derived::file_containment(
             prefix_dir,
             partition,
             n,
             composed
                 .into_iter()
                 .map(
-                    |(layer, level, level_version, bytes)| tessera_store::membership::Filed {
+                    |(layer, level, level_version, bytes)| tessera_store::derived::Filed {
                         // A partition is a function of the level's records and the prefix's
                         // postings, so it is not per view and the entry carries none.
                         view: String::new(),
@@ -9891,7 +9891,7 @@ impl Executor {
             // and at ten million artifacts a row form here is the gigabytes §7.3 prices — held
             // beside the outgoing generation's own forms, because the fold runs before the flip.
             let shape = self.live.with_artifacts(|store| {
-                tessera_store::membership::observe_shape(space.base_rows(), &|visit| {
+                tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
                     for (ordinal, record) in store.level(&layer, level) {
                         visit(ordinal, &space.project_base(&record.members));
                     }
@@ -10013,14 +10013,14 @@ impl Executor {
         }
 
         // **Filed by the shared writer** — see `write_containment_partitions` above.
-        tessera_store::membership::file_row_columns(
+        tessera_store::derived::file_row_columns(
             prefix_dir,
             partition,
             n,
             written
                 .into_iter()
                 .map(|(view, layer, level, level_version, layout, bytes)| {
-                    tessera_store::membership::Filed {
+                    tessera_store::derived::Filed {
                         view,
                         layer,
                         level,
@@ -10098,14 +10098,14 @@ impl Executor {
         }
 
         // **Filed by the shared writer** — see `write_containment_partitions` above.
-        tessera_store::membership::file_tile_indexes(
+        tessera_store::derived::file_tile_indexes(
             prefix_dir,
             partition,
             n,
             projected
                 .into_iter()
                 .map(|(view, layer, level, level_version, bytes)| {
-                    tessera_store::membership::Filed {
+                    tessera_store::derived::Filed {
                         view,
                         layer,
                         level,

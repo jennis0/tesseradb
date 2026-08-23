@@ -52,8 +52,8 @@ use tessera_lifecycle::membership::ArtifactStore;
 use tessera_plugin::Plugin;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
-use tessera_store::membership as derived;
-use tessera_store::membership::{Filed, LevelShape, PostingSlice, SignatureIndex};
+use tessera_store::derived;
+use tessera_store::derived::{Filed, LevelShape, PostingSlice, SignatureIndex};
 use tessera_store::RowSpace;
 use tessera_types::layer::{MembershipSource, RegisteredLayer, ServingLayout};
 
@@ -359,7 +359,7 @@ fn containment(
 /// into the build show it and neither has to reconstruct it.
 ///
 /// **Both figures, and only one of them decides.** The `everywhere` fraction is the trigger
-/// (`tessera_store::membership::ROW_MAJOR_EVERYWHERE_FRACTION`); blocks per artifact is decision
+/// (`tessera_store::derived::ROW_MAJOR_EVERYWHERE_FRACTION`); blocks per artifact is decision
 /// 0092's (c) and is reported beside it, because it is what says how much *work* a membership is
 /// even now that it no longer says how far that work is spread.
 pub fn report(pass: &ArtifactPass) {
