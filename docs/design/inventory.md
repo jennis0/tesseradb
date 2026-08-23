@@ -78,13 +78,14 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotations.md` | Normative — r43 | 18 |
 | `architecture.md` | Normative — r49 | 37 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 22 |
+| `artifact-system.md` | Descriptive. This document orients an ar | 6 |
 | `artifacts-from-points.md` | Draft | 2 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
 | `client-interaction.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 22 |
+| `configuration.md` | Normative for the build-time configurati | 28 |
 | `conformance.md` | Normative — r15 | 20 |
 | `contracts.md` | Normative — r37 | 23 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
