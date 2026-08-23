@@ -100,7 +100,7 @@ quoting only warm medians would describe a state no first viewport is ever in.
 
 ## Results
 
-### The tiers, and the three walls above 10⁷
+### The tiers, and the walls above 10⁷
 
 | tier | points | artifacts | materialise | build | peak build RSS | inputs | bundle | outcome |
 |---|---:|---:|---:|---:|---:|---:|---:|---|
@@ -480,6 +480,60 @@ none), measured here: at `artifact_budget = 100` the same request returns the sa
 Whether a wide request over a ten-million-artifact flat layer should be answerable at all is an
 owner question the campaign does not settle.
 
+### 9. The 5×10⁷ tier — five times the corpus, five times the artifacts (`5e7-*.csv`)
+
+Built without `generator/treed`, whose root membership the build refuses at this size (above): four
+layers, 499 997 artifacts on each of the two enumerated arms, 37 spatial. Folded once before
+measuring, so these are the settled layouts rather than the build's.
+
+**The layout finding reproduces at a second scale**, with larger numbers on both sides:
+
+| layer | after the build | at the fold | blocks/artifact |
+|---|---|---|---:|
+| `generator/flat` | `ArtifactMajor` | `RowMajorList` | 178.9 |
+| `generator/partition-enumerated` | `ArtifactMajor` | `RowMajorLabel` | 93.7 |
+| `generator/partition-attribute` | `RowMajorLabel` | `RowMajorLabel` | — |
+
+**Census: 28 of 28 cells exact** — four shapes by seven principals, 499 997 artifacts compared one
+by one against the closed form at every rung.
+
+**The grid, p50 in milliseconds, three iterations, post-fold** (`5e7-grid.csv`):
+
+| principal sees \ viewport | 100% | 75% | 50% | 25% | 6.25% | 0.39% | 0.024% |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **93.8%** — attribute | 830 | 811 | 774 | 690 | 592 | 134 | 11.5 |
+| **93.8%** — enumerated twin | 854 | 858 | 849 | 756 | 600 | 136 | 14.6 |
+| **93.8%** — flat (overlapping) | 1 214 | 1 162 | 1 189 | 917 | 665 | 284 | 23.9 |
+| **3.1%** — attribute | 584 | 587 | 549 | 482 | 154 | 6.7 | 1.2 |
+| **3.1%** — enumerated twin | 624 | 607 | 618 | 491 | 157 | 7.3 | 1.3 |
+| **0.0016%** — any of them | 1.6 | 1.5 | 1.5 | 1.2 | 1.0 | 1.0 | 0.9 |
+| **any** — spatial | 1.4 | 1.3 | 1.3 | 1.2 | 1.1 | 0.9 | 0.9 |
+
+Monotone in both axes on all three, the twin agreeing to 3% (830 against 854 ms), the overlapping
+list form paying its constant (1 214 ms), and the spatial route still 1 ms flat. **Five times the
+corpus and five times the artifacts costs 6.1× the 10⁷ tier's post-fold whole-map cell** (135.5 →
+830 ms) — the artifact count is what moves it, as the design says.
+
+⊘ **Cold is worse here and one of them truncated.** `generator/flat`'s first whole-map request is
+**95 644 ms and is the §8 defect** (`cold_truncated = true` in the CSV); the enumerated twin's is
+51 090 ms and survives; the predicate route's is 10 831 ms.
+
+**The concurrency envelope, and where it now binds** (`5e7-concurrency.csv`):
+
+| sessions | throughput | p50 | p99 | server cores | peak RSS | errors |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 1.02 rps | 736 ms | 11 360 ms | 1.02 | 13.3 GB | 0 |
+| 8 | **7.82 rps** | 1 016 ms | 2 888 ms | 5.94 | 15.8 GB | 0 |
+| 32 | 7.07 rps | 6 047 ms | 9 397 ms | **10.32** | 22.5 GB | 0 |
+| 128 | 3.48 rps | 36 604 ms | 60 303 ms | 7.77 | **40.6 GB** | **170** |
+
+**Memory is what binds, and it scales with the corpus.** A principal's own `M_auth` and its cached
+row projections cost about **76 MB per session at 10⁷ points and 221 MB at 5×10⁷** — five times the
+corpus, three times the per-session cost — so at 128 sessions the server reaches 40.6 GB on a 47 GB
+box and 170 requests fail. Masks are not shared, which is the scenario the owner set; the direct
+consequence is that **the concurrency ceiling falls as the corpus grows**. Extrapolated at the same
+rate, 128 principals over 10⁹ points would want several hundred gigabytes of mask alone.
+
 ### 8. ⊘ A defect, with its reproduction — a cold request is truncated and nothing says so
 
 **What happens.** The first `/v1/viewport` after boot naming a level whose row form is not yet built
@@ -506,9 +560,16 @@ to build over 9.83M artifacts, that build happens **after** the response's first
 60-second whole-stream deadline therefore fires on the first send after it. It reproduces on every
 boot and, by §6, after every fold that rebuilds a row form.
 
+**It is not a ten-million-artifact phenomenon.** It recurred twice more at 5×10⁷ points with
+499 997 artifacts — once on `layout_after_fold.py`'s first request and once as `generator/flat`'s
+cold cell in §9, at 95.6 s — so the trigger is a row-form build over about half a million artifacts,
+not an extreme one.
+
 It is fail-closed at the client — `reference/oracle/wire.py` raises on a truncated stream rather
 than decoding a plausible shorter response, which is what turned this up — and it is **silent on the
-server**, which is the part worth fixing. Recorded, not fixed: this is a measurement track.
+server**, which is the part worth fixing. Recorded, not fixed: this is a measurement track. The
+campaign's harness steps past it rather than raising the deadline (`campaign.warm`), so every figure
+outside §7 is on the shipped configuration.
 
 ---
 
