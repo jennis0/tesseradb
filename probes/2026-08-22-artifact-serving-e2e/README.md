@@ -480,6 +480,43 @@ none), measured here: at `artifact_budget = 100` the same request returns the sa
 Whether a wide request over a ten-million-artifact flat layer should be answerable at all is an
 owner question the campaign does not settle.
 
+### 8. ⊘ A defect, with its reproduction — a cold request is truncated and nothing says so
+
+**What happens.** The first `/v1/viewport` after boot naming a level whose row form is not yet built
+is aborted mid-body when that build outruns the whole-stream deadline. The client receives a `200`
+with a truncated chunked body and no trailer; **the server logs nothing** — neither
+`viewport stream aborted mid-body` nor `viewport stream aborted before its trailer` fires.
+
+**Reproduction**, from a clean boot on the ceiling bundle (10⁷ points, one attribute-predicate layer
+over `weight`, 9 832 352 artifacts):
+
+```
+POST /v1/viewport  {"view":"s0","zoom":0,"bbox":[0,0,65536,65536],"k":0,
+                    "layers":["campaign/ceiling"]}
+```
+
+| pass | shipped `stream_deadline_ms = 60000` | `stream_deadline_ms = 600000` |
+|---|---|---|
+| 1 (cold) | **fails at 111 356 ms**, `Response ended prematurely` | **succeeds at 110 719 ms** |
+| 2 (warm) | 4.2 ms | 4.1 ms |
+| 3 (warm) | 3.7 ms | — |
+
+Raising the deadline is what identifies the cause: the level's row form and tile index take ~111 s
+to build over 9.83M artifacts, that build happens **after** the response's first flush, and the
+60-second whole-stream deadline therefore fires on the first send after it. It reproduces on every
+boot and, by §6, after every fold that rebuilds a row form.
+
+**It is not a ten-million-artifact phenomenon.** It recurred twice more at 5×10⁷ points with
+499 997 artifacts — once on `layout_after_fold.py`'s first request and once as `generator/flat`'s
+cold cell in §9, at 95.6 s — so the trigger is a row-form build over about half a million artifacts,
+not an extreme one.
+
+It is fail-closed at the client — `reference/oracle/wire.py` raises on a truncated stream rather
+than decoding a plausible shorter response, which is what turned this up — and it is **silent on the
+server**, which is the part worth fixing. Recorded, not fixed: this is a measurement track. The
+campaign's harness steps past it rather than raising the deadline (`campaign.warm`), so every figure
+outside §7 is on the shipped configuration.
+
 ### 9. The 5×10⁷ tier — five times the corpus, five times the artifacts (`5e7-*.csv`)
 
 Built without `generator/treed`, whose root membership the build refuses at this size (above): four
@@ -533,43 +570,6 @@ corpus, three times the per-session cost — so at 128 sessions the server reach
 box and 170 requests fail. Masks are not shared, which is the scenario the owner set; the direct
 consequence is that **the concurrency ceiling falls as the corpus grows**. Extrapolated at the same
 rate, 128 principals over 10⁹ points would want several hundred gigabytes of mask alone.
-
-### 8. ⊘ A defect, with its reproduction — a cold request is truncated and nothing says so
-
-**What happens.** The first `/v1/viewport` after boot naming a level whose row form is not yet built
-is aborted mid-body when that build outruns the whole-stream deadline. The client receives a `200`
-with a truncated chunked body and no trailer; **the server logs nothing** — neither
-`viewport stream aborted mid-body` nor `viewport stream aborted before its trailer` fires.
-
-**Reproduction**, from a clean boot on the ceiling bundle (10⁷ points, one attribute-predicate layer
-over `weight`, 9 832 352 artifacts):
-
-```
-POST /v1/viewport  {"view":"s0","zoom":0,"bbox":[0,0,65536,65536],"k":0,
-                    "layers":["campaign/ceiling"]}
-```
-
-| pass | shipped `stream_deadline_ms = 60000` | `stream_deadline_ms = 600000` |
-|---|---|---|
-| 1 (cold) | **fails at 111 356 ms**, `Response ended prematurely` | **succeeds at 110 719 ms** |
-| 2 (warm) | 4.2 ms | 4.1 ms |
-| 3 (warm) | 3.7 ms | — |
-
-Raising the deadline is what identifies the cause: the level's row form and tile index take ~111 s
-to build over 9.83M artifacts, that build happens **after** the response's first flush, and the
-60-second whole-stream deadline therefore fires on the first send after it. It reproduces on every
-boot and, by §6, after every fold that rebuilds a row form.
-
-**It is not a ten-million-artifact phenomenon.** It recurred twice more at 5×10⁷ points with
-499 997 artifacts — once on `layout_after_fold.py`'s first request and once as `generator/flat`'s
-cold cell in §9, at 95.6 s — so the trigger is a row-form build over about half a million artifacts,
-not an extreme one.
-
-It is fail-closed at the client — `reference/oracle/wire.py` raises on a truncated stream rather
-than decoding a plausible shorter response, which is what turned this up — and it is **silent on the
-server**, which is the part worth fixing. Recorded, not fixed: this is a measurement track. The
-campaign's harness steps past it rather than raising the deadline (`campaign.warm`), so every figure
-outside §7 is on the shipped configuration.
 
 ### 10. The bracket re-run (`bracket-a1e6-blocks{6,8,10,12}-medians.csv`)
 
@@ -650,4 +650,4 @@ is left unstaged. `check-track-allowlist.sh campaign` reports it and nothing els
 
 | revision | date | what changed |
 |---|---|---|
-| r1 | 2026-08-22 | Created — the Stage 7 validation campaign |
+| r1 | 2026-08-22 | Created — the Stage 7 validation campaign: three corpus sizes, a design-ceiling probe, the bracket re-run, and four findings for the owner |
