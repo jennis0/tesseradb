@@ -132,6 +132,7 @@ report gestures.
 | `marks` | the draw list: `ids` (`BigUint64Array`), `codes`, positions, `scalars` (typed arrays by column), per-tile provenance, and its `Count` |
 | `artifacts` | the layer selected; the served set with geometry, content and `parentId`; the tree; the channel's status and refusal |
 | `selection` | the picked item's record (named fields) or its refusal; the opened artifact or its refusal |
+| `region` | the selected box or lasso; its `visible` and `matched` as `Masked`, its `served` as `Count`; the held marks inside it; the tiles it was counted over (§5.10) |
 | `filters` | operands from meta; the composed `FilterExpr` as sent; per-column value lists and their refusals |
 | `legend` | per column: the codes marks on screen carry and their resolved values |
 | `replica` | bytes, points, bands held; the last plan's held-versus-fetched split; look-ahead spend |
@@ -144,7 +145,8 @@ the deck world `f32`; `store.dataXY(marks)` gives the corpus's own data coordina
 frame.
 
 **Verbs** are the write surface: `setView`, `setFilters(expr)`, `setLayer(name | null)`,
-`setColourBy`, `setBudget`, `pick(id)`, `openArtifact(id)`, `clear()`, `refresh()`, `dispose()`.
+`setColourBy`, `setBudget`, `pick(id)`, `openArtifact(id)`, `select(shape | null)`, `clear()`,
+`refresh()`, `dispose()`.
 C2's own filter UI calls `setFilters` with a `FilterExpr` built from `meta.filterOperands`.
 
 **Numbers are typed by what they are**, so a customer drawing their own panel gets the right
@@ -201,6 +203,7 @@ and the one that is Tessera's own is the third:
 | **narrow** — filter by attribute or text, watch `matched` fall while `visible` holds, clear | one control per operand; the counts beside them |
 | **encode** — colour by a column, read what the colours mean | a selector; a legend |
 | **see structure** — turn on a layer, read hulls and labels, open a cluster, walk its tree, see what is in view | a layer picker; the overlay; a list of what is served; a card |
+| **select a region** — drag a box or a lasso, see how much is in it and what, then do something with it | a select mode on the map with live highlight; a panel with both numbers and the served items inside; actions |
 | **refresh** — when told the corpus moved | one control, reachable from anywhere |
 
 The demo adds a ninth — switch dataset and principal, watch the instruments — which is §7's.
@@ -225,7 +228,7 @@ one is where a host writes "12,040 of 12,040" against a cluster.
 
 ### 5.3 The catalogue
 
-Fourteen tags in four tiers. C1 meets the first; a host that wants its own layout meets the
+Fifteen tags in four tiers. C1 meets the first; a host that wants its own layout meets the
 second and third; the fourth is for hosts building their own panels.
 
 **Tier 0 — the experience.**
@@ -246,7 +249,9 @@ second and third; the fourth is for hosts building their own panels.
   never reads as an empty corpus. Constructs a store from its attributes when none is in
   context, so a map alone is one tag. Properties: `colour-by`, `layer`, `budget`, `palette`,
   `tooltip-fields` (which of the scalars already on the wire the hover hint shows — hover costs
-  no request; the click costs one). Methods: `fit()`, `fitTo(artifactId)`. Four **corner
+  no request; the click costs one), and `mode` — `pan`, `box` or `lasso` — with shift-drag as
+  the shortcut in `pan` and the live highlight drawn as the pointer moves (§5.10). Methods:
+  `fit()`, `fitTo(artifactId)`, `select(shape)`. Four **corner
   slots** — `top-left`, `top-right`, `bottom-left`, `bottom-right` — for anything a host wants
   over the map, which is where the explorer puts the status strip and the legend; the pattern
   is MapLibre's and Leaflet's control corners, and it needs no JS. A `tooltip` slot takes a
@@ -283,6 +288,10 @@ and is placeable and replaceable on its own.
   card; an `open` event for the same purpose. Distinguishes a miss from a broken pick.
 - **`<tessera-artifact-card>`** — the selected artifact: label, layer, key, its `Masked`
   count, its content, its children from the held set. Steady during a pan by construction.
+- **`<tessera-selection>`** — the selected region: its three numbers through
+  `<tessera-count>`, the served items inside it as a list (title from `tooltip-fields`, click
+  picks), and the actions — *clear* now; *filter to this*, *export* and *save as artifact*
+  as §5.10 says.
 
 **Tier 3 — primitives.**
 
@@ -328,6 +337,7 @@ Named slots, each with default content, so replacing a piece is putting an eleme
 | `legend` | `<tessera-legend>` | map bottom-right / sidebar |
 | `filters` | `<tessera-filter-panel>` | sidebar |
 | `artifacts` | `<tessera-artifact-list>` | sidebar |
+| `selection` | `<tessera-selection>`, shown while a region is selected | sidebar, above `detail` |
 | `detail` | the item card or the artifact card, whichever changed last | floating right / sidebar bottom |
 | `tooltip` | the `tooltip-fields` hint | over the map, following the cursor |
 
@@ -359,7 +369,8 @@ Each rung is cheaper than the next, and a host stops at the first that does what
 
 Custom events, prefixed, bubbling and composed so a host listens on any ancestor:
 `tessera-viewchange`, `tessera-hover`, `tessera-pick` (the id and, once it arrives, the record),
-`tessera-artifactopen`, `tessera-filterchange` (the composed expression), `tessera-layerchange`,
+`tessera-artifactopen`, `tessera-selectchange` (the shape, and the counts once they arrive),
+`tessera-filterchange` (the composed expression), `tessera-layerchange`,
 `tessera-statechange` (each transition of §5.4), `tessera-expired`. Detail payloads carry
 `tessera_id`s, records and expressions — the same things the wire does.
 
@@ -400,6 +411,39 @@ contrast in both schemes.
   filter box that could not be clicked into while marks streamed): Lit's keyed rendering keeps
   a control's identity across store ticks, and the panels that move every frame are separate
   elements from the ones a user types into.
+
+### 5.10 Selection — box and lasso
+
+The wire has no spatial operand: the request's bbox is the only region there is, and
+client-interaction §9 rules that selection should become a **content-addressed filter operand**
+— composable with other filters, cached like them, with the matched-versus-visible highlight for
+free. ⊘ That operand is not built, for a rectangle or a polygon. What follows is what a
+selection can do **today**, what waits on the operand, and how the two are kept apart on screen.
+
+**Today, from what the response already carries.** A viewport response is per-tile counts
+plus points. A drawn region is answered by one counting request (`k = 0`, as the artifact
+channel asks) over the region's bbox at the depth where a tile is at most a screen pixel,
+bounded by `max_tiles_per_request`; the store sums the tiles inside the shape — every tile for
+a box, the rasterised interior for a lasso — into the region's `visible` and `matched`. That is
+arithmetic on number-channel values, not a masked quantity computed from a sample
+(client-interaction P1 names *live lasso highlight* as the client's own computation), and it is
+exact at the counted tiles' resolution: the highlight is drawn **snapped to the tiles that were
+counted**, so what the user sees selected is what the numbers are over, and never a smoother
+shape the numbers do not describe. The served items inside are the held marks whose positions
+fall in the shape — a sample, so `served` is a `Count` whose `total` is the region's `matched`
+(P2: both numbers, always). One request per settled gesture, debounced like the artifact
+channel; the live highlight while dragging is client-side and free.
+
+**What waits on the operand**, marked as such in the panel rather than hidden: *filter to this*
+(the selection composed with the other filters, so the counts and the map narrow to it) is the
+operand; *export* (the items in the region as a table) is client-interaction §8.1's bulk-export
+verb with its refusing threshold; *save as artifact* (a per-analyst selection, annotations §8.3)
+is the runtime-artifact path artifact-system §10 lists as not built. Each is a server-side
+verb, asked for in §11 D11, and the panel shows the action as unavailable with the reason rather
+than omitting it — a host reading the catalogue should not have to discover the boundary.
+
+Undrawn items are never painted into the mark layer (client-interaction §9): the region's
+list is a panel, and the map highlights only what it already draws.
 
 ## 6. Artifacts, at every layer
 
@@ -451,7 +495,8 @@ JavaScript in it; `pip install tesseradb[widget]` adds anywidget and the bundle.
 and Colab from one package. What crosses the kernel boundary, as synced traitlets, is **control
 and selection, never data**: URLs and view name down; `bbox`, `layer`, `colour_by` and
 `filters` (the composed `FilterExpr`, applied without the panel's debounce) both ways;
-`selected` and `selected_artifact` (one `tessera_id` each) up. `widget.selected` in the next
+`selected` and `selected_artifact` (one `tessera_id` each) up; `region` (the shape, and
+its counts once they arrive) both ways, so a cell can read what was lassoed or set a box. `widget.selected` in the next
 cell is the picked item; setting `widget.filters` redraws; the pan path stays browser → Tessera
 and the kernel is never on it (client-interaction §7). A `to_arrow()` that ships the current
 `marks` over the comm as Arrow buffers for a DataFrame is the natural next verb and is not in
@@ -518,9 +563,11 @@ scripts as the net, one worktree per step:
    visible changes; `smoke.mjs` and `smoke-artifacts.mjs` green.
 2. **`@tesseradb/deck` and `@tesseradb/components`**: `TesseraLayer` and the encoding object;
    `<tessera-map>`, `<tessera-status>`, `<tessera-count>`, `<tessera-item-card>`,
-   `<tessera-filter>` and `<tessera-filter-panel>`, `<tessera-explorer>`. The viewer becomes the explorer plus instruments. Smoke green.
+   `<tessera-filter>` and `<tessera-filter-panel>`, `<tessera-explorer>`, and box selection
+   with `<tessera-selection>`. The viewer becomes the explorer plus instruments. Smoke green.
 3. **Artifacts and encoding**: `<tessera-layer-picker>`, wire geometry drawn, the sidecar
-   retired, `<tessera-artifact-list>`, `<tessera-artifact-card>`, `<tessera-legend>`. `smoke-artifacts.mjs` asserts hull and label
+   retired, `<tessera-artifact-list>`, `<tessera-artifact-card>`, `<tessera-legend>`; lasso
+   selection. `smoke-artifacts.mjs` asserts hull and label
    render under two principals.
 4. **C1 and C2 examples in the gate**: a plain-HTML page, a React page using the explorer, a
    page using the store over a plain canvas with none of our rendering, and `@tesseradb/react`. `check-clients.sh`
@@ -574,7 +621,7 @@ The C2 example is the check that the store is usable with none of our rendering.
   `[widget]` extra with the built bundle committed; the SDK and the in-process instance join
   it later; sharing no code with `reference/`. Ruled by the owner 2026-08-24 in conversation —
   recorded here so a decision file can carry it at promotion.
-- **D7 — the first-cut set**: §5.3's fourteen tags, `TesseraLayer`, the hooks. The two
+- **D7 — the first-cut set**: §5.3's fifteen tags, `TesseraLayer`, the hooks. The two
   granularity calls a UX reader may disagree with: one element per filter operand rather than
   a panel only, and the status strip as one element with a compact and an expanded form rather
   than a badge and a panel. Two declined pieces recorded in §5.3.
@@ -583,6 +630,10 @@ The C2 example is the check that the store is usable with none of our rendering.
 - **D9 — the wire idioms of §3**: whether `k = 0`, `layers`-omitted-means-all, and the omitted
   artifacts frame are changed before the OpenAPI description is written, or documented as they
   are. Recommended: decide each at that pass, with 0048 in hand.
+- **D11 — the selection operand and its verbs** (§5.10): a rectangle-and-polygon filter
+  operand on the wire, which client-interaction §9 already rules the shape of, and behind it
+  the export verb and the runtime-artifact path. Server-side; box and lasso work without them
+  at tile resolution; *filter to this*, *export* and *save* wait. Asked for, in that order.
 - **D10 — whether browser-direct (T1) is a supported production topology.** If yes, an
   enumerated `serve.cors_origins`; if no, C3 is told an app server sits in front.
   Recommended: no for now — every documented integration is T2, and a production CORS surface
@@ -633,4 +684,6 @@ paragraph is updated on promotion.
   truthfulness primitive), a four-tier catalogue of fourteen tags, eight uniform states, the
   explorer's regions as slots, the customisation ladder, events, accessibility. One element per
   filter operand, a status strip with two densities, an artifact list, and a count primitive
-  are new; the view-info panel is the status strip's expanded form. D2a added.
+  are new; the view-info panel is the status strip's expanded form. D2a added. Same day, owner:
+  box and lasso selection added (§5.10) — counts from the per-tile stream today, snapped to
+  the counted tiles; the composable operand and its three actions asked for as D11.
