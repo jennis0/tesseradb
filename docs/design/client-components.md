@@ -42,10 +42,10 @@ design; the rest is what each layer contains.
 | layer | what | for | package |
 |---|---|---|---|
 | L0 | the **wire**: `/session/*`, `/v1/*`, framed Arrow | C3 | none — documentation |
-| L1 | the **store**: verbs, decode, replica, driver, the presented frame, artifacts, filters, selection — headless, no DOM | C2 | `@tessera/client` |
-| L2 | **adapters**: a deck.gl layer; a tile-shaped adapter; React hooks | C2 | `@tessera/deck`, `@tessera/react` |
-| L3 | **components**: the composite `<tessera-explorer>` and the pieces it is made of | C1 | `@tessera/components` |
-| L4 | the **demo** and the **widget** | C4 | `@tessera/viewer`, `tesseradb[widget]` |
+| L1 | the **store**: verbs, decode, replica, driver, the presented frame, artifacts, filters, selection — headless, no DOM | C2 | `@tesseradb/client` |
+| L2 | **adapters**: a deck.gl layer; a tile-shaped adapter; React hooks | C2 | `@tesseradb/deck`, `@tesseradb/react` |
+| L3 | **components**: the composite `<tessera-explorer>` and the pieces it is made of | C1 | `@tesseradb/components` |
+| L4 | the **demo** and the **widget** | C4 | `@tesseradb/viewer`, `tesseradb[widget]` |
 
 C1 never sees L1 — the composite constructs its own store. C2 never loads L3 — no Lit, no
 custom elements, no deck.gl unless they asked for the deck adapter. C3 never installs anything.
@@ -98,7 +98,7 @@ app server sits in front (T2) — which is what every documented integration say
 
 C2 has a visualisation and a camera. What they want from us is: *tell the store where I am
 looking, and hand me what to draw, from your cache, with your scheduling.* The store is that
-object, and it is `@tessera/client`'s main export.
+object, and it is `@tesseradb/client`'s main export.
 
 ```ts
 const store = createStore({viewerUrl, sessionUrl, token});   // or authorise: () => Promise<Token>
@@ -170,7 +170,7 @@ longer true.
 
 **Adapters, one per engine family:**
 
-- **`@tessera/deck`** — `TesseraLayer`, a deck.gl `CompositeLayer` over `marks` and `artifacts`,
+- **`@tesseradb/deck`** — `TesseraLayer`, a deck.gl `CompositeLayer` over `marks` and `artifacts`,
   which is what the viewer's `buildViewportLayers` and its GPU slab are today, given a class
   boundary. For the customer who owns a `Deck` already — a basemap, their own layers. Peer
   dependency on `@deck.gl/*`; a customer with deck has one copy.
@@ -180,7 +180,7 @@ longer true.
   `tile-addressed-integration.md`; built when a customer with such an engine exists, and
   client-interaction §8.6's tile-addressed GET alias on the server is the cheaper half of the
   same story.
-- **`@tessera/react`** — `useTesseraStore(options)` and `useProjection(store, name)` over
+- **`@tesseradb/react`** — `useTesseraStore(options)` and `useProjection(store, name)` over
   `useSyncExternalStore`, with `dispose` in the effect cleanup so StrictMode's double mount
   does not leak a driver. Its `/components` entry carries the C1 element wrappers (§5), kept
   behind a separate entry so a C2 user who wants only hooks never loads Lit.
@@ -252,7 +252,7 @@ no numbers, and neither "empty" nor "refused", both of which are answers.
 - **Custom elements, with Lit.** The one embedding primitive React, Vue, Svelte, Angular, plain
   HTML and anywidget all share; one implementation of the obligations above. Lit for the
   context protocol, reactive properties and `@lit/react` — about 5 kB (assumed from its
-  published size). React 19 takes custom elements natively; `@tessera/react/components` wraps
+  published size). React 19 takes custom elements natively; `@tesseradb/react/components` wraps
   them with typed props and events for typing and for React 18.
 - **Two distributions.** Unbundled ESM with `lit`, `@deck.gl/*` and `@luma.gl/*` as peers, for
   anyone with a bundler; and one self-contained bundle — the `<script type="module">` above —
@@ -316,7 +316,7 @@ presets, the trace bar (`?trace=1`), the stage-timing readout (from the response
 `stage_ns`), the request-failure list and the replica drawer's spend figures. Each reads a
 projection like any piece. `run_demo.sh` keeps its invocation, its scales and its port table;
 the smoke scripts keep running against the demo page, reading the probe from
-`document.querySelector('tessera-map')`. `@tessera/viewer` keeps its name (client-architecture
+`document.querySelector('tessera-map')`. `@tesseradb/viewer` keeps its name (client-architecture
 D4) and becomes this page.
 
 **The notebook** is the same explorer in an anywidget, shipped as the `widget` extra of
@@ -353,24 +353,29 @@ quantity and decides nothing about what is drawn.
 
 ## 8. The packages
 
+The npm scope is **`@tesseradb`**, matching the Python package; the repository's two existing
+packages, `@tessera/client` and `@tessera/viewer`, take the new scope at §9 step 1 — no
+deployment holds the old names (decision 0048), and client-architecture D4's ruling is about the
+viewer keeping its *name*, which it does.
+
 | package | customer | depends on | contents |
 |---|---|---|---|
-| `@tessera/client` | C2 (and every layer above) | `apache-arrow` | verbs, decode, coordinates, replica, driver, composition, **the store** |
-| `@tessera/deck` | C2 with deck.gl; C1 through the map | client; peers `@deck.gl/*`, `@luma.gl/*` | `TesseraLayer`, the slab, the encoding object |
-| `@tessera/react` | C2 in React; C1 in React | client; peer `react`; `/components` entry also peers `@tessera/components` | hooks; element wrappers |
-| `@tessera/components` | C1 | client, deck; peer `lit` | `<tessera-explorer>`, the pieces, `<tessera-store>`, the formatter, tokens and parts |
-| `@tessera/viewer` | C4 | components | the demo page and its instruments |
+| `@tesseradb/client` | C2 (and every layer above) | `apache-arrow` | verbs, decode, coordinates, replica, driver, composition, **the store** |
+| `@tesseradb/deck` | C2 with deck.gl; C1 through the map | client; peers `@deck.gl/*`, `@luma.gl/*` | `TesseraLayer`, the slab, the encoding object |
+| `@tesseradb/react` | C2 in React; C1 in React | client; peer `react`; `/components` entry also peers `@tesseradb/components` | hooks; element wrappers |
+| `@tesseradb/components` | C1 | client, deck; peer `lit` | `<tessera-explorer>`, the pieces, `<tessera-store>`, the formatter, tokens and parts |
+| `@tesseradb/viewer` | C4 | components | the demo page and its instruments |
 | `tesseradb` (Python) | C4 | `[widget]` extra: anywidget, the components bundle committed | the widget class, the mount, the messages; later the SDK and the in-process instance |
 
 This amends client-architecture §1's two-package split. Its second package — "the deck.gl
-binding and its GPU slab … panels, the trace bar, DOM wiring" — becomes `@tessera/deck` and
-`@tessera/components`, and `@tessera/viewer` keeps its name and its instruments and consumes
+binding and its GPU slab … panels, the trace bar, DOM wiring" — becomes `@tesseradb/deck` and
+`@tesseradb/components`, and `@tesseradb/viewer` keeps its name and its instruments and consumes
 them. D1a's boundary rule is unchanged and is where `client` stops and `deck` starts; D3's
 adapter story is §4's tile-shaped adapter; D4's ruling is kept. §11 D3 asks the owner to rule
 the split explicitly rather than inherit it.
 
 The colour encoding accumulators — palette ranks by observed frequency, sticky numeric domains —
-live in `@tessera/deck`'s encoding object, shared by `TesseraLayer` and `<tessera-legend>`, fed by
+live in `@tesseradb/deck`'s encoding object, shared by `TesseraLayer` and `<tessera-legend>`, fed by
 the store's `legend` projection and reset by the store's `reset` event on identity-key change.
 The store owns what was counted; the vis side owns what colour it gets, which is where
 client-architecture §1 draws the line.
@@ -380,7 +385,7 @@ client-architecture §1 draws the line.
 The order, as client-architecture §6 gives its own — the demo working at every step, the smoke
 scripts as the net, one worktree per step:
 
-0. **The presented frame moves** into `@tessera/client`: `assemble.ts`'s composition half and
+0. **The presented frame moves** into `@tesseradb/client`: `assemble.ts`'s composition half and
    `binding.ts`'s frame-applying store writes; `ViewState` becomes the driver's type. Finishes
    client-architecture §6 step 3. Not separable from step 1 — the legend fold walks the
    assembled frame and the artifact channel reads its depth.
@@ -388,14 +393,14 @@ scripts as the net, one worktree per step:
    `createStore`. The artifact channel, item and artifact detail, category resolution, filter
    composition and the legend fold leave `main.ts`. The viewer consumes the store; nothing
    visible changes; `smoke.mjs` and `smoke-artifacts.mjs` green.
-2. **`@tessera/deck` and `@tessera/components`**: `TesseraLayer` and the encoding object;
+2. **`@tesseradb/deck` and `@tesseradb/components`**: `TesseraLayer` and the encoding object;
    `<tessera-map>`, `<tessera-view-info>`, `<tessera-item-card>`, `<tessera-filter-panel>`,
    `<tessera-explorer>`. The viewer becomes the explorer plus instruments. Smoke green.
 3. **Artifacts**: `<tessera-layer-picker>`, wire geometry drawn, the sidecar retired,
    `<tessera-artifact-card>`, `<tessera-legend>`. `smoke-artifacts.mjs` asserts hull and label
    render under two principals.
 4. **C1 and C2 examples in the gate**: a plain-HTML page, a React page using the explorer, a
-   page using the store over a plain canvas with none of our rendering, and `@tessera/react`. `check-clients.sh`
+   page using the store over a plain canvas with none of our rendering, and `@tesseradb/react`. `check-clients.sh`
    typechecks new workspaces as written. Vue and Svelte documented, not checked.
 5. **`tesseradb[widget]`** and the notebook example, run in Jupyter and Marimo by hand once; the
    built bundle **committed** into the Python package so it installs without Node, and the gate
@@ -424,13 +429,13 @@ The C2 example is the check that the store is usable with none of our rendering.
   customer and nobody else has to know.
 - **Light DOM with a class contract.** Simpler to restyle from a host stylesheet, and impossible
   to keep from being restyled by accident; §11 D2.
-- **Folding the deck adapter into `@tessera/client`.** Makes the headless package depend on the
+- **Folding the deck adapter into `@tesseradb/client`.** Makes the headless package depend on the
   GPU path, which a customer drawing to their own canvas never wants; the boundary
   client-architecture §1 drew is worth a package.
 
 ## 11. Decisions for the owner
 
-- **D1 — custom elements, authored with Lit; React through `@tessera/react`.** Recommended.
+- **D1 — custom elements, authored with Lit; React through `@tesseradb/react`.** Recommended.
 - **D2 — shadow DOM with tokens, parts and slots**, against light DOM with classes. Recommended:
   shadow.
 - **D3 — the package split of §8**, which amends client-architecture §1 from two packages to
@@ -493,4 +498,6 @@ paragraph is updated on promotion.
   given its C2 surface (`createStore`, `setView` from any camera, `dataXY`, the hooks); the deck
   adapter split into its own package; C3's document set, the wire's idioms and the production
   CORS question added (D9, D10). Same day, owner: the Python package is `tesseradb`, one
-  package with the widget as an extra (D6); the non-deck example renderer is a plain canvas.
+  package with the widget as an extra (D6); the non-deck example renderer is a plain canvas;
+  the npm scope is `@tesseradb` to match, the repository's `@tessera/*` names changing at §9
+  step 1 (pre-release, decision 0048).
