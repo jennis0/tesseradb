@@ -111,6 +111,8 @@ architecture design.
 | [`concurrency-lifecycle.md`](concurrency-lifecycle.md) | Normative | Generations, retention, the two removal rules, the WAL, merge versus snapshot |
 | [`conformance.md`](conformance.md) | Normative | The suite: the definitions-oracle, canaries, the byte-scanner, interleavings |
 | [`client-interaction.md`](client-interaction.md) | Provisional | What a client is: holdings, version coordinates, display obligations, protocol |
+| [`client-architecture.md`](client-architecture.md) | Provisional | The client/vis boundary rule, the driver as an explicit state machine, the replica's API and frame composition on the tile grid. Driver built; §6's migration half done, finished by `client-components.md` |
+| [`client-components.md`](client-components.md) | Provisional r2 | The embeddable component library over the headless client: the store and its projections, the two count types, nine components including a drop-in deck.gl layer, the token-and-parts styling contract, the anywidget embed with token-as-message custody, and what the demo keeps as instruments. **Nothing in it is built**; §10 is the order |
 | [`caching.md`](caching.md) | Provisional | Where data rests and what that costs — caching as feasibility, not optimisation |
 | [`delta-serving.md`](delta-serving.md) | Provisional | What a client may declare it holds, and what that lets the server omit, skip or elide |
 | [`views-and-multi-table.md`](views-and-multi-table.md) | Provisional | Named orthogonal coordinate systems, and physical table shards |
