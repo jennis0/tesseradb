@@ -22,9 +22,9 @@ expense of another is the failure this document is organised to avoid.
 | | who | what they need | what "done" looks like |
 |---|---|---|---|
 | **C1** | an application developer who wants a **drop-in** | a map and its panels in their page with the fewest lines and no state wiring; restyle it; rearrange it; in the extreme, replace one piece | one tag, two attributes, a working masked map; CSS to restyle; a slot to replace a piece |
-| **C2** | someone with an **existing visualisation** switching to Tessera as the backend | our data in their tool — deck.gl, MapLibre, Plotly, a canvas of their own — with our caching and scheduling doing the asking | a headless store that takes their camera and hands back typed arrays and counts; adapters for the common engines |
+| **C2** | someone with an **existing visualisation** switching to Tessera as the backend | our data in their tool — deck.gl, MapLibre, a canvas of their own — with our caching and scheduling doing the asking | a headless store that takes their camera and hands back typed arrays and counts; adapters for the common engines |
 | **C3** | a **power user** building their frontend from scratch | a wire interface that is well designed and fully documented; **no dependence on our client** | an OpenAPI description, the framing documented to the byte, the obligations list, and a wire with no idioms you have to be told |
-| **C4** | the **in-repo demo**, and the **notebook**, which is the same customer in a different container | out of the box, ready to go, showing everything | `run_demo.sh` and `TesseraMap(url, credential)` both open on the full experience |
+| **C4** | the **in-repo demo**, and the **notebook**, which is the same customer in a different container | out of the box, ready to go, showing everything | `run_demo.sh` and `tesseradb.Map(url, credential)` both open on the full experience |
 
 The client is **never responsible for disclosure**. The server decides what a principal may
 have before any byte leaves it, whatever the client asked for. What a client can get wrong is
@@ -45,7 +45,7 @@ design; the rest is what each layer contains.
 | L1 | the **store**: verbs, decode, replica, driver, the presented frame, artifacts, filters, selection — headless, no DOM | C2 | `@tessera/client` |
 | L2 | **adapters**: a deck.gl layer; a tile-shaped adapter; React hooks | C2 | `@tessera/deck`, `@tessera/react` |
 | L3 | **components**: the composite `<tessera-explorer>` and the pieces it is made of | C1 | `@tessera/components` |
-| L4 | the **demo** and the **widget** | C4 | `@tessera/viewer`, `tessera-widget` |
+| L4 | the **demo** and the **widget** | C4 | `@tessera/viewer`, `tesseradb[widget]` |
 
 C1 never sees L1 — the composite constructs its own store. C2 never loads L3 — no Lit, no
 custom elements, no deck.gl unless they asked for the deck adapter. C3 never installs anything.
@@ -139,7 +139,7 @@ report gestures.
 **Positions come in the coordinate system the customer needs**, because every engine wants a
 different one. `marks` carries the wire's cell-space positions (`Float64`, 32 bits per axis) and
 the deck world `f32`; `store.dataXY(marks)` gives the corpus's own data coordinates from
-`meta`'s quantisation for a Plotly or Vega user, and a geographic corpus's extent is its CRS
+`meta`'s quantisation for a renderer that is not ours, and a geographic corpus's extent is its CRS
 (client-interaction §12). The transform is a per-point pass done on request, not on every
 frame.
 
@@ -319,8 +319,11 @@ the smoke scripts keep running against the demo page, reading the probe from
 `document.querySelector('tessera-map')`. `@tessera/viewer` keeps its name (client-architecture
 D4) and becomes this page.
 
-**The notebook** is the same explorer in an anywidget. `tessera-widget`'s `_esm` is the
-self-contained bundle plus a `render({model, el, signal})` that mounts `<tessera-explorer>` into
+**The notebook** is the same explorer in an anywidget, shipped as the `widget` extra of
+**`tesseradb`** — the one Python package, which later also carries the SDK (#47) and, in a
+separate piece of work, an in-process Tessera for a notebook. The base install has no
+JavaScript in it; `pip install tesseradb[widget]` adds anywidget and the bundle. The widget's
+`_esm` is the self-contained bundle plus a `render({model, el, signal})` that mounts `<tessera-explorer>` into
 `el`; `_css` is empty. anywidget reaches Jupyter, Marimo (`mo.ui.anywidget`, two-way), VS Code
 and Colab from one package. What crosses the kernel boundary, as synced traitlets, is **control
 and selection, never data**: URLs and view name down; `bbox`, `layer`, `colour_by` and
@@ -344,8 +347,8 @@ browser-direct's exposure everywhere. For a JupyterHub whose browser cannot reac
 nothing crosses. ⊘ Documented, not built, in the first cut; the widget's messages are built at
 §9 step 5.
 
-The Python SDK (#47) does not exist and the widget does not wait for it: authorise is one HTTP
-call with `urllib`, moved into the SDK when there is one. The widget computes no masked
+The SDK (#47) does not exist and the widget does not wait for it: authorise is one HTTP call
+with `urllib`, which becomes the SDK's first verb when the SDK lands in the same package. The widget computes no masked
 quantity and decides nothing about what is drawn.
 
 ## 8. The packages
@@ -357,7 +360,7 @@ quantity and decides nothing about what is drawn.
 | `@tessera/react` | C2 in React; C1 in React | client; peer `react`; `/components` entry also peers `@tessera/components` | hooks; element wrappers |
 | `@tessera/components` | C1 | client, deck; peer `lit` | `<tessera-explorer>`, the pieces, `<tessera-store>`, the formatter, tokens and parts |
 | `@tessera/viewer` | C4 | components | the demo page and its instruments |
-| `tessera-widget` (Python) | C4 | the components bundle, committed | the anywidget class, the mount, the messages |
+| `tesseradb` (Python) | C4 | `[widget]` extra: anywidget, the components bundle committed | the widget class, the mount, the messages; later the SDK and the in-process instance |
 
 This amends client-architecture §1's two-package split. Its second package — "the deck.gl
 binding and its GPU slab … panels, the trace bar, DOM wiring" — becomes `@tessera/deck` and
@@ -392,9 +395,9 @@ scripts as the net, one worktree per step:
    `<tessera-artifact-card>`, `<tessera-legend>`. `smoke-artifacts.mjs` asserts hull and label
    render under two principals.
 4. **C1 and C2 examples in the gate**: a plain-HTML page, a React page using the explorer, a
-   React page using the store with a non-deck renderer, and `@tessera/react`. `check-clients.sh`
+   page using the store over a plain canvas with none of our rendering, and `@tessera/react`. `check-clients.sh`
    typechecks new workspaces as written. Vue and Svelte documented, not checked.
-5. **`tessera-widget`** and the notebook example, run in Jupyter and Marimo by hand once; the
+5. **`tesseradb[widget]`** and the notebook example, run in Jupyter and Marimo by hand once; the
    built bundle **committed** into the Python package so it installs without Node, and the gate
    rebuilds it and fails on a diff.
 6. **C3's documents**: the OpenAPI description generated from the server's types, the worked
@@ -422,7 +425,8 @@ The C2 example is the check that the store is usable with none of our rendering.
 - **Light DOM with a class contract.** Simpler to restyle from a host stylesheet, and impossible
   to keep from being restyled by accident; §11 D2.
 - **Folding the deck adapter into `@tessera/client`.** Makes the headless package depend on the
-  GPU path; the boundary client-architecture §1 drew is worth a package.
+  GPU path, which a customer drawing to their own canvas never wants; the boundary
+  client-architecture §1 drew is worth a package.
 
 ## 11. Decisions for the owner
 
@@ -435,8 +439,10 @@ The C2 example is the check that the store is usable with none of our rendering.
   message, the proxy arm documented; (b) proxy arm only. (b) is a base-URL change over (a).
   Recommended: (a).
 - **D5 — instruments stay in the demo.** Recommended.
-- **D6 — the Python package at `clients/py/widget/`**, sharing no code with `reference/`, the
-  built bundle committed; not waiting on #47.
+- **D6 — one Python package, `tesseradb`, at `clients/py/tesseradb/`**, the widget as its
+  `[widget]` extra with the built bundle committed; the SDK and the in-process instance join
+  it later; sharing no code with `reference/`. Ruled by the owner 2026-08-24 in conversation —
+  recorded here so a decision file can carry it at promotion.
 - **D7 — the first-cut set**: the explorer, seven pieces, `<tessera-store>`, `TesseraLayer`,
   the hooks. Two declined pieces recorded in §5.
 - **D8 — a fetch-model hint in `/v1/meta`** (artifact-system §6's ⊘). Asked for, not depended
@@ -463,7 +469,8 @@ its §7; the token custody item is its §15, answered here. The two artifact fet
 documentation.
 
 On the roadmap: [#10] becomes four packages; [#46]'s reference viewer becomes §7's demo; the
-widget precedes [#47] and does not depend on it. The roadmap paragraph is updated on promotion.
+widget precedes [#47] and does not depend on it, and both live in `tesseradb`. The roadmap
+paragraph is updated on promotion.
 
 ## Appendix R — review trail
 
@@ -485,4 +492,5 @@ widget precedes [#47] and does not depend on it. The roadmap paragraph is update
   every piece takes its data as a property with the store binding as the default; the store
   given its C2 surface (`createStore`, `setView` from any camera, `dataXY`, the hooks); the deck
   adapter split into its own package; C3's document set, the wire's idioms and the production
-  CORS question added (D9, D10).
+  CORS question added (D9, D10). Same day, owner: the Python package is `tesseradb`, one
+  package with the widget as an extra (D6); the non-deck example renderer is a plain canvas.
