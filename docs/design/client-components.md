@@ -255,7 +255,10 @@ second and third; the fourth is for hosts building their own panels.
   slots** — `top-left`, `top-right`, `bottom-left`, `bottom-right` — for anything a host wants
   over the map, which is where the explorer puts the status strip and the legend; the pattern
   is MapLibre's and Leaflet's control corners, and it needs no JS. A `tooltip` slot takes a
-  host's own hint renderer.
+  host's own hint renderer. A `basemap` property takes a deck.gl layer to
+  draw **under** the points — a self-hosted PMTiles raster for a geographic corpus
+  (client-interaction §12's basemap plan) — which the ops-console board needed and the first
+  draft had no place for.
 
 **Tier 2 — the panels.** Each reads the store by context, takes its data by property instead,
 and is placeable and replaceable on its own.
@@ -279,11 +282,12 @@ and is placeable and replaceable on its own.
   column and never per vocabulary; a numeric domain as a ramp. `selectable` adds the colour-by
   selector, which the explorer's toolbar uses; without it the legend is a readout for a corner.
 - **`<tessera-layer-picker>`** — which annotation layers the map draws, from `meta.layers`,
-  **any number at once** (owner direction 2026-08-24; the wire's `layers` is a list and each
-  named layer costs its own pass, so the store names exactly the ones that are on). A layer
-  draws by what it carries: one whose artifacts carry members colours the points and places
-  the names; one attached to those artifacts — descriptions, topics — draws beneath the names;
-  one carrying supplied shapes draws them as outlines. Never a count of a layer's artifacts,
+  **usually one, and any number when they are different kinds of feature** — a geographic
+  corpus with districts, incidents and routes as three layers is the case; stacking label
+  layers over one clustering is not (owner direction 2026-08-24). The wire's `layers` is a list
+  and each named layer costs its own pass, so the store names exactly the ones that are on. A
+  layer draws by what it carries: one whose artifacts carry members colours the points and
+  places the names; one carrying supplied shapes draws them as outlines with their counts. Never a count of a layer's artifacts,
   because the wire never carries one.
 - **`<tessera-artifact-list>`** — what the layer served for this view, as a list or a tree
   built from `parentId`, each with its label and its `Masked` count; click selects and fits.
@@ -338,7 +342,7 @@ Named slots, each with default content, so replacing a piece is putting an eleme
 
 | slot | default | where it sits (overlay / docked) |
 |---|---|---|
-| `status` | `<tessera-status>` | map bottom-left / sidebar top |
+| `status` | `<tessera-status>` | map bottom-left in both layouts — always in view |
 | `toolbar` | fit, colour-by (`<tessera-legend selectable>`), `<tessera-layer-picker>` | map top-left / sidebar top |
 | `legend` | `<tessera-legend>` | map bottom-right / sidebar |
 | `filters` | `<tessera-filter-panel>` | sidebar |
@@ -436,8 +440,9 @@ data map should look like:
   overlap.
 - **Labels sized by cluster size** in the UI face, semibold, a thin halo in the background
   colour, the count beside the name in regular weight at four-fifths the size, and leader lines
-  when a label has to move off its centroid. A second, attached layer — descriptions, topics —
-  draws beneath the name in italic; a member layer's children draw beneath that, smaller.
+  when a label has to move off its centroid. A member layer's children draw beneath the name,
+  smaller. An attached layer's descriptions *can* draw beneath the name in italic — the canvas
+  shows it — but it is not the default, since one layer at a time is the common case.
 - **No grid, and no tile structure**, anywhere: the storage's cells are never shown.
 
 The demo's `clusters.json` sidecar and the dashed rings it placed are gone with this.
@@ -670,6 +675,12 @@ The C2 example is the check that the store is usable with none of our rendering.
   is a decision about who may present tokens, not a client convenience.
 
 ## 12. Provenance
+
+The design canvas — the explorer in three layouts and every state, the lasso flow, and five host
+applications embedding the same pieces — is published as an artifact ("Tessera Client
+Components", 2026-08-24); its generator and layout are kept at
+`docs/evidence/mockups/client-components/` so the boards can be rebuilt, and the rendered boards
+are not committed because they are its output. What the boards changed is in Appendix R.
 
 The owner's direction of 2026-08-24, in two parts: the four-point brief (package, split,
 restyle, artifacts) and the four-customer re-cut with the correction that the client is never

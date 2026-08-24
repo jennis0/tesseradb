@@ -1,0 +1,158 @@
+{
+  "pages": [
+    {
+      "id": "page-1",
+      "name": "Default explorer"
+    },
+    {
+      "id": "page-2",
+      "name": "Host apps"
+    }
+  ],
+  "artboards": [
+    {
+      "file": "Main.dc.html",
+      "title": "Explorer \u2014 docked",
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "page": "page-1"
+    },
+    {
+      "file": "ExplorerOverlay.dc.html",
+      "title": "Explorer \u2014 overlay",
+      "x": 1540,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "page": "page-1"
+    },
+    {
+      "file": "ExplorerNarrow.dc.html",
+      "title": "Explorer \u2014 narrow",
+      "x": 0,
+      "y": 1040,
+      "w": 860,
+      "h": 880,
+      "page": "page-1"
+    },
+    {
+      "file": "StatusStates.dc.html",
+      "title": "Status \u2014 every state",
+      "x": 960,
+      "y": 1040,
+      "w": 960,
+      "h": 1200,
+      "page": "page-1"
+    },
+    {
+      "file": "SelectionFlow.dc.html",
+      "title": "Lasso \u2014 the flow",
+      "x": 2020,
+      "y": 1040,
+      "w": 1720,
+      "h": 620,
+      "page": "page-1"
+    },
+    {
+      "file": "OpsConsole.dc.html",
+      "title": "Host 1 \u2014 ops console (geo)",
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "page": "page-2"
+    },
+    {
+      "file": "ImageCurator.dc.html",
+      "title": "Host 2 \u2014 image dataset curator",
+      "x": 1540,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "page": "page-2"
+    },
+    {
+      "file": "ResearchDesk.dc.html",
+      "title": "Host 3 \u2014 document research desk",
+      "x": 0,
+      "y": 1040,
+      "w": 1440,
+      "h": 900,
+      "page": "page-2"
+    },
+    {
+      "file": "Article.dc.html",
+      "title": "Host 4 \u2014 editorial drop-in",
+      "x": 1540,
+      "y": 1040,
+      "w": 900,
+      "h": 1500,
+      "page": "page-2"
+    },
+    {
+      "file": "Notebook.dc.html",
+      "title": "Host 5 \u2014 notebook",
+      "x": 2540,
+      "y": 1040,
+      "w": 1200,
+      "h": 1000,
+      "page": "page-2"
+    }
+  ],
+  "annotations": [
+    {
+      "id": "n-default",
+      "x": 0,
+      "y": -150,
+      "w": 560,
+      "page": "page-1",
+      "text": "The default explorer. One tag, its own store. Docked and overlay are the same components in two layouts; the theme chip above each board switches the same tokens between light and dark.\nStates and the lasso flow below."
+    },
+    {
+      "id": "n-ops",
+      "x": 0,
+      "y": -190,
+      "w": 440,
+      "page": "page-2",
+      "text": "Host 1 \u00b7 Ops console (geo)\nCustomisation: mid. Docked explorer; basemap slotted under the map; their facet rail is our filter elements restyled; their incident card replaces the item card. Tokens: dark, amber, Barlow + JetBrains Mono, 2px radii."
+    },
+    {
+      "id": "n-img",
+      "x": 1540,
+      "y": -190,
+      "w": 440,
+      "page": "page-2",
+      "text": "Host 2 \u00b7 Image dataset curator (ML)\nCustomisation: heavy. No explorer \u2014 pieces in their own grid. Tooltip slot shows a thumbnail; item card and selection panel are theirs, fed from the store. Lasso \u2192 queue for labelling, with the sample and the set both named."
+    },
+    {
+      "id": "n-res",
+      "x": 0,
+      "y": 890,
+      "w": 440,
+      "page": "page-2",
+      "text": "Host 3 \u00b7 Document research desk\nCustomisation: mid. Search-first app; the header search box is a tessera-filter on title. Results list and document preview are theirs; the map is one view among tabs. Warm serif tokens."
+    },
+    {
+      "id": "n-art",
+      "x": 1540,
+      "y": 890,
+      "w": 440,
+      "page": "page-2",
+      "text": "Host 4 \u00b7 Editorial drop-in\nCustomisation: minimal. One tag in an article column, panels=\"legend\", a dozen tokens: the page's serif, one green, no radii, no shadow. Tests the narrow container."
+    },
+    {
+      "id": "n-nb",
+      "x": 2540,
+      "y": 890,
+      "w": 440,
+      "page": "page-2",
+      "text": "Host 5 \u00b7 Notebook\nCustomisation: none. tesseradb.Map in a cell at cell width; the same docked explorer with a narrower sidebar. The next cells read the selection back into Python. The token never enters the notebook."
+    }
+  ],
+  "launch": {
+    "view": "canvas",
+    "page": "page-1"
+  }
+}
