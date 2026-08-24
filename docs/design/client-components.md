@@ -132,7 +132,7 @@ report gestures.
 | `marks` | the draw list: `ids` (`BigUint64Array`), `codes`, positions, `scalars` (typed arrays by column), per-tile provenance, and its `Count` |
 | `artifacts` | the layer selected; the served set with geometry, content and `parentId`; the tree; the channel's status and refusal |
 | `selection` | the picked item's record (named fields) or its refusal; the opened artifact or its refusal |
-| `region` | the selected box or lasso; its `visible` and `matched` as `Masked`, its `served` as `Count`; the held marks inside it; the tiles it was counted over (§5.10) |
+| `region` | the selected box or lasso; its `visible` and `matched` as `Masked`, its `served` as `Count`; the held marks inside it (§5.11) |
 | `filters` | operands from meta; the composed `FilterExpr` as sent; per-column value lists and their refusals |
 | `legend` | per column: the codes marks on screen carry and their resolved values |
 | `replica` | bytes, points, bands held; the last plan's held-versus-fetched split; look-ahead spend |
@@ -250,7 +250,7 @@ second and third; the fourth is for hosts building their own panels.
   context, so a map alone is one tag. Properties: `colour-by`, `layer`, `budget`, `palette`,
   `tooltip-fields` (which of the scalars already on the wire the hover hint shows — hover costs
   no request; the click costs one), and `mode` — `pan`, `box` or `lasso` — with shift-drag as
-  the shortcut in `pan` and the live highlight drawn as the pointer moves (§5.10). Methods:
+  the shortcut in `pan` and the live highlight drawn as the pointer moves (§5.11). Methods:
   `fit()`, `fitTo(artifactId)`, `select(shape)`. Four **corner
   slots** — `top-left`, `top-right`, `bottom-left`, `bottom-right` — for anything a host wants
   over the map, which is where the explorer puts the status strip and the legend; the pattern
@@ -260,13 +260,15 @@ second and third; the fourth is for hosts building their own panels.
 **Tier 2 — the panels.** Each reads the store by context, takes its data by property instead,
 and is placeable and replaceable on its own.
 
-- **`<tessera-status>`** — the state and the three counts. Compact by default: one line —
-  *500 shown · 3,210 matched · 12,040 visible* — with the state as a badge (loading, retrying,
-  refused with its code, expired) and the **refresh control** when `stale`. `expanded` adds the
-  drawn region, the depth, provisional marks as a count of marks, and the replica drawer. This
-  is the view-info panel of the brief, shaped so its compact form can live on the map where it
-  is always in view; the counts are in that order because their relationship is the content — a
-  filter narrows the answer and never the grant.
+- **`<tessera-status>`** — the state and the three counts. One line — *500 shown · 3,210
+  matched · 12,040 visible* — with the state as a badge (loading, retrying, refused with its
+  code, expired) and the **refresh control** when `stale`; the detail behind the numbers (the
+  drawn region, provisional marks, what the replica holds) is a hover, not a panel. This is the
+  view-info panel of the brief, reduced to the strip: the mock-ups showed the expanded card adding
+  nothing the strip and a hover do not, so the strip is the default and lives on the map where it
+  is always in view. `expanded` still exists for a host that wants the card. The counts are in
+  that order because their relationship is the content — a filter narrows the answer and never
+  the grant.
 - **`<tessera-filter column="…">`** — one operand, rendered by its type from `meta`: a value
   picker for a category (with a refused enumeration shown as a refusal beside a free-text
   entry), a range for a number or a datetime, words-or-phrase for text, a value for a keyword.
@@ -276,9 +278,13 @@ and is placeable and replaceable on its own.
 - **`<tessera-legend>`** — what the colours mean: the values marks on screen carry, resolved per
   column and never per vocabulary; a numeric domain as a ramp. `selectable` adds the colour-by
   selector, which the explorer's toolbar uses; without it the legend is a readout for a corner.
-- **`<tessera-layer-picker>`** — which annotation layer the map draws, from `meta.layers`,
-  one at a time or none. Never a count of a layer's artifacts, because the wire never carries
-  one.
+- **`<tessera-layer-picker>`** — which annotation layers the map draws, from `meta.layers`,
+  **any number at once** (owner direction 2026-08-24; the wire's `layers` is a list and each
+  named layer costs its own pass, so the store names exactly the ones that are on). A layer
+  draws by what it carries: one whose artifacts carry members colours the points and places
+  the names; one attached to those artifacts — descriptions, topics — draws beneath the names;
+  one carrying supplied shapes draws them as outlines. Never a count of a layer's artifacts,
+  because the wire never carries one.
 - **`<tessera-artifact-list>`** — what the layer served for this view, as a list or a tree
   built from `parentId`, each with its label and its `Masked` count; click selects and fits.
   The "clusters in view" panel of the instrument, made navigational.
@@ -291,7 +297,7 @@ and is placeable and replaceable on its own.
 - **`<tessera-selection>`** — the selected region: its three numbers through
   `<tessera-count>`, the served items inside it as a list (title from `tooltip-fields`, click
   picks), and the actions — *clear* now; *filter to this*, *export* and *save as artifact*
-  as §5.10 says.
+  as §5.11 says.
 
 **Tier 3 — primitives.**
 
@@ -412,7 +418,31 @@ contrast in both schemes.
   a control's identity across store ticks, and the panels that move every frame are separate
   elements from the ones a user types into.
 
-### 5.10 Selection — box and lasso
+### 5.10 How the map draws
+
+Settled on the design canvas (2026-08-24), against DataMapPlot as the reference for what a
+data map should look like:
+
+- **Colour by cluster is the default when a layer with members is on**, and the palette is
+  positional: a cluster's hue from its angle about the map's centre, its lightness from its
+  distance, so neighbours are related colours and the map reads as one thing. Colouring by a
+  column remains the alternative, with a swatch legend; by cluster, the labels are the legend.
+- **A density wash under the points** — the points binned to a coarse grid, smoothed, drawn once
+  at low opacity in the cluster's colour (about a tenth in light, a fifth in dark) — so density
+  reads as depth. A blur per point was tried and rejected: it shows every dot's halo.
+- **Nested density contours on every cluster**, three levels traced from the cluster's own
+  smoothed density, hairline and greatly faded; the selected cluster's are strong with a faint
+  fill inside the outermost. Convex hulls were tried and rejected: they balloon on outliers and
+  overlap.
+- **Labels sized by cluster size** in the UI face, semibold, a thin halo in the background
+  colour, the count beside the name in regular weight at four-fifths the size, and leader lines
+  when a label has to move off its centroid. A second, attached layer — descriptions, topics —
+  draws beneath the name in italic; a member layer's children draw beneath that, smaller.
+- **No grid, and no tile structure**, anywhere: the storage's cells are never shown.
+
+The demo's `clusters.json` sidecar and the dashed rings it placed are gone with this.
+
+### 5.11 Selection — box and lasso
 
 The wire has no spatial operand: the request's bbox is the only region there is, and
 client-interaction §9 rules that selection should become a **content-addressed filter operand**
@@ -427,9 +457,9 @@ bounded by `max_tiles_per_request`; the store sums the tiles inside the shape �
 a box, the rasterised interior for a lasso — into the region's `visible` and `matched`. That is
 arithmetic on number-channel values, not a masked quantity computed from a sample
 (client-interaction P1 names *live lasso highlight* as the client's own computation), and it is
-exact at the counted tiles' resolution: the highlight is drawn **snapped to the tiles that were
-counted**, so what the user sees selected is what the numbers are over, and never a smoother
-shape the numbers do not describe. The served items inside are the held marks whose positions
+exact at pixel resolution, and **the highlight is the shape the user drew** — the tile grid is a
+fact about storage and is never shown (owner direction 2026-08-24); at pixel depth the
+difference between the shape and the tiles under it is below what a screen can show. The served items inside are the held marks whose positions
 fall in the shape — a sample, so `served` is a `Count` whose `total` is the region's `matched`
 (P2: both numbers, always). One request per settled gesture, debounced like the artifact
 channel; the live highlight while dragging is client-side and free.
@@ -460,8 +490,8 @@ sidecar — rings placed by the publishing script, from a time when no geometry 
 What every layer states the same way, because the wire gives nothing to fill any other reading
 from: the count is over the whole membership and does not move with the viewport, so a card is
 steady during a pan; an absent artifact has no reason — no "hidden" rendering, no greyed entry,
-and an artifact with no served parent is a root; one layer at a time, named in the request,
-because omitting the selector pays for every layer; and the channel asks for itself with its
+and an artifact with no served parent is a root; the layers that are on are named in the request, because omitting the selector pays for
+every layer and each named one costs its own pass; and the channel asks for itself with its
 `k = 0` request per settled view, since the replica elides held tiles and an elided tile carries
 no artifacts.
 
@@ -630,7 +660,7 @@ The C2 example is the check that the store is usable with none of our rendering.
 - **D9 — the wire idioms of §3**: whether `k = 0`, `layers`-omitted-means-all, and the omitted
   artifacts frame are changed before the OpenAPI description is written, or documented as they
   are. Recommended: decide each at that pass, with 0048 in hand.
-- **D11 — the selection operand and its verbs** (§5.10): a rectangle-and-polygon filter
+- **D11 — the selection operand and its verbs** (§5.11): a rectangle-and-polygon filter
   operand on the wire, which client-interaction §9 already rules the shape of, and behind it
   the export verb and the runtime-artifact path. Server-side; box and lasso work without them
   at tile resolution; *filter to this*, *export* and *save* wait. Asked for, in that order.
@@ -685,5 +715,9 @@ paragraph is updated on promotion.
   explorer's regions as slots, the customisation ladder, events, accessibility. One element per
   filter operand, a status strip with two densities, an artifact list, and a count primitive
   are new; the view-info panel is the status strip's expanded form. D2a added. Same day, owner:
-  box and lasso selection added (§5.10) — counts from the per-tile stream today, snapped to
+  box and lasso selection added (§5.11) — counts from the per-tile stream today, snapped to
   the counted tiles; the composable operand and its three actions asked for as D11.
+- 2026-08-24: the design canvas (ten boards: the explorer in three layouts and every state, the
+  lasso flow, five host apps) and the owner's review of it. Rulings taken: several annotation
+  layers at once; the tile grid never shown; the status strip the default with the expanded
+  card optional; copy trimmed to hovers. §5.10 records how the map draws.
