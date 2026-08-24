@@ -187,96 +187,219 @@ longer true.
 
 ## 5. C1 — the components
 
-The drop-in customer's minimal page:
+### 5.1 What people do with a masked map
 
-```html
-<script type="module" src="https://…/tessera-components.js"
-        integrity="sha384-…" crossorigin="anonymous"></script>
-<tessera-explorer viewer-url="https://tessera.example/v1" token="…"></tessera-explorer>
-```
+The components follow the tasks, not the panels the instrument happens to have. Eight tasks,
+and the one that is Tessera's own is the third:
 
-One tag. **`<tessera-explorer>`** is the composite: the map with its panels around it in a
-default layout — view info, filters, legend, layer picker, item card, artifact card — the whole
-demo experience without the instruments. It constructs its own store from its attributes;
-there is no provider to write and nothing to wire. The token is an attribute because that is
-the simplest thing, with an `authorise` property — a function returning a token — for renewal
-when the deployment's lifetime runs out; a page that supplies neither shows the expired state
-when it comes, which is a display state and not an error.
+| task | what it needs on screen |
+|---|---|
+| **orient** — what is here, how much, what is it called | counts for the region; labels from an annotation layer |
+| **navigate** — pan, zoom, jump to a thing, come back | the map; fit-to-extent; fit-to-artifact |
+| **read the state** — is this current, complete, refused, still loading; how `visible`, `matched` and `shown` relate | a status strip that is always in view, and a refresh control when the corpus moved |
+| **inspect a point** — a hint on hover, the record on click, then act on it in the host | a tooltip that costs no request; a card; an event the host handles |
+| **narrow** — filter by attribute or text, watch `matched` fall while `visible` holds, clear | one control per operand; the counts beside them |
+| **encode** — colour by a column, read what the colours mean | a selector; a legend |
+| **see structure** — turn on a layer, read hulls and labels, open a cluster, walk its tree, see what is in view | a layer picker; the overlay; a list of what is served; a card |
+| **refresh** — when told the corpus moved | one control, reachable from anywhere |
 
-Where does the token come from? From the customer's own server, which holds the session
-credential and calls `/session/authorise` for the signed-in user — client-interaction §7's T2,
-the documented topology. The package ships a ten-line Express example, because the drop-in
-story is two files and this is the second one.
+The demo adds a ninth — switch dataset and principal, watch the instruments — which is §7's.
 
-**Restyle, rearrange, replace** — three levels, each cheaper than the next:
+### 5.2 What earns a tag
 
-1. **Tokens.** Every colour, font, spacing and radius is a `--tessera-*` custom property with a
+A piece is its own element when at least one of three things is true; otherwise it is a `part`
+inside one:
+
+- a host would **place it on its own** — a search box in their header, a legend in a map corner,
+  a detail card in their sidebar;
+- a host would **replace it** with something of their own — the item card is the obvious one,
+  the filter panel the next;
+- it is a **truthfulness primitive** a host would otherwise get wrong — a count that knows the
+  difference between a sample and a set.
+
+Applied, the rule cuts in both directions. A filter *panel* is not the unit — a host puts the
+text search in the header and the category picker in a toolbar, so the unit is one operand's
+control, and the panel is their composition. A field row in a card is not a unit — nobody places
+one alone — so it is a part with a slot for replacement. A count *is* a unit, because rendering
+one is where a host writes "12,040 of 12,040" against a cluster.
+
+### 5.3 The catalogue
+
+Fourteen tags in four tiers. C1 meets the first; a host that wants its own layout meets the
+second and third; the fourth is for hosts building their own panels.
+
+**Tier 0 — the experience.**
+
+- **`<tessera-explorer>`** — the map with its status strip, toolbar, legend, layer picker,
+  filters, artifact list and the detail card, in a default layout. Constructs its own store
+  from `viewer-url`, `session-url` and `token` (or an `authorise` property for renewal); no
+  provider, no wiring. `layout="overlay"` (map full-bleed, panels floating — the demo's look)
+  or `layout="docked"` (map beside a sidebar — the predictable one inside an application);
+  under a narrow container the sidebar becomes a sheet behind a button, by container query.
+  `panels="filters legend layers artifacts detail"` chooses which appear. Every region is a
+  named slot with default content (§5.5).
+
+**Tier 1 — the map.**
+
+- **`<tessera-map>`** — the canvas: points, the artifact overlay, hover, pick, the selection
+  highlight, and the display states drawn on the canvas itself, so a refused or expired view
+  never reads as an empty corpus. Constructs a store from its attributes when none is in
+  context, so a map alone is one tag. Properties: `colour-by`, `layer`, `budget`, `palette`,
+  `tooltip-fields` (which of the scalars already on the wire the hover hint shows — hover costs
+  no request; the click costs one). Methods: `fit()`, `fitTo(artifactId)`. Four **corner
+  slots** — `top-left`, `top-right`, `bottom-left`, `bottom-right` — for anything a host wants
+  over the map, which is where the explorer puts the status strip and the legend; the pattern
+  is MapLibre's and Leaflet's control corners, and it needs no JS. A `tooltip` slot takes a
+  host's own hint renderer.
+
+**Tier 2 — the panels.** Each reads the store by context, takes its data by property instead,
+and is placeable and replaceable on its own.
+
+- **`<tessera-status>`** — the state and the three counts. Compact by default: one line —
+  *500 shown · 3,210 matched · 12,040 visible* — with the state as a badge (loading, retrying,
+  refused with its code, expired) and the **refresh control** when `stale`. `expanded` adds the
+  drawn region, the depth, provisional marks as a count of marks, and the replica drawer. This
+  is the view-info panel of the brief, shaped so its compact form can live on the map where it
+  is always in view; the counts are in that order because their relationship is the content — a
+  filter narrows the answer and never the grant.
+- **`<tessera-filter column="…">`** — one operand, rendered by its type from `meta`: a value
+  picker for a category (with a refused enumeration shown as a refusal beside a free-text
+  entry), a range for a number or a datetime, words-or-phrase for text, a value for a keyword.
+  Calls `setFilters` with the recomposed expression.
+- **`<tessera-filter-panel>`** — every operand `meta` offers, as `<tessera-filter>`s, with
+  applied-filter chips and *clear all*. A column absent from `meta` is absent here.
+- **`<tessera-legend>`** — what the colours mean: the values marks on screen carry, resolved per
+  column and never per vocabulary; a numeric domain as a ramp. `selectable` adds the colour-by
+  selector, which the explorer's toolbar uses; without it the legend is a readout for a corner.
+- **`<tessera-layer-picker>`** — which annotation layer the map draws, from `meta.layers`,
+  one at a time or none. Never a count of a layer's artifacts, because the wire never carries
+  one.
+- **`<tessera-artifact-list>`** — what the layer served for this view, as a list or a tree
+  built from `parentId`, each with its label and its `Masked` count; click selects and fits.
+  The "clusters in view" panel of the instrument, made navigational.
+- **`<tessera-item-card>`** — the selected point: its fields in declaration order, by name
+  (`/v1/items` omits absent fields, so position lies), presented by `type`; a **slot per
+  field** so a host renders a title as a link into their application without replacing the
+  card; an `open` event for the same purpose. Distinguishes a miss from a broken pick.
+- **`<tessera-artifact-card>`** — the selected artifact: label, layer, key, its `Masked`
+  count, its content, its children from the held set. Steady during a pan by construction.
+
+**Tier 3 — primitives.**
+
+- **`<tessera-count>`** — renders a `Count` or a `Masked` correctly and nothing else: both
+  figures or neither for a sample, one figure or none for a scalar, and neither when the view
+  is stale. A host writing its own status line uses it and gets the rule for free.
+- **`<tessera-store>`** — the provider, for the one case that needs one: several maps or
+  panels sharing a store for linked views. Nothing else needs it and the documentation does not
+  lead with it.
+
+Two the brief did not name and this design declines: a **search box** (text `match` is one
+`<tessera-filter>`, placeable in a header already) and a **principal switcher** (an
+application's user is one principal; the demo's is an instrument).
+
+**Selection** is two slots in the store — the picked point and the opened artifact — because a
+point inside a cluster makes both meaningful at once. The explorer's `detail` region shows
+whichever changed last; a host placing the two cards separately shows both.
+
+### 5.4 The states, uniformly
+
+Every panel renders the same eight states the same way, through a `part="state"` region, so a
+host that restyles one has restyled them all:
+
+| state | what the panel shows |
+|---|---|
+| **detached** | no store and no data: nothing, and neither "empty" nor "refused", both of which are answers |
+| **loading** | a skeleton, no numbers; on the first request of a session, that the session is being established, since that can take seconds at 10⁹ |
+| **retrying** | the skeleton and that it is retrying, after `Retry-After` |
+| **shown** | the content; the only state in which a number appears |
+| **empty** | that there is nothing here — an answer, not a blank |
+| **refused** | the refusal's code and detail; a `422` is the host's bug and says so |
+| **expired** | the token's lifetime ended: a prompt, the `authorise` property if the host gave one, an `expired` event either way |
+| **stale** | the corpus moved: the content stays, numbers do not, and the refresh control appears — in the status strip always, in any panel showing a number |
+
+### 5.5 The explorer's regions
+
+Named slots, each with default content, so replacing a piece is putting an element in a slot:
+
+| slot | default | where it sits (overlay / docked) |
+|---|---|---|
+| `status` | `<tessera-status>` | map bottom-left / sidebar top |
+| `toolbar` | fit, colour-by (`<tessera-legend selectable>`), `<tessera-layer-picker>` | map top-left / sidebar top |
+| `legend` | `<tessera-legend>` | map bottom-right / sidebar |
+| `filters` | `<tessera-filter-panel>` | sidebar |
+| `artifacts` | `<tessera-artifact-list>` | sidebar |
+| `detail` | the item card or the artifact card, whichever changed last | floating right / sidebar bottom |
+| `tooltip` | the `tooltip-fields` hint | over the map, following the cursor |
+
+A replacement that wants live data reads the store from its context — `closest('tessera-explorer').store`
+or the Lit consumer — and subscribes; a ten-line example ships with the package.
+
+### 5.6 The customisation ladder
+
+Each rung is cheaper than the next, and a host stops at the first that does what they want:
+
+1. **Attributes** — `layout`, `panels`, `colour-by`, `layer`, `tooltip-fields`.
+2. **Tokens** — every colour, font, spacing and radius is a `--tessera-*` custom property with a
    neutral default that follows `color-scheme`, so light and dark come from the host page
-   unconfigured. One token is a size — `--tessera-map-height`, the map's height when its
-   container gives it none. The map's **data palette** is a `palette` property and not a token:
-   it encodes data, and brand colours are the wrong thing to encode data in.
-2. **Parts and slots.** Every structural element carries a `part` — `count`, `field`, `value`,
-   `refusal`, `refresh` — for `::part()` from outside the shadow root. The explorer's layout is
-   **named slots with default content**: `sidebar`, `detail`, `filters`, `legend`, `layers`,
-   `overlay`. Put your own element in a slot and the default piece is gone; an attribute
-   (`panels="filters legend"`) hides the ones you do not want.
-3. **Pieces on their own.** `<tessera-map>`, `<tessera-view-info>`, `<tessera-item-card>`,
-   `<tessera-filter-panel>`, `<tessera-layer-picker>`, `<tessera-artifact-card>`,
-   `<tessera-legend>` are the explorer's contents and are usable without it, in the customer's
-   own layout. A `<tessera-map>` on its own constructs a store from its attributes exactly as
-   the explorer does; the others find the nearest store by context and need no attributes at
-   all. **Every piece also takes its data as a property** — `.item`, `.artifact`, `.counts`,
-   `.values` — and renders it; the store binding is what fills the property in when the
-   customer does not. A card fed from the customer's own fetch, or from a Python cell, works
-   without a store on the page.
+   unconfigured; `--tessera-density` for compact or comfortable; `--tessera-map-height` for a
+   map whose container gives it none. The map's **data palette** is a `palette` property, not a
+   token — it encodes data, and brand colours are the wrong thing to encode data in. The default
+   palette is distinguishable under the common colour-vision deficiencies.
+3. **Parts** — `state`, `count`, `field`, `label`, `value`, `refusal`, `refresh`, `chip`, and
+   the structural ones per component, for `::part()` from outside the shadow root. The names are
+   the contract; the markup is not.
+4. **Slots** — the explorer's regions, the map's corners and tooltip, the card's fields.
+5. **Compose the pieces** in the host's own layout, with no explorer.
+6. **Bring your own data** — every panel takes its data by property; a card fed from the host's
+   own fetch or a Python cell works with no store on the page.
+7. **Fork** — the components ship as readable source as well as built ESM
+   (client-interaction §12's *editable rather than merely themable*).
 
-Replacing a piece entirely is the slot; a replacement that wants live data reads the store from
-its context (`this.closest('tessera-explorer').store`, or the Lit consumer) and subscribes — a
-ten-line example ships with the package. **`<tessera-store>`** exists for the one case that
-needs an explicit provider: two maps sharing a store for linked views. It is not needed for
-anything else and the documentation does not lead with it.
+### 5.7 Events
 
-**What the pieces owe, and it is all about not saying something false:** the display states are
-drawn, on the canvas as well as in the panels, so a refused or expired view never reads as an
-empty corpus; only `shown` renders a number; `<tessera-view-info>` shows `visible`, `matched`,
-`served` in that order because their relationship is the content, and owns the **refresh
-control**, present whenever `status.stale` is; the item card renders fields by name, never by
-position (`/v1/items` omits absent fields, so position lies), and distinguishes a miss from a
-broken pick; the filter panel is built from `meta.filterOperands` alone and renders a refused
-enumeration as a refusal with a free-text entry rather than an empty list; the legend names only
-values marks on screen carry. A piece with **no store and no data** renders a detached state —
-no numbers, and neither "empty" nor "refused", both of which are answers.
+Custom events, prefixed, bubbling and composed so a host listens on any ancestor:
+`tessera-viewchange`, `tessera-hover`, `tessera-pick` (the id and, once it arrives, the record),
+`tessera-artifactopen`, `tessera-filterchange` (the composed expression), `tessera-layerchange`,
+`tessera-statechange` (each transition of §5.4), `tessera-expired`. Detail payloads carry
+`tessera_id`s, records and expressions — the same things the wire does.
 
-**Authoring and mechanics** — decided here, not left to the examples:
+### 5.8 Accessibility
 
-- **Custom elements, with Lit.** The one embedding primitive React, Vue, Svelte, Angular, plain
-  HTML and anywidget all share; one implementation of the obligations above. Lit for the
-  context protocol, reactive properties and `@lit/react` — about 5 kB (assumed from its
-  published size). React 19 takes custom elements natively; `@tesseradb/react/components` wraps
-  them with typed props and events for typing and for React 18.
-- **Two distributions.** Unbundled ESM with `lit`, `@deck.gl/*` and `@luma.gl/*` as peers, for
-  anyone with a bundler; and one self-contained bundle — the `<script type="module">` above —
-  for a page with no build step, which is also the widget's `_esm` (§7). The bundle is
-  published with its subresource-integrity hash, and the snippet above carries it — a page
-  that loads a script from a host it does not control should say which bytes it expected.
-- **Client-only import**: Lit and deck.gl touch `window` at import, so a server-rendered page
-  imports the package dynamically on the client. **Define before render**: the entry defines
+The panels are DOM and are accessible the ordinary way: labelled controls, keyboard operation,
+focus order. The map is a canvas: it takes focus, arrows pan and `+`/`-` zoom, and the marks
+are not individually focusable — the artifact list and the item card are the accessible route
+to what is on it. The status strip is an `aria-live` region, so a refusal, an expiry or a stale
+signal is announced. Motion follows `prefers-reduced-motion`; the default tokens meet AA
+contrast in both schemes.
+
+### 5.9 Mechanics — decided here, not left to the examples
+
+- **Custom elements, with Lit.** The embedding primitive React, Vue, Svelte, Angular, plain
+  HTML and anywidget share; one implementation of §5.4. Lit for the context protocol, reactive
+  properties and `@lit/react` — about 5 kB (assumed from its published size). React 19 takes
+  custom elements natively; `@tesseradb/react/components` wraps them with typed props and
+  events for React 18 and for typing. Tags stay `tessera-*`: the product is Tessera, the
+  scope is `@tesseradb` only because `tessera` was taken, and a tag has no registry.
+- **Two distributions.** Unbundled ESM with `lit`, `@deck.gl/*` and `@luma.gl/*` as peers for
+  anyone with a bundler; and one self-contained bundle with its subresource-integrity hash for a
+  page with no build step, which is also the widget's `_esm` (§7).
+- **Client-only import** — Lit and deck.gl touch `window` at import, so a server-rendered page
+  imports the package dynamically on the client. **Define before render** — the entry defines
   every element on import; Vue needs `isCustomElement: tag => tag.startsWith('tessera-')`, and
-  Vue and Svelte need property bindings for object values. **Context before provider**: the
-  context protocol's request is a one-shot event, so the package attaches Lit's `ContextRoot`
-  once on import to replay a request that arrived before its provider.
-- **Per instance, not per module**: a `<tessera-map>` owns its `Deck`, its slab and its trace
+  Vue and Svelte need property bindings for object values. **Context before provider** — the
+  protocol's request is a one-shot event, so the package attaches Lit's `ContextRoot` once on
+  import to replay a request that arrived before its provider.
+- **Per instance, not per module** — a `<tessera-map>` owns its `Deck`, its slab and its trace
   probe (a property; the demo publishes the first map's onto `window` for the smoke scripts),
   finalises the `Deck` on disconnect because browsers cap live WebGL contexts, and is
   `display: block` with the height token because a custom element is inline and heightless and
-  deck.gl sizes its canvas from its parent — without this a bare map is 0 × 0 and silent.
+  deck.gl sizes its canvas from its parent.
 - **Standard decorators with `accessor`** (TypeScript ≥ 5.2): under the workspace's ES2022
-  target, legacy `@property` on a plain field is shadowed by class-field definition and does
-  nothing.
-
-Two pieces the direction did not name and this design declines: a **search box** (text `match`
-is a filter operand and lives in the filter panel) and a **principal switcher** (an
-application's user is one principal; it is an instrument, §7).
+  target, legacy `@property` on a plain field is shadowed by class-field definition.
+- **Controls are not rebuilt under the user** — the instrument learned this by measurement (a
+  filter box that could not be clicked into while marks streamed): Lit's keyed rendering keeps
+  a control's identity across store ticks, and the panels that move every frame are separate
+  elements from the ones a user types into.
 
 ## 6. Artifacts, at every layer
 
@@ -363,7 +486,7 @@ viewer keeping its *name*, which it does.
 | `@tesseradb/client` | C2 (and every layer above) | `apache-arrow` | verbs, decode, coordinates, replica, driver, composition, **the store** |
 | `@tesseradb/deck` | C2 with deck.gl; C1 through the map | client; peers `@deck.gl/*`, `@luma.gl/*` | `TesseraLayer`, the slab, the encoding object |
 | `@tesseradb/react` | C2 in React; C1 in React | client; peer `react`; `/components` entry also peers `@tesseradb/components` | hooks; element wrappers |
-| `@tesseradb/components` | C1 | client, deck; peer `lit` | `<tessera-explorer>`, the pieces, `<tessera-store>`, the formatter, tokens and parts |
+| `@tesseradb/components` | C1 | client, deck; peer `lit` | `<tessera-explorer>`, the map, the panels, `<tessera-count>`, `<tessera-store>`, tokens and parts |
 | `@tesseradb/viewer` | C4 | components | the demo page and its instruments |
 | `tesseradb` (Python) | C4 | `[widget]` extra: anywidget, the components bundle committed | the widget class, the mount, the messages; later the SDK and the in-process instance |
 
@@ -394,10 +517,10 @@ scripts as the net, one worktree per step:
    composition and the legend fold leave `main.ts`. The viewer consumes the store; nothing
    visible changes; `smoke.mjs` and `smoke-artifacts.mjs` green.
 2. **`@tesseradb/deck` and `@tesseradb/components`**: `TesseraLayer` and the encoding object;
-   `<tessera-map>`, `<tessera-view-info>`, `<tessera-item-card>`, `<tessera-filter-panel>`,
-   `<tessera-explorer>`. The viewer becomes the explorer plus instruments. Smoke green.
-3. **Artifacts**: `<tessera-layer-picker>`, wire geometry drawn, the sidecar retired,
-   `<tessera-artifact-card>`, `<tessera-legend>`. `smoke-artifacts.mjs` asserts hull and label
+   `<tessera-map>`, `<tessera-status>`, `<tessera-count>`, `<tessera-item-card>`,
+   `<tessera-filter>` and `<tessera-filter-panel>`, `<tessera-explorer>`. The viewer becomes the explorer plus instruments. Smoke green.
+3. **Artifacts and encoding**: `<tessera-layer-picker>`, wire geometry drawn, the sidecar
+   retired, `<tessera-artifact-list>`, `<tessera-artifact-card>`, `<tessera-legend>`. `smoke-artifacts.mjs` asserts hull and label
    render under two principals.
 4. **C1 and C2 examples in the gate**: a plain-HTML page, a React page using the explorer, a
    page using the store over a plain canvas with none of our rendering, and `@tesseradb/react`. `check-clients.sh`
@@ -438,6 +561,9 @@ The C2 example is the check that the store is usable with none of our rendering.
 - **D1 — custom elements, authored with Lit; React through `@tesseradb/react`.** Recommended.
 - **D2 — shadow DOM with tokens, parts and slots**, against light DOM with classes. Recommended:
   shadow.
+- **D2a — the explorer's default layout**: `overlay` (the demo's look, map full-bleed) or
+  `docked` (map beside a sidebar). Recommended: `docked` — it is the predictable one inside an
+  application, and the demo sets `overlay` explicitly.
 - **D3 — the package split of §8**, which amends client-architecture §1 from two packages to
   four plus the demo. Recommended as written.
 - **D4 — the notebook's first-cut posture.** (a) Browser-direct with the token as a custom
@@ -448,8 +574,10 @@ The C2 example is the check that the store is usable with none of our rendering.
   `[widget]` extra with the built bundle committed; the SDK and the in-process instance join
   it later; sharing no code with `reference/`. Ruled by the owner 2026-08-24 in conversation —
   recorded here so a decision file can carry it at promotion.
-- **D7 — the first-cut set**: the explorer, seven pieces, `<tessera-store>`, `TesseraLayer`,
-  the hooks. Two declined pieces recorded in §5.
+- **D7 — the first-cut set**: §5.3's fourteen tags, `TesseraLayer`, the hooks. The two
+  granularity calls a UX reader may disagree with: one element per filter operand rather than
+  a panel only, and the status strip as one element with a compact and an expanded form rather
+  than a badge and a panel. Two declined pieces recorded in §5.3.
 - **D8 — a fetch-model hint in `/v1/meta`** (artifact-system §6's ⊘). Asked for, not depended
   on.
 - **D9 — the wire idioms of §3**: whether `k = 0`, `layers`-omitted-means-all, and the omitted
@@ -501,3 +629,8 @@ paragraph is updated on promotion.
   package with the widget as an extra (D6); the non-deck example renderer is a plain canvas;
   the npm scope is `@tesseradb` to match, the repository's `@tessera/*` names changing at §9
   step 1 (pre-release, decision 0048).
+- 2026-08-24: §5 rewritten from user tasks — a granularity rule (placed alone, replaced, or a
+  truthfulness primitive), a four-tier catalogue of fourteen tags, eight uniform states, the
+  explorer's regions as slots, the customisation ladder, events, accessibility. One element per
+  filter operand, a status strip with two densities, an artifact list, and a count primitive
+  are new; the view-info panel is the status strip's expanded form. D2a added.
