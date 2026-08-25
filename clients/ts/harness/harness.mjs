@@ -366,6 +366,14 @@ const listCounts = async () =>
     .catch(() => ({}));
 
 await page.locator('tessera-map [part="controls"] button', {hasText: 'fit'}).first().click().catch(() => {});
+// The demo opens with a layer on; the example page leaves that to the layer picker, so a page
+// with none on has its first layer turned on here — a precondition of the two claims below.
+if ((await page.evaluate(() => window.__tesseraProbeOf()?.cluster.layersOn.length ?? 0)) === 0) {
+  // A minute, because under headless swiftshader the main thread is gone for 10–14 s at a time
+  // drawing a million marks, and a click that cannot land is reported rather than swallowed.
+  const on = await page.locator('tessera-layer-picker [part="entry"] input').first().click({timeout: 60_000}).then(() => true, () => false);
+  console.log(`  ·    no layer was on; the first layer ${on ? 'turned on through the picker' : 'could not be turned on — the picker did not take a click'}`);
+}
 await settled();
 await page.waitForTimeout(1500);
 const countsBefore = await listCounts();
