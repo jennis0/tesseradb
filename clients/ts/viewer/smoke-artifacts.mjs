@@ -217,6 +217,13 @@ console.log('--- screenshots ---');
 for (const s of shotsTaken) {
   console.log(`  ${s.label.padEnd(26)} ${String(s.panel.served ?? 0).padStart(3)} clusters  ${s.file}`);
 }
+// A run in which no principal was served a count from any layer proves nothing about masking — it
+// is what a lost layer selection looks like (found 2026-08-25: the choice was dropped on every
+// principal switch and this script still said OK). The panel must have read a number somewhere.
+if (!results.some((r) => r.served !== null)) {
+  console.error('ARTIFACT SMOKE FAILED: no principal was served a cluster count from any layer — the panel never showed one');
+  process.exit(1);
+}
 console.log('--- console errors ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
 

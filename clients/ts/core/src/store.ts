@@ -258,6 +258,8 @@ export function createStore(options: StoreOptions): Store {
   let replica: Replica | null = null;
   let presenter: Presenter | null = null;
   let channel: ArtifactChannel | null = null;
+  /** The layers `setLayers` last named — held here so a call before meta survives to the channel. */
+  let layersOn: string[] = [];
   let lastView: {input: ViewInput} | null = null;
   let queuedView: ViewInput | null = null; // a setView before meta arrives
 
@@ -374,13 +376,20 @@ export function createStore(options: StoreOptions): Store {
     );
 
     channel = new ArtifactChannel(client, {
+      clock,
       view: viewId,
       quantisation: meta.quantisation,
       token: () => token,
-      depth: () => presenter?.frame?.depth,
+      // The drawn depth, from the projection the frame handler has just replaced — the presenter's
+      // own handle is assigned after it hands the frame over, so it is one frame behind here.
+      depth: () => projections.view.depth ?? presenter?.frame?.depth,
       table,
       onChange: onArtifacts
     });
+    // A `setLayers` that arrived before meta is honoured now: the channel is what asks, and it
+    // did not exist to be told. (Found by the artifacts smoke: the demo chooses its layer before
+    // opening the session's store, and the choice was lost on every principal switch.)
+    channel.setLayer(layersOn[0] ?? null);
 
     if (queuedView) {
       const q = queuedView;
@@ -463,6 +472,13 @@ export function createStore(options: StoreOptions): Store {
       standIn: frame.standIn,
       count: {shown: frame.exactDrawn, total: Number(visible), exact: true}
     });
+    // The channel asks at a depth the drawn frame supplies, so a view noted before the first frame
+    // was refused (no depth) and nothing else re-asks until the camera moves. The first derive is
+    // that moment: ask now, or the session's opening view shows its points and no artifacts.
+    if (channel && !channel.hasView && lastView && presenter?.view) {
+      const v = presenter.view;
+      channel.schedule({target: v.view.target, zoom: v.view.zoom}, v.width, v.height);
+    }
     replaceProjection('tiles', {tiles: frame.tiles});
     accumulateEncoding(frame);
 
@@ -629,7 +645,13 @@ export function createStore(options: StoreOptions): Store {
 
   function setLayers(names: string[]): void {
     // Usually one (owner 2026-08-25); the channel draws one at a time.
-    channel?.setLayer(names[0] ?? null);
+    layersOn = names;
+    if (!channel) {
+      // Before meta: record the intent where a reader sees it; the channel adopts it at meta.
+      replaceProjection('artifacts', {...projections.artifacts, layer: names[0] ?? null});
+      return;
+    }
+    channel.setLayer(names[0] ?? null);
     if (lastView && presenter?.view) {
       const v = presenter.view;
       channel?.refresh(v.view, v.width, v.height);

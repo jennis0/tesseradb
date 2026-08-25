@@ -108,6 +108,11 @@ export class ArtifactChannel {
     return this.state;
   }
 
+  /** Whether a view has been noted — false until a drawn frame gave `noteView` a depth. */
+  get hasView(): boolean {
+    return this.view !== null;
+  }
+
   /** Point the channel at a layer — a different set of artifacts and a different criterion. */
   setLayer(layer: string | null): void {
     if (this.state.layer === layer) return;

@@ -267,3 +267,36 @@ describe('subscription', () => {
     expect(seen.length).toBe(n);
   });
 });
+
+describe('setLayers before meta', () => {
+  it('is honoured once the channel exists, and the projection shows the intent meanwhile', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(() => response('ck'));
+    const store = createStore({
+      viewerUrl: 'http://viewer',
+      token: 'tok',
+      client,
+      clock,
+      scheduler,
+      prefetch: false,
+      replica: {revalidateAfterMs: Infinity}
+    });
+    // Before meta has landed — the demo does exactly this when it opens a session's store.
+    store.setLayers(['clusters/a']);
+    expect(store.get('artifacts').layer).toBe('clusters/a');
+    await clock.advance(1);
+    expect(store.get('artifacts').layer).toBe('clusters/a');
+
+    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    // The artifact channel's own request (`k = 0`) names the layer chosen before meta.
+    const named = viewport.mock.calls.some((call) => {
+      const req = call[1] as {k?: number; layers?: string[] | 'all'};
+      return req.k === 0 && Array.isArray(req.layers) && req.layers[0] === 'clusters/a';
+    });
+    expect(named).toBe(true);
+  });
+});
