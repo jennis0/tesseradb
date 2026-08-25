@@ -24,6 +24,7 @@ function band(depth: number, prefix: bigint, n: number, served = n): Band {
     capUsed: 500,
     visible: BigInt(served * 3),
     matched: BigInt(served * 3),
+    membership: {},
     heldBelow: BigInt(n + 1),
     identityKey: 'ik',
     contentKey: 'ck',

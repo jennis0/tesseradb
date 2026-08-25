@@ -6,8 +6,12 @@
 //     --viewer http://127.0.0.1:37585 --session http://127.0.0.1:49303 --terms 0
 //
 // Writes core/test/fixtures/{meta.json,viewport-plain.bin,viewport-underlay.bin} and, where the
-// server carries a layer, viewport-artifacts.bin. Re-run it whenever the wire format changes; a
-// decoder test passing against a stale golden is worse than no test.
+// server carries a layer, viewport-artifacts.bin (the channel's counts-only shape, which the
+// worked decodes in reference/examples pin byte for byte) and viewport-membership.bin (the layer
+// named with points, so the per-point membership column is on it). Re-run it whenever the wire format changes; a
+// decoder test passing against a stale golden is worse than no test. `--artifacts-only`
+// recaptures the artifacts golden alone, against whatever corpus carries a layer, and leaves the
+// wide-schema goldens untouched.
 //
 // **Capture against the WIDE fixture** (`data/scaled/attrs/schema-wide.toml`, nineteen columns),
 // not against a demo bundle. `decode.test.ts` walks `meta.json`'s declared columns and checks each
@@ -26,6 +30,7 @@ const args = Object.fromEntries(
 const viewer = args.viewer ?? 'http://127.0.0.1:37585';
 const session = args.session ?? 'http://127.0.0.1:49303';
 const terms = (args.terms ?? '0').split(',');
+const artifactsOnly = 'artifacts-only' in args;
 const cred = process.env.TESSERA_SESSION_CRED;
 if (!cred) throw new Error('set TESSERA_SESSION_CRED to the session credential');
 
@@ -61,14 +66,16 @@ const base = {view: meta.views[0].id, zoom: 2, bbox: full, k: 50, layers: []};
 
 const dir = join(dirname(fileURLToPath(import.meta.url)), '..', 'core', 'test', 'fixtures');
 await mkdir(dir, {recursive: true});
-const plain = await viewport(base);
-const underlay = await viewport({...base, underlay_offset: 2});
-await writeFile(join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
-await writeFile(join(dir, 'viewport-plain.bin'), plain);
-await writeFile(join(dir, 'viewport-underlay.bin'), underlay);
-console.log(
-  `captured to ${dir}: plain ${plain.length} B, underlay ${underlay.length} B (delta ${underlay.length - plain.length} B)`
-);
+if (!artifactsOnly) {
+  const plain = await viewport(base);
+  const underlay = await viewport({...base, underlay_offset: 2});
+  await writeFile(join(dir, 'meta.json'), JSON.stringify(meta, null, 2));
+  await writeFile(join(dir, 'viewport-plain.bin'), plain);
+  await writeFile(join(dir, 'viewport-underlay.bin'), underlay);
+  console.log(
+    `captured to ${dir}: plain ${plain.length} B, underlay ${underlay.length} B (delta ${underlay.length - plain.length} B)`
+  );
+}
 
 /**
  * The artifacts frame, captured only when this server actually carries a layer this principal
@@ -82,11 +89,19 @@ console.log(
  */
 if ((meta.layers ?? []).length > 0) {
   const layer = meta.layers[0].name;
-  // `k = 0`: the tiles, the artifacts frame and the trailer, and no points at all — which is also
-  // the request the viewer's annotation channel makes, so the golden is that path's own shape.
-  const artifacts = await viewport({...base, k: 0, layers: [layer]});
-  await writeFile(join(dir, 'viewport-artifacts.bin'), artifacts);
-  console.log(`captured viewport-artifacts.bin (${artifacts.length} B) for layer ${layer}`);
+  // The layer named with points: the artifacts frame **and** a points frame carrying the per-point
+  // membership column (D12, contracts §3.2 r39) — the point path's own shape once a layer is on.
+  // A larger `k` than the other goldens, so the clusters' members are among the points served
+  // rather than only their tiles' heads.
+  const membership = await viewport({...base, k: 200, layers: [layer]});
+  await writeFile(join(dir, 'viewport-membership.bin'), membership);
+  // And the annotation channel's own shape: `k = 0`, the tiles, the artifacts frame and the
+  // trailer, no points frame at all — the body a decoder is most likely to misread as truncated.
+  // Pinned byte for byte by the worked decodes' answer sheet, so it is captured as the same
+  // principal (`--terms 0`) every time.
+  const channel = await viewport({...base, k: 0, layers: [layer]});
+  await writeFile(join(dir, 'viewport-artifacts.bin'), channel);
+  console.log(`captured viewport-membership.bin (${membership.length} B) and viewport-artifacts.bin (${channel.length} B) for layer ${layer}`);
 } else {
   console.log('no layer reachable: viewport-artifacts.bin not re-captured');
 }

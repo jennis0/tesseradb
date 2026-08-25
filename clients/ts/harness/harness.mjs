@@ -4,10 +4,12 @@
 // components' parts and never through an id the shadow DOM hides — and the measurements the
 // delivery record owes.
 //
-//   node clients/ts/harness/harness.mjs [--url http://localhost:5173] [--shot /tmp/tessera-harness.png]
+//   node clients/ts/harness/harness.mjs [--url http://localhost:5173] [--shot /tmp/tessera-harness.png] [--headed]
 //
 // Requires a running `tessera serve` with a published layer and a running `vite dev`. A target
-// beside the gate, not a step in it: it needs a served bundle, ports and headless Chromium.
+// beside the gate, not a step in it: it needs a served bundle, ports and Chromium — headless
+// under swiftshader by default; `--headed` runs the real browser on a display (WSLg's, or
+// `xvfb-run`), which is where the GPU and the frame cadence are measured rather than emulated.
 //
 // The claims, each checked rather than eyeballed:
 //   1. only `shown` renders a count — sampled from the first paint, through loading;
@@ -18,7 +20,13 @@
 //      channel's response is given a moved content key, and the strip goes stale;
 //   5. a region's count renders as inexact when its cell exceeds a pixel — a box at the
 //      overview, counted in the `tiles` form at a bounded depth, reads `≈`;
-//   6. a switch of principal empties every card.
+//   6. a switch of principal empties every card;
+//   7. a different principal reports a different picture;
+//   8. an artifact's count does not move across a pan — the list's row for one artifact reads
+//      the same number before and after the map is dragged, though the served set may change;
+//   9. a coloured point's ordinal resolves to a served artifact — colour by cluster is chosen
+//      through the legend, and every ordinal the marks on screen carry resolves, through the
+//      session table, to an id in the served set (read off the probe, never eyeballed).
 //
 // Hover and click on marks are not driven here: deck.gl's `onClick` does not fire under headless
 // chromium (the same reason the smoke scripts never drove the drill-down), so the pick path is
@@ -33,10 +41,15 @@ const args = Object.fromEntries(
 );
 const url = args.url ?? 'http://localhost:5173';
 const shot = args.shot ?? '/tmp/tessera-harness.png';
+const headed = 'headed' in args;
+/** A Chromium other than the one this Playwright bundles — `--executable /path/to/chrome`. */
+const executablePath = args.executable;
 
-const browser = await chromium.launch({
-  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox']
-});
+const browser = await chromium.launch(
+  headed
+    ? {headless: false, args: ['--disable-gpu-sandbox'], ...(executablePath ? {executablePath} : {})}
+    : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox'], ...(executablePath ? {executablePath} : {})}
+);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 
 const consoleErrors = [];
@@ -163,11 +176,14 @@ const baseline = await stripCounts();
 
 // ---- 3: a refusal renders as one ---------------------------------------------------------------
 
-/** Whether a viewport request is the artifact channel's — a named layer — rather than the point path's. */
+/**
+ * Whether a viewport request is the artifact channel's — `k = 0` with a named layer — rather
+ * than the point path's, which names the layers too now (§5.10) but always asks for points.
+ */
 const isChannel = (route) => {
   try {
     const body = JSON.parse(route.request().postData() ?? '{}');
-    return Array.isArray(body.layers) && body.layers.length > 0;
+    return body.k === 0 && Array.isArray(body.layers) && body.layers.length > 0;
   } catch {
     return false;
   }
@@ -251,10 +267,11 @@ await page.locator('tessera-map [part="controls"] button', {hasText: 'fit'}).fir
 await settled();
 const requestsBefore = viewportRequests.length;
 const selectStarted = Date.now();
+// Clear of the toolbar's panels top-left and the sidebar right: the box is on the canvas.
 await page.keyboard.down('Shift');
-await page.mouse.move(500, 300);
+await page.mouse.move(620, 250);
 await page.mouse.down();
-await page.mouse.move(760, 500, {steps: 8});
+await page.mouse.move(900, 520, {steps: 8});
 await page.mouse.up();
 await page.keyboard.up('Shift');
 const selection = page.locator('tessera-selection').first();
@@ -309,6 +326,83 @@ await settled();
     `"${baseline.map((c) => c.text).join(' · ')}" → "${after.map((c) => c.text).join(' · ')}"`
   );
 }
+// Back to the principal the page opened on — the broadest — so the artifact claims and the
+// measurements below run at the largest picture the demo serves.
+await page.selectOption('#principal', current);
+await untilState(['shown'], 60_000);
+await settled();
+
+// ---- 8: an artifact's count does not move across a pan -------------------------------------------
+
+/** The artifact list's rows, id → count, through its parts. */
+const listCounts = async () =>
+  page
+    .locator('tessera-artifact-list')
+    .first()
+    .evaluate((root) => {
+      const scope = root.shadowRoot ?? root;
+      /** @type {Record<string, number>} */
+      const out = {};
+      for (const item of Array.from(scope.querySelectorAll('[part="item"]'))) {
+        const id = item.getAttribute('data-id') ?? '';
+        const countEl = item.querySelector('tessera-count');
+        const text = (countEl?.shadowRoot ?? countEl)?.querySelector('[part="count"]')?.textContent ?? '';
+        out[id] = Number(text.replaceAll(',', ''));
+      }
+      return out;
+    })
+    .catch(() => ({}));
+
+await page.locator('tessera-map [part="controls"] button', {hasText: 'fit'}).first().click().catch(() => {});
+await settled();
+await page.waitForTimeout(1500);
+const countsBefore = await listCounts();
+// Two notches in and a drag: the served set may change, the count beside an artifact may not.
+await page.mouse.move(640, 400);
+await page.mouse.wheel(0, -400);
+await settled();
+await page.mouse.move(640, 400);
+await page.mouse.down();
+await page.mouse.move(500, 320, {steps: 6});
+await page.mouse.up();
+await settled();
+await page.waitForTimeout(1500);
+const countsAfter = await listCounts();
+{
+  const shared = Object.keys(countsBefore).filter((id) => id in countsAfter);
+  const moved = shared.filter((id) => countsBefore[id] !== countsAfter[id]);
+  check(
+    'an artifact’s count does not move across a pan',
+    shared.length > 0 && moved.length === 0,
+    `${Object.keys(countsBefore).length} rows before, ${Object.keys(countsAfter).length} after, ${shared.length} in both, ${moved.length} moved`
+  );
+}
+
+// ---- 9: a coloured point's ordinal resolves to a served artifact ---------------------------------
+
+const legendSelect = page.locator('tessera-legend select').first();
+const clusterOption = await legendSelect.locator('option[part="cluster-option"]').first().getAttribute('value').catch(() => null);
+const refillStarted = Date.now();
+if (clusterOption) await legendSelect.selectOption(clusterOption);
+await settled();
+await page.waitForTimeout(800);
+{
+  const probe = await page.evaluate(() => {
+    const p = window.__tesseraProbe;
+    return p ? {encoding: p.encoding, cluster: p.cluster, lutWrites: p.timings.lutWrites} : null;
+  });
+  const served = new Set(probe?.cluster.servedIds ?? []);
+  const sample = probe?.cluster.sample ?? [];
+  const unresolved = sample.filter((s) => s.resolvedId === null);
+  const foreign = sample.filter((s) => s.resolvedId !== null && !served.has(s.resolvedId));
+  check(
+    'a coloured point’s ordinal resolves to a served artifact',
+    clusterOption !== null && probe?.encoding === `cluster|${probe.cluster.layer}` && sample.length > 0 && foreign.length === 0,
+    `colour-by ${probe?.encoding}; ${sample.length} ordinals sampled from the marks on screen, ${sample.length - unresolved.length} resolve to one of ${served.size} served artifacts, ${unresolved.length} neutral, ${foreign.length} to an artifact not served; ${probe?.lutWrites} lookup-texture writes so far`
+  );
+}
+const clusterShot = shot.replace(/\.png$/, '-cluster.png');
+await page.screenshot({path: clusterShot, timeout: 60_000});
 
 // ---- measurements --------------------------------------------------------------------------------
 
@@ -320,10 +414,45 @@ for (const notch of [-400, -400, 400, 400]) {
   await page.mouse.wheel(0, notch);
   await settled();
 }
+// The layer-switch refill under the colour-stale refetch: the layer off, then on again, and the
+// time until every band in view is colour-current again (the strip's hover reads *colours exact*).
+const pickerBox = page.locator('tessera-layer-picker [part="entry"] input').first();
+let refillMs = null;
+let refillStale = null;
+// Under headless swiftshader the main thread can be gone for tens of seconds drawing a million
+// marks, and a click that cannot land in time is a measurement not taken, not a failed claim.
+const clickable = (await pickerBox.count()) > 0 && (await pickerBox.click({timeout: 15_000}).then(() => true, () => false));
+if (clickable) {
+  await page.waitForTimeout(600);
+  const switchedAt = Date.now();
+  await pickerBox.click({timeout: 15_000}).catch(() => {}); // on: a band lacking the column is colour-stale until it refetches
+  let firstStale = null;
+  while (Date.now() - switchedAt < 60_000) {
+    const c = await page.evaluate(() => window.__tesseraProbe?.cluster ?? null);
+    if (c && c.layersOn.length > 0) {
+      if (c.coverage.stale > 0 && firstStale === null) firstStale = c.coverage.stale;
+      if (firstStale !== null && c.coverage.stale === 0) {
+        refillMs = Date.now() - switchedAt;
+        refillStale = firstStale;
+        break;
+      }
+      // Never stale at all: the bands kept their column through the switch, which is the
+      // free case §5.10 describes for a layer switched back on.
+      if (firstStale === null && c.coverage.current > 0 && Date.now() - switchedAt > 4000) {
+        refillMs = 0;
+        refillStale = 0;
+        break;
+      }
+    }
+    await page.waitForTimeout(100);
+  }
+}
+await settled();
+
 const probe = await page.evaluate(() => {
   const p = window.__tesseraProbe;
   if (!p) return null;
-  return {marks: p.marks, paints: p.paints, requests: p.requests, timings: p.timings, view: p.view, instruments: p.instruments ?? null};
+  return {marks: p.marks, paints: p.paints, requests: p.requests, timings: p.timings, view: p.view, instruments: p.instruments ?? null, lanes: p.lanes, cluster: p.cluster};
 });
 const quantile = (xs, q) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -334,11 +463,20 @@ if (probe) {
   const d = probe.timings.decodeMs;
   console.log(`  bundle: ${dataset}`);
   console.log(`  marks on screen: ${probe.marks.toLocaleString('en-GB')} at depth ${probe.view.depth}; ${probe.paints} paints, ${probe.requests} fetched frames`);
-  console.log(`  per response — decode: n=${d.length}, median ${quantile(d, 0.5).toFixed(1)} ms, p95 ${quantile(d, 0.95).toFixed(1)} ms, max ${Math.max(...d, 0).toFixed(1)} ms (worker; remap: not measurable until D12's column is on this branch)`);
-  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, wash bin ${probe.timings.washMs.toFixed(2)} ms, layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle)`);
-  console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (software GL under headless chromium)`);
+  const lanes = probe.lanes;
+  const worker = lanes.decode.filter((x) => x.workerMs !== null);
+  const queued = worker.map((x) => x.ms - (x.workerMs ?? 0));
+  const biggest = lanes.decode.reduce((m, x) => (x.points > (m?.points ?? -1) ? x : m), /** @type {typeof lanes.decode[number] | null} */ (null));
+  console.log(`  per response — decode as seen from the main thread: n=${d.length}, median ${quantile(d, 0.5).toFixed(1)} ms, p95 ${quantile(d, 0.95).toFixed(1)} ms, max ${Math.max(...d, 0).toFixed(1)} ms`);
+  console.log(`  per response — in the worker: n=${worker.length}, median ${quantile(worker.map((x) => x.workerMs ?? 0), 0.5).toFixed(1)} ms, max ${Math.max(0, ...worker.map((x) => x.workerMs ?? 0)).toFixed(1)} ms; queued behind the lane: median ${quantile(queued, 0.5).toFixed(1)} ms, max ${Math.max(0, ...queued).toFixed(1)} ms`);
+  if (biggest) console.log(`  per response — the largest: ${biggest.points.toLocaleString('en-GB')} points, ${(biggest.bytes / 1e6).toFixed(1)} MB, ${biggest.ms.toFixed(0)} ms main-thread, ${biggest.workerMs?.toFixed(0) ?? '?'} ms in the worker`);
+  console.log(`  per response — remap on the main thread: n=${lanes.absorb.remap.length}, median ${quantile(lanes.absorb.remap, 0.5).toFixed(2)} ms, max ${Math.max(0, ...lanes.absorb.remap).toFixed(2)} ms over ${Math.max(0, ...lanes.absorb.remapPoints).toLocaleString('en-GB')} points at most; absorb split median ${quantile(lanes.absorb.split, 0.5).toFixed(1)} ms, max ${Math.max(0, ...lanes.absorb.split).toFixed(1)} ms; longest single slice ${lanes.absorb.sliceMaxMs.toFixed(1)} ms`);
+  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, wash bin ${probe.timings.washMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not run'}`);
+  console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} texture writes in the session`);
   const region = await page.evaluate(() => window.__tesseraProbe?.region ?? null);
-  console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under headless input, which waits on deck's software-GL hover picks`);
+  console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under ${headed ? 'headed' : 'headless'} input; lanes: ${lanes.region ? `settle ${lanes.region.settleMs.toFixed(0)} ms, wire ${lanes.region.wireMs.toFixed(0)} ms (server ${lanes.region.serverMs.toFixed(1)} ms, ${lanes.region.tiles} tiles), projection ${lanes.region.projectMs.toFixed(1)} ms` : 'not recorded'}`);
+  console.log(`  main thread — longest tasks: ${lanes.longTasks.slice(0, 5).map((t) => `${t.ms.toFixed(0)} ms at ${(t.at / 1000).toFixed(1)} s`).join(', ') || 'none over 50 ms'}; decode replies that waited through a long task: ${lanes.decode.filter((x) => lanes.longTasks.some((t) => x.at - x.ms <= t.at + t.ms && x.at >= t.at)).length} of ${lanes.decode.length}`);
+  console.log(`  layer switch — ${refillMs === null ? 'not measured' : refillMs === 0 ? 'no band went colour-stale: the columns survived the switch' : `${refillMs} ms from the layer back on to colours exact, ${refillStale} tiles refetched`} (${Date.now() - refillStarted > 0 ? 'measured after colour by cluster was chosen' : ''})`);
 } else {
   console.log('  no probe on the page');
 }
@@ -350,9 +488,11 @@ console.log('--- responses that were not 2xx ---');
 console.log(refusals.length ? refusals.map((e) => `  ${e}`).join('\n') : '  none');
 console.log('--- console errors (the harness’s own 403s excepted) ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
-console.log(`--- screenshot: ${shot}`);
-// The 403s are the harness's own, refused under the page above; anything else counts.
-const unexpected = consoleErrors.filter((e) => !/403 \(Forbidden\)/.test(e));
+console.log(`--- screenshots: ${shot}, ${clusterShot}`);
+// The 403s are the harness's own, refused under the page above, and an incomplete chunked body
+// is a streamed response the client abandoned mid-flight (a superseded request's abort, which
+// Chromium logs against the resource); anything else counts.
+const unexpected = consoleErrors.filter((e) => !/403 \(Forbidden\)|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(e));
 if (unexpected.length) failures.push(`${unexpected.length} console error(s)`);
 if (failures.length) {
   console.error(`HARNESS FAILED (${passes.length} ok, ${failures.length} failed):\n  ${failures.join('\n  ')}`);

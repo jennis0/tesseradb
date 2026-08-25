@@ -23,13 +23,20 @@ export type Decoder = {
   decode(bytes: Uint8Array, background?: boolean): Promise<ViewportResult>;
   /** Release the workers, if there are any. */
   close(): void;
+  /**
+   * The last reply's own decode time in the worker, in ms — what `decode` measured from the
+   * outside minus the time the response spent queued in its lane. `null` where nothing was
+   * queued or measured (the inline decoder, whose `decode` *is* the work).
+   */
+  readonly lastWorkerMs: number | null;
 };
 
 export function inlineDecoder(): Decoder {
   // Synchronous, so there is no queue to invert and the flag is meaningless here.
   return {
     decode: async (bytes) => decodeViewport(bytes),
-    close: () => {}
+    close: () => {},
+    lastWorkerMs: null
   };
 }
 
@@ -61,6 +68,7 @@ export function workerDecoder(): Decoder | null {
   if (typeof Worker === 'undefined') return null;
 
   /** One serial lane: a worker, its pending map, and its id counter. */
+  let lastWorkerMs: number | null = null;
   function lane(): {decode: (bytes: Uint8Array) => Promise<ViewportResult>; close: () => void} | null {
     let worker: Worker;
     try {
@@ -73,11 +81,12 @@ export function workerDecoder(): Decoder | null {
     }
     let nextId = 1;
     const pending = new Map<number, {resolve: (r: ViewportResult) => void; reject: (e: Error) => void}>();
-    worker.onmessage = (event: MessageEvent<{id: number; result?: ViewportResult; error?: string}>) => {
-      const {id, result, error} = event.data;
+    worker.onmessage = (event: MessageEvent<{id: number; result?: ViewportResult; error?: string; ms?: number}>) => {
+      const {id, result, error, ms} = event.data;
       const waiter = pending.get(id);
       if (!waiter) return;
       pending.delete(id);
+      if (ms !== undefined) lastWorkerMs = ms;
       if (error !== undefined) waiter.reject(new Error(error));
       else waiter.resolve(result!);
     };
@@ -135,6 +144,9 @@ export function workerDecoder(): Decoder | null {
     close() {
       for (const l of foreground) l.close();
       backgroundLane?.close();
+    },
+    get lastWorkerMs() {
+      return lastWorkerMs;
     }
   };
 }

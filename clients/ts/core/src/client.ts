@@ -55,9 +55,12 @@ export type TesseraClientOptions = {
   sessionCredential?: string;
   /**
    * Per-response decode time — an instrument's hook (design §5.10's measurements), never a
-   * behaviour: `ms` from bytes-in to typed-arrays-out, with the response's size and point count.
+   * behaviour: `ms` from bytes-in to typed-arrays-out as seen from this thread, with the
+   * response's size and point count, and `workerMs` — the worker's own decode time, so the
+   * difference is what the response spent queued behind another in its lane (`null` where it
+   * decoded inline).
    */
-  onDecode?: (ms: number, bytes: number, points: number) => void;
+  onDecode?: (ms: number, bytes: number, points: number, workerMs: number | null) => void;
   /**
    * Override where responses are decoded. Defaults to a worker in a browser, inline elsewhere.
    *
@@ -229,7 +232,7 @@ export class TesseraClient {
     // the server answered in 5 ms. The channel's and the region's asks are exactly the requests
     // whose latency the user is waiting on, so they never queue behind a point sweep.
     const result = req.k === 0 ? decodeViewport(bytes) : await this.decoder.decode(bytes, background);
-    this.opts.onDecode?.(performance.now() - decodeStarted, size, result.ids.length);
+    this.opts.onDecode?.(performance.now() - decodeStarted, size, result.ids.length, req.k === 0 ? null : this.decoder.lastWorkerMs);
     return {
       result,
       timings: {

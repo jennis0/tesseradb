@@ -14,6 +14,10 @@
     "./filter": "./src/filter.ts",
     "./filter-panel": "./src/filter-panel.ts",
     "./selection": "./src/selection.ts",
+    "./layer-picker": "./src/layer-picker.ts",
+    "./artifact-list": "./src/artifact-list.ts",
+    "./artifact-card": "./src/artifact-card.ts",
+    "./legend": "./src/legend.ts",
     "./explorer": "./src/explorer.ts",
     "./src/*": "./src/*",
     "./vite-plugin-decorators": "./vite-plugin-decorators.ts"

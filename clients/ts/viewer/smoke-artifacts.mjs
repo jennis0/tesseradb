@@ -3,17 +3,19 @@
 //
 //   node clients/ts/viewer/smoke-artifacts.mjs [--url http://localhost:5173] [--shots DIR]
 //
-// **This is the instrument for Stage 2's claim**, which is not "clusters draw" but: one clustering,
-// several viewers, and a count beside each cluster that is *that viewer's own* — with clusters
-// simply absent for a viewer who is served none of them, and nothing anywhere saying why.
+// **This is the instrument for the artifacts claim**, which is not "clusters draw" but: one
+// clustering, several viewers, and a count beside each cluster that is *that viewer's own* — with
+// clusters simply absent for a viewer who is served none of them, and nothing anywhere saying why;
+// and, at step 3, that the geometry drawn is the wire's: a hull and a label render under two
+// principals, read off the map's probe rather than eyeballed.
 //
-// It reports, per layer and per principal: how many clusters were served, what the same cluster is
-// worth to each of them, and whether the drill-down returns the number the map is showing. It
-// fails if the counts do not move with the mask, if a cluster is served to everyone alike, or if
-// the panel and the drill-down disagree.
+// It reports, per principal: how many clusters were served, what the same cluster is worth to
+// each of them, and how many outlines and labels the map drew. It fails if the counts do not move
+// with the mask, if a cluster is served to everyone alike, or if no hull or label rendered.
 //
-// Requires a running `tessera serve` with a published layer (`scripts/publish-clusters.mjs`) and a
-// running `vite dev`.
+// Everything is read through the components' parts — `tessera-artifact-list [part="item"]` — and
+// the probe; never through an id the shadow DOM hides. Requires a running `tessera serve` with a
+// published layer (`scripts/publish-clusters.mjs`) and a running `vite dev`.
 import {mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
 import {chromium} from 'playwright';
@@ -59,92 +61,81 @@ const settled = async (limitMs = 45_000) => {
 };
 
 /**
- * The clusters panel, parsed: how many were served and what each is worth here.
+ * The artifact list, parsed through its parts: how many were served and what each is worth here.
  *
- * Read off the rendered panel rather than from the wire, deliberately — what is on screen is what
- * this is checking, and a reader that went to the service directly would pass while the viewer
- * showed something else entirely.
+ * Read off the rendered element rather than from the wire, deliberately — what is on screen is
+ * what this is checking, and a reader that went to the service directly would pass while the
+ * viewer showed something else entirely.
  */
-const clustersPanel = async () =>
-  page.evaluate(() => {
-    const text = document.getElementById('instruments')?.innerText ?? '';
-    const section = text.split('CLUSTERS IN VIEW')[1]?.split(/\n[A-Z][A-Z ]+\n/)[0] ?? '';
-    const lines = section.split('\n').map((l) => l.trim()).filter(Boolean);
-    const served = /^(\d[\d,]*) served$/.exec(lines[0] ?? '');
+const artifactList = async () =>
+  page.locator('tessera-artifact-list').first().evaluate((root) => {
+    const scope = root.shadowRoot ?? root;
+    const state = scope.querySelector('[part="state"]')?.getAttribute('data-state') ?? null;
     const counts = {};
-    for (let i = 0; i < lines.length - 1; i++) {
-      if (/^c-\d+$|^#\d+$/.test(lines[i]) && /^[\d,]+$/.test(lines[i + 1])) {
-        counts[lines[i]] = Number(lines[i + 1].replaceAll(',', ''));
-      }
+    for (const item of scope.querySelectorAll('[part="item"]')) {
+      const name = item.querySelector('[part="name"]')?.textContent?.trim() ?? '';
+      const countEl = item.querySelector('tessera-count');
+      const text = (countEl?.shadowRoot ?? countEl)?.querySelector('[part="count"]')?.textContent ?? '';
+      const n = Number(text.replaceAll(',', ''));
+      if (name && Number.isFinite(n)) counts[name] = n;
     }
-    return {
-      served: served ? Number(served[1].replaceAll(',', '')) : null,
-      empty: /nothing served here/.test(section),
-      counts
-    };
+    const served = /([\d,]+) served/.exec(scope.textContent ?? '');
+    return {state, served: served ? Number(served[1].replaceAll(',', '')) : null, empty: /nothing served here/.test(scope.textContent ?? ''), counts};
   });
 
-/** The cluster detail panel, after a click. */
-const detailPanel = async () =>
+/** What the map drew of the artifacts, from the probe: outlines, placed labels, the layers on. */
+const drawn = async () =>
   page.evaluate(() => {
-    const text = document.getElementById('instruments')?.innerText ?? '';
-    if (!/\nCLUSTER\n/.test(`\n${text}`)) return null;
-    const section = text.split(/\nCLUSTER\n/)[1] ?? '';
-    const key = /\n(c-\d+)\n/.exec(`\n${section}`);
-    const count = /([\d,]+) members you can see/.exec(section);
-    return {
-      key: key ? key[1] : null,
-      maskedCount: count ? Number(count[1].replaceAll(',', '')) : null
-    };
+    const p = window.__tesseraProbe;
+    return p ? {outlines: p.timings.outlines, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length} : null;
   });
 
-// The controls are rendered from `/v1/meta`, so nothing can be counted until the first response
-// has landed — and the layer select exists only where this principal reaches a layer at all.
-await page.waitForSelector('#artifact-layer', {timeout: 60_000});
+// The picker is rendered from `/v1/meta`, so nothing can be counted until the first response has
+// landed — and an entry exists only where this principal reaches a layer at all.
+await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
 await settled();
 
-const layers = await page.locator('#artifact-layer option').count();
+const layers = await page.locator('tessera-layer-picker [part="entry"]').count();
 const principals = await page.locator('#principal option').count();
 const results = [];
 
 for (let l = 0; l < layers; l++) {
-  const layerValue = await page.locator('#artifact-layer option').nth(l).getAttribute('value');
-  if (!layerValue) continue;
-  await page.selectOption('#artifact-layer', layerValue);
+  const entry = page.locator('tessera-layer-picker [part="entry"]').nth(l);
+  const layerName = await entry.getAttribute('data-layer');
+  // One layer on at a time: tick this entry, untick the others.
+  for (let o = 0; o < layers; o++) {
+    const box = page.locator('tessera-layer-picker [part="entry"]').nth(o).locator('input');
+    if ((await box.isChecked()) !== (o === l)) await box.click();
+  }
   for (let p = 0; p < principals; p++) {
     const label = (await page.locator('#principal option').nth(p).innerText()).trim();
     await page.selectOption('#principal', String(p));
+    // A new session's store: the layer choice is re-applied through the picker after meta.
+    await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+    for (let o = 0; o < layers; o++) {
+      const box = page.locator('tessera-layer-picker [part="entry"]').nth(o).locator('input');
+      if ((await box.isChecked()) !== (o === l)) await box.click();
+    }
     await settled();
     // The artifact channel asks once the view settles; give it its own beat.
     await page.waitForTimeout(1500);
-    const panel = await clustersPanel();
-    results.push({layer: layerValue, principal: label, ...panel});
+    results.push({layer: layerName, principal: label, ...(await artifactList()), drawn: await drawn()});
   }
 }
 
-/**
- * **The click-through is not exercised here, and the reason is the browser rather than the code.**
- * deck.gl's `onClick` does not fire under headless chromium — the same reason the item drill-down
- * has never been driven by `smoke.mjs` either — so a "no cluster opened" result would say nothing
- * about the viewer. What the click leads to is covered where it can be: `core/test/client.live.test.ts`
- * opens a served artifact by identifier against the running server and requires the count to be
- * the one the viewport already carried.
- */
-const opened = await detailPanel();
-
-// The pair a reader is meant to put side by side: the same clustering, two principals, on the
-// layer whose criterion decides which clusters exist for each of them.
-const criterionLayer = (await page.locator('#artifact-layer option').all()).at(-1);
-if (criterionLayer) await page.selectOption('#artifact-layer', (await criterionLayer.getAttribute('value')) ?? '');
+// The pair a reader is meant to put side by side: the same clustering, two principals.
 const shotsTaken = [];
 for (const p of [Math.max(0, principals - 3), principals - 1]) {
   await page.selectOption('#principal', String(p));
+  await page.locator('tessera-layer-picker [part="entry"]').first().waitFor({timeout: 60_000});
+  const box = page.locator('tessera-layer-picker [part="entry"]').first().locator('input');
+  if (!(await box.isChecked())) await box.click();
   await settled();
   await page.waitForTimeout(1500);
   const label = (await page.locator('#principal option').nth(p).innerText()).trim();
   const file = join(shots, `principal-${p}.png`);
   await page.screenshot({path: file, timeout: 60_000});
-  shotsTaken.push({label, file, panel: await clustersPanel()});
+  shotsTaken.push({label, file, list: await artifactList(), drawn: await drawn()});
 }
 
 await browser.close();
@@ -156,7 +147,7 @@ for (const r of results) {
     .map(([k, v]) => `${k}=${v.toLocaleString()}`)
     .join(' ');
   console.log(
-    `  ${r.layer.padEnd(28)} ${r.principal.padEnd(26)} served=${String(r.served ?? (r.empty ? 0 : '?')).padStart(4)}  ${sample}`
+    `  ${(r.layer ?? '?').padEnd(28)} ${r.principal.padEnd(26)} served=${String(r.served ?? (r.empty ? 0 : '?')).padStart(4)}  outlines=${String(r.drawn?.outlines ?? '?').padStart(3)} labels=${String(r.drawn?.labels ?? '?').padStart(3)}  ${sample}`
   );
 }
 console.log('--- the same cluster, across principals ---');
@@ -167,18 +158,16 @@ for (const r of results) {
 }
 const failures = [];
 /**
- * What a missing row means, which is **two different things** and must not be conflated.
- *
- * The panel lists the largest dozen and says how many more there are, so a cluster can be missing
- * from it either because this principal was not served it — the disclosure control working — or
- * because it is merely the thirteenth. Reporting the second as "absent" would manufacture evidence
- * for the very claim this script exists to check.
+ * What a missing row means, which is **two different things** and must not be conflated: a
+ * cluster can be missing from the list because this principal was not served it — the disclosure
+ * control working — or because the list stopped at its row limit. Reporting the second as
+ * "absent" would manufacture evidence for the very claim this script exists to check.
  */
-const PANEL_ROWS = 12;
+const LIST_ROWS = 40;
 const readingOf = (row, key) => {
   const count = row.counts[key];
   if (count !== undefined) return String(count);
-  return (row.served ?? 0) > PANEL_ROWS ? 'not in top 12' : 'absent';
+  return (row.served ?? 0) > LIST_ROWS ? 'not listed' : 'absent';
 };
 
 for (const [layer, rows] of byLayer) {
@@ -190,12 +179,7 @@ for (const [layer, rows] of byLayer) {
   const anyKey = [...keys][0];
   if (anyKey) {
     const values = rows.map((r) => r.counts[anyKey]).filter((v) => v !== undefined);
-    if (new Set(values).size < 2) {
-      failures.push(`${layer}: every principal saw the same count for ${anyKey}`);
-    }
-    // Genuinely absent — not merely below the panel's cut — for at least one principal, and served
-    // to another: presence itself moving with the mask, which is the half of the claim that counts
-    // alone cannot show.
+    if (new Set(values).size < 2) failures.push(`${layer}: every principal saw the same count for ${anyKey}`);
     const absentSomewhere = rows.some((r) => readingOf(r, anyKey) === 'absent');
     const presentSomewhere = rows.some((r) => r.counts[anyKey] !== undefined);
     console.log(
@@ -207,33 +191,29 @@ for (const [layer, rows] of byLayer) {
     );
   }
 }
-console.log('--- drill-down ---');
-console.log(
-  opened
-    ? `  a cluster is open: ${opened.key} = ${opened.maskedCount?.toLocaleString()}`
-    : '  not exercised — deck.gl picking does not fire headless; see client.live.test.ts'
-);
-console.log('--- screenshots ---');
+console.log('--- geometry drawn (the wire’s, per principal) ---');
 for (const s of shotsTaken) {
-  console.log(`  ${s.label.padEnd(26)} ${String(s.panel.served ?? 0).padStart(3)} clusters  ${s.file}`);
+  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} outlines, ${s.drawn?.labels ?? 0} labels  ${s.file}`);
 }
+// A hull and a label must render under two principals — the geometry is the wire's, derived per
+// principal, and a map that drew none would pass every count check while showing a bare field.
+const drewBoth = shotsTaken.filter((s) => (s.drawn?.outlines ?? 0) > 0 && (s.drawn?.labels ?? 0) > 0);
+if (drewBoth.length < 2) failures.push(`a hull and a label rendered under ${drewBoth.length} of 2 principals`);
 // A run in which no principal was served a count from any layer proves nothing about masking — it
 // is what a lost layer selection looks like (found 2026-08-25: the choice was dropped on every
-// principal switch and this script still said OK). The panel must have read a number somewhere.
+// principal switch and this script still said OK). The list must have read a number somewhere.
 if (!results.some((r) => r.served !== null)) {
-  console.error('ARTIFACT SMOKE FAILED: no principal was served a cluster count from any layer — the panel never showed one');
+  console.error('ARTIFACT SMOKE FAILED: no principal was served a cluster count from any layer — the list never showed one');
   process.exit(1);
 }
 console.log('--- console errors ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
 
 // A layer with a criterion must hide clusters from someone, or the control is not being exercised.
-const criterionRows = results.filter((r) => /min\d+/.test(r.layer));
+const criterionRows = results.filter((r) => /min\d+/.test(r.layer ?? ''));
 if (criterionRows.length > 0) {
   const servedCounts = new Set(criterionRows.map((r) => r.served ?? 0));
-  if (servedCounts.size < 2) {
-    failures.push('the criterion layer served the same number of clusters to every principal');
-  }
+  if (servedCounts.size < 2) failures.push('the criterion layer served the same number of clusters to every principal');
 }
 if (consoleErrors.length) failures.push(`${consoleErrors.length} console error(s)`);
 

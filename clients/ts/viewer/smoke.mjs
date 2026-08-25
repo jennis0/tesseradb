@@ -39,7 +39,9 @@ page.on('response', (r) => {
   let artifacts = false;
   try {
     const body = JSON.parse(r.request().postData() ?? '{}');
-    artifacts = Array.isArray(body.layers) && body.layers.length > 0;
+    // The channel's ask: counts only, a named layer. The point path names the layers too (§5.10)
+    // but always asks for points.
+    artifacts = body.k === 0 && Array.isArray(body.layers) && body.layers.length > 0;
   } catch {
     // A GET, or a body that is not JSON. Neither is the artifact channel.
   }

@@ -16,7 +16,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table: new SessionArtifactTable()},
+    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table: new SessionArtifactTable(), servedOrdinals: new Set(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
@@ -60,6 +60,7 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     },
     setLayers: spy('setLayers'),
     setColourBy: spy('setColourBy'),
+    setPalette: spy('setPalette'),
     setBudget: spy('setBudget'),
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});
@@ -121,5 +122,19 @@ export function deepAll(root: ParentNode, selector: string): Element[] {
     const shadow = (el as HTMLElement).shadowRoot;
     if (shadow) out.push(...deepAll(shadow, selector));
   }
+  return out;
+}
+
+/** The text of an element including what its descendants' shadow roots render. */
+export function deepText(el: Element | null): string {
+  if (!el) return '';
+  let out = '';
+  const walk = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) out += node.textContent ?? '';
+    const shadow = (node as HTMLElement).shadowRoot;
+    if (shadow) for (const child of shadow.childNodes) walk(child);
+    for (const child of node.childNodes) walk(child);
+  };
+  walk(el);
   return out;
 }

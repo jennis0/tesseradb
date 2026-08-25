@@ -25,6 +25,7 @@ function band(tag: number, n: number, identityKey = 'ik', depth = 2): Band {
     capUsed: 500,
     visible: BigInt(n * 3),
     matched: BigInt(n * 3),
+    membership: {},
     heldBelow: BigInt(tag * 1000 + n),
     identityKey,
     contentKey: 'ck',

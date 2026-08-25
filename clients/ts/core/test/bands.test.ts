@@ -24,6 +24,7 @@ function band(overrides: Partial<Band> & {depth: number; prefix: bigint; n: numb
     capUsed: 500,
     visible: BigInt(n),
     matched: BigInt(n),
+    membership: {},
     heldBelow: n === 0 ? 0n : ids[n - 1]! + 1n,
     identityKey: 'ik',
     contentKey: 'ck',
@@ -70,6 +71,7 @@ describe('bandsOfResult', () => {
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars,
       subCells: null,
+      membership: {},
       artifacts: []
     };
 
@@ -93,6 +95,7 @@ describe('bandsOfResult', () => {
       world: new Float32Array(8),
       scalars: {},
       subCells: null,
+      membership: {},
       artifacts: []
     };
     const [only] = bandsOfResult(result, 1, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
@@ -416,6 +419,7 @@ describe('bandSplitter', () => {
       world: Float32Array.from({length: n * 2}, (_, i) => i),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from({length: n}, (_, i) => i)}},
       subCells: null,
+      membership: {},
       artifacts: []
     };
     const meta = {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0};

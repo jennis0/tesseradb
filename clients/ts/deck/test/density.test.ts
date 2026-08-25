@@ -79,3 +79,45 @@ describe('resolvePick — a miss is not a broken pick', () => {
     expect(resolvePick({index: 0, sourceLayer: {id: 'x', props: {}}}).kind).toBe('broken');
   });
 });
+
+import {DENSITY_SUPERSAMPLE, filterDensity} from '../src/density.js';
+
+describe('filterDensity — the tile grid is never shown (decision 0097)', () => {
+  it('turns a single non-zero bin into a halo with no one-texel step from nothing to full', () => {
+    const binned = binDensity([tile(4, 6, 3, true, 100)], 3)!;
+    const soft = filterDensity(binned, 3);
+    const S = DENSITY_SUPERSAMPLE;
+    // One padding cell each side, S texels a cell.
+    expect(soft.width).toBe(3 * S);
+    expect(soft.height).toBe(3 * S);
+    expect(soft.bounds).toEqual([256 - 64, 384 - 64, 320 + 64, 448 + 64]);
+    const alpha = (x: number, y: number) => soft.data[(y * soft.width + x) * 4 + 3]!;
+    let peak = 0;
+    for (let y = 0; y < soft.height; y++) for (let x = 0; x < soft.width; x++) peak = Math.max(peak, alpha(x, y));
+    expect(peak).toBeGreaterThan(0);
+    // Every neighbouring pair of texels differs by well under the peak: the edge is a ramp.
+    let worst = 0;
+    for (let y = 0; y < soft.height; y++) {
+      for (let x = 1; x < soft.width; x++) worst = Math.max(worst, Math.abs(alpha(x, y) - alpha(x - 1, y)));
+    }
+    for (let x = 0; x < soft.width; x++) {
+      for (let y = 1; y < soft.height; y++) worst = Math.max(worst, Math.abs(alpha(x, y) - alpha(x, y - 1)));
+    }
+    expect(worst).toBeLessThanOrEqual(peak * 0.35);
+    // The halo extends beyond the cell and fades to nothing at the padding's far edge.
+    expect(alpha(S + S / 2, S + S / 2)).toBe(peak);
+    expect(alpha(0, S + S / 2)).toBe(0);
+    expect(alpha(S / 2, S + S / 2)).toBeGreaterThan(0);
+    expect(alpha(S / 2, S + S / 2)).toBeLessThan(peak);
+  });
+
+  it('keeps an empty bin between two filled ones dimmer than either', () => {
+    const binned = binDensity([tile(0, 0, 3, true, 100), tile(2, 0, 3, true, 100)], 3)!;
+    const soft = filterDensity(binned, 3);
+    const S = DENSITY_SUPERSAMPLE;
+    const mid = S + S / 2;
+    const alpha = (x: number) => soft.data[(mid * soft.width + x) * 4 + 3]!;
+    expect(alpha(2 * S + S / 2)).toBeLessThan(alpha(S + S / 2));
+    expect(alpha(2 * S + S / 2)).toBeLessThan(alpha(3 * S + S / 2));
+  });
+});

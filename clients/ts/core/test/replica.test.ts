@@ -21,6 +21,7 @@ function response(tiles: {tile: bigint; served: number; visible?: number}[], pin
     world: new Float32Array(total * 2),
     scalars: {},
     subCells: null,
+    membership: {},
     artifacts: []
   };
   return {

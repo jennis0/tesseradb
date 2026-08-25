@@ -1,4 +1,5 @@
 import {BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
+import type {SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
 import type {Quantisation, ViewportResponse} from './types.js';
@@ -43,6 +44,8 @@ export type ReplicaOptions = {
    */
   revalidateAfterMs?: number;
   now?: () => number;
+  /** The session artifact table the bands' membership is named through (design §5.10). */
+  table?: SessionArtifactTable;
   /**
    * Observability hook: how long a named phase inside the replica took, and over how many items.
    *
@@ -157,7 +160,7 @@ export class Replica {
     private readonly quantisation: Quantisation,
     private readonly opts: ReplicaOptions
   ) {
-    this.cache = new BandCache(opts.cacheBytes ?? 512 * 1024 * 1024);
+    this.cache = new BandCache(opts.cacheBytes ?? 512 * 1024 * 1024, opts.table ?? null);
     this.now = opts.now ?? (() => performance.now());
   }
 
@@ -189,6 +192,11 @@ export class Replica {
   /** See {@link BandCache.exactIn} — the fast half of a frame, for folding an arrival into one. */
   exactIn(want: TileRect, depth: number): Band[] {
     return this.cache.exactIn(want, depth);
+  }
+
+  /** See {@link BandCache.retract} — the colour-stale refetch's first half; the caller reschedules. */
+  retract(bands: readonly Band[]): void {
+    this.cache.retract(bands);
   }
 
   /** See {@link BandCache.version} — the store's change counter, for reusing a derived frame. */
@@ -461,16 +469,21 @@ export class Replica {
       identityKey: this.identityKey,
       contentKey,
       capUsed: k,
-      now: this.now()
+      now: this.now(),
+      table: this.opts.table,
+      onRemap: (ms) => this.opts.onPhase?.('remap', ms, response.result.ids.length)
     });
     const bands: Band[] = [];
     let splitMs = 0;
     let storeMs = 0;
     let slices = 0;
+    let longestSliceMs = 0;
     while (!splitter.done()) {
       const started = performance.now();
       const slice = splitter.step(started + ABSORB_SLICE_MS);
-      splitMs += performance.now() - started;
+      const took = performance.now() - started;
+      splitMs += took;
+      if (took > longestSliceMs) longestSliceMs = took;
       // Stored slice by slice: a redraw between slices then draws what has arrived so far, which
       // is strictly more picture, not less.
       const stored = performance.now();
@@ -484,6 +497,8 @@ export class Replica {
     }
     this.opts.onPhase?.('split', splitMs, bands.length);
     this.opts.onPhase?.('store', storeMs, slices);
+    // The longest single slice: the one figure that says whether the budget held the thread.
+    this.opts.onPhase?.('slice', longestSliceMs, slices);
 
     if (this.opts.cache !== false && bands.length > 0) {
       this.cache.evict({depth, prefix: bands[0]!.prefix});

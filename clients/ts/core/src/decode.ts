@@ -1,7 +1,7 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
-import type {Artifact, ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
+import type {Artifact, MembershipColumn, ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
@@ -131,6 +131,91 @@ function concatScalarColumns(pieces: ScalarColumn[], total: number): ScalarColum
   }
 }
 
+/** The points-frame column name prefix a membership column carries (contracts §3.2, r39). */
+export const MEMBERSHIP_PREFIX = 'membership:';
+
+/**
+ * The per-point membership column, hashed to a **response-local index** (design §5.10).
+ *
+ * The decoder runs in a worker lane that shares nothing with the other lanes, so it cannot name
+ * an artifact with a session ordinal; what it can do is the per-point work. Each distinct
+ * `tessera_id` the column carries — at most the response's served artifacts, ≤ 10⁴ — gets a
+ * local index from 1, `0` standing for null, and the main thread maps the short distinct list to
+ * session ordinals and remaps the index array with a tight loop (`bands.ts`).
+ *
+ * **Hashed on the two `u32` halves, never on a `BigInt`.** Arrow's `u64` column is little-endian
+ * words already; a `Map<bigint, …>` would allocate a `BigInt` per point, which at 10⁶ points is
+ * the same per-point allocation `decode.ts` refuses for the position code. Open addressing over a
+ * power-of-two table sized to the point count, so the probe sequence is bounded by load.
+ *
+ * Nulls are read from each chunk's validity bitmap; a chunk with no bitmap is all valid.
+ */
+function hashMembership(vectors: Vector<DataType>[], total: number): MembershipColumn {
+  const index = total > 0xffff ? new Uint32Array(total) : new Uint16Array(total);
+  // Distinct ids as their halves; `capacity` is a power of two at most half full for ≤ 10⁴
+  // distinct, and grown when a response defies that.
+  let capacity = 1 << 12;
+  let slotsLo = new Uint32Array(capacity);
+  let slotsHi = new Uint32Array(capacity);
+  let slotsIdx = new Uint32Array(capacity); // 0 = empty
+  let distinctLo: number[] = [];
+  let distinctHi: number[] = [];
+
+  const grow = () => {
+    capacity *= 2;
+    slotsLo = new Uint32Array(capacity);
+    slotsHi = new Uint32Array(capacity);
+    slotsIdx = new Uint32Array(capacity);
+    for (let d = 0; d < distinctLo.length; d++) insert(distinctLo[d]!, distinctHi[d]!, d + 1);
+  };
+  const insert = (lo: number, hi: number, idx: number) => {
+    let at = (Math.imul(lo ^ Math.imul(hi, 0x9e3779b1), 0x85ebca6b) >>> 0) & (capacity - 1);
+    while (slotsIdx[at] !== 0) at = (at + 1) & (capacity - 1);
+    slotsLo[at] = lo;
+    slotsHi[at] = hi;
+    slotsIdx[at] = idx;
+  };
+  const indexOf = (lo: number, hi: number): number => {
+    let at = (Math.imul(lo ^ Math.imul(hi, 0x9e3779b1), 0x85ebca6b) >>> 0) & (capacity - 1);
+    for (;;) {
+      const held = slotsIdx[at]!;
+      if (held === 0) {
+        distinctLo.push(lo);
+        distinctHi.push(hi);
+        const idx = distinctLo.length;
+        insert(lo, hi, idx);
+        if (distinctLo.length * 2 > capacity) grow();
+        return idx;
+      }
+      if (slotsLo[at] === lo && slotsHi[at] === hi) return held;
+      at = (at + 1) & (capacity - 1);
+    }
+  };
+
+  let o = 0;
+  for (const vector of vectors) {
+    for (const chunk of vector.data) {
+      const values = chunk.values as BigUint64Array;
+      const halves = new Uint32Array(values.buffer, values.byteOffset, values.length * 2);
+      const bitmap = chunk.nullCount > 0 ? chunk.nullBitmap : null;
+      const offset = chunk.offset;
+      for (let i = 0; i < chunk.length; i++, o++) {
+        if (bitmap) {
+          const bit = offset + i;
+          if (((bitmap[bit >> 3]! >> (bit & 7)) & 1) === 0) continue; // null → 0, already
+        }
+        const at = (offset + i) * 2;
+        index[o] = indexOf(halves[at]!, halves[at + 1]!);
+      }
+    }
+  }
+  const ids = new BigUint64Array(distinctLo.length);
+  for (let d = 0; d < distinctLo.length; d++) {
+    ids[d] = BigInt(distinctLo[d]!) | (BigInt(distinctHi[d]!) << 32n);
+  }
+  return {index, ids};
+}
+
 /**
  * Gather the even bits of a `u32` into the low 16 bits — the inverse of the Morton spread, and the
  * mirror of `tessera_build::input::compact`.
@@ -251,12 +336,23 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
       if (field.name === 'tessera_id' || field.name === 'code') continue;
       // **The per-point membership column is not a declared scalar** — it is the deepest served
       // artifact per named layer (D12, §5.10), a nullable `u64` named `membership:<layer>` after
-      // the render scalars. Step 3 (`@tesseradb/deck`) consumes it into a response-local index in
-      // the decode worker; here it is skipped by name so it is never coloured by, ranked, or shown
-      // as a column. Decoding it as a scalar would put a `tessera_id` on the palette.
-      if (field.name.startsWith('membership:')) continue;
+      // the render scalars. It is hashed below into a response-local index; here it is skipped by
+      // name so it is never coloured by, ranked, or shown as a column. Decoding it as a scalar
+      // would put a `tessera_id` on the palette.
+      if (field.name.startsWith(MEMBERSHIP_PREFIX)) continue;
       const perFrame = pointTables.map((t) => scalarColumn(field.name, t.getChild(field.name)!));
       scalars[field.name] = concatScalarColumns(perFrame, totalPoints);
+    }
+  }
+
+  const membership: Record<string, MembershipColumn> = {};
+  if (pointTables.length > 0) {
+    for (const field of pointTables[0]!.schema.fields) {
+      if (!field.name.startsWith(MEMBERSHIP_PREFIX)) continue;
+      membership[field.name.slice(MEMBERSHIP_PREFIX.length)] = hashMembership(
+        pointTables.map((t) => t.getChild(field.name)!),
+        totalPoints
+      );
     }
   }
 
@@ -331,5 +427,5 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     }
   }
 
-  return {tiles, ids, codes, positions, world, scalars, subCells, artifacts};
+  return {tiles, ids, codes, positions, world, scalars, membership, subCells, artifacts};
 }

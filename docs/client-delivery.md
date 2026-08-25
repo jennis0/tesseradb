@@ -19,8 +19,10 @@ order and §11 for the decisions.
 Steps 0 and 1 are built (branch `client/step-0-1`): the presented frame moved into the client and
 the headless store is `@tesseradb/client`'s main export, the scope rename to `@tesseradb/*` landed
 with it, and the viewer consumes the store. Step 2 is built (branch `client/step-2`): `@tesseradb/deck`
-and `@tesseradb/components`, box selection, and the viewer as the explorer plus instruments. Steps
-3–5 and the server tracks are ahead; the design
+and `@tesseradb/components`, box selection, and the viewer as the explorer plus instruments. Step 3
+is built (branch `client/step-3`): the membership column consumed end to end, the lookup texture,
+the four artifact elements, wire geometry drawn, lasso, the sidecar retired. Steps 4–5 and the
+server tracks are ahead; the design
 is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
 recorded as decisions 0095–0101; the open decisions and what each gates are in the handover's §1.
 
@@ -43,7 +45,7 @@ first drawn frame; the smoke fails when no principal is served a count.
 | 0 | the presented frame into the client: `Presenter` holds the `Composition` and executes the driver's fold/derive verdict under an injected frame scheduler; `binding.ts` and the viewer's duplicate `ViewState` gone | `check-clients.sh` green; `smoke.mjs` green (996,488 of 1,856,276 shown, depth 8, no console errors) | — | **done** 2026-08-25 (`client/step-0-1`) |
 | 1 | the store: `createStore` with the projections, `Count`/`Masked` and their formatters, `stale` on the content key, `setView`'s conversion, `dataXY`/`extentOf`, the token supplier, the encoding accumulators, filter composition, the artifact channel, item/artifact/category fetches and the session artifact table out of the viewer; the `@tesseradb` rename; the viewer consuming the store | store/channel/table/counts/encoding/driver-503 tests; `check-clients.sh` green; `smoke.mjs` and `smoke-artifacts.mjs` green (24 clusters served under the full mask, 16 under sparse, 6 under narrow) | D3 | **done** 2026-08-25 (`client/step-0-1`) |
 | 2 | `@tesseradb/deck` and `@tesseradb/components`: `TesseraLayer` over `marks`/`tiles`/`artifacts` with the slab, rank-to-colour and the stand-in buffers moved out of the viewer, the density wash from the exact tiles' counts, artifacts at their wire centroid (the sidecar's rings gone); the nine elements of §9 step 2, a subpath entry each, the eight states through `part="state"`, the §5.9 mechanics (standard decorators with `accessor`, guarded defines, one `ContextRoot`, store precedence at connection, the `Deck` finalised a settle after disconnect, the single-file bundle with the inlined worker and its SRI hash); box selection as one `k = 0` `tiles`-form request under a 4,096-tile bound with `exact` set by the cell-versus-pixel rule; the viewer as `<tessera-explorer layout="overlay">` plus instruments | `check-clients.sh` green (core 198, deck 43, components 37, spike 5, wire-example 7); `smoke.mjs` OK through the parts (996,488 of 1,856,276 shown, strip `shown`, I7 holds across five encodings); `smoke-artifacts.mjs` OK (24 / 24 / 24 / 16 / 6 clusters full→narrow); `smoke-budget.mjs` OK (803,286 marks, spread 1.00×); the harness: **7 of 7 claims hold** | D1, D2, D2a, D5, D7 | **done** 2026-08-25 (`client/step-2`); see the measurements below and the notes the step left |
-| 3 | layer picker with closure, artifact list and card, legend, wire geometry drawn, sidecar retired, lasso; **with D12:** the membership attribute, the lookup texture, colour coverage | `smoke-artifacts.mjs` under two principals; the harness | D12 for colour | not started |
+| 3 | the membership column consumed: hashed to a response-local index in the decode worker, named on the main thread through the session table as each band is built (one reference per distinct ordinal per band, released on eviction; a layer's column carried over a refetch that did not name it), the point path naming the layers on with their closure (decision 0096); the `u32` ordinal as a per-point GPU attribute through the slab's dirty-span path and a lookup texture of one RGBA per live ordinal, 1,024 wide and grown in rows, the point shader reading `lut[ordinal]` behind a uniform switch — palette, level, highlight and the switch are texture rewrites, never a per-point pass (decision 0100); colour coverage per band over its distinct list, in the visible box, colour-stale bands refetched once per served set; the positional palette (decision 0099's default) with `spread` as the option; served hulls and boxes as hairline outlines, the opened one strong with a faint fill; names and counts at centroids, sized by masked count, placed by priority into a spatial hash with leader lines; the density wash supersampled and sampled linearly so the grid never shows (decision 0097); `<tessera-layer-picker>`, `<tessera-artifact-list>`, `<tessera-artifact-card>`, `<tessera-legend>` in the explorer's slots; `mode="lasso"` rasterised to the cells it meets at the box's bounded depth; `clusters.json` and `publish-clusters.mjs`'s sidecar half gone | `check-clients.sh` green (core 222, deck 54, components 44, spike 5, wire-example 7); `smoke-artifacts.mjs` OK (6 / 16 / 24 / 24 / 24 clusters narrow→full, a hull and a label under both principals shot); the harness **9 of 9 claims hold** headed, 9 of 9 headless (see the measurements) | D12 (built) | **done** 2026-08-25 (`client/step-3`) |
 | 4 | the examples (plain HTML, React explorer, canvas store) and `@tesseradb/react`, in the gate | typecheck; the harness against the C1 page | D10 for the production paragraph | not started |
 | 5 | `tesseradb[widget]`: `Map`, operator-only `authorise`, the messages, the traitlets, the wheel's build hook | the notebook example; the build hook in the gate | D4, D10 | not started |
 | 6 | C3's documents: contracts §3.2 amended, the OpenAPI description, worked decodes with a test, the obligations list | the decode test; `check-doc-links.py` | D9 | **landed** (branch `client/step-6-docs`): contracts r38 states the request in full; `docs/openapi/tessera.yaml` kept true by `tests/openapi.rs` (12 tests; the omitted-`layers` semantic test is `#[ignore]` until S3 lands); worked decodes in `reference/examples/` and `clients/ts/wire-example/` over one answer sheet; `design/client-obligations.md` (Provisional) |
@@ -92,7 +94,58 @@ headless chromium under swiftshader on WSL2; re-run before quoting):
   software-GL hover picks and says nothing about the client.
 - **Layer-switch refill under the colour-stale refetch**: step 3's; not measured.
 
-**Notes the step left.** Vite 8's oxc lowers only legacy decorators, so the standard form the design
+**Measured at step 3** (2026-08-25, `clients/ts/harness/harness.mjs` against the same demo, full
+principal, 996,488 marks on screen at depth 8, colouring by cluster through the lookup texture;
+**headed** Chromium 1208 on WSLg's display with `--headed --executable`, and headless swiftshader
+beside it; re-run before quoting):
+
+- **Per response, decode** (headed, 50 responses): as seen from the main thread median 42.7 ms,
+  p95 185 ms, max 193 ms; in the worker median 11.2 ms, max 103 ms; queued behind the lane median
+  40.7 ms, max 189 ms. The largest response, 747,268 points and 28.0 MB, took 67 ms in the worker
+  and 77 ms as seen from the main thread. **Remap** on the main thread, over 41 responses: median
+  4.1 ms, max 33.4 ms over 747,268 points; the absorb split median 33.2 ms, max 121 ms, the longest
+  single slice 18.7 ms against the 6 ms budget (a slice checks the clock every 64 tiles).
+- **Per settle** (headed, last settle): slab sync 3.0 ms, wash bin and filter 0.0 ms (memoised on
+  the `tiles` object), lookup texture 0.1 ms, outlines 0.2 ms (21), labels 0.2 ms (21 placed), whole
+  layer build 3.5 ms; the coverage check 2.8 ms over 16,100 bands, 0 stale. Twenty-four texture
+  writes in the whole session, against 153 paints.
+- **Per frame** (headed): mean 16.7 ms, p95 16.9 ms over 120 frames — the rAF cadence, with a
+  million marks coloured through the texture; the GPU is not the limit on this box. Headless
+  swiftshader is a different machine: mean 628 ms, p95 8.8 s, with main-thread tasks of 10–14 s
+  while it rasterises 1.5 million marks, which is what the two step-2 latencies were.
+- **The two latencies step 2 could not explain**, resolved. (1) *A 1M-point response decoding in
+  8.3 s*: the worker decoded it in 49–77 ms every time; the seconds were the reply waiting for the
+  main thread, which under headless swiftshader was inside a 10–14 s draw. Headed, the largest
+  response waits 10 ms. Neither the decoder's queue nor the absorb budget is the cause, so neither
+  changed: the worker now reports its own time so the lane's queue is a number rather than a
+  suspicion. (2) *A box counted 8.8 s after settle*: headed and headless alike the region's three
+  lanes are settle 201 ms, wire 52–56 ms (server 7–10 ms over 2,070 tiles at depth 7), projection
+  0.2 ms — **262–268 ms select-to-counted on the store's clock**; the 8 s was the same main
+  thread, and the earlier 100 s from mouse-up to the panel was the harness's box landing on the
+  toolbar's panels (it now starts clear of them: 779–887 ms mouse-up to panel).
+- **Layer-switch refill**: with one layer published the switch off and back on is the free case
+  §5.10 describes — the columns survive on their bands, no band goes colour-stale (measured, both
+  modes) — so the refill under a colour-stale refetch is **not measured**; it needs a second layer
+  in the demo. What was measured is the coverage check itself (above), and one wrong turn: before
+  coverage was scoped to the visible box it counted the render margin's bands, whose ordinals name
+  artifacts the channel never served for this view, and refetched 1,320 of 16,100 bands for nothing.
+- **Colour by cluster**: 16 ordinals sampled from the marks on screen, every one resolving through
+  the table to one of the 21 served artifacts, none to an artifact not served (the harness's ninth
+  claim).
+
+**Notes step 3 left.** A colour-stale band keeps drawing what resolves: its ordinals that still
+resolve to a served artifact keep that colour (exact, since membership in a served artifact is
+what the wire said), the rest draw neutral, and the band is refetched — the design's "its points
+draw neutral" would cost a per-point pass to zero the ordinals, which decision 0100 refuses.
+Stand-ins carry no ordinal and draw neutral under cluster colour. The replica's counts-only
+revalidation sends `layers: []`: it absorbs no points and would pay the artifact pass for nothing,
+and the harness tells the channel's request from the point path's by `k = 0` with a named layer.
+Headed runs need a full Chromium: Playwright 1.62's own could not be downloaded here (the CDN
+timed out), and `--executable` points the harness at the 1208 build on the machine. Chromium logs
+`ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the client abandoned mid-flight (a
+superseded request's abort); the harness exempts it beside its own 403s.
+
+**Notes step 2 left.** Vite 8's oxc lowers only legacy decorators, so the standard form the design
 decides is lowered by `components/vite-plugin-decorators.ts` (esbuild) for the dev server and the
 bundle; found by the first smoke run, where the browser received `accessor` raw. A `k = 0` response
 decodes inline rather than in a worker lane, because the lanes are serial and a counts-only answer

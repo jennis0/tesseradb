@@ -3,11 +3,18 @@ import {SessionArtifactTable} from './artifactTable.js';
 import type {Composition} from './compose.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
 import {dataToWorldXY, MAX_DEPTH, WORLD_SIZE} from './coords.js';
+import {tileRectOfBbox} from './budget.js';
+import {rectContainsTile} from './rects.js';
+import {worldBbox} from './prefetch.js';
 import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
 import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
 import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
-import {cellExceedsPixel, insideBox, rasteriseBox} from './region.js';
+import {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, type WorldPolygon} from './region.js';
+import {layerClosure} from './layers.js';
+import {artifactColours, type PaletteKind, type Rgba} from './palette.js';
+import type {Band, BandKey} from './bands.js';
+import {bandKey} from './bands.js';
 import {Replica, type ReplicaOptions} from './replica.js';
 import {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
 import type {DepthChoice} from './budget.js';
@@ -36,10 +43,12 @@ import type {
  * to `requestAnimationFrame`/`setTimeout`, so the whole store is testable in node against a fake
  * `fetch` (or a fake `TesseraClient`) with a fake scheduler.
  *
- * ⊘ **Selection counting, and the membership column, are step 2 and step 3.** `select(shape)`
- * records the shape and `region` is null; the session artifact table is built and refcounted now
- * but filled only by the artifact channel's served set until the wire carries per-point membership
- * (D12).
+ * **The membership column** (D12, §5.10): the point path names the layers that are on with their
+ * closure, so each band arrives with its ordinals named through the session table; the
+ * `artifacts` projection carries the table, the served set's ordinals and each one's colour, and
+ * the colour coverage over the bands in view — a band whose ordinals no longer resolve to
+ * anything served, or that lacks a column for a layer now on, is colour-stale and is refetched
+ * after novel ground by the replica's own path.
  */
 
 export type {Count, Masked} from './counts.js';
@@ -50,8 +59,8 @@ export type ViewInput = {bbox: [number, number, number, number]; width: number; 
 
 /**
  * A selection shape, in **data coordinates** — the space `setView` takes and `dataXY` returns.
- * A box is counted (§5.11); ⊘ a lasso is recorded and not counted until step 3 builds its
- * rasterisation — `region` stays null for one.
+ * A box and a lasso are both counted (§5.11): the lasso is rasterised to the tiles it meets at
+ * the same bounded depth, and typed exact by the same cell-versus-pixel rule.
  */
 export type SelectionShape =
   | {kind: 'box'; bbox: [number, number, number, number]}
@@ -69,6 +78,8 @@ export type StoreOptions = {
   view?: string;
   /** Marks-on-screen budget — the input's default, not a ceiling (design, owner 2026-08-25). */
   budget?: number;
+  /** How served artifacts are coloured (§5.10): positional by default, or spread over the served set. */
+  palette?: PaletteKind;
   prefetch?: boolean;
   /** Injected for tests; browser defaults otherwise. */
   scheduler?: FrameScheduler;
@@ -139,7 +150,10 @@ export type MarksProjection = {
 export type TilesProjection = {tiles: Composition['tiles']};
 
 export type ArtifactsProjection = {
+  /** The first layer on. */
   layer: string | null;
+  /** Every layer on — the closure the request names (decision 0096). */
+  layers: string[];
   served: Artifact[];
   lineage: ServedLineage;
   status: ArtifactChannelState['status'];
@@ -147,6 +161,17 @@ export type ArtifactsProjection = {
   version: number;
   /** The session artifact table, for a consumer resolving ordinals (§5.10). */
   table: SessionArtifactTable;
+  /** The served set's ordinals — what `table.resolve` walks up to. */
+  servedOrdinals: ReadonlySet<number>;
+  /** Each served ordinal's colour under the palette; an ordinal not here resolves to neutral. */
+  colours: ReadonlyMap<number, Rgba>;
+  palette: PaletteKind;
+  /**
+   * Colour coverage over the bands in view (§5.10): `current` resolve wholly to the served set;
+   * `stale` do not, or lack a column for a layer on, and are being refetched. The status strip's
+   * hover reads *colours exact* when `stale` is zero.
+   */
+  coverage: {current: number; stale: number};
 };
 
 export type SelectionProjection = {
@@ -213,8 +238,14 @@ export interface Store {
   setFilters(draft: FilterDraft): void;
   /** Page a filterable category's value set into `filters.values` — for its picker. */
   loadFilterValues(column: string): Promise<void>;
+  /** Turn layers on — each with its closure (decision 0096); `[]` turns every layer off. */
   setLayers(names: string[]): void;
+  /**
+   * Colour by a declared column, by `cluster:<layer>` for a layer that is on (a lookup-texture
+   * switch on the vis side, never a per-point pass), or `null` for uniform.
+   */
   setColourBy(column: string | null): void;
+  setPalette(kind: PaletteKind): void;
   setBudget(budget: number): void;
   pick(id: bigint): Promise<void>;
   openArtifact(id: bigint): Promise<void>;
@@ -227,6 +258,9 @@ export interface Store {
   refresh(): void;
   dispose(): void;
 }
+
+/** The `colourBy` prefix that names a layer's cluster colour rather than a column. */
+export const CLUSTER_PREFIX = 'cluster:';
 
 /** How long a selection must be still before its counting request goes out — the channel's settle. */
 const REGION_SETTLE_MS = 200;
@@ -273,6 +307,7 @@ export function createStore(options: StoreOptions): Store {
   let viewId = options.view ?? '';
   let budget = options.budget ?? 500_000;
   let colourBy: string | null = null;
+  let palette: PaletteKind = options.palette ?? 'positional';
   let contentKeyAtFrame = '';
   let selection: SelectionShape | null = null;
 
@@ -291,7 +326,7 @@ export function createStore(options: StoreOptions): Store {
     view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table},
+    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table, servedOrdinals: new Set(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
@@ -358,13 +393,18 @@ export function createStore(options: StoreOptions): Store {
       replaceProjection('filters', {...projections.filters, draft, expr: composeFilters(draft)});
     }
 
+    layersOn = layerClosure(meta.layers, layersOn);
     replica = new Replica(
       async (req, signal, background) => {
         const tok = await ensureToken();
         tokenEverUsed = true;
+        // The point path names the layers that are on, with their closure, and pays their pass
+        // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on
+        // — and `[]` on the replica's counts-only revalidation, which absorbs no points and would
+        // pay the artifact pass for a frame nobody reads.
         return client.viewport(
           tok,
-          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: []},
+          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn},
           signal,
           background
         );
@@ -372,6 +412,7 @@ export function createStore(options: StoreOptions): Store {
       meta.quantisation,
       {
         view: viewId,
+        table,
         cacheBytes: options.replica?.cacheBytes,
         cache: options.replica?.cache,
         revalidateAfterMs: options.replica?.revalidateAfterMs,
@@ -412,7 +453,7 @@ export function createStore(options: StoreOptions): Store {
     // A `setLayers` that arrived before meta is honoured now: the channel is what asks, and it
     // did not exist to be told. (Found by the artifacts smoke: the demo chooses its layer before
     // opening the session's store, and the choice was lost on every principal switch.)
-    channel.setLayer(layersOn[0] ?? null);
+    channel.setLayers(layersOn);
 
     if (queuedView) {
       const q = queuedView;
@@ -504,6 +545,7 @@ export function createStore(options: StoreOptions): Store {
     }
     replaceProjection('tiles', {tiles: frame.tiles});
     accumulateEncoding(frame);
+    checkColourCoverage();
 
     if (replica) {
       const fetched = p.fetched;
@@ -534,21 +576,97 @@ export function createStore(options: StoreOptions): Store {
 
   function onArtifacts(state: ArtifactChannelState): void {
     recomputeStale();
+    // The served set's ordinals: the channel took its reference before it emitted, so every
+    // served artifact is named. Colours are O(served) under either palette.
+    const servedOrdinals = new Set<number>();
+    const named: {ordinal: number; artifact: Artifact}[] = [];
+    for (const a of state.artifacts) {
+      const ordinal = table.ordinalOf(a.layer, a.tesseraId);
+      if (ordinal === 0) continue;
+      servedOrdinals.add(ordinal);
+      named.push({ordinal, artifact: a});
+    }
     replaceProjection('artifacts', {
+      ...projections.artifacts,
       layer: state.layer,
+      layers: state.layers,
       served: state.artifacts,
       lineage: servedLineage(state.artifacts),
       status: state.status,
       refusal: state.refusal,
       version: state.version,
-      table
+      table,
+      servedOrdinals,
+      colours: artifactColours(named, palette),
+      palette
     });
+    checkColourCoverage();
+  }
+
+  /** Bands already asked for again under this served-set version — a refetch is asked once. */
+  const colourAsked = new Map<BandKey, number>();
+
+  /**
+   * Colour coverage (§5.10): per band in view, over its distinct list — never its points — is
+   * every ordinal resolvable to the served set, for every layer on? A band that is not, or that
+   * lacks the column for a layer on (fetched before the layer was), is colour-stale: it keeps
+   * drawing what resolves, and its tile is asked for again after novel ground, once per served
+   * set, through the replica's coverage retraction and the driver's ordinary plan.
+   */
+  function checkColourCoverage(): void {
+    const a = projections.artifacts;
+    if (!replica || !presenter || a.status !== 'shown' || a.layers.length === 0) {
+      if (a.coverage.stale !== 0 || a.coverage.current !== 0) replaceProjection('artifacts', {...a, coverage: {current: 0, stale: 0}});
+      return;
+    }
+    const started = clock.now();
+    const stale: Band[] = [];
+    let current = 0;
+    // **In view means the visible box, not the render rect.** The channel answers for what the
+    // viewer is looking at; the point path fetches a wider ring, and a band in the margin names
+    // artifacts the channel never served for this view. Those resolve to neutral, correctly, and
+    // are not a reason to refetch — they colour when a pan brings their artifacts into the box.
+    const v = presenter.view;
+    const depth = projections.view.depth;
+    const visible = v ? tileRectOfBbox(worldBbox({target: [v.view.target[0], v.view.target[1]], zoom: v.view.zoom, width: v.width, height: v.height}, 1), depth) : null;
+    for (const band of projections.marks.bands) {
+      if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
+      let ok = true;
+      for (const layer of a.layers) {
+        const m = band.membership[layer];
+        if (!m) {
+          ok = false;
+          break;
+        }
+        for (let i = 0; i < m.distinct.length; i++) {
+          if (table.resolve(m.distinct[i]!, a.servedOrdinals) === 0) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) break;
+      }
+      if (ok) current++;
+      else stale.push(band);
+    }
+    const toAsk = stale.filter((b) => colourAsked.get(bandKey(b.depth, b.prefix)) !== a.version);
+    for (const b of toAsk) colourAsked.set(bandKey(b.depth, b.prefix), a.version);
+    if (toAsk.length > 0) {
+      replica.retract(toAsk);
+      presenter.reschedule();
+    }
+    options.instruments?.onTrace?.('coverage', {ms: clock.now() - started, bands: projections.marks.bands.length, stale: stale.length, asked: toAsk.length});
+    if (a.coverage.current !== current || a.coverage.stale !== stale.length) {
+      replaceProjection('artifacts', {...projections.artifacts, coverage: {current, stale: stale.length}});
+    }
   }
 
   // ---- the encoding accumulators (in the store, §4) -----------------------------------------
 
   function accumulateEncoding(frame: Composition): void {
-    if (!colourBy || !meta) return;
+    // Cluster colour is the lookup texture's, resolved on the vis side from the table; nothing
+    // accumulates for it here.
+    if (!colourBy || !meta || colourBy.startsWith(CLUSTER_PREFIX)) return;
     const column = meta.declaredScalars.find((c) => c.name === colourBy);
     if (!column) return;
     if (column.category) {
@@ -643,7 +761,7 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('filters', {...projections.filters, draft, expr});
     // A filter narrows what is served without changing the identity key, so bands held under one
     // filter are renderable under another — the client that changed the question is the only party
-    // that knows the held answers are to a different one (§4; `main.ts:440`'s manual reset).
+    // that knows the held answers are to a different one (§4).
     presenter?.cancel();
     replica?.reset();
     contentKeyAtFrame = '';
@@ -669,18 +787,33 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function setLayers(names: string[]): void {
-    // Usually one (owner 2026-08-25); the channel draws one at a time.
-    layersOn = names;
+    // Usually one, with its closure (decision 0096) — the request names every layer in it.
+    layersOn = meta ? layerClosure(meta.layers, names) : names;
     if (!channel) {
       // Before meta: record the intent where a reader sees it; the channel adopts it at meta.
-      replaceProjection('artifacts', {...projections.artifacts, layer: names[0] ?? null});
+      replaceProjection('artifacts', {...projections.artifacts, layer: layersOn[0] ?? null, layers: layersOn});
       return;
     }
-    channel.setLayer(names[0] ?? null);
+    channel.setLayers(layersOn);
     if (lastView && presenter?.view) {
       const v = presenter.view;
       channel?.refresh(v.view, v.width, v.height);
     }
+    // A layer switched on: no held band carries its column, so every band in view is colour-stale
+    // at once and refetches centre-first as the coverage check finds them (§5.10). The hulls,
+    // names and counts come at once from the channel; the points take colour as bands land.
+    checkColourCoverage();
+  }
+
+  function setPalette(kind: PaletteKind): void {
+    if (kind === palette) return;
+    palette = kind;
+    const a = projections.artifacts;
+    const named = a.served
+      .map((artifact) => ({ordinal: table.ordinalOf(artifact.layer, artifact.tesseraId), artifact}))
+      .filter((n) => n.ordinal !== 0);
+    // O(served): the colours move, the ordinals do not, and the vis side rewrites its texture.
+    replaceProjection('artifacts', {...a, colours: artifactColours(named, kind), palette: kind});
   }
 
   function setColourBy(column: string | null): void {
@@ -688,6 +821,7 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('legend', {...projections.legend, colourBy: column});
     // No refetch: every declared column is already in the held response, so this is an accumulator
     // pass over what is drawn (§4). The vis side rebuilds its layers; the mark count cannot move.
+    // `cluster:<layer>` is a uniform switch on the vis side and accumulates nothing.
     if (column && projections.view.composition) accumulateEncoding(projections.view.composition);
   }
 
@@ -732,16 +866,22 @@ export function createStore(options: StoreOptions): Store {
 
   let regionTimer: unknown = null;
   let regionInFlight: AbortController | null = null;
+  /** The counting request's three timestamps — selected, request sent, response in — for the instruments. */
+  let regionClock = {selected: 0, requested: 0, answered: 0};
 
-  /** The held marks whose world positions fall inside a world-space box — the region's sample. */
-  function heldInside(world: [number, number, number, number]): RegionProjection['held'] {
+  /** A shape in world space: the box, or the lasso's polygon. */
+  type WorldShape = {kind: 'box'; box: [number, number, number, number]} | {kind: 'lasso'; polygon: WorldPolygon};
+
+  /** The held marks whose world positions fall inside the shape — the region's sample (P1). */
+  function heldInside(world: WorldShape): RegionProjection['held'] {
     const ids: bigint[] = [];
     const xy: number[] = [];
     let count = 0;
+    const inside = world.kind === 'box' ? (x: number, y: number) => insideBox(x, y, world.box) : (x: number, y: number) => insidePolygon(x, y, world.polygon);
     const take = (band: {ids: BigUint64Array; positions: Float32Array}, i: number) => {
       const x = band.positions[i * 2]!;
       const y = band.positions[i * 2 + 1]!;
-      if (!insideBox(x, y, world)) return;
+      if (!inside(x, y)) return;
       count++;
       if (ids.length < REGION_HELD_LIMIT) {
         ids.push(band.ids[i]!);
@@ -758,12 +898,16 @@ export function createStore(options: StoreOptions): Store {
     return {ids: BigUint64Array.from(ids), positions: Float32Array.from(xy), count};
   }
 
-  function worldOfShape(shape: SelectionShape): [number, number, number, number] | null {
-    if (shape.kind !== 'box' || !meta) return null;
+  function worldOfShape(shape: SelectionShape): WorldShape | null {
+    if (!meta) return null;
     const q = meta.quantisation;
-    const [x0, y0] = dataToWorldXY(shape.bbox[0], shape.bbox[1], q);
-    const [x1, y1] = dataToWorldXY(shape.bbox[2], shape.bbox[3], q);
-    return [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+    if (shape.kind === 'box') {
+      const [x0, y0] = dataToWorldXY(shape.bbox[0], shape.bbox[1], q);
+      const [x1, y1] = dataToWorldXY(shape.bbox[2], shape.bbox[3], q);
+      return {kind: 'box', box: [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)]};
+    }
+    if (shape.points.length < 3) return null;
+    return {kind: 'lasso', polygon: shape.points.map(([x, y]) => dataToWorldXY(x, y, q))};
   }
 
   /**
@@ -783,9 +927,10 @@ export function createStore(options: StoreOptions): Store {
       replaceProjection('region', null);
       return;
     }
-    const {depth, tiles} = rasteriseBox(world);
+    const {depth, tiles} = world.kind === 'box' ? rasteriseBox(world.box) : rasterisePolygon(world.polygon);
     const zoom = presenter?.view?.view.zoom ?? 0;
     const held = heldInside(world);
+    regionClock = {selected: clock.now(), requested: 0, answered: 0};
     replaceProjection('region', {
       shape,
       status: 'loading',
@@ -809,11 +954,13 @@ export function createStore(options: StoreOptions): Store {
     try {
       const tok = await ensureToken();
       tokenEverUsed = true;
+      regionClock.requested = clock.now();
       const response = await client.viewport(
         tok,
         {view: viewId, zoom: depth, tiles, k: 0, filters: composeFilters(projections.filters.draft), layers: []},
         signal.signal
       );
+      regionClock.answered = clock.now();
       if (regionInFlight !== signal || selection !== shape) return;
       regionInFlight = null;
       let visible = 0n;
@@ -833,6 +980,15 @@ export function createStore(options: StoreOptions): Store {
         matched: {value: Number(matched), exact: !coarse},
         // The sample is the held marks inside, against the region's matched — both figures always.
         served: {shown: current.held.count, total: Number(matched), exact: true}
+      });
+      // The three lanes of a counting request, for the delivery record: the settle, the wire (with
+      // its main-thread decode), and the projection.
+      options.instruments?.onTrace?.('region', {
+        settleMs: regionClock.requested - regionClock.selected,
+        wireMs: regionClock.answered - regionClock.requested,
+        projectMs: clock.now() - regionClock.answered,
+        serverMs: response.timings.serverUs / 1000,
+        tiles: tiles.length
       });
     } catch (error) {
       if (signal.signal.aborted || regionInFlight !== signal) return;
@@ -928,6 +1084,7 @@ export function createStore(options: StoreOptions): Store {
     loadFilterValues,
     setLayers,
     setColourBy,
+    setPalette,
     setBudget,
     pick,
     openArtifact,

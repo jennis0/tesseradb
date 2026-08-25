@@ -6,7 +6,7 @@ export {chooseDepth, calibrate, tilesInBbox, tileRectOfBbox, MIN_DEPTH} from './
 export type {BudgetInputs, DepthChoice, Observation} from './budget.js';
 export {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
 export {createDecoder, inlineDecoder, setWorkerFactory, workerDecoder, type Decoder} from './decoder.js';
-export {BandCache, bandKey, bandsOfResult, isComplete} from './bands.js';
+export {BandCache, bandKey, bandsOfResult, distinctOrdinals, isComplete} from './bands.js';
 export {
   coverageAdd,
   coverageAt,
@@ -23,6 +23,7 @@ export {
 export type {
   Band,
   BandKey,
+  BandMembership,
   EvictionFocus,
   PlannedRequest,
   Provenance,
@@ -88,8 +89,11 @@ export {
   type FormatOptions,
   type Masked
 } from './counts.js';
-export {createStore, REGION_HELD_LIMIT, type Store} from './store.js';
-export {cellExceedsPixel, insideBox, rasteriseBox, REGION_TILE_BOUND, type RegionRequest} from './region.js';
+export {createStore, CLUSTER_PREFIX, REGION_HELD_LIMIT, type Store} from './store.js';
+export {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, REGION_TILE_BOUND, type RegionRequest, type WorldPolygon} from './region.js';
+export {layerClosure, layerEntries, type LayerEntry} from './layers.js';
+export {artifactColours, hslToRgb, polarOf, positionalColour, GRID32_CENTRE, NEUTRAL, type PaletteKind, type Rgba} from './palette.js';
+export {MEMBERSHIP_PREFIX} from './decode.js';
 export type {
   ArtifactsProjection,
   FiltersProjection,

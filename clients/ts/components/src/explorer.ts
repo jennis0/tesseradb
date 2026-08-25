@@ -12,6 +12,10 @@ import './status.js';
 import './filter-panel.js';
 import './item-card.js';
 import './selection.js';
+import './layer-picker.js';
+import './artifact-list.js';
+import './artifact-card.js';
+import './legend.js';
 
 /**
  * `<tessera-explorer>` — the map with its status strip, filters, the selection panel and the
@@ -25,9 +29,10 @@ import './selection.js';
  * sheet behind a button, by container query. `panels="filters selection detail"` chooses which
  * appear; every region is a named slot with default content.
  *
- * ⊘ The `toolbar`, `legend` and `artifacts` slots have no default content until step 3 builds
- * `<tessera-legend>`, `<tessera-layer-picker>` and `<tessera-artifact-list>`; a host may fill
- * them now.
+ * The `toolbar` slot holds the layer picker and the selectable legend, `legend` the legend's
+ * readout, `artifacts` the artifact list, and `detail` whichever of the item card and the
+ * artifact card changed last (§5.3) — a point inside a cluster makes both meaningful, and a host
+ * placing the two separately shows both.
  */
 const ALL_PANELS = ['toolbar', 'legend', 'filters', 'artifacts', 'selection', 'detail'] as const;
 type Panel = (typeof ALL_PANELS)[number];
@@ -134,9 +139,25 @@ export class TesseraExplorer extends TesseraElement {
   @state() accessor sheetOpen = false;
 
   private provider = new ContextProvider(this, {context: storeContext, initialValue: null});
+  /** Which of the two selections changed last — what the detail region shows. */
+  private lastDetail: 'item' | 'artifact' = 'item';
+  private seenItem: object | null = null;
+  private seenArtifact: object | null = null;
 
   protected override onStoreAdopted(store: Store): void {
     this.provider.setValue(store);
+  }
+
+  protected override onStoreChange(): void {
+    const sel = this.resolvedStore?.get('selection');
+    if (sel) {
+      if (sel.item && sel.item !== this.seenItem) this.lastDetail = 'item';
+      if (sel.artifact && sel.artifact !== this.seenArtifact) this.lastDetail = 'artifact';
+      if (sel.artifactRefusal && !sel.artifact) this.lastDetail = 'artifact';
+      this.seenItem = sel.item;
+      this.seenArtifact = sel.artifact;
+    }
+    super.onStoreChange();
   }
 
   override dispose(): void {
@@ -158,17 +179,21 @@ export class TesseraExplorer extends TesseraElement {
     const s = this.resolvedStore;
     const region = s?.get('region') ?? null;
     const selection = s?.get('selection');
-    // The detail region shows whichever changed last; with no artifact card yet, the item card.
-    const detail = html`<slot name="detail"><tessera-item-card .pick=${this.map?.lastPick ?? null}></tessera-item-card></slot>`;
+    // The detail region shows whichever changed last.
+    const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
+    const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card></tessera-artifact-card>` : html`<tessera-item-card .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
+    // The toolbar carries the selectable legend, so the `legend` region's default readout is
+    // left empty while the toolbar shows — two legends for one colouring is a screen of noise.
+    const toolbar = html`<slot name="toolbar"><tessera-layer-picker></tessera-layer-picker><tessera-legend selectable></tessera-legend></slot>`;
     const sidebar = html`<aside part="sidebar" ?data-open=${this.sheetOpen}>
-      ${this.has('toolbar') && this.layout === 'docked' ? html`<slot name="toolbar"></slot>` : nothing}
-      ${this.has('legend') && this.layout === 'docked' ? html`<slot name="legend"></slot>` : nothing}
+      ${this.has('toolbar') && this.layout === 'docked' ? toolbar : nothing}
+      ${this.has('legend') && this.layout === 'docked' ? html`<slot name="legend">${this.has('toolbar') ? nothing : html`<tessera-legend></tessera-legend>`}</slot>` : nothing}
       ${this.has('filters') ? html`<slot name="filters"><tessera-filter-panel></tessera-filter-panel></slot>` : nothing}
-      ${this.has('artifacts') ? html`<slot name="artifacts"></slot>` : nothing}
+      ${this.has('artifacts') ? html`<slot name="artifacts"><tessera-artifact-list></tessera-artifact-list></slot>` : nothing}
       ${this.has('selection') && region ? html`<slot name="selection"><tessera-selection></tessera-selection></slot>` : nothing}
       ${this.has('detail') ? detail : nothing}
     </aside>`;
-    return html`<div part="frame">
+    return html`<div part="frame" @tessera-artifactselect=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))} @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}>
       <tessera-map
         colour-by=${this.colourBy || nothing}
         layers=${this.layers || nothing}
@@ -179,11 +204,11 @@ export class TesseraExplorer extends TesseraElement {
         @click=${() => this.requestUpdate()}
       >
         <div slot="top-left">
-          ${this.has('toolbar') && this.layout === 'overlay' ? html`<slot name="toolbar"></slot>` : nothing}
+          ${this.has('toolbar') && this.layout === 'overlay' ? toolbar : nothing}
         </div>
         <div slot="bottom-left"><slot name="status"><tessera-status></tessera-status></slot></div>
         <div slot="bottom-right">
-          ${this.has('legend') && this.layout === 'overlay' ? html`<slot name="legend"></slot>` : nothing}
+          ${this.has('legend') && this.layout === 'overlay' ? html`<slot name="legend">${this.has('toolbar') ? nothing : html`<tessera-legend></tessera-legend>`}</slot>` : nothing}
         </div>
         <slot name="tooltip" slot="tooltip"></slot>
       </tessera-map>

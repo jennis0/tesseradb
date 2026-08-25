@@ -83,6 +83,11 @@ export class TesseraStatus extends TesseraElement {
     if (!v || !r) return '';
     const parts = [`drawn at depth ${v.depth}`];
     if (v.provisional > 0) parts.push(`${v.provisional.toLocaleString('en-GB')} provisional marks (uncounted)`);
+    // Exact only (§5.10): every band on screen resolves to the served set, or some are refetching.
+    const a = this.resolvedStore?.get('artifacts');
+    if (a && a.layers.length > 0 && a.status === 'shown') {
+      parts.push(a.coverage.stale === 0 ? 'colours exact' : `refreshing ${a.coverage.stale.toLocaleString('en-GB')} tiles`);
+    }
     parts.push(`replica holds ${(r.bytes / 1e6).toFixed(1)} MB in ${r.bands.toLocaleString('en-GB')} bands`);
     return parts.join(' · ');
   }

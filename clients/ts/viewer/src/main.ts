@@ -5,10 +5,8 @@ import {loadDatasets, readConfig, type Dataset} from './config.js';
 import {esc} from './html.js';
 import {renderErrors} from './panels/errors.js';
 import {renderSource} from './panels/source.js';
-import {renderLegend} from './panels/legend.js';
 import {renderStats, toggleStatsDrawer} from './panels/stats.js';
 import {renderDepth} from './panels/view.js';
-import {renderArtifactDetail, renderArtifacts, renderLayerControl} from './panels/layers.js';
 import {installTrace, installTraceBar, trace} from './trace.js';
 import {coalesce, createStore as createAppState, type Store} from './state.js';
 
@@ -23,11 +21,13 @@ import {coalesce, createStore as createAppState, type Store} from './state.js';
  * `session-url` and the session credential stay (§5.3: never on a C1 surface).
  *
  * **What the instruments are.** The things that measure rather than show: the dataset and
- * principal pickers, the mark budget, the layer and colour controls (componentised at step 3),
- * the clusters in view, the depth the budget chose, the last request's timings and the replica
- * drawer, and the refusals observed. They read a mirror of the store's projections plus the
- * numbers the §4 surface deliberately omits, which the store forwards on its demo-only
- * `instruments` channel.
+ * principal pickers, the mark budget, the depth the budget chose, the last request's timings and
+ * the replica drawer, and the refusals observed. The layer picker, the legend, the artifact list
+ * and the artifact card are the explorer's own (§5.3). The instruments read a mirror of the
+ * store's projections plus the numbers the §4 surface deliberately omits, which the store
+ * forwards on its demo-only `instruments` channel; the probe on `window` carries the three lanes'
+ * timings — decode in the worker, absorb on this thread, the region's counting request — for the
+ * harness.
  */
 
 const config = readConfig();
@@ -71,17 +71,7 @@ const store = createAppState({
   inFlight: 0,
   failures: [],
   colourBy: DEFAULT_COLOUR_BY,
-  categories: {},
-  categoryErrors: {},
-  ranks: {},
-  domains: {},
-  artifactLayer: null,
-  artifacts: [],
-  artifactVersion: 0,
-  artifactStatus: 'idle',
-  artifactError: null,
-  selectedArtifact: null,
-  artifactDetailError: null
+  artifactLayer: null
 });
 
 const explorer = document.getElementById('explorer') as TesseraExplorer;
@@ -89,7 +79,7 @@ const instrumentsEl = document.getElementById('instruments')!;
 
 declare global {
   interface Window {
-    __tesseraProbe?: MapProbe;
+    __tesseraProbe?: MapProbe & {lanes: Lanes};
   }
 }
 
@@ -98,26 +88,56 @@ async function publishProbe(): Promise<void> {
   await explorer.updateComplete;
   const map = explorer.map;
   if (!map) return;
-  window.__tesseraProbe = map.probe;
+  const probe = map.probe as MapProbe & {lanes: Lanes};
+  probe.lanes ??= {decode: [], absorb: {split: [], store: [], remap: [], remapPoints: [], sliceMaxMs: 0}, region: null, coverage: null, longTasks: []};
+  window.__tesseraProbe = probe;
+  observeLongTasks(probe.lanes);
 }
+
+/**
+ * The main thread's long tasks, so a latency the lanes cannot explain — a response answered in
+ * milliseconds and projected seconds later — can be laid against what blocked the thread and
+ * when. Chromium's `longtask` entries, the ten longest kept.
+ */
+let longTasksObserved = false;
+function observeLongTasks(lanes: Lanes): void {
+  if (longTasksObserved || typeof PerformanceObserver === 'undefined') return;
+  longTasksObserved = true;
+  try {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        lanes.longTasks.push({ms: entry.duration, at: entry.startTime});
+        lanes.longTasks.sort((a, b) => b.ms - a.ms);
+        if (lanes.longTasks.length > 10) lanes.longTasks.length = 10;
+      }
+    });
+    observer.observe({type: 'longtask', buffered: true});
+  } catch {
+    // Not every runtime has the entry type; the lanes still say what they can.
+  }
+}
+
+/** The three lanes' timings (design §5.10's measurement), kept on the probe for the harness. */
+type Lanes = {
+  decode: {ms: number; workerMs: number | null; points: number; bytes: number; at: number}[];
+  absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
+  region: Record<string, number> | null;
+  coverage: Record<string, number> | null;
+  /** The ten longest main-thread tasks, ms and their start time on `performance.now()`'s clock. */
+  longTasks: {ms: number; at: number}[];
+};
 
 // ---------------------------------------------------------------------------------- the panels
 
 /** The controls: everything that changes what is asked for. */
 function renderControls(): string {
-  return renderSource(store.state, datasets, presets) + renderLayerControl(store.state) + renderLegend(store.state);
+  return renderSource(store.state, datasets, presets);
 }
 
 /** The readouts: everything that reports what came back. */
 function renderReadouts(): string {
   const slab = explorer.map?.slab;
-  return (
-    renderArtifacts(store.state) +
-    (store.state.selectedArtifact || store.state.artifactDetailError ? renderArtifactDetail(store.state) : '') +
-    renderStats(store.state, {drawn: slab?.drawn ?? 0, departed: slab?.departed ?? 0}) +
-    renderDepth(store.state) +
-    renderErrors(store.state)
-  );
+  return renderStats(store.state, {drawn: slab?.drawn ?? 0, departed: slab?.departed ?? 0}) + renderDepth(store.state) + renderErrors(store.state);
 }
 
 /**
@@ -126,22 +146,7 @@ function renderReadouts(): string {
  */
 function controlsSignature(): string {
   const s = store.state;
-  const colour = s.colourBy ?? '';
-  return [
-    s.datasetId,
-    s.switching ? '1' : '0',
-    s.termsLabel,
-    s.terms.length,
-    colour,
-    s.categories[colour]?.length ?? -1,
-    Object.keys(s.ranks[colour] ?? {}).length,
-    s.categoryErrors[colour]?.code ?? '',
-    s.domains[colour] ? `${s.domains[colour]!.min}..${s.domains[colour]!.max}` : '',
-    s.budget,
-    s.artifactLayer ?? '',
-    s.meta?.layers.length ?? -1,
-    s.meta?.declaredScalars.length ?? -1
-  ].join('|');
+  return [s.datasetId, s.switching ? '1' : '0', s.termsLabel, s.terms.length, s.budget].join('|');
 }
 
 let controlsPainted = '';
@@ -187,21 +192,6 @@ function bindControls() {
     openSession(preset);
   });
 
-  const artifactLayer = document.getElementById('artifact-layer') as HTMLSelectElement | null;
-  artifactLayer?.addEventListener('change', () => {
-    const chosen = artifactLayer.value === '' ? null : artifactLayer.value;
-    trace.event('layer', {name: chosen ?? 'none'});
-    dataStore?.setLayers(chosen ? [chosen] : []);
-  });
-
-  const colourBy = document.getElementById('colour-by') as HTMLSelectElement | null;
-  colourBy?.addEventListener('change', () => {
-    const chosen = colourBy.value === '' ? null : colourBy.value;
-    // No refetch: every rendered column is already in the held response, so this is an encoding
-    // pass over what is drawn — the switch a viewer can run as a check on I7.
-    dataStore?.setColourBy(chosen);
-  });
-
   const budgetInput = document.getElementById('budget') as HTMLInputElement | null;
   budgetInput?.addEventListener('change', () => {
     trace.event('budget', {n: Number(budgetInput.value)});
@@ -231,9 +221,6 @@ function mirror(): void {
   const meta = ds.get('meta');
   const status = ds.get('status');
   const view = ds.get('view');
-  const legend = ds.get('legend');
-  const artifacts = ds.get('artifacts');
-  const selection = ds.get('selection');
   const replica = ds.get('replica');
 
   store.update((s) => {
@@ -246,18 +233,6 @@ function mirror(): void {
     s.lastError = status.refusal;
     s.inFlight = status.status === 'loading' ? 1 : 0;
     s.frame = view.composition;
-    s.colourBy = legend.colourBy;
-    s.ranks = legend.ranks;
-    s.domains = legend.domains;
-    s.categories = legend.categories;
-    s.categoryErrors = legend.categoryErrors;
-    if (s.artifacts !== artifacts.served) s.artifactVersion += 1;
-    s.artifacts = artifacts.served;
-    s.artifactLayer = artifacts.layer;
-    s.artifactStatus = artifacts.status;
-    s.artifactError = artifacts.refusal;
-    s.selectedArtifact = selection.artifact ? {...selection.artifact.detail, id: selection.artifact.id} : null;
-    s.artifactDetailError = selection.artifactRefusal;
     s.replicaBytes = replica.bytes;
     s.replicaPoints = replica.points;
     s.replicaBands = replica.bands;
@@ -280,16 +255,6 @@ function openSession(preset: Dataset['presets'][number]): void {
     s.frame = null;
     s.sessionWarm = false;
     s.status = 'idle';
-    s.selectedArtifact = null;
-    s.artifactDetailError = null;
-    s.categories = {};
-    s.categoryErrors = {};
-    s.ranks = {};
-    s.domains = {};
-    s.artifacts = [];
-    s.artifactVersion += 1;
-    s.artifactStatus = 'idle';
-    s.artifactError = null;
   });
 
   const prefetch = new URLSearchParams(location.search).get('prefetch') !== '0';
@@ -308,6 +273,18 @@ function openSession(preset: Dataset['presets'][number]): void {
     budget: store.state.budget,
     prefetch,
     driver: {prefetchLayers: config.prefetchLayers},
+    replica: {
+      // The absorb lane: the split and store phases per response, and the longest single slice —
+      // the figure that says whether the slice budget held the thread (§5.10's measurement).
+      onPhase: (kind, ms, n) => {
+        const lanes = window.__tesseraProbe?.lanes;
+        if (!lanes) return;
+        if (kind === 'split' || kind === 'store' || kind === 'remap') lanes.absorb[kind].push(ms);
+        if (kind === 'slice') lanes.absorb.sliceMaxMs = Math.max(lanes.absorb.sliceMaxMs, ms);
+        for (const key of ['split', 'store', 'remap'] as const) if (lanes.absorb[key].length > 50) lanes.absorb[key].shift();
+        if (kind === 'remap') lanes.absorb.remapPoints.push(n);
+      }
+    },
     instruments: {
       onFrame: (info) => {
         const probe = window.__tesseraProbe;
@@ -329,10 +306,18 @@ function openSession(preset: Dataset['presets'][number]): void {
           s.lastBytes = info.bytes;
         });
       },
-      onTrace: (kind, fields) => trace.event(kind, fields)
+      onTrace: (kind, fields) => {
+        trace.event(kind, fields);
+        const lanes = window.__tesseraProbe?.lanes;
+        if (!lanes) return;
+        // The region's counting request, in its three lanes, and the coverage check per settle.
+        if (kind === 'region') lanes.region = {...fields};
+        if (kind === 'coverage') lanes.coverage = {...fields};
+      }
     }
   });
   dataStore.setColourBy(store.state.colourBy);
+  // The demo opens with the first layer on: the smoke and the harness read counts off it.
   dataStore.setLayers(store.state.artifactLayer ? [store.state.artifactLayer] : []);
   unsubscribe = dataStore.subscribe(() => mirror());
   // The explorer takes the store by property — first in the precedence — and its map pushes the
@@ -360,12 +345,15 @@ async function activate(dataset: Dataset): Promise<void> {
     viewerUrl: dataset.viewerUrl,
     sessionUrl: dataset.sessionUrl,
     sessionCredential: config.sessionCredential,
-    // Per-response decode time, for the harness's measurement (design §5.10).
-    onDecode: (ms) => {
+    // Per-response decode time, for the harness's measurement (design §5.10): as seen from this
+    // thread, and the worker's own — the difference is the lane's queue.
+    onDecode: (ms, bytes, points, workerMs) => {
       const probe = window.__tesseraProbe;
       if (!probe) return;
       probe.timings.decodeMs.push(ms);
       if (probe.timings.decodeMs.length > 50) probe.timings.decodeMs.shift();
+      probe.lanes.decode.push({ms, workerMs, points, bytes, at: performance.now()});
+      if (probe.lanes.decode.length > 50) probe.lanes.decode.shift();
     }
   });
 
@@ -391,12 +379,6 @@ async function activate(dataset: Dataset): Promise<void> {
     s.lastTimings = null;
     s.colourBy = DEFAULT_COLOUR_BY;
     s.artifactLayer = null;
-    s.artifacts = [];
-    s.artifactVersion += 1;
-    s.artifactStatus = 'idle';
-    s.artifactError = null;
-    s.selectedArtifact = null;
-    s.artifactDetailError = null;
   });
 
   // Choose the colour and layer defaults once meta is known, before opening the session's store, so

@@ -3,14 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <title>Tessera viewer</title>
+    <!-- No icon to fetch: a headed browser asks for one and the dev server's 404 reads as an error. -->
+    <link rel="icon" href="data:," />
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <!-- The explorer is the map with its status strip, filters, selection and detail card (design
-         client-components §7); the instruments beside it are the demo's own — dataset and principal,
-         where the session credential stays, the layer and colour controls step 3 componentises, and
-         the readouts that measure rather than show. -->
-    <tessera-explorer id="explorer" layout="overlay" panels="filters selection detail"></tessera-explorer>
+    <!-- The explorer is the map with its status strip, toolbar (the layer picker and the legend),
+         filters, artifact list, selection and detail card (design client-components §7); the
+         instruments beside it are the demo's own — dataset and principal, where the session
+         credential stays, and the readouts that measure rather than show. -->
+    <tessera-explorer id="explorer" layout="overlay"></tessera-explorer>
     <aside id="instruments"></aside>
     <script type="module" src="/src/main.ts"></script>
   </body>
