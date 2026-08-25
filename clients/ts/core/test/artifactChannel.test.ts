@@ -167,3 +167,29 @@ describe('the artifact channel', () => {
     expect(ch.current.artifacts).toHaveLength(0);
   });
 });
+
+describe('the depth clamp', () => {
+  it('asks no deeper than max_tiles_per_request allows for the view it was handed', async () => {
+    const clock = manualClock();
+    const {client, viewport} = fakeClient(() => responseWith([artifact(1n)]));
+    const states: ArtifactChannelState[] = [];
+    const ch = new ArtifactChannel(client, {
+      view: 's0',
+      quantisation: Q,
+      token: () => 'tok',
+      // A frame drawn at depth 10 while the camera sits at the full extent — the pairing the
+      // harness produced on a principal switch, which asked for 2^20 tiles and was refused (422).
+      depth: () => 10,
+      maxTiles: 4096,
+      clock,
+      onChange: (s) => states.push(s)
+    });
+    ch.setLayer('clusters/x');
+    ch.refresh({target: [256, 256, 0], zoom: 0}, 512, 512);
+    await Promise.resolve();
+    expect(viewport).toHaveBeenCalledTimes(1);
+    const req = viewport.mock.calls[0]![1] as {zoom: number};
+    // 4^6 = 4096 tiles over the whole world fits; 4^7 does not.
+    expect(req.zoom).toBe(6);
+  });
+});

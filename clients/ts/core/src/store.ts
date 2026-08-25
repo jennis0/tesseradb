@@ -405,6 +405,7 @@ export function createStore(options: StoreOptions): Store {
       // The drawn depth, from the projection the frame handler has just replaced — the presenter's
       // own handle is assigned after it hands the frame over, so it is one frame behind here.
       depth: () => projections.view.depth ?? presenter?.frame?.depth,
+      maxTiles: meta.maxTilesPerRequest,
       table,
       onChange: onArtifacts
     });
