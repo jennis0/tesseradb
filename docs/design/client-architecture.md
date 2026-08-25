@@ -28,7 +28,7 @@ every behaviour in it is testable without a browser. It contains:
   id-order-prefix rule, per-tile density matching, exact-supersession, provenance and the
   no-counts-on-non-exact rule — as a pure computation from replica state to a typed draw list.
 
-**`tessera-vis`** (today `@tessera/viewer`) is the end-to-end display: the deck.gl binding and
+**`tessera-vis`** (today `@tesseradb/viewer`) is the end-to-end display: the deck.gl binding and
 its GPU slab (owned buffers, dirty spans, partition retention), colour encoding, panels, the
 trace bar, DOM wiring. It holds no timers except `requestAnimationFrame` coalescing, makes no
 requests, and decides nothing about data: it renders draw lists and forwards view events.
@@ -179,7 +179,11 @@ Strangler order, demo working at every step, sanity + traces + density audit as 
 2. Anticipation and staleness cadence migrate; Appendix M re-measured — bites/pause and
    revalidation rows must move from *dead* to *designed*.
 3. Composition unifies on the tile grid; density audit stays clean; ascending-id assertion in.
-4. Replica API split lands; `tile()` deleted; viewer renamed `tessera-vis` (D4).
+   **Done** — the composition and the presented frame live in `tessera-client` (`compose.ts`,
+   `presented.ts`); the client-components design's step 0 finished this half.
+4. Replica API split lands; `tile()` deleted; **the scope renamed to `@tesseradb/*`** (superseding
+   D4's *name* ruling — a scope change under decision 0048). **Done** at the client-components
+   design's step 1; the vis package is `@tesseradb/viewer`.
 5. The controller's timer fields are deleted. What remains in vis is the §1 list, verified by
    the package having no timer other than rAF and no import of the driver's internals.
 
@@ -207,8 +211,11 @@ plus the driver's headless suite in CI.
   `fetch`/`read`** — per-tile asks batched into region fetches, each answered from `read`,
   with empty distinct from refused per ask — documented with §3's driver-bypass obligation
   list. The rectangle-shaped supersession of the plan's tile-shaped Layer 1 is recorded here.
-- **D4 — RULED 2026-08-10: no rename.** `tessera-vis` was a stand-in name; the package stays
-  `@tessera/viewer`. This document keeps "vis" as the boundary vocabulary only.
+- **D4 — RULED 2026-08-10: no rename.** `tessera-vis` was a stand-in name; the package stayed
+  `@tessera/viewer`. This document keeps "vis" as the boundary vocabulary only. **Amended by the
+  client-components design (§8):** the whole npm scope became `@tesseradb/*` at its step 1, so the
+  package is now `@tesseradb/viewer` — a scope rename under decision 0048, not the *name* change
+  D4 declined.
 - **D5 — the anticipation spend the re-arm unlocks.** Fixing the dead ring moves measured
   anticipation from ~0.05 bites per pause toward the designed ≤3 — up to ~60× today's ring
   spend, the fleet cost the look-ahead probe priced at roughly half again the server CPU per
@@ -254,7 +261,9 @@ produced Appendix M.
   D2 restated with the interaction-driven alternative and visibility as an injected input
   (F6); the presented-frame handle added so migration step 1 does not read viewer state (F7).
   Reviewer verdict: ready to bind after these changes; D3's deletion verified safe.
-- 2026-08-10: D4 ruled — no rename; the package stays `@tessera/viewer`.
+- 2026-08-10: D4 ruled — no rename; the package stayed `@tessera/viewer` (its scope later became
+  `@tesseradb/viewer` at the client-components design's step 1 — a scope rename, not a renaming of
+  the package).
 - 2026-08-10: owner "generally on board" (D1a accepted); D1b ruled moot pre-launch; D2 ruled
   — minutes-scale staleness acceptable, latency-neutrality binding, timer (if any)
   configurable; D3 ruled — delete, with the tile-engine adapter story preserved over

@@ -16,17 +16,28 @@ order and §11 for the decisions.
 
 ## Where it stands
 
-Nothing is built. The design is at r4, reviewed across three lenses, with the owner's rulings of
-2026-08-24/25 recorded in its §11 and awaiting decision files; the open decisions and what each
-gates are in the handover's §1. The instrument in `clients/ts/` — `@tessera/client` and
-`@tessera/viewer` — is the starting point for step 0.
+Steps 0 and 1 are built (branch `client/step-0-1`): the presented frame moved into the client and
+the headless store is `@tesseradb/client`'s main export, the scope rename to `@tesseradb/*` landed
+with it, and the viewer consumes the store. Steps 2–6 and the server tracks are ahead; the design
+is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
+recorded as decisions 0095–0101; the open decisions and what each gates are in the handover's §1.
+
+**The smoke scripts have not been run against a live demo for steps 0–1.** Every corpus available
+in this environment — `data/bench-fixtures/2m4` and the `.dev` bundles — predates manifest fields
+the current binary requires (`vocabularies`, then `visibility`), so the server refuses to open any
+of them, and a fresh build is blocked because the demo build config (`data/demo/config-2m4.toml`)
+is absent — only an attribute-only `schema-2m4.toml` remains, without the source section a build
+needs. The offline gate is green (`check-clients.sh`: core 186 tests, viewer 59; typecheck;
+allowlist; doc-links) and the store's whole surface is unit-tested in node with a fake `fetch`,
+scheduler and clock; what is unverified is the live runtime of the rewired viewer. Re-run
+`smoke.mjs`/`smoke-artifacts.mjs` once a bundle the current binary opens exists.
 
 ## The steps
 
 | step | what lands | proved by | needs | status |
 |---|---|---|---|---|
-| 0 | the presented frame into the client: the store holds the `Composition`, absorbs `binding.ts`'s writes; the viewer's duplicate `ViewState` goes | smoke green; `check-clients.sh` | — | not started |
-| 1 | the store: `createStore`, the projections, `Count`/`Masked`, `stale` on the content key, `setView`'s conversion, `dataXY`, `extentOf`, the encoding accumulators, the artifact channel and the panel fetches out of the viewer, the session artifact table; the `@tesseradb` rename | smoke green; store tests | D3 | not started |
+| 0 | the presented frame into the client: `Presenter` holds the `Composition` and executes the driver's fold/derive verdict under an injected frame scheduler; `binding.ts` and the viewer's duplicate `ViewState` gone | `check-clients.sh` green; smoke **not run** (see below) | — | **done** 2026-08-25 (`client/step-0-1`) |
+| 1 | the store: `createStore` with the projections, `Count`/`Masked` and their formatters, `stale` on the content key, `setView`'s conversion, `dataXY`/`extentOf`, the token supplier, the encoding accumulators, filter composition, the artifact channel, item/artifact/category fetches and the session artifact table out of the viewer; the `@tesseradb` rename; the viewer consuming the store | store/channel/table/counts/encoding/driver-503 tests; `check-clients.sh` green; smoke **not run** (see below) | D3 | **done** 2026-08-25 (`client/step-0-1`) |
 | 2 | `@tesseradb/deck` and `@tesseradb/components`: `TesseraLayer`, the slab, the density texture; nine elements incl. `<tessera-explorer>`; box selection; the eight states; the §5.9 mechanics; the viewer as the explorer plus instruments | smoke through shadow-piercing locators; the harness's first assertions | D1, D2, D2a, D5, D7 | not started |
 | 3 | layer picker with closure, artifact list and card, legend, wire geometry drawn, sidecar retired, lasso; **with D12:** the membership attribute, the lookup texture, colour coverage | `smoke-artifacts.mjs` under two principals; the harness | D12 for colour | not started |
 | 4 | the examples (plain HTML, React explorer, canvas store) and `@tesseradb/react`, in the gate | typecheck; the harness against the C1 page | D10 for the production paragraph | not started |

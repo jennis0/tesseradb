@@ -3,10 +3,19 @@
 Two TypeScript packages and a headless-browser smoke test, built to answer one question:
 **does a running Tessera actually work?**
 
-- `core/` — `@tesseradb/client`. The four viewer/session verbs, the framed-Arrow decoder, the
-  coordinate arithmetic. Stateless: no cache, no view key, no replica state.
-- `viewer/` — a Vite + deck.gl app. All UI, all state.
+- `core/` — `@tesseradb/client`. The **headless store** is its main export: `createStore({viewerUrl,
+  token | authorise})` hands a visualisation the projections to draw and the verbs to steer, over
+  the driver, the replica, the presented frame, the artifact channel, the encoding accumulators,
+  filter composition and the session artifact table (design client-components §4). The four
+  viewer/session verbs, the framed-Arrow decoder and the coordinate arithmetic sit beneath it. No
+  DOM: the frame scheduler and the clock are injected, so the whole store is testable in node.
+- `viewer/` — a Vite + deck.gl app, `@tesseradb/viewer`. It **consumes the store** and renders: the
+  deck binding, the GPU slab, rank-to-colour, the panels and the trace bar. The data path — what is
+  asked, what may be presented — is the store's; the viewer draws what it is handed.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
+
+The npm scope is `@tesseradb/*`, matching the Python package (design §8); it was `@tessera/*` until
+the store landed.
 
 Design: [`docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md`](../../docs/archive/plans/2026-08-01-mvp-client-and-deckgl-viewer-design.md).
 It is the first slice of
