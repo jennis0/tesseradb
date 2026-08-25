@@ -134,7 +134,7 @@ const samples = [];
       .evaluate((root) => {
         const scope = root.shadowRoot ?? root;
         const state = scope.querySelector('[part="state"]')?.getAttribute('data-state') ?? null;
-        const counts = [...scope.querySelectorAll('[part="count"]')]
+        const counts = Array.from(scope.querySelectorAll('[part="count"]'))
           .filter((el) => el.getAttribute('data-empty') !== 'true')
           .map((el) => ({text: (el.textContent ?? '').trim(), empty: false}));
         return state ? {state, counts} : null;
