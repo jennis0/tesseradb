@@ -89,8 +89,32 @@ async function publishProbe(): Promise<void> {
   const map = explorer.map;
   if (!map) return;
   const probe = map.probe as MapProbe & {lanes: Lanes};
-  probe.lanes ??= {decode: [], absorb: {split: [], store: [], remap: [], remapPoints: [], sliceMaxMs: 0}, region: null, coverage: null};
+  probe.lanes ??= {decode: [], absorb: {split: [], store: [], remap: [], remapPoints: [], sliceMaxMs: 0}, region: null, coverage: null, longTasks: []};
   window.__tesseraProbe = probe;
+  observeLongTasks(probe.lanes);
+}
+
+/**
+ * The main thread's long tasks, so a latency the lanes cannot explain — a response answered in
+ * milliseconds and projected seconds later — can be laid against what blocked the thread and
+ * when. Chromium's `longtask` entries, the ten longest kept.
+ */
+let longTasksObserved = false;
+function observeLongTasks(lanes: Lanes): void {
+  if (longTasksObserved || typeof PerformanceObserver === 'undefined') return;
+  longTasksObserved = true;
+  try {
+    const observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        lanes.longTasks.push({ms: entry.duration, at: entry.startTime});
+        lanes.longTasks.sort((a, b) => b.ms - a.ms);
+        if (lanes.longTasks.length > 10) lanes.longTasks.length = 10;
+      }
+    });
+    observer.observe({type: 'longtask', buffered: true});
+  } catch {
+    // Not every runtime has the entry type; the lanes still say what they can.
+  }
 }
 
 /** The three lanes' timings (design §5.10's measurement), kept on the probe for the harness. */
@@ -99,6 +123,8 @@ type Lanes = {
   absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
   region: Record<string, number> | null;
   coverage: Record<string, number> | null;
+  /** The ten longest main-thread tasks, ms and their start time on `performance.now()`'s clock. */
+  longTasks: {ms: number; at: number}[];
 };
 
 // ---------------------------------------------------------------------------------- the panels

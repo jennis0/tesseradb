@@ -3,6 +3,9 @@ import {SessionArtifactTable} from './artifactTable.js';
 import type {Composition} from './compose.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
 import {dataToWorldXY, MAX_DEPTH, WORLD_SIZE} from './coords.js';
+import {tileRectOfBbox} from './budget.js';
+import {rectContainsTile} from './rects.js';
+import {worldBbox} from './prefetch.js';
 import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.js';
 import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
 import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
@@ -396,10 +399,12 @@ export function createStore(options: StoreOptions): Store {
         const tok = await ensureToken();
         tokenEverUsed = true;
         // The point path names the layers that are on, with their closure, and pays their pass
-        // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on.
+        // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on
+        // — and `[]` on the replica's counts-only revalidation, which absorbs no points and would
+        // pay the artifact pass for a frame nobody reads.
         return client.viewport(
           tok,
-          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: layersOn},
+          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn},
           signal,
           background
         );
@@ -617,7 +622,15 @@ export function createStore(options: StoreOptions): Store {
     const started = clock.now();
     const stale: Band[] = [];
     let current = 0;
+    // **In view means the visible box, not the render rect.** The channel answers for what the
+    // viewer is looking at; the point path fetches a wider ring, and a band in the margin names
+    // artifacts the channel never served for this view. Those resolve to neutral, correctly, and
+    // are not a reason to refetch — they colour when a pan brings their artifacts into the box.
+    const v = presenter.view;
+    const depth = projections.view.depth;
+    const visible = v ? tileRectOfBbox(worldBbox({target: [v.view.target[0], v.view.target[1]], zoom: v.view.zoom, width: v.width, height: v.height}, 1), depth) : null;
     for (const band of projections.marks.bands) {
+      if (visible && (band.depth !== depth || !rectContainsTile(visible, band.x, band.y))) continue;
       let ok = true;
       for (const layer of a.layers) {
         const m = band.membership[layer];
@@ -748,7 +761,7 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('filters', {...projections.filters, draft, expr});
     // A filter narrows what is served without changing the identity key, so bands held under one
     // filter are renderable under another — the client that changed the question is the only party
-    // that knows the held answers are to a different one (§4; `main.ts:440`'s manual reset).
+    // that knows the held answers are to a different one (§4).
     presenter?.cancel();
     replica?.reset();
     contentKeyAtFrame = '';

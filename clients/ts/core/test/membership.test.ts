@@ -216,11 +216,11 @@ describe('the cache releases what a band held', () => {
   });
 });
 
-describe('the artifacts golden carries the column (captured against the demo layer)', () => {
+describe('the membership golden (captured against the demo layer, the layer named with points)', () => {
   it('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
     const {readFileSync} = require('node:fs') as typeof import('node:fs');
     const {join} = require('node:path') as typeof import('node:path');
-    const r = decodeViewport(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-artifacts.bin'))));
+    const r = decodeViewport(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin'))));
     expect(r.artifacts.length).toBeGreaterThanOrEqual(3);
     const centroids = new Set(r.artifacts.map((a) => a.centroid?.join(',')));
     expect(centroids.size).toBe(r.artifacts.length);

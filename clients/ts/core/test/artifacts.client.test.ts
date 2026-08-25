@@ -152,7 +152,7 @@ describe('the artifacts frame, decoded from a captured response', () => {
     new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
   it('carries one row per served artifact, and no points beside them', () => {
-    const result = decodeViewport(fixture('viewport-artifacts-k0.bin'));
+    const result = decodeViewport(fixture('viewport-artifacts.bin'));
     expect(result.artifacts.length).toBeGreaterThan(0);
     // Captured at `k = 0` — the annotation channel's own request shape. A body with an artifacts
     // frame and no points frame at all is the case a decoder is most likely to get wrong.

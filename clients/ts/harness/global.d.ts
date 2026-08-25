@@ -34,6 +34,7 @@ interface Window {
       absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
       region: Record<string, number> | null;
       coverage: Record<string, number> | null;
+      longTasks: {ms: number; at: number}[];
     };
     instruments?: {depth: number; tiles: number; predictedMarks: number; limitedBy: string; bytes: number};
     [extra: string]: unknown;

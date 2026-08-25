@@ -142,15 +142,17 @@ checks every declared column decodes at its declared type, so a six-column captu
 passing while quietly dropping two thirds of the types it covers. The other two are captured with
 `layers: []` so they keep pinning the no-artifacts-frame case whatever the server holds.
 
-**`viewport-artifacts.bin` is the exception, and may be captured against any corpus that carries a
-layer** — `--artifacts-only` recaptures it alone, leaving the wide goldens as they are. It is taken
-with a small `k` and the layer named, so the body carries the artifacts frame **and** a points
-frame with the per-point membership column (D12); the wide fixture's breadth, a property of the
-declared columns, has nothing to contribute to either. What it must carry is several artifacts
-with genuinely different geometry — a layer declaring `centroid`, `box` and `hull` over clusters
-that occupy different parts of the map — and at least one point the column names a member, so it
-is captured as a principal broad enough to be served several (the demo's *medium* preset). Its
-companion `viewport-artifacts-k0.bin` is the channel's own shape, `k = 0` and no points frame. Clusters cut from runs of consecutive ids do **not** qualify on a
+**`viewport-artifacts.bin` and `viewport-membership.bin` are the exception, and may be captured
+against any corpus that carries a layer** — `--artifacts-only` recaptures the pair alone, leaving
+the wide goldens as they are. The first is the annotation channel's own shape, `k = 0` and no
+points frame; the worked decodes in `reference/examples` and `wire-example` pin its bytes, so it
+is captured as `--terms 0` every time. The second names the layer with points, so the body carries
+the artifacts frame **and** a points frame with the per-point membership column (D12); the wide
+fixture's breadth, a property of the declared columns, has nothing to contribute to either. What
+it must carry is several artifacts with genuinely different geometry — a layer declaring
+`centroid`, `box` and `hull` over clusters that occupy different parts of the map — and at least
+one point the column names a member, so it is captured as a principal broad enough to be served
+several (the demo's *medium* preset). Clusters cut from runs of consecutive ids do **not** qualify on a
 synthetic corpus whose positions are a modular sequence — every such run samples the whole extent,
 so every centroid lands in the middle and a decoder reading row 0 for every row would pass.
 
