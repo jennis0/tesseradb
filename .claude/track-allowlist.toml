@@ -12,8 +12,7 @@
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Wave 1 tracks: step01 (the client steps 0 and 1, serial on clients/ts), docs6 (C3's documents,
-# step 6), s3 (the per-point membership column, D12).
+# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (deck and components).
 
 # FROZEN (controller, 2026-08-25). Decisions and the two normative designs change only through
 # the owner; scripts are the checks themselves; authz and plugin crates are outside this campaign.
@@ -85,4 +84,21 @@ paths = [
   "crates/tessera-server/tests/http.rs",
   "crates/tessera-types/src/*",
   "docs/evidence/memos/2026-08-25-d12-membership-column.md",
+]
+
+# Wave 2 — step 2 (controller, 2026-08-25): `@tesseradb/deck` and `@tesseradb/components`, the
+# viewer as the explorer plus instruments, box selection in the store (region counting is store
+# work, so core is on the list), the harness beside the gate. Branches from main at the step 0–1
+# merge (53eb4a7).
+[track.step2]
+paths = [
+  "clients/ts/core/*",
+  "clients/ts/deck/*",
+  "clients/ts/components/*",
+  "clients/ts/harness/*",
+  "clients/ts/viewer/*",
+  "clients/ts/scripts/*",
+  "clients/ts/README.md",
+  "clients/ts/tsconfig.base.json",
+  "run_demo.sh",
 ]
