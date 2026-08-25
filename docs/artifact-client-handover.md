@@ -11,7 +11,7 @@ in the viewer; `scripts/publish-clusters.mjs` to put a clustering on a running s
 `viewer/smoke-artifacts.mjs`, which reproduces the two-principal comparison headlessly. Two things
 were learnt in the doing and are recorded where they belong rather than here — the annotation
 channel must issue its **own** request, because the replica elides held tiles and an elided tile
-carries no artifacts (`clients/ts/viewer/src/artifacts.ts`); and a zero masked count is served by
+carries no artifacts (`clients/ts/core/src/artifactChannel.ts`); and a zero masked count is served by
 the drill-down where the viewport withholds it, on a layer declaring no criterion (the ⊘ in
 `artifact-delivery.md` §3).
 

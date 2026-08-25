@@ -300,3 +300,67 @@ describe('setLayers before meta', () => {
     expect(named).toBe(true);
   });
 });
+
+describe('select(box) — one counting request in the tiles form (§5.11)', () => {
+  it('asks once at a bounded depth with k = 0, sums the tiles, and types exactness by the cell', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('marks').count.shown).toBeGreaterThan(0);
+    const before = viewport.mock.calls.length;
+
+    // The whole extent, in data coordinates: 64 × 64 tiles at depth 6 under the 4,096 bound.
+    store.select({kind: 'box', bbox: [0, 100, 0, 200]});
+    store.select({kind: 'box', bbox: [0, 0, 100, 200]});
+    const first = store.get('region')!;
+    expect(first.status).toBe('loading');
+    expect(first.depth).toBe(6);
+    expect(first.tiles).toBe(4096);
+    // The held marks inside are the client's own fact, known before the server answers.
+    expect(first.held.count).toBe(3);
+
+    await clock.advance(250);
+    // Two selects, one settled request: debounced like the artifact channel.
+    expect(viewport.mock.calls.length).toBe(before + 1);
+    const req = (viewport.mock.calls[before] as unknown as [string, {tiles?: bigint[]; k?: number; zoom: number; bbox?: unknown}])[1];
+    expect(req.k).toBe(0);
+    expect(req.zoom).toBe(6);
+    expect(req.bbox).toBeUndefined();
+    expect(req.tiles?.length).toBe(4096);
+
+    const shown = store.get('region')!;
+    expect(shown.status).toBe('shown');
+    expect(shown.visible).toEqual({value: 10_000_000, exact: false});
+    expect(shown.matched).toEqual({value: 10_000_000, exact: false});
+    expect(shown.served).toEqual({shown: 3, total: 10_000_000, exact: true});
+  });
+
+  it('clears the region on select(null) and re-asks on setFilters', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
+    store.select({kind: 'box', bbox: [0, 0, 1, 1]});
+    await clock.advance(250);
+    const asked = viewport.mock.calls.length;
+    store.setFilters({archive: {family: 'category', keys: ['cs']}});
+    expect(store.get('region')?.status).toBe('loading');
+    await clock.advance(250);
+    expect(viewport.mock.calls.length).toBeGreaterThan(asked);
+    store.select(null);
+    expect(store.get('region')).toBeNull();
+  });
+
+  it('records a lasso without counting it — region stays null until step 3', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
+    const before = viewport.mock.calls.length;
+    store.select({kind: 'lasso', points: [[0, 0], [1, 0], [1, 1]]});
+    await clock.advance(250);
+    expect(store.get('region')).toBeNull();
+    expect(viewport.mock.calls.length).toBe(before);
+  });
+});

@@ -1,3 +1,4 @@
+import {decodeViewport} from './decode.js';
 import {createDecoder, type Decoder} from './decoder.js';
 import type {
   ArrowType,
@@ -52,6 +53,11 @@ export type TesseraClientOptions = {
    * typed, and client-interaction §7 for the topology that is actually recommended.
    */
   sessionCredential?: string;
+  /**
+   * Per-response decode time — an instrument's hook (design §5.10's measurements), never a
+   * behaviour: `ms` from bytes-in to typed-arrays-out, with the response's size and point count.
+   */
+  onDecode?: (ms: number, bytes: number, points: number) => void;
   /**
    * Override where responses are decoded. Defaults to a worker in a browser, inline elsewhere.
    *
@@ -215,8 +221,17 @@ export class TesseraClient {
     const size = bytes.byteLength;
     const stage = response.headers.get('x-tessera-stage-ns');
     this.decoder ??= this.opts.decoder ?? createDecoder();
+    const decodeStarted = performance.now();
+    // **A counts-only response decodes on this thread.** `k = 0` carries tiles and artifacts and
+    // no points (contracts §3.2) — a few kilobytes to a couple of megabytes of fixed-width rows,
+    // milliseconds to decode — and the worker lanes are serial: measured on the demo, a region's
+    // count queued 7.9 s behind a million-point decode in the lane it was dealt, for a response
+    // the server answered in 5 ms. The channel's and the region's asks are exactly the requests
+    // whose latency the user is waiting on, so they never queue behind a point sweep.
+    const result = req.k === 0 ? decodeViewport(bytes) : await this.decoder.decode(bytes, background);
+    this.opts.onDecode?.(performance.now() - decodeStarted, size, result.ids.length);
     return {
-      result: await this.decoder.decode(bytes, background),
+      result,
       timings: {
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),

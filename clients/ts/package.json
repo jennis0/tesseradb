@@ -4,7 +4,10 @@
   "workspaces": [
     "spike",
     "core",
+    "deck",
+    "components",
     "viewer",
+    "harness",
     "wire-example"
   ],
   "scripts": {

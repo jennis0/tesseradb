@@ -7,6 +7,7 @@ import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.
 import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
 import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
+import {cellExceedsPixel, insideBox, rasteriseBox} from './region.js';
 import {Replica, type ReplicaOptions} from './replica.js';
 import {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
 import type {DepthChoice} from './budget.js';
@@ -47,7 +48,11 @@ export {formatCount, formatMasked} from './counts.js';
 /** A data-coordinates bbox and the pixel size it is drawn at — what `setView` takes (§4). */
 export type ViewInput = {bbox: [number, number, number, number]; width: number; height: number};
 
-/** A selection shape — recorded now; its counting request is step 2 (§5.11). */
+/**
+ * A selection shape, in **data coordinates** — the space `setView` takes and `dataXY` returns.
+ * A box is counted (§5.11); ⊘ a lasso is recorded and not counted until step 3 builds its
+ * rasterisation — `region` stays null for one.
+ */
 export type SelectionShape =
   | {kind: 'box'; bbox: [number, number, number, number]}
   | {kind: 'lasso'; points: [number, number][]};
@@ -151,12 +156,24 @@ export type SelectionProjection = {
   artifactRefusal: Refusal | null;
 };
 
+/**
+ * The selected region and what it holds (§5.11). `visible` and `matched` are the sum over the
+ * counted cells, exact only where every cell is at most a screen pixel; `served` is the held marks
+ * inside the shape against `matched` — a sample, so both figures always. `status` is the counting
+ * request's own: the numbers are `NO_MASKED` until it answers, and a refusal is not a zero.
+ */
 export type RegionProjection = {
   shape: SelectionShape;
+  status: 'loading' | 'shown' | 'refused';
+  refusal: Refusal | null;
   visible: Masked;
   matched: Masked;
   served: Count;
+  /** The depth the region was counted at, and how many tiles that was. */
   depth: number;
+  tiles: number;
+  /** The held marks inside the shape — ids and world positions, the first {@link REGION_HELD_LIMIT}. */
+  held: {ids: BigUint64Array; positions: Float32Array; count: number};
 };
 
 export type FiltersProjection = {
@@ -210,6 +227,11 @@ export interface Store {
   refresh(): void;
   dispose(): void;
 }
+
+/** How long a selection must be still before its counting request goes out — the channel's settle. */
+const REGION_SETTLE_MS = 200;
+/** How many held marks a region lists — the panel's list, not the count, which is always whole. */
+export const REGION_HELD_LIMIT = 500;
 
 const NO_STATUS: StatusProjection = {
   status: 'idle',
@@ -267,7 +289,7 @@ export function createStore(options: StoreOptions): Store {
     meta: null,
     status: NO_STATUS,
     view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
-    marks: {bands: [], standIn: {ids: new BigUint64Array(0), positions: new Float32Array(0), scalars: {}} as never, count: NO_COUNT},
+    marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
     artifacts: {layer: null, served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
@@ -383,6 +405,7 @@ export function createStore(options: StoreOptions): Store {
       // The drawn depth, from the projection the frame handler has just replaced — the presenter's
       // own handle is assigned after it hands the frame over, so it is one frame behind here.
       depth: () => projections.view.depth ?? presenter?.frame?.depth,
+      maxTiles: meta.maxTilesPerRequest,
       table,
       onChange: onArtifacts
     });
@@ -625,6 +648,8 @@ export function createStore(options: StoreOptions): Store {
     replica?.reset();
     contentKeyAtFrame = '';
     if (lastView) setView(lastView.input);
+    // A region's `matched` is under the filters, so the question changed with them.
+    if (selection) select(selection);
   }
 
   async function loadFilterValues(column: string): Promise<void> {
@@ -703,10 +728,127 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
+  // ---- the selected region (§5.11) ------------------------------------------------------------
+
+  let regionTimer: unknown = null;
+  let regionInFlight: AbortController | null = null;
+
+  /** The held marks whose world positions fall inside a world-space box — the region's sample. */
+  function heldInside(world: [number, number, number, number]): RegionProjection['held'] {
+    const ids: bigint[] = [];
+    const xy: number[] = [];
+    let count = 0;
+    const take = (band: {ids: BigUint64Array; positions: Float32Array}, i: number) => {
+      const x = band.positions[i * 2]!;
+      const y = band.positions[i * 2 + 1]!;
+      if (!insideBox(x, y, world)) return;
+      count++;
+      if (ids.length < REGION_HELD_LIMIT) {
+        ids.push(band.ids[i]!);
+        xy.push(x, y);
+      }
+    };
+    for (const band of projections.marks.bands) {
+      for (let i = 0; i < band.ids.length; i++) take(band, i);
+    }
+    for (const piece of projections.marks.standIn) {
+      if (piece.indices) for (const i of piece.indices.slice(0, piece.limit)) take(piece.band, i);
+      else for (let i = 0; i < Math.min(piece.limit, piece.band.ids.length); i++) take(piece.band, i);
+    }
+    return {ids: BigUint64Array.from(ids), positions: Float32Array.from(xy), count};
+  }
+
+  function worldOfShape(shape: SelectionShape): [number, number, number, number] | null {
+    if (shape.kind !== 'box' || !meta) return null;
+    const q = meta.quantisation;
+    const [x0, y0] = dataToWorldXY(shape.bbox[0], shape.bbox[1], q);
+    const [x1, y1] = dataToWorldXY(shape.bbox[2], shape.bbox[3], q);
+    return [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+  }
+
+  /**
+   * Count the selected region: one `k = 0` request in the `tiles` form at the bounded depth,
+   * debounced like the artifact channel so a redrawn shape costs one request per settled gesture.
+   * The held marks inside are computed at once — the client's own facts (P1) — and the numbers
+   * land when the server answers.
+   */
   function select(shape: SelectionShape | null): void {
-    // ⊘ The counting request is step 2 (§5.11). Recorded here; `region` stays null until then.
     selection = shape;
-    replaceProjection('region', null);
+    if (regionTimer) clock.cancel(regionTimer);
+    regionTimer = null;
+    regionInFlight?.abort();
+    regionInFlight = null;
+    const world = shape ? worldOfShape(shape) : null;
+    if (!shape || !world) {
+      replaceProjection('region', null);
+      return;
+    }
+    const {depth, tiles} = rasteriseBox(world);
+    const zoom = presenter?.view?.view.zoom ?? 0;
+    const held = heldInside(world);
+    replaceProjection('region', {
+      shape,
+      status: 'loading',
+      refusal: null,
+      visible: NO_MASKED,
+      matched: NO_MASKED,
+      served: {shown: held.count, total: 0, exact: false},
+      depth,
+      tiles: tiles.length,
+      held
+    });
+    regionTimer = clock.after(REGION_SETTLE_MS, () => {
+      regionTimer = null;
+      void countRegion(shape, tiles, depth, cellExceedsPixel(depth, zoom));
+    });
+  }
+
+  async function countRegion(shape: SelectionShape, tiles: bigint[], depth: number, coarse: boolean): Promise<void> {
+    const signal = new AbortController();
+    regionInFlight = signal;
+    try {
+      const tok = await ensureToken();
+      tokenEverUsed = true;
+      const response = await client.viewport(
+        tok,
+        {view: viewId, zoom: depth, tiles, k: 0, filters: composeFilters(projections.filters.draft), layers: []},
+        signal.signal
+      );
+      if (regionInFlight !== signal || selection !== shape) return;
+      regionInFlight = null;
+      let visible = 0n;
+      let matched = 0n;
+      for (const t of response.result.tiles) {
+        visible += t.visible;
+        matched += t.matched;
+      }
+      const current = projections.region;
+      if (!current || current.shape !== shape) return;
+      replaceProjection('region', {
+        ...current,
+        status: 'shown',
+        refusal: null,
+        // Exact for the cells asked; exact for the shape only when no cell exceeds a pixel.
+        visible: {value: Number(visible), exact: !coarse},
+        matched: {value: Number(matched), exact: !coarse},
+        // The sample is the held marks inside, against the region's matched — both figures always.
+        served: {shown: current.held.count, total: Number(matched), exact: true}
+      });
+    } catch (error) {
+      if (signal.signal.aborted || regionInFlight !== signal) return;
+      regionInFlight = null;
+      const current = projections.region;
+      if (!current || current.shape !== shape) return;
+      const e = error as {code?: string; detail?: string; message?: string};
+      replaceProjection('region', {
+        ...current,
+        status: 'refused',
+        refusal: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)},
+        visible: NO_MASKED,
+        matched: NO_MASKED,
+        served: {shown: current.held.count, total: 0, exact: false}
+      });
+    }
   }
 
   function extentOf(artifactId: bigint): [number, number, number, number] | null {
@@ -742,17 +884,22 @@ export function createStore(options: StoreOptions): Store {
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
     replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
     replaceProjection('status', {...NO_STATUS});
+    selection = null;
+    replaceProjection('region', null);
   }
 
   function refresh(): void {
     // Redraw the marks against the refreshed content key — a held layer set goes with it (§4).
     channel?.reset();
     if (lastView) setView(lastView.input);
+    if (selection) select(selection);
   }
 
   function dispose(): void {
     presenter?.cancel();
     channel?.cancel();
+    if (regionTimer) clock.cancel(regionTimer);
+    regionInFlight?.abort();
     if (renewTimer) clock.cancel(renewTimer);
     client.close();
   }

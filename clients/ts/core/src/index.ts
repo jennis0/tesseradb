@@ -5,7 +5,7 @@ export {decodeViewport} from './decode.js';
 export {chooseDepth, calibrate, tilesInBbox, tileRectOfBbox, MIN_DEPTH} from './budget.js';
 export type {BudgetInputs, DepthChoice, Observation} from './budget.js';
 export {TesseraClient, TesseraError, type TesseraClientOptions} from './client.js';
-export {createDecoder, inlineDecoder, workerDecoder, type Decoder} from './decoder.js';
+export {createDecoder, inlineDecoder, setWorkerFactory, workerDecoder, type Decoder} from './decoder.js';
 export {BandCache, bandKey, bandsOfResult, isComplete} from './bands.js';
 export {
   coverageAdd,
@@ -88,7 +88,8 @@ export {
   type FormatOptions,
   type Masked
 } from './counts.js';
-export {createStore, type Store} from './store.js';
+export {createStore, REGION_HELD_LIMIT, type Store} from './store.js';
+export {cellExceedsPixel, insideBox, rasteriseBox, REGION_TILE_BOUND, type RegionRequest} from './region.js';
 export type {
   ArtifactsProjection,
   FiltersProjection,

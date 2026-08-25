@@ -67,7 +67,7 @@ const settled = async (limitMs = 45_000) => {
  */
 const clustersPanel = async () =>
   page.evaluate(() => {
-    const text = document.getElementById('stats')?.innerText ?? '';
+    const text = document.getElementById('instruments')?.innerText ?? '';
     const section = text.split('CLUSTERS IN VIEW')[1]?.split(/\n[A-Z][A-Z ]+\n/)[0] ?? '';
     const lines = section.split('\n').map((l) => l.trim()).filter(Boolean);
     const served = /^(\d[\d,]*) served$/.exec(lines[0] ?? '');
@@ -87,7 +87,7 @@ const clustersPanel = async () =>
 /** The cluster detail panel, after a click. */
 const detailPanel = async () =>
   page.evaluate(() => {
-    const text = document.getElementById('stats')?.innerText ?? '';
+    const text = document.getElementById('instruments')?.innerText ?? '';
     if (!/\nCLUSTER\n/.test(`\n${text}`)) return null;
     const section = text.split(/\nCLUSTER\n/)[1] ?? '';
     const key = /\n(c-\d+)\n/.exec(`\n${section}`);

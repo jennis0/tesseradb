@@ -1,18 +1,37 @@
 # Tessera clients — an instrument, not a product
 
-Two TypeScript packages and a headless-browser smoke test, built to answer one question:
-**does a running Tessera actually work?**
+Four TypeScript packages, a headless-browser smoke test and an acceptance harness, built to answer
+one question: **does a running Tessera actually work?**
 
 - `core/` — `@tesseradb/client`. The **headless store** is its main export: `createStore({viewerUrl,
   token | authorise})` hands a visualisation the projections to draw and the verbs to steer, over
   the driver, the replica, the presented frame, the artifact channel, the encoding accumulators,
-  filter composition and the session artifact table (design client-components §4). The four
-  viewer/session verbs, the framed-Arrow decoder and the coordinate arithmetic sit beneath it. No
-  DOM: the frame scheduler and the clock are injected, so the whole store is testable in node.
-- `viewer/` — a Vite + deck.gl app, `@tesseradb/viewer`. It **consumes the store** and renders: the
-  deck binding, the GPU slab, rank-to-colour, the panels and the trace bar. The data path — what is
-  asked, what may be presented — is the store's; the viewer draws what it is handed.
+  filter composition, the session artifact table and the region counter (design client-components
+  §4, §5.11). The four viewer/session verbs, the framed-Arrow decoder and the coordinate arithmetic
+  sit beneath it. No DOM: the frame scheduler and the clock are injected, so the whole store is
+  testable in node.
+- `deck/` — `@tesseradb/deck`. `TesseraLayer`, a deck.gl `CompositeLayer` over the store's `marks`,
+  `tiles` and `artifacts` — the GPU slab, rank-to-colour, the density wash, the artifact markers,
+  the selection highlight — for a host that owns a `Deck` already. It never fetches; deck.gl and
+  luma.gl are peers.
+- `components/` — `@tesseradb/components`. Lit custom elements: `<tessera-explorer>`, `<tessera-map>`,
+  `<tessera-status>`, `<tessera-count>`, `<tessera-item-card>`, `<tessera-filter>`,
+  `<tessera-filter-panel>`, `<tessera-selection>`, `<tessera-store>` — a subpath entry each, the
+  eight display states rendered through `part="state"`, tokens `--tessera-*`, parts, slots and
+  events per design §5. `npm run build -w @tesseradb/components` writes the single-file bundle with
+  the decode worker inlined and its SRI hash beside it (`dist/`).
+- `viewer/` — the demo, `@tesseradb/viewer`: `<tessera-explorer layout="overlay">` plus the
+  instruments — dataset and principal pickers (where the session credential stays), the layer and
+  colour controls, the depth and request readouts, the trace bar.
+- `harness/` — the acceptance harness (design §9): the components' claims, checked through
+  shadow-piercing locators against the demo page, and the §5.10 measurements printed.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
+
+**Vite 8 and the decorators.** The elements use standard (TC39 stage-3) decorators with `accessor`,
+as design §5.9 decides; Vite 8's oxc transform lowers only the legacy form, so
+`components/vite-plugin-decorators.ts` runs esbuild over the component sources first. Both the dev
+server and the bundle use it; a host bundling the unbundled distribution needs the same or a
+transform of its own.
 
 The npm scope is `@tesseradb/*`, matching the Python package (design §8); it was `@tessera/*` until
 the store landed.
@@ -231,11 +250,17 @@ nothing a viewer can see, which is what a fold is supposed to look like from out
 ## Testing
 
 ```bash
-npm test                       # spike + core: tile arithmetic, framing, decode, coords
+npm test                       # spike, core, deck, components: every unit suite
 cd core && TESSERA_LIVE=1 TESSERA_SESSION_CRED=… npx vitest run test/client.live.test.ts
 cd viewer && node smoke.mjs             # drives the page in headless chromium
 cd viewer && node smoke-artifacts.mjs   # the same clustering under every principal
+cd viewer && node ../harness/harness.mjs  # the §9 claims, through the parts; the measurements
 ```
+
+The smoke scripts and the harness read the page **through the components' parts** —
+`tessera-status [part="count"]`, `[part="state"]`, `[part="refresh"]` — with Playwright's
+shadow-piercing locators, never an id the shadow DOM hides; the mark count and the view's figures
+come from the map's probe (`window.__tesseraProbe`, the first map's, published by the demo).
 
 `smoke.mjs` reports what the page actually did — requests and their statuses, the counts each
 principal reported, whether marks accumulate on zoom, lit canvas pixels, console errors — and
@@ -252,9 +277,13 @@ as though the control under test had changed it. `smoke.mjs` turns look-ahead of
 section for the same reason: the anticipation ring issues requests whenever the view is still, which
 is exactly when a colour switch is measured.
 
-**Clicking is not exercised headless.** deck.gl's `onClick` does not fire under headless chromium,
-so neither drill-down — a mark's record or a cluster's count — can be driven from these scripts.
-The routes behind them are covered in `core/test/client.live.test.ts` instead.
+**Clicking on the canvas is not exercised headless.** deck.gl's `onClick` does not fire under
+headless chromium, so neither canvas drill-down — a mark's record or a cluster's count — can be
+driven from these scripts. The routes behind them are covered in `core/test/client.live.test.ts`,
+the pick resolution in `deck/test`, and the harness fills the item card through the selection
+panel's list, which is DOM. Hover picks *do* run under headless input and are slow there — every
+`mouse.move` waits on a software-GL pick pass over the marks — so a mouse-up-to-panel time the
+harness prints is the input's, and the store's own select-to-counted clock is printed beside it.
 
 Headless chromium needs `npx playwright install chromium-headless-shell` once.
 

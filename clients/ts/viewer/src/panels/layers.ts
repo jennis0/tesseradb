@@ -1,5 +1,5 @@
 import type {Artifact} from '@tesseradb/client';
-import {servedLineage, type ServedLineage} from '../artifacts.js';
+import {servedLineage, type ServedLineage} from '@tesseradb/client';
 import {esc, panel, row} from '../html.js';
 import type {AppState} from '../state.js';
 
@@ -93,7 +93,6 @@ export function renderArtifacts(state: AppState): string {
     case 'idle':
       return panel('Clusters in view', '<div class="muted">waiting for the first view</div>');
     case 'loading':
-    case 'retrying':
       return panel('Clusters in view', '<div class="muted">loading…</div>');
     case 'refused':
       return panel(

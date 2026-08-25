@@ -4,7 +4,7 @@ import {
   colourOfRank,
   css,
   paletteValues
-} from '../colour.js';
+} from '@tesseradb/deck';
 import {esc, panel, row} from '../html.js';
 import type {AppState} from '../state.js';
 

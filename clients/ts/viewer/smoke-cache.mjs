@@ -40,7 +40,7 @@ page.on('request', (r) => {
 
 const snap = async (tag) => {
   const t = await page.evaluate(() => {
-    const text = document.getElementById('panels')?.innerText ?? '';
+    const text = document.getElementById('instruments')?.innerText ?? '';
     const g = (l) => text.match(new RegExp(`${l}\\s*\\n\\s*([\\d,.]+)`))?.[1] ?? '?';
     const depth = text.match(/depth\s*\n\s*(\d+)/)?.[1] ?? '?';
     const tiles = g('tiles in view');

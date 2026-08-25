@@ -1,4 +1,5 @@
 import type {TesseraClient} from './client.js';
+import {rectArea} from './rects.js';
 import {tileRectOfBbox} from './budget.js';
 import {rectToRequestBbox} from './coords.js';
 import {worldBbox, type Viewport} from './prefetch.js';
@@ -71,6 +72,12 @@ export type ArtifactChannelOptions = {
   token(): string | null;
   /** The depth the map is drawn at, or undefined before the first frame. */
   depth(): number | undefined;
+  /**
+   * The deployment's `max_tiles_per_request`. The ask is clamped to a depth whose rect stays under
+   * it — a drawn depth paired with a wider view than the one it was drawn for (a camera move
+   * landing between a frame and its settle) otherwise asks for a million tiles and is refused.
+   */
+  maxTiles?: number;
   onChange(state: ArtifactChannelState): void;
   clock?: ArtifactChannelClock;
   settleMs?: number;
@@ -169,7 +176,12 @@ export class ArtifactChannel {
       width,
       height
     };
-    this.view = {bbox: worldBbox(viewport, 1), depth};
+    const bbox = worldBbox(viewport, 1);
+    let asked = depth;
+    if (this.opts.maxTiles !== undefined) {
+      while (asked > 0 && rectArea(tileRectOfBbox(bbox, asked)) > this.opts.maxTiles) asked -= 1;
+    }
+    this.view = {bbox, depth: asked};
     return true;
   }
 
