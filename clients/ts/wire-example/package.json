@@ -1,0 +1,18 @@
+{
+  "name": "@tesseradb/wire-example",
+  "private": true,
+  "type": "module",
+  "description": "A worked decode of the framed /v1/viewport body with apache-arrow alone — shares no code with the client packages, deliberately.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "decode": "node src/decode-viewport.mjs"
+  },
+  "dependencies": {
+    "apache-arrow": "^21.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
