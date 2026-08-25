@@ -1,0 +1,1053 @@
+# Tessera's viewer and session planes, as an OpenAPI 3.1 description.
+#
+# Hand-authored, and kept true by `crates/tessera-server/tests/openapi.rs`, which starts the
+# server, exercises every route below (a success and at least one refusal each) and validates
+# every JSON request and response body against the schemas in `components`. A field added to a
+# response and not to this file fails that test, because every closed DTO is declared
+# `additionalProperties: false`. The contract itself is `docs/design/contracts.md` §3 (the API)
+# and §5 (the framing); where the two disagree, contracts wins and this file is wrong.
+#
+# What this file cannot say: the framed-Arrow body of `POST /v1/viewport`. It is not JSON, so it
+# is declared as `application/octet-stream` and described in prose; the frame layout is contracts
+# §5, and `docs/openapi/README.md` carries a worked decode in Python and in JavaScript.
+openapi: 3.1.0
+info:
+  title: Tessera viewer and session planes
+  version: "1"
+  summary: A permission-masked point service — the two planes a client speaks to.
+  description: |
+    Two listeners. The **session plane** mints and revokes viewer sessions and is authenticated by
+    the operator-configured *session credential*, a shared secret; it is never browser-facing. The
+    **viewer plane** answers about the corpus as one principal may see it and is authenticated by
+    the *session token* the session plane minted. `/healthz` and `/readyz` sit on both, unauthenticated,
+    bare status codes with no body.
+
+    `api_version` is published by `GET /v1/meta` and by nothing else. There is no version header,
+    on either side, so a client must not send one as a negotiation and must not expect a refusal
+    if its assumed version is wrong (contracts §3.1).
+
+    **Every error is one envelope** (`Error` below) with a closed code list, and the codes group
+    into three refusal classes that tell a client whether to retry (contracts §3.1, design §10.6):
+
+    - **Failure** — `500 fail-closed`, `503 not-ready`. Fail-closed and never a partial result.
+    - **Backpressure** — `429 backpressure`. Retry the request *unchanged*, after `Retry-After`,
+      which every 429 carries together with an agreeing body `retry_after_s`. The number is
+      per-subject — `1` for the viewer and session planes' compute-admission gate, derived
+      elsewhere — so read the header rather than assuming it.
+    - **Shape** — `422 contract`. Must not be retried unchanged; the request has to change.
+
+    `401`, `403`, `404` and `409` are none of the three: they concern the credential or the
+    identity of the thing addressed. The `401`/`403` split is best-effort — a `401 bad-credential`
+    on a token that previously worked is a revoked session, and a client treats it as it treats
+    `403 expired-token`: the session has ended, re-authorise.
+
+    A refusal is a function of the request and the deployment's configuration, never of the
+    viewer's data. In particular `404 unknown` is one status, one code and one detail string for
+    *no such identifier* and *exists but is not visible to this principal*.
+servers:
+  - url: http://{viewer-host}
+    description: The viewer plane listener (`serve.viewer_bind`). Routes under `/v1/`.
+    variables:
+      viewer-host:
+        default: 127.0.0.1:8080
+  - url: http://{session-host}
+    description: The session plane listener (`serve.session_bind`). Routes under `/session/`.
+    variables:
+      session-host:
+        default: 127.0.0.1:8081
+
+tags:
+  - name: session
+    description: Minting and revoking viewer sessions. Authenticated by the session credential.
+  - name: viewer
+    description: The corpus as one principal sees it. Authenticated by a session token.
+  - name: probes
+    description: Liveness and readiness, on both listeners, unauthenticated, no body.
+
+paths:
+  /session/authorise:
+    post:
+      tags: [session]
+      operationId: authorise
+      summary: Mint a viewer session from a credential the auth plugin understands.
+      description: |
+        `auth_data` is base64 of bytes the deployment's auth plugin evaluates (`terms_of_auth`,
+        contracts §4.3) — **opaque to this description**: what the bytes mean is the plugin's, and
+        the built-in passthrough plugin reads them as JSON `{"terms": [...]}`. The decoded bytes are
+        also the fast-path hash input, which is why the encoding is base64 and never "verbatim
+        JSON".
+
+        A valid credential yielding zero terms still mints a token, with zero visibility — the
+        service cannot distinguish *wrong credential* from *cleared for nothing* and refusing
+        would disclose which (contracts §3.3).
+
+        Behind the compute-admission gate: a cold authorise builds and writes a mask fragment.
+      security:
+        - sessionCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthoriseRequest"
+      responses:
+        "200":
+          description: A session. `expires_at` is `min(backstop, plugin not_after)`, seconds since the Unix epoch.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthoriseResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "422":
+          $ref: "#/components/responses/Contract"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /session/revoke:
+    post:
+      tags: [session]
+      operationId: revoke
+      summary: End a session by its non-capability `token_id`.
+      description: |
+        Revocation is by `token_id` so the capability itself never transits a second time. A
+        `token_id` that names no live session is still a `204` — there is nothing to say about it
+        that would not enumerate sessions.
+      security:
+        - sessionCredential: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RevokeRequest"
+      responses:
+        "204":
+          description: Revoked, or never live. No body.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "422":
+          $ref: "#/components/responses/Contract"
+
+  /healthz:
+    get:
+      tags: [probes]
+      operationId: healthz
+      summary: Liveness. Unauthenticated, no body.
+      security: []
+      responses:
+        "200":
+          description: The process is up.
+
+  /readyz:
+    get:
+      tags: [probes]
+      operationId: readyz
+      summary: Readiness — bundle verified, workers ready, plugin loaded. Unauthenticated, no body.
+      security: []
+      responses:
+        "200":
+          description: Ready to serve.
+        "503":
+          description: Not ready. Deliberately no body and no `Retry-After` — a number that varied with the executor's posture would hand an unauthenticated caller exactly what the bare-boolean shape withholds.
+
+  /v1/meta:
+    get:
+      tags: [viewer]
+      operationId: meta
+      summary: The deployment's shape as this principal may know it.
+      description: |
+        Everything here is a deployment constant identical for every principal **except
+        `layers`**, which is filtered per principal — a layer this caller may not know about is
+        absent by the same route a name nobody registered is. Never cache this document across
+        principals.
+
+        Not behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      responses:
+        "200":
+          description: The document. `declared_scalars` is the column schema in full; `filter_operands` is the subset a request may filter on, with each column's operator names; `selection` is design §7.2's clause parameters, which a client needs to read a mark count as a density at all.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Meta"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /v1/categories/{column}:
+    get:
+      tags: [viewer]
+      operationId: categories
+      summary: What a category column's codes stand for, gated by the vocabulary's `visibility`.
+      description: |
+        Two forms, one gate. `?codes=` resolves codes the caller already holds; the bare form
+        enumerates ascending by value **key**, resuming after `?after=` and bounded by `?limit=`,
+        whose ceiling and default are `selection.max_category_values`. `limit` above the ceiling is
+        clamped; `limit=0` is `422`. A `visibility = "derived"` column is filtered per principal
+        **before** the two forms diverge and the page is cut after the filter, so a page's length
+        never counts what the principal cannot see.
+
+        **An unresolvable code is omitted, never refused**, and an empty `values` is a real answer
+        served with `200` — "no such code", "a code no key explains" and "a value you cannot see"
+        are one outcome. No counts: a legend with counts is a separate surface.
+
+        Not behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      parameters:
+        - name: column
+          in: path
+          required: true
+          description: A column name from `/v1/meta`'s `declared_scalars` that carries a `category` block.
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9_-]+$"
+        - name: codes
+          in: query
+          required: false
+          description: Comma-separated `u32` codes to resolve. Present means bulk lookup; absent means enumerate. `next` is always `null` for this form.
+          schema:
+            type: string
+        - name: after
+          in: query
+          required: false
+          description: Resume enumeration after this value key — the cursor, which is `next` from the previous page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          description: Page bound. Clamped to `selection.max_category_values`; `0` is refused.
+          schema:
+            type: integer
+            minimum: 1
+      responses:
+        "200":
+          description: The values this principal may be told about, in key order for the bare form and request order for `?codes=`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CategoriesResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: No such column, a column that is not a category, or a column whose vocabulary is missing — one answer for all three, so this route cannot become a finer schema oracle than `/v1/meta`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          $ref: "#/components/responses/Contract"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/viewport:
+    post:
+      tags: [viewer]
+      operationId: viewport
+      summary: Masked counts per tile, a served sample of points, and the served annotation artifacts, over a region at a depth.
+      description: |
+        The response is **not JSON**. It is a sequence of tagged, length-prefixed frames —
+        `u8 kind`, `u32 little-endian payload length`, payload — each payload a complete Arrow IPC
+        stream (JSON for the trailer), decodable alone (contracts §5). Kinds: `1` tiles (exactly
+        one, first), `2` sub-cells (exactly one iff `underlay_offset` was supplied and non-zero),
+        `5` artifacts (at most one, after tiles and before any points; **absent, never empty, when
+        nothing is served**, deliberately), `3` points (zero or more, whole tiles per frame,
+        boundaries not contract), `4` trailer (exactly one, last — its presence is the completeness
+        signal). A body without a trailer is incomplete whatever the transport said; an unknown
+        kind is a decoder error, never skipped. `docs/openapi/README.md` walks a decode in Python
+        and JavaScript, and contracts §3.2 gives every batch's schema.
+
+        **Exactly one of `bbox` and `tiles`.** `k` defaults to the deployment's `k_max_marks` and
+        is capped by `max_k` (both in `/v1/meta`'s `selection`); it is design §7.2's cap clause,
+        so a tile may return fewer than `k` while more are visible — that is the density signal,
+        not truncation. **`k = 0` is the counts-only request**: tiles and artifacts as at any `k`,
+        and no points frame at all. **A client must not decrease `k` as it zooms in**; the server
+        cannot enforce this.
+
+        `layers` decides whether an artifacts frame can appear — see its schema; the semantics
+        there are the owner's ruling of 2026-08-25 and the server change is landing on the s3
+        track, so until that merges an *omitted* `layers` is read as `"all"` and the string form is
+        not accepted. `artifact_budget` is honoured structurally (ancestors in place of their
+        descendants), never by sampling, and is inert on a flat layer.
+
+        Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ViewportRequest"
+      responses:
+        "200":
+          description: The framed body. Headers carry the coordinates a client caches and revalidates by.
+          headers:
+            etag:
+              description: The **content key**, quoted — identity, the served watermark, the overlay version, a per-process nonce (`delta-serving.md` §2). What a held band may be *declared* under. Echoed as `If-Match`; a mismatch yields the full response, never `412`.
+              required: true
+              schema:
+                type: string
+            x-tessera-identity-key:
+              description: The **identity key** — idset, auth-data hash, mask-fragment identity, view. What a held band may be *rendered* under at all; the client's cache partition key.
+              required: true
+              schema:
+                type: string
+            x-tessera-pin:
+              description: The generation stamp of the geometry this response was computed from, as JSON `{"prefix", "segments_version"}`. A stamp, not a selector — echo it back as `pin`, and the only effect is `x-tessera-stale`.
+              required: true
+              schema:
+                type: string
+            x-tessera-stale:
+              description: "`1` if geometry has moved since the `pin` this request presented, else `0`. The **broadcast** form: it moves at every flush, merge and compaction whether or not anything this principal can see changed. Advisory in both directions."
+              required: true
+              schema:
+                type: string
+                enum: ["0", "1"]
+            x-tessera-server-us:
+              description: Server compute after admission to first-flush-ready, microseconds. The whole-stream wall total is the trailer's `stream_us`.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+            x-tessera-admission-us:
+              description: Time spent in the compute-admission gate, microseconds.
+              required: true
+              schema:
+                type: string
+                pattern: "^[0-9]+$"
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+                description: Framed Arrow IPC streams and one JSON trailer, per contracts §5.
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: Unknown `view`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "422":
+          description: "`zoom` above 16; neither or both of `bbox`/`tiles`; a non-finite or inverted bbox; a tile prefix with bits above `zoom`; an `underlay_offset` beyond the deployment's ceiling, the grid or the sub-cell budget (refused, never clamped); an unknown filter column or an operator outside its family (an unknown *value* is an empty operand, never a refusal); `none_of` naming a text column or naming two columns."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+        "503":
+          $ref: "#/components/responses/NotReady"
+
+  /v1/items/{tessera_id}:
+    post:
+      tags: [viewer]
+      operationId: item
+      summary: One item's whole record, if this principal may see it.
+      description: |
+        The record assembled from its three homes and keyed by declared column name; a category
+        appears as its vocabulary **key**, never its code; every width lands on a JSON number. **An
+        absent field is absent from the object, never `null`.** `external_id` is the caller's own,
+        base64, present only where one exists — the only place a caller external id appears on
+        this plane.
+
+        `404 unknown` is returned identically for *no such id* and *exists but not visible* — same
+        status, same code, same detail, and the same work. Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      parameters:
+        - $ref: "#/components/parameters/TesseraId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ItemRequest"
+      responses:
+        "200":
+          description: The record.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          $ref: "#/components/responses/Unknown"
+        "409":
+          description: "`idset` was supplied and differs from the deployment's — *stale idset; re-resolve by external_id*. Decided before inversion and identically for every identifier."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+  /v1/artifacts/{tessera_id}:
+    post:
+      tags: [viewer]
+      operationId: artifact
+      summary: Drill down on one annotation artifact — its masked count and derived geometry for this principal.
+      description: |
+        A separate route from `/v1/items`, so that the *shape* of an answer never says which of the
+        two an identifier names. `masked_count` is **this principal's** count of the artifact's
+        members and never its size. Geometry is recomputed per principal from `membership ∩ M_auth`
+        and travels in the same 32-bit-per-axis grid units as the viewport's `code`; a client must
+        not cache one principal's geometry against an identifier. An absent geometry field means
+        *this layer declares no such property*, never *withheld*: an artifact whose content cannot
+        be served is a `404` entire.
+
+        `404` is the only failure shape and one construction site: nothing by that id, a point by
+        that id, a layer this principal cannot reach, a suppressed artifact, and one below its
+        layer's existence criterion are one answer. Behind the compute-admission gate.
+      security:
+        - sessionToken: []
+      parameters:
+        - $ref: "#/components/parameters/TesseraId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ArtifactRequest"
+      responses:
+        "200":
+          description: The artifact as this principal sees it.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactResponse"
+        "401":
+          $ref: "#/components/responses/BadCredential"
+        "403":
+          $ref: "#/components/responses/ExpiredToken"
+        "404":
+          description: "`404 unknown`: nothing this principal may see by that identifier — and an unknown `view` takes the same answer, since a view is addressed like any other named thing."
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "409":
+          description: Stale `idset`, on `/v1/items`' rule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        "429":
+          $ref: "#/components/responses/Backpressure"
+        "500":
+          $ref: "#/components/responses/FailClosed"
+
+components:
+  securitySchemes:
+    sessionCredential:
+      type: http
+      scheme: bearer
+      description: The operator-configured session credential (`serve.session_credential`), a shared secret. Compared in constant time. Never handed to a browser.
+    sessionToken:
+      type: http
+      scheme: bearer
+      description: The `token` `POST /session/authorise` minted. A missing, malformed or unrecognised token — including a revoked one — is `401 bad-credential`; a recognised token past `expires_at` is `403 expired-token`. Both end the session.
+
+  parameters:
+    TesseraId:
+      name: tessera_id
+      in: path
+      required: true
+      description: The item's or artifact's opaque identifier, a `u64` in decimal. A keyed blinding permutation of the internal identity — stable across sessions, meaningless without the key, and **not** a cryptographic guarantee (contracts §5, decision 0014).
+      schema:
+        type: string
+        pattern: "^[0-9]+$"
+
+  responses:
+    BadCredential:
+      description: "`401 bad-credential`: missing, malformed or unrecognised bearer credential. On a token that previously worked this is the session ending — revoked — and a client treats it exactly as `403`."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ExpiredToken:
+      description: "`403 expired-token`: the token is recognised and its `expires_at` has passed. Re-authorise."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unknown:
+      description: "`404 unknown`: nothing this principal may see by that identifier — indistinguishable from *nothing exists* by construction."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Contract:
+      description: "`422 contract`: the request itself is wrong. Do not retry unchanged."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Backpressure:
+      description: "`429 backpressure`: shed whole, never a narrowed answer. Retry unchanged after `Retry-After`, which agrees with the body's `retry_after_s`."
+      headers:
+        Retry-After:
+          required: true
+          description: Seconds. `1` for the compute-admission gate and the single-flight builders; other subjects derive their own figure. Read it rather than assuming it.
+          schema:
+            type: string
+            pattern: "^[0-9]+$"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BackpressureError"
+    FailClosed:
+      description: "`500 fail-closed`: a mask, composition or containment failure. Partial results do not exist."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotReady:
+      description: "`503 not-ready`: unverified bundle, unready worker, unloaded plugin. No `Retry-After`, deliberately."
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+  schemas:
+    Error:
+      type: object
+      description: The one error envelope, every plane (contracts §3.1). The code list is closed.
+      additionalProperties: false
+      required: [error, detail]
+      properties:
+        error:
+          type: string
+          enum:
+            - bad-credential
+            - expired-token
+            - unknown
+            - conflict
+            - contract
+            - backpressure
+            - fail-closed
+            - not-ready
+        detail:
+          type: string
+          description: Human-readable. Identical for every branch of a `404`, so it discloses nothing an enumeration could use.
+        retry_after_s:
+          type: integer
+          minimum: 0
+          description: Present on every `429` and on nothing else; agrees with the `Retry-After` header.
+
+    BackpressureError:
+      description: An `Error` whose code is `backpressure` and whose `retry_after_s` is present.
+      allOf:
+        - $ref: "#/components/schemas/Error"
+        - type: object
+          required: [retry_after_s]
+          properties:
+            error:
+              const: backpressure
+
+    AuthoriseRequest:
+      type: object
+      additionalProperties: false
+      required: [auth_data]
+      properties:
+        auth_data:
+          type: string
+          contentEncoding: base64
+          description: >-
+            Bytes the auth plugin evaluates. **Plugin-defined; this description can say only that
+            they are bytes.** The passthrough plugin reads JSON `{"terms": ["<label>", ...]}`.
+
+    AuthoriseResponse:
+      type: object
+      additionalProperties: false
+      required: [token, token_id, expires_at]
+      properties:
+        token:
+          type: string
+          description: >-
+            The capability. Presented as `Authorization: Bearer <token>` on the viewer plane;
+            never logged, never transited to the session plane again.
+        token_id:
+          type: integer
+          minimum: 0
+          description: The non-capability handle `POST /session/revoke` takes.
+        expires_at:
+          type: integer
+          minimum: 0
+          description: Seconds since the Unix epoch — `min(backstop, plugin not_after)`.
+
+    RevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [token_id]
+      properties:
+        token_id:
+          type: integer
+          minimum: 0
+
+    Meta:
+      type: object
+      additionalProperties: false
+      required: [api_version, bundle_format, idset, views, quantisation, declared_scalars, filter_operands, selection, layers]
+      properties:
+        api_version:
+          type: integer
+          const: 1
+        bundle_format:
+          type: integer
+        idset:
+          type: integer
+          minimum: 0
+          description: The identity set the `tessera_id`s were minted under. The identity **key** appears in no response on any plane.
+        views:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, display_name]
+            properties:
+              id:
+                type: string
+              display_name:
+                type: string
+        quantisation:
+          type: object
+          additionalProperties: false
+          required: [x_min, x_max, y_min, y_max]
+          description: The extent a point's `code` is scaled against — 32 bits per axis over this range.
+          properties:
+            x_min: { type: number }
+            x_max: { type: number }
+            y_min: { type: number }
+            y_max: { type: number }
+        declared_scalars:
+          type: array
+          description: The column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column.
+          items:
+            $ref: "#/components/schemas/DeclaredScalar"
+        filter_operands:
+          type: array
+          description: The columns a request may filter on and each one's operator names. `family` is what tells a client which control to draw — a category has a value set `/v1/categories/{column}` fills; a keyword has none.
+          items:
+            type: object
+            additionalProperties: false
+            required: [column, family, operands]
+            properties:
+              column:
+                type: string
+              family:
+                type: string
+                enum: [category, keyword, numeric, text]
+              operands:
+                type: array
+                items:
+                  type: string
+                  enum: [eq, in, prefix, contains, range, match, phrase]
+        selection:
+          $ref: "#/components/schemas/Selection"
+        layers:
+          type: array
+          description: The annotation layers this principal may know exist, and what each declared. **The only per-principal field on this document.** Never the artifact cardinality.
+          items:
+            $ref: "#/components/schemas/Layer"
+
+    DeclaredScalar:
+      type: object
+      additionalProperties: false
+      required: [name, arrow_type, category, analyser, render, index]
+      properties:
+        name:
+          type: string
+          pattern: "^[A-Za-z0-9_-]+$"
+          description: The column's identifier, unique bundle-wide, path-safe. Not view-qualified.
+        arrow_type:
+          type: string
+          description: The storage type's name (`u8`, `u16`, `u32`, `u64`, `i8`…`i64`, `f32`, `f64`, `bool`, `timestamp_us`, `keyword`, `text`). Engine-derived; the set is the build schema's core types and this description does not enumerate it further.
+        category:
+          description: Present for a category column; `null` for a plain one — the signal a client keys a legend off, since the points frame ships a category as a bare integer.
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [vocabulary, kind, visibility]
+              properties:
+                vocabulary:
+                  type: string
+                kind:
+                  type: string
+                  enum: [declared, discovered]
+                visibility:
+                  type: string
+                  enum: [public, derived]
+                  description: "`public`: the value set is served as authored to any session. `derived`: filtered per principal — a value appears iff at least one item carrying it is visible."
+        analyser:
+          description: For a `text` column, the `<name>/<version>` analyser identity that segmented the index — what lets a client tell *nothing says this* from *your query segmented differently*. `null` for every other type.
+          type: [string, "null"]
+        render:
+          type: boolean
+          description: The column arrives in the points frame.
+        index:
+          type: boolean
+          description: The column has an entity-space search structure. Neither flag set means blob-resident — returned at drill-down, never an operand.
+
+    Selection:
+      type: object
+      additionalProperties: false
+      description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values]
+      properties:
+        k_min:
+          type: integer
+          minimum: 0
+        k_max_marks:
+          type: integer
+          minimum: 0
+          description: The overplot ceiling and `k`'s default.
+        max_k:
+          type: integer
+          minimum: 0
+          description: The machine ceiling. Effective cap is `min(k, max_k, k_max_marks)`.
+        theta_target_marks:
+          type: integer
+          minimum: 0
+        max_underlay_offset:
+          type: integer
+          minimum: 0
+        max_tiles_per_request:
+          type: integer
+          minimum: 0
+          description: The tile-count ceiling a `422` is otherwise indistinguishable from the client's own arithmetic being wrong.
+        max_category_values:
+          type: integer
+          minimum: 0
+          description: "`/v1/categories`' page ceiling and default."
+
+    Layer:
+      type: object
+      additionalProperties: false
+      required: [name, title, views, membership, hierarchy, levels, computed_content, supplied_content, depends_on, version]
+      properties:
+        name:
+          type: string
+        title:
+          type: [string, "null"]
+        views:
+          type: array
+          items: { type: string }
+        membership:
+          description: Where the layer's artifacts get their members — a stored set per artifact, or a shape decomposed at request time. Engine-derived; other spellings are the declaration's and are not enumerated here.
+          type: string
+        hierarchy:
+          type: object
+          additionalProperties: false
+          required: [kind, prune_children]
+          properties:
+            kind:
+              type: string
+              enum: [flat, nested, stacked, tiered]
+            prune_children:
+              type: boolean
+              description: The layer's **default** cut policy; `artifact_budget` may ask for more.
+        levels:
+          type: array
+          description: Empty for a treed layer, whose lineage is in its edges.
+          items:
+            type: object
+            additionalProperties: false
+            required: [level, title, zoom]
+            properties:
+              level:
+                type: integer
+                minimum: 0
+              title:
+                type: [string, "null"]
+              zoom:
+                description: Advisory `[min, max]` zoom; bounds no work.
+                oneOf:
+                  - type: "null"
+                  - type: array
+                    minItems: 2
+                    maxItems: 2
+                    items: { type: integer, minimum: 0 }
+        computed_content:
+          type: array
+          description: Properties recomputed per viewer from `membership ∩ M_auth` — `centroid`, `hull`, `box`.
+          items: { type: string }
+        supplied_content:
+          type: array
+          description: The **types** of publisher-supplied content, positional to the artifacts frame's `content` column. Safe to publish because an artifact failing containment is absent whole.
+          items: { type: string }
+        depends_on:
+          type: array
+          description: Layers whose artifacts this layer's may target — a clustering's labels name the clustering.
+          items: { type: string }
+        version:
+          type: integer
+          minimum: 0
+          description: Moves on a gate edit; a client echoes it to notice one.
+
+    CategoriesResponse:
+      type: object
+      additionalProperties: false
+      required: [column, values, next]
+      properties:
+        column:
+          type: string
+        values:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [code, key, title]
+            properties:
+              code:
+                type: integer
+                minimum: 1
+                description: Never `0`, the reserved *absent* sentinel.
+              key:
+                type: string
+              title:
+                type: [string, "null"]
+                description: The authored presentation; `null` where no author wrote one, which is every value a discovered vocabulary mints. The key is the display fallback.
+        next:
+          type: [string, "null"]
+          description: The last key returned, to pass as `?after=`; `null` when the set is complete, and always `null` for `?codes=`.
+
+    Pin:
+      type: object
+      additionalProperties: false
+      required: [prefix, segments_version]
+      description: A generation stamp — the `x-tessera-pin` header's JSON, echoed back. Advisory, never authorisation.
+      properties:
+        prefix:
+          type: string
+        segments_version:
+          type: integer
+          minimum: 0
+
+    ViewportRequest:
+      type: object
+      additionalProperties: false
+      required: [view, zoom]
+      description: Exactly one of `bbox` and `tiles` (contracts §3.2).
+      properties:
+        view:
+          type: string
+          description: A view id from `/v1/meta`.
+        zoom:
+          type: integer
+          minimum: 0
+          maximum: 16
+          description: The tile depth — the grid is 2¹⁶ × 2¹⁶.
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: number }
+          description: "`[x0, y0, x1, y1]` in the quantisation extent's coordinates, `x0 ≤ x1`, `y0 ≤ y1`, all finite. The tiles answered for are the depth-`zoom` tiles it intersects."
+        tiles:
+          type: array
+          items:
+            type: integer
+            minimum: 0
+          description: Depth-`zoom` Morton prefixes, in place of `bbox`. Answered in the request's own order after duplicate removal (first occurrence kept); a prefix with bits above `zoom` is refused. Omitting a tile the client already holds costs the server nothing for it.
+        k:
+          type: integer
+          minimum: 0
+          description: The cap clause. Defaults to `k_max_marks`; capped by `max_k`. `0` is the counts-only request. Never decrease it on zoom.
+        filters:
+          $ref: "#/components/schemas/FilterExpr"
+        pin:
+          $ref: "#/components/schemas/Pin"
+        underlay_offset:
+          type: integer
+          minimum: 0
+          description: Serve exact masked counts at depth `zoom + underlay_offset` as the sub-cells frame. Absent or `0` serves none and adds no bytes. Refused, never clamped, above `max_underlay_offset`, past depth 16, or over the sub-cell budget.
+        layers:
+          description: |
+            Which annotation layers to answer for — and so whether an artifacts frame can appear.
+            **Omitted or `[]`: no layers**, no artifact pass, no cost. **`"all"`: every layer this
+            principal reaches.** **An array: the named set intersected with the reachable set,
+            never unioned** — a name this principal does not reach is absent whether or not it was
+            asked for, so naming a layer is not a way to learn whether it exists. (Owner ruling
+            2026-08-25; the server change lands on the s3 track. Until it merges, omitted is read
+            as `"all"` and the string form is not accepted — send `[]` for none and an explicit
+            array otherwise, which both servers read identically.)
+          oneOf:
+            - type: array
+              items: { type: string }
+            - type: string
+              const: all
+        artifact_budget:
+          type: integer
+          minimum: 0
+          description: How many artifacts the client wants back at most. Honoured structurally — ancestors in place of their descendants — never by sampling (decision 0083); accepted and inert on a flat layer. Unbounded when absent.
+
+    FilterExpr:
+      description: |
+        A boolean expression over declared columns (contracts §3.2, decisions 0062 and 0066). A node
+        is a **leaf** — exactly one column name mapped to exactly one operator — or a
+        **combinator**: `all_of`, `any_of` or `none_of` over sub-expressions. `all_of: []` matches
+        the whole candidate; `any_of: []` matches nothing; `none_of: []` is `422`, as is a `none_of`
+        whose branches name different columns or a `text` column. Nesting is bounded by the
+        deployment and an over-deep expression is refused, never flattened.
+
+        Values: a category takes its vocabulary **key** (string) or **code** (integer), freely
+        mixed; a keyword takes byte-exact strings; a numeric takes numbers (and `range` a bounds
+        object of `gte`/`gt`/`lte`/`lt`, at least one, at most one per side); a `text` column takes
+        `match` with a string or `{"query", "minimum_should_match"}`, and `phrase` with a string.
+
+        **An unknown column or an operator outside the column's family is `422`; an unknown
+        *value* is an empty operand** — the one filter rule stated for clients: render *no
+        matches* identically for a value you may not see and one that does not exist.
+      type: object
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        all_of:
+          type: array
+          items: { $ref: "#/components/schemas/FilterExpr" }
+        any_of:
+          type: array
+          items: { $ref: "#/components/schemas/FilterExpr" }
+        none_of:
+          type: array
+          items: { $ref: "#/components/schemas/FilterExpr" }
+      additionalProperties:
+        $ref: "#/components/schemas/FilterLeafOperator"
+
+    FilterLeafOperator:
+      type: object
+      description: One operator from the column's family in `/v1/meta`'s `filter_operands`, with its value. Value shapes are per family (see `FilterExpr`) and are not narrowed further here, since the family is schema the description cannot know per column.
+      minProperties: 1
+      maxProperties: 1
+      properties:
+        eq: {}
+        in:
+          type: array
+        prefix:
+          type: string
+        contains:
+          type: string
+        range:
+          type: object
+          additionalProperties: false
+          minProperties: 1
+          properties:
+            gte: { type: number }
+            gt: { type: number }
+            lte: { type: number }
+            lt: { type: number }
+        match:
+          oneOf:
+            - type: string
+            - type: object
+              additionalProperties: false
+              required: [query, minimum_should_match]
+              properties:
+                query: { type: string }
+                minimum_should_match: { type: integer, minimum: 1 }
+        phrase:
+          type: string
+      additionalProperties: false
+
+    ItemRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        pin:
+          $ref: "#/components/schemas/Pin"
+        idset:
+          type: integer
+          minimum: 0
+          description: The idset the caller minted its `tessera_id` under. Supplying it makes a `tessera_id` from a past idset a `409` rather than another item's record.
+
+    ItemResponse:
+      type: object
+      additionalProperties: false
+      required: [fields]
+      properties:
+        fields:
+          type: object
+          description: The record by declared column name. Values are JSON numbers (every width), strings (a keyword, a text, or a category's **key**) or booleans. An absent field is absent, never `null`.
+          additionalProperties:
+            type: [number, string, boolean]
+        external_id:
+          type: string
+          contentEncoding: base64
+          description: The caller's own external id, present only where one exists.
+
+    ArtifactRequest:
+      type: object
+      additionalProperties: false
+      required: [view]
+      properties:
+        view:
+          type: string
+          description: Which view's row space the count is taken in. Required, unlike `/v1/items` — a masked count is an intersection in row space, and row space is per view.
+        idset:
+          type: integer
+          minimum: 0
+
+    ArtifactResponse:
+      type: object
+      additionalProperties: false
+      required: [layer, masked_count]
+      properties:
+        layer:
+          type: string
+        key:
+          type: string
+          description: The publisher's own key, absent where none was supplied.
+        masked_count:
+          type: integer
+          minimum: 0
+          description: How many of this artifact's members **the asking principal** can see. Never the artifact's size.
+        centroid:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items: { type: number }
+          description: In the viewport's 32-bit-per-axis grid units, over the members this principal can see. Absent where the layer declares none.
+        box:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: integer, minimum: 0 }
+          description: "`[min_x, min_y, max_x, max_y]`, grid units."
+        hull:
+          type: array
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: integer, minimum: 0 }
+        content:
+          type: array
+          items: { type: string }
+          description: The publisher's supplied content, positional to the layer's declared `supplied_content` types. Absent where the layer declares none; never partial.
