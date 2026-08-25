@@ -724,7 +724,19 @@ impl ViewportSink for WireSink {
             .zip(&chunk.scalars)
             .map(|(d, col)| (d.name.as_str(), column_ref(col)))
             .collect();
-        let frame = points_frame(&chunk.tessera_ids, &chunk.codes, &scalar_refs);
+        // The membership columns (D12) name themselves: which layers get one is settled by the
+        // artifact pass, after the head, so the chunk carries the names rather than the head.
+        let membership_refs: Vec<(&str, &[Option<u64>])> = chunk
+            .membership
+            .iter()
+            .map(|m| (m.layer.as_str(), m.ids.as_slice()))
+            .collect();
+        let frame = points_frame(
+            &chunk.tessera_ids,
+            &chunk.codes,
+            &scalar_refs,
+            &membership_refs,
+        );
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
         self.points_total += chunk.tessera_ids.len() as u64;
         self.flushes += 1;

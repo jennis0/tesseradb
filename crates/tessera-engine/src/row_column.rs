@@ -365,6 +365,34 @@ impl RowColumn {
         out
     }
 
+    /// Every artifact of this level that labels `row`: one for the label form, any number for the
+    /// list form, none at a hole and — for a list column, which has no live tail — none above the
+    /// base. The per-point membership column reads a served point's leaf here
+    /// (`client-components.md` §5.10); `row` is one the caller already gathered, so this discloses
+    /// nothing the walk up to a served ancestor does not then bound.
+    pub fn for_each_label(&self, row: u32, mut visit: impl FnMut(u32)) {
+        let base_rows = self.base_rows();
+        match &*self.pack {
+            Pack::Label(pack) => {
+                let label = if row < base_rows {
+                    pack.label(row as usize)
+                } else {
+                    self.tail.as_ref().map_or(ROW_COLUMN_HOLE, |t| t.label(row))
+                };
+                if label != ROW_COLUMN_HOLE {
+                    visit(label);
+                }
+            }
+            Pack::List(pack) => {
+                if row < base_rows {
+                    for ordinal in pack.list(row as usize) {
+                        visit(ordinal);
+                    }
+                }
+            }
+        }
+    }
+
     /// **The masked count for every artifact of this level, in one walk of the mask** — decision
     /// 0093's one named exception, and the only route a row-major level has to the quantity the
     /// disclosure rule requires.

@@ -221,8 +221,27 @@ impl Lineage {
     }
 
     /// The parent of `ordinal`, or `None` at a root and at an ordinal this level does not hold.
-    fn parent_of(&self, ordinal: u32) -> Option<u32> {
+    pub fn parent_of(&self, ordinal: u32) -> Option<u32> {
         self.parent.get(ordinal as usize).copied().flatten()
+    }
+
+    /// `ordinal` itself if `keep` holds for it, else the nearest ancestor `keep` holds for, else
+    /// `None` — the walk the per-point membership column takes from a point's leaf to the
+    /// **deepest served** artifact above it (`client-components.md` §5.10). Bounded by the edge
+    /// count, as [`Lineage::chain`] is, so a cycle in a malformed level terminates as a miss.
+    pub fn nearest(&self, ordinal: u32, keep: impl Fn(u32) -> bool) -> Option<u32> {
+        let mut at = ordinal;
+        let mut steps = 0usize;
+        loop {
+            if keep(at) {
+                return Some(at);
+            }
+            if steps > self.edges {
+                return None;
+            }
+            at = self.parent_of(at)?;
+            steps += 1;
+        }
     }
 
     /// True where no artifact of the level names a parent — the flat case, which every layer
