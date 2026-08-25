@@ -1,0 +1,18 @@
+{
+  "extends": "../tsconfig.base.json",
+  "include": [
+    "src",
+    "test"
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "types": [
+      "vite/client"
+    ],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ]
+  }
+}

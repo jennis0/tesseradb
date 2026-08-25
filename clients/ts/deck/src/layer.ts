@@ -69,6 +69,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
   radius?: number;
   /** How many marks a paint ended up drawing, for the host's probe. */
   onDrawn?: ((drawn: number, provisional: number) => void) | null;
+  /** Per-settle work, in ms — the slab sync, the wash bin, the whole layer build — for the harness. */
+  onTimings?: ((t: {slabMs: number; washMs: number; layersMs: number}) => void) | null;
 };
 
 type Resolved = {
@@ -197,7 +199,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     wash: true,
     radius: 1.6,
     pickable: true,
-    onDrawn: null
+    onDrawn: null,
+    onTimings: null
   };
 
   declare state: {tick: number; unsubscribe: (() => void) | null; subscribed: Store | null};
@@ -259,6 +262,15 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   override renderLayers(): LayersList {
+    const started = performance.now();
+    const timings = {slabMs: 0, washMs: 0, layersMs: 0};
+    const layers = this.buildLayers(timings);
+    timings.layersMs = performance.now() - started;
+    this.props.onTimings?.(timings);
+    return layers;
+  }
+
+  private buildLayers(timings: {slabMs: number; washMs: number}): LayersList {
     const r = this.resolved();
     const {slab} = this.props;
     const layers: (Layer | null)[] = [];
@@ -275,7 +287,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const encoding = encodingOf(r.meta, r.legend);
     const encodingKey = encodingSignature(encoding);
     const colourBy = r.legend?.colourBy ?? null;
+    const slabStarted = performance.now();
     slab.sync(r.marks.bands, r.depth, encoding, colourBy);
+    timings.slabMs = performance.now() - slabStarted;
 
     if (!checkedMarks.has(r.marks)) {
       checkedMarks.add(r.marks);
@@ -288,7 +302,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       }
     }
 
-    if (this.props.wash && r.tiles) layers.push(this.washLayer(r.tiles, r.depth));
+    if (this.props.wash && r.tiles) {
+      const washStarted = performance.now();
+      layers.push(this.washLayer(r.tiles, r.depth));
+      timings.washMs = performance.now() - washStarted;
+    }
 
     // Layers toggle `visible`; they are never omitted — deck destroys an absent layer and re-uploads
     // everything it held when it returns. One layer per retained slab partition, addressed by slot,
