@@ -646,3 +646,70 @@ fn measure_the_column_cost() {
         }
     }
 }
+
+/// **A label carries its cluster's masked count** (D13): the number beside a label is the
+/// target's, as this principal sees it, so the two agree in one response — and a label whose
+/// target this response does not hold is absent, so there is no count to disagree with.
+#[test]
+fn a_dependent_artifact_carries_its_targets_masked_count() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration(TREE, Some(ExistenceCriterion::Count(50)), true, None))
+        .unwrap();
+    engine.register_layer(labels()).unwrap();
+    plant(&fx, &engine);
+    // A label over **ten** of `a1`'s hundred members — its own count is ten for a broad principal,
+    // which is exactly the number that must not be served.
+    engine
+        .publish_artifacts(
+            LABELS.into(),
+            0,
+            vec![IncomingArtifact::attached(
+                Some("l-a1".into()),
+                fx.members(0..10),
+                vec![IncomingContent::new(vec!["a1 topic".into()], fx.members(0..10))],
+                IncomingAttachment {
+                    layer: TREE.into(),
+                    level: 0,
+                    key: "a1".into(),
+                },
+            )],
+        )
+        .unwrap();
+
+    for credential in [full_coverage_credential(), subset_credential()] {
+        let out = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::All, None);
+        let by_key: BTreeMap<&str, &ArtifactOut> = out
+            .artifacts
+            .iter()
+            .map(|a| (a.key.as_deref().unwrap(), a))
+            .collect();
+        match by_key.get("a1") {
+            Some(target) => {
+                let label = by_key
+                    .get("l-a1")
+                    .expect("the label is served beside its cluster");
+                assert_eq!(
+                    label.masked_count, target.masked_count,
+                    "the label's count is its cluster's"
+                );
+                assert!(target.masked_count > 10, "and not the label's own membership");
+            }
+            // The subset principal: `a1` fails the bar and `a` is served instead, so the label —
+            // describing an artifact this response does not hold — is absent whole.
+            None => {
+                assert!(by_key.contains_key("a"));
+                assert!(
+                    !by_key.contains_key("l-a1"),
+                    "a label whose cluster is withheld is withheld with it"
+                );
+            }
+        }
+    }
+    // Both arms ran: the broad principal serves `a1`, the narrow one does not.
+    let broad = viewport(&engine, &full_coverage_credential(), WHOLE_MAP, LayerSelection::All, None);
+    assert!(broad.artifacts.iter().any(|a| a.key.as_deref() == Some("a1")));
+    let narrow = viewport(&engine, &subset_credential(), WHOLE_MAP, LayerSelection::All, None);
+    assert!(!narrow.artifacts.iter().any(|a| a.key.as_deref() == Some("a1")));
+}

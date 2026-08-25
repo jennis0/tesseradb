@@ -4049,6 +4049,29 @@ impl Engine {
         // response from describing a cluster it does not contain (decision 0089).
         let dropped = orphaned_dependents(&placed, &in_request, &mut served_at);
 
+        // **A dependent carries its target's masked count** (D13; owner ruling 2026-08-25): a
+        // label describes its cluster, so the number beside it is the cluster's — how many of
+        // *that* artifact's members this principal can see — and not the label's own membership,
+        // which a publisher may leave empty. The target is in this response with that very count
+        // (the drop above guarantees it), so the value is derivable from the artifacts frame and
+        // discloses nothing new (decision 0023). Filter-blind, as every masked count is
+        // (`MaskedSet::count_intersection`, I12): the request's filter never moves it.
+        let count_at: std::collections::BTreeMap<&(String, u32, u32), u64> = placed
+            .iter()
+            .zip(&out)
+            .map(|(place, artifact)| (&place.at, artifact.masked_count))
+            .collect();
+        let target_counts: Vec<Option<u64>> = placed
+            .iter()
+            .map(|place| {
+                place
+                    .attached_to
+                    .as_ref()
+                    .filter(|target| in_request.contains(&target.0))
+                    .and_then(|target| count_at.get(target).copied())
+            })
+            .collect();
+
         // **A parent is named only where it is also in this response**, which is the whole of the
         // disclosure rule for this field. An artifact whose parent exists but was withheld — below
         // its own criterion for this viewer, suppressed, or dropped by the frontier — carries a
@@ -4056,9 +4079,14 @@ impl Engine {
         // grouping exists which they are not cleared to see, which is a disclosure the rest of this
         // pass takes care to avoid making.
         let mut served = Vec::with_capacity(out.len());
-        for ((mut artifact, place), dropped) in out.into_iter().zip(&placed).zip(dropped) {
+        for (((mut artifact, place), dropped), target_count) in
+            out.into_iter().zip(&placed).zip(dropped).zip(target_counts)
+        {
             if dropped {
                 continue;
+            }
+            if let Some(count) = target_count {
+                artifact.masked_count = count;
             }
             artifact.parent_id = place
                 .parent
