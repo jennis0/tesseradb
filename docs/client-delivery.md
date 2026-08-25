@@ -123,6 +123,12 @@ beside it; re-run before quoting):
   0.2 ms — **262–268 ms select-to-counted on the store's clock**; the 8 s was the same main
   thread, and the earlier 100 s from mouse-up to the panel was the harness's box landing on the
   toolbar's panels (it now starts clear of them: 779–887 ms mouse-up to panel).
+- **Under headless swiftshader the server sheds the stream** (integration, 2026-08-25): a
+  10–14 s main-thread draw stops the client reading, `serve.stream_write_stall_ms` (10 s) fires,
+  and the point path sees `fetch-failed` — five sheds in one harness run, one of which landed on
+  the stale claim and failed it (8 of 9 headless; 9 of 9 headed, and 9 of 9 headless when no
+  shed coincides). A shed mid-body is a retry case the driver does not yet treat as one — it
+  retries 429 and backs off on 503, and a broken stream refuses. Recorded; not changed.
 - **Layer-switch refill**: with one layer published the switch off and back on is the free case
   §5.10 describes — the columns survive on their bands, no band goes colour-stale (measured, both
   modes) — so the refill under a colour-stale refetch is **not measured**; it needs a second layer
