@@ -4,7 +4,8 @@
   "workspaces": [
     "spike",
     "core",
-    "viewer"
+    "viewer",
+    "wire-example"
   ],
   "scripts": {
     "test": "npm run test --workspaces --if-present",
