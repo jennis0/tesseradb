@@ -112,3 +112,10 @@ prevent.
 | [0092](0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md) | 2026-08-21 | The build reports a layer's shape, and no layer carries a declared bound |
 | [0093](0093-nothing-is-materialised-per-token-over-the-artifact-population.md) | 2026-08-21 | Nothing is materialised per token over the artifact population |
 | [0094](0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md) | 2026-08-21 | The serving layout is chosen at build, overridable per layer, and re-evaluated at every fold |
+| [0095](0095-one-python-package-tesseradb-and-the-tesseradb-npm-scope.md) | 2026-08-24 | One Python package, `tesseradb`, and the `@tesseradb` npm scope |
+| [0096](0096-layers-are-usually-one-and-the-picker-offers-the-closure.md) | 2026-08-24 | Layers are usually one; several only for different kinds of feature; the picker offers the closure |
+| [0097](0097-the-tile-grid-is-never-shown.md) | 2026-08-24 | The tile grid is never shown; a selection's highlight is the shape drawn |
+| [0098](0098-the-status-strip-is-the-default.md) | 2026-08-24 | The status strip is the default; the expanded card is optional |
+| [0099](0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md) | 2026-08-25 | The map's look follows DataMapPlot, and colour by cluster is exact only |
+| [0100](0100-the-render-target-is-multi-million-marks-and-ten-thousand-artifacts.md) | 2026-08-25 | The render target is multi-million marks and 10⁴-plus artifacts a layer |
+| [0101](0101-the-client-is-never-responsible-for-disclosure.md) | 2026-08-24 | The client is never responsible for disclosure; its obligations are truthfulness |
