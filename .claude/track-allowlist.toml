@@ -1,8 +1,9 @@
-# Artifact scale campaign file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
+# Client-components campaign file ownership — the allowlist behind `scripts/check-track-allowlist.sh`.
 #
-# Rewritten 2026-08-21 for the artifact scale campaign (controller), replacing the records-and-
-# search epic map whose campaign closed. Tracks branch from `artifacts/scale` (5948b83) and merge
-# back into it; the campaign's plan is docs/evidence/memos/2026-08-21-artifact-scale-plan.md.
+# Rewritten 2026-08-25 for the client-components campaign (controller), replacing the artifact
+# scale campaign's map, whose tracks have all merged. Tracks branch from `main` at 26ffaee (the
+# decision files 0095–0101) and merge back into it; the plan is docs/client-handover.md §2 and the
+# status record is docs/client-delivery.md.
 #
 # The rule this file gives teeth to: ownership is an allowlist, not an intention. A track that
 # needs a file outside its list **stops and reports** — the controller reassigns or sequences.
@@ -11,24 +12,18 @@
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Wave 1 tracks: interleave (the write-path interleaving battery — one NEW test file, the
-# deltest precedent: a new file cannot conflict with anything), cadence (the two cache-cadence
-# defects, scale memo §8.1/§8.2), generator (the seeded generator's artifact arm reaches disk).
+# Wave 1 tracks: step01 (the client steps 0 and 1, serial on clients/ts), docs6 (C3's documents,
+# step 6), s3 (the per-point membership column, D12).
 
-# FROZEN (controller, 2026-08-21). The authz, wire and plugin crates are outside this campaign;
-# decisions and the normative designs change only through the owner; scripts are the checks
-# themselves. `manifest.rs` stays frozen this wave — the route-recording work that will need it
-# is not yet dispatched, and unfreezing happens with that dispatch, recorded here.
-# `crates/tessera-store/src/manifest.rs` came OFF the freeze 2026-08-22 (controller): the serving
-# track's durable containment coordinate is a manifest field, and the freeze's own precedent —
-# tessera-spatial coming off when the keyword family needed it — says a stale freeze is worse than
-# none. Note `check-track-allowlist.sh --selftest` predates this campaign's tracks and fails on 20
-# of 38 cases independently of this change; the script is itself frozen, so its selftest is stale
-# by design until the owner sweeps it.
+# FROZEN (controller, 2026-08-25). Decisions and the two normative designs change only through
+# the owner; scripts are the checks themselves; authz and plugin crates are outside this campaign.
+# `crates/tessera-wire/*` came OFF the previous campaign's freeze for this one: the D12 column is
+# a points-frame schema change and `payload.rs` is the only place that schema is built — a freeze
+# that made the ruled column unbuildable would be the stale freeze the manifest.rs precedent
+# (2026-08-22) says is worse than none. It is owned by [track.s3] alone.
 [frozen]
 paths = [
   "crates/tessera-authz/*",
-  "crates/tessera-wire/*",
   "crates/tessera-plugin/*",
   "docs/decisions/*",
   "docs/design/architecture.md",
@@ -37,96 +32,57 @@ paths = [
 ]
 
 # Files more than one track legitimately touches; expected to conflict textually at merge and
-# reviewed at integration. `tessera-types`: controller-approved edits in practice — say so in
-# the report.
+# reviewed at integration. `clients/ts/package.json`: step01 renames workspaces, docs6 adds the
+# wire-example workspace. `docs/design/client-components.md` is the controller's, edited at
+# integration only — a track that finds the design wrong reports it.
 [shared]
 paths = [
-  "Cargo.toml",
   "Cargo.lock",
-  "crates/tessera-types/*",
+  "clients/ts/package.json",
+  "clients/ts/package-lock.json",
+  "docs/client-delivery.md",
 ]
 
-# Wave 1 — the write-path interleaving battery. A NEW file only, deliberately (the deltest
-# precedent): the cadence track owns the engine sources and is running, and a new file cannot
-# conflict with its edits.
-[track.interleave]
+# Wave 1 — steps 0 and 1: the presented frame into the client, then the store; the @tesseradb
+# rename. Everything under clients/ts except the wire-example workspace docs6 creates.
+[track.step01]
 paths = [
-  "crates/tessera-engine/tests/artifact_interleavings.rs",
+  "clients/ts/core/*",
+  "clients/ts/viewer/*",
+  "clients/ts/spike/*",
+  "clients/ts/scripts/*",
+  "clients/ts/README.md",
+  "clients/ts/tsconfig.base.json",
+  "run_demo.sh",
+  "docs/design/client-architecture.md",
 ]
 
-# Wave 1 — the cache-cadence defects (scale memo §8.1: the global artifact store version; §8.2:
-# the lineage rebuilt per request). Owns the serving/caching seam and the artifact test files
-# that pin it. Does NOT own the write path's commit-window logic — write.rs is here for the
-# fold's warm/invalidation sites only; the interleaving battery's territory is behavioural, not
-# textual, so the boundary is reviewed at integration.
-[track.cadence]
+# Wave 1 — step 6, C3's documents: contracts §3.2 amended (documenting the wire as it is — no
+# behaviour changes), the OpenAPI description and the test that keeps it true, the worked decodes
+# sharing no code with ours, the obligations list.
+[track.docs6]
 paths = [
-  "crates/tessera-engine/src/artifacts.rs",
-  "crates/tessera-engine/src/session.rs",
-  "crates/tessera-engine/src/write.rs",
-  "crates/tessera-engine/src/viewport.rs",
-  "crates/tessera-engine/src/cut.rs",
-  "crates/tessera-lifecycle/src/*",
-  "crates/tessera-engine/tests/artifact_serving.rs",
-  "crates/tessera-engine/tests/artifact_fold.rs",
-  "crates/tessera-engine/tests/artifact_growth.rs",
-  "crates/tessera-engine/tests/artifact_hierarchy.rs",
-  "crates/tessera-engine/tests/artifact_cache_cadence.rs",
+  "docs/design/contracts.md",
+  "docs/design/client-obligations.md",
+  "docs/openapi/*",
+  "docs/design/README.md",
+  "clients/ts/wire-example/*",
+  "crates/tessera-server/tests/openapi.rs",
+  "crates/tessera-server/Cargo.toml",
+  "reference/*",
 ]
 
-# Wave 1 — the seeded generator's artifact arm reaches disk: the partition arm, attribute-column
-# and members-file emission, spatial boundary layers, the census verb. Owns the corpus crate and
-# the CLI's corpus verbs; a probe campaign it runs is the record of a measurement, so it owns
-# probes/* for the same reason [track.dict] did in the last campaign.
-[track.generator]
+# Wave 1 — S3, the per-point membership column (D12): the wire's points frame gains per named
+# layer one nullable u64; the engine resolves deepest-served per point; the server plumbs it. Owns
+# the memo that carries the proposed leak-register row (C30) for the owner.
+[track.s3]
 paths = [
-  "crates/tessera-corpus/*",
-  "crates/tessera-cli/src/main.rs",
-  "crates/tessera-cli/tests/*",
-  "probes/*",
-]
-
-# Wave 2 — the probe corrections the adversarial review found (controller, 2026-08-21): the
-# masked candidacy test restored to the routes the headline figures come from, the fixture
-# decorrelated, contents ranked, the members rule fixed at 10^9, medians reported, every quoted
-# table recorded. Owns the serving-scale probe campaign's directory, not probes/ wholesale —
-# the generator track owns its own campaign records beside it.
-[track.probe]
-paths = [
-  "crates/tessera-bench/*",
-  "probes/2026-08-20-artifact-serving-scale/*",
-]
-
-# Wave 3 — the serving-path build (controller, 2026-08-22): the design's structures reach the
-# engine, in the plan's serialised order. `crates/tessera-store/src/manifest.rs` comes OFF the
-# freeze for this track and this track alone: the layout tag on `MembershipExtent` is the review's
-# finding 5 fix, and a stale freeze refusing it would be worse than none. `docs/decisions/*` and
-# the normative designs stay the owner's.
-[track.serving]
-paths = [
+  "crates/tessera-wire/*",
   "crates/tessera-engine/src/*",
   "crates/tessera-engine/tests/*",
-  "crates/tessera-lifecycle/src/*",
-  "crates/tessera-store/src/membership.rs",
-  "crates/tessera-store/src/manifest.rs",
-  "crates/tessera-store/src/derived.rs",
-  "crates/tessera-store/src/lib.rs",
   "crates/tessera-server/src/*",
-  "crates/tessera-server/tests/*",
-  "crates/tessera-build/src/*",
-  "crates/tessera-build/tests/*",
-  "crates/tessera-store/tests/*",
-  "docs/design/configuration.md",
-  "docs/design/contracts.md",
-]
-
-# Wave 4 — the Stage 7 validation campaign (controller, 2026-08-22): fixtures materialised, served
-# and measured against the built engine. A measurement track owns its bench arms and its probe
-# record and writes no engine code.
-[track.campaign]
-paths = [
-  "crates/tessera-bench/*",
-  "crates/tessera-corpus/*",
-  "probes/*",
-  "docs/evidence/memos/*",
+  "crates/tessera-server/tests/viewport_membership.rs",
+  "crates/tessera-server/tests/http.rs",
+  "crates/tessera-types/src/*",
+  "docs/evidence/memos/2026-08-25-d12-membership-column.md",
 ]
