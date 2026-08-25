@@ -1,7 +1,8 @@
 # Handover — the client components, from design to execution
 
-**Date:** 2026-08-25 · **Status:** design at r4, reviewed; nothing built. Branch
-`client/components-design`, worktree `.claude/worktrees/client-components`.
+**Date:** 2026-08-25 · **Status:** **built** — steps 0–6 and S3 merged to `main` the same day;
+[`client-delivery.md`](client-delivery.md) is the record. This document stays as the map of how
+the work was cut and what bit; its §2 is now history rather than a work list.
 
 **Read [`client-delivery.md`](client-delivery.md) first** — it is the status record for this work,
 on the convention the artifact work set ([`artifact-delivery.md`](artifact-delivery.md)): it moves in
@@ -69,9 +70,9 @@ ruling that exists only in a chat does not exist):
 | D12 membership column — the palette's centre | step 3 | corpus extent |
 | D8 fetch-model hint, D9 wire idioms, D11 selection operand, D13 label target, D14 verified-assertion plugin | server tracks | asked for; the client work proceeds without them |
 
-**Nothing is built.** The store, the packages, the components, the widget, the C3 documents, and
-every server-side ask are all ahead. The instrument (`clients/ts/`) is what exists and is what
-step 0 starts from.
+**Built 2026-08-25** (see the record): the store, the five packages, the thirteen elements, the
+widget, the C3 documents, and S2–S4 on the server. Still open, and the owner's: D10 and D4 (S1),
+D11 (S6), D14 (S7), and D12's register row (C30, proposed).
 
 ## 2. The work list, in order
 

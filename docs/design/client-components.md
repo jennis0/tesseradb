@@ -1,7 +1,12 @@
 # Client components — four customers, one stack
 
 **Date:** 2026-08-25
-**Status:** Provisional r4 — reviewed. r3 was reviewed across three lenses (truthfulness and
+**Status:** Provisional r5 — **built through §9's six steps** (2026-08-25; the record is
+[`client-delivery.md`](../client-delivery.md), which wins over this document wherever they differ).
+Still Provisional because four decisions remain the owner's — D10 (viewer-plane CORS), D4 (the
+notebook's proxy arm), D11 (the selection operand) and the leak-register row for D12 (C30, proposed
+in `evidence/memos/2026-08-25-d12-membership-column.md`) — and because the building changed three
+things this document said, recorded in Appendix R's r5 entry. r4 was reviewed. r3 was reviewed across three lenses (truthfulness and
 corpus fit, embeddability, the four customers; Appendix R) and every finding is dispositioned
 here in one pass. **To become normative:** owner rulings on the open decisions in §11, and the
 ruled ones written to `docs/decisions/`. Defers to [`client-interaction.md`](client-interaction.md)
@@ -1002,3 +1007,22 @@ paragraph is updated on promotion.
   membership attribute and lookup texture so every colouring interaction is O(artifacts), the
   table walk for hierarchy, colour coverage and what refetches under a cut change or a layer
   switch, and the per-point byte table at several million marks.
+- 2026-08-25: r5 — built, steps 0–6 and the server track for D12, one day, one controller and
+  seven implementers. The owner ruled three more things mid-build: **D8 declined** (no fetch-model
+  hint; the store picks by observation); **D13 as a count, not an identifier** — a dependent
+  artifact carries its *target's* masked count, and the target's id stays off the wire; **D9's
+  `layers`: omitted or `[]` is none, the string `"all"` is every reachable layer**, `all` refused as
+  a layer name. What the building changed: (1) §7's *two views of one widget share one store* does
+  not hold — one store has one view input and two explorers over it fought for the camera; the
+  store is per view, the token supplier per model, and the active view syncs up. (2) §5.10's
+  colour-stale band does not go wholly neutral — zeroing its ordinals would be the per-point pass
+  decision 0100 refuses; it keeps drawing the ordinals that still resolve, and stand-ins draw
+  neutral. (3) §5.11's box→prefix rasterisation and the exactness rule live in the store, not the
+  deck adapter, because the store issues the request. Found at integration, none in the design:
+  the artifact channel is built at meta, so a verb before meta must be held as intent; the channel
+  must clamp its depth to `max_tiles_per_request` whatever view it is paired with; the density
+  wash at a coarse depth was the tile grid, filtered now (decision 0097); under headless swiftshader
+  the server sheds a stream the client stops reading — an environment fact the record carries with
+  the measurements. Every §5.10 figure is now measured (headed Chromium, 996,488 marks coloured
+  through the lookup texture: per settle ≤ 3.5 ms, remap median 4 ms, frame 16.7 ms) except the
+  layer-switch refill, which needs a second layer in the demo.
