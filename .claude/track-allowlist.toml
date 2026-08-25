@@ -12,7 +12,7 @@
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (artifacts and encoding), same files.
+# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (merged). Wave 4: step4 (examples, react) and step5 (the widget), in parallel on disjoint files.
 
 # FROZEN (controller, 2026-08-25). Decisions and the two normative designs change only through
 # the owner; scripts are the checks themselves; authz and plugin crates are outside this campaign.
@@ -117,4 +117,24 @@ paths = [
   "clients/ts/README.md",
   "clients/ts/tsconfig.base.json",
   "run_demo.sh",
+]
+
+# Wave 4 — steps 4 and 5 in parallel (controller, 2026-08-25). Disjoint by construction: step 4 is
+# the examples, `@tesseradb/react` and the harness's C1-page assertions; step 5 is the Python
+# package, the notebook example and the components' bundle entry. Both branch from main at the
+# step-3 merge. `clients/ts/package.json` is shared (both add workspaces).
+[track.step4]
+paths = [
+  "clients/ts/react/*",
+  "clients/ts/examples/*",
+  "clients/ts/harness/*",
+  "clients/ts/README.md",
+]
+
+[track.step5]
+paths = [
+  "clients/py/*",
+  "clients/ts/components/*",
+  "notebooks/*",
+  "CLAUDE.md",
 ]
