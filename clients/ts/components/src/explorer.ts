@@ -182,10 +182,12 @@ export class TesseraExplorer extends TesseraElement {
     // The detail region shows whichever changed last.
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
     const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card></tessera-artifact-card>` : html`<tessera-item-card .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
+    // The toolbar carries the selectable legend, so the `legend` region's default readout is
+    // left empty while the toolbar shows — two legends for one colouring is a screen of noise.
     const toolbar = html`<slot name="toolbar"><tessera-layer-picker></tessera-layer-picker><tessera-legend selectable></tessera-legend></slot>`;
     const sidebar = html`<aside part="sidebar" ?data-open=${this.sheetOpen}>
       ${this.has('toolbar') && this.layout === 'docked' ? toolbar : nothing}
-      ${this.has('legend') && this.layout === 'docked' ? html`<slot name="legend"><tessera-legend></tessera-legend></slot>` : nothing}
+      ${this.has('legend') && this.layout === 'docked' ? html`<slot name="legend">${this.has('toolbar') ? nothing : html`<tessera-legend></tessera-legend>`}</slot>` : nothing}
       ${this.has('filters') ? html`<slot name="filters"><tessera-filter-panel></tessera-filter-panel></slot>` : nothing}
       ${this.has('artifacts') ? html`<slot name="artifacts"><tessera-artifact-list></tessera-artifact-list></slot>` : nothing}
       ${this.has('selection') && region ? html`<slot name="selection"><tessera-selection></tessera-selection></slot>` : nothing}
@@ -206,7 +208,7 @@ export class TesseraExplorer extends TesseraElement {
         </div>
         <div slot="bottom-left"><slot name="status"><tessera-status></tessera-status></slot></div>
         <div slot="bottom-right">
-          ${this.has('legend') && this.layout === 'overlay' ? html`<slot name="legend"><tessera-legend></tessera-legend></slot>` : nothing}
+          ${this.has('legend') && this.layout === 'overlay' ? html`<slot name="legend">${this.has('toolbar') ? nothing : html`<tessera-legend></tessera-legend>`}</slot>` : nothing}
         </div>
         <slot name="tooltip" slot="tooltip"></slot>
       </tessera-map>

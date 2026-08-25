@@ -143,11 +143,14 @@ passing while quietly dropping two thirds of the types it covers. The other two 
 `layers: []` so they keep pinning the no-artifacts-frame case whatever the server holds.
 
 **`viewport-artifacts.bin` is the exception, and may be captured against any corpus that carries a
-layer.** It is taken at `k = 0` — the annotation channel's own request shape — so the body holds no
-points frame at all, and the wide fixture's breadth, which is entirely a property of the *points*
-columns, has nothing to contribute to it. What it must carry is several artifacts with genuinely
-different geometry: a layer declaring `centroid`, `box` and `hull` over clusters that occupy
-different parts of the map. Clusters cut from runs of consecutive ids do **not** qualify on a
+layer** — `--artifacts-only` recaptures it alone, leaving the wide goldens as they are. It is taken
+with a small `k` and the layer named, so the body carries the artifacts frame **and** a points
+frame with the per-point membership column (D12); the wide fixture's breadth, a property of the
+declared columns, has nothing to contribute to either. What it must carry is several artifacts
+with genuinely different geometry — a layer declaring `centroid`, `box` and `hull` over clusters
+that occupy different parts of the map — and at least one point the column names a member, so it
+is captured as a principal broad enough to be served several (the demo's *medium* preset). Its
+companion `viewport-artifacts-k0.bin` is the channel's own shape, `k = 0` and no points frame. Clusters cut from runs of consecutive ids do **not** qualify on a
 synthetic corpus whose positions are a modular sequence — every such run samples the whole extent,
 so every centroid lands in the middle and a decoder reading row 0 for every row would pass.
 
@@ -187,15 +190,16 @@ Three things about that panel are worth knowing before reading a number off it:
   principal cannot reach, suppressed, never published — one answer, indistinguishable. Under
   `--min-visible 1000` the same clustering serves 0, 0, 8, 20 and 24 clusters to the five principals
   above.
-- **The rings are placed by the publisher, not by the service.** There is no artifact geometry on
-  the wire — a bounding box over full membership would disclose a cluster's extent by panning — so
-  `publish-clusters.mjs` writes centroids to `viewer/public/clusters.json` and the viewer joins them
-  by stable key. Only artifacts the server actually served are drawn; the sidecar supplies position
-  and nothing else. Real geometry arrives as derived content at Stage 3, gated by containment.
+- **Every shape and colour on the map is the wire's.** A cluster's outline is the `hull` or `box`
+  the service derived for *this* principal from the members they can see; its name sits at the
+  derived `centroid`; a point wears a cluster's colour only because the response's membership
+  column named it a member (decision 0099, exact only). Nothing is placed from a publisher-side
+  file, and no shape is contoured from the held marks — the sidecar the demo once used is gone.
 
-The annotation channel makes its **own** request (`k = 0`, one named layer) rather than reading the
-artifacts off the point path's responses: the replica elides tiles it already holds, and an elided
-tile carries no artifacts, so clusters would thin out as the cache warmed.
+The annotation channel makes its **own** request (`k = 0`, the layers that are on) rather than
+reading the artifacts off the point path's responses: the replica elides tiles it already holds,
+and an elided tile carries no artifacts, so clusters would thin out as the cache warmed. The
+point path names the same layers, which is what puts the membership column on each band.
 
 ### Labels attached to those clusters, and who is served which description
 

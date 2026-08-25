@@ -1,25 +1,13 @@
-import type {
-  Artifact,
-  ArtifactDetail,
-  CategoryValue,
-  Composition,
-  DepthChoice,
-  Domain,
-  Meta,
-  Ranks,
-  Session,
-  Timings
-} from '@tesseradb/client';
+import type {Composition, DepthChoice, Meta, Session, Timings} from '@tesseradb/client';
 
 /**
  * The demo's own state: what its **instruments** read.
  *
- * The map, the status strip, the filters, the selection panel and the item card are
- * `@tesseradb/components` now and read the store directly. What remains here is a mirror of the
- * store's projections for the instrument panels — the dataset and principal pickers, the layer and
- * colour controls (componentised at step 3), the depth and request readouts — plus the measurement
- * numbers the §4 surface deliberately omits, which the store forwards on its demo-only
- * `instruments` channel.
+ * The map, the status strip, the filters, the selection panel, the cards, the layer picker, the
+ * legend and the artifact list are `@tesseradb/components` and read the store directly. What
+ * remains here is a mirror of the store's projections for the instrument panels — the dataset
+ * and principal pickers, the depth and request readouts — plus the measurement numbers the §4
+ * surface deliberately omits, which the store forwards on its demo-only `instruments` channel.
  */
 
 export type DisplayStatus = 'idle' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused';
@@ -61,19 +49,9 @@ export type AppState = {
   inFlight: number;
   /** Refusals observed on the store's status, newest last. */
   failures: RequestFailure[];
+  /** The colour and layer a session's store opens on; the explorer's own controls take over from there. */
   colourBy: string | null;
-  /** Resolved values per column, from the store's legend — the codes drawn, named. */
-  categories: Record<string, CategoryValue[]>;
-  categoryErrors: Record<string, {code: string; detail: string}>;
-  ranks: Record<string, Ranks>;
-  domains: Record<string, Domain>;
   artifactLayer: string | null;
-  artifacts: Artifact[];
-  artifactVersion: number;
-  artifactStatus: 'idle' | 'loading' | 'shown' | 'refused';
-  artifactError: {code: string; detail: string} | null;
-  selectedArtifact: (ArtifactDetail & {id: bigint}) | null;
-  artifactDetailError: {code: string; detail: string} | null;
 };
 
 type Listener = (state: AppState) => void;

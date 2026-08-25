@@ -96,7 +96,7 @@ export type TesseraLayerProps = CompositeLayerProps & {
   /** How many marks a paint ended up drawing, for the host's probe. */
   onDrawn?: ((drawn: number, provisional: number) => void) | null;
   /** Per-settle work, in ms — the slab sync, the wash bin, the lookup texture, the outlines, the labels, the whole layer build — for the harness. */
-  onTimings?: ((t: {slabMs: number; washMs: number; lutMs: number; outlinesMs: number; labelsMs: number; layersMs: number; lutWrites: number}) => void) | null;
+  onTimings?: ((t: {slabMs: number; washMs: number; lutMs: number; outlinesMs: number; labelsMs: number; layersMs: number; lutWrites: number; outlines: number; labels: number}) => void) | null;
 };
 
 /** How zoom is bucketed for label placement: a quarter of a zoom level. */
@@ -355,7 +355,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
 
   override renderLayers(): LayersList {
     const started = performance.now();
-    const timings = {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0};
+    const timings = {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0};
     this.state.zoomBucket = Math.round((this.context.viewport?.zoom ?? 0) * LABEL_ZOOM_STEP);
     const layers = this.buildLayers(timings);
     timings.layersMs = performance.now() - started;
@@ -364,7 +364,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return layers;
   }
 
-  private buildLayers(timings: {slabMs: number; washMs: number; lutMs: number; outlinesMs: number; labelsMs: number}): LayersList {
+  private buildLayers(timings: {slabMs: number; washMs: number; lutMs: number; outlinesMs: number; labelsMs: number; outlines: number; labels: number}): LayersList {
     const r = this.resolved();
     const {slab} = this.props;
     const layers: (Layer | null)[] = [];
@@ -551,7 +551,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    * Derived per principal (contracts §3.2), so a shape is exact for this viewer; nothing is
    * contoured from held marks (decision 0099).
    */
-  private outlineLayers(r: Resolved, timings: {outlinesMs: number}): Layer[] {
+  private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number}): Layer[] {
     const a = r.artifacts;
     if (!a || a.served.length === 0) return [];
     const started = performance.now();
@@ -570,6 +570,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       heldOutlines.set(a.served, held);
     }
     timings.outlinesMs = performance.now() - started;
+    timings.outlines = held.data.length;
     if (held.data.length === 0) return [];
     return [
       new PolygonLayer(
@@ -600,7 +601,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    * declared centroid with the count the wire carries for it (its target's, D13). Free text is
    * deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
    */
-  private labelLayers(r: Resolved, timings: {labelsMs: number}): Layer[] {
+  private labelLayers(r: Resolved, timings: {labelsMs: number; labels: number}): Layer[] {
     const a = r.artifacts;
     if (!this.props.labels || !a || a.served.length === 0) return [];
     const viewport = this.context.viewport;
@@ -644,6 +645,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       heldLabels.set(a.served, held);
     }
     timings.labelsMs = performance.now() - started;
+    timings.labels = held.data.length;
     const layers: Layer[] = [];
     if (held.leaders.length > 0) {
       layers.push(

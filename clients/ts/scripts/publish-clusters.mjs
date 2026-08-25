@@ -18,18 +18,15 @@
 // idset goes with them, because a `tessera_id` is only meaningful under the identity lineage that
 // minted it.
 //
-// ## The sidecar, and what it must never carry
+// ## Nothing is written beside the wire
 //
-// **There is no artifact geometry on the wire** — deliberately, since a bounding box over full
-// membership would disclose a cluster's true extent by panning — so the viewer cannot place a
-// cluster on the map by itself. This writes the centroids it computed to `viewer/public/clusters.json`
-// and the viewer joins them by stable key. That is publisher-side scaffolding for a development
-// demo, not a pattern: real artifact geometry arrives as derived content at Stage 3, gated by the
-// containment test.
-//
-// It carries positions and nothing else. **The declared membership size stays out of it**: that is
-// a corpus-wide count over items a viewer may not see, and the whole point of the masked count
-// beside a cluster is that it is *not* that number. Sizes are printed here, for the operator
+// The viewer places, outlines and colours a cluster from the derived geometry the wire carries —
+// `centroid`, `box` and `hull`, recomputed per principal from `membership ∩ M_auth` — and from the
+// per-point membership column. The centroids this script computes over the publisher's own view
+// are used for nothing but the clustering; they are never written anywhere a viewer could read
+// them. **The declared membership size stays out of everything**: that is a corpus-wide count over
+// items a viewer may not see, and the whole point of the masked count beside a cluster is that
+// it is *not* that number. Sizes are printed here, for the operator
 // choosing a criterion, and go no further.
 //
 // **What the positions are, stated plainly**: centroids over the *publisher's* full view, for every
@@ -38,9 +35,7 @@
 // the demo serves it to the operator's own browser. Real geometry arrives as derived content
 // (Stage 3), recomputed per viewer from `membership ∩ M_auth`; a deployment must delete this file
 // rather than promote it.
-import {readFile, writeFile, mkdir} from 'node:fs/promises';
-import {dirname, join} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {readFile} from 'node:fs/promises';
 import {tableFromIPC} from 'apache-arrow';
 
 const args = Object.fromEntries(
@@ -56,14 +51,12 @@ const operatorCred = process.env.TESSERA_OPERATOR_CRED;
 if (!sessionCred) throw new Error('set TESSERA_SESSION_CRED');
 if (!operatorCred) throw new Error('set TESSERA_OPERATOR_CRED');
 
-const here = dirname(fileURLToPath(import.meta.url));
 const CLUSTERS = Number(args.clusters ?? 24);
 const SAMPLE_DEPTH = Number(args['sample-depth'] ?? 7);
 const SAMPLE_K = Number(args['sample-k'] ?? 64);
 const ITERATIONS = Number(args.iterations ?? 12);
 /** Members per publish request. The batch is the commit unit, and each one is an fsync. */
 const BATCH = Number(args.batch ?? 50_000);
-const OUT = args.out ?? join(here, '..', 'viewer', 'public', 'clusters.json');
 
 /**
  * The layer name, which is an identity rather than a label: publication is append-only, a repeated
@@ -92,14 +85,6 @@ const labelTerm = args['label-term'] ?? null;
 if (labelLayer && !labelTerm) {
   throw new Error('--labels needs --label-term: the per-term variation is generated from what that principal can see');
 }
-
-const SIDECAR_NOTE =
-  "Development scaffolding, and a disclosure if it is ever served to anyone who is not the " +
-  'publisher: these centroids are computed over the publisher\'s OWN full view, so they are ' +
-  'corpus-derived geometry sitting beside the wire rather than on it, and the file enumerates ' +
-  'every cluster including ones the server withholds. The viewer draws a marker only for an ' +
-  'artifact the server actually served, which is what makes it safe HERE. No membership and no ' +
-  "declared size: the count beside a cluster is the viewer's own, and never the cluster's size.";
 
 // --------------------------------------------------------------------------------- the plumbing
 
@@ -368,16 +353,6 @@ console.log(`published ${published} artifacts`);
  * That is containment's whole claim: what decides is *which* documents, never how many.
  */
 
-/**
- * Where each published label goes in the sidecar — at the centroid of the cluster it annotates.
- *
- * A label has no geometry of its own and never will: it describes its target, so the target's
- * position is the only one it could sensibly take. Declared out here because the sidecar is
- * written below, past the end of the block that fills it, and stays empty when no labels were
- * asked for.
- */
-let labelPlaces = [];
-
 if (labelLayer) {
   console.log(`sampling as the term-${labelTerm} principal, for the per-term variation`);
   const termToken = await authorise([labelTerm]);
@@ -474,32 +449,7 @@ if (labelLayer) {
   }
   await publishLabels();
   console.log(`published ${labels.length} labels into ${labelLayer}`);
-
-  const centroid = new Map(clusters.map((c) => [c.key, c]));
-  labelPlaces = labels.map((l) => ({
-    key: l.key,
-    x: centroid.get(l.cluster).x,
-    y: centroid.get(l.cluster).y
-  }));
 }
-
-// Merged rather than overwritten, and keyed by layer: publication is append-only and a name is
-// never reused, so a second run is a second *layer* — and the demo's point is comparing two of
-// them (one with an existence criterion, one without) over the same clusters.
-let sidecar = {note: SIDECAR_NOTE, layers: {}};
-try {
-  const held = JSON.parse(await readFile(OUT, 'utf8'));
-  if (held.layers) sidecar = {note: SIDECAR_NOTE, layers: held.layers};
-} catch {
-  // No file yet, which is the first run.
-}
-sidecar.layers[layerName] = clusters.map((c) => ({key: c.key, x: c.x, y: c.y}));
-// The label layer gets its own entry, or the labels are served and never drawn: placement is by
-// layer, and a label carries no position of its own.
-if (labelLayer) sidecar.layers[labelLayer] = labelPlaces;
-await mkdir(dirname(OUT), {recursive: true});
-await writeFile(OUT, `${JSON.stringify(sidecar, null, 2)}\n`);
-console.log(`wrote ${OUT}`);
 
 // ----------------------------------------------------------------------------------- the report
 

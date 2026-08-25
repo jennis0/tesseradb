@@ -215,3 +215,25 @@ describe('the cache releases what a band held', () => {
     expect([...distinctOrdinals(Uint32Array.from([3, 0, 1, 3, 1]))]).toEqual([1, 3]);
   });
 });
+
+describe('the artifacts golden carries the column (captured against the demo layer)', () => {
+  it('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
+    const {readFileSync} = require('node:fs') as typeof import('node:fs');
+    const {join} = require('node:path') as typeof import('node:path');
+    const r = decodeViewport(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-artifacts.bin'))));
+    expect(r.artifacts.length).toBeGreaterThanOrEqual(3);
+    const centroids = new Set(r.artifacts.map((a) => a.centroid?.join(',')));
+    expect(centroids.size).toBe(r.artifacts.length);
+    const layers = Object.keys(r.membership);
+    expect(layers.length).toBe(1);
+    const m = r.membership[layers[0]!]!;
+    expect(m.index.length).toBe(r.ids.length);
+    let named = 0;
+    for (let i = 0; i < m.index.length; i++) if (m.index[i] !== 0) named++;
+    expect(named).toBeGreaterThan(0);
+    const servedIds = new Set(r.artifacts.map((a) => a.tesseraId));
+    for (const id of m.ids) expect(servedIds.has(id)).toBe(true);
+    // Every layer the column names is a layer in the artifacts frame.
+    expect(r.artifacts.every((a) => a.layer === layers[0])).toBe(true);
+  });
+});

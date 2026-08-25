@@ -68,6 +68,9 @@ export type MapProbe = {
     layersMs: number;
     /** Lookup-texture writes since the map was made — what a colouring interaction costs. */
     lutWrites: number;
+    /** What the last paint drew of the artifacts: outlines and placed labels. */
+    outlines: number;
+    labels: number;
     /** Frame gaps over the last two seconds, ms. */
     frame: {mean: number; p95: number; n: number};
     /** Per-response decode, reported by the host through the store's instruments. */
@@ -227,7 +230,7 @@ export class TesseraMap extends TesseraElement {
     encoding: 'uniform',
     view: {depth: 0, status: 'idle', stale: false, visible: 0, matched: 0, served: 0, provisional: 0},
     region: null,
-    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
+    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
     cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: []}
   };
 
@@ -505,7 +508,9 @@ export class TesseraMap extends TesseraElement {
               outlinesMs: t.outlinesMs,
               labelsMs: t.labelsMs,
               layersMs: t.layersMs,
-              lutWrites: t.lutWrites
+              lutWrites: t.lutWrites,
+              outlines: t.outlines,
+              labels: t.labels
             });
           }
         })

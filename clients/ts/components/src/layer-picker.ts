@@ -22,6 +22,7 @@ export class TesseraLayerPicker extends TesseraElement {
     css`
       :host {
         display: block;
+        max-width: 260px;
         padding: var(--tessera-space) calc(var(--tessera-space) * 1.6);
         background: var(--tessera-panel-bg);
         border: 1px solid var(--tessera-border);
