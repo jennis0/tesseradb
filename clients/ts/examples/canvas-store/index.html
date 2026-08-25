@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <title>Tessera — the store on a canvas</title>
+    <link rel="icon" href="data:," />
+    <style>
+      html, body { margin: 0; height: 100%; font: 14px system-ui, sans-serif; background: #111; color: #ddd; }
+      body { display: grid; grid-template-rows: auto 1fr auto; }
+      header, footer { display: flex; gap: 1.5rem; align-items: center; padding: 0.4rem 1rem; }
+      canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+      #status[data-state='refused'] { color: #f66; }
+      #status[data-state='stale'] { color: #fc6; }
+      button { font: inherit; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>Tessera store, no Tessera rendering</strong>
+      <label>signed in as <select id="principal"></select></label>
+    </header>
+    <canvas id="map"></canvas>
+    <footer>
+      <span id="status" data-state="idle">idle</span>
+      <span>shown <b id="shown"></b></span>
+      <span>matched <b id="matched"></b></span>
+      <span>visible <b id="visible"></b></span>
+      <span id="marks"></span>
+      <button id="refresh" hidden>refresh</button>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
