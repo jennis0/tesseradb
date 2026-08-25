@@ -509,7 +509,9 @@ fn a_dependent_layer_resolves_over_its_own_members() {
 /// get the same answer from either. Swept over principals, viewports and budgets.
 #[test]
 fn the_two_layouts_answer_identically() {
-    let mut answers: Vec<(ServingLayout, Vec<BTreeMap<u64, Option<u64>>>)> = Vec::new();
+    /// One case's column, keyed by source id.
+    type Case = BTreeMap<u64, Option<u64>>;
+    let mut answers: Vec<(ServingLayout, Vec<Case>)> = Vec::new();
     for layout in [ServingLayout::ArtifactMajor, ServingLayout::RowMajorList] {
         let fx = fixture();
         let engine = fx.open();
@@ -548,7 +550,7 @@ fn the_two_layouts_answer_identically() {
                         .iter()
                         .map(|a| (a.tessera_id.raw(), a.key.clone().unwrap()))
                         .collect();
-                    let case: BTreeMap<u64, Option<u64>> = out
+                    let case: Case = out
                         .points
                         .tessera_ids
                         .iter()
