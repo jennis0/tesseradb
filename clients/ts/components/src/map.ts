@@ -664,10 +664,20 @@ export class TesseraMap extends TesseraElement {
 
   /** Fit an artifact's box, if the store holds one for it. */
   fitTo(artifactId: bigint): boolean {
-    const s = this.resolvedStore;
-    const extent = s?.extentOf(artifactId);
-    const meta = s?.get('meta');
-    if (!extent || !meta) return false;
+    const extent = this.resolvedStore?.extentOf(artifactId);
+    if (!extent) return false;
+    return this.fitBbox(extent);
+  }
+
+  /**
+   * Fit a box given in **data coordinates** — the space `setView` takes and `tessera-viewchange`
+   * reports, so a host (the notebook widget's `bbox`) can hand back what it was told. The camera
+   * keeps the canvas's aspect, so the box shown contains the one asked for and the next
+   * `tessera-viewchange` reports the box actually shown.
+   */
+  fitBbox(extent: [number, number, number, number]): boolean {
+    const meta = this.resolvedStore?.get('meta');
+    if (!meta) return false;
     const q = meta.quantisation;
     const [x0, y0] = dataToWorldXY(extent[0], extent[1], q);
     const [x1, y1] = dataToWorldXY(extent[2], extent[3], q);
