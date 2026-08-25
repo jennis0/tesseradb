@@ -42,7 +42,7 @@ function fakeModel(initial: Record<string, unknown>): WidgetModel & {sent: Sent[
   return m;
 }
 
-const base = {url: 'http://tessera.test', view: null, layers: [], colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, layout: 'docked', height: 400};
+const base = {url: 'http://tessera.test', view: null, layers: [], colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400};
 
 function setUp(initial: Record<string, unknown> = {}) {
   const model = fakeModel({...base, ...initial});

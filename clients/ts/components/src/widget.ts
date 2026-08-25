@@ -29,7 +29,8 @@ import './explorer.js';
  * new model, so it sends `ready` again.
  *
  * **What crosses the kernel boundary is control and selection, never data.** `url` and `view` come
- * down; `bbox`, `layers`, `colour_by` and `filters` go both ways; `selected`, `selected_artifact`
+ * down (with `explorer_layout` and `height`, which are the cell's, not the store's); `bbox`,
+ * `layers`, `colour_by` and `filters` go both ways; `selected`, `selected_artifact`
  * and `region` go up. Up-syncs happen **at the settle** — when the store's status reaches `shown`
  * for a new composition, and when a region's counts arrive — never per frame, so the kernel is
  * off the pan path (client-interaction §7). Ids cross as decimal strings: a `tessera_id` is a
@@ -400,7 +401,7 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
     state = states.get(model)!;
   }
   const explorer = document.createElement('tessera-explorer') as TesseraExplorer;
-  explorer.layout = (model.get('layout') as 'docked' | 'overlay') || 'docked';
+  explorer.layout = (model.get('explorer_layout') as 'docked' | 'overlay') || 'docked';
   const height = model.get('height');
   explorer.style.setProperty('--tessera-explorer-height', typeof height === 'number' ? `${height}px` : String(height || '480px'));
   explorer.store = state.store;
