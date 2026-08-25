@@ -538,12 +538,19 @@ draws from the wire today, what the look needs, and which is which.
   thirty labels needs no atlas.
 - **Colour** by a declared column, with the swatch legend.
 
-**What the look needs, asked for as D12:** a **per-point membership column** for the layers
-that are on, in the points frame, server-derived per principal — `null` both for "in no
-artifact" and "in an artifact this principal was not served", one value, so it says nothing
-beyond the served set. With it: **colour by cluster becomes the default when such a layer is
-on**, the wash takes the cluster's hue, and the labels are the legend. Its palette is
-positional — hue from the artifact's angle about the **corpus extent's** centre (not the
+**Colour by cluster, from today's wire, as a mapping.** The client holds every served
+artifact's masked centroid and hull and every served point's position, so it can **assign**
+each point to its nearest served centroid — a client-computed colour mapping, which
+client-interaction §9 permits, presented as *coloured by nearest cluster* and never as
+membership. For a k-means layer that is the clustering's own rule and is right almost
+everywhere; for a non-convex clustering, points near a boundary take the wrong colour. Points
+inside no hull draw as noise. With that, **colour by cluster is the default when a layer with
+members is on**, the wash takes the cluster's hue, and the labels are the legend. **D12 —
+a per-point membership column** in the points frame for the layers that are on, server-derived
+per principal, `null` both for "in no artifact" and "in an artifact this principal was not
+served" (one value, so it says nothing beyond the served set) — is the upgrade that makes the
+colours **exact** at boundaries and correct for non-convex clusterings, not what the look waits
+on; it can wait for a layer where the difference shows. The palette is positional — hue from the artifact's angle about the **corpus extent's** centre (not the
 viewport's, or every cluster would recolour on every pan), lightness from its distance — with
 the accepted cost that a zoomed-in view holds a narrow angular sector and its hues converge;
 the alternative, hues spread evenly over the served set at each settle, is offered in D12. It
@@ -845,10 +852,10 @@ step in it. The C2 example is the check that the store is usable with none of ou
   on the wire, and behind it the export verb and the runtime-artifact path. Box and lasso work
   without them; *filter to this*, *export* and *save* wait. Asked for, in that order.
 - **D12 — a per-point membership column** in the points frame for the layers that are on,
-  server-derived per principal, one `null` (§5.10). The DataMapPlot look — colour by cluster,
-  the coloured wash, the labels as the legend — depends on it; without it the map colours by
-  column and clusters show as outlines and names. Needs a leak-register pass. Recommended: ask
-  for it; and rule the palette's centre — the corpus extent (stable under pan, converges when
+  server-derived per principal, one `null` (§5.10). The look does not wait on it: nearest-served-
+  centroid assignment gives colour by cluster from today's wire as a mapping; the column makes
+  it exact at boundaries and right for non-convex clusterings. Needs a leak-register pass.
+  Recommended: ask for it when a layer shows the difference; and rule the palette's centre — the corpus extent (stable under pan, converges when
   zoomed in) or hues spread over the served set at each settle (never converges, recolours
   when the set changes).
 - **D13 — a dependent artifact's target on the wire** (§5.10), so a label can show its
@@ -901,8 +908,9 @@ paragraph is updated on promotion.
 - 2026-08-25: r4 — r3 reviewed across three lenses (truthfulness and corpus fit, embeddability,
   the four customers), forty-one findings, dispositioned in one pass; every one accepted. The
   ones that changed the shape: **per-point membership is not on the wire**, so the DataMapPlot
-  rendering splits into what draws exactly from the number channel and the served hull, and
-  what waits on a membership column (D12); **`x-tessera-stale` is the broadcast geometry stamp**,
+  rendering splits into what draws exactly from the number channel and the served hull, what
+  the client assigns as a mapping (nearest served centroid), and what a membership column
+  would make exact (D12); **`x-tessera-stale` is the broadcast geometry stamp**,
   so staleness keys on the content key with numbers refreshed eagerly and marks stale-marked;
   **counting a region at pixel depth** is 10⁶ tiles, so the `tiles` form at a bounded depth with
   the inexactness typed; **the drop-in's token** comes from the host's server calling authorise
