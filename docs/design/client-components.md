@@ -7,9 +7,9 @@ here in one pass. **To become normative:** owner rulings on the open decisions i
 ruled ones written to `docs/decisions/`. Defers to [`client-interaction.md`](client-interaction.md)
 for every obligation it restates. **Amends** [`client-architecture.md`](client-architecture.md)
 §1 (§8) and its review finding F8 (§4). **Wire changes it asks for and does not depend on:** §3's
-idioms (D9), a fetch-model hint (D8), the selection operand (D11), a per-point membership column
-(D12), a label's target (D13); and one it *does* depend on for production, a viewer-plane CORS
-surface (D10).
+idioms (D9), a fetch-model hint (D8), the selection operand (D11), a label's target (D13); and
+two it *does* depend on — a viewer-plane CORS surface for production (D10) and a per-point
+membership column for colour by cluster (D12, ruled needed, exact only).
 **Touches:** client-interaction §4, §6.1–6.2, §7, §8.6, §10, §12, §13, §15; client-architecture
 §1, §6, §7 (D3, D4 amended in scope), F8; artifact-system §6; contracts §3.1, §3.2 (amended:
 `layers`, `artifact_budget`, `k = 0`); `docs/design/README.md`; `docs/roadmap.md` ([#10],
@@ -159,9 +159,9 @@ coordinates are quantisation-space numbers and nothing here names a projection.
 | `meta` | `/v1/meta` as this principal sees it: columns, operands, layers with their dependencies, views, extent |
 | `status` | `idle · loading · retrying · shown · empty · refused`; `sessionWarm`; the last refusal; **`stale`** (below) |
 | `view` | the drawn region and depth; `visible` and `matched` as `Masked`; `served` as `Count`; provisional marks as a plain mark count — a screen fact, not a masked quantity |
-| `marks` | the draw list: `ids` (`BigUint64Array`), world positions (`Float32Array` — what the replica holds; `dataXY` derives data coordinates from it, good to a hundredth of a cell), `scalars` (typed arrays by column), per-tile provenance, and its `Count` |
+| `marks` | the draw list: `ids` (`BigUint64Array`), world positions (`Float32Array` — what the replica holds; `dataXY` derives data coordinates from it, good to a hundredth of a cell), `scalars` (typed arrays by column), **membership ordinals per layer on** (`Uint32Array`, §5.10), per-tile provenance, and its `Count` |
 | `tiles` | the exact per-tile `visible` and `matched` at the drawn depth, and the underlay's sub-cell counts where requested — the number channel, which §5.10's density reads |
-| `artifacts` | the layers on; the served set with `centroid`, `box`, `hull`, `content`, `maskedCount` as `Masked`, `parentId`; the tree; the channel's status and refusal |
+| `artifacts` | the layers on; the served set with `centroid`, `box`, `hull`, `content`, `maskedCount` as `Masked`, `parentId`; the tree; **the session artifact table** and each ordinal's resolved colour (§5.10); the channel's status and refusal |
 | `selection` | the picked item's record (named fields) or its refusal; the opened artifact or its refusal |
 | `region` | the selected box or lasso; its `visible` and `matched` as `Masked`, its `served` as `Count`; the held marks inside it; the depth it was counted at (§5.11) |
 | `filters` | operands from meta; the composed `FilterExpr` as sent; per-column value lists and their refusals |
@@ -499,102 +499,145 @@ contrast in both schemes.
   a control's identity across store ticks, and the panels that move every frame are separate
   elements from the ones a user types into.
 
-### 5.10 How the map draws
+### 5.10 How the map draws, and what the client holds per point
 
-The look was settled on the design canvas against DataMapPlot as the reference for what a data
-map should look like — positional cluster colours, a density wash, faint nested contours, names
-sized by the artifact's masked count — and **the review found that half of it is not
-computable from the wire as it stands.** The points frame carries ids, positions and declared
-columns; the artifacts frame carries each served artifact's centroid, box, hull, content and
-masked count. Nothing says which served point belongs to which served artifact: an enumerated
-layer — the demo's clustering — has no per-point attribution at all, and an attribute layer's
-column reaches the marks only if it renders (and the client's `Layer` type does not carry its
-name). The mock-up generator had the members; a client does not. So this section states what
-draws from the wire today, what the look needs, and which is which.
+The look was settled on the design canvas against DataMapPlot — cluster colours, a density
+wash, faint nested outlines, names sized by masked count — and the review found that the wire
+carries no per-point membership, so the mock-up's colouring had no source. The owner's ruling
+(2026-08-25) is **exact only**: a point wears a cluster's colour only when the wire said it is
+a member; there is no geometric guess in between. That makes D12 a prerequisite of colour by
+cluster rather than an upgrade, and it makes this section mostly about **the data path** —
+what arrives, what is held per point at several million marks, and what happens when the
+served artifact set changes under it — with the drawing at the end.
 
-**From the wire today, exact:**
+**What arrives.** With D12, a point request that names layers gets, per named layer, one
+nullable `u64` column in the points frame: the `tessera_id` of the **deepest served**
+artifact the point belongs to in *that response*, `null` if no ancestor is served. Deepest
+served rather than the leaf, so the column never names an artifact the response withheld —
+naming a finer artifact the principal was not served would say one exists. A point request
+therefore names the layers that are on and pays their pass; the response's artifacts frame
+comes with it and feeds the table below. The `k = 0` channel is still what enumerates the
+artifacts *in view* for the panels, because held tiles are elided from point requests.
 
-- **Outlines** are the served `hull` or `box` — derived per principal from the members they
-  can see, so the outline is exact for this viewer. The selected artifact's is strong with a
-  faint fill; the others are hairlines, greatly faded.
-- **The density wash** reads the **number channel**: the per-tile `visible`/`matched` counts at
-  the drawn depth (`budget / m_target` of them — some 6×10⁴ across a viewport at the 10⁶-mark
-  render target), refined by the
-  underlay's sub-cell counts where requested — binned in world space at the drawn depth,
-  rebuilt at the settle and drawn as a texture so gestures cost a texture draw. Not from the
-  marks: marks per tile are proportional to density only inside the sampler's window and flat
-  above its cap (contracts §3.2), so a wash from marks reads uniform exactly where the data is
-  densest. Single hue, or the hue of the column the points are coloured by.
-- **Names and counts** at the artifact's `centroid`, from its `content` and `maskedCount`: the
-  name in the UI face, semibold, a thin halo in the background colour; the count beside it in
-  regular weight at four-fifths the size; size by masked count within a narrow band; greedy
-  overlap avoidance and a leader line when a label moves off its centroid; children beneath,
-  smaller. A label that is a *dependent* artifact (a clustering's labels) draws its own text at
-  its own centroid — which its layer must declare as derived content; the generating set makes
-  it the cluster's, near enough — and the count it shows is its target's, not its own, once the
-  wire says which that is (D13; until then the two stack by overlap avoidance and the label
-  layer shows no count). Free text needs deck's `TextLayer` with `characterSet: 'auto'` and
-  `fontSettings.sdf` for the halo, or a DOM overlay positioned by `viewport.project`, which for
-  thirty labels needs no atlas.
-- **Colour** by a declared column, with the swatch legend.
+**The session artifact table.** Ids are stable across responses (a replacement mints new
+identities, an edit keeps them — decision 0081), so the store keeps one append-only table per
+session: ordinal → `{tesseraId, layer, parent ordinal where both ends were in one response,
+level}` with the reverse map, dropped with the identity key like everything else. Ten
+thousand artifacts a layer over a session is a few megabytes. The ordinal — a `u32` — is what
+every point carries, and it is assigned in exactly one place:
 
-**Colour by cluster, from today's wire, as a mapping.** The client holds every served
-artifact's masked centroid and hull and every served point's position, so it can **assign**
-each point to its nearest served centroid — a client-computed colour mapping, which
-client-interaction §9 permits, presented as *coloured by nearest cluster* and never as
-membership. For a k-means layer that is the clustering's own rule and is right almost
-everywhere; for a non-convex clustering, points near a boundary take the wrong colour. Points
-inside no hull draw as noise. With that, **colour by cluster is the default when a layer with
-members is on**, the wash takes the cluster's hue, and the labels are the legend. **D12 —
-a per-point membership column** in the points frame for the layers that are on, server-derived
-per principal, `null` both for "in no artifact" and "in an artifact this principal was not
-served" (one value, so it says nothing beyond the served set) — is the upgrade that makes the
-colours **exact** at boundaries and correct for non-convex clusterings, not what the look waits
-on; it can wait for a layer where the difference shows. The palette is positional — hue from the artifact's angle about the **corpus extent's** centre (not the
-viewport's, or every cluster would recolour on every pan), lightness from its distance — with
-the accepted cost that a zoomed-in view holds a narrow angular sector and its hues converge;
-the alternative, hues spread evenly over the served set at each settle, is offered in D12. It
-needs its own pass against the leak register: what it discloses is the membership of served
-points in served artifacts, which the served hull already bounds.
+- **The decode worker cannot assign it** — three lanes decode concurrently and cannot share a
+  table without `SharedArrayBuffer`, which needs cross-origin isolation a host page rarely
+  has. So the worker does the per-point work and none of the naming: it hashes the column's
+  distinct ids (at most the served artifacts, ≤ 10⁴) and emits a **response-local index per
+  point** (`Uint16Array` or `Uint32Array`) plus the distinct-id list.
+- **The main thread names them**: the distinct list maps to session ordinals through the table
+  — a few thousand lookups — and a tight remap loop turns the local indices into session
+  ordinals as the band is built: about a tenth of a millisecond per fifty-thousand-point
+  response, and no per-point hash on the main thread ever.
 
-**The render target is multi-million marks on screen and 10⁴-plus artifacts in a layer**
-(owner, 2026-08-25; the viewer runs at several million today — its 500,000 is only the input's
-default — and the served artifact set per view is bounded by the cut and `artifact_budget`,
-not by the layer). Every per-point and per-artifact cost here is sized to that — modelled, to be
-measured by the harness at §9 step 2:
+**What a band holds per point**, at a million marks per column, with the membership added:
 
-- **Assignment is a texture, not a pass.** N × K on the CPU is out at this scale — 3×10⁶ points
-  against 10⁴ artifacts is 3×10¹⁰ — and even bucketed to a handful of candidates per point it
-  is 100–200 ms per settle plus a 12 MB colour-attribute upload. So the assignment lives on the
-  GPU: once per settle, the served hulls are drawn filled into an offscreen **id texture** at
-  viewport resolution, smallest last so an overlap resolves to the tighter cluster, and the
-  point shader samples it by position — its colour is the hull it is inside, and no hull is
-  noise. O(1) per point per frame, no CPU pass, no per-point upload, and a changed artifact set
-  is a texture redraw. Ten thousand hulls of twenty vertices is a trivial draw. Nearest-centroid
-  is the same picture with Voronoi cones instead of hulls and is kept only as the choice for a
-  layer that serves centroids and no hulls. With D12's column, the shader reads the attribute
-  instead of the texture. Point-in-hull on the CPU is used for nothing at this scale.
-- **Labels are placed by priority in a spatial hash.** Overlap avoidance over 10⁴ labels is
-  O(K²) naively; sorted by masked count and placed greedily into a hash of occupied cells it is
-  O(K), milliseconds in the worker, and a few hundred labels fit a viewport whatever the layer
-  holds — the rest wait for zoom, which is DataMapPlot's own behaviour. `TextLayer` with a few
-  hundred visible strings is cheap; the DOM overlay is not, past a hundred, and is the small-map
-  option only.
-- **Outlines and contours** are line strips: 10⁴ hulls × 3 levels × 20 vertices is 6×10⁵
-  vertices in one `PathLayer`, well inside a frame.
-- **The wash** bins the per-tile counts, not the points: `budget / m_target` tiles per view —
-  some 2×10⁵ at three million marks, under `max_tiles_per_request` — into a texture, once per
-  settle.
+| per point | today | with D12 | where |
+|---|---|---|---|
+| `tessera_id` | 8 B `u64` | 8 B | CPU (picking resolves index → id) |
+| position, world `f32` | 8 B | 8 B | CPU and GPU |
+| declared scalars | 1–8 B each | same | CPU; GPU as colour when colouring by column |
+| colour `RGBA` | 4 B | 4 B | CPU and GPU |
+| picking colour | 4 B | 4 B | GPU, written once per growth |
+| **membership ordinal**, per layer on | — | **4 B `u32`**, `0` for none | CPU and GPU |
 
-**What stays decoration if it is drawn at all:** contours traced from held marks are the density
-of a per-tile-capped *sample* (client-interaction §9 names a shape drawn around held points as
-the sample-as-set error in geometry). With D12 they may be drawn as inner texture inside the
-served hull — a mapping, permitted — and never as the outer boundary, which is the hull. Without
-D12 they are not drawn.
+Three million marks with one layer on is 12 MB more on each side; the slab's stated budget
+(~20 B a mark CPU-side, 12–16 B GPU-side, six million marks across six retained depths)
+grows by a fifth. The byte ledger counts it; eviction is unchanged.
+
+**Colour resolves in the shader, through a lookup texture.** Today colours are computed
+CPU-side per point and rewritten across every resident mark when the encoding changes. For
+cluster colour that pass is replaced: the membership ordinal is a per-point GPU attribute,
+uploaded with the band's slot through the same dirty-span path as positions, and the point
+shader reads `colour = lut[ordinal]` from a data texture of one entry per table ordinal (10⁵
+entries is 400 KB). Everything a user does to the colouring is then **O(artifacts), never
+O(points)**: choosing the level to colour at, changing the palette, highlighting the selected
+cluster and dimming the rest, switching between cluster colour and column colour (a uniform)
+— each is a rewrite of the lookup texture. This is the piece that makes several million marks
+interactive; a per-point colour rewrite at that scale is tens of milliseconds and a 12 MB
+upload, per interaction.
+
+**Hierarchy is a walk in the table, not on the points.** `lut[o]` is the colour of
+`resolve(o)`: walk `o`'s parent links up to the artifact currently served at the chosen level.
+A band fetched when the cut served children resolves upward *exactly* — membership in a child
+implies membership in its parent — so zooming out never touches a point. The walk fails only
+where the edge was never seen (the child served alone, later its parent alone; `parent_id` is
+on the wire only when both ends are in one response, deliberately), or where the cut moved
+finer, since a walk cannot go down. Those ordinals resolve to **neutral**.
+
+**Colour coverage, and what refetches.** A band is *colour-current* when every distinct
+ordinal it carries resolves to something served now — checked per band over its distinct list
+(a dozen entries), never per point, whenever the served set changes: 10⁴ bands is a
+millisecond. A band that is not, and is in view, is **colour-stale**: its points draw neutral
+and the driver's plan treats its tile as a refetch candidate **after** novel ground,
+centre-first, exactly as a stale-content band already is. So:
+
+- **The cut moves coarser** (zooming out): nothing refetches for colour; the table walk covers
+  it. Neutral appears only for the never-seen-edge case, and is refetched.
+- **The cut moves finer** (zooming in): the driver is fetching deeper bands anyway, and they
+  arrive with the finer ids; the stand-ins drawn meanwhile resolve upward to the level they
+  know, which is exact at that level, or neutral where they cannot.
+- **The set changes without a zoom** (`artifact_budget`, a fold re-laying the layer): the
+  content key rotates on a fold, which already stale-marks bands; a budget change marks the
+  in-view bands colour-stale. Refetch is progressive either way.
+- **The user switches layer**: no held band has the new layer's column, so every band in view
+  is colour-stale at once. The new layer's hulls, names and counts appear immediately from the
+  artifact channel; the points draw neutral and take colour centre-first as bands refetch —
+  the same cost as a filter change today, and the honest cost of exact-only. Columns for a
+  layer turned off stay on their bands until eviction, so switching back is free.
+
+**Exact only, stated.** A coloured point asserts membership in the served artifact whose
+colour it wears, at the level the table resolved it to; neutral means *not known here yet*.
+The status strip's hover carries it: *colours exact* when every band on screen is current,
+*refreshing N tiles* while any is not. Nothing on screen is a nearest-centroid guess.
+
+**The drawing**, in order of what it reads:
+
+- **Outlines** are the served `hull` or `box` — derived per principal, so exact for this
+  viewer — as hairlines, faded; the selected artifact's strong, with a faint fill in its colour
+  that is also the only *coloured* area fill. Nested contours from held marks are not drawn:
+  they are the density of a per-tile-capped sample, and exact-only applies to shapes too.
+- **The density wash** reads the number channel — per-tile `visible`/`matched` at the drawn
+  depth, refined by the underlay's sub-cell counts where requested — binned in world space at
+  the drawn depth, rebuilt at the settle, drawn as one texture. **Single hue**: colouring it
+  by a tile's majority cluster would be a colour chosen from a sample, which is the guess just
+  refused.
+- **Points** in their membership colour through the lookup texture, or a column's colour, or
+  the neutral.
+- **Names and counts** at each artifact's `centroid` from its `content` and `maskedCount`, sized
+  by masked count within a narrow band, placed by priority into a spatial hash (10⁴ labels is
+  O(K) that way; a few hundred fit a viewport and the rest wait for zoom), with a leader line
+  when a label moves. A dependent artifact (a clustering's labels) draws its text at its own
+  declared `centroid` and shows no count until the wire names its target (D13). Free text is
+  deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
+- **The palette** is positional — hue from the artifact's angle about the corpus extent's
+  centre, lightness from its distance; stable under pan, converging when zoomed in — or, at
+  the owner's choice, hues spread over the served set at each settle (D12).
+
+**Sizes, modelled** — the render target is multi-million marks on screen and 10⁴-plus
+artifacts in a layer (owner, 2026-08-25; the viewer runs at several million today, its
+500,000 being only the input's default; the served set per view is bounded by the cut and
+`artifact_budget`). Per response: decode as today plus one hash pass over the membership
+column in the worker and a remap loop on the main thread. Per settle: a resolve walk over
+≤ 10⁵ table entries, a colour-coverage check over held bands' distinct lists, one lookup
+texture write, the wash texture, label placement — all O(artifacts) or O(bands), none
+O(points). Per frame: nothing new; the shader's texture fetch. 10⁴ hulls × 20 vertices in one
+`PathLayer` is a trivial draw. The harness measures every one of these at §9 step 2.
+
+**What the server does** for D12: for each served point and each named layer, the leaf from
+the row→artifact inversion the scale design already builds for containment, then a walk up the
+edges until it meets the response's served set — a few steps per point — and a `u64` or a
+null. Its leak-register pass is short: the column reveals membership of served points in served
+artifacts, which the served hull already bounds, and deepest-served keeps finer structure out.
 
 **No grid, and no tile structure**, anywhere: the storage's cells are never shown (owner
-direction 2026-08-24). The demo's `clusters.json` sidecar — rings placed by the publishing
-script, from a time when no geometry crossed the wire — is retired at §9 step 3.
+direction 2026-08-24). The demo's `clusters.json` sidecar is retired at §9 step 3.
 
 ### 5.11 Selection — box and lasso
 
@@ -774,7 +817,7 @@ scripts as the net, one worktree per step:
    `<tessera-explorer>`, box selection with `<tessera-selection>`. The viewer becomes the
    explorer plus instruments. Smoke green, through shadow-piercing locators.
 3. **Artifacts and encoding**: `<tessera-layer-picker>` with dependency closure, wire geometry
-   drawn, the sidecar retired, `<tessera-artifact-list>`, `<tessera-artifact-card>`,
+   drawn, the membership attribute and lookup texture once D12 serves, the sidecar retired, `<tessera-artifact-list>`, `<tessera-artifact-card>`,
    `<tessera-legend>`; lasso selection in the `tiles` form. `smoke-artifacts.mjs` asserts hull
    and label render under two principals.
 4. **C1 and C2 examples in the gate**: a plain-HTML page, a React page using the explorer, a
@@ -861,13 +904,12 @@ step in it. The C2 example is the check that the store is usable with none of ou
 - **D11 — the selection operand and its verbs** (§5.11): a rectangle-and-polygon filter operand
   on the wire, and behind it the export verb and the runtime-artifact path. Box and lasso work
   without them; *filter to this*, *export* and *save* wait. Asked for, in that order.
-- **D12 — a per-point membership column** in the points frame for the layers that are on,
-  server-derived per principal, one `null` (§5.10). The look does not wait on it: nearest-served-
-  centroid assignment gives colour by cluster from today's wire as a mapping; the column makes
-  it exact at boundaries and right for non-convex clusterings. Needs a leak-register pass.
-  Recommended: ask for it when a layer shows the difference; and rule the palette's centre — the corpus extent (stable under pan, converges when
-  zoomed in) or hues spread over the served set at each settle (never converges, recolours
-  when the set changes).
+- **D12 — a per-point membership column** in the points frame for the layers that are on:
+  the deepest served artifact's id, server-derived per principal, one `null` (§5.10). **Ruled
+  needed, exact only** (owner, 2026-08-25): colour by cluster exists only when the wire says so,
+  with no geometric guess between. Needs a leak-register pass. Still open in it: the palette's
+  centre — the corpus extent (stable under pan, converges when zoomed in) or hues spread over
+  the served set at each settle (never converges, recolours when the set changes).
 - **D13 — a dependent artifact's target on the wire** (§5.10), so a label can show its
   cluster's count and be placed by its cluster's centroid. Until then label layers declare
   `centroid` and show no count. Asked for.
@@ -941,3 +983,10 @@ paragraph is updated on promotion.
   the gate; the decisions split into ruled and open with the count corrected to thirteen.
   Style: vocabulary aligned with annotations.md, process narration moved here, the §8.6
   misquotation removed, file citations kept to §9.
+- 2026-08-25: owner, on r4: colour by cluster is **exact only** — the nearest-centroid mapping is
+  dropped and D12 becomes a prerequisite; the render target is multi-million marks and 10⁴-plus
+  artifacts a layer; §5.10 rewritten as the data path — the deepest-served column, the session
+  artifact table with ordinals named on the main thread from a worker-local index, the
+  membership attribute and lookup texture so every colouring interaction is O(artifacts), the
+  table walk for hierarchy, colour coverage and what refetches under a cut change or a layer
+  switch, and the per-point byte table at several million marks.
