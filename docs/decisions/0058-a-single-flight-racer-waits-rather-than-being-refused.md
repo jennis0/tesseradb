@@ -87,7 +87,7 @@ look-ahead, and false of every client the design intends to support.
   (`crates/tessera-server/tests/http.rs`) — concurrent viewports on a cold session produce the 429
   while the gate's `shed_total` stays 0.
 - Build cost at 10⁹: `refresh.rs`'s table, 4,550 ms for a full projection rebuild.
-- Client retry budget: `clients/ts/viewer/src/viewportLayer.ts`, `MAX_RETRIES = 2` with `1000 * 2 **
+- Client retry budget: `clients/ts/core/src/driver.ts`, `MAX_RETRIES = 2` with `1000 * 2 **
   attempt` backoff.
 - The refusals are already counted — `building_refusals`, on `/control/status` for both the
   projection and fragment caches — which is how the mechanism was identified rather than guessed.
