@@ -2,7 +2,8 @@
   "extends": "../tsconfig.base.json",
   "include": [
     "src",
-    "test"
+    "test",
+    "vite-plugin-decorators.ts"
   ],
   "compilerOptions": {
     "noEmit": true,

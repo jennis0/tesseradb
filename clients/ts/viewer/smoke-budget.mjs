@@ -38,25 +38,24 @@ await page.waitForTimeout(settle);
 await page.selectOption('#principal', principal);
 await page.waitForTimeout(settle);
 
+/**
+ * The figures come from the map's probe (design §5.9): the store's `view` projection — depth,
+ * status, the counts — and the demo's instrument numbers beside it (the tiles the budget asked
+ * for and what limited it), which the §4 surface deliberately omits and the demo publishes.
+ */
 const readPanels = () =>
   page.evaluate(() => {
-    const text = document.querySelector('#stats')?.textContent ?? '';
-    // The row spans concatenate label and value with no separator, so strip whitespace entirely.
-    const flat = text.replace(/\s+/g, '');
-    const shown = /([\d,]+)of([\d,]+)shown/.exec(flat);
-    const depth = /depthchosen(\d+)/.exec(flat);
-    const tiles = /tilesrequested([\d,]+)/.exec(flat);
-    const actual = /actualmarks([\d,]+)/.exec(flat);
-    const limited = /limitedby(budget|maxTiles|maxDepth|saturated)/.exec(flat);
-    const status = /counts(unavailable|loading)/.exec(flat);
+    const p = window.__tesseraProbe;
+    if (!p) return {served: null, visible: null, depth: null, tiles: null, actual: null, limitedBy: null, status: 'absent'};
+    const i = p.instruments ?? {};
     return {
-      served: shown?.[1] ?? null,
-      visible: shown?.[2] ?? null,
-      depth: depth?.[1] ?? null,
-      tiles: tiles?.[1] ?? null,
-      actual: actual?.[1] ?? null,
-      limitedBy: limited?.[1] ?? null,
-      status: status?.[1] ?? 'shown'
+      served: p.view.served,
+      visible: p.view.visible,
+      depth: String(p.view.depth),
+      tiles: i.tiles ?? null,
+      actual: String(p.marks - p.view.provisional),
+      limitedBy: i.limitedBy ?? null,
+      status: p.view.status
     };
   });
 

@@ -11,10 +11,12 @@
   },
   "dependencies": {
     "@deck.gl/core": "^9.3.7",
-    "@deck.gl/geo-layers": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
     "@luma.gl/core": "^9.3.6",
-    "@tesseradb/client": "*"
+    "@tesseradb/client": "*",
+    "@tesseradb/components": "*",
+    "@tesseradb/deck": "*",
+    "lit": "^3.3.0"
   },
   "devDependencies": {
     "playwright": "^1.62.1",

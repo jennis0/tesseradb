@@ -52,7 +52,8 @@ export type MapProbe = {
   requests: number;
   encoding: string;
   view: {depth: number; status: string; stale: boolean; visible: number; matched: number; served: number; provisional: number};
-  region: {depth: number; tiles: number; exact: boolean; visible: number; matched: number; held: number; status: string} | null;
+  /** `ms` is select-to-counted, the store's own clock: the settle, the request and the sum. */
+  region: {depth: number; tiles: number; exact: boolean; visible: number; matched: number; held: number; status: string; ms: number | null} | null;
   timings: {
     /** Per settle: the slab sync, the wash bin and the whole layer build, last values in ms. */
     slabMs: number;
@@ -124,12 +125,9 @@ export class TesseraMap extends TesseraElement {
         align-items: flex-end;
       }
       [part='controls'] {
-        position: absolute;
-        z-index: 3;
-        top: var(--tessera-space);
-        right: var(--tessera-space);
         display: flex;
         gap: 4px;
+        pointer-events: auto;
       }
       [part='controls'] button {
         padding: 2px 8px;
@@ -211,6 +209,7 @@ export class TesseraMap extends TesseraElement {
   private selectedWorldXY: [number, number] | null = null;
   private regionWorld: [number, number, number, number] | null = null;
   private regionAnnounced: object | null = null;
+  private regionAskedAt = 0;
   private pickedId: bigint | null = null;
   private announcedItem: object | null = null;
   private announcedArtifact: object | null = null;
@@ -317,7 +316,8 @@ export class TesseraMap extends TesseraElement {
         this.regionWorld = next;
         this.paint();
       }
-      p.region = {depth: region.depth, tiles: region.tiles, exact: region.visible.exact, visible: region.visible.value, matched: region.matched.value, held: region.held.count, status: region.status};
+      const ms = region.status === 'loading' ? null : (p.region?.ms ?? performance.now() - this.regionAskedAt);
+      p.region = {depth: region.depth, tiles: region.tiles, exact: region.visible.exact, visible: region.visible.value, matched: region.matched.value, held: region.held.count, status: region.status, ms};
       if (region.status !== 'loading' && region !== this.regionAnnounced) {
         this.regionAnnounced = region;
         emit(this, 'tessera-selectchange', {
@@ -529,6 +529,8 @@ export class TesseraMap extends TesseraElement {
 
   /** Select a shape programmatically, in data coordinates; `null` clears. */
   select(shape: SelectionShape | null): void {
+    this.regionAskedAt = performance.now();
+    if (this.probe.region) this.probe.region = null;
     this.resolvedStore?.select(shape);
     emit(this, 'tessera-selectchange', {shape, status: shape ? 'loading' : 'cleared'});
   }
@@ -645,14 +647,16 @@ export class TesseraMap extends TesseraElement {
         @pointercancel=${this.onPointerUp}
       ></div>
       ${state === 'stale' ? html`<div part="overlay" style="align-items:flex-start;justify-content:center">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>` : overlay}
-      ${this.noControls
-        ? nothing
-        : html`<div part="controls" role="toolbar" aria-label="map mode">
-            <button type="button" aria-pressed=${this.mode === 'pan'} title="pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>pan</button>
-            <button type="button" aria-pressed=${this.mode === 'box'} title="drag a box to select" @click=${() => (this.mode = 'box')}>box</button>
-            <button type="button" title="fit the whole extent" @click=${() => this.fit()}>fit</button>
-          </div>`}
-      <div class="corner top-left"><slot name="top-left"></slot></div>
+      <div class="corner top-left">
+        ${this.noControls
+          ? nothing
+          : html`<div part="controls" role="toolbar" aria-label="map mode">
+              <button type="button" aria-pressed=${this.mode === 'pan'} title="pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>pan</button>
+              <button type="button" aria-pressed=${this.mode === 'box'} title="drag a box to select" @click=${() => (this.mode = 'box')}>box</button>
+              <button type="button" title="fit the whole extent" @click=${() => this.fit()}>fit</button>
+            </div>`}
+        <slot name="top-left"></slot>
+      </div>
       <div class="corner top-right"><slot name="top-right"></slot></div>
       <div class="corner bottom-left"><slot name="bottom-left"></slot></div>
       <div class="corner bottom-right"><slot name="bottom-right"></slot></div>

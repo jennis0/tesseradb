@@ -396,12 +396,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       };
       heldWash.set(tiles, held);
     }
+    // No image is no layer: a BitmapLayer given no image throws in its texture transform, and a
+    // wash that comes and goes is a few-kilobyte texture, not a re-upload worth keeping a layer for.
+    if (!held.image) return null;
     const [x0, y0, x1, y1] = held.bounds;
     return new BitmapLayer(
       this.getSubLayerProps({id: 'wash'}),
       {
-        visible: held.image !== null,
-        image: held.image ?? undefined,
+        image: held.image,
         // `[left, bottom, right, top]`: row 0 of the image is the lowest tile row, and under the
         // y-down orthographic view that is the smaller world y — so `top` is `y0`.
         bounds: [x0, y1, x1, y0],

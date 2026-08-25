@@ -14,7 +14,7 @@ export function renderErrors(state: AppState): string {
   const rows = state.failures
     .slice(-6)
     .reverse()
-    .map((f) => `<div class="bad">${esc(f.tileId)} — ${esc(f.code)}: ${esc(f.detail)}</div>`)
+    .map((f) => `<div class="bad">${new Date(f.at).toISOString().slice(11, 19)} — ${esc(f.code)}: ${esc(f.detail)}</div>`)
     .join('');
   return panel(`Failures (${state.failures.length})`, rows);
 }

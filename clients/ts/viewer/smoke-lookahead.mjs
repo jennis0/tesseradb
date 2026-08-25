@@ -82,7 +82,7 @@ for (let i = 0; i < 6; i++) {
 const total = requests - before;
 
 const stats = await page.evaluate(() => {
-  const text = document.getElementById('panels')?.innerText ?? '';
+  const text = document.getElementById('instruments')?.innerText ?? '';
   const g = (l) => text.match(new RegExp(`${l}\\s*\\n\\s*([\\d,.]+( of [\\d,]+)?)`))?.[1] ?? '?';
   return {cache: g('tiles from cache'), prefetched: g('prefetched ahead'), held: g('replica held')};
 });

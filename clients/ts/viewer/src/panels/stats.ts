@@ -63,7 +63,7 @@ export function toggleStatsDrawer(open: boolean): void {
  */
 export function renderStats(state: AppState, residency: {drawn: number; departed: number}): string {
   const t = state.lastTimings;
-  const provisional = state.assembled?.provisional ?? 0;
+  const provisional = state.frame?.provisional ?? 0;
   const drawn = residency.drawn + provisional;
   const l = state.latency;
 
@@ -108,7 +108,7 @@ function drawer(
       ${row('waited (debounce)', l ? `${l.waited} ms` : '—')}
       ${row('admission', t ? `${(t.admissionUs / 1000).toFixed(1)} ms` : '—')}
       ${row('in flight', String(state.inFlight))}
-      ${row('tiles in view', String(state.assembled?.tiles.length ?? 0))}
+      ${row('tiles in view', String(state.frame?.tiles.length ?? 0))}
       ${row('— of which provisional', provisional.toLocaleString('en-GB'))}
       ${row('— retained off-view', residency.departed.toLocaleString('en-GB'))}
       ${row('replica points', (state.replicaPoints ?? 0).toLocaleString('en-GB'))}

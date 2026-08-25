@@ -1,4 +1,5 @@
 import {defineConfig} from 'vite';
+import {tesseraDecorators} from './vite-plugin-decorators.js';
 
 /**
  * The self-contained bundle: one ESM file, lit and deck.gl inside it, the decode worker inlined
@@ -6,6 +7,7 @@ import {defineConfig} from 'vite';
  * host with a bundler resolves `@tesseradb/components` to `src/index.ts`.
  */
 export default defineConfig({
+  plugins: [tesseraDecorators()],
   build: {
     lib: {
       entry: 'src/bundle.ts',

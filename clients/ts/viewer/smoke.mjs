@@ -77,10 +77,11 @@ const settled = async (limitMs = 45_000) => {
 await settled();
 
 /** Pixels on the canvas that are not the page background — "did it draw anything". */
+// The canvas is inside the map's shadow root: found by the locator, which pierces, and read
+// through its handle — `document.querySelector` would report no canvas at all.
 const litPixels = () =>
-  page.evaluate(() => {
-    const canvas = document.querySelector('canvas');
-    if (!canvas) return 0;
+  page.locator('canvas').first().evaluate((canvas) => {
+    if (!(canvas instanceof HTMLCanvasElement)) return 0;
     const off = document.createElement('canvas');
     off.width = canvas.width;
     off.height = canvas.height;
@@ -94,12 +95,21 @@ const litPixels = () =>
     return lit;
   });
 
-const counts = () =>
-  page.evaluate(() => {
-    const text = document.querySelector('#stats')?.textContent ?? '';
-    const m = /([\d,]+) of ([\d,]+) shown/.exec(text);
-    return m ? {served: m[1], visible: m[2]} : null;
-  });
+/**
+ * The three counts, read through the status strip's parts — shadow-piercing locators, never an
+ * id in a panel's markup (design §9). `shown` renders as `served of visible`; the other two are
+ * one figure each. A count that rendered nothing (stale, inexact, not shown) reads as null.
+ */
+const counts = async () => {
+  const text = async (part) => {
+    const el = page.locator(`tessera-status [part="${part}"] [part="count"]`).first();
+    if ((await el.count()) === 0) return '';
+    return (await el.textContent()) ?? '';
+  };
+  const shown = /([\d,]+) of ([\d,]+)/.exec(await text('count-shown'));
+  const matched = (await text('count-matched')).trim();
+  return shown ? {served: shown[1], visible: shown[2], matched} : null;
+};
 
 // Success criterion 3, checked rather than asserted by eye: a different principal must produce a
 // different picture and different masked counts.
@@ -155,7 +165,7 @@ for (let i = 0; i < colourOptions; i++) {
     lit: await litPixels(),
     viewportRequests:
       requests.filter((r) => r.path === '/v1/viewport' && !r.artifacts).length - viewportsBefore,
-    legend: (await page.locator('#controls').innerText())
+    legend: (await page.locator('#instruments').innerText())
       .split('\n')
       .filter((l) => l.trim())
       .slice(-3)
@@ -172,16 +182,17 @@ if (categoryOption) {
 
 // Both columns: what you change is on the left, what came back is on the right, and a report
 // that read only one of them would omit half of what the run did.
-const panelText = await page
-  .evaluate(() =>
-    [document.getElementById('controls')?.innerText, document.getElementById('stats')?.innerText]
-      .filter(Boolean)
-      .join('\n')
-  )
+// The instruments and the explorer's panels alike: what you change and what came back, read
+// through shadow roots by the locator rather than by an id the shadow DOM hides.
+const panelText = await Promise.all([
+  page.locator('#instruments').innerText(),
+  page.locator('tessera-status').first().innerText(),
+  page.locator('tessera-filter-panel').first().innerText()
+])
+  .then((parts) => parts.filter(Boolean).join('\n'))
   .catch(() => '(no panels)');
-const canvasPixels = await page.evaluate(() => {
-  const canvas = document.querySelector('canvas');
-  if (!canvas) return {found: false};
+const canvasPixels = await page.locator('canvas').first().evaluate((canvas) => {
+  if (!(canvas instanceof HTMLCanvasElement)) return {found: false};
   // Read back the framebuffer via a 2D copy: how many pixels are not the page background?
   const off = document.createElement('canvas');
   off.width = canvas.width;
@@ -195,6 +206,10 @@ const canvasPixels = await page.evaluate(() => {
   }
   return {found: true, width: off.width, height: off.height, lit, total: data.length / 4};
 });
+
+// The strip's state, read before the browser goes: the smoke's last word on whether the page
+// ended `shown`, through the part, which is the only way the shadow DOM offers.
+const stripState = await page.locator('tessera-status [part="state"]').first().getAttribute('data-state').catch((e) => `error: ${e.message.slice(0, 120)}`);
 
 // A minute, not the default thirty seconds: a screenshot waits for a frame, and this page draws
 // ~10^6 marks under a software rasteriser in CI-like conditions.
@@ -246,6 +261,8 @@ for (const c of colourSeries) {
 }
 console.log('--- panels ---');
 console.log(panelText.split('\n').map((l) => `  ${l}`).join('\n'));
+console.log('--- the status strip’s state ---');
+console.log(`  data-state=${stripState}`);
 console.log('--- canvas ---');
 console.log(' ', JSON.stringify(canvasPixels));
 // **`/v1/categories` no longer refuses a `derived` column, so a 500 here is breakage.** This block
@@ -281,6 +298,7 @@ const maskingVisible = principals.length < 2 || distinctVisible.size > 1;
 const failures = [];
 if (!viewportOk) failures.push('no successful /v1/viewport');
 if (!drewSomething) failures.push('nothing drawn on the canvas');
+if (stripState !== 'shown') failures.push(`the status strip ended in ${stripState}, not shown`);
 if (!maskingVisible) failures.push('every principal reported the same visible count');
 if (categoryFaults.length)
   failures.push(`${categoryFaults.length} 500(s) from /v1/categories — the derived predicate is built, so this is a fault`);

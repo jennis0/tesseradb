@@ -53,6 +53,11 @@ export type TesseraClientOptions = {
    */
   sessionCredential?: string;
   /**
+   * Per-response decode time — an instrument's hook (design §5.10's measurements), never a
+   * behaviour: `ms` from bytes-in to typed-arrays-out, with the response's size and point count.
+   */
+  onDecode?: (ms: number, bytes: number, points: number) => void;
+  /**
    * Override where responses are decoded. Defaults to a worker in a browser, inline elsewhere.
    *
    * Exists for tests and for a consumer that already owns a worker pool — not as a switch anyone
@@ -215,8 +220,11 @@ export class TesseraClient {
     const size = bytes.byteLength;
     const stage = response.headers.get('x-tessera-stage-ns');
     this.decoder ??= this.opts.decoder ?? createDecoder();
+    const decodeStarted = performance.now();
+    const result = await this.decoder.decode(bytes, background);
+    this.opts.onDecode?.(performance.now() - decodeStarted, size, result.ids.length);
     return {
-      result: await this.decoder.decode(bytes, background),
+      result,
       timings: {
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
