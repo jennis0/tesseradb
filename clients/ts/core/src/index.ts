@@ -88,7 +88,8 @@ export {
   type FormatOptions,
   type Masked
 } from './counts.js';
-export {createStore, type Store} from './store.js';
+export {createStore, REGION_HELD_LIMIT, type Store} from './store.js';
+export {cellExceedsPixel, insideBox, rasteriseBox, REGION_TILE_BOUND, type RegionRequest} from './region.js';
 export type {
   ArtifactsProjection,
   FiltersProjection,
