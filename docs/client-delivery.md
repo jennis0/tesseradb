@@ -39,9 +39,9 @@ client steps can see what they wait on):
 | track | ask | gates | status |
 |---|---|---|---|
 | S1 | D10 — viewer-plane `serve.cors_origins` | step 4's production docs, step 5 | not started |
-| S2 | D9 — the wire idioms at the contracts amendment | step 6 | not started |
-| S3 | D12 — the per-point membership column, deepest served, with its leak-register pass | step 3's colouring | not started |
-| S4 | D13 — a dependent artifact's target | label counts | not started |
+| S2 | D9 — the wire idioms at the contracts amendment | step 6 | **`layers` built on `server/s3-membership`** (2026-08-25): omitted or `[]` is none, `"all"` is every reachable layer, `all` refused as a name; the contracts wording is in S3's report for step 6 to fold |
+| S3 | D12 — the per-point membership column, deepest served, with its leak-register pass | step 3's colouring | **built** on `server/s3-membership` (2026-08-25): `membership:<layer>` per served layer, nullable `u64`, after the scalars; both layouts; measured; the register row (C30) is **proposed** in [the memo](evidence/memos/2026-08-25-d12-membership-column.md), **owner ruling pending** |
+| S4 | D13 — a dependent artifact's target | label counts | **ruled and built** on `server/s3-membership` (2026-08-25): not the target's id — a dependent carries its target's masked count; register note proposed in S3's memo; the drill-down route left for a ruling |
 | S5 | D8 — the fetch-model hint in `/v1/meta` | nothing; the store observes | not started |
 | S6 | D11 — the selection operand; the export verb; the runtime-artifact path | *filter to this*, *export*, *save* | not started |
 | S7 | D14 — a verified-assertion auth plugin | C1's production token story | not started |
