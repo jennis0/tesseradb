@@ -1,0 +1,25 @@
+{
+  "name": "@tesseradb/example-react-explorer",
+  "private": true,
+  "type": "module",
+  "description": "C1 in React 19: the explorer through @tesseradb/react's wrappers, with the item card replaced by a host component reading useProjection.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@tesseradb/client": "*",
+    "@tesseradb/components": "*",
+    "@tesseradb/react": "*",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.2.0"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@tesseradb/example-plain-html",
+  "private": true,
+  "type": "module",
+  "description": "C1 with no build step: the self-contained bundle by relative path with its integrity hash, and the app server that holds the session credential.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "serve": "node server.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.0"
+  }
+}
