@@ -1,6 +1,6 @@
 import {OrthographicView, type BinaryAttribute as DeckBinaryAttribute, type Layer} from '@deck.gl/core';
 import {LineLayer, ScatterplotLayer, TextLayer} from '@deck.gl/layers';
-import {CELLS_PER_WORLD_UNIT, MAX_DEPTH, WORLD_SIZE} from '@tessera/client';
+import {CELLS_PER_WORLD_UNIT, MAX_DEPTH, WORLD_SIZE, type DriverViewState} from '@tessera/client';
 import {
   placedArtifacts,
   servedLineage,
@@ -26,26 +26,12 @@ export const INITIAL_VIEW_STATE = {
   maxZoom: MAX_DEPTH
 };
 
-
-export type ViewState = {
-  target: [number, number, number];
-  zoom: number;
-};
-
-
-function worldToDataBbox(
-  world: [number, number, number, number],
-  q: {xMin: number; xMax: number; yMin: number; yMax: number}
-): [number, number, number, number] {
-  const sx = (q.xMax - q.xMin) / WORLD_SIZE;
-  const sy = (q.yMax - q.yMin) / WORLD_SIZE;
-  return [
-    q.xMin + world[0] * sx,
-    q.yMin + world[1] * sy,
-    q.xMin + world[2] * sx,
-    q.yMin + world[3] * sy
-  ];
-}
+/**
+ * The driver's own view type, re-exported for the deck side. It used to be declared here a second
+ * time, identically — one type, two homes, and a rename in one would not have been caught in the
+ * other.
+ */
+export type ViewState = DriverViewState;
 
 /**
  * The current colour encoding, resolved from state.

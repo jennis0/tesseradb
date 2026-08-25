@@ -1,4 +1,5 @@
 import {
+  assertCompositionMatchesServed,
   compose,
   fold,
   type Band,
@@ -156,26 +157,31 @@ function fromComposition(c: Composition, standIn: Assembled['standIn']): Assembl
   };
 }
 
-/** Assemble a frame — core decides what contributes; this materialises it. */
-export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assembled {
-  const c = compose(frame);
-  return fromComposition(c, materialiseStandIn(c.standIn, c.provisional, columns ?? []));
+/**
+ * Materialise a presented composition into buffers, reusing what a held frame already built.
+ *
+ * The stand-in piece list comes back from core's `fold` **by reference** when nothing was
+ * filtered, and that identity is the signal here: the held buffers — and with them the colour memo
+ * and deck's upload skip — survive untouched. A derive, or a fold that filtered a piece, pays the
+ * copy for the columns named (the one being coloured by, in practice).
+ */
+export function materialise(
+  c: Composition,
+  held: Assembled | null,
+  columns: Iterable<string>
+): Assembled {
+  if (held && held.composition.standIn === c.standIn) return fromComposition(c, held.standIn);
+  return fromComposition(c, materialiseStandIn(c.standIn, c.provisional, columns));
 }
 
-/**
- * Fold fresh exact bands into a frame already on screen.
- *
- * Core's `fold` recomputes the exact half and filters the stand-in pieces against the new exact
- * ground; when nothing was filtered the piece list comes back by reference and the held buffers
- * — and with them the colour memo and deck's upload skip — survive untouched.
- */
+/** Compose and materialise a replica frame in one step — the shape the tests drive. */
+export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assembled {
+  return materialise(compose(frame), null, columns ?? []);
+}
+
+/** Fold fresh exact bands into a frame already on screen — see {@link materialise}. */
 export function refreshExact(held: Assembled, bands: Band[], version: number): Assembled {
-  const folded = fold(held.composition, bands, version);
-  const standIn =
-    folded.standIn === held.composition.standIn
-      ? held.standIn
-      : materialiseStandIn(folded.standIn, folded.provisional, Object.keys(held.standIn.scalars));
-  return fromComposition(folded, standIn);
+  return materialise(fold(held.composition, bands, version), held, Object.keys(held.standIn.scalars));
 }
 
 /**
@@ -207,18 +213,5 @@ export function foldBandColumn<T>(
  * a superset read as density overstates (`delta-serving.md` §7).
  */
 export function assertAssemblyMatchesServed(assembled: Assembled): void {
-  if (assembled.exactDrawn !== assembled.exactServed) {
-    throw new Error(
-      `assembly: drawing ${assembled.exactDrawn} marks across exact tiles but the server served ` +
-        `${assembled.exactServed}. A mark was lost between the replica and the buffers.`
-    );
-  }
-  for (const tile of assembled.tiles) {
-    if (!tile.exact && tile.counts !== null) {
-      throw new Error(
-        `tile ${tile.prefix} draws a superset of its served set but carries counts. ` +
-          `A superset of marks must never be read as density.`
-      );
-    }
-  }
+  assertCompositionMatchesServed(assembled.composition);
 }

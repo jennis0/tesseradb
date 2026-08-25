@@ -1,5 +1,5 @@
 import {Deck} from '@deck.gl/core';
-import {Replica, TesseraClient} from '@tessera/client';
+import {Presenter, Replica, TesseraClient, defaultFrameScheduler} from '@tessera/client';
 import {loadDatasets, readConfig, type Dataset} from './config.js';
 import {esc} from './html.js';
 import {renderErrors} from './panels/errors.js';
@@ -11,7 +11,7 @@ import {renderStats, toggleStatsDrawer} from './panels/stats.js';
 import {renderCounts, renderDepth} from './panels/view.js';
 import {renderArtifactDetail, renderArtifacts, renderLayerControl} from './panels/layers.js';
 import {ArtifactChannel, loadArtifactPlaces} from './artifacts.js';
-import {foldBandColumn} from './assemble.js';
+import {foldBandColumn, materialise} from './assemble.js';
 import {countCodes, countCodesCached, extendRanks, widenDomain} from './colour.js';
 import {
   composeFilters,
@@ -23,7 +23,6 @@ import {
 import {MarkSlab} from './slab.js';
 import {installTrace, installTraceBar, trace} from './trace.js';
 import {coalesce, createStore, type Store} from './state.js';
-import {DriverBinding} from './binding.js';
 import {
   INITIAL_VIEW_STATE,
   VIEW,
@@ -54,7 +53,7 @@ let requestCount = 0;
  */
 let client: TesseraClient | null = null;
 let replica: Replica | null = null;
-let controller: DriverBinding | null = null;
+let presenter: Presenter | null = null;
 /**
  * The annotation channel, which issues its own requests rather than reading the point path's.
  *
@@ -176,7 +175,7 @@ const deck = new Deck({
   onViewStateChange: ({viewState}) => {
     const v = viewState as {target: number[]; zoom: number};
     currentView = {target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
-    controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+    presenter?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
     artifactChannel?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
     return viewState;
   },
@@ -438,7 +437,7 @@ async function loadFilterValues(column: string) {
  * changed the question is the only party that knows the held answers are to a different one.
  */
 function applyFilters() {
-  controller?.cancel();
+  presenter?.cancel();
   replica?.reset();
   store.update((s) => {
     s.assembled = null;
@@ -450,7 +449,7 @@ function applyFilters() {
     s.lastPick = null;
   });
   trace.event('filters', {n: Object.keys(store.state.filters).length});
-  controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+  presenter?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
 
 let filterTimer: ReturnType<typeof setTimeout> | null = null;
@@ -614,7 +613,7 @@ function bindControls() {
     trace.event('principal', {label: preset.label, n: preset.terms.length});
     // A different principal is a different mask: abort anything in flight for the old token, and
     // drop the calibration, which was measured against a different visible set.
-    controller?.cancel();
+    presenter?.cancel();
     // The same argument, and a sharper one: the same cluster has a different count under a
     // different mask, and some clusters cease to exist entirely. Held artifacts belong to the old
     // token and must not be drawn for a moment longer.
@@ -655,7 +654,7 @@ function bindControls() {
         // The artifact channel is *not* scheduled here: there is no drawn frame at this moment, so
         // it would have no depth to ask at. It asks on the first frame the new token produces —
         // see the subscriber below `activate`.
-        controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+        presenter?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
       })
       .catch((error) => recordFailure(store, `authorise ${preset.label}`, error));
   });
@@ -711,8 +710,8 @@ function bindControls() {
     });
     // The driver holds its own copy of the budget — the store's is only seed and display — so the
     // change must be handed over before the reschedule or the plan replays the old depth.
-    controller?.setBudget(Number(budgetInput.value));
-    controller?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+    presenter?.setBudget(Number(budgetInput.value));
+    presenter?.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
   });
 }
 
@@ -971,12 +970,12 @@ store.subscribe(() => {
  * bundle changed.
  */
 async function activate(dataset: Dataset) {
-  controller?.cancel();
+  presenter?.cancel();
   artifactChannel?.cancel();
   client?.close();
   replica?.reset();
   markSlab.clear();
-  controller = null;
+  presenter = null;
   replica = null;
   artifactChannel = null;
   presets = dataset.presets;
@@ -1093,14 +1092,79 @@ async function activate(dataset: Dataset) {
         if (trace.enabled) trace.event(kind, {ms, n});
         // A piece of a split response has been absorbed: its bands are drawable NOW, not when the
         // whole fetch settles — so paint them. rAF-coalesced, and the fold path makes it cheap.
-        if (kind === 'store') controller?.absorbed();
+        if (kind === 'store') presenter?.absorbed();
       }
     }
   );
   // `?prefetch=0` turns look-ahead off without touching the replica — the A/B the measurement
   // wants, and the switch an operator watching aggregate select CPU would reach for.
   const prefetch = new URLSearchParams(location.search).get('prefetch') !== '0';
-  controller = new DriverBinding(store, replica, prefetch);
+  /**
+   * The presented frame lives in the client (`Presenter`): it executes the driver's fold-or-derive
+   * verdict under the one clock the vis side owns, and hands over a composition. What remains here
+   * is what the panels and the encoding need written into the app store.
+   */
+  presenter = new Presenter(
+    replica,
+    {
+      kMaxMarks: meta.selection.kMaxMarks,
+      maxTilesPerRequest: meta.maxTilesPerRequest,
+      thetaTargetMarks: meta.selection.thetaTargetMarks
+    },
+    {
+      now: () => performance.now(),
+      after: (ms, fire) => setTimeout(fire, ms),
+      cancel: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>)
+    },
+    defaultFrameScheduler(),
+    {
+      onPresented: ({frame, plan, fetched, calibration}) => {
+        const columns = store.state.colourBy ? [store.state.colourBy] : [];
+        const assembled = materialise(frame, store.state.assembled, columns);
+        const {mTarget, visibleInView} = calibration;
+        store.update((s) => {
+          s.assembled = assembled;
+          s.sessionWarm = true;
+          s.status = 'shown';
+          s.mTarget = mTarget;
+          if (visibleInView !== undefined) s.lastVisibleInView = visibleInView;
+          if (s.colourBy && !meta.declaredScalars.find((c) => c.name === s.colourBy)?.category) {
+            const widened = foldBandColumn(assembled, s.colourBy, s.domains[s.colourBy] ?? null, widenDomain);
+            if (widened) s.domains[s.colourBy] = widened;
+          }
+          if (fetched?.response) {
+            s.lastTimings = fetched.response.timings;
+            s.lastBytes = fetched.plan.bytes;
+          }
+          if (fetched) {
+            s.lastPlan = {omitted: fetched.plan.wanted - fetched.plan.novel, fetched: fetched.plan.novel};
+          }
+          // What the budget chose for this frame. Without it the depth panel reads `—` for every
+          // figure it has, which is worse than absent: the panel is there to show the prediction
+          // against what actually arrived.
+          s.depthChoice = {...plan.choice, requestedAt: Date.now()};
+          s.replicaBytes = replica!.bytes;
+          s.replicaPoints = replica!.points;
+          s.replicaBands = replica!.bandCount;
+          s.inFlight = 0;
+        });
+      },
+      onStatus: (status, refusal) => {
+        store.update((s) => {
+          s.status = status;
+          s.inFlight = status === 'loading' ? 1 : 0;
+          if (status === 'refused') {
+            s.assembled = null;
+            s.lastError = refusal;
+          }
+        });
+      },
+      onTrace: (kind, fields) => trace.event(kind, fields),
+      onPhase: (kind, fn, fields) => trace.phase(kind, fn, fields)
+    },
+    {budget: store.state.budget, prefetchLayers: config.prefetchLayers},
+    prefetch
+  );
   artifactChannel = new ArtifactChannel(client, store, meta.quantisation);
   // Unawaited: the sidecar decides where a cluster is drawn, not whether it is served, so the map
   // and the counts panel do not wait on it.
@@ -1124,7 +1188,7 @@ async function activate(dataset: Dataset) {
     if (operand.family === 'category') void loadFilterValues(operand.column);
   }
 
-  controller.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
+  presenter.schedule(currentView, mapEl.clientWidth, mapEl.clientHeight);
 }
 
 /**

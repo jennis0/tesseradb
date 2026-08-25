@@ -4,10 +4,10 @@ import {
   tileRectOfBbox,
   worldBbox,
   type Artifact,
+  type DriverViewState as ViewState,
   type Quantisation
 } from '@tessera/client';
 import type {Store} from './state.js';
-import type {ViewState} from './viewportLayer.js';
 
 /**
  * The annotation channel: which artifacts the current view is served, and what each one's masked

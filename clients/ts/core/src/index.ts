@@ -35,3 +35,13 @@ export type {Plan, PlannedFetch, PlannerInputs, Viewport} from './prefetch.js';
 export type {ReplicaFrame, ReplicaOptions} from './replica.js';
 export {Driver, type Clock, type DriverEvents, type DriverMeta, type DriverOptions, type ViewState as DriverViewState} from './driver.js';
 export {compose, fold, type ComposedTile, type Composition, type StandInPiece} from './compose.js';
+export {
+  Presenter,
+  assertCompositionMatchesServed,
+  defaultFrameScheduler,
+  type FrameScheduler,
+  type Presented,
+  type PresentedStatus,
+  type PresenterEvents,
+  type Refusal
+} from './presented.js';
