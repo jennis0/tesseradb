@@ -68,7 +68,7 @@ it keeps one.
    *Broken:* the replica elides tiles it already holds and an elided tile contributes no
    artifacts, so a cluster's presence would depend on whether its ground happened to be novel and
    the map would **lose clusters as the cache warmed** — the worst kind of bug, because the cache
-   working is what makes it appear (`clients/ts/viewer/src/artifacts.ts` states this at the
+   working is what makes it appear (`clients/ts/core/src/artifactChannel.ts` states this at the
    site). Point requests send `layers: []` for the same reason; with the membership column (D12)
    they name the layers on and pay the pass.
 
