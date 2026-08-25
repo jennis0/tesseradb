@@ -42,20 +42,38 @@ function fakeModel(initial: Record<string, unknown>): WidgetModel & {sent: Sent[
   return m;
 }
 
-const base = {url: 'http://tessera.test', view: null, layers: [], colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400};
+const META = {
+  apiVersion: 1,
+  idset: 0,
+  views: [{id: 's0', displayName: 'default'}],
+  quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1},
+  declaredScalars: [],
+  layers: [],
+  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000},
+  maxTilesPerRequest: 4096,
+  filterOperands: [] as FilterOperandSet[]
+};
 
+const base = {url: 'http://tessera.test', view: null, layers: null, colour_by: null, filters: null, bbox: null, selected: null, selected_artifact: null, region: null, explorer_layout: 'docked', height: 400};
+
+/** A model initialised and one view rendered, so there is a store: the store is per view. */
 function setUp(initial: Record<string, unknown> = {}) {
   const model = fakeModel({...base, ...initial});
   let supplier: (() => Promise<{token: string; expiresAt: number}>) | null = null;
-  const store = fakeStore();
+  const stores: FakeStore[] = [];
   const dispose = initialize({
     model,
     storeFactory: (opts) => {
       supplier = opts.authorise;
+      const store = fakeStore();
+      stores.push(store);
       return store as Store;
     }
   });
-  return {model, store, supplier: () => supplier!, dispose};
+  const el = document.createElement('div');
+  document.body.append(el);
+  const unmount = render({model, el});
+  return {model, store: stores[0]!, stores, el, unmount, supplier: () => supplier!, dispose};
 }
 
 describe('the token protocol', () => {
@@ -90,26 +108,47 @@ describe('the token protocol', () => {
     await expect(p).rejects.toThrow('no credential');
   });
 
-  it('initialize is once per model: two renders share one store and one ready', async () => {
-    const {model, supplier} = setUp();
-    const el1 = document.createElement('div');
+  it('two views of one model: a store each, one supplier, and one ready', async () => {
+    const {model, supplier, stores, el} = setUp();
     const el2 = document.createElement('div');
-    document.body.append(el1, el2);
-    render({model, el: el1});
-    render({model, el: el2});
+    document.body.append(el2);
+    const unmount2 = render({model, el: el2});
     await settle(document.body);
     expect(stateOf(model)?.views).toBe(2);
-    expect(el1.querySelector('tessera-explorer')).not.toBeNull();
-    supplier()();
-    supplier()();
-    expect(model.sent.filter((s) => (s.content as {type: string}).type === 'ready')).toHaveLength(1);
+    expect(stores).toHaveLength(2);
+    expect(el.querySelector('tessera-explorer')).not.toBeNull();
+    // Both stores ask; one ready goes out, and a held token is handed back without a round trip.
+    const a = supplier()();
+    const b = supplier()();
+    model.fire('msg:custom', {type: 'token', token: 'shared', expires_at: null});
+    expect((await a).token).toBe('shared');
+    expect((await b).token).toBe('shared');
+    expect((await supplier()()).token).toBe('shared');
+    expect(model.sent.map((s) => s.content)).toEqual([{type: 'ready'}]);
+    // A view's store is disposed with the view.
+    unmount2();
+    expect(stores[1]!.calls.map((c) => c.name)).toContain('dispose');
+    expect(stateOf(model)?.views).toBe(1);
+  });
+
+  it('a token near expiry is renewed with reauthorise; one with no expiry is never asked for again', async () => {
+    const {model, supplier} = setUp();
+    const first = supplier()();
+    model.fire('msg:custom', {type: 'token', token: 'a', expires_at: Date.now() / 1000 + 10});
+    await first;
+    const second = supplier()();
+    expect(model.sent.map((s) => s.content)).toEqual([{type: 'ready'}, {type: 'reauthorise'}]);
+    model.fire('msg:custom', {type: 'token', token: 'b', expires_at: Date.now() / 1000 + 3600});
+    expect((await second).token).toBe('b');
+    expect((await supplier()()).token).toBe('b');
+    expect(model.sent).toHaveLength(2);
   });
 });
 
 describe('the up-sync', () => {
   function shown(store: FakeStore, composition: object) {
     store.set('status', status({}));
-    store.set('view', {...store.get('view'), composition: composition as never});
+    store.set('view', {...store.get('view'), composition: {tiles: [], exact: [], standIn: [], exactDrawn: 0, exactServed: 0, ...composition} as never});
   }
 
   it('happens at the settle, not per projection change, and carries the control traits from the store', () => {
@@ -150,6 +189,7 @@ describe('the up-sync', () => {
 
   it('the echo guard: an up-synced layers change does not come back down as setLayers', () => {
     const {model, store} = setUp();
+    expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
     store.set('artifacts', {...store.get('artifacts'), layers: ['x']});
     shown(store, {});
     expect(store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
@@ -159,11 +199,36 @@ describe('the up-sync', () => {
 });
 
 describe('the down-sync', () => {
+  it('a bbox set in the kernel before meta is fitted when meta arrives, and echoes nothing back', async () => {
+    const {model, store, el} = setUp();
+    await settle(document.body);
+    const explorer = el.querySelector('tessera-explorer') as unknown as {map: {fitBbox(b: number[]): boolean} | null};
+    const fitted: number[][] = [];
+    const map = explorer.map;
+    expect(map).not.toBeNull();
+    // As the real one: nothing fits before meta, and the box is pending.
+    map!.fitBbox = (b) => {
+      if (!store.get('meta')) return false;
+      fitted.push(b);
+      return true;
+    };
+    model.set('bbox', [1, 2, 3, 4]);
+    expect(fitted).toEqual([]);
+    store.set('meta', META as never);
+    expect(fitted).toEqual([[1, 2, 3, 4]]);
+  });
+
+  it('layers null leaves the default and [] is none', () => {
+    expect(setUp({layers: null}).store.calls.filter((c) => c.name === 'setLayers')).toHaveLength(0);
+    expect(setUp({layers: []}).store.calls.filter((c) => c.name === 'setLayers').map((c) => c.args)).toEqual([[[]]]);
+  });
+
   it('applies layers and colour_by set in the kernel, and filters once meta has the operand list', () => {
     const {model, store} = setUp({layers: ['clusters/a'], colour_by: 'cluster:clusters/a'});
     expect(store.calls.map((c) => c.name)).toEqual(['setLayers', 'setColourBy']);
+    // Only the active view syncs up; a settle on it after meta carries what the store applied.
     const operands: FilterOperandSet[] = [{column: 'year', family: 'numeric', operands: ['range']}];
-    store.set('meta', {filterOperands: operands} as never);
+    store.set('meta', {...META, filterOperands: operands} as never);
     model.set('filters', {year: {range: {gte: 2000}}});
     const applied = store.calls.filter((c) => c.name === 'setFilters');
     expect(applied).toHaveLength(1);
@@ -177,7 +242,7 @@ describe('the down-sync', () => {
   it('a filters expression set before meta is applied at meta', () => {
     const {model, store} = setUp({filters: {year: {range: {lte: 5}}}});
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(0);
-    store.set('meta', {filterOperands: [{column: 'year', family: 'numeric', operands: ['range']}]} as never);
+    store.set('meta', {...META, filterOperands: [{column: 'year', family: 'numeric', operands: ['range']}]} as never);
     expect(store.calls.filter((c) => c.name === 'setFilters')).toHaveLength(1);
     expect(model.sent).toEqual([]);
   });

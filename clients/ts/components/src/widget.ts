@@ -36,11 +36,13 @@ import './explorer.js';
  * off the pan path (client-interaction §7). Ids cross as decimal strings: a `tessera_id` is a
  * `u64`, which is not a JS number, and a `BigInt` does not serialise.
  *
- * **The store is per model, the explorer per view.** anywidget calls `initialize` once per model
- * and `render` once per view of it; the store lives with the model and every view mounts its own
- * `<tessera-explorer .store>`, so a second view of one widget draws the same replica rather than
- * fetching it twice. The explorer never disposes a store it was handed; the store is disposed
- * when the model is.
+ * **The token is per model; the store and the camera are per view.** anywidget calls
+ * `initialize` once per model and `render` once per view of it. A store has one view input, so
+ * two explorers sharing one store would fight over the camera and one of them would draw the
+ * other's frame; each view builds its own store over the shared supplier instead, and the
+ * supplier hands a token it already holds back without a round trip, so a second view costs no
+ * second `ready`. Up-syncs come from the **active** view — the one whose camera last moved — and
+ * down-syncs go to every view; the store is disposed with its view.
  *
  * **Echo guard.** Backbone fires `change:<key>` for a `model.set` made here as much as for one
  * made in the kernel, so every up-sync sets a flag the down-sync handlers read and ignore. Without
@@ -58,61 +60,72 @@ export type WidgetModel = {
   send(content: unknown, callbacks?: unknown, buffers?: ArrayBuffer[]): void;
 };
 
-/** What the kernel sends the page. `expires_at` is seconds since the epoch, as `/session/authorise` reports it. */
+/** What the kernel sends the page. `expires_at` is seconds since the epoch, as `/session/authorise` reports it, or `null` when unknown. */
 export type KernelMessage =
-  | {type: 'token'; token: string; expires_at: number}
+  | {type: 'token'; token: string; expires_at: number | null}
   | {type: 'refused'; detail: string};
 
 /** What the page sends the kernel. */
 export type PageMessage = {type: 'ready'} | {type: 'reauthorise'} | {type: 'error'; what: string; detail: string};
 
-type ModelState = {
+type ViewState = {
+  explorer: TesseraExplorer;
   store: Store | null;
-  supplier: TokenSupplier;
-  /** Every explorer mounted for this model, so a down-synced `bbox` reaches each camera. */
-  views: Set<TesseraExplorer>;
-  /** The box the camera last reported, in data coordinates — what the settle syncs up. */
+  unsubscribe: (() => void) | null;
+  /** The box this view's camera last reported, in data coordinates — what its settle syncs up. */
   lastBbox: [number, number, number, number] | null;
+};
+
+type ModelState = {
+  supplier: TokenSupplier;
+  storeFactory: StoreFactory;
+  views: Map<TesseraExplorer, ViewState>;
+  /** The view whose settles sync up: the last one mounted or moved. */
+  active: ViewState | null;
   /** A `bbox` the kernel set before any map could fit it (no view, or no meta yet); fitted at the first chance. */
   pendingFit: [number, number, number, number] | null;
   syncingUp: boolean;
-  unsubscribe: (() => void) | null;
   dispose(): void;
 };
 
 const states = new WeakMap<object, ModelState>();
 
 /** For a test: the state behind a model, once `initialize` has run. */
-export function stateOf(model: object): {store: Store | null; views: number} | null {
+export function stateOf(model: object): {stores: (Store | null)[]; views: number} | null {
   const s = states.get(model);
-  return s ? {store: s.store, views: s.views.size} : null;
+  return s ? {stores: [...s.views.values()].map((v) => v.store), views: s.views.size} : null;
 }
 
 /**
- * The token supplier over the comm. One outstanding request at a time: a `ready` (the first) or a
- * `reauthorise` (every later one) is sent, and the promise settles on the next `token` or
- * `refused` message. A second call while one is outstanding shares its promise rather than asking
- * the kernel twice.
+ * The token supplier over the comm, shared by every view of the model. A token it holds that is
+ * not about to expire is handed back without a round trip — that is what makes a second view cost
+ * no second `ready`. Otherwise one request is outstanding at a time: `ready` the first time, then
+ * `reauthorise`, and the promise settles on the next `token` or `refused` message; a call while
+ * one is outstanding shares its promise rather than asking the kernel twice. An `expires_at` of
+ * `null` (a token handed in as a string, with no known expiry) is never renewed early; the server
+ * refuses it when it expires and the store reports `expired`.
  */
 function tokenSupplier(model: WidgetModel, onMessage: (cb: (msg: KernelMessage) => void) => void): TokenSupplier {
-  let outstanding: {resolve(v: {token: string; expiresAt: number}): void; reject(e: Error): void} | null = null;
+  type Got = {token: string; expiresAt: number};
+  let outstanding: {resolve(v: Got): void; reject(e: Error): void} | null = null;
   let asked = false;
+  let held: Got | null = null;
   onMessage((msg) => {
     if (!outstanding) return;
+    const o = outstanding;
+    outstanding = null;
     if (msg.type === 'token') {
-      const o = outstanding;
-      outstanding = null;
-      o.resolve({token: msg.token, expiresAt: msg.expires_at});
+      held = {token: msg.token, expiresAt: msg.expires_at === null ? Number.POSITIVE_INFINITY : msg.expires_at};
+      o.resolve(held);
     } else if (msg.type === 'refused') {
-      const o = outstanding;
-      outstanding = null;
       o.reject(new Error(msg.detail));
     }
   });
-  let inflight: Promise<{token: string; expiresAt: number}> | null = null;
+  let inflight: Promise<Got> | null = null;
   return () => {
+    if (held && (held.expiresAt === Number.POSITIVE_INFINITY || Date.now() / 1000 < held.expiresAt - 60)) return Promise.resolve(held);
     if (inflight) return inflight;
-    inflight = new Promise<{token: string; expiresAt: number}>((resolve, reject) => {
+    inflight = new Promise<Got>((resolve, reject) => {
       outstanding = {resolve, reject};
       model.send(asked ? {type: 'reauthorise'} : {type: 'ready'});
       asked = true;
@@ -202,15 +215,20 @@ function sameBbox(a: number[] | null, b: number[] | null): boolean {
   return a.every((v, i) => v === b[i]);
 }
 
-function buildStore(model: WidgetModel, supplier: TokenSupplier, factory: StoreFactory): Store | null {
+/** How a store is built — `createStore` unless a test injects one with no network. */
+export type StoreFactory = (options: {viewerUrl: string; authorise: TokenSupplier; view?: string}) => Store;
+
+function buildStore(model: WidgetModel, state: ModelState): Store | null {
   const url = model.get('url');
   if (typeof url !== 'string' || !url) return null;
   const view = model.get('view');
-  return factory({viewerUrl: url, authorise: supplier, ...(typeof view === 'string' && view ? {view} : {})});
+  return state.storeFactory({viewerUrl: url, authorise: state.supplier, ...(typeof view === 'string' && view ? {view} : {})});
 }
 
-/** How a store is built — `createStore` unless a test injects one with no network. */
-export type StoreFactory = (options: {viewerUrl: string; authorise: TokenSupplier; view?: string}) => Store;
+function heightOf(model: WidgetModel): string {
+  const h = model.get('height');
+  return typeof h === 'number' ? `${h}px` : String(h || '480px');
+}
 
 export function initialize({model, storeFactory = createStore}: {model: WidgetModel; storeFactory?: StoreFactory}): () => void {
   const listeners: ((msg: KernelMessage) => void)[] = [];
@@ -219,21 +237,18 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     for (const l of listeners) l(msg);
   };
   model.on('msg:custom', onCustom);
-  const supplier = tokenSupplier(model, (cb) => listeners.push(cb));
 
   const state: ModelState = {
-    store: null,
-    supplier,
-    views: new Set(),
-    lastBbox: null,
+    supplier: tokenSupplier(model, (cb) => listeners.push(cb)),
+    storeFactory,
+    views: new Map(),
+    active: null,
     pendingFit: null,
     syncingUp: false,
-    unsubscribe: null,
     dispose() {
-      state.unsubscribe?.();
-      state.unsubscribe = null;
-      state.store?.dispose();
-      state.store = null;
+      for (const v of state.views.values()) teardown(v);
+      state.views.clear();
+      state.active = null;
       model.off('msg:custom', onCustom);
     }
   };
@@ -249,8 +264,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     try {
       let dirty = false;
       for (const [k, v] of Object.entries(patch)) {
-        const cur = model.get(k);
-        if (JSON.stringify(cur) === JSON.stringify(v)) continue;
+        if (JSON.stringify(model.get(k)) === JSON.stringify(v)) continue;
         model.set(k, v);
         dirty = true;
       }
@@ -260,16 +274,49 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     }
   };
 
-  let lastComposition: object | null = null;
-  let lastRegion: object | null = null;
-  let lastSelection: object | null = null;
-  const follow = (store: Store) => {
-    state.unsubscribe?.();
-    lastComposition = null;
-    lastRegion = null;
-    lastSelection = null;
-    state.unsubscribe = store.subscribe(() => {
-      if (state.pendingFit && store.get('meta')) fit(state.pendingFit);
+  const applyFilters = (store: Store, expr: FilterExpr | null) => {
+    const meta = store.get('meta');
+    // Before `/v1/meta` there is no operand list to check against; `follow` applies the kernel's
+    // expression when meta arrives.
+    if (!meta) return;
+    try {
+      store.setFilters(draftOf(expr, meta.filterOperands));
+    } catch (e) {
+      report('filters', e);
+    }
+  };
+
+  // Down-sync: what the kernel holds, applied to one store (a new one, or one whose meta arrived).
+  const applyControls = (store: Store) => {
+    // `null` leaves the explorer's default; `[]` is none.
+    const layers = model.get('layers');
+    if (Array.isArray(layers)) store.setLayers(layers.map(String));
+    const colourBy = model.get('colour_by');
+    if (typeof colourBy === 'string' && colourBy) store.setColourBy(colourBy);
+    const filters = model.get('filters');
+    if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
+  };
+
+  const fit = (bbox: [number, number, number, number]) => {
+    let done = false;
+    for (const v of state.views.values()) done = (v.explorer.map?.fitBbox(bbox) ?? false) || done;
+    state.pendingFit = done ? null : bbox;
+  };
+
+  /** Follow one view's store: its settles and answers sync up while it is the active view. */
+  const follow = (v: ViewState, store: Store) => {
+    let lastComposition: object | null = null;
+    let lastRegion: object | null = null;
+    let lastSelection: object | null = null;
+    let metaSeen = false;
+    v.unsubscribe = store.subscribe(() => {
+      if (!metaSeen && store.get('meta')) {
+        metaSeen = true;
+        const filters = model.get('filters');
+        if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
+        if (state.pendingFit) fit(state.pendingFit);
+      }
+      if (state.active !== v) return;
       const status = store.get('status');
       const view = store.get('view');
       const patch: Record<string, unknown> = {};
@@ -279,7 +326,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
       const settled = (status.status === 'shown' || status.status === 'empty') && view.composition !== lastComposition;
       if (settled) {
         lastComposition = view.composition;
-        patch.bbox = state.lastBbox;
+        patch.bbox = v.lastBbox;
         patch.layers = store.get('artifacts').layers;
         patch.colour_by = store.get('legend').colourBy;
         patch.filters = store.get('filters').expr;
@@ -310,88 +357,73 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
     });
   };
 
-  const rebuild = () => {
-    state.unsubscribe?.();
-    state.unsubscribe = null;
-    state.store?.dispose();
-    state.store = buildStore(model, supplier, storeFactory);
-    if (state.store) {
-      follow(state.store);
-      applyControls(state.store);
-    }
-    for (const el of state.views) el.store = state.store;
+  const teardown = (v: ViewState) => {
+    v.unsubscribe?.();
+    v.unsubscribe = null;
+    v.store?.dispose();
+    v.store = null;
+    v.explorer.store = null;
   };
 
-  // Down-sync: what the kernel set, applied to the store; ignored while an up-sync is what moved it.
-  const applyControls = (store: Store) => {
-    const layers = model.get('layers');
-    if (Array.isArray(layers) && layers.length) store.setLayers(layers.map(String));
-    const colourBy = model.get('colour_by');
-    if (typeof colourBy === 'string' && colourBy) store.setColourBy(colourBy);
-    const filters = model.get('filters');
-    if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
-  };
-  const applyFilters = (store: Store, expr: FilterExpr | null) => {
-    const meta = store.get('meta');
-    if (!meta) {
-      // Before `/v1/meta` there is no operand list to check against; the store re-applies its own
-      // draft at meta, and the kernel's expression is applied then through the `meta` change below.
-      return;
+  /** Give a view a store — at mount, and again when `url` or `view` changes under it. */
+  const equip = (v: ViewState) => {
+    teardown(v);
+    v.store = buildStore(model, state);
+    if (v.store) {
+      follow(v, v.store);
+      applyControls(v.store);
     }
-    try {
-      store.setFilters(draftOf(expr, meta.filterOperands));
-    } catch (e) {
-      report('filters', e);
-    }
+    v.explorer.store = v.store;
   };
-  model.on('change:url', () => rebuild());
-  model.on('change:view', () => rebuild());
+
+  const rebuildAll = () => {
+    for (const v of state.views.values()) equip(v);
+  };
+  model.on('change:url', rebuildAll);
+  model.on('change:view', rebuildAll);
   model.on('change:layers', () => {
-    if (state.syncingUp || !state.store) return;
+    if (state.syncingUp) return;
     const layers = model.get('layers');
-    if (Array.isArray(layers)) state.store.setLayers(layers.map(String));
+    if (!Array.isArray(layers)) return;
+    for (const v of state.views.values()) v.store?.setLayers(layers.map(String));
   });
   model.on('change:colour_by', () => {
-    if (state.syncingUp || !state.store) return;
+    if (state.syncingUp) return;
     const c = model.get('colour_by');
-    state.store.setColourBy(typeof c === 'string' && c ? c : null);
+    for (const v of state.views.values()) v.store?.setColourBy(typeof c === 'string' && c ? c : null);
   });
   model.on('change:filters', () => {
-    if (state.syncingUp || !state.store) return;
-    applyFilters(state.store, (model.get('filters') as FilterExpr | null) ?? null);
+    if (state.syncingUp) return;
+    const expr = (model.get('filters') as FilterExpr | null) ?? null;
+    for (const v of state.views.values()) if (v.store) applyFilters(v.store, expr);
   });
   model.on('change:bbox', () => {
     if (state.syncingUp) return;
     const bbox = model.get('bbox');
-    if (!Array.isArray(bbox) || bbox.length !== 4 || sameBbox(bbox as number[], state.lastBbox)) return;
+    if (!Array.isArray(bbox) || bbox.length !== 4 || sameBbox(bbox as number[], state.active?.lastBbox ?? null)) return;
     fit(bbox as [number, number, number, number]);
   });
-  const fit = (bbox: [number, number, number, number]) => {
-    let done = false;
-    for (const el of state.views) done = (el.map?.fitBbox(bbox) ?? false) || done;
-    state.pendingFit = done ? null : bbox;
-  };
-  // A filter expression set before meta arrived is applied once the operand list exists.
-  let metaSeen = false;
-  const onMeta = () => {
-    const store = state.store;
-    if (!store || metaSeen || !store.get('meta')) return;
-    metaSeen = true;
-    const filters = model.get('filters');
-    if (filters !== null && filters !== undefined) applyFilters(store, filters as FilterExpr);
-  };
-
-  rebuild();
-  if (state.store) {
-    const store = state.store;
-    const stop = store.subscribe(() => {
-      onMeta();
-      if (metaSeen) stop();
-    });
-  }
+  model.on('change:height', () => {
+    for (const v of state.views.values()) v.explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
+  });
   model.on('destroy', () => state.dispose());
+
+  // What `render` calls, kept on the state so a test's fake model needs no second entry point.
+  mounts.set(state, (explorer) => {
+    const v: ViewState = {explorer, store: null, unsubscribe: null, lastBbox: null};
+    state.views.set(explorer, v);
+    state.active = v;
+    equip(v);
+    return () => {
+      state.views.delete(explorer);
+      teardown(v);
+      if (state.active === v) state.active = [...state.views.values()].at(-1) ?? null;
+    };
+  });
   return () => state.dispose();
 }
+
+const mounts = new WeakMap<ModelState, (explorer: TesseraExplorer) => () => void>();
 
 export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement; signal?: AbortSignal}): () => void {
   let state = states.get(model);
@@ -402,20 +434,15 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
   }
   const explorer = document.createElement('tessera-explorer') as TesseraExplorer;
   explorer.layout = (model.get('explorer_layout') as 'docked' | 'overlay') || 'docked';
-  const height = model.get('height');
-  explorer.style.setProperty('--tessera-explorer-height', typeof height === 'number' ? `${height}px` : String(height || '480px'));
-  explorer.store = state.store;
+  explorer.style.setProperty('--tessera-explorer-height', heightOf(model));
+  el.append(explorer);
+  const unmount = mounts.get(state)!(explorer);
+  const v = state.views.get(explorer)!;
   const onView = (e: Event) => {
-    state!.lastBbox = (e as CustomEvent<{bbox: [number, number, number, number]}>).detail.bbox;
+    v.lastBbox = (e as CustomEvent<{bbox: [number, number, number, number]}>).detail.bbox;
+    state!.active = v;
   };
   explorer.addEventListener('tessera-viewchange', onView);
-  const onHeight = () => {
-    const h = model.get('height');
-    explorer.style.setProperty('--tessera-explorer-height', typeof h === 'number' ? `${h}px` : String(h || '480px'));
-  };
-  model.on('change:height', onHeight);
-  el.append(explorer);
-  state.views.add(explorer);
   if (state.pendingFit) {
     const pending = state.pendingFit;
     void explorer.updateComplete.then(() => {
@@ -423,9 +450,8 @@ export function render({model, el, signal}: {model: WidgetModel; el: HTMLElement
     });
   }
   const cleanup = () => {
-    state!.views.delete(explorer);
-    model.off('change:height', onHeight);
     explorer.removeEventListener('tessera-viewchange', onView);
+    unmount();
     explorer.remove();
   };
   signal?.addEventListener('abort', cleanup, {once: true});

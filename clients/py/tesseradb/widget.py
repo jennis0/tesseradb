@@ -79,6 +79,10 @@ class Map(anywidget.AnyWidget):
     on expiry), or a callable returning either (called on expiry). ``view`` names one of the
     served views; ``None`` is the first.
 
+    ``layers`` names the annotation layers to draw (their dependents come with them); ``None``
+    leaves the explorer's default and ``[]`` draws none. ``colour_by`` is a column, or
+    ``"cluster:<layer>"`` for the served clusters' exact membership (decision 0100).
+
     Reading the widget in the next cell is the point: ``m.selected`` is the picked item's id,
     ``m.selected_artifact`` the opened artifact's, ``m.region`` the drawn box or lasso with its
     counts, ``m.bbox`` where the camera settled. Setting ``m.filters`` (the wire's expression, e.g.
@@ -95,8 +99,9 @@ class Map(anywidget.AnyWidget):
     and reported through ``last_error`` and a warning, and applies nothing.
     """
 
-    _esm = traitlets.Unicode("").tag(sync=False)
-    _css = ""
+    # The bundle's text, set per instance from `bundle_path()`; anywidget's frontend reads both.
+    _esm = traitlets.Unicode("").tag(sync=True)
+    _css = traitlets.Unicode("").tag(sync=True)
 
     # Down.
     url = traitlets.Unicode().tag(sync=True)
@@ -106,14 +111,16 @@ class Map(anywidget.AnyWidget):
     height = traitlets.Int(480).tag(sync=True)
     # Both ways, synced up at the settle.
     bbox = traitlets.List(traitlets.Float(), minlen=4, maxlen=4, allow_none=True, default_value=None).tag(sync=True)
-    layers = traitlets.List(traitlets.Unicode()).tag(sync=True)
+    # `None` leaves the explorer's own default; `[]` is none; a list is exactly those (with their
+    # dependency closure, which the store adds).
+    layers = traitlets.List(traitlets.Unicode(), allow_none=True, default_value=None).tag(sync=True)
     colour_by = traitlets.Unicode(None, allow_none=True).tag(sync=True)
-    filters = traitlets.Dict(None, allow_none=True).tag(sync=True)
+    filters = traitlets.Dict(default_value=None, allow_none=True).tag(sync=True)
     # Up.
     # `Any` rather than `Unicode` so the validator below runs on an int and stringifies it.
     selected = traitlets.Any(None, allow_none=True).tag(sync=True)
     selected_artifact = traitlets.Any(None, allow_none=True).tag(sync=True)
-    region = traitlets.Dict(None, allow_none=True).tag(sync=True)
+    region = traitlets.Dict(default_value=None, allow_none=True).tag(sync=True)
     # Kernel-side only: the page's last refusal of something set here (never synced).
     last_error = traitlets.Unicode(None, allow_none=True)
 
@@ -123,7 +130,7 @@ class Map(anywidget.AnyWidget):
         token: Optional[TokenSource] = None,
         *,
         view: Optional[str] = None,
-        layers: Sequence[str] = (),
+        layers: Optional[Sequence[str]] = None,
         colour_by: Optional[str] = None,
         filters: Optional[dict] = None,
         bbox: Optional[Sequence[float]] = None,
@@ -149,7 +156,7 @@ class Map(anywidget.AnyWidget):
         super().__init__(
             url=url,
             view=view,
-            layers=list(layers),
+            layers=None if layers is None else list(layers),
             colour_by=colour_by,
             filters=filters,
             bbox=None if bbox is None else [float(v) for v in bbox],
@@ -204,7 +211,9 @@ class Map(anywidget.AnyWidget):
         return _decimal_id(proposal["value"], proposal["trait"].name)
 
     @traitlets.validate("layers")
-    def _validate_layers(self, proposal: dict) -> list:
+    def _validate_layers(self, proposal: dict) -> Optional[list]:
+        if proposal["value"] is None:
+            return None
         layers = list(proposal["value"])
         if "all" in layers:
             raise traitlets.TraitError("`all` is not a layer name; name the layers, or set none")

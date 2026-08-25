@@ -44,7 +44,18 @@ def test_the_token_is_never_model_state(make):
     state = m.get_state()
     assert "tok-secret" not in json.dumps({k: v for k, v in state.items() if k != "_esm"})
     assert not any(name.startswith("token") for name in m.trait_names())
-    assert "_esm" not in m.keys or "_esm" not in [k for k in m.keys if m.traits()[k].metadata.get("sync")]
+
+
+def test_the_page_gets_the_bundle_as_synced_esm_and_empty_css(make):
+    m = make(token="t")
+    state = m.get_state()
+    assert state["_esm"].startswith("export function render")
+    assert state["_css"] == ""
+
+
+def test_the_up_traits_start_as_none_not_empty(make):
+    m = make(token="t")
+    assert m.region is None and m.filters is None and m.selected is None and m.bbox is None
 
 
 def test_ready_is_answered_with_the_token_as_a_custom_message(make):
@@ -109,12 +120,15 @@ def test_ids_are_decimal_strings(make):
     assert m.selected is None
 
 
-def test_layers_refuse_the_all_keyword(make):
+def test_layers_refuse_the_all_keyword_and_tell_none_from_default(make):
     m = make(token="t")
+    assert m.layers is None
     with pytest.raises(traitlets.TraitError):
         m.layers = ["all"]
     m.layers = ["clusters/a"]
     assert m.layers == ["clusters/a"]
+    m.layers = []
+    assert m.layers == []
 
 
 def test_bbox_is_four_floats_or_none(make):
@@ -136,6 +150,7 @@ def test_a_page_error_lands_in_last_error_and_a_warning(make):
 
 def test_the_synced_surface_is_exactly_the_design_s(make):
     synced = set(Map.class_traits(sync=True)) - set(anywidget.AnyWidget.class_traits(sync=True))
+    synced = {k for k in synced if not k.startswith("_")}  # `_esm` and `_css` are anywidget's
     assert synced == {
         "url", "view", "explorer_layout", "height",
         "bbox", "layers", "colour_by", "filters",
