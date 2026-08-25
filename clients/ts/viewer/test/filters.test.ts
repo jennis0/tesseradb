@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import type {FilterOperandSet} from '@tessera/client';
+import type {FilterOperandSet} from '@tesseradb/client';
 import {
   activeCount,
   composeFilters,

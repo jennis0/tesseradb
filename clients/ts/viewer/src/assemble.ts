@@ -9,7 +9,7 @@ import {
   type ScalarColumn,
   type StandInPiece,
   type TileRect
-} from '@tessera/client';
+} from '@tesseradb/client';
 
 /**
  * Materialising a composition into the buffers one `ScatterplotLayer` draws.

@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import type {Artifact} from '@tessera/client';
+import type {Artifact} from '@tesseradb/client';
 import {
   placedArtifacts,
   servedLineage,

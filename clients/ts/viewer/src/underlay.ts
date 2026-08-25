@@ -1,4 +1,4 @@
-import type {SubCell} from '@tessera/client';
+import type {SubCell} from '@tesseradb/client';
 
 /**
  * Rasterise a tile's masked sub-cell counts into an RGBA image for a `BitmapLayer`.

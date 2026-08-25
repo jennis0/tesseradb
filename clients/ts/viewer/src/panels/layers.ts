@@ -1,4 +1,4 @@
-import type {Artifact} from '@tessera/client';
+import type {Artifact} from '@tesseradb/client';
 import {servedLineage, type ServedLineage} from '../artifacts.js';
 import {esc, panel, row} from '../html.js';
 import type {AppState} from '../state.js';

@@ -45,3 +45,65 @@ export {
   type PresenterEvents,
   type Refusal
 } from './presented.js';
+export {
+  countCodes,
+  countCodesCached,
+  countCodesInPiece,
+  extendRanks,
+  numericValues,
+  rankedValues,
+  widenDomain,
+  widenDomainOver,
+  type Domain,
+  type Ranks
+} from './encoding.js';
+export {
+  activeCount,
+  composeFilters,
+  emptyDraft,
+  isPopulated,
+  type ColumnDraft,
+  type FilterDraft,
+  type TextMode
+} from './filters.js';
+export {
+  ArtifactChannel,
+  servedLineage,
+  subtreeOf,
+  type ArtifactChannelState,
+  type ServedLineage
+} from './artifactChannel.js';
+export {
+  SessionArtifactTable,
+  NO_ORDINAL,
+  type ArtifactEntry,
+  type ArtifactRef
+} from './artifactTable.js';
+export {
+  formatCount,
+  formatMasked,
+  NO_COUNT,
+  NO_MASKED,
+  type Count,
+  type FormatOptions,
+  type Masked
+} from './counts.js';
+export {createStore, type Store} from './store.js';
+export type {
+  ArtifactsProjection,
+  FiltersProjection,
+  LegendProjection,
+  MarksProjection,
+  ProjectionName,
+  Projections,
+  RegionProjection,
+  ReplicaProjection,
+  SelectionProjection,
+  SelectionShape,
+  StatusProjection,
+  StoreOptions,
+  TilesProjection,
+  TokenSupplier,
+  ViewInput,
+  ViewProjection
+} from './store.js';

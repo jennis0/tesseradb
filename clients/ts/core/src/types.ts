@@ -242,15 +242,17 @@ export type ViewportRequest = {
    */
   filters?: FilterExpr | null;
   /**
-   * Which annotation layers to answer for. Omitted means every layer this principal reaches; `[]`
-   * means none, and costs the server nothing.
+   * Which annotation layers to answer for. **Omitted or `[]` means none**; the string `'all'`
+   * means every layer this principal reaches; an array is those layers ∩ the reachable set.
    *
    * **It narrows and never widens.** Naming a layer this principal cannot reach is not a way to
-   * learn it exists — the response is what it would have been without the name. A client fetching
-   * points it will not draw artifacts against should send `[]` rather than omitting this, so a
-   * deployment with layers does not pay for them on every tile request.
+   * learn it exists — the response is what it would have been without the name. A client that wants
+   * artifacts names the layers that are on (or `'all'`); a point-fetching client that wants none
+   * sends `[]` or omits this, so a deployment with layers does not pay for them on every tile
+   * request. The old convention — omitted meant *all* — was replaced server-side; do not rely on
+   * omission meaning anything but *none*.
    */
-  layers?: string[];
+  layers?: string[] | 'all';
   /**
    * How many artifacts the client wants back at most, in the same shape as `k` beside it.
    *

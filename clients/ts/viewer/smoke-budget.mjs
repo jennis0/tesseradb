@@ -40,7 +40,7 @@ await page.waitForTimeout(settle);
 
 const readPanels = () =>
   page.evaluate(() => {
-    const text = document.querySelector('#panels')?.textContent ?? '';
+    const text = document.querySelector('#stats')?.textContent ?? '';
     // The row spans concatenate label and value with no separator, so strip whitespace entirely.
     const flat = text.replace(/\s+/g, '');
     const shown = /([\d,]+)of([\d,]+)shown/.exec(flat);

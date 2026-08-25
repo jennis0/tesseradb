@@ -199,6 +199,40 @@ describe('driver', () => {
     expect(h.calls.length).toBe(before);
   });
 
+  it('retries a 503 not-ready on a short backoff and recovers — a starting server is not a refusal', async () => {
+    // The built driver retried only 429; a 503 gave up at once, turning an unready bundle into a
+    // refusal the client could not recover from.
+    const statuses: string[] = [];
+    const clock = fakeClock();
+    let call = 0;
+    const replica = new Replica(
+      async () => {
+        call++;
+        if (call <= 2) throw new TesseraError(503, 'not-ready', 'unverified bundle');
+        return emptyResponse();
+      },
+      Q,
+      {view: 's', now: () => clock.now(), revalidateAfterMs: Infinity}
+    );
+    replica.reset();
+    const driver = new Driver(
+      replica,
+      {kMaxMarks: 500, maxTilesPerRequest: 4096, thetaTargetMarks: 10},
+      clock,
+      {onFrame: () => {}, onStatus: (s) => statuses.push(s)},
+      {notReadyBackoffMs: 250},
+      false
+    );
+    driver.schedule({target: [0.5, 0.5, 0], zoom: 3}, 400, 300);
+    await clock.advance(10); // first attempt fails
+    expect(statuses).toContain('retrying');
+    await clock.advance(250); // first backoff → second attempt, fails
+    await clock.advance(500); // second backoff → third attempt, succeeds
+    // Three attempts in all — two 503s and the success — never a refusal.
+    expect(call).toBeGreaterThanOrEqual(3); // two 503s, then a success (plus the margin leg)
+    expect(statuses).not.toContain('refused');
+  });
+
   it('a gesture pays the full derivation at most once per gap — the walk never runs per frame', async () => {
     const h = harness();
     const derives: number[] = [];

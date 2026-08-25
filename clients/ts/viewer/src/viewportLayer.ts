@@ -1,6 +1,6 @@
 import {OrthographicView, type BinaryAttribute as DeckBinaryAttribute, type Layer} from '@deck.gl/core';
 import {LineLayer, ScatterplotLayer, TextLayer} from '@deck.gl/layers';
-import {CELLS_PER_WORLD_UNIT, MAX_DEPTH, WORLD_SIZE, type DriverViewState} from '@tessera/client';
+import {CELLS_PER_WORLD_UNIT, MAX_DEPTH, WORLD_SIZE, type DriverViewState} from '@tesseradb/client';
 import {
   placedArtifacts,
   servedLineage,

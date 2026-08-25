@@ -3,7 +3,7 @@
 Two TypeScript packages and a headless-browser smoke test, built to answer one question:
 **does a running Tessera actually work?**
 
-- `core/` — `@tessera/client`. The four viewer/session verbs, the framed-Arrow decoder, the
+- `core/` — `@tesseradb/client`. The four viewer/session verbs, the framed-Arrow decoder, the
   coordinate arithmetic. Stateless: no cache, no view key, no replica state.
 - `viewer/` — a Vite + deck.gl app. All UI, all state.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
@@ -85,7 +85,7 @@ export TESSERA_OPERATOR_CRED=dev-operator-credential
 
 cd clients/ts && npm install
 node scripts/measure-principals.mjs --terms 0..200   # writes viewer/presets.json
-npm run dev -w @tessera/viewer                       # http://localhost:5173
+npm run dev -w @tesseradb/viewer                       # http://localhost:5173
 ```
 
 The Vite port is `strictPort`: the origin is enumerated in `dev_cors_origins`, so a silent
