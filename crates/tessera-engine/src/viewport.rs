@@ -383,6 +383,19 @@ pub struct SubCellCount {
     pub count: u64,
 }
 
+/// Which annotation layers a viewport answers for.
+///
+/// Two shapes and no third: the empty list is *none* and costs nothing, and there is no value
+/// meaning *the default*, so a caller who did not think about layers cannot pay for all of them
+/// by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerSelection<'a> {
+    /// Every layer this principal reaches.
+    All,
+    /// These, intersected with what the principal reaches — never unioned. Empty is none.
+    Named(&'a [&'a str]),
+}
+
 /// One `/v1/viewport` request, as the engine sees it.
 ///
 /// A struct rather than a positional argument list: the query is the system's main entry point and
@@ -459,7 +472,13 @@ pub struct ViewportRequest<'a> {
     /// **It narrows and never widens.** A name this principal does not reach is simply absent from
     /// the answer, by the same route a name nobody registered is: the request is intersected with
     /// the session's resolved set, so asking for a layer is not a way to learn whether it exists.
-    pub layers: Option<&'a [&'a str]>,
+    ///
+    /// [`ViewportRequest::new`] starts at [`LayerSelection::All`]. **The wire's default is the
+    /// opposite** (owner ruling 2026-08-25): a `/v1/viewport` request that omits `layers` names
+    /// none, and asks for every layer with the string `"all"`. A Rust caller has no *omitted* —
+    /// it constructs the request and names its selection — and the batch entry point keeps the
+    /// serve-everything default its callers were written against.
+    pub layers: LayerSelection<'a>,
     /// The client's artifact budget — how many artifacts it wants back at most, in the same shape
     /// as the `k` mark budget beside it ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md)).
     ///
@@ -495,13 +514,13 @@ impl<'a> ViewportRequest<'a> {
             underlay_offset: None,
             cancel: None,
             filter: None,
-            layers: None,
+            layers: LayerSelection::All,
             artifact_budget: None,
         }
     }
 
     /// Answer for exactly these layers rather than for every one this principal reaches.
-    pub fn layers(mut self, layers: Option<&'a [&'a str]>) -> Self {
+    pub fn layers(mut self, layers: LayerSelection<'a>) -> Self {
         self.layers = layers;
         self
     }
@@ -3650,7 +3669,7 @@ impl Engine {
         view_data: &tessera_store::ViewData,
         ranges: &[Vec<(usize, Range<u32>)>],
         mask: &crate::compose::EffectiveMask,
-        requested: Option<&[&str]>,
+        requested: LayerSelection<'_>,
         artifact_budget: Option<u32>,
         mask_identity: crate::histogram::MaskIdentity,
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
@@ -3663,12 +3682,12 @@ impl Engine {
         // **Intersected with the request, never unioned.** A name the principal does not reach is
         // absent whether or not they asked for it, so asking is not a way to learn what exists.
         let names: Vec<String> = match requested {
-            Some(list) => list
+            LayerSelection::Named(list) => list
                 .iter()
                 .filter(|name| reachable.contains(name))
                 .map(|name| name.to_string())
                 .collect(),
-            None => reachable.names().map(str::to_string).collect(),
+            LayerSelection::All => reachable.names().map(str::to_string).collect(),
         };
         if names.is_empty() {
             return Ok((Vec::new(), Vec::new()));

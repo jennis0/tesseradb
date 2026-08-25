@@ -495,6 +495,10 @@ impl Default for ContentDeclaration {
     }
 }
 
+/// The one word a viewport request's `layers` field may carry in place of a list: every layer
+/// the principal reaches. A layer may not be registered under it ([`DeclarationError::ReservedName`]).
+pub const RESERVED_LAYER_SELECTION: &str = "all";
+
 /// One declared resolution. Present only on layers whose resolutions are semantic and balanced —
 /// a tiered geography — or whose levels are independent analyses. **A treed layer declares
 /// none** and sits entirely at level 0 (decision 0082).
@@ -893,6 +897,10 @@ pub enum DeclarationError {
     PredicateDeclares(String),
     /// A layer naming itself in `depends_on`.
     SelfDependency,
+    /// A layer named `all`, which the viewport request's `layers` field reserves for *every layer
+    /// this principal reaches* (contracts §3.2; owner ruling 2026-08-25). Refused at registration
+    /// so the word can never be ambiguous on the wire.
+    ReservedName(String),
     /// The same view, level title or supplied-content name declared twice.
     Duplicate(String),
     /// A row-major layout pinned on a layer whose membership is a **shape**. A spatial predicate
@@ -914,6 +922,11 @@ impl std::fmt::Display for DeclarationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DeclarationError::EmptyName => write!(f, "a layer name may not be empty"),
+            DeclarationError::ReservedName(name) => write!(
+                f,
+                "'{name}' is reserved: a viewport request's `layers: \"{RESERVED_LAYER_SELECTION}\"` \
+                 names every layer the principal reaches, so no layer may carry that name"
+            ),
             DeclarationError::TreeWithLevels => write!(
                 f,
                 "a nested layer's hierarchy is its edges, so it declares no levels: remove the \
@@ -994,6 +1007,9 @@ impl LayerDeclaration {
     pub fn validate(&self) -> Result<(), DeclarationError> {
         if self.name.trim().is_empty() {
             return Err(DeclarationError::EmptyName);
+        }
+        if self.name.trim().eq_ignore_ascii_case(RESERVED_LAYER_SELECTION) {
+            return Err(DeclarationError::ReservedName(self.name.clone()));
         }
         if self.depends_on.iter().any(|d| d == &self.name) {
             return Err(DeclarationError::SelfDependency);
@@ -1303,6 +1319,24 @@ mod tests {
     }
 
     /// **The three words are three variants**, and a word outside them is not a layout.
+    /// `all` is the viewport request's word for every reachable layer, so no layer may carry it
+    /// — in any case, since a request's spelling is checked exactly and a layer named `All`
+    /// would read as the same word to a person.
+    #[test]
+    fn the_reserved_layer_selection_is_refused_as_a_name() {
+        for name in ["all", "All", " all "] {
+            let mut d = decl(HierarchyKind::Flat, Vec::new());
+            d.name = name.into();
+            assert!(
+                matches!(d.validate(), Err(DeclarationError::ReservedName(_))),
+                "{name:?} must be refused"
+            );
+        }
+        let mut d = decl(HierarchyKind::Flat, Vec::new());
+        d.name = "all/of/them".into();
+        assert!(d.validate().is_ok(), "only the bare word is reserved");
+    }
+
     #[test]
     fn the_pin_vocabulary_round_trips_and_admits_nothing_else() {
         for layout in [

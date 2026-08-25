@@ -3,6 +3,10 @@
 //! gets none; a response that serves no artifact carries none. And the join, at the wire: every
 //! value the column carries is a `tessera_id` in the same body's artifacts frame.
 //!
+//! **And the `layers` field's two spellings** (D9; owner ruling 2026-08-25): omitted or `[]` is
+//! no layers, `"all"` is every reachable one, anything else a `422` — and `all` cannot be a
+//! layer's name.
+//!
 //! The engine's own cases (`tessera-engine/tests/membership_column.rs`) cover the resolution; this
 //! file is about the frame — the name, the nullability, the position after the scalars, and the
 //! column's presence following the request and the response rather than the registry.
@@ -237,4 +241,75 @@ async fn an_empty_layer_list_gets_no_column_and_so_does_a_response_serving_nothi
     let decoded = decode_viewport_frames(&body);
     assert!(decoded.artifacts.is_none());
     assert!(decoded.points.is_empty());
+}
+
+/// **Omitted means none, `"all"` means every reachable layer, and any other string is refused.**
+/// A client that never mentions layers pays no artifact pass and gets no column.
+#[tokio::test]
+async fn omitted_layers_means_none_and_the_word_all_means_every_reachable_layer() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    register_and_plant(&server).await;
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    let body = viewport(&server, token, serde_json::Value::Null).await;
+    let decoded = decode_viewport_frames(&body);
+    assert!(decoded.artifacts.is_none(), "omitted: no artifacts frame");
+    assert!(decode_points(&body).membership.is_empty(), "omitted: no column");
+
+    let body = viewport(&server, token, json!("all")).await;
+    let decoded = decode_viewport_frames(&body);
+    assert_eq!(
+        decoded.artifacts.as_deref().map(<[_]>::len),
+        Some(3),
+        "\"all\": every reachable layer's artifacts"
+    );
+    assert_eq!(decode_points(&body).membership.len(), 1);
+
+    for bogus in [json!("ALL"), json!("everything"), json!(7)] {
+        let resp = server
+            .client
+            .post(server.viewer_url("/v1/viewport"))
+            .bearer_auth(token)
+            .json(&json!({
+                "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+                "layers": bogus
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 422, "{bogus} is neither a list nor the word");
+    }
+}
+
+/// `all` is reserved on the wire, so the registry refuses it as a layer name.
+#[tokio::test]
+async fn a_layer_cannot_be_registered_under_the_reserved_word() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let resp = server
+        .client
+        .put(server.control_url("/control/layers"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({
+            "name": "all",
+            "title": "all",
+            "views": ["s0"],
+            "membership": "enumerated",
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+            "content": { "computed": [], "supplied": [], "withdraw_on_member_deletion": true },
+            "depends_on": [],
+            "levels": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 422, "{body}");
+    assert!(body.contains("reserved"), "{body}");
 }

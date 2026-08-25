@@ -74,7 +74,8 @@ pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use membership_column::MembershipColumn;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
-    ArtifactOut, ColumnBuf, EngineMeta, ItemOut, PointColumns, ScalarOut, SinkClosed, SinkResult,
+    ArtifactOut, ColumnBuf, EngineMeta, ItemOut, LayerSelection, PointColumns, ScalarOut, SinkClosed,
+    SinkResult,
     SubCellCount, TileCount, ViewCoordinates, ViewportHead, ViewportOut, ViewportRequest,
     ViewportSink,
 };

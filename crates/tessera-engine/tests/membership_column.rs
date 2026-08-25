@@ -17,7 +17,7 @@ mod common;
 use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportOut, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportOut, ViewportRequest};
 use tessera_lifecycle::membership::{IncomingAttachment, IncomingContent};
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
@@ -202,7 +202,7 @@ fn viewport(
     engine: &Engine,
     credential: &[u8],
     bbox: [f64; 4],
-    layers: Option<&[&str]>,
+    layers: LayerSelection,
     budget: Option<u32>,
 ) -> ViewportOut {
     let session = engine.authorise(credential).unwrap();
@@ -303,7 +303,7 @@ fn a_point_names_its_deepest_served_ancestor_and_null_under_none() {
     plant(&fx, &engine);
     let credential = full_coverage_credential();
 
-    let leaves = viewport(&engine, &credential, WHOLE_MAP, None, None);
+    let leaves = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::All, None);
     assert_eq!(
         leaves.points.membership.len(),
         1,
@@ -318,7 +318,7 @@ fn a_point_names_its_deepest_served_ancestor_and_null_under_none() {
     let nulls = leaves.points.len() - named;
     assert!(named > 0 && nulls > 0, "both a named and a null point were exercised");
 
-    let climbed = viewport(&engine, &credential, WHOLE_MAP, None, Some(3));
+    let climbed = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::All, Some(3));
     let keys: BTreeSet<&str> = climbed
         .artifacts
         .iter()
@@ -335,7 +335,7 @@ fn a_point_names_its_deepest_served_ancestor_and_null_under_none() {
         plant(&fx2, &e);
         (fx2, e)
     };
-    let whole = viewport(&engine_whole.1, &credential, WHOLE_MAP, None, None);
+    let whole = viewport(&engine_whole.1, &credential, WHOLE_MAP, LayerSelection::All, None);
     assert_eq!(whole.artifacts.len(), 7, "every node passes and none is pruned");
     assert_tree_column(&engine_whole.0, &whole, 0..N_ITEMS);
 }
@@ -358,12 +358,12 @@ fn a_masked_principal_is_named_the_coarser_served_ancestor() {
         .unwrap();
     plant(&fx, &engine);
 
-    let broad = viewport(&engine, &full_coverage_credential(), WHOLE_MAP, None, None);
+    let broad = viewport(&engine, &full_coverage_credential(), WHOLE_MAP, LayerSelection::All, None);
     let broad_keys: BTreeSet<&str> = broad.artifacts.iter().filter_map(|a| a.key.as_deref()).collect();
     assert_eq!(broad_keys, BTreeSet::from(["a1", "a2", "b1", "b2"]));
     assert_tree_column(&fx, &broad, 0..N_ITEMS);
 
-    let narrow = viewport(&engine, &subset_credential(), WHOLE_MAP, None, None);
+    let narrow = viewport(&engine, &subset_credential(), WHOLE_MAP, LayerSelection::All, None);
     let narrow_keys: BTreeSet<&str> = narrow.artifacts.iter().filter_map(|a| a.key.as_deref()).collect();
     assert_eq!(
         narrow_keys,
@@ -398,7 +398,7 @@ fn the_column_set_follows_the_layers_the_response_served() {
     plant(&fx, &engine);
     let credential = full_coverage_credential();
 
-    let none = viewport(&engine, &credential, WHOLE_MAP, Some(&[]), None);
+    let none = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::Named(&[]), None);
     assert!(none.artifacts.is_empty());
     assert!(none.points.membership.is_empty());
     assert!(!none.points.is_empty(), "points still flow without a column");
@@ -406,7 +406,7 @@ fn the_column_set_follows_the_layers_the_response_served() {
     // A viewport over a region the tree does not reach: points, no artifact, no column.
     let mut away = None;
     for bbox in [[900.0, 900.0, 1000.0, 1000.0], [0.0, 900.0, 100.0, 1000.0]] {
-        let out = viewport(&engine, &credential, bbox, None, None);
+        let out = viewport(&engine, &credential, bbox, LayerSelection::All, None);
         if out.artifacts.is_empty() && !out.points.is_empty() {
             away = Some(out);
             break;
@@ -416,10 +416,10 @@ fn the_column_set_follows_the_layers_the_response_served() {
         assert!(away.points.membership.is_empty());
     }
 
-    let unknown = viewport(&engine, &credential, WHOLE_MAP, Some(&["nobody/registered"]), None);
+    let unknown = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::Named(&["nobody/registered"]), None);
     assert!(unknown.points.membership.is_empty());
 
-    let named = viewport(&engine, &credential, WHOLE_MAP, Some(&[TREE]), None);
+    let named = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::Named(&[TREE]), None);
     assert_eq!(named.points.membership.len(), 1);
     assert_eq!(named.points.membership[0].layer, TREE);
 }
@@ -467,11 +467,11 @@ fn a_dependent_layer_resolves_over_its_own_members() {
         .unwrap();
     let credential = full_coverage_credential();
 
-    let out = viewport(&engine, &credential, WHOLE_MAP, Some(&[TREE, LABELS]), None);
+    let out = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::Named(&[TREE, LABELS]), None);
     let by_point = joined(&out);
     let layers: Vec<&str> = out.points.membership.iter().map(|c| c.layer.as_str()).collect();
     assert_eq!(layers, vec![TREE, LABELS], "columns in request order");
-    let reversed = viewport(&engine, &credential, WHOLE_MAP, Some(&[LABELS, TREE]), None);
+    let reversed = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::Named(&[LABELS, TREE]), None);
     let layers: Vec<&str> = reversed.points.membership.iter().map(|c| c.layer.as_str()).collect();
     assert_eq!(layers, vec![LABELS, TREE], "and the request's order, not the registry's");
     let served_from = |range: std::ops::Range<u64>| {
@@ -497,7 +497,7 @@ fn a_dependent_layer_resolves_over_its_own_members() {
 
     // Cut to the children: `a1` goes, its label goes with it (decision 0089), and the column says
     // nothing about either.
-    let climbed = viewport(&engine, &credential, WHOLE_MAP, None, Some(3));
+    let climbed = viewport(&engine, &credential, WHOLE_MAP, LayerSelection::All, Some(3));
     assert!(climbed.artifacts.iter().all(|a| a.layer == TREE));
     let layers: Vec<&str> = climbed.points.membership.iter().map(|c| c.layer.as_str()).collect();
     assert_eq!(layers, vec![TREE]);
@@ -523,7 +523,7 @@ fn the_two_layouts_answer_identically() {
             .unwrap();
         plant(&fx, &engine);
         fx.wait_for_publication(&engine, 1);
-        let served_layout = viewport(&engine, &full_coverage_credential(), WHOLE_MAP, None, None);
+        let served_layout = viewport(&engine, &full_coverage_credential(), WHOLE_MAP, LayerSelection::All, None);
         assert_eq!(
             engine.recorded_layout(TREE, 0),
             Some(layout),
@@ -536,7 +536,7 @@ fn the_two_layouts_answer_identically() {
         for credential in [full_coverage_credential(), subset_credential()] {
             for bbox in [WHOLE_MAP, [0.0, 0.0, 500.0, 500.0], [250.0, 250.0, 750.0, 750.0]] {
                 for budget in [None, Some(3), Some(1)] {
-                    let out = viewport(&engine, &credential, bbox, None, budget);
+                    let out = viewport(&engine, &credential, bbox, LayerSelection::All, budget);
                     assert_tree_column(&fx, &out, 0..N_ITEMS);
                     let column = out.points.membership.first();
                     // Keyed by **source id**, because the two fixtures are two builds and an
@@ -606,7 +606,7 @@ fn measure_the_column_cost() {
         assert_eq!(engine.recorded_layout(TREE, 0), Some(layout));
         let credential = full_coverage_credential();
         let session = engine.authorise(&credential).unwrap();
-        let run = |layers: Option<&[&str]>, k: usize, budget: Option<u32>| {
+        let run = |layers: LayerSelection, k: usize, budget: Option<u32>| {
             engine
                 .viewport(
                     &session,
@@ -616,7 +616,7 @@ fn measure_the_column_cost() {
                 )
                 .unwrap()
         };
-        let time = |layers: Option<&[&str]>, k: usize, budget: Option<u32>| {
+        let time = |layers: LayerSelection, k: usize, budget: Option<u32>| {
             run(layers, k, budget);
             let runs = 30;
             let t = std::time::Instant::now();
@@ -627,14 +627,14 @@ fn measure_the_column_cost() {
         };
         let k = N_ITEMS as usize;
         for budget in [None, Some(64), Some(16)] {
-            let out = run(None, k, budget);
+            let out = run(LayerSelection::All, k, budget);
             let served = out.artifacts.len();
             let points = out.points.len();
             assert_eq!(engine.layout_fallbacks(), 0);
-            let layers_k = time(None, k, budget);
-            let layers_0 = time(None, 0, budget);
-            let none_k = time(Some(&[]), k, budget);
-            let none_0 = time(Some(&[]), 0, budget);
+            let layers_k = time(LayerSelection::All, k, budget);
+            let layers_0 = time(LayerSelection::All, 0, budget);
+            let none_k = time(LayerSelection::Named(&[]), k, budget);
+            let none_0 = time(LayerSelection::Named(&[]), 0, budget);
             let column = layers_k
                 .saturating_sub(layers_0)
                 .saturating_sub(none_k.saturating_sub(none_0));
