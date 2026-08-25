@@ -399,7 +399,7 @@ export function createStore(options: StoreOptions): Store {
       status,
       sessionWarm: projections.status.sessionWarm || status === 'shown',
       refusal,
-      stale: projections.status.stale && status !== 'shown' ? projections.status.stale : projections.status.stale,
+      stale: projections.status.stale,
       expired,
       retrying: status === 'retrying'
     });
