@@ -19,7 +19,7 @@
  * (I10). Moving decode does not move a decision.
  */
 import {decodeViewport} from './decode.js';
-import type {ScalarColumn} from './types.js';
+import type {MembershipColumn, ScalarColumn} from './types.js';
 
 export type DecodeRequest = {id: number; bytes: ArrayBuffer};
 
@@ -28,12 +28,14 @@ function transferables(result: {
   ids: BigUint64Array;
   world: Float32Array;
   scalars: Record<string, ScalarColumn>;
+  membership: Record<string, MembershipColumn>;
 }): Transferable[] {
   const out: Transferable[] = [result.ids.buffer, result.world.buffer];
   for (const column of Object.values(result.scalars)) {
     const values = column.values as unknown;
     if (ArrayBuffer.isView(values)) out.push((values as ArrayBufferView).buffer);
   }
+  for (const column of Object.values(result.membership)) out.push(column.index.buffer, column.ids.buffer);
   // A buffer listed twice is a `DataCloneError`, and Arrow columns can share one.
   return [...new Set(out)];
 }
@@ -41,12 +43,16 @@ function transferables(result: {
 self.onmessage = (event: MessageEvent<DecodeRequest>) => {
   const {id, bytes} = event.data;
   try {
+    const started = performance.now();
     const decoded = decodeViewport(new Uint8Array(bytes));
     // **Cell space and the codes stay in the worker.** Nothing downstream reads them — a band holds
     // world positions and the region queries work there — so shipping them would double the bytes
     // crossing the boundary for no reader.
     const result = {...decoded, positions: new Float64Array(0), codes: new BigUint64Array(0)};
-    self.postMessage({id, result}, {transfer: transferables(result)});
+    // The worker's own time, bytes in to arrays out — so the main thread can tell decode from
+    // the time a response spent queued behind another in this lane (design §5.10's measurement).
+    const ms = performance.now() - started;
+    self.postMessage({id, result, ms}, {transfer: transferables(result)});
   } catch (error) {
     self.postMessage({id, error: error instanceof Error ? error.message : String(error)});
   }

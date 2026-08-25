@@ -81,3 +81,26 @@ describe('the session artifact table', () => {
     expect(table.ordinalOf('clusters/x', 10n)).toBe(NO_ORDINAL);
   });
 });
+
+describe('the level walk and retained references', () => {
+  it('resolves to the first served ancestor at or above the chosen level', () => {
+    const table = new SessionArtifactTable();
+    const [root, mid, leaf] = table.take([ref(1n), ref(2n, 1n), ref(3n, 2n)]);
+    const served = new Set([root!, mid!, leaf!]);
+    expect(table.resolve(leaf!, served)).toBe(leaf);
+    expect(table.resolve(leaf!, served, 1)).toBe(mid);
+    expect(table.resolve(leaf!, served, 0)).toBe(root);
+    // A level above everything served resolves to neutral, never to a deeper artifact.
+    expect(table.resolve(leaf!, new Set([leaf!]), 0)).toBe(NO_ORDINAL);
+  });
+
+  it('retain adds references a release must match before an ordinal recycles', () => {
+    const table = new SessionArtifactTable();
+    const [a] = table.take([ref(10n)]);
+    table.retain([a!, NO_ORDINAL, 999]);
+    table.release([a!]);
+    expect(table.ordinalOf('clusters/x', 10n)).toBe(a);
+    table.release([a!]);
+    expect(table.ordinalOf('clusters/x', 10n)).toBe(NO_ORDINAL);
+  });
+});

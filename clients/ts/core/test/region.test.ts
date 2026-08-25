@@ -83,3 +83,47 @@ describe('insideBox', () => {
     expect(insideBox(2.1, 2, [1, 1, 2, 2])).toBe(false);
   });
 });
+
+import {insidePolygon, rasterisePolygon} from '../src/region.js';
+
+describe('the lasso — a polygon rasterised to the tiles it meets (§5.11)', () => {
+  const triangle: [number, number][] = [[0, 0], [WORLD_SIZE, 0], [0, WORLD_SIZE]];
+
+  it('counts a point inside by the even-odd rule, and one outside not', () => {
+    expect(insidePolygon(10, 10, triangle)).toBe(true);
+    expect(insidePolygon(WORLD_SIZE - 1, WORLD_SIZE - 1, triangle)).toBe(false);
+    // A self-crossing bow tie: the two lobes are inside, the crossing's outside is not.
+    const bow: [number, number][] = [[0, 0], [10, 10], [10, 0], [0, 10]];
+    expect(insidePolygon(2, 5, bow)).toBe(true);
+    expect(insidePolygon(8, 5, bow)).toBe(true);
+    expect(insidePolygon(5, 2, bow)).toBe(false);
+  });
+
+  it('names the cells the polygon meets at the box’s depth — a superset of the shape, under the bound', () => {
+    const r = rasterisePolygon(triangle);
+    expect(r.depth).toBe(6);
+    // The lower-left half of a 64 × 64 grid plus the cells the diagonal crosses or touches.
+    expect(r.tiles.length).toBeGreaterThan(2048);
+    expect(r.tiles.length).toBeLessThanOrEqual(2048 + 128);
+    for (const t of r.tiles) {
+      const {x, y} = tileXY(t, 6);
+      expect(x + y).toBeLessThanOrEqual(64);
+    }
+  });
+
+  it('includes a cell the polygon crosses without holding its centre, and a cell holding a vertex', () => {
+    // A sliver one world unit wide and a thousandth tall, sitting just above a row boundary at
+    // the grid's own depth (a cell is 1/128 of a unit): no cell centre is inside, yet every cell
+    // along it is crossed by its upper edge, so all 128 are named.
+    const sliver: [number, number][] = [[1, 4.5], [2, 4.5], [2, 4.501], [1, 4.501]];
+    const r = rasterisePolygon(sliver);
+    expect(r.depth).toBe(MAX_DEPTH);
+    expect(r.tiles.length).toBeGreaterThanOrEqual(128);
+    expect(r.tiles.length).toBeLessThanOrEqual(2 * 129);
+  });
+
+  it('honours the bound the way the box does', () => {
+    expect(rasterisePolygon(triangle, 16).depth).toBe(2);
+    expect(rasterisePolygon(triangle, 16).tiles.length).toBeLessThanOrEqual(16);
+  });
+});

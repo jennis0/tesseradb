@@ -380,6 +380,18 @@ export type ViewportResult = {
    * See {@link ScalarColumn} for why these are typed arrays rather than `unknown[]`.
    */
   scalars: Record<string, ScalarColumn>;
+  /**
+   * The per-point membership column per served layer (D12, contracts §3.2 r39, design §5.10),
+   * already hashed to a **response-local index**: `index[i]` is `0` for a point under no served
+   * artifact of that layer, else `1 + d` where `ids[d]` is the `tessera_id` of the deepest served
+   * artifact holding it — always one in this response's {@link ViewportResult.artifacts}. Keyed by
+   * layer name. Empty when the response served no artifacts, which is also what a request naming
+   * no layers gets.
+   *
+   * The session ordinal a band carries is assigned on the main thread from the short `ids` list
+   * (`bands.ts`); the decoder cannot name it, its lanes sharing no table.
+   */
+  membership: Record<string, MembershipColumn>;
   subCells: SubCell[] | null;
   /**
    * The artifacts this viewport served — empty when none did.
@@ -390,6 +402,14 @@ export type ViewportResult = {
    * a principal reaches at all comes from `GET /v1/meta`.
    */
   artifacts: Artifact[];
+};
+
+/** One layer's membership column as the decoder hands it over — see {@link ViewportResult.membership}. */
+export type MembershipColumn = {
+  /** Per point, `0` for none, else one past the position in `ids`. `Uint16Array` where it fits. */
+  index: Uint16Array | Uint32Array;
+  /** The distinct `tessera_id`s the column named, in first-seen order. */
+  ids: BigUint64Array;
 };
 
 /**

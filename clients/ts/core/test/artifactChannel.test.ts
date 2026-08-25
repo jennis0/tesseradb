@@ -26,6 +26,7 @@ function responseWith(artifacts: Artifact[]): ViewportResponse {
     positions: new Float64Array(0),
     world: new Float32Array(0),
     scalars: {},
+    membership: {},
     subCells: null,
     artifacts
   };

@@ -22,6 +22,7 @@ const empty: ViewportResult = {
   world: new Float32Array(),
   scalars: {},
   subCells: null,
+  membership: {},
   artifacts: []
 };
 

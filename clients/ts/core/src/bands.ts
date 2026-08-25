@@ -1,4 +1,5 @@
 import {MAX_DEPTH, WORLD_SIZE, tileContains, tileXY} from './coords.js';
+import {NO_ORDINAL, type ArtifactRef, type SessionArtifactTable} from './artifactTable.js';
 import type {ScalarColumn, ViewportResult} from './types.js';
 import {
   coverageAdd,
@@ -75,6 +76,18 @@ export type Band = {
    */
   positions: Float32Array;
   scalars: Record<string, ScalarColumn>;
+  /**
+   * The session ordinal per point, per layer the response was asked for (design §5.10): `0` for
+   * a point under no served artifact of that layer. Named on the main thread as the band was
+   * built, from the decoder's response-local index. A layer absent here was not named when the
+   * band was fetched, which is what makes the band colour-stale for it; a layer turned off keeps
+   * its column until eviction, so turning it back on is free.
+   *
+   * `distinct` is the band's reference on the table — one per ordinal it carries — released when
+   * the band is evicted or truncated, and the list colour coverage is checked over (a dozen
+   * entries, never the points).
+   */
+  membership: Record<string, BandMembership>;
   /** `m(T)` as the server reported it: how many points the definition serves for this tile. */
   served: number;
   /** `min(k, k_max_marks)` in force when this band was fetched — see {@link isComplete}. */
@@ -88,6 +101,18 @@ export type Band = {
   bytes: number;
   touchedAt: number;
 };
+
+export type BandMembership = {ordinals: Uint32Array; distinct: Uint32Array};
+
+/** The distinct non-zero ordinals of a slice, ascending — a band's reference on the table. */
+export function distinctOrdinals(ordinals: Uint32Array): Uint32Array {
+  const seen = new Set<number>();
+  for (let i = 0; i < ordinals.length; i++) {
+    const o = ordinals[i]!;
+    if (o !== NO_ORDINAL) seen.add(o);
+  }
+  return Uint32Array.from(seen).sort();
+}
 
 /**
  * Does this band hold the whole of `served(T)`, and will it still at `k`?
@@ -114,12 +139,15 @@ export function isComplete(band: Band, contentKey: string, k: number): boolean {
 function bandBytes(
   ids: BigUint64Array,
   positions: Float32Array,
-  scalars: Record<string, ScalarColumn>
+  scalars: Record<string, ScalarColumn>,
+  membership: Record<string, BandMembership>
 ): number {
   let bytes = ids.byteLength + positions.byteLength;
   for (const column of Object.values(scalars)) {
     bytes += scalarBytes(column);
   }
+  // The ordinal column is 4 B a point per layer on (§5.10's table); the ledger counts it.
+  for (const m of Object.values(membership)) bytes += m.ordinals.byteLength + m.distinct.byteLength;
   return bytes;
 }
 
@@ -173,13 +201,88 @@ export type BandSplitter = {
   step(deadline: number): Band[];
 };
 
+/**
+ * The main thread's half of naming (design §5.10): the decoder's distinct-id list maps to
+ * session ordinals through the table — a few thousand lookups, once per response — and each
+ * band's points are remapped from local index to ordinal with a tight loop as the band is
+ * built. Parent links come from the same response's artifacts frame, which is the only place a
+ * `parentId` is ever named (decision 0087).
+ *
+ * The response holds one temporary reference per distinct ordinal while its bands are being
+ * built, so an ordinal named by the distinct list cannot be recycled between two slices; each
+ * band then takes its own references, and the temporary ones go when the split completes.
+ */
+type ResponseNaming = {
+  layer: string;
+  index: Uint16Array | Uint32Array;
+  /** Local index → session ordinal; `map[0] = 0`. */
+  map: Uint32Array;
+  /** Scratch over local indices, for collecting a band's distinct set without a `Set` per band. */
+  mark: Uint8Array;
+};
+
+function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; release: () => void} {
+  const parentOf = new Map<string, bigint | null>();
+  for (const a of result.artifacts) parentOf.set(`${a.layer} ${a.tesseraId}`, a.parentId);
+  const naming: ResponseNaming[] = [];
+  const held: Uint32Array[] = [];
+  for (const [layer, column] of Object.entries(result.membership)) {
+    const refs: ArtifactRef[] = [];
+    for (let d = 0; d < column.ids.length; d++) {
+      const id = column.ids[d]!;
+      refs.push({tesseraId: id, layer, parentId: parentOf.get(`${layer} ${id}`) ?? null});
+    }
+    const ordinals = table.take(refs);
+    held.push(ordinals);
+    const map = new Uint32Array(column.ids.length + 1);
+    map.set(ordinals, 1);
+    naming.push({layer, index: column.index, map, mark: new Uint8Array(column.ids.length + 1)});
+  }
+  return {
+    naming,
+    release: () => {
+      for (const ordinals of held) table.release(ordinals);
+    }
+  };
+}
+
+/** One band's membership for one layer: the remap loop, and its distinct list, retained. */
+function remapBand(n: ResponseNaming, from: number, to: number, table: SessionArtifactTable): BandMembership {
+  const ordinals = new Uint32Array(to - from);
+  const {index, map, mark} = n;
+  let distinctCount = 0;
+  for (let i = from; i < to; i++) {
+    const local = index[i]!;
+    ordinals[i - from] = map[local]!;
+    if (local !== 0 && mark[local] === 0) {
+      mark[local] = 1;
+      distinctCount++;
+    }
+  }
+  const distinct = new Uint32Array(distinctCount);
+  let d = 0;
+  for (let i = from; i < to; i++) {
+    const local = index[i]!;
+    if (mark[local] === 1) {
+      mark[local] = 0;
+      distinct[d++] = map[local]!;
+    }
+  }
+  distinct.sort();
+  table.retain(distinct);
+  return {ordinals, distinct};
+}
+
 export function bandSplitter(
   result: ViewportResult,
   depth: number,
-  meta: {identityKey: string; contentKey: string; capUsed: number; now: number}
+  meta: {identityKey: string; contentKey: string; capUsed: number; now: number; table?: SessionArtifactTable; onRemap?: (ms: number) => void}
 ): BandSplitter {
   let offset = 0;
   let i = 0;
+  const table = meta.table;
+  const named = table && Object.keys(result.membership).length > 0 ? nameResponse(result, table) : null;
+  let remapMs = 0;
   return {
     done: () => i >= result.tiles.length,
     step(deadline: number): Band[] {
@@ -208,6 +311,12 @@ export function bandSplitter(
         // Already in world space — the decoder produced it, which in a browser means a worker did.
         const positions = result.world.slice(offset * 2, end * 2);
         const scalars = sliceScalars(result.scalars, offset, end);
+        const membership: Record<string, BandMembership> = {};
+        if (named) {
+          const started = performance.now();
+          for (const n of named.naming) membership[n.layer] = remapBand(n, offset, end, table!);
+          remapMs += performance.now() - started;
+        }
         const {x, y} = tileXY(tile.tile, depth);
         bands.push({
           depth,
@@ -217,6 +326,7 @@ export function bandSplitter(
           ids,
           positions,
           scalars,
+          membership,
           served,
           capUsed: meta.capUsed,
           visible: tile.visible,
@@ -224,10 +334,14 @@ export function bandSplitter(
           heldBelow: ids.length === 0 ? 0n : ids[ids.length - 1]! + 1n,
           identityKey: meta.identityKey,
           contentKey: meta.contentKey,
-          bytes: bandBytes(ids, positions, scalars),
+          bytes: bandBytes(ids, positions, scalars, membership),
           touchedAt: meta.now
         });
         offset = end;
+      }
+      if (i >= result.tiles.length && named) {
+        named.release();
+        meta.onRemap?.(remapMs);
       }
       return bands;
     }
@@ -325,7 +439,17 @@ export class BandCache {
   private held = 0;
   private heldPoints = 0;
 
-  constructor(private readonly budgetBytes: number) {}
+  constructor(
+    private readonly budgetBytes: number,
+    /** The session table each band's membership holds references on; absent, nothing is named. */
+    private readonly table: SessionArtifactTable | null = null
+  ) {}
+
+  /** Give back every reference a band's membership holds. */
+  private releaseMembership(band: Band): void {
+    if (!this.table) return;
+    for (const m of Object.values(band.membership)) this.table.release(m.distinct);
+  }
 
   get bytes(): number {
     return this.held;
@@ -407,6 +531,20 @@ export class BandCache {
     const key = bandKey(band.depth, band.prefix);
     const previous = this.bands.get(key);
     if (previous) {
+      // **A layer's column survives a refetch that did not name the layer.** A band refetched
+      // for another layer's column carries the same served set (same content key and length),
+      // so the columns it lacks are carried over from the band it replaces with their references
+      // — which is what makes switching a layer back on free (§5.10). A replacement under a
+      // moved content key carries nothing over: the served set may differ.
+      const sameSet = previous.contentKey === band.contentKey && previous.ids.length === band.ids.length;
+      for (const [layer, held] of Object.entries(previous.membership)) {
+        if (sameSet && !(layer in band.membership)) {
+          band.membership[layer] = held;
+          band.bytes += held.ordinals.byteLength + held.distinct.byteLength;
+        } else if (this.table) {
+          this.table.release(held.distinct);
+        }
+      }
       this.held -= previous.bytes;
       this.heldPoints -= previous.ids.length;
     }
@@ -433,8 +571,22 @@ export class BandCache {
     return coverageAt(this.covered, depth, contentKey, k);
   }
 
+  /**
+   * Withdraw the coverage claim over each of `bands`' tiles, so the next plan fetches them
+   * again — the colour-stale refetch (§5.10): a band whose ordinals no longer resolve to
+   * anything served, or that lacks the column for a layer now on, is asked for again after novel
+   * ground, centre-first, by the same path a stale-content band takes. The band stays held and
+   * drawn meanwhile; the arrival replaces it.
+   */
+  retract(bands: readonly Band[]): void {
+    for (const band of bands) {
+      if (this.bands.get(bandKey(band.depth, band.prefix)) === band) this.retractCoverage(band.depth, band.x, band.y);
+    }
+  }
+
   /** Drop everything. Called on a token change, where the whole partition becomes unrenderable. */
   dropIdentity(): void {
+    for (const band of this.bands.values()) this.releaseMembership(band);
     this.bands.clear();
     this.byDepth.clear();
     this.covered = [];
@@ -662,12 +814,21 @@ export class BandCache {
     const ids = band.ids.slice(0, keep);
     const positions = band.positions.slice(0, keep * 2);
     const scalars = sliceScalars(band.scalars, 0, keep);
-    const bytes = bandBytes(ids, positions, scalars);
+    // The head's membership, re-referenced: the distinct list may shrink with the tail.
+    const membership: Record<string, BandMembership> = {};
+    for (const [layer, held] of Object.entries(band.membership)) {
+      const ordinals = held.ordinals.slice(0, keep);
+      const distinct = distinctOrdinals(ordinals);
+      this.table?.retain(distinct);
+      this.table?.release(held.distinct);
+      membership[layer] = {ordinals, distinct};
+    }
+    const bytes = bandBytes(ids, positions, scalars, membership);
     this.held += bytes - band.bytes;
     this.heldPoints += keep - band.ids.length;
     this.changes++;
     const truncated = bandKey(band.depth, band.prefix);
-    const kept: Band = {...band, ids, positions, scalars, heldBelow: ids[keep - 1]! + 1n, bytes};
+    const kept: Band = {...band, ids, positions, scalars, membership, heldBelow: ids[keep - 1]! + 1n, bytes};
     this.bands.set(truncated, kept);
     this.index(kept, truncated);
   }

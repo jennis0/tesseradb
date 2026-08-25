@@ -42,7 +42,10 @@ import {SessionArtifactTable, type ArtifactRef} from './artifactTable.js';
 
 /** The session's held artifacts, and the channel's state — what a projection is built from. */
 export type ArtifactChannelState = {
+  /** The first layer on — the one a single-layer reader keeps naming. */
   layer: string | null;
+  /** Every layer on, with the closure the store named (decision 0096). */
+  layers: string[];
   artifacts: Artifact[];
   status: 'idle' | 'loading' | 'shown' | 'refused';
   refusal: {code: string; detail: string} | null;
@@ -96,6 +99,7 @@ export class ArtifactChannel {
   private heldOrdinals: Uint32Array | null = null;
   private state: ArtifactChannelState = {
     layer: null,
+    layers: [],
     artifacts: [],
     status: 'idle',
     refusal: null,
@@ -120,10 +124,19 @@ export class ArtifactChannel {
     return this.view !== null;
   }
 
-  /** Point the channel at a layer — a different set of artifacts and a different criterion. */
+  /** Point the channel at one layer — {@link setLayers} with one name, or none. */
   setLayer(layer: string | null): void {
-    if (this.state.layer === layer) return;
-    this.state = {...this.state, layer};
+    this.setLayers(layer ? [layer] : []);
+  }
+
+  /**
+   * Point the channel at the layers that are on — a closure, usually one layer with its
+   * dependents (decision 0096). Every one is named in the request and each costs its own pass.
+   */
+  setLayers(layers: readonly string[]): void {
+    const next = [...layers];
+    if (next.length === this.state.layers.length && next.every((l, i) => l === this.state.layers[i])) return;
+    this.state = {...this.state, layer: next[0] ?? null, layers: next};
     this.emit();
   }
 
@@ -221,12 +234,12 @@ export class ArtifactChannel {
   private async request(): Promise<void> {
     const view = this.view;
     const token = this.opts.token();
-    const layer = this.state.layer;
+    const layers = this.state.layers;
     if (!token || !view) return;
     this.inFlight?.abort();
     // No layer selected is not a request. It is also not an error, and not an empty answer to a
     // question that was asked — so the held set is simply cleared.
-    if (!layer) {
+    if (layers.length === 0) {
       this.inFlight = null;
       this.releaseHeld();
       this.state = {...this.state, artifacts: [], status: 'idle', refusal: null, version: this.state.version + 1};
@@ -248,7 +261,7 @@ export class ArtifactChannel {
           // The counts and the artifacts frame, and no points at all: this channel draws none, and
           // the points on screen are the point path's business.
           k: 0,
-          layers: [layer]
+          layers
         },
         signal.signal
       );

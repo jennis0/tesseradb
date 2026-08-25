@@ -23,6 +23,7 @@ function servedResponse(n: number): ViewportResponse {
     world: Float32Array.from({length: n * 2}, () => 0.1),
     scalars: {},
     subCells: null,
+    membership: {},
     artifacts: []
   };
   return {

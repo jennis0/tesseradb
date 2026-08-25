@@ -32,6 +32,7 @@ function response(contentKey: string, identityKey = 'ik', served = 3): ViewportR
     world: Float32Array.from({length: served * 2}, () => 0.1),
     scalars: {archive: {arrowType: 'u16', values: Uint16Array.from({length: served}, () => 5)}},
     subCells: null,
+    membership: {},
     artifacts: []
   };
   return {
@@ -353,14 +354,35 @@ describe('select(box) — one counting request in the tiles form (§5.11)', () =
     expect(store.get('region')).toBeNull();
   });
 
-  it('records a lasso without counting it — region stays null until step 3', async () => {
+  it('counts a lasso over the tiles it meets, in the tiles form at the bounded depth', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
     const before = viewport.mock.calls.length;
-    store.select({kind: 'lasso', points: [[0, 0], [1, 0], [1, 1]]});
+    // A triangle over the lower-left half of the extent: its bounding box is the whole extent
+    // (depth 6, 4,096 cells), and it meets about half of those cells plus the diagonal.
+    store.select({kind: 'lasso', points: [[0, 0], [100, 0], [0, 200]]});
+    const loading = store.get('region')!;
+    expect(loading.status).toBe('loading');
+    expect(loading.depth).toBe(6);
+    expect(loading.tiles).toBeGreaterThan(2000);
+    expect(loading.tiles).toBeLessThan(4096);
+    // The held mark at world (0.1, 0.1) is inside the triangle.
+    expect(loading.held.count).toBe(3);
     await clock.advance(250);
+    expect(viewport.mock.calls.length).toBe(before + 1);
+    const req = (viewport.mock.calls[before] as unknown as [string, {tiles?: bigint[]; k?: number; zoom: number}])[1];
+    expect(req.k).toBe(0);
+    expect(req.zoom).toBe(6);
+    expect(req.tiles?.length).toBe(loading.tiles);
+    const shown = store.get('region')!;
+    expect(shown.status).toBe('shown');
+    expect(shown.matched.exact).toBe(false);
+    // A lasso too thin to be a polygon is no selection.
+    store.select({kind: 'lasso', points: [[0, 0], [1, 1]]});
     expect(store.get('region')).toBeNull();
-    expect(viewport.mock.calls.length).toBe(before);
   });
 });
