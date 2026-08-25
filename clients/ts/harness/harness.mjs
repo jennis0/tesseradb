@@ -128,9 +128,20 @@ const samples = [];
 {
   const started = Date.now();
   while (Date.now() - started < 90_000) {
-    const state = await stripState().catch(() => null);
-    if (state) samples.push({state, counts: await nonEmptyCounts()});
-    if (state === 'shown') break;
+    // One evaluate for the pair: read in two round-trips, a transition landing between them
+    // (`loading` read, then counts read after the frame arrived) reads as a count outside shown.
+    const sample = await strip
+      .evaluate((root) => {
+        const scope = root.shadowRoot ?? root;
+        const state = scope.querySelector('[part="state"]')?.getAttribute('data-state') ?? null;
+        const counts = [...scope.querySelectorAll('[part="count"]')]
+          .filter((el) => el.getAttribute('data-empty') !== 'true')
+          .map((el) => ({text: (el.textContent ?? '').trim(), empty: false}));
+        return state ? {state, counts} : null;
+      })
+      .catch(() => null);
+    if (sample) samples.push(sample);
+    if (sample?.state === 'shown') break;
     await page.waitForTimeout(100);
   }
 }

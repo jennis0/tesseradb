@@ -28,3 +28,4 @@ clients/ts/viewer/public/datasets.json
 # script is re-run per server anyway, a layer name never being reusable.
 clients/ts/viewer/public/clusters.json
 *.env.local
+clients/ts/.vite.out
