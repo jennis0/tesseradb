@@ -12,7 +12,7 @@
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (deck and components).
+# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (artifacts and encoding), same files.
 
 # FROZEN (controller, 2026-08-25). Decisions and the two normative designs change only through
 # the owner; scripts are the checks themselves; authz and plugin crates are outside this campaign.
@@ -91,6 +91,22 @@ paths = [
 # work, so core is on the list), the harness beside the gate. Branches from main at the step 0–1
 # merge (53eb4a7).
 [track.step2]
+paths = [
+  "clients/ts/core/*",
+  "clients/ts/deck/*",
+  "clients/ts/components/*",
+  "clients/ts/harness/*",
+  "clients/ts/viewer/*",
+  "clients/ts/scripts/*",
+  "clients/ts/README.md",
+  "clients/ts/tsconfig.base.json",
+  "run_demo.sh",
+]
+
+# Wave 3 — step 3 (controller, 2026-08-25): artifacts and encoding — the membership column
+# consumed, the lookup texture, the four artifact elements, lasso, the sidecar retired. Same files
+# as step 2; branches from main at the step-2 merge.
+[track.step3]
 paths = [
   "clients/ts/core/*",
   "clients/ts/deck/*",
