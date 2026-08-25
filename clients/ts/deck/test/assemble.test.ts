@@ -34,6 +34,7 @@ function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 
     capUsed: 500,
     visible: BigInt(served * 3),
     matched: BigInt(served * 3),
+    membership: {},
     heldBelow: BigInt(n + 1),
     identityKey: 'ik',
     contentKey: 'ck',
@@ -191,6 +192,7 @@ describe('assemble', () => {
       world: Float32Array.from([0, 0, 1, 1, 2, 2, 3, 3, 4, 4]),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}},
       subCells: null,
+      membership: {},
       artifacts: []
     };
     const bands = bandsOfResult(result, 2, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});

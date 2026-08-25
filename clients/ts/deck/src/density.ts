@@ -17,6 +17,13 @@ import {WORLD_SIZE, tileXY, type ComposedTile} from '@tesseradb/client';
  *
  * Rebuilt at the settle, O(tiles); a full viewport at 10⁹ scale is ~10⁵ tiles, a millisecond or
  * two, and it is drawn as one `BitmapLayer` under the points.
+ *
+ * **The tile grid is never shown** (decision 0097). A bin per tile drawn nearest-neighbour is the
+ * storage grid drawn — at a coarse depth under a sparse principal it read as hard-edged squares.
+ * So the binned image is {@link filterDensity}'d: supersampled with the intensity interpolated
+ * between tile centres, softened at the scale of one drawn cell, its alpha fading with density
+ * so an isolated cell reads as a halo and never as a block, and sampled linearly on the GPU. No
+ * texel column steps from nothing to full across one texel.
  */
 
 export type DensityImage = {
@@ -92,4 +99,85 @@ export function binDensity(
     bounds: [x0 * span, y0 * span, (x1 + 1) * span, (y1 + 1) * span],
     filled
   };
+}
+
+/** Texels per tile in the filtered image — four gives a ramp of four steps across a cell edge. */
+export const DENSITY_SUPERSAMPLE = 4;
+
+/**
+ * The binned image as a soft field: one padding cell around it so a halo can extend past an
+ * edge tile, {@link DENSITY_SUPERSAMPLE} texels per cell, intensity bilinear between cell
+ * centres and box-blurred by one texel, alpha proportional to intensity.
+ */
+export function filterDensity(image: DensityImage, depth: number, hue: [number, number, number] = WASH_HUE): DensityImage {
+  const S = DENSITY_SUPERSAMPLE;
+  const W = image.width + 2;
+  const H = image.height + 2;
+  // The coarse intensity field, from the binned alpha, with a one-cell border of nothing.
+  const field = new Float32Array(W * H);
+  let peak = 0;
+  for (let y = 0; y < image.height; y++) {
+    for (let x = 0; x < image.width; x++) {
+      const a = image.data[(y * image.width + x) * 4 + 3]!;
+      field[(y + 1) * W + (x + 1)] = a;
+      if (a > peak) peak = a;
+    }
+  }
+  const width = W * S;
+  const height = H * S;
+  const fine = new Float32Array(width * height);
+  for (let py = 0; py < height; py++) {
+    const cy = (py + 0.5) / S - 0.5;
+    const y0 = Math.max(0, Math.floor(cy));
+    const y1 = Math.min(H - 1, y0 + 1);
+    const ty = Math.min(1, Math.max(0, cy - y0));
+    for (let px = 0; px < width; px++) {
+      const cx = (px + 0.5) / S - 0.5;
+      const x0 = Math.max(0, Math.floor(cx));
+      const x1 = Math.min(W - 1, x0 + 1);
+      const tx = Math.min(1, Math.max(0, cx - x0));
+      const top = field[y0 * W + x0]! * (1 - tx) + field[y0 * W + x1]! * tx;
+      const bottom = field[y1 * W + x0]! * (1 - tx) + field[y1 * W + x1]! * tx;
+      fine[py * width + px] = top * (1 - ty) + bottom * ty;
+    }
+  }
+  // One-texel box blur, separable: the bilinear creases go, the halo stays.
+  const blurred = new Float32Array(width * height);
+  for (let py = 0; py < height; py++) {
+    for (let px = 0; px < width; px++) {
+      let sum = 0;
+      let n = 0;
+      for (let dx = -1; dx <= 1; dx++) {
+        const x = px + dx;
+        if (x < 0 || x >= width) continue;
+        sum += fine[py * width + x]!;
+        n++;
+      }
+      blurred[py * width + px] = sum / n;
+    }
+  }
+  const data = new Uint8ClampedArray(width * height * 4);
+  let filled = 0;
+  for (let py = 0; py < height; py++) {
+    for (let px = 0; px < width; px++) {
+      let sum = 0;
+      let n = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const y = py + dy;
+        if (y < 0 || y >= height) continue;
+        sum += blurred[y * width + px]!;
+        n++;
+      }
+      const a = Math.round(sum / n);
+      const i = (py * width + px) * 4;
+      data[i] = hue[0];
+      data[i + 1] = hue[1];
+      data[i + 2] = hue[2];
+      data[i + 3] = a;
+      if (a > 0) filled++;
+    }
+  }
+  const span = WORLD_SIZE / 2 ** depth;
+  const [bx0, by0, bx1, by1] = image.bounds;
+  return {width, height, data, bounds: [bx0 - span, by0 - span, bx1 + span, by1 + span], filled};
 }
