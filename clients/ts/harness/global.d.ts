@@ -1,5 +1,10 @@
-/** The map's probe, published on `window` by the demo (design §5.9) — what the harness reads. */
+/**
+ * The map's probe (design §5.9): the demo publishes its first map's on `window` with the lanes it
+ * keeps itself; `__tesseraProbeOf` is the harness's own accessor, installed before any page
+ * script, which falls back to the explorer's map's probe on a page that publishes none.
+ */
 interface Window {
+  __tesseraProbeOf: () => Window['__tesseraProbe'] | null;
   __tesseraProbe?: {
     paints: number;
     at: number;
@@ -28,8 +33,8 @@ interface Window {
       servedIds: string[];
       sample: {ordinal: number; resolvedId: string | null}[];
     };
-    /** The three lanes' timings, kept by the demo (design §5.10's measurement). */
-    lanes: {
+    /** The three lanes' timings, kept by the demo (design §5.10's measurement); absent on any other page. */
+    lanes?: {
       decode: {ms: number; workerMs: number | null; points: number; bytes: number; at: number}[];
       absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
       region: Record<string, number> | null;
