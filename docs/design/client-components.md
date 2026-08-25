@@ -557,24 +557,34 @@ the alternative, hues spread evenly over the served set at each settle, is offer
 needs its own pass against the leak register: what it discloses is the membership of served
 points in served artifacts, which the served hull already bounds.
 
-**The render target is 10⁶ marks** (owner, 2026-08-25; the viewer runs at 5×10⁵ today, and
-client-interaction's 10⁷ is the large-budget ambition), and every per-point cost here is sized
-to it — modelled, to be measured by the harness at §9 step 2:
+**The render target is multi-million marks on screen and 10⁴-plus artifacts in a layer**
+(owner, 2026-08-25; the viewer runs at several million today — its 500,000 is only the input's
+default — and the served artifact set per view is bounded by the cut and `artifact_budget`,
+not by the layer). Every per-point and per-artifact cost here is sized to that — modelled, to be
+measured by the harness at §9 step 2:
 
-- **Assigning points to clusters client-side** — nearest served centroid, the mapping §5.10
-  draws colour from until D12 lands — is N × K distance checks: 10⁶ points against 30
-  artifacts is 3×10⁷, roughly 100–200 ms single-threaded, so it never runs on the main thread.
-  Bucketing the centroids on a coarse grid so each point checks its cell's neighbours brings it
-  to 15–30 ms, and it runs in the decode worker: per response on arrival (tens of thousands of
-  points, amortised), and once over the held bands in view when a settle brings a different
-  artifact set. The result is one small integer per point, uploaded as a colour attribute
-  through the slab's existing dirty-span path — a few milliseconds for a million points. If a
-  settle-time recompute is ever measured to hitch, the GPU form is a Voronoi texture drawn once
-  per settle and sampled by the point shader — O(1) per point, no CPU pass — and is not built
-  until the worker form is measured wanting. Point-in-hull is 20–30× dearer per candidate and is
-  used only as a bbox pre-filter for points inside no hull, which draw as noise.
-- **The wash** bins the per-tile counts, not the points: 6×10⁴ tiles against the same centroids
-  is negligible.
+- **Assignment is a texture, not a pass.** N × K on the CPU is out at this scale — 3×10⁶ points
+  against 10⁴ artifacts is 3×10¹⁰ — and even bucketed to a handful of candidates per point it
+  is 100–200 ms per settle plus a 12 MB colour-attribute upload. So the assignment lives on the
+  GPU: once per settle, the served hulls are drawn filled into an offscreen **id texture** at
+  viewport resolution, smallest last so an overlap resolves to the tighter cluster, and the
+  point shader samples it by position — its colour is the hull it is inside, and no hull is
+  noise. O(1) per point per frame, no CPU pass, no per-point upload, and a changed artifact set
+  is a texture redraw. Ten thousand hulls of twenty vertices is a trivial draw. Nearest-centroid
+  is the same picture with Voronoi cones instead of hulls and is kept only as the choice for a
+  layer that serves centroids and no hulls. With D12's column, the shader reads the attribute
+  instead of the texture. Point-in-hull on the CPU is used for nothing at this scale.
+- **Labels are placed by priority in a spatial hash.** Overlap avoidance over 10⁴ labels is
+  O(K²) naively; sorted by masked count and placed greedily into a hash of occupied cells it is
+  O(K), milliseconds in the worker, and a few hundred labels fit a viewport whatever the layer
+  holds — the rest wait for zoom, which is DataMapPlot's own behaviour. `TextLayer` with a few
+  hundred visible strings is cheap; the DOM overlay is not, past a hundred, and is the small-map
+  option only.
+- **Outlines and contours** are line strips: 10⁴ hulls × 3 levels × 20 vertices is 6×10⁵
+  vertices in one `PathLayer`, well inside a frame.
+- **The wash** bins the per-tile counts, not the points: `budget / m_target` tiles per view —
+  some 2×10⁵ at three million marks, under `max_tiles_per_request` — into a texture, once per
+  settle.
 
 **What stays decoration if it is drawn at all:** contours traced from held marks are the density
 of a per-tile-capped *sample* (client-interaction §9 names a shape drawn around held points as
