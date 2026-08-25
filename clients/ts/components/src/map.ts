@@ -10,7 +10,8 @@ import {
   type Store,
   type SelectionShape
 } from '@tesseradb/client';
-import {MarkSlab, TesseraLayer, encodingOf, encodingSignature, resolvePick, type Picked} from '@tesseradb/deck';
+import {LookupTexture, MarkSlab, TesseraLayer, clusterLayerOf, encodingOf, encodingSignature, resolvePick, type Picked} from '@tesseradb/deck';
+import type {PaletteKind} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import type {PickOutcome} from './item-card.js';
@@ -32,9 +33,12 @@ import {chrome, tokens} from './tokens.js';
  * converted to the view's data bbox and handed to `setView` on every change; the driver debounces.
  * The element holds the view state itself so `fit()`, `fitTo()` and the keyboard can move it.
  *
- * **Selection** (§5.11): `mode="box"`, or shift-drag in `pan`, draws a box; the highlight while
- * dragging is the shape and nothing else (decision 0097), and the settled shape goes to
- * `store.select`, which counts it. ⊘ `mode="lasso"` is accepted and draws nothing until step 3.
+ * **Selection** (§5.11): `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` draws
+ * a freehand polygon. The highlight while dragging is the shape and nothing else (decision 0097),
+ * and the settled shape goes to `store.select`, which counts it over the cells it meets.
+ *
+ * **Colour by cluster** is `colour-by="cluster:<layer>"` (§5.10): the map owns the lookup texture
+ * beside the slab, and the `palette` property chooses positional or spread (decision 0099).
  *
  * `display: block` with its height from `--tessera-map-height`, because a custom element is
  * inline and heightless and deck sizes its canvas from its parent.
@@ -55,14 +59,32 @@ export type MapProbe = {
   /** `ms` is select-to-counted, the store's own clock: the settle, the request and the sum. */
   region: {depth: number; tiles: number; exact: boolean; visible: number; matched: number; held: number; status: string; ms: number | null} | null;
   timings: {
-    /** Per settle: the slab sync, the wash bin and the whole layer build, last values in ms. */
+    /** Per settle: the slab sync, the wash bin, the lookup texture, the outlines, the labels and the whole layer build, last values in ms. */
     slabMs: number;
     washMs: number;
+    lutMs: number;
+    outlinesMs: number;
+    labelsMs: number;
     layersMs: number;
+    /** Lookup-texture writes since the map was made — what a colouring interaction costs. */
+    lutWrites: number;
     /** Frame gaps over the last two seconds, ms. */
     frame: {mean: number; p95: number; n: number};
     /** Per-response decode, reported by the host through the store's instruments. */
     decodeMs: number[];
+  };
+  /**
+   * Colour by cluster, for the harness: the layer coloured by, the coverage, and a sample of
+   * the ordinals the marks on screen carry with what each resolves to — a served artifact's id,
+   * or none — so *a coloured point's ordinal resolves to a served artifact* is checked rather
+   * than eyeballed.
+   */
+  cluster: {
+    layer: string | null;
+    layersOn: string[];
+    coverage: {current: number; stale: number};
+    servedIds: string[];
+    sample: {ordinal: number; resolvedId: string | null}[];
   };
   [extra: string]: unknown;
 };
@@ -92,7 +114,8 @@ export class TesseraMap extends TesseraElement {
         position: absolute;
         inset: 0;
       }
-      :host([mode='box']) [part='canvas'] {
+      :host([mode='box']) [part='canvas'],
+      :host([mode='lasso']) [part='canvas'] {
         cursor: crosshair;
       }
       .corner {
@@ -178,6 +201,10 @@ export class TesseraMap extends TesseraElement {
   @property({type: Number}) accessor budget = 0;
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
   @property({reflect: true}) accessor mode: 'pan' | 'box' | 'lasso' = 'pan';
+  /** How served artifacts are coloured: by position about the extent's centre, or spread over the served set. */
+  @property() accessor palette: PaletteKind = 'positional';
+  /** The level to colour a nested layer at; unset colours at the deepest served. */
+  @property({type: Number, attribute: 'cluster-level'}) accessor clusterLevel: number | null = null;
   /** A deck.gl layer drawn under the points — a geographic corpus's basemap (§5.3). */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   @property({type: Boolean}) accessor wash = true;
@@ -187,6 +214,7 @@ export class TesseraMap extends TesseraElement {
 
   @state() accessor hover: {x: number; y: number; lines: string[]} | null = null;
   @state() accessor drag: [number, number, number, number] | null = null;
+  @state() accessor dragPolygon: [number, number][] | null = null;
 
   /** What the last click resolved to — a miss, a broken pick, or a hit that went to the store. */
   lastPick: PickOutcome = null;
@@ -199,15 +227,18 @@ export class TesseraMap extends TesseraElement {
     encoding: 'uniform',
     view: {depth: 0, status: 'idle', stale: false, visible: 0, matched: 0, served: 0, provisional: 0},
     region: null,
-    timings: {slabMs: 0, washMs: 0, layersMs: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []}
+    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
+    cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: []}
   };
 
   readonly slab = new MarkSlab();
+  readonly lut = new LookupTexture();
   private deck: Deck<OrthographicView> | null = null;
   private finalizeTimer: ReturnType<typeof setTimeout> | null = null;
   private viewState: ViewState = {target: [WORLD_SIZE / 2, WORLD_SIZE / 2, 0], zoom: 0, minZoom: -2, maxZoom: MAX_DEPTH};
   private selectedWorldXY: [number, number] | null = null;
   private regionWorld: [number, number, number, number] | null = null;
+  private regionPolygon: [number, number][] | null = null;
   private regionAnnounced: object | null = null;
   private regionAskedAt = 0;
   private pickedId: bigint | null = null;
@@ -255,8 +286,9 @@ export class TesseraMap extends TesseraElement {
         emit(this, 'tessera-layerchange', {layers: this.layers});
       }
       if (changed.has('budget') && this.budget > 0) s.setBudget(this.budget);
+      if (changed.has('palette')) s.setPalette(this.palette);
     }
-    if (changed.has('mode') || changed.has('drag') || changed.has('basemap') || changed.has('wash') || changed.has('radius')) this.paint();
+    if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel')) this.paint();
   }
 
   protected override onStoreAdopted(store: Store): void {
@@ -264,9 +296,11 @@ export class TesseraMap extends TesseraElement {
     this.metaSeen = false;
     this.selectedWorldXY = null;
     this.regionWorld = null;
+    this.regionPolygon = null;
     if (this.colourBy !== '') store.setColourBy(this.colourBy === 'none' ? null : this.colourBy);
     if (this.layers) store.setLayers(this.layers);
     if (this.budget > 0) store.setBudget(this.budget);
+    if (this.palette !== 'positional') store.setPalette(this.palette);
     this.paint();
   }
 
@@ -289,10 +323,18 @@ export class TesseraMap extends TesseraElement {
       served: view.served.shown,
       provisional: view.provisional
     };
-    p.encoding = encodingSignature(encodingOf(s.get('meta'), s.get('legend')));
+    const legend = s.get('legend');
+    const clusterLayer = clusterLayerOf(legend.colourBy);
+    p.encoding = clusterLayer ? `cluster|${clusterLayer}` : encodingSignature(encodingOf(s.get('meta'), legend));
     if (view.composition && !checkedCompositions.has(view.composition)) {
       checkedCompositions.add(view.composition);
       assertCompositionMatchesServed(view.composition);
+    }
+    const artifacts = s.get('artifacts');
+    if (artifacts !== this.probedArtifacts || view.composition !== this.probedComposition) {
+      this.probedArtifacts = artifacts;
+      this.probedComposition = view.composition;
+      p.cluster = this.clusterProbe(clusterLayer, artifacts, s.get('marks').bands);
     }
 
     // Events for what arrived: the picked record, the opened artifact, the region's counts.
@@ -307,13 +349,21 @@ export class TesseraMap extends TesseraElement {
     }
     const region = s.get('region');
     const meta = s.get('meta');
-    if (region && region.shape.kind === 'box' && meta) {
+    if (region && meta) {
       const q = meta.quantisation;
-      const [x0, y0] = dataToWorldXY(region.shape.bbox[0], region.shape.bbox[1], q);
-      const [x1, y1] = dataToWorldXY(region.shape.bbox[2], region.shape.bbox[3], q);
-      const next: [number, number, number, number] = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
-      if (!this.regionWorld || next.some((v, i) => v !== this.regionWorld![i])) {
-        this.regionWorld = next;
+      if (region.shape.kind === 'box') {
+        const [x0, y0] = dataToWorldXY(region.shape.bbox[0], region.shape.bbox[1], q);
+        const [x1, y1] = dataToWorldXY(region.shape.bbox[2], region.shape.bbox[3], q);
+        const next: [number, number, number, number] = [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+        if (!this.regionWorld || next.some((v, i) => v !== this.regionWorld![i])) {
+          this.regionWorld = next;
+          this.regionPolygon = null;
+          this.paint();
+        }
+      } else if (region.shape !== this.regionShape) {
+        this.regionShape = region.shape;
+        this.regionWorld = null;
+        this.regionPolygon = region.shape.points.map(([x, y]) => dataToWorldXY(x, y, q));
         this.paint();
       }
       const ms = region.status === 'loading' ? null : (p.region?.ms ?? performance.now() - this.regionAskedAt);
@@ -329,12 +379,39 @@ export class TesseraMap extends TesseraElement {
           depth: region.depth
         });
       }
-    } else if (!region && this.regionWorld) {
+    } else if (!region && (this.regionWorld || this.regionPolygon)) {
       this.regionWorld = null;
+      this.regionPolygon = null;
+      this.regionShape = null;
       p.region = null;
       this.paint();
     }
     super.onStoreChange();
+  }
+
+  private probedArtifacts: object | null = null;
+  private probedComposition: object | null = null;
+  private regionShape: SelectionShape | null = null;
+
+  /** See {@link MapProbe.cluster}: a sample of carried ordinals, each resolved through the table. */
+  private clusterProbe(clusterLayer: string | null, artifacts: ReturnType<Store['get']> & {layers: string[]}, bands: readonly {membership: Record<string, {distinct: Uint32Array}>}[]): MapProbe['cluster'] {
+    const a = artifacts as unknown as import('@tesseradb/client').ArtifactsProjection;
+    const layer = clusterLayer ?? a.layers[0] ?? null;
+    const sample: {ordinal: number; resolvedId: string | null}[] = [];
+    if (layer) {
+      for (const band of bands) {
+        const m = band.membership[layer];
+        if (!m) continue;
+        for (let i = 0; i < m.distinct.length && sample.length < 16; i++) {
+          const ordinal = m.distinct[i]!;
+          const resolved = a.table.resolve(ordinal, a.servedOrdinals, this.clusterLevel ?? undefined);
+          const entry = resolved === 0 ? null : a.table.entry(resolved);
+          sample.push({ordinal, resolvedId: entry ? idString(entry.tesseraId) : null});
+        }
+        if (sample.length >= 16) break;
+      }
+    }
+    return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: a.served.map((x) => idString(x.tesseraId)), sample};
   }
 
   /** Release the store this map built, and the `Deck`, now. */
@@ -343,6 +420,7 @@ export class TesseraMap extends TesseraElement {
     this.deck?.finalize();
     this.deck = null;
     this.slab.clear();
+    this.lut.destroy();
   }
 
   // ---- deck ---------------------------------------------------------------------------------
@@ -358,7 +436,10 @@ export class TesseraMap extends TesseraElement {
       controller: true,
       pickingRadius: 8,
       layers: [],
-      onDeviceInitialized: (device) => this.slab.attach(device),
+      onDeviceInitialized: (device) => {
+        this.slab.attach(device);
+        this.lut.attach(device);
+      },
       onViewStateChange: ({viewState}) => {
         const v = viewState as {target: number[]; zoom: number};
         this.viewState = {...this.viewState, target: [v.target[0]!, v.target[1]!, 0], zoom: v.zoom};
@@ -400,10 +481,14 @@ export class TesseraMap extends TesseraElement {
           id: 'tessera',
           store: s,
           slab: this.slab,
+          lut: this.lut,
+          clusterLevel: this.clusterLevel ?? undefined,
           selectedWorldXY: this.selectedWorldXY,
           openedArtifact: s.get('selection').artifact?.id ?? null,
           region: this.regionWorld,
+          regionPolygon: this.regionPolygon,
           drag: this.drag,
+          dragPolygon: this.dragPolygon,
           wash: this.wash,
           radius: this.radius,
           onDrawn: (drawn, provisional) => {
@@ -413,9 +498,15 @@ export class TesseraMap extends TesseraElement {
             p.marks = drawn + provisional;
           },
           onTimings: (t) => {
-            this.probe.timings.slabMs = t.slabMs;
-            this.probe.timings.washMs = t.washMs;
-            this.probe.timings.layersMs = t.layersMs;
+            Object.assign(this.probe.timings, {
+              slabMs: t.slabMs,
+              washMs: t.washMs,
+              lutMs: t.lutMs,
+              outlinesMs: t.outlinesMs,
+              labelsMs: t.labelsMs,
+              layersMs: t.layersMs,
+              lutWrites: t.lutWrites
+            });
           }
         })
       );
@@ -423,8 +514,8 @@ export class TesseraMap extends TesseraElement {
     this.deck.setProps({
       layers,
       viewState: this.viewState,
-      // In box mode the drag is the selection's; the wheel still zooms.
-      controller: this.mode === 'box' ? {dragPan: false, dragRotate: false} : true
+      // In box and lasso modes the drag is the selection's; the wheel still zooms.
+      controller: this.mode === 'box' || this.mode === 'lasso' ? {dragPan: false, dragRotate: false} : true
     });
   }
 
@@ -480,7 +571,7 @@ export class TesseraMap extends TesseraElement {
     }
   }
 
-  // ---- selection: the box ---------------------------------------------------------------------
+  // ---- selection: the box and the lasso -------------------------------------------------------
 
   private unproject(e: PointerEvent): [number, number] | null {
     const viewport = this.deck?.getViewports()[0];
@@ -492,11 +583,13 @@ export class TesseraMap extends TesseraElement {
 
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
-    if (this.mode !== 'box' && !(this.mode === 'pan' && e.shiftKey)) return;
+    const lasso = this.mode === 'lasso';
+    if (!lasso && this.mode !== 'box' && !(this.mode === 'pan' && e.shiftKey)) return;
     const at = this.unproject(e);
     if (!at) return;
     this.dragStart = at;
-    this.drag = [at[0], at[1], at[0], at[1]];
+    if (lasso) this.dragPolygon = [at];
+    else this.drag = [at[0], at[1], at[0], at[1]];
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.stopPropagation();
   };
@@ -505,22 +598,37 @@ export class TesseraMap extends TesseraElement {
     if (!this.dragStart) return;
     const at = this.unproject(e);
     if (!at) return;
-    const [sx, sy] = this.dragStart;
-    this.drag = [Math.min(sx, at[0]), Math.min(sy, at[1]), Math.max(sx, at[0]), Math.max(sy, at[1])];
+    if (this.dragPolygon) {
+      // A vertex per pointer move, thinned to a pixel or so: the shape the user drew, no more.
+      const last = this.dragPolygon[this.dragPolygon.length - 1]!;
+      const scale = 2 ** this.viewState.zoom;
+      if (Math.hypot(at[0] - last[0], at[1] - last[1]) * scale >= 2) this.dragPolygon = [...this.dragPolygon, at];
+    } else {
+      const [sx, sy] = this.dragStart;
+      this.drag = [Math.min(sx, at[0]), Math.min(sy, at[1]), Math.max(sx, at[0]), Math.max(sy, at[1])];
+    }
     e.stopPropagation();
   };
 
   private onPointerUp = (e: PointerEvent): void => {
     if (!this.dragStart) return;
     const box = this.drag;
+    const polygon = this.dragPolygon;
     this.dragStart = null;
     this.drag = null;
-    if (!box) return;
+    this.dragPolygon = null;
     e.stopPropagation();
-    // A click-sized box is not a selection.
-    if (box[2] - box[0] < 1e-6 && box[3] - box[1] < 1e-6) return;
     const s = this.resolvedStore;
     if (!s || !s.get('meta')) return;
+    if (polygon) {
+      // Fewer than three vertices is a click, not a shape.
+      if (polygon.length < 3) return;
+      this.select({kind: 'lasso', points: polygon.map(([x, y]) => s.dataXY(x, y))});
+      return;
+    }
+    if (!box) return;
+    // A click-sized box is not a selection.
+    if (box[2] - box[0] < 1e-6 && box[3] - box[1] < 1e-6) return;
     const [x0, y0] = s.dataXY(box[0], box[1]);
     const [x1, y1] = s.dataXY(box[2], box[3]);
     const shape: SelectionShape = {kind: 'box', bbox: [x0, y0, x1, y1]};
@@ -594,9 +702,10 @@ export class TesseraMap extends TesseraElement {
         this.setViewState({zoom: Math.max(-2, this.viewState.zoom - 1)});
         break;
       case 'Escape':
-        if (this.drag) {
+        if (this.drag || this.dragPolygon) {
           this.dragStart = null;
           this.drag = null;
+          this.dragPolygon = null;
         } else if (this.resolvedStore?.get('region')) {
           this.select(null);
         }
@@ -653,6 +762,7 @@ export class TesseraMap extends TesseraElement {
           : html`<div part="controls" role="toolbar" aria-label="map mode">
               <button type="button" aria-pressed=${this.mode === 'pan'} title="pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>pan</button>
               <button type="button" aria-pressed=${this.mode === 'box'} title="drag a box to select" @click=${() => (this.mode = 'box')}>box</button>
+              <button type="button" aria-pressed=${this.mode === 'lasso'} title="draw a shape to select" @click=${() => (this.mode = 'lasso')}>lasso</button>
               <button type="button" title="fit the whole extent" @click=${() => this.fit()}>fit</button>
             </div>`}
         <slot name="top-left"></slot>
