@@ -255,7 +255,7 @@ fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<St
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [LAYER];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
-    request.layers = Some(&names);
+    request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
         .viewport(&session, request)
         .expect("a viewport over the fixture")
@@ -507,7 +507,7 @@ fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [LAYER];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
-    request.layers = Some(&names);
+    request.layers = tessera_engine::LayerSelection::Named(&names);
     let row = engine
         .viewport(&session, request)
         .expect("a viewport")
