@@ -6,6 +6,12 @@
 //
 //   node clients/ts/harness/harness.mjs [--url http://localhost:5173] [--shot /tmp/tessera-harness.png] [--headed]
 //
+// The same assertions run against the demo page and against the C1 example page
+// (`examples/plain-html`, `--url http://localhost:5180`), which is the explorer with none of the
+// demo's layout: the claims read the components' parts, the probe is the explorer's own map's
+// where the page publishes none, and the demo's instruments panel is optional. Both pages carry a
+// `#principal` select, which is how a page says who is signed in.
+//
 // Requires a running `tessera serve` with a published layer and a running `vite dev`. A target
 // beside the gate, not a step in it: it needs a served bundle, ports and Chromium — headless
 // under swiftshader by default; `--headed` runs the real browser on a display (WSLg's, or
@@ -51,6 +57,12 @@ const browser = await chromium.launch(
     : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox'], ...(executablePath ? {executablePath} : {})}
 );
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
+// The probe: the demo publishes its first map's on `window` (with the lanes it keeps itself);
+// any page with an explorer has the map's own, and that is what the C1 example page offers.
+await page.addInitScript(() => {
+  const explorer = () => /** @type {{map: {probe: Window['__tesseraProbe']} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+  window.__tesseraProbeOf = () => window.__tesseraProbe ?? explorer()?.map?.probe ?? null;
+});
 
 const consoleErrors = [];
 page.on('console', (m) => {
@@ -120,7 +132,7 @@ const settled = async (limitMs = 45_000) => {
   let stable = 0;
   while (Date.now() - started < limitMs) {
     await page.waitForTimeout(400);
-    const marks = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    const marks = await page.evaluate(() => window.__tesseraProbeOf()?.marks ?? -1);
     if (marks === last) {
       if (++stable >= 4) return true;
     } else {
@@ -283,7 +295,7 @@ const regionMs = Date.now() - selectStarted;
   const exact = await matched.getAttribute('data-exact').catch(() => null);
   const state = await selection.locator('[part="state"]').first().textContent().catch(() => '');
   const request = viewportRequests.slice(requestsBefore).find((r) => Array.isArray(r.tiles) && r.k === 0 && !(Array.isArray(r.layers) && r.layers.length > 0));
-  const probe = await page.evaluate(() => window.__tesseraProbe?.region ?? null);
+  const probe = await page.evaluate(() => window.__tesseraProbeOf()?.region ?? null);
   check(
     'a region’s count renders as inexact when its cell exceeds a pixel',
     exact === 'false' && text.startsWith('≈') && request !== undefined && request.tiles.length <= 4096,
@@ -300,9 +312,9 @@ if ((await item.count()) > 0) await item.click();
 const card = page.locator('tessera-item-card').first();
 await card.locator('[part="field"]').first().waitFor({timeout: 20_000}).catch(() => {});
 const fieldsBefore = await card.locator('[part="field"]').count();
-const options = await page.locator('#principal option').count();
+const options = await page.locator('#principal option').evaluateAll((els) => els.map((el) => /** @type {HTMLOptionElement} */ (el).value));
 const current = await page.locator('#principal').inputValue();
-const other = [...Array(options).keys()].map(String).find((v) => v !== current) ?? current;
+const other = options.find((v) => v !== current) ?? current;
 await page.selectOption('#principal', other);
 await page.waitForTimeout(300);
 {
@@ -354,6 +366,14 @@ const listCounts = async () =>
     .catch(() => ({}));
 
 await page.locator('tessera-map [part="controls"] button', {hasText: 'fit'}).first().click().catch(() => {});
+// The demo opens with a layer on; the example page leaves that to the layer picker, so a page
+// with none on has its first layer turned on here — a precondition of the two claims below.
+if ((await page.evaluate(() => window.__tesseraProbeOf()?.cluster.layersOn.length ?? 0)) === 0) {
+  // A minute, because under headless swiftshader the main thread is gone for 10–14 s at a time
+  // drawing a million marks, and a click that cannot land is reported rather than swallowed.
+  const on = await page.locator('tessera-layer-picker [part="entry"] input').first().click({timeout: 60_000}).then(() => true, () => false);
+  console.log(`  ·    no layer was on; the first layer ${on ? 'turned on through the picker' : 'could not be turned on — the picker did not take a click'}`);
+}
 await settled();
 await page.waitForTimeout(1500);
 const countsBefore = await listCounts();
@@ -388,7 +408,7 @@ await settled();
 await page.waitForTimeout(800);
 {
   const probe = await page.evaluate(() => {
-    const p = window.__tesseraProbe;
+    const p = window.__tesseraProbeOf();
     return p ? {encoding: p.encoding, cluster: p.cluster, lutWrites: p.timings.lutWrites} : null;
   });
   const served = new Set(probe?.cluster.servedIds ?? []);
@@ -407,7 +427,11 @@ await page.screenshot({path: clusterShot, timeout: 60_000});
 // ---- measurements --------------------------------------------------------------------------------
 
 // The largest bundle the demo is serving — the harness measures what is there and says which.
-const dataset = await page.locator('#instruments').innerText().then((t) => /bundle\s+(.+)/.exec(t)?.[1]?.trim() ?? (t.split('\n').find((l) => /arXiv|bundle/.test(l)) ?? '?'));
+const dataset = await page
+  .locator('#instruments')
+  .innerText({timeout: 2_000})
+  .then((t) => /bundle\s+(.+)/.exec(t)?.[1]?.trim() ?? (t.split('\n').find((l) => /arXiv|bundle/.test(l)) ?? '?'))
+  .catch(() => page.title().then((t) => `${t} (no instruments panel; the bundle is whatever the demo serves)`));
 // Drive a few zoom notches so the settle work and the frame gaps are measured under load.
 for (const notch of [-400, -400, 400, 400]) {
   await page.mouse.move(640, 400);
@@ -428,7 +452,7 @@ if (clickable) {
   await pickerBox.click({timeout: 15_000}).catch(() => {}); // on: a band lacking the column is colour-stale until it refetches
   let firstStale = null;
   while (Date.now() - switchedAt < 60_000) {
-    const c = await page.evaluate(() => window.__tesseraProbe?.cluster ?? null);
+    const c = await page.evaluate(() => window.__tesseraProbeOf()?.cluster ?? null);
     if (c && c.layersOn.length > 0) {
       if (c.coverage.stale > 0 && firstStale === null) firstStale = c.coverage.stale;
       if (firstStale !== null && c.coverage.stale === 0) {
@@ -450,9 +474,9 @@ if (clickable) {
 await settled();
 
 const probe = await page.evaluate(() => {
-  const p = window.__tesseraProbe;
+  const p = window.__tesseraProbeOf();
   if (!p) return null;
-  return {marks: p.marks, paints: p.paints, requests: p.requests, timings: p.timings, view: p.view, instruments: p.instruments ?? null, lanes: p.lanes, cluster: p.cluster};
+  return {marks: p.marks, paints: p.paints, requests: p.requests, timings: p.timings, view: p.view, instruments: p.instruments ?? null, lanes: p.lanes ?? null, cluster: p.cluster};
 });
 const quantile = (xs, q) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -464,18 +488,22 @@ if (probe) {
   console.log(`  bundle: ${dataset}`);
   console.log(`  marks on screen: ${probe.marks.toLocaleString('en-GB')} at depth ${probe.view.depth}; ${probe.paints} paints, ${probe.requests} fetched frames`);
   const lanes = probe.lanes;
-  const worker = lanes.decode.filter((x) => x.workerMs !== null);
-  const queued = worker.map((x) => x.ms - (x.workerMs ?? 0));
-  const biggest = lanes.decode.reduce((m, x) => (x.points > (m?.points ?? -1) ? x : m), /** @type {typeof lanes.decode[number] | null} */ (null));
-  console.log(`  per response — decode as seen from the main thread: n=${d.length}, median ${quantile(d, 0.5).toFixed(1)} ms, p95 ${quantile(d, 0.95).toFixed(1)} ms, max ${Math.max(...d, 0).toFixed(1)} ms`);
-  console.log(`  per response — in the worker: n=${worker.length}, median ${quantile(worker.map((x) => x.workerMs ?? 0), 0.5).toFixed(1)} ms, max ${Math.max(0, ...worker.map((x) => x.workerMs ?? 0)).toFixed(1)} ms; queued behind the lane: median ${quantile(queued, 0.5).toFixed(1)} ms, max ${Math.max(0, ...queued).toFixed(1)} ms`);
-  if (biggest) console.log(`  per response — the largest: ${biggest.points.toLocaleString('en-GB')} points, ${(biggest.bytes / 1e6).toFixed(1)} MB, ${biggest.ms.toFixed(0)} ms main-thread, ${biggest.workerMs?.toFixed(0) ?? '?'} ms in the worker`);
-  console.log(`  per response — remap on the main thread: n=${lanes.absorb.remap.length}, median ${quantile(lanes.absorb.remap, 0.5).toFixed(2)} ms, max ${Math.max(0, ...lanes.absorb.remap).toFixed(2)} ms over ${Math.max(0, ...lanes.absorb.remapPoints).toLocaleString('en-GB')} points at most; absorb split median ${quantile(lanes.absorb.split, 0.5).toFixed(1)} ms, max ${Math.max(0, ...lanes.absorb.split).toFixed(1)} ms; longest single slice ${lanes.absorb.sliceMaxMs.toFixed(1)} ms`);
-  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, wash bin ${probe.timings.washMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not run'}`);
+  if (d.length > 0) console.log(`  per response — decode as seen from the main thread: n=${d.length}, median ${quantile(d, 0.5).toFixed(1)} ms, p95 ${quantile(d, 0.95).toFixed(1)} ms, max ${Math.max(...d, 0).toFixed(1)} ms`);
+  if (lanes) {
+    const worker = lanes.decode.filter((x) => x.workerMs !== null);
+    const queued = worker.map((x) => x.ms - (x.workerMs ?? 0));
+    const biggest = lanes.decode.reduce((m, x) => (x.points > (m?.points ?? -1) ? x : m), /** @type {typeof lanes.decode[number] | null} */ (null));
+    console.log(`  per response — in the worker: n=${worker.length}, median ${quantile(worker.map((x) => x.workerMs ?? 0), 0.5).toFixed(1)} ms, max ${Math.max(0, ...worker.map((x) => x.workerMs ?? 0)).toFixed(1)} ms; queued behind the lane: median ${quantile(queued, 0.5).toFixed(1)} ms, max ${Math.max(0, ...queued).toFixed(1)} ms`);
+    if (biggest) console.log(`  per response — the largest: ${biggest.points.toLocaleString('en-GB')} points, ${(biggest.bytes / 1e6).toFixed(1)} MB, ${biggest.ms.toFixed(0)} ms main-thread, ${biggest.workerMs?.toFixed(0) ?? '?'} ms in the worker`);
+    console.log(`  per response — remap on the main thread: n=${lanes.absorb.remap.length}, median ${quantile(lanes.absorb.remap, 0.5).toFixed(2)} ms, max ${Math.max(0, ...lanes.absorb.remap).toFixed(2)} ms over ${Math.max(0, ...lanes.absorb.remapPoints).toLocaleString('en-GB')} points at most; absorb split median ${quantile(lanes.absorb.split, 0.5).toFixed(1)} ms, max ${Math.max(0, ...lanes.absorb.split).toFixed(1)} ms; longest single slice ${lanes.absorb.sliceMaxMs.toFixed(1)} ms`);
+  } else {
+    console.log('  per response — the decode, absorb and region lanes are the demo\'s instruments; this page keeps none (the store\'s `instruments` option), so they are not measured here');
+  }
+  console.log(`  per settle — slab sync ${probe.timings.slabMs.toFixed(2)} ms, wash bin ${probe.timings.washMs.toFixed(2)} ms, lookup texture ${probe.timings.lutMs.toFixed(2)} ms, outlines ${probe.timings.outlinesMs.toFixed(2)} ms (${probe.timings.outlines}), labels ${probe.timings.labelsMs.toFixed(2)} ms (${probe.timings.labels} placed), layer build ${probe.timings.layersMs.toFixed(2)} ms (last settle); coverage check ${lanes?.coverage ? `${lanes.coverage.ms.toFixed(2)} ms over ${lanes.coverage.bands} bands, ${lanes.coverage.stale} stale` : 'not recorded'}`);
   console.log(`  per frame — mean ${probe.timings.frame.mean.toFixed(1)} ms, p95 ${probe.timings.frame.p95.toFixed(1)} ms over the last ${probe.timings.frame.n} frames (${headed ? 'headed chromium on the display' : 'software GL under headless chromium'}), colouring by ${probe.cluster.layer ? 'cluster' : 'column'} through the lookup texture, ${probe.timings.lutWrites} texture writes in the session`);
-  const region = await page.evaluate(() => window.__tesseraProbe?.region ?? null);
-  console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under ${headed ? 'headed' : 'headless'} input; lanes: ${lanes.region ? `settle ${lanes.region.settleMs.toFixed(0)} ms, wire ${lanes.region.wireMs.toFixed(0)} ms (server ${lanes.region.serverMs.toFixed(1)} ms, ${lanes.region.tiles} tiles), projection ${lanes.region.projectMs.toFixed(1)} ms` : 'not recorded'}`);
-  console.log(`  main thread — longest tasks: ${lanes.longTasks.slice(0, 5).map((t) => `${t.ms.toFixed(0)} ms at ${(t.at / 1000).toFixed(1)} s`).join(', ') || 'none over 50 ms'}; decode replies that waited through a long task: ${lanes.decode.filter((x) => lanes.longTasks.some((t) => x.at - x.ms <= t.at + t.ms && x.at >= t.at)).length} of ${lanes.decode.length}`);
+  const region = await page.evaluate(() => window.__tesseraProbeOf()?.region ?? null);
+  console.log(`  box selection — ${region?.ms?.toFixed(0) ?? '?'} ms select-to-counted (200 ms settle, the request, the sum); ${regionMs} ms mouse-up to panel under ${headed ? 'headed' : 'headless'} input; lanes: ${lanes?.region ? `settle ${lanes.region.settleMs.toFixed(0)} ms, wire ${lanes.region.wireMs.toFixed(0)} ms (server ${lanes.region.serverMs.toFixed(1)} ms, ${lanes.region.tiles} tiles), projection ${lanes.region.projectMs.toFixed(1)} ms` : 'not recorded'}`);
+  if (lanes) console.log(`  main thread — longest tasks: ${lanes.longTasks.slice(0, 5).map((t) => `${t.ms.toFixed(0)} ms at ${(t.at / 1000).toFixed(1)} s`).join(', ') || 'none over 50 ms'}; decode replies that waited through a long task: ${lanes.decode.filter((x) => lanes.longTasks.some((t) => x.at - x.ms <= t.at + t.ms && x.at >= t.at)).length} of ${lanes.decode.length}`);
   console.log(`  layer switch — ${refillMs === null ? 'not measured' : refillMs === 0 ? 'no band went colour-stale: the columns survived the switch' : `${refillMs} ms from the layer back on to colours exact, ${refillStale} tiles refetched`} (${Date.now() - refillStarted > 0 ? 'measured after colour by cluster was chosen' : ''})`);
 } else {
   console.log('  no probe on the page');

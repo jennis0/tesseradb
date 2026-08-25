@@ -1,7 +1,7 @@
 # Tessera clients — an instrument, not a product
 
-Four TypeScript packages, a headless-browser smoke test and an acceptance harness, built to answer
-one question: **does a running Tessera actually work?**
+Five TypeScript packages, three example pages, a headless-browser smoke test and an acceptance
+harness, built to answer one question: **does a running Tessera actually work?**
 
 - `core/` — `@tesseradb/client`. The **headless store** is its main export: `createStore({viewerUrl,
   token | authorise})` hands a visualisation the projections to draw and the verbs to steer, over
@@ -20,11 +20,22 @@ one question: **does a running Tessera actually work?**
   eight display states rendered through `part="state"`, tokens `--tessera-*`, parts, slots and
   events per design §5. `npm run build -w @tesseradb/components` writes the single-file bundle with
   the decode worker inlined and its SRI hash beside it (`dist/`).
+- `react/` — `@tesseradb/react`. `useTesseraStore(options)` and `useProjection(store, name)` over
+  `useSyncExternalStore`; the store is built in an effect paired with its `dispose`, so
+  StrictMode's double mount leaks no driver. `@tesseradb/react/components` wraps every element
+  through `@lit/react` with typed props and events, behind optional peers on
+  `@tesseradb/components` and `@lit/react`, so a hooks-only install pulls neither Lit nor deck.gl.
+- `examples/` — the three pages design §9 step 4 asks for, each a workspace the gate typechecks:
+  `plain-html` (no build step; the bundle with its integrity hash, and the app server that holds
+  the session credential), `react-explorer` (React 19 through the wrappers, one slot replaced by
+  a host component) and `canvas-store` (the store under a hand-rolled camera on a 2D canvas, with
+  none of our rendering — the check that C2 works).
 - `viewer/` — the demo, `@tesseradb/viewer`: `<tessera-explorer layout="overlay">` plus the
   instruments — dataset and principal pickers (where the session credential stays), the layer and
   colour controls, the depth and request readouts, the trace bar.
 - `harness/` — the acceptance harness (design §9): the components' claims, checked through
-  shadow-piercing locators against the demo page, and the §5.10 measurements printed.
+  shadow-piercing locators against the demo page and against the plain-HTML example page
+  (`--url`), and the §5.10 measurements printed.
 - `spike/` — the deck.gl tile-convention spike, kept as a regression guard.
 
 **Vite 8 and the decorators.** The elements use standard (TC39 stage-3) decorators with `accessor`,
@@ -58,6 +69,48 @@ to copy:
 The documented integration topology is **T2 with verified assertions** — credential construction
 at the integrator's app server, where the authority is (client-interaction §7). Nothing here
 revises that.
+
+## Embedding the elements
+
+The elements are custom elements, so every framework takes them; what differs is how each sets an
+object-valued property and whether it needs telling the tag is not its own.
+
+**Plain HTML** — `examples/plain-html`: the self-contained bundle with its integrity hash and
+`<tessera-explorer viewer-url token>`; the token from the page's own server, which holds the
+session credential (`examples/plain-html/README.md` says what that server is under the
+passthrough plugin, and what the production topology is until D10 is ruled).
+
+**React** — `examples/react-explorer`: the wrappers in `@tesseradb/react/components` set object
+props as properties and type the events (`onPick`, `onSelectChange`, …); the hooks in
+`@tesseradb/react` read the store. React 19 sets properties on custom elements natively, so the
+raw tags work there too; the wrappers are for React 18 and for the typing.
+
+**Vue** — not checked in the gate; two things are needed. The compiler must be told the tags are
+custom elements, or it warns that `tessera-map` failed to resolve as a component:
+
+```ts
+// vite.config.ts
+vue({template: {compilerOptions: {isCustomElement: (tag) => tag.startsWith('tessera-')}}})
+```
+
+and object values go through **property** bindings, since an attribute can only carry a string:
+`<tessera-status .store="store" />`, `<tessera-count .count="served" />`, `<tessera-explorer
+.authorise="getToken" />`. Events are ordinary: `@tessera-pick="onPick"`. Import
+`@tesseradb/components` from a client-only path — Lit and deck.gl touch `window` at import, so a
+server-rendered app imports it dynamically in `onMounted` or a `<ClientOnly>` boundary.
+
+**Svelte** — not checked in the gate. Svelte sets a property when the element has one of that
+name and an attribute otherwise, so object values need no marking in most cases; where the
+element is upgraded after Svelte set the attribute (the module still loading), bind explicitly:
+`<tessera-count bind:this={el} />` then `el.count = served`, or use Svelte's `prop:` directive
+(`<tessera-status prop:store={store} />`). Events: `on:tessera-pick={onPick}`. The same
+client-only import rule applies under SvelteKit — import the package in `onMount`, not at module
+scope.
+
+**Every framework**: define before render. The package's root entry defines every element on
+import; a panel rendered before the import resolves is an unknown element until it upgrades,
+which is harmless but reads as a blank. The context root is attached once on import, so a panel
+above the explorer in the DOM still finds its store.
 
 ## Prerequisites
 
@@ -261,12 +314,14 @@ cd core && TESSERA_LIVE=1 TESSERA_SESSION_CRED=… npx vitest run test/client.li
 cd viewer && node smoke.mjs             # drives the page in headless chromium
 cd viewer && node smoke-artifacts.mjs   # the same clustering under every principal
 cd viewer && node ../harness/harness.mjs  # the §9 claims, through the parts; the measurements
+cd harness && node harness.mjs --url http://localhost:5180   # the same claims against examples/plain-html
 ```
 
 The smoke scripts and the harness read the page **through the components' parts** —
 `tessera-status [part="count"]`, `[part="state"]`, `[part="refresh"]` — with Playwright's
 shadow-piercing locators, never an id the shadow DOM hides; the mark count and the view's figures
-come from the map's probe (`window.__tesseraProbe`, the first map's, published by the demo).
+come from the map's probe (`window.__tesseraProbe`, the first map's, published by the demo; on a
+page that publishes none the harness reads the explorer's map's own).
 
 `smoke.mjs` reports what the page actually did — requests and their statuses, the counts each
 principal reported, whether marks accumulate on zoom, lit canvas pixels, console errors — and
