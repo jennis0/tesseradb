@@ -78,6 +78,10 @@ export type DriverOptions = {
   deriveMinGapMs?: number;
   inFlightMaxMs?: number;
   maxRetries?: number;
+  /** First backoff after a 503 `not-ready`, doubled per attempt; a shorter wait than a 429's. */
+  notReadyBackoffMs?: number;
+  /** Ceiling on any retry backoff, so a late attempt does not wait minutes. */
+  retryBackoffMaxMs?: number;
   /** Anticipation pacing — D5: shipped at design budgets, judged by measurement. */
   maxPrefetchPerPause?: number;
   maxPrefetchBytesPerPause?: number;
@@ -97,6 +101,8 @@ const DEFAULTS = {
   deriveMinGapMs: 120,
   inFlightMaxMs: 5_000,
   maxRetries: 2,
+  notReadyBackoffMs: 250,
+  retryBackoffMaxMs: 8_000,
   maxPrefetchPerPause: 3,
   maxPrefetchBytesPerPause: 8_000_000,
   prefetchLayers: 1,
@@ -589,10 +595,18 @@ export class Driver {
       this.inFlightAt = null;
       this.inFlight = null;
 
-      const shed = error instanceof TesseraError && error.status === 429;
-      if (shed && attempt < this.o.maxRetries) {
+      // Two retryable refusals, and they are not the same wait. A 429 `backpressure` is the
+      // server shedding load, retried on the exponential the shed path always used; a 503
+      // `not-ready` is an unverified bundle or an unready worker (contracts §3.1), which the
+      // built driver did not retry at all — a client that gave up on it turned a starting server
+      // into a refusal. Both surface as `retrying`; both re-enter the same generation discipline.
+      const status = error instanceof TesseraError ? error.status : 0;
+      const retryable = status === 429 || status === 503;
+      if (retryable && attempt < this.o.maxRetries) {
         this.events.onStatus?.('retrying');
-        this.retryHandle = this.clock.after(1000 * 2 ** attempt, () => {
+        const base = status === 503 ? this.o.notReadyBackoffMs : 1000;
+        const backoff = Math.min(base * 2 ** attempt, this.o.retryBackoffMaxMs);
+        this.retryHandle = this.clock.after(backoff, () => {
           this.retryHandle = null;
           // Superseded by anything newer: the retry re-enters the same discipline.
           if (generation === this.generation) void this.request(view, attempt + 1);

@@ -1,5 +1,5 @@
 {
-  "name": "@tessera/viewer",
+  "name": "@tesseradb/viewer",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,7 +14,7 @@
     "@deck.gl/geo-layers": "^9.3.7",
     "@deck.gl/layers": "^9.3.7",
     "@luma.gl/core": "^9.3.6",
-    "@tessera/client": "*"
+    "@tesseradb/client": "*"
   },
   "devDependencies": {
     "playwright": "^1.62.1",

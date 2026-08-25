@@ -468,4 +468,4 @@ echo
 echo "To watch the replica: zoom in a few notches, then pan away and back."
 echo "To record a session for someone else: add ?trace=1, press m when it feels wrong, download."
 echo "http://localhost:$VITE_PORT/?prefetch=0 turns look-ahead off, cache still on, for comparison."
-npm run dev -w @tessera/viewer
+npm run dev -w @tesseradb/viewer

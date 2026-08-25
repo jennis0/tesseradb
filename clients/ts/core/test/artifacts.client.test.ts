@@ -52,10 +52,21 @@ describe('the viewport request', () => {
     await c.viewport('tok', {view: 's0', zoom: 4, layers: []});
     await c.viewport('tok', {view: 's0', zoom: 4});
 
-    // The distinction the server acts on: `[]` costs nothing, absent answers for every layer this
-    // principal reaches. A client meaning the first and sending neither pays for the others.
+    // The wire is `string[] | 'all'`: `[]` and absent both mean *none* now, so a point-fetching
+    // client sends `[]` (or omits) and pays nothing for artifacts.
     expect(seen[0]!.body.layers).toEqual([]);
     expect('layers' in seen[1]!.body).toBe(false);
+  });
+
+  it("sends the string 'all' verbatim, and never substitutes it for an array", async () => {
+    const seen = stubFetch(() => new Response(new ArrayBuffer(0), {status: 200}));
+    const c = client();
+    await c.viewport('tok', {view: 's0', zoom: 4, layers: 'all'});
+    await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x']});
+    // `'all'` is every reachable layer; an array is those ∩ reachable. Each reaches the wire as
+    // exactly what the caller gave — the store must name the on layers, never rely on a default.
+    expect(seen[0]!.body.layers).toBe('all');
+    expect(seen[1]!.body.layers).toEqual(['clusters/x']);
   });
 
   it('carries the layer selection and the artifact budget under their wire names', async () => {

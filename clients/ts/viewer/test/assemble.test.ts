@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
-import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tessera/client';
-import type {ScalarColumn, ViewportResult} from '@tessera/client';
+import {bandsOfResult, mortonOfTile, type Band, type ReplicaFrame} from '@tesseradb/client';
+import type {ScalarColumn, ViewportResult} from '@tesseradb/client';
 import {assemble, assembledMarks, assertAssemblyMatchesServed, foldBandColumn, refreshExact} from '../src/assemble.js';
 
 /** A band at `depth`/`prefix` whose points all sit in cell `(cx, cy)`. */

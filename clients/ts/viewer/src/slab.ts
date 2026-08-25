@@ -36,7 +36,7 @@
  */
 import {Buffer as GpuBuffer} from '@luma.gl/core';
 import type {Device} from '@luma.gl/core';
-import type {Band, ScalarColumn} from '@tessera/client';
+import type {Band, ScalarColumn} from '@tesseradb/client';
 import {writeColours, type Encoding} from './colour.js';
 
 /** Enough for a first view at the default budget without a growth step on the way. */

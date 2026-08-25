@@ -16,17 +16,30 @@ order and §11 for the decisions.
 
 ## Where it stands
 
-Nothing is built. The design is at r4, reviewed across three lenses, with the owner's rulings of
-2026-08-24/25 recorded in its §11 and awaiting decision files; the open decisions and what each
-gates are in the handover's §1. The instrument in `clients/ts/` — `@tessera/client` and
-`@tessera/viewer` — is the starting point for step 0.
+Steps 0 and 1 are built (branch `client/step-0-1`): the presented frame moved into the client and
+the headless store is `@tesseradb/client`'s main export, the scope rename to `@tesseradb/*` landed
+with it, and the viewer consumes the store. Steps 2–6 and the server tracks are ahead; the design
+is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
+recorded as decisions 0095–0101; the open decisions and what each gates are in the handover's §1.
+
+**The smoke scripts ran for steps 0–1 on a rebuilt demo bundle** (2026-08-25, integration). Every
+prebuilt bundle predated manifest fields the current binary requires (`vocabularies`, `visibility`),
+and the demo build declaration `data/demo/config-2m4.toml` had gone; it was regenerated from
+`probes/build_demo_datasets.py`'s templates and `run_demo.sh --scale 2m4` rebuilt the bundle (5m18s,
+4.4 GiB peak, 1.4 GB on disk). Two things the offline gate had not caught then surfaced and are fixed
+in the same change: `publish-clusters.mjs` registered its layer with the pre-`visibility` field names
+(a 422 from the control plane), and **a `setLayers` issued before `/v1/meta` was lost** — the artifact
+channel is built at meta and the call reached nothing, so the demo's layer choice vanished on every
+principal switch while `smoke-artifacts.mjs` still printed OK with no count read. The store now holds
+the intent, hands it to the channel at meta, gives the channel its injected clock, and asks at the
+first drawn frame; the smoke fails when no principal is served a count.
 
 ## The steps
 
 | step | what lands | proved by | needs | status |
 |---|---|---|---|---|
-| 0 | the presented frame into the client: the store holds the `Composition`, absorbs `binding.ts`'s writes; the viewer's duplicate `ViewState` goes | smoke green; `check-clients.sh` | — | not started |
-| 1 | the store: `createStore`, the projections, `Count`/`Masked`, `stale` on the content key, `setView`'s conversion, `dataXY`, `extentOf`, the encoding accumulators, the artifact channel and the panel fetches out of the viewer, the session artifact table; the `@tesseradb` rename | smoke green; store tests | D3 | not started |
+| 0 | the presented frame into the client: `Presenter` holds the `Composition` and executes the driver's fold/derive verdict under an injected frame scheduler; `binding.ts` and the viewer's duplicate `ViewState` gone | `check-clients.sh` green; `smoke.mjs` green (996,488 of 1,856,276 shown, depth 8, no console errors) | — | **done** 2026-08-25 (`client/step-0-1`) |
+| 1 | the store: `createStore` with the projections, `Count`/`Masked` and their formatters, `stale` on the content key, `setView`'s conversion, `dataXY`/`extentOf`, the token supplier, the encoding accumulators, filter composition, the artifact channel, item/artifact/category fetches and the session artifact table out of the viewer; the `@tesseradb` rename; the viewer consuming the store | store/channel/table/counts/encoding/driver-503 tests; `check-clients.sh` green; `smoke.mjs` and `smoke-artifacts.mjs` green (24 clusters served under the full mask, 16 under sparse, 6 under narrow) | D3 | **done** 2026-08-25 (`client/step-0-1`) |
 | 2 | `@tesseradb/deck` and `@tesseradb/components`: `TesseraLayer`, the slab, the density texture; nine elements incl. `<tessera-explorer>`; box selection; the eight states; the §5.9 mechanics; the viewer as the explorer plus instruments | smoke through shadow-piercing locators; the harness's first assertions | D1, D2, D2a, D5, D7 | not started |
 | 3 | layer picker with closure, artifact list and card, legend, wire geometry drawn, sidecar retired, lasso; **with D12:** the membership attribute, the lookup texture, colour coverage | `smoke-artifacts.mjs` under two principals; the harness | D12 for colour | not started |
 | 4 | the examples (plain HTML, React explorer, canvas store) and `@tesseradb/react`, in the gate | typecheck; the harness against the C1 page | D10 for the production paragraph | not started |

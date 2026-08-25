@@ -191,11 +191,11 @@ export class TesseraClient {
     // from the one a caller who never mentioned filters sends — and a cache keyed on the body would
     // then hold two entries for one question.
     if (req.filters) body.filters = req.filters;
-    // Sent whenever the caller named a selection, **including the empty one**, which is the one
-    // case where omitting and sending differ in meaning: `[]` is "no layers, charge me nothing"
-    // and absent is "every layer I reach". A point-fetching client that meant the first and sent
-    // neither pays the artifact pass on every tile request it makes.
-    if (req.layers) body.layers = req.layers;
+    // Sent exactly as given, `[]` included: the wire is `string[] | 'all'`, where `[]` (or absent)
+    // is "no layers, charge me nothing", `'all'` is "every layer I reach", and an array is those ∩
+    // the reachable set. The server's old convention that absent meant *all* is gone; this sends
+    // what the caller passed and never substitutes one for the other.
+    if (req.layers !== undefined) body.layers = req.layers;
     if (req.artifactBudget !== undefined) body.artifact_budget = req.artifactBudget;
     // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
     // an opaque string on this side so a client never has to know its shape.

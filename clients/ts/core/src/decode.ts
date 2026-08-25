@@ -249,6 +249,12 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   if (pointTables.length > 0) {
     for (const field of pointTables[0]!.schema.fields) {
       if (field.name === 'tessera_id' || field.name === 'code') continue;
+      // **The per-point membership column is not a declared scalar** — it is the deepest served
+      // artifact per named layer (D12, §5.10), a nullable `u64` named `membership:<layer>` after
+      // the render scalars. Step 3 (`@tesseradb/deck`) consumes it into a response-local index in
+      // the decode worker; here it is skipped by name so it is never coloured by, ranked, or shown
+      // as a column. Decoding it as a scalar would put a `tessera_id` on the palette.
+      if (field.name.startsWith('membership:')) continue;
       const perFrame = pointTables.map((t) => scalarColumn(field.name, t.getChild(field.name)!));
       scalars[field.name] = concatScalarColumns(perFrame, totalPoints);
     }

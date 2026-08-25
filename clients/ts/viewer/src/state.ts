@@ -6,7 +6,7 @@ import type {
   Meta,
   Session,
   Timings
-} from '@tessera/client';
+} from '@tesseradb/client';
 import type {ArtifactPlaces} from './artifacts.js';
 import type {Assembled} from './assemble.js';
 import type {Domain, Ranks} from './colour.js';

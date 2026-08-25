@@ -295,14 +295,20 @@ const declaration = {
   title: args.title ?? `k-means over ${ids.length.toLocaleString()} sampled points`,
   views: [view],
   membership: 'enumerated',
-  // `artifacts_carry_own: true` would serve nothing at this stage — the per-artifact label arrives
-  // with content at Stage 3, so a layer declaring it has nothing to satisfy and every artifact is
-  // withheld, fail-closed.
-  access: {label: args.label ?? null, artifacts_carry_own: false},
+  value_set: 'closed',
+  // The layer's own access label (`--label`), or public; each artifact inherits it — a per-artifact
+  // label field would serve nothing here, since the demo's artifacts carry none.
+  visibility: args.label ?? null,
+  artifact_visibility: {field: null, default: 'inherited'},
   // `null` is a declaration in its own right — *this layer needs no existence criterion* — rather
   // than a field nobody filled in.
-  visible_when: minVisible === null ? null : {min_visible: minVisible},
-  hierarchy: {kind: 'flat', prune_children: false}
+  require_member_visibility: minVisible === null ? null : {count: minVisible},
+  hierarchy: {kind: 'flat', prune_children: false},
+  // Derived geometry, recomputed per viewer from `membership ∩ M_auth`: what the client draws as
+  // outlines and places names at, in place of the sidecar this script used to write.
+  content: {computed: ['centroid', 'box', 'hull'], supplied: [], withdraw_on_member_deletion: true},
+  depends_on: [],
+  levels: []
 };
 
 const registered = await fetch(`${control}/control/layers`, {
