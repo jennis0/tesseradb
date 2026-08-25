@@ -56,6 +56,15 @@ page.on('request', (r) => {
   }
 });
 
+/** Every response that was not a 2xx, with the request that earned it — a 422 is the client's bug. */
+const refusals = [];
+page.on('response', async (r) => {
+  if (!/\/v1\/|\/session\//.test(r.url()) || r.ok()) return;
+  const req = r.request();
+  const body = req.postData() ?? '';
+  refusals.push(`${r.status()} ${new URL(r.url()).pathname} ← ${body.slice(0, 160)}`);
+});
+
 const failures = [];
 const passes = [];
 /** @param {string} claim @param {boolean} ok @param {string} evidence */
@@ -326,6 +335,8 @@ if (probe) {
 await page.screenshot({path: shot, timeout: 60_000});
 await browser.close();
 
+console.log('--- responses that were not 2xx ---');
+console.log(refusals.length ? refusals.map((e) => `  ${e}`).join('\n') : '  none');
 console.log('--- console errors (the harness’s own 403s excepted) ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
 console.log(`--- screenshot: ${shot}`);
