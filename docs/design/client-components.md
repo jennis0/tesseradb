@@ -536,6 +536,18 @@ every point carries, and it is assigned in exactly one place:
   ordinals as the band is built: about a tenth of a millisecond per fifty-thousand-point
   response, and no per-point hash on the main thread ever.
 
+**The table and the texture are bounded by what is held, not by the layer.** A layer may hold
+10⁶–10⁷ artifacts (the scale campaign's target), and a session over one at a fine cut can be
+served a large fraction of them; a table and a lookup texture that only grew would reach tens
+of megabytes and, for the texture, the GPU's size limit. So ordinals are **refcounted and
+recycled**: each band's distinct-ordinal list is a reference, taken when the band is built and
+released when it is evicted, and an ordinal whose count reaches zero returns to a free list.
+Live ordinals are therefore bounded by resident marks — at most one per held point per layer,
+in practice far fewer — and the texture is sized to the live range, grown in powers of two.
+The `u32` itself is not the bound: it indexes four billion, and the flat-layer case (no cut to
+bound a view; artifact-system §6's ⊘ wide response) strains the artifact channel's response
+size, not the ordinal space.
+
 **What a band holds per point**, at a million marks per column, with the membership added:
 
 | per point | today | with D12 | where |
@@ -555,8 +567,8 @@ grows by a fifth. The byte ledger counts it; eviction is unchanged.
 CPU-side per point and rewritten across every resident mark when the encoding changes. For
 cluster colour that pass is replaced: the membership ordinal is a per-point GPU attribute,
 uploaded with the band's slot through the same dirty-span path as positions, and the point
-shader reads `colour = lut[ordinal]` from a data texture of one entry per table ordinal (10⁵
-entries is 400 KB). Everything a user does to the colouring is then **O(artifacts), never
+shader reads `colour = lut[ordinal]` from a data texture of one entry per *live* table ordinal (10⁵
+entries is 400 KB; a million is 4 MB, still one texture). Everything a user does to the colouring is then **O(artifacts), never
 O(points)**: choosing the level to colour at, changing the palette, highlighting the selected
 cluster and dimming the rest, switching between cluster colour and column colour (a uniform)
 — each is a rewrite of the lookup texture. This is the piece that makes several million marks
