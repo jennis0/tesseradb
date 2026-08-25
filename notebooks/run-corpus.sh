@@ -463,4 +463,4 @@ one's hang off a single root: a share does not shrink downward, so a child can c
 parent misses, and what is left is pieces. A piece's top is drawn flush left, exactly as a cluster
 with no parent at all is — nothing tells you a coarser one exists above it.
 EOF
-npm run dev -w @tessera/viewer
+npm run dev -w @tesseradb/viewer
