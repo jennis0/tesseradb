@@ -21,8 +21,9 @@ counts are bitmap arithmetic. The differentiator is the access control, not the 
 | [docs/evidence/](docs/evidence/) | Measurements, investigations, prior art. Never normative |
 | [probes/](probes/) | Raw measurement campaigns. Re-run before trusting a quoted figure |
 | [docs/archive/](docs/archive/) | Frozen. Never cite as authority; never execute |
-| GitHub issues | The authority on what is being worked on, everywhere except the artifact work |
+| GitHub issues | The authority on what is being worked on, everywhere except the artifact and client-components work |
 | [docs/artifact-delivery.md](docs/artifact-delivery.md) | **The artifact (annotations) work** — its stages, its gates and its status, tracked here rather than on issues by owner direction |
+| [docs/client-delivery.md](docs/client-delivery.md) | **The client-components work** — its steps, the server tracks it asks for, and its status, on the same convention; [docs/client-handover.md](docs/client-handover.md) is its map |
 
 **A document's standing is its `Status:` line, not its location.** `docs/design/` holds both
 normative and provisional documents; the provisional ones say so and name what remains.
