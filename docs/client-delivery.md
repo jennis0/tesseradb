@@ -21,8 +21,9 @@ the headless store is `@tesseradb/client`'s main export, the scope rename to `@t
 with it, and the viewer consumes the store. Step 2 is built (branch `client/step-2`): `@tesseradb/deck`
 and `@tesseradb/components`, box selection, and the viewer as the explorer plus instruments. Step 3
 is built (branch `client/step-3`): the membership column consumed end to end, the lookup texture,
-the four artifact elements, wire geometry drawn, lasso, the sidecar retired. Steps 4–5 and the
-server tracks are ahead; the design
+the four artifact elements, wire geometry drawn, lasso, the sidecar retired. Step 5 is built (branch
+`client/step-5`): the `tesseradb` package with the widget as its `[widget]` extra, run by hand in
+JupyterLab and Marimo. Step 4 and the server tracks are ahead; the design
 is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
 recorded as decisions 0095–0101; the open decisions and what each gates are in the handover's §1.
 
@@ -47,7 +48,7 @@ first drawn frame; the smoke fails when no principal is served a count.
 | 2 | `@tesseradb/deck` and `@tesseradb/components`: `TesseraLayer` over `marks`/`tiles`/`artifacts` with the slab, rank-to-colour and the stand-in buffers moved out of the viewer, the density wash from the exact tiles' counts, artifacts at their wire centroid (the sidecar's rings gone); the nine elements of §9 step 2, a subpath entry each, the eight states through `part="state"`, the §5.9 mechanics (standard decorators with `accessor`, guarded defines, one `ContextRoot`, store precedence at connection, the `Deck` finalised a settle after disconnect, the single-file bundle with the inlined worker and its SRI hash); box selection as one `k = 0` `tiles`-form request under a 4,096-tile bound with `exact` set by the cell-versus-pixel rule; the viewer as `<tessera-explorer layout="overlay">` plus instruments | `check-clients.sh` green (core 198, deck 43, components 37, spike 5, wire-example 7); `smoke.mjs` OK through the parts (996,488 of 1,856,276 shown, strip `shown`, I7 holds across five encodings); `smoke-artifacts.mjs` OK (24 / 24 / 24 / 16 / 6 clusters full→narrow); `smoke-budget.mjs` OK (803,286 marks, spread 1.00×); the harness: **7 of 7 claims hold** | D1, D2, D2a, D5, D7 | **done** 2026-08-25 (`client/step-2`); see the measurements below and the notes the step left |
 | 3 | the membership column consumed: hashed to a response-local index in the decode worker, named on the main thread through the session table as each band is built (one reference per distinct ordinal per band, released on eviction; a layer's column carried over a refetch that did not name it), the point path naming the layers on with their closure (decision 0096); the `u32` ordinal as a per-point GPU attribute through the slab's dirty-span path and a lookup texture of one RGBA per live ordinal, 1,024 wide and grown in rows, the point shader reading `lut[ordinal]` behind a uniform switch — palette, level, highlight and the switch are texture rewrites, never a per-point pass (decision 0100); colour coverage per band over its distinct list, in the visible box, colour-stale bands refetched once per served set; the positional palette (decision 0099's default) with `spread` as the option; served hulls and boxes as hairline outlines, the opened one strong with a faint fill; names and counts at centroids, sized by masked count, placed by priority into a spatial hash with leader lines; the density wash supersampled and sampled linearly so the grid never shows (decision 0097); `<tessera-layer-picker>`, `<tessera-artifact-list>`, `<tessera-artifact-card>`, `<tessera-legend>` in the explorer's slots; `mode="lasso"` rasterised to the cells it meets at the box's bounded depth; `clusters.json` and `publish-clusters.mjs`'s sidecar half gone | `check-clients.sh` green (core 222, deck 54, components 44, spike 5, wire-example 7); `smoke-artifacts.mjs` OK (6 / 16 / 24 / 24 / 24 clusters narrow→full, a hull and a label under both principals shot); the harness **9 of 9 claims hold** headed, 9 of 9 headless (see the measurements) | D12 (built) | **done** 2026-08-25 (`client/step-3`) |
 | 4 | the examples (plain HTML, React explorer, canvas store) and `@tesseradb/react`, in the gate | typecheck; the harness against the C1 page | D10 for the production paragraph | not started |
-| 5 | `tesseradb[widget]`: `Map`, operator-only `authorise`, the messages, the traitlets, the wheel's build hook | the notebook example; the build hook in the gate | D4, D10 | not started |
+| 5 | `tesseradb[widget]`: `Map`, operator-only `authorise`, the messages, the traitlets, the wheel's build hook | the notebook example; the build hook in the gate | D4, D10 | **done** 2026-08-25 (`client/step-5`): `clients/py` — `Map(url, token=…, view=None)`, `authorise` operator-only, the token never model state (`ready`/`token`/`reauthorise`/`refused`/`error` over the comm), the traitlets up-synced at the settle, ids as decimal `u64` strings; the bundle built by `hatch_build.py` at wheel-build time; `clients/py/check.sh` proves the wheel holds it (21 Python tests, 22 widget tests in the components' 66); **run by hand in JupyterLab 4.6.3 and Marimo 0.24.0** against the demo — see the notes below |
 | 6 | C3's documents: contracts §3.2 amended, the OpenAPI description, worked decodes with a test, the obligations list | the decode test; `check-doc-links.py` | D9 | **landed** (branch `client/step-6-docs`): contracts r38 states the request in full; `docs/openapi/tessera.yaml` kept true by `tests/openapi.rs` (12 tests; the omitted-`layers` semantic test is `#[ignore]` until S3 lands); worked decodes in `reference/examples/` and `clients/ts/wire-example/` over one answer sheet; `design/client-obligations.md` (Provisional) |
 
 **Server tracks the design asks for** (each its own design and worktree; status kept here so the
@@ -138,6 +139,49 @@ beside it; re-run before quoting):
 - **Colour by cluster**: 16 ordinals sampled from the marks on screen, every one resolving through
   the table to one of the 21 served artifacts, none to an artifact not served (the harness's ninth
   claim).
+
+**Step 5 ran by hand** (2026-08-25, against the demo's 2m4 bundle at the *medium* preset, 360,239
+visible; headed Chromium 1208 driven by Playwright with the kernel read through `jupyter_client`,
+so "by hand" means a scripted hand — the sequence a person would perform, with the readings taken
+from the kernel rather than from a screenshot):
+
+- **JupyterLab 4.6.3, anywidget 0.11.0**, `jupyter lab --port 5173` so the page's origin is the
+  one the demo's `dev_cors_origins` names. `Map(...)` mounted the explorer and drew 327,125 of
+  360,239 at depth 8 coloured by cluster; one `ready`, one token. A click set `selected` to
+  `'14895740295145689746'` (a decimal string of a `u64`); a shift-drag box set `region` with its
+  counts (25,372 visible, inexact, over 3,200 tiles at depth 8). `m.bbox = …` from the kernel
+  moved the camera and the settle reported the box actually shown (the aspect differs).
+  `m.filters = {"title": {"match": "quantum"}}` applied without the panel's debounce: 2,729
+  matched of 26,614 visible, the region's matched dropping to 472. `{"any_of": …}` was refused
+  to `last_error` with its reason and applied nothing. `m.colour_by = None; m.layers = []`
+  redrew neutral with no layer. A second `m` in another cell drew the same view from its own
+  store.
+- **Marimo 0.24.0**, `marimo edit --port 5173`: `mo.ui.anywidget(Map(...))` mounted and drew the
+  same 327,125 marks — which is the verification §7 asked for, since the map cannot draw until
+  the kernel has answered `ready` with the token as a custom message. The reading cell re-ran
+  at the settle with every synced trait in `.value`; a click on a hull set `selected_artifact`
+  to `'12619485137644099626'`; a box set `region`.
+- **What the run found and changed.** (1) deck.gl reads `process.env.NODE_ENV` unguarded, and
+  the bundle was a `ReferenceError` under a Blob URL — vite's `define` now substitutes it. (2)
+  ipywidgets' `DOMWidget` already owns a `layout` trait (its CSS layout model), so the
+  explorer's is `explorer_layout`. (3) The design's store-per-model was wrong in practice: a
+  store has one view input, and two explorers over one store fought for the camera, one of them
+  drawing the other's frame — the store is per view, the token supplier per model, and the
+  *active* view (the last mounted or moved) is the one whose settles sync up. (4) Under this
+  JupyterLab and anywidget the module is evaluated **per view**, not per model: a second view
+  of one widget sent a second `ready` (the kernel answered it; the token was the same), and
+  luma.gl logged *This version of luma.gl has already been initialized* once per further
+  evaluation — a console line, not a failure; the guarded defines are what keep a second
+  evaluation harmless. Two views cost two stores and two replicas; a page of many views of one
+  widget pays that.
+- **Not measured**: the settle-to-kernel latency of an up-sync, and the kernel-to-camera latency
+  of a down-sync; both were sub-second by eye in the runs above and neither was timed.
+- **Not built** (design §7, D4 open): the proxy arm. The widget's browser-direct arm works
+  under `dev_cors_origins` today and under D10's `cors_origins` if granted; the proxy arm's
+  server-extension sketch is in `clients/py/README.md`.
+- **The build hook in the gate**: `bash clients/py/check.sh` — a venv, an editable install
+  (which runs the hook), ruff, pytest, a wheel built and opened. It runs in about five seconds
+  with `node_modules` current; `npm ci` runs only when the lockfile is newer than the install.
 
 **Notes step 3 left.** A colour-stale band keeps drawing what resolves: its ordinals that still
 resolve to a served artifact keep that colour (exact, since membership in a served artifact is
