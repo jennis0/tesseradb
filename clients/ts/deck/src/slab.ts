@@ -487,6 +487,20 @@ export class MarkSlab {
     this.activeSlot = 0;
   }
 
+  /**
+   * The band and in-band index behind mark `index` of partition `slot` — what a hover reads its
+   * scalars through, so a hint costs no request. A walk over the partition's slots, O(bands),
+   * on a pointer move deck already throttles.
+   */
+  markAt(slot: number, index: number): {band: Band; i: number} | null {
+    const p = this.parts[slot];
+    if (!p) return null;
+    for (const held of p.slots.values()) {
+      if (index >= held.from && index < held.from + held.length) return {band: held.band, i: index - held.from};
+    }
+    return null;
+  }
+
   /** Marks held across every retained partition — the figure the budget bounds. */
   get residentMarks(): number {
     let total = 0;

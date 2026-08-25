@@ -42,6 +42,21 @@ export function inlineDecoder(): Decoder {
  *
  * Returns `null` where `Worker` is unavailable, so the caller falls back rather than failing.
  */
+/**
+ * How the worker is made, when a bundle cannot resolve a relative worker file.
+ *
+ * The default is `new URL('./decode.worker.js', import.meta.url)`, which every bundler that
+ * serves the package as files understands. A single-file distribution has no file to point at
+ * — the built decoder would fall back to the main thread silently, at tens of milliseconds a
+ * response — so it inlines the worker (a Blob URL, with a data URL where blob workers are
+ * refused) and installs the factory here before any decoder is built (design §5.9).
+ */
+let workerFactory: (() => Worker) | null = null;
+
+export function setWorkerFactory(factory: (() => Worker) | null): void {
+  workerFactory = factory;
+}
+
 export function workerDecoder(): Decoder | null {
   if (typeof Worker === 'undefined') return null;
 
@@ -49,7 +64,9 @@ export function workerDecoder(): Decoder | null {
   function lane(): {decode: (bytes: Uint8Array) => Promise<ViewportResult>; close: () => void} | null {
     let worker: Worker;
     try {
-      worker = new Worker(new URL('./decode.worker.js', import.meta.url), {type: 'module'});
+      worker = workerFactory
+        ? workerFactory()
+        : new Worker(new URL('./decode.worker.js', import.meta.url), {type: 'module'});
     } catch {
       // A bundler that cannot resolve the worker URL, or a runtime that forbids module workers.
       return null;

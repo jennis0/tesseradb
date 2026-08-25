@@ -107,8 +107,20 @@ function assembleScalar(name: string, pieces: readonly StandInPiece[], total: nu
   return {arrowType: first.arrowType, values: out} as unknown as ScalarColumn;
 }
 
-/** The stand-in piece list as concatenated buffers — the one copy this file still pays. */
-function materialiseStandIn(
+/** The stand-in buffers a `ScatterplotLayer` draws, and how many marks they hold. */
+export type StandInBuffers = Assembled['standIn'] & {count: number};
+
+/**
+ * The stand-in piece list as concatenated buffers — the one copy this file still pays — for the
+ * columns a renderer is colouring by. `TesseraLayer` memoises this on the piece list's identity,
+ * which `fold` preserves whenever nothing was filtered.
+ */
+export function materialiseStandIn(pieces: readonly StandInPiece[], columns: Iterable<string>): StandInBuffers {
+  const total = pieces.reduce((n, piece) => n + pieceLength(piece), 0);
+  return {...concatenatePieces(pieces, total, columns), count: total};
+}
+
+function concatenatePieces(
   pieces: readonly StandInPiece[],
   total: number,
   columns: Iterable<string>
@@ -171,7 +183,7 @@ export function materialise(
   columns: Iterable<string>
 ): Assembled {
   if (held && held.composition.standIn === c.standIn) return fromComposition(c, held.standIn);
-  return fromComposition(c, materialiseStandIn(c.standIn, c.provisional, columns));
+  return fromComposition(c, concatenatePieces(c.standIn, c.provisional, columns));
 }
 
 /** Compose and materialise a replica frame in one step — the shape the tests drive. */

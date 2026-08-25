@@ -25,7 +25,6 @@ function band(depth: number, prefix: bigint, n: number, served = n, cell = {cx: 
     x,
     y,
     ids: BigUint64Array.from({length: n}, (_, i) => BigInt(i + 1)),
-    codes: BigUint64Array.from({length: n}, () => morton << 32n),
     // World space already — the cell->world conversion happens when a band is built.
     positions: Float32Array.from({length: n * 2}, (_, i) =>
       (i % 2 === 0 ? cell.cx : cell.cy) / 128
@@ -54,10 +53,11 @@ function frame(
   return {
     depth,
     want,
+    version: 0,
     exact,
     fallback: fallback.map((band) => ({band, clip: want})),
     response: null,
-    plan: {wanted: 0, novel: 0, requests: 0}
+    plan: {wanted: 0, novel: 0, requests: 0, bytes: 0}
   };
 }
 
@@ -91,7 +91,6 @@ describe('assemble', () => {
     const enriched: Band = {
       ...parent,
       ids: BigUint64Array.from([1n, 2n, 3n]),
-      codes: new BigUint64Array(3),
       positions: Float32Array.from([10, 4, 12, 4, 18, 4]),
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([7, 8, 9])}},
       served: 3
