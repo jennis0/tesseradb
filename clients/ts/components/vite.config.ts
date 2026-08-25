@@ -8,6 +8,11 @@ import {tesseraDecorators} from './vite-plugin-decorators.js';
  */
 export default defineConfig({
   plugins: [tesseraDecorators()],
+  // deck.gl reads `process.env.NODE_ENV` unguarded, and library mode does not substitute it. A
+  // page bundled by a host is fine (its bundler substitutes); this file is evaluated as-is — from
+  // a `<script type="module">` and, as the widget's `_esm`, from a Blob URL inside JupyterLab,
+  // where the first `process` is a ReferenceError before any element defines.
+  define: {'process.env.NODE_ENV': JSON.stringify('production')},
   build: {
     lib: {
       entry: 'src/bundle.ts',

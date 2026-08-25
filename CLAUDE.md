@@ -238,6 +238,7 @@ cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/check-layers.sh
 bash scripts/check-clients.sh
+bash clients/py/check.sh
 python3 scripts/check-doc-links.py
 ```
 
