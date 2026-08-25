@@ -411,7 +411,7 @@ async fn viewport_artifacts(
 ) -> Option<Vec<ArtifactRow>> {
     let auth = authorise(server, terms).await;
     let token = auth["token"].as_str().unwrap();
-    let mut body = json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200 });
+    let mut body = json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200, "layers": "all" });
     for (key, value) in extra.as_object().unwrap() {
         body[key] = value.clone();
     }

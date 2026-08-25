@@ -100,7 +100,7 @@ fn served(
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
-    request.layers = Some(&names);
+    request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
         .viewport(&session, request)
         .expect("a viewport over the fixture")
@@ -560,7 +560,7 @@ fn served_entity(engine: &Engine, grant: &str, layer: &str, key: &str) -> tesser
     let session = engine.authorise(&credential(grant)).unwrap();
     let names = [layer];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
-    request.layers = Some(&names);
+    request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
         .viewport(&session, request)
         .expect("a viewport")

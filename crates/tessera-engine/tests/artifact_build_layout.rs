@@ -34,7 +34,7 @@ use arrow::record_batch::RecordBatch;
 use common::*;
 use parquet::arrow::ArrowWriter;
 use tessera_build::BuildArgs;
-use tessera_engine::ViewportRequest;
+use tessera_engine::{LayerSelection, ViewportRequest};
 use tessera_types::layer::ServingLayout;
 
 const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
@@ -344,7 +344,7 @@ fn the_first_request_over_a_fresh_bundle_adopts_and_composes_nothing() {
     let out = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(Some(&[SPREAD, CLUMPED])),
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[SPREAD, CLUMPED])),
         )
         .expect("the first viewport over a freshly built bundle");
     let elapsed = started.elapsed();
@@ -390,7 +390,7 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let row_major = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(Some(&[SPREAD])),
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[SPREAD])),
         )
         .expect("a viewport over the row-major level")
         .artifacts;
@@ -400,7 +400,7 @@ fn the_flipped_level_answers_what_the_artifact_major_route_answers() {
     let artifact_major = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(Some(&[CLUMPED])),
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[CLUMPED])),
         )
         .expect("a viewport over the artifact-major level")
         .artifacts;

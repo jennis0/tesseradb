@@ -12,8 +12,9 @@
 //! kind 2  sub-cells  Arrow IPC stream (cell: uint64, count: uint64); exactly one, iff the
 //!                    request asked for the §3.3 underlay — schema-only when requested-but-empty,
 //!                    ABSENT ENTIRELY when unrequested
-//! kind 3  points     Arrow IPC stream (tessera_id: uint64, code: uint64, ...scalars); zero or
-//!                    more, whole tiles per frame, concatenating to the full points stream
+//! kind 3  points     Arrow IPC stream (tessera_id: uint64, code: uint64, ...scalars,
+//!                    ...membership:<layer>); zero or more, whole tiles per frame, concatenating
+//!                    to the full points stream
 //! kind 4  trailer    JSON; exactly one, last — its presence is the completeness signal
 //! ```
 //!
@@ -417,8 +418,17 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     out
 }
 
+/// The points-frame column name a layer's membership column travels under: `membership:<layer>`.
+///
+/// One definition, shared by the writer and every Rust reader, so the two cannot spell it
+/// differently. The Python oracle and the TS client carry their own, deliberately (contracts
+/// §0.2's second-reader posture).
+pub fn membership_column_name(layer: &str) -> String {
+    format!("membership:{layer}")
+}
+
 /// The kind-3 points frame: one `tessera_id` and one 64-bit position `code` per point, plus the
-/// declared scalars in schema order.
+/// declared scalars in schema order, then one nullable membership column per layer.
 ///
 /// `code` is the Morton interleave of the point's two 32-bit fixed-point axes against the extent
 /// `/v1/meta` publishes — the same 16 bytes per point the `x`/`y` `f32` pair cost, carrying 32
@@ -429,6 +439,15 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
 /// [`estimated_points_bytes`]: at a saturated flush this payload is a megabyte-plus, so the copy
 /// a materialise-then-frame shape would cost is the largest single memmove in the response.
 ///
+/// `membership` is the per-point membership column of design D12 (`client-components.md`
+/// §5.10): per layer, the `tessera_id` of the **deepest served** artifact the point belongs to
+/// in this response, `null` where no served artifact holds it. Plain `Option<u64>` slices —
+/// nothing here knows what an artifact is, and the engine has already bounded every value to the
+/// response's own artifacts frame. Columns are named [`membership_column_name`] and appended
+/// after the scalars, so a decoder that indexes scalars positionally is unaffected. Empty when
+/// the request resolved to no layers or the response served no artifact: an absent column and an
+/// all-null one would say the same thing, and only one of them costs bytes.
+///
 /// # Panics
 ///
 /// Panics on any column length mismatch or Arrow construction failure.
@@ -436,12 +455,16 @@ pub fn points_frame(
     tessera_ids: &[u64],
     codes: &[u64],
     scalars: &[(&str, ScalarColumn)],
+    membership: &[(&str, &[Option<u64>])],
 ) -> Vec<u8> {
     let points = tessera_ids.len();
     assert_eq!(points, codes.len(), "points/codes length mismatch");
     for (name, col) in scalars {
         let len = wire_column_len(col);
         assert_eq!(points, len, "scalar column {name:?} length mismatch");
+    }
+    for (layer, col) in membership {
+        assert_eq!(points, col.len(), "membership column {layer:?} length mismatch");
     }
 
     let mut fields = vec![
@@ -451,9 +474,20 @@ pub fn points_frame(
     for (name, col) in scalars {
         fields.push(Field::new(*name, wire_column_type(col), false));
     }
+    // **After the render scalars, one per named layer in request order, and nullable** — the only
+    // nullable columns in this frame. `membership:` prefixes the layer name so a declared scalar
+    // can never collide with it: a layer is path-shaped (`clusters/hdbscan`) and a scalar name is
+    // an identifier, but the prefix is what makes that structural rather than a coincidence.
+    for (layer, _) in membership {
+        fields.push(Field::new(
+            membership_column_name(layer),
+            DataType::UInt64,
+            true,
+        ));
+    }
     let schema = Arc::new(Schema::new(fields));
 
-    let mut columns: Vec<ArrayRef> = Vec::with_capacity(2 + scalars.len());
+    let mut columns: Vec<ArrayRef> = Vec::with_capacity(2 + scalars.len() + membership.len());
     columns.push(Arc::new(UInt64Array::from_iter_values(
         tessera_ids.iter().copied(),
     )));
@@ -461,11 +495,15 @@ pub fn points_frame(
     for (_, col) in scalars {
         columns.push(wire_column_array(col));
     }
+    for (_, col) in membership {
+        columns.push(Arc::new(UInt64Array::from_iter(col.iter().copied())));
+    }
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("points frame batch construction");
 
-    let mut out =
-        Vec::with_capacity(FRAME_HEADER_BYTES + estimated_points_bytes(points, scalars));
+    let mut out = Vec::with_capacity(
+        FRAME_HEADER_BYTES + estimated_points_bytes(points, scalars, membership.len()),
+    );
     let len_at = begin_frame(&mut out, FRAME_POINTS);
     write_stream_into(&schema, &batch, &mut out);
     patch_frame_len(&mut out, len_at);
@@ -550,9 +588,16 @@ impl std::error::Error for FrameError {}
 /// **A hint, never a contract.** A short estimate costs a reallocation and a long one costs
 /// transient memory; neither changes a byte of output, which is why this is allowed to approximate
 /// nothing — the fixed-width columns are exact and `utf8` is walked.
-fn estimated_points_bytes(points: usize, scalars: &[(&str, ScalarColumn)]) -> usize {
+fn estimated_points_bytes(
+    points: usize,
+    scalars: &[(&str, ScalarColumn)],
+    membership_columns: usize,
+) -> usize {
     // `tessera_id` and `code`, both u64.
     let mut bytes = points * 16;
+    // A membership column is a u64 per point plus its validity bitmap, and the same per-buffer
+    // padding and per-field descriptor a scalar pays.
+    bytes += membership_columns * (points * 8 + points.div_ceil(8) + 64 + 128);
     for (_, col) in scalars {
         bytes += match col {
             ScalarColumn::Bool(_) => points.div_ceil(8),
@@ -602,6 +647,7 @@ fn write_stream_into(schema: &Schema, batch: &RecordBatch, out: &mut Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Array;
 
     #[test]
     fn frames_roundtrip_through_split() {
@@ -612,6 +658,7 @@ mod tests {
             &[1, 2, 3],
             &[10, 20, 30],
             &[("w", ScalarColumn::U16(&[7, 8, 9])), ("n", ScalarColumn::Utf8(&names3))],
+            &[],
         );
         let trailer = trailer_frame(br#"{"stream_us":1}"#);
 
@@ -634,6 +681,98 @@ mod tests {
                 batch.expect("frame batch decodes");
             }
         }
+    }
+
+    /// Decode one points payload into `(schema, batches)`.
+    fn decode_points(frame: &[u8]) -> (Arc<Schema>, Vec<RecordBatch>) {
+        let frames = split_frames(frame).expect("a single well-formed frame");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].0, FRAME_POINTS);
+        let cursor = std::io::Cursor::new(frames[0].1.to_vec());
+        let reader = arrow::ipc::reader::StreamReader::try_new(cursor, None).unwrap();
+        let schema = reader.schema();
+        let batches: Vec<RecordBatch> = reader.map(|b| b.unwrap()).collect();
+        (schema, batches)
+    }
+
+    /// **Zero, one and two membership columns**, and the nullability of each survives the IPC
+    /// round trip. The column set is what a client keys its colouring on, so its position (after
+    /// the scalars, in request order), its name and its nulls are each pinned here.
+    #[test]
+    fn membership_columns_are_named_nullable_and_after_the_scalars() {
+        let ids = [1u64, 2, 3];
+        let codes = [10u64, 20, 30];
+        let scalars = [("w", ScalarColumn::U16(&[7, 8, 9]))];
+
+        // Zero: the schema is exactly the scalars'.
+        let (schema, _) = decode_points(&points_frame(&ids, &codes, &scalars, &[]));
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["tessera_id", "code", "w"]);
+
+        // One and two: appended, named, nullable, in the order given.
+        let a: [Option<u64>; 3] = [Some(100), None, Some(300)];
+        let b: [Option<u64>; 3] = [None, None, Some(999)];
+        let frame = points_frame(
+            &ids,
+            &codes,
+            &scalars,
+            &[("clusters/hdbscan", &a), ("regions/admin", &b)],
+        );
+        let (schema, batches) = decode_points(&frame);
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "tessera_id",
+                "code",
+                "w",
+                "membership:clusters/hdbscan",
+                "membership:regions/admin"
+            ]
+        );
+        assert!(!schema.field(2).is_nullable(), "a scalar is never null");
+        assert!(schema.field(3).is_nullable());
+        assert!(schema.field(4).is_nullable());
+        assert_eq!(schema.field(3).data_type(), &DataType::UInt64);
+
+        assert_eq!(batches.len(), 1);
+        let batch = &batches[0];
+        let read = |i: usize| -> Vec<Option<u64>> {
+            let col = batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .unwrap();
+            (0..col.len())
+                .map(|r| col.is_valid(r).then(|| col.value(r)))
+                .collect()
+        };
+        assert_eq!(read(3), a.to_vec());
+        assert_eq!(read(4), b.to_vec());
+    }
+
+    /// The size estimate is a hint, but a hint that ignores a column is a reallocation on every
+    /// flush; the estimate must grow by at least the column's data.
+    #[test]
+    fn the_size_estimate_covers_the_membership_columns() {
+        let points = 1000;
+        let scalars = [("w", ScalarColumn::U16(&[0u16; 1000]))];
+        let without = estimated_points_bytes(points, &scalars, 0);
+        let with_two = estimated_points_bytes(points, &scalars, 2);
+        assert!(with_two >= without + 2 * (points * 8 + points.div_ceil(8)));
+
+        // And the estimate is an over-estimate of the real payload, which is what lets the frame
+        // buffer be sized once.
+        let ids = vec![0u64; points];
+        let col: Vec<Option<u64>> = (0..points)
+            .map(|i| (i % 3 != 0).then_some(i as u64))
+            .collect();
+        let frame = points_frame(&ids, &ids, &scalars, &[("a", &col), ("b", &col)]);
+        assert!(
+            frame.len() <= FRAME_HEADER_BYTES + with_two,
+            "estimate {with_two} short of the {} bytes written",
+            frame.len()
+        );
     }
 
     #[test]

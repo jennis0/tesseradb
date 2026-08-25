@@ -551,6 +551,9 @@ class Server:
         (contracts §3.2: an unknown filter column is a `422`, `none_of` is a `422`), where
         `raise_for_status` would convert the assertion target into a harness exception."""
         body = {"view": view_id, "zoom": zoom, "bbox": list(bbox)}
+        # `layers` omitted means no layers since contracts r38 (D9); the oracle wants every layer
+        # the principal reaches, which is what the I3 containment tests compare against.
+        body["layers"] = "all"
         if k is not None:
             body["k"] = k
         if underlay_offset is not None:

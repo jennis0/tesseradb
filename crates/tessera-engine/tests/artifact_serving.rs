@@ -9,7 +9,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportRequest};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
@@ -391,7 +391,7 @@ fn the_layer_selector_narrows_and_never_widens() {
     }
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let answer = |layers: Option<&[&str]>| {
+    let answer = |layers: LayerSelection| {
         engine
             .viewport(
                 &session,
@@ -401,18 +401,22 @@ fn the_layer_selector_narrows_and_never_widens() {
             .artifacts
     };
 
-    assert_eq!(answer(None).len(), 2, "absent means every reachable layer");
+    assert_eq!(
+        answer(LayerSelection::All).len(),
+        2,
+        "`all` means every reachable layer"
+    );
     assert!(
-        answer(Some(&[])).is_empty(),
+        answer(LayerSelection::Named(&[])).is_empty(),
         "an empty list costs nothing and answers nothing"
     );
-    let one = answer(Some(&["clusters/a"]));
+    let one = answer(LayerSelection::Named(&["clusters/a"]));
     assert_eq!(one.len(), 1);
     assert_eq!(one[0].layer, "clusters/a");
     // A name that does not exist is absent, exactly as a name this principal could not reach
     // would be — asking is not a probe.
-    assert!(answer(Some(&["clusters/never"])).is_empty());
-    assert_eq!(answer(Some(&["clusters/a", "clusters/never"])).len(), 1);
+    assert!(answer(LayerSelection::Named(&["clusters/never"])).is_empty());
+    assert_eq!(answer(LayerSelection::Named(&["clusters/a", "clusters/never"])).len(), 1);
 }
 
 /// A publication is visible to the next request without a restart, a flush or a new session — and

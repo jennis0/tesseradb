@@ -65,6 +65,7 @@ use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
 use crate::cancel::CancelToken;
 use crate::compose::{compose, visible_to, EffectiveMask, FilterRows, MaskedSet, RowProjection};
 use crate::filter::{Endpoint, Family, FilterOperand, Scalar};
+use crate::membership_column::{ServedLayer, ServedLevel};
 use crate::select::{SelectParams, Selection, SelectionPart, SelectionParts, Threshold};
 use crate::session::{Engine, EngineError, Result, Session};
 use crate::timing::{Probe, StageTimings, TileProbe, TileStats};
@@ -154,6 +155,12 @@ pub struct PointColumns {
     /// full declaration: a `filter`-only or blob-resident column occupies no slot in a segment's
     /// tail (contracts §2.6), so a buffer under its name could only be invented values.
     pub scalars: Vec<ColumnBuf>,
+    /// One column per layer this response served artifacts from, in the response's layer order:
+    /// the deepest served artifact each point belongs to, or `None` — see
+    /// [`crate::membership_column`]. Empty when no artifact was served. Parallel to the three
+    /// buffers above, and named by the chunk rather than by the head because which layers get a
+    /// column is not known until the artifact pass has run, which is after the head is delivered.
+    pub membership: Vec<crate::membership_column::MembershipColumn>,
 }
 
 impl PointColumns {
@@ -196,6 +203,17 @@ impl PointColumns {
         for (dst, src) in self.scalars.iter_mut().zip(other.scalars) {
             dst.append(src)?;
         }
+        // The same positional rule for the membership columns, and the same reason: every chunk
+        // of one response is resolved against the same served layers in the same order. The
+        // layer names are checked rather than assumed, because unlike a scalar's type nothing
+        // downstream would catch a column appended under another layer's name.
+        for (dst, src) in self.membership.iter_mut().zip(other.membership) {
+            assert_eq!(
+                dst.layer, src.layer,
+                "chunks of one response cannot disagree on their membership layers"
+            );
+            dst.ids.extend(src.ids);
+        }
         Ok(())
     }
 
@@ -208,6 +226,8 @@ impl PointColumns {
         for col in &self.scalars {
             bytes += col.wire_bytes_estimate();
         }
+        // A u64 and a validity bit per point per membership column.
+        bytes += self.membership.len() * (self.tessera_ids.len() * 8 + self.tessera_ids.len().div_ceil(8));
         bytes
     }
 }
@@ -363,6 +383,19 @@ pub struct SubCellCount {
     pub count: u64,
 }
 
+/// Which annotation layers a viewport answers for.
+///
+/// Two shapes and no third: the empty list is *none* and costs nothing, and there is no value
+/// meaning *the default*, so a caller who did not think about layers cannot pay for all of them
+/// by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayerSelection<'a> {
+    /// Every layer this principal reaches.
+    All,
+    /// These, intersected with what the principal reaches — never unioned. Empty is none.
+    Named(&'a [&'a str]),
+}
+
 /// One `/v1/viewport` request, as the engine sees it.
 ///
 /// A struct rather than a positional argument list: the query is the system's main entry point and
@@ -439,7 +472,13 @@ pub struct ViewportRequest<'a> {
     /// **It narrows and never widens.** A name this principal does not reach is simply absent from
     /// the answer, by the same route a name nobody registered is: the request is intersected with
     /// the session's resolved set, so asking for a layer is not a way to learn whether it exists.
-    pub layers: Option<&'a [&'a str]>,
+    ///
+    /// [`ViewportRequest::new`] starts at [`LayerSelection::All`]. **The wire's default is the
+    /// opposite** (owner ruling 2026-08-25): a `/v1/viewport` request that omits `layers` names
+    /// none, and asks for every layer with the string `"all"`. A Rust caller has no *omitted* —
+    /// it constructs the request and names its selection — and the batch entry point keeps the
+    /// serve-everything default its callers were written against.
+    pub layers: LayerSelection<'a>,
     /// The client's artifact budget — how many artifacts it wants back at most, in the same shape
     /// as the `k` mark budget beside it ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md)).
     ///
@@ -475,13 +514,13 @@ impl<'a> ViewportRequest<'a> {
             underlay_offset: None,
             cancel: None,
             filter: None,
-            layers: None,
+            layers: LayerSelection::All,
             artifact_budget: None,
         }
     }
 
     /// Answer for exactly these layers rather than for every one this principal reaches.
-    pub fn layers(mut self, layers: Option<&'a [&'a str]>) -> Self {
+    pub fn layers(mut self, layers: LayerSelection<'a>) -> Self {
         self.layers = layers;
         self
     }
@@ -1386,6 +1425,7 @@ impl Engine {
                 .iter()
                 .map(|d| ColumnBuf::empty(d.arrow_type))
                 .collect(),
+            membership: Vec::new(),
         });
         Ok(ViewportOut {
             coordinates: head.coordinates,
@@ -1989,7 +2029,7 @@ impl Engine {
 
         // The artifacts frame, after the counts and before any point. It is an aggregate channel,
         // not a point one — a cluster's masked count belongs beside a tile's, not beside a mark.
-        let artifacts = self.serve_artifacts(
+        let (artifacts, served_layers) = self.serve_artifacts(
             session,
             &generation,
             view,
@@ -2006,6 +2046,20 @@ impl Engine {
         }
         probe.skip();
 
+        // The per-point membership column, resolved once for the whole response against the
+        // served set the artifacts frame just carried (`crate::membership_column`). No artifact
+        // served, no work: the resolver is not built and no chunk carries a column.
+        let membership = if artifacts.is_empty() {
+            None
+        } else {
+            let gathered: Vec<u32> = swept.iter().flat_map(|ts| ts.rows.iter().copied()).collect();
+            let resolved = crate::membership_column::Resolved::new(gathered, &served_layers);
+            (!resolved.is_empty()).then_some(resolved)
+        };
+        // Unattributed, as the artifact pass above is: a serial stage between two the header
+        // names, measured by `tests/membership_column.rs` rather than by a stage field.
+        probe.skip();
+
         // The emit pass: gather and hand off, serial, in response order (this module's doc says
         // why serial). The buffer is seeded from the declaration rather than from whichever tile
         // arrives first — a request whose first tile is narrower than a later one must not fix
@@ -2017,6 +2071,10 @@ impl Engine {
                 .iter()
                 .map(|d| ColumnBuf::empty(d.arrow_type))
                 .collect(),
+            membership: membership
+                .as_ref()
+                .map(|m| m.empty_columns())
+                .unwrap_or_default(),
         };
         let mut buf = seed();
         let mut buf_bytes = 0usize;
@@ -2026,7 +2084,10 @@ impl Engine {
             check_cancelled(&cancel)?;
             let mut stats = TileProbe::new();
             let parts = SelectionParts::new(&ts.parts);
-            let tile_points = gather_tile_columns(&parts, &ts.rows, render_scalars)?;
+            let mut tile_points = gather_tile_columns(&parts, &ts.rows, render_scalars)?;
+            if let Some(membership) = &membership {
+                tile_points.membership = membership.columns_for(&ts.rows);
+            }
             stats.count(|t| &mut t.points_gathered, tile_points.len() as u64);
             buf_bytes += tile_points.wire_bytes_estimate();
             if let Err((want, got)) = buf.append(tile_points) {
@@ -3608,10 +3669,10 @@ impl Engine {
         view_data: &tessera_store::ViewData,
         ranges: &[Vec<(usize, Range<u32>)>],
         mask: &crate::compose::EffectiveMask,
-        requested: Option<&[&str]>,
+        requested: LayerSelection<'_>,
         artifact_budget: Option<u32>,
         mask_identity: crate::histogram::MaskIdentity,
-    ) -> Result<Vec<ArtifactOut>> {
+    ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
         let reachable = self.write.resolve_layers(
@@ -3621,15 +3682,15 @@ impl Engine {
         // **Intersected with the request, never unioned.** A name the principal does not reach is
         // absent whether or not they asked for it, so asking is not a way to learn what exists.
         let names: Vec<String> = match requested {
-            Some(list) => list
+            LayerSelection::Named(list) => list
                 .iter()
                 .filter(|name| reachable.contains(name))
                 .map(|name| name.to_string())
                 .collect(),
-            None => reachable.names().map(str::to_string).collect(),
+            LayerSelection::All => reachable.names().map(str::to_string).collect(),
         };
         if names.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         // Built once for the whole response, and from the *same* resolution the names above came
         // from: a label's target may live in any layer its own declares in `depends_on`, reachable
@@ -3676,7 +3737,7 @@ impl Engine {
             tile_rows.add_range(span);
         }
         if tile_rows.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         // **The one composition, hoisted out of every layer and every artifact**
         // (`design/artifact-serving-at-scale.md` §4 step 2, and `crate::tile_index::Viewport`).
@@ -3700,6 +3761,10 @@ impl Engine {
         let mut served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId> =
             std::collections::BTreeMap::new();
         let mut placed: Vec<Placement> = Vec::new();
+        // Every level this pass walked, with the structures the membership column reads the
+        // served set back through — the same row form and the same lineage the verdicts and the
+        // cut used, so the column cannot describe a level the artifacts frame did not.
+        let mut served_layers: Vec<ServedLayer> = Vec::new();
         for name in names {
             let Some(layer) = self.write.registered_layer(&name) else {
                 // Dropped between the resolution and here. Absent is the right answer and the same
@@ -3746,6 +3811,7 @@ impl Engine {
                 &code_of_key,
             );
 
+            let mut served_levels: Vec<ServedLevel> = Vec::new();
             for (level, runs) in layer.runs.iter().enumerate() {
                 let level = level as u32;
                 let recorded = layer.layout_of(level);
@@ -3892,6 +3958,13 @@ impl Engine {
                     artifact_budget,
                     layer.declaration.hierarchy.prune_children,
                 );
+                served_levels.push(ServedLevel {
+                    level,
+                    rows: Arc::clone(&rows),
+                    lineage: Arc::clone(&lineage),
+                    // Filled once the response's membership is settled, below.
+                    served: std::collections::HashMap::new(),
+                });
 
                 for (ordinal, entity, masked_count, rank) in passing {
                     if served.binary_search(&ordinal).is_err() {
@@ -3965,12 +4038,39 @@ impl Engine {
                     });
                 }
             }
+            served_layers.push(ServedLayer {
+                name,
+                levels: served_levels,
+            });
         }
         // **The cut ran after the verdicts, so a dependent may have passed on a target this
         // response then removed.** Dropping it here — before the parents are resolved, so a
         // dependent that goes takes its own name out of `served_at` with it — is what keeps one
         // response from describing a cluster it does not contain (decision 0089).
         let dropped = orphaned_dependents(&placed, &in_request, &mut served_at);
+
+        // **A dependent carries its target's masked count** (D13; owner ruling 2026-08-25): a
+        // label describes its cluster, so the number beside it is the cluster's — how many of
+        // *that* artifact's members this principal can see — and not the label's own membership,
+        // which a publisher may leave empty. The target is in this response with that very count
+        // (the drop above guarantees it), so the value is derivable from the artifacts frame and
+        // discloses nothing new (decision 0023). Filter-blind, as every masked count is
+        // (`MaskedSet::count_intersection`, I12): the request's filter never moves it.
+        let count_at: std::collections::BTreeMap<&(String, u32, u32), u64> = placed
+            .iter()
+            .zip(&out)
+            .map(|(place, artifact)| (&place.at, artifact.masked_count))
+            .collect();
+        let target_counts: Vec<Option<u64>> = placed
+            .iter()
+            .map(|place| {
+                place
+                    .attached_to
+                    .as_ref()
+                    .filter(|target| in_request.contains(&target.0))
+                    .and_then(|target| count_at.get(target).copied())
+            })
+            .collect();
 
         // **A parent is named only where it is also in this response**, which is the whole of the
         // disclosure rule for this field. An artifact whose parent exists but was withheld — below
@@ -3979,9 +4079,14 @@ impl Engine {
         // grouping exists which they are not cleared to see, which is a disclosure the rest of this
         // pass takes care to avoid making.
         let mut served = Vec::with_capacity(out.len());
-        for ((mut artifact, place), dropped) in out.into_iter().zip(&placed).zip(dropped) {
+        for (((mut artifact, place), dropped), target_count) in
+            out.into_iter().zip(&placed).zip(dropped).zip(target_counts)
+        {
             if dropped {
                 continue;
+            }
+            if let Some(count) = target_count {
+                artifact.masked_count = count;
             }
             artifact.parent_id = place
                 .parent
@@ -3990,7 +4095,18 @@ impl Engine {
                 .copied();
             served.push(artifact);
         }
-        Ok(served)
+        // **The membership column's served set is `served_at` after the drop** — exactly the
+        // artifacts in `served`, and the only identifiers the column can name.
+        for ((name, level, ordinal), tessera_id) in &served_at {
+            if let Some(slot) = served_layers
+                .iter_mut()
+                .find(|l| &l.name == name)
+                .and_then(|l| l.levels.iter_mut().find(|l| l.level == *level))
+            {
+                slot.served.insert(*ordinal, *tessera_id);
+            }
+        }
+        Ok((served, served_layers))
     }
 }
 
@@ -4801,6 +4917,7 @@ fn gather_tile_columns(
         tessera_ids,
         codes,
         scalars,
+        membership: Vec::new(),
     })
 }
 

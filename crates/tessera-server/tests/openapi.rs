@@ -770,7 +770,6 @@ async fn viewport_carries_the_described_headers_and_framing() {
 /// already states the ruled form, and [`the_layers_field_is_an_array_or_the_string_all`] checks
 /// the shape.
 #[tokio::test]
-#[ignore = "ruled 2026-08-25; the server change lands on the s3 track — enable at integration"]
 async fn an_omitted_layers_field_means_no_artifacts_frame() {
     let doc = description();
     let f = fixture().await;
