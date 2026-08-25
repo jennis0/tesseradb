@@ -518,7 +518,8 @@ draws from the wire today, what the look needs, and which is which.
   can see, so the outline is exact for this viewer. The selected artifact's is strong with a
   faint fill; the others are hairlines, greatly faded.
 - **The density wash** reads the **number channel**: the per-tile `visible`/`matched` counts at
-  the drawn depth (about 3,000 tiles across a viewport at design budgets), refined by the
+  the drawn depth (`budget / m_target` of them — some 6×10⁴ across a viewport at the 10⁶-mark
+  render target), refined by the
   underlay's sub-cell counts where requested — binned in world space at the drawn depth,
   rebuilt at the settle and drawn as a texture so gestures cost a texture draw. Not from the
   marks: marks per tile are proportional to density only inside the sampler's window and flat
@@ -548,6 +549,25 @@ the accepted cost that a zoomed-in view holds a narrow angular sector and its hu
 the alternative, hues spread evenly over the served set at each settle, is offered in D12. It
 needs its own pass against the leak register: what it discloses is the membership of served
 points in served artifacts, which the served hull already bounds.
+
+**The render target is 10⁶ marks** (owner, 2026-08-25; the viewer runs at 5×10⁵ today, and
+client-interaction's 10⁷ is the large-budget ambition), and every per-point cost here is sized
+to it — modelled, to be measured by the harness at §9 step 2:
+
+- **Assigning points to clusters client-side** — nearest served centroid, the mapping §5.10
+  draws colour from until D12 lands — is N × K distance checks: 10⁶ points against 30
+  artifacts is 3×10⁷, roughly 100–200 ms single-threaded, so it never runs on the main thread.
+  Bucketing the centroids on a coarse grid so each point checks its cell's neighbours brings it
+  to 15–30 ms, and it runs in the decode worker: per response on arrival (tens of thousands of
+  points, amortised), and once over the held bands in view when a settle brings a different
+  artifact set. The result is one small integer per point, uploaded as a colour attribute
+  through the slab's existing dirty-span path — a few milliseconds for a million points. If a
+  settle-time recompute is ever measured to hitch, the GPU form is a Voronoi texture drawn once
+  per settle and sampled by the point shader — O(1) per point, no CPU pass — and is not built
+  until the worker form is measured wanting. Point-in-hull is 20–30× dearer per candidate and is
+  used only as a bbox pre-filter for points inside no hull, which draw as noise.
+- **The wash** bins the per-tile counts, not the points: 6×10⁴ tiles against the same centroids
+  is negligible.
 
 **What stays decoration if it is drawn at all:** contours traced from held marks are the density
 of a per-tile-capped *sample* (client-interaction §9 names a shape drawn around held points as
