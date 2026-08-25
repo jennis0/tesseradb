@@ -82,12 +82,14 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `artifacts-from-points.md` | Draft | 2 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
+| `client-components.md` | Provisional — under review | 11 |
 | `client-interaction.md` | Provisional — under review |  |
+| `client-obligations.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
 | `configuration.md` | Normative for the build-time configurati | 28 |
 | `conformance.md` | Normative — r15 | 20 |
-| `contracts.md` | Normative — r37 | 23 |
+| `contracts.md` | Normative — r39 | 24 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |

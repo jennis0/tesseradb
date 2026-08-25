@@ -56,11 +56,13 @@ fn build_body() -> Vec<u8> {
         &[0, 1],
         &[1, 2],
         &[("count", ScalarColumn::U64(&counts_a))],
+        &[],
     ));
     body.extend_from_slice(&points_frame(
         &[2],
         &[3],
         &[("count", ScalarColumn::U64(&counts_b))],
+        &[],
     ));
     body.extend_from_slice(&trailer_frame(
         br#"{"stream_us":1,"arrow_serialise_ns":2,"points":3,"flushes":2}"#,
@@ -156,7 +158,7 @@ fn frame_bytes_never_contain_a_raw_entity_id_encoding() {
 
     let n = handles.len() as u64;
     let mut body = tiles_frame(&[0], &[n], &[n], &[n]);
-    body.extend_from_slice(&points_frame(&handles, &codes, &[]));
+    body.extend_from_slice(&points_frame(&handles, &codes, &[], &[]));
     body.extend_from_slice(&trailer_frame(b"{}"));
 
     for &raw in &sensitive_ids {
@@ -173,7 +175,7 @@ fn frame_bytes_never_contain_a_raw_entity_id_encoding() {
 /// used to emit.
 #[test]
 fn the_points_frame_identity_column_is_tessera_id() {
-    let frame = points_frame(&[10, 20, 30], &[1, 2, 3], &[]);
+    let frame = points_frame(&[10, 20, 30], &[1, 2, 3], &[], &[]);
     let (kind, payload) = split_frames(&frame).unwrap()[0];
     assert_eq!(kind, FRAME_POINTS);
 

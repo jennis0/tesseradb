@@ -582,6 +582,7 @@ async fn client_view(server: &TestServer, terms: &[&str]) -> ClientView {
             "zoom": 0,
             "bbox": [0.0, 0.0, 1000.0, 1000.0],
             "k": 200,
+            "layers": "all",
         }))
         .send()
         .await

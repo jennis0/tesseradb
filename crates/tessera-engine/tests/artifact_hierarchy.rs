@@ -14,7 +14,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportRequest};
 use tessera_lifecycle::membership::IncomingAttachment;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
@@ -620,7 +620,7 @@ fn levelled_artifacts_of(
             &session,
             ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
                 .artifact_budget(budget)
-                .layers(Some(&[layer])),
+                .layers(LayerSelection::Named(&[layer])),
         )
         .expect("a viewport over the whole map")
         .artifacts

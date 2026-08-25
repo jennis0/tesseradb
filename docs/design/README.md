@@ -89,6 +89,8 @@ Then, depending on what you are after:
   record blob, the row-space route and the keyword family must measure, and what fails when a
   budget is crossed.
 - **How a client talks to it.** [`client-interaction.md`](client-interaction.md) and its children.
+  A client written against the wire alone starts at [`client-obligations.md`](client-obligations.md)
+  — the rules the server cannot enforce — with the API described in [`../openapi/`](../openapi/).
 
 Supporting evidence — the prior-art survey behind "no existing technology can replace this build",
 and the scaling analysis with its runnable models — is in [`../evidence/`](../evidence/).
@@ -113,6 +115,7 @@ architecture design.
 | [`client-interaction.md`](client-interaction.md) | Provisional | What a client is: holdings, version coordinates, display obligations, protocol |
 | [`client-architecture.md`](client-architecture.md) | Provisional | The client/vis boundary rule, the driver as an explicit state machine, the replica's API and frame composition on the tile grid. Driver built; §6's migration half done, finished by `client-components.md` |
 | [`client-components.md`](client-components.md) | Provisional r4 | The client stack organised by four customers: the wire as C3's product, the headless store as C2's, the `<tessera-explorer>` composite and its pieces as C1's, the demo and the `tesseradb` widget as C4's — six packages, two count types, a token-and-parts-and-slots styling contract, token-as-message custody. **Nothing in it is built**; §9 is the order. r3 reviewed across three lenses and dispositioned into r4; awaits the owner's rulings on §11 |
+| [`client-obligations.md`](client-obligations.md) | Provisional | The twelve rules a client keeps because the server cannot — display states, both figures or neither, staleness on the content key, masked counts are never sizes, absence carries no reason, the artifact channel, `k` on zoom, `u64` ids, the six proxied headers, the 401/403 split, depth as the client's choice with its formula stated — each with what goes wrong on the screen if it is broken |
 | [`caching.md`](caching.md) | Provisional | Where data rests and what that costs — caching as feasibility, not optimisation |
 | [`delta-serving.md`](delta-serving.md) | Provisional | What a client may declare it holds, and what that lets the server omit, skip or elide |
 | [`views-and-multi-table.md`](views-and-multi-table.md) | Provisional | Named orthogonal coordinate systems, and physical table shards |

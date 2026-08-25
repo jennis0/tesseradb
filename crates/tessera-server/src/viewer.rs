@@ -26,7 +26,9 @@ use tessera_wire::{
 };
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{CancelToken, SinkClosed, SinkResult, ViewportHead, ViewportSink};
+use tessera_engine::{
+    CancelToken, LayerSelection, SinkClosed, SinkResult, ViewportHead, ViewportSink,
+};
 
 use crate::error::{map_engine_error, map_join_error, ApiError};
 use crate::health::{healthz, readyz};
@@ -496,14 +498,20 @@ struct ViewportReq {
     /// must not be conflated.
     #[serde(default)]
     filters: Option<serde_json::Value>,
-    /// Which annotation layers to answer for. Absent answers for every layer this principal
-    /// reaches; an empty list answers for none and costs nothing.
+    /// Which annotation layers to answer for — and, with them, which membership columns the
+    /// points frames carry (D12).
     ///
-    /// **It narrows and never widens.** A name this principal does not reach is absent from the
-    /// answer whether or not it was asked for, by the same route a name nobody registered is — so
-    /// naming a layer is not a way to learn whether it exists.
+    /// **Absent, or the empty list, answers for none and costs nothing; the string `"all"`
+    /// answers for every layer this principal reaches** (owner ruling 2026-08-25, contracts
+    /// §3.2). A client that never thinks about layers therefore never pays the artifact pass,
+    /// and one that wants everything says so. `all` is reserved — a layer cannot be registered
+    /// under it — so the word is never ambiguous.
+    ///
+    /// **A list narrows and never widens.** A name this principal does not reach is absent from
+    /// the answer whether or not it was asked for, by the same route a name nobody registered is —
+    /// so naming a layer is not a way to learn whether it exists.
     #[serde(default)]
-    layers: Option<Vec<String>>,
+    layers: Option<LayersReq>,
     /// How many artifacts the client wants back at most, in the same shape as `k` beside it.
     ///
     /// **Honoured structurally, never by sampling** ([decision 0083](../../../docs/decisions/0083-the-frontier-is-a-request-time-budget.md)):
@@ -513,6 +521,36 @@ struct ViewportReq {
     /// frame later is the change this ordering exists to avoid.
     #[serde(default)]
     artifact_budget: Option<u32>,
+}
+
+/// The `layers` field's two spellings: a list of names, or the one reserved word.
+///
+/// Untagged, so the JSON is `["a", "b"]` or `"all"` and nothing else: any other string is a
+/// `422` from serde rather than a name that silently matches no layer, which is what an
+/// `Option<Vec<String>>` accepting a stray string would have had to become.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LayersReq {
+    All(AllLayers),
+    Named(Vec<String>),
+}
+
+/// The literal `"all"` and only that — `tessera_types::layer::RESERVED_LAYER_SELECTION`.
+#[derive(Debug)]
+struct AllLayers;
+
+impl<'de> Deserialize<'de> for AllLayers {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        if word == tessera_types::layer::RESERVED_LAYER_SELECTION {
+            Ok(AllLayers)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "`layers` is a list of layer names or the string \"{}\"; got \"{word}\"",
+                tessera_types::layer::RESERVED_LAYER_SELECTION
+            )))
+        }
+    }
 }
 
 /// The streamed viewport's channel capacity, in frames. Two: one in flight to hyper, one built
@@ -724,7 +762,19 @@ impl ViewportSink for WireSink {
             .zip(&chunk.scalars)
             .map(|(d, col)| (d.name.as_str(), column_ref(col)))
             .collect();
-        let frame = points_frame(&chunk.tessera_ids, &chunk.codes, &scalar_refs);
+        // The membership columns (D12) name themselves: which layers get one is settled by the
+        // artifact pass, after the head, so the chunk carries the names rather than the head.
+        let membership_refs: Vec<(&str, &[Option<u64>])> = chunk
+            .membership
+            .iter()
+            .map(|m| (m.layer.as_str(), m.ids.as_slice()))
+            .collect();
+        let frame = points_frame(
+            &chunk.tessera_ids,
+            &chunk.codes,
+            &scalar_refs,
+            &membership_refs,
+        );
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
         self.points_total += chunk.tessera_ids.len() as u64;
         self.flushes += 1;
@@ -821,22 +871,28 @@ fn run_viewport_stream(
     // for, all of them the caller's own words back.
     let named_view = req.view.clone();
     let named_zoom = req.zoom;
-    let named_layers = req
-        .layers
-        .as_ref()
-        .map(|names| names.join(","))
-        .unwrap_or_default();
+    let named_layers = match &req.layers {
+        Some(LayersReq::All(_)) => tessera_types::layer::RESERVED_LAYER_SELECTION.to_string(),
+        Some(LayersReq::Named(names)) => names.join(","),
+        None => String::new(),
+    };
 
-    // Borrowed as `&[&str]` for the engine's request, which holds the list rather than owning it.
-    let layer_names: Option<Vec<&str>> = req
-        .layers
-        .as_ref()
-        .map(|names| names.iter().map(String::as_str).collect());
+    // **Omitted is the empty list**, and the mapping is the one place the wire's default is
+    // decided. Borrowed as `&[&str]` for the engine's request, which holds the list rather than
+    // owning it.
+    let layer_names: Vec<&str> = match &req.layers {
+        Some(LayersReq::Named(names)) => names.iter().map(String::as_str).collect(),
+        Some(LayersReq::All(_)) | None => Vec::new(),
+    };
+    let layers = match &req.layers {
+        Some(LayersReq::All(_)) => LayerSelection::All,
+        Some(LayersReq::Named(_)) | None => LayerSelection::Named(&layer_names),
+    };
     let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
         .underlay_offset(req.underlay_offset)
-        .layers(layer_names.as_deref())
+        .layers(layers)
         .artifact_budget(req.artifact_budget)
         .cancel(Some(cancel));
     if let Some(filter) = filter {
