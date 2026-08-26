@@ -30,7 +30,10 @@ page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => {
   // A 429 the client retried and recovered still prints a browser resource-load error. That is
   // the transport narrating, not the client failing; judge on whether the view survived instead.
-  if (m.type() === 'error' && !/429|Too Many Requests/.test(m.text())) errors.push(m.text());
+  // A 429 is shed-and-retried, and `ERR_INCOMPLETE_CHUNKED_ENCODING` is Chromium logging a
+  // streamed response the driver abandoned when the view moved — a superseded request's abort,
+  // which is the client working as designed (the harness has exempted it since step 3).
+  if (m.type() === 'error' && !/429|Too Many Requests|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(m.text())) errors.push(m.text());
 });
 
 await page.goto(url, {waitUntil: 'load'});

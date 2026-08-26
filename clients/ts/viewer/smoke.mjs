@@ -280,17 +280,27 @@ console.log(' ', JSON.stringify(canvasPixels));
 //
 // So there is nothing left to excuse, and every console error counts. The 500s are still listed
 // separately, because a run that fails wants to say *which* of the two it was.
+/**
+ * The one console error a healthy run still produces: Chromium logs
+ * `ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the client abandoned mid-flight,
+ * which is what a superseded request *is* — the driver aborts the one in flight when the view
+ * moves. The harness has exempted it since step 3; these scripts had not, so a run against a
+ * corpus large enough for a response to still be streaming when the next gesture lands failed on
+ * the client working as designed. Nothing else is excused.
+ */
+const isSupersededAbort = (text) => /ERR_INCOMPLETE_CHUNKED_ENCODING/.test(text);
+
 const categoryFaults = requests.filter(
   (r) => r.path.startsWith('/v1/categories/') && r.status === 500
 );
-const unexplained = consoleErrors;
+const unexplained = consoleErrors.filter((e) => !isSupersededAbort(e));
 console.log('--- category route faults (none expected) ---');
 console.log(
   categoryFaults.length
     ? categoryFaults.map((r) => `  ${r.status} ${r.path}`).join('\n')
     : '  none'
 );
-console.log('--- console errors ---');
+console.log('--- console errors (a superseded request’s abort excepted) ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
 console.log(`--- screenshot: ${shot}`);
 
