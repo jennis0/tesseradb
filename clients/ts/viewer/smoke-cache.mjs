@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Does the replica actually make a revisit free? Zoom in, pan away, pan back, count requests.
 //
-//   node clients/ts/viewer/smoke-cache.mjs
+//   node clients/ts/viewer/smoke-cache.mjs [--url http://localhost:5173]
+//     [--headed] [--executable /path/to/chrome]
 //
 // Requires a running `tessera serve` and `vite dev` — the same setup smoke.mjs wants.
 //
@@ -12,11 +13,12 @@
 //    replica being consulted.
 //  - **Let the depth budget settle.** `calibrate` is one-directional and bands are keyed by depth,
 //    so while `mTarget` is still moving every view lands at a depth nothing is held at.
-import {chromium} from 'playwright';
+import {flags, isSupersededAbort, launchBrowser} from './smoke-browser.mjs';
 
-const browser = await chromium.launch({
-  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox']
-});
+const args = flags();
+const url = args.url ?? 'http://localhost:5173';
+
+const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 
 let requests = 0;
@@ -56,7 +58,7 @@ const snap = async (tag) => {
   return requests;
 };
 
-await page.goto('http://localhost:5173', {waitUntil: 'load'});
+await page.goto(url, {waitUntil: 'load'});
 await page.waitForTimeout(6000);
 
 // The broadest principal, so the budget actually binds rather than saturating on 1,366 marks.
@@ -103,7 +105,15 @@ console.log('');
 console.log(`panning into new territory cost : ${away - base} request(s)  (0 means the ring had it)`);
 console.log(`panning back to what we held cost: ${back - away} request(s)  (expect 0)`);
 console.log(`counts-only revalidations over the run: ${revalidations}`);
-console.log(`console errors: ${errors.length ? errors.join(' | ') : 'none'}`);
+// A superseded request's abort is the client working as designed and is not counted against the
+// run (`smoke-browser.mjs`); how many there were is still reported, since a run full of them says
+// the view was moving under the measurement.
+const unexplained = errors.filter((e) => !isSupersededAbort(e));
+const aborts = errors.length - unexplained.length;
+console.log(
+  `console errors: ${unexplained.length ? unexplained.join(' | ') : 'none'}` +
+    `${aborts ? ` (and ${aborts} superseded request(s) aborted)` : ''}`
+);
 console.log(back - away === 0 ? 'REVISIT FREE' : 'REVISIT COST A REQUEST');
 
 await browser.close();
