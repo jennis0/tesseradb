@@ -140,7 +140,8 @@ Harness **9 of 9** headed, `modes.mjs` **15 of 15**, `smoke`, `smoke-artifacts`,
 preset at 1440 × 900, five zoom notches from the overview at 260 wheel units each; the probe's
 `view.provisional` and `cluster.coverage`; re-run before quoting). Bands that go **colour-stale**,
 which is what retracts a tile and refetches it: 1,572 of 15,018 when colour by cluster is first
-chosen and 2,267 of 15,006 at the first notch, then 0 — **0 at every one of the six points after**.
+chosen and 2,267–2,382 of 15,006 at the first notch, then 0 — **0 at every one of the six points
+after**.
 Stand-in marks drawn neutral, mid-zoom before the settle: 748,282 then 2,702,504 (of 4,841,708 on
 screen — 56%) then 1,676,221 then 1,156,345 — **none after, at any notch**. The costs are
 unchanged: the lookup texture is rewritten on the table's version as well as the served set's, which
@@ -158,15 +159,20 @@ staleness is for — a band with no column for a layer just switched on (the har
 refill still measures it), and one whose parent chain was never seen. The design is the
 controller's file and is not edited here.
 
-**Measured for the labels** (same run and viewport). Labels placed: 26 → **31** at the overview,
-46 → **68** at the first notch, 52 → **85** three notches in — wrapping narrows the box the spatial
-hash packs against, so raising the size band placed more names rather than fewer. The name's size
-band is 12–22 px (was 10–15); a line is at most fourteen characters over at most three lines; the
-halo is 0.16 em, which is 1.9 px on the smallest name and 3.5 px on the largest. The halo needed
-the atlas, not the prop: deck divides `outlineWidth` by `fontSettings.radius` and clips the glyph's
-distance field at `fontSettings.buffer` atlas pixels — 4 at a 64 px atlas by default — so the
-previous `outlineWidth: 2.5` could draw about **a third of a pixel** on a 12 px name whatever it
-said. `fontSettings.buffer` is 12 now. Label placement stays O(artifacts): 0.30–0.40 ms a settle.
+**Measured for the labels** (same run and viewport, both trees instrumented to count labels
+placed rather than text rows — a wrapped name is several rows of one label, and `timings.labels`
+counts labels now for that reason). Labels placed over the overview and five notches:
+**13 / 23 / 27 / 26 / 11 / 4 before, 10 / 21 / 22 / 25 / 11 / 4 after** — slightly *fewer*, which
+is what a larger size band costs; wrapping the box the spatial hash packs against recovers most of
+it, and at the two deepest notches all of it. The name's size band is 12–22 px (was 10–15); a line
+is at most fourteen characters over at most three lines; the halo is 0.16 em, which is 1.9 px on
+the smallest name and 3.5 px on the largest. The halo needed the atlas, not the prop: deck divides
+`outlineWidth` by `fontSettings.radius` and clips the glyph's distance field at
+`fontSettings.buffer` atlas pixels — 4 at a 64 px atlas by default — so the previous
+`outlineWidth: 2.5` could draw about **a third of a pixel** on a 12 px name whatever it said.
+`fontSettings.buffer` is 12 now, and the halo's own alpha is the boards' 0.85 on both grounds.
+Label placement stays O(artifacts): 0.30–0.40 ms a settle. Light and dark both shot; the demo
+declares `color-scheme: dark`, so the light ground was seen by overriding it on the page.
 
 **Found and not fixed here** (the server or the corpus): the server cuts a nested tree at one
 depth, so the overview's `artifact_budget` cannot ask for the first split of a wide root without
