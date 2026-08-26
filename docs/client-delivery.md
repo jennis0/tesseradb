@@ -66,7 +66,6 @@ client steps can see what they wait on):
 | S7 | D14 — a verified-assertion auth plugin | C1's production token story | not started |
 | S8 | membership by predicate — a k-means layer whose membership is *nearest model centroid*, so every point is a member and colour covers the corpus (artifact-system §10's specified-not-built path) | k-means colouring beyond the sampled members | **deferred** by the owner 2026-08-25; a client-side Voronoi over served centroids was declined the same day — it would bake a classification into our client that the wire does not carry, so a C2/C3 client would draw a different map; decision 0099 stands |
 | S9 | a per-branch artifact cut — `cut.rs` resolves one depth for the whole tree, so a root with 26 children serves only itself under any budget below 27, and a budget that reaches one branch's leaves is far past another's (found 2026-08-25 on the collapsed notebook-2m4 tree; per-branch depth is noted there as deliberately unbuilt) | the overview under a small budget; label count at the overview | **asked for** 2026-08-25; the client's overview budget is raised past the observed fan-out meanwhile |
-
 **The notebook corpus is the demo's fifth dataset** (2026-08-26, track `corpus`): `data/notebook/`'s
 declarations migrated to the configuration surface (the notebook's writer already produced the
 current form; the files on disk were reshaped to match it, and `hull` added to the clusterings'
@@ -82,6 +81,7 @@ its labels, is the `notebook-2m4` scale on 37590/49308/45726: built in 5m13s at 
 layers on `/v1/meta`, every layer served under five measured principals (the memo's second table). Its HDBSCAN root chain is collapsed (the notebook's writer and `notebooks/collapse-hdbscan.py`:
 257 nodes at depth 58 → 197 at depth 11, placeholder topics dropped); the honest tree has 26 nodes
 at depth 1, so a single-depth cut under a budget of 27 serves the root alone at the full principal.
+| S9 | a per-branch cut of a nested tree under `artifact_budget` — the engine cuts the whole tree at one depth, so a root of 26 children is served alone under any budget below 27 and the overview shows one artifact | the overview's cut; the client's base budget could fall to the labels a viewport fits | **asked** (2026-08-26): the client's base budget is 48 meanwhile (`core/src/artifactBudget.ts`) |
 
 **Step 4's notes** (2026-08-25). The plain-HTML example's app server is the claim-minting proxy
 under `builtin:passthrough` and its README says so where a C1 developer reads it (design §5.3);
@@ -102,8 +102,8 @@ board-crop/screenshot pair per element and state.
 | 1 | the filter panel is ugly and unusable with 171 categories | **done**: chips with × and *Clear all*; a category is a search over the enumeration with the top four as checkboxes and *Show N more…* (171 never listed at once); text is a field with *all words / phrase*; ranges two inputs — `ExplorerOverlay.png` |
 | 2 | initial load at 1.8M points is laggy and the loading pill says nothing | **done**: measured headed (Chromium 1208, RTX 3080) on 2m4's full principal, 996,488 marks — before: first marks at 1.86 s all at once in a 275 ms task, frame gaps 328/289/276 ms; after: first marks at 1.29–1.55 s streaming to 996,488 by 1.9–2.1 s, the longest task during streaming 63–85 ms (the 209 ms and 169 ms left are WebGL context creation and the warm shader link, before any data). The pill is gone; the strip's *Starting session…* and *Loading* rows are the progress. Under software GL (headless swiftshader) a frame is seconds, so slices are stored without presenting and the response paints once, as before |
 | 3 | clicking an artifact shows nothing; click-to-filter is not wanted | **done**: a click selects — the card and the highlighted outline — and never moves the camera or filters; *Fit to cluster* is the card's button; the card is a live read of the served set (children as the channel answers) |
-| 4 | no way to see the HDBSCAN and toponymy artifacts | **done with the corpus track's 2.4M corpus** (viewer 37590): the channel and the point path carry `artifact_budget` (`BASE × 2^zoom`, 24 at the overview, capped at 2,048 — `core/src/artifactBudget.ts`), so HDBSCAN is served a 41-artifact cut at the overview and 143 three notches in; a tiered layer the server serves whole (toponymy, 797 at every budget) draws at the level the budget would have cut — `levelForBudget` — and the legend's *Level* select shows `auto · 16 topics…`, refining to 574 on zoom, or a chosen level. Topic labels attach to their cluster by the count a dependent carries (D13) and name it where it has no name of its own |
-| 5 | it does not look like the designs | **done**: every element restyled to `gen.py`'s tokens and markup — `Main.png`, `ExplorerOverlay.png`, `StatusStates.png` (nine states), `SelectionFlow.png`, `ExplorerNarrow.png`; light and dark follow the host's `color-scheme` |
+| 4 | no way to see the HDBSCAN and toponymy artifacts | **done with the corpus track's 2.4M corpus** (viewer 37590): the channel and the point path carry `artifact_budget` (`BASE × 2^zoom`, 48 at the overview, capped at 2,048 — `core/src/artifactBudget.ts`; 48 because the server cuts a whole tree at one depth, and the rebuilt tree's root has 26 children, so any budget below 27 served the root alone — S9 below), so HDBSCAN is served a 71-artifact cut at the overview (the root, its 26 splits, 26 and 18 beneath; 69 topics with text) and 84 three notches in; a tiered layer the server serves whole (toponymy, 797 at every budget) draws at the level the budget would have cut — `levelForBudget` — and the legend's *Level* select shows `auto · 16 topics…`, refining to 574 on zoom, or a chosen level. Topic labels attach to their cluster by the count a dependent carries (D13) and name it where it has no name of its own |
+| 5 | it does not look like the designs | **done**: every element restyled to `gen.py`'s tokens and markup — `Main.png`, `ExplorerOverlay.png`, `StatusStates.png` (nine states), `SelectionFlow.png`, `ExplorerNarrow.png`; light and dark follow the host's `color-scheme`. **The map at 2.4M** (2026-08-26, judged on notebook-2m4's full preset against `gen.py`'s `datamap2` / `datamap_layers2`): marks translucent and sized by count and zoom (`deck/src/marks-style.ts` — the function and its numbers are below); a nested layer's contours are a hairline each with a 7–9% fill at the cut's leaves and none above; an artifact with no text draws no label, and a viewport places the top N by masked count that fit (`labelBudget`, 36 at 1440 × 900); a flat layer's hulls draw only for the hovered and the opened artifact — the hovered one found through the hull, the label, or a mark it holds, resolved through the ordinal and the table (`artifactOfMark`). An open or a close now repaints the map, which the highlighted outline of point 3 had needed and not had: the layer follows the store's projections on its own, but the opened artifact is a property the host computes at a paint |
 | 6 | words instead of icons in the interaction menu | **done**: pan, box, lasso, a rule, fit as `gen.py`'s icons, top-left docked and top-right overlay |
 | 7 | the mode toolbar is buggy — select tools do nothing, then pan breaks | **done**: deck's input layer saw a selection's pointerdown and never its pointerup, so its session stayed pressed; the gestures are now taken in the capture phase before the canvas sees them. `harness/modes.mjs` drives every transition with human-paced pointer input: 13 of 15 against the old handlers, 15 of 15 now |
 | 8 | text like *how many artifacts a layer holds is never published…* in a panel | **done**: every explanatory sentence is out of the panels — a state is one line — and in `clients/ts/README.md` (*What the panels do not say*) |
@@ -115,8 +115,30 @@ quoting): decode as seen from the main thread median 21.9 ms, p95 88 ms; the lar
 over 16,100 bands; per frame mean 16.7 ms, p95 17.6 ms; box selection 262 ms select-to-counted.
 **Harness 9 of 9**; `smoke`, `smoke-artifacts`, `smoke-budget` OK on 2m4.
 
-**Found and not fixed here** (the server or the corpus): the wire gives a dependent artifact no
-centroid and no target id, so a topic label can be placed only through its count (exact where
+**Measured for the map at 2.4M** (2026-08-26, headed Chromium 1208 on notebook-2m4's full preset at
+1440 × 900, the probe's `timings.markRadius` / `markAlpha` / `markCount`; re-run before quoting).
+The mark style is `markStyle(marks, zoom)` over the resident count `marks` (every mark the slab
+holds for the frame plus the stand-ins, margin included — a screen fact) and deck's zoom:
+`t = clamp((log10(marks) − 2) / 4, 0, 1)` (0 at a hundred marks, 1 at a million), radius
+`1.2 + 1.0 (1 − t) + 0.08 clamp(zoom, 0, 10)` px, alpha `min(0.95, 0.5 + 0.3 (1 − t) + 0.02 clamp(zoom, 0, 10))`;
+a host's `radius` attribute pins the radius and the alpha still follows. deck raises its
+`opacity` prop to `1 / 2.2` before the shader reads it, so the layer passes `alpha^2.2`. Before:
+1.6 px at full alpha whatever the count — 1,012,813 marks at the overview drew as opaque blobs
+(`m24-hdbscan-z0`). After, at the same view: **1.20 px at 0.50** over 1,012,813 resident marks;
+three notches in **1.43 px at 0.56** over 1,578,845 (zoom 2.92); the boards' 1,600 marks would
+draw at 1.9 px at 0.71 (the boards: 1.5 px at 0.68 light / 0.78 dark). A style change is two
+uniforms; no per-point pass. The contours' fill is 18/255 light, 23/255 dark at a leaf, 0 above,
+hairline 41/255 light, 56/255 dark at 0.8 px; hovered 26/33 fill, 150 line at 1 px; opened 41 fill,
+200 line at 1.2 px. Labels: toponymy's overview drew 28 names at 1440 × 900 where it had drawn
+dozens of overlapping `tpN-` keys; HDBSCAN's overview 28, k-means's 21 — none overlapping, the
+placement unchanged and the candidates cut to what has text and to the budget. The flat layer
+(k-means, 64 hulls in view) draws no hull at rest, one while hovered, one strong while opened.
+Harness **9 of 9** headed, `modes.mjs` **15 of 15**, `smoke`, `smoke-artifacts`, `smoke-budget` OK.
+
+**Found and not fixed here** (the server or the corpus): the server cuts a nested tree at one
+depth, so the overview's `artifact_budget` cannot ask for the first split of a wide root without
+also paying for the depth beneath it (S9); the wire gives a dependent artifact no centroid and no
+target id, so a topic label can be placed only through its count (exact where
 counts are distinct, unattached where two share one); the server serves a tiered layer whole
 whatever `artifact_budget` says (toponymy: 797 at budget 42, 819 KB), so the client cuts by level
 itself; 170 of toponymy's 797 artifacts name a parent that is not served alongside them, so the

@@ -83,11 +83,17 @@ const artifactList = async () =>
     return {state, served: served ? Number(served[1].replaceAll(',', '')) : null, empty: /Nothing in this view/.test(scope.textContent ?? ''), counts};
   });
 
-/** What the map drew of the artifacts, from the probe: outlines, placed labels, the layers on. */
+/**
+ * What the map drew of the artifacts, from the probe: outlines, placed labels, the layers on —
+ * and how many served artifacts carry a text, read off the explorer's store, since an artifact
+ * with no text draws no label (its key is an id, never a name).
+ */
 const drawn = async () =>
   page.evaluate(() => {
     const p = window.__tesseraProbe;
-    return p ? {outlines: p.timings.outlines, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length} : null;
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const named = explorer?.store?.get('artifacts').served.filter((a) => (a.content[0] ?? '').length > 0).length ?? 0;
+    return p ? {outlines: p.timings.outlines, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length, named} : null;
   });
 
 // The picker is rendered from `/v1/meta`, so nothing can be counted until the first response has
@@ -193,12 +199,20 @@ for (const [layer, rows] of byLayer) {
 }
 console.log('--- geometry drawn (the wire’s, per principal) ---');
 for (const s of shotsTaken) {
-  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} outlines, ${s.drawn?.labels ?? 0} labels  ${s.file}`);
+  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} outlines, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
 }
-// A hull and a label must render under two principals — the geometry is the wire's, derived per
-// principal, and a map that drew none would pass every count check while showing a bare field.
-const drewBoth = shotsTaken.filter((s) => (s.drawn?.outlines ?? 0) > 0 && (s.drawn?.labels ?? 0) > 0);
-if (drewBoth.length < 2) failures.push(`a hull and a label rendered under ${drewBoth.length} of 2 principals`);
+// A hull must render under two principals — the geometry is the wire's, derived per principal,
+// and a map that drew none would pass every count check while showing a bare field. A label
+// renders wherever a served artifact carries a text, and never where none does: a layer whose
+// artifacts have keys alone draws no label, since a key is an id.
+const drewHull = shotsTaken.filter((s) => (s.drawn?.outlines ?? 0) > 0);
+if (drewHull.length < 2) failures.push(`a hull rendered under ${drewHull.length} of 2 principals`);
+for (const s of shotsTaken) {
+  const named = s.drawn?.named ?? 0;
+  const labels = s.drawn?.labels ?? 0;
+  if (named > 0 && labels === 0) failures.push(`${s.label}: ${named} served artifacts carry a text and no label rendered`);
+  if (named === 0 && labels > 0) failures.push(`${s.label}: no served artifact carries a text and ${labels} labels rendered — a key drawn as a name`);
+}
 // A run in which no principal was served a count from any layer proves nothing about masking — it
 // is what a lost layer selection looks like (found 2026-08-25: the choice was dropped on every
 // principal switch and this script still said OK). The list must have read a number somewhere.

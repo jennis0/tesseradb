@@ -8,8 +8,14 @@
  * fits the 512-unit world, +1 per doubling — so the budget doubles per zoom level: about the
  * labels a viewport fits at the overview, and the finer cut a zoomed view can show. Named here so
  * a test pins it and a reader finds one place to change it.
+ *
+ * The base is 48 because the server cuts a whole tree at one depth: a root with 26 children is
+ * served as the root alone under any budget below 27, and the overview would show one artifact.
+ * Forty-eight serves the first split of a tree that wide and its topics; a per-branch cut is
+ * asked of the server (S9 in the delivery record) and would let this fall to the labels a
+ * viewport fits.
  */
-export const BASE_ARTIFACT_BUDGET = 24;
+export const BASE_ARTIFACT_BUDGET = 48;
 export const MAX_ARTIFACT_BUDGET = 2048;
 
 export function artifactBudgetFor(zoom: number): number {
