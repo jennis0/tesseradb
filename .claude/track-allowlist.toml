@@ -12,7 +12,7 @@
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (merged). Wave 4: step4 (examples, react) and step5 (the widget), in parallel on disjoint files.
+# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (merged). Wave 4 merged. Wave 5 (owner review 2026-08-25): corpus (the notebook corpus as the demo) and ui (bugs and the boards), in parallel.
 
 # FROZEN (controller, 2026-08-25). Decisions and the two normative designs change only through
 # the owner; scripts are the checks themselves; authz and plugin crates are outside this campaign.
@@ -137,4 +137,31 @@ paths = [
   "clients/ts/components/*",
   "notebooks/*",
   "CLAUDE.md",
+]
+
+# Wave 5 — the owner's review (controller, 2026-08-25). `corpus`: data/notebook's declarations
+# migrated to the current configuration surface, built, and served as the demo's dataset with its
+# HDBSCAN tree, topic labels and taxonomy. `ui`: the four bugs and the visual pass against the
+# design boards. Disjoint: corpus owns the data pipeline and the two demo scripts; ui owns the
+# client packages. Both branch from main at 28d82ec.
+[track.corpus]
+paths = [
+  "notebooks/*",
+  "data/notebook/*",
+  "run_demo.sh",
+  "clients/ts/scripts/*",
+  "docs/evidence/memos/2026-08-25-notebook-corpus-as-demo.md",
+]
+
+[track.ui]
+paths = [
+  "clients/ts/core/*",
+  "clients/ts/deck/*",
+  "clients/ts/components/*",
+  "clients/ts/harness/*",
+  "clients/ts/viewer/*",
+  "clients/ts/examples/*",
+  "clients/ts/react/*",
+  "clients/ts/README.md",
+  "docs/evidence/mockups/client-components/*",
 ]
