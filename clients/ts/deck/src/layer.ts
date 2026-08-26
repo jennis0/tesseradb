@@ -261,7 +261,7 @@ const NO_POINTS: [number, number][] = [];
 const heldColumnEncoding = new WeakMap<MarkSlab, {encoding: Encoding; colourBy: string | null}>();
 /** A lookup texture per slab, for a host that handed none in. */
 const ownLut = new WeakMap<MarkSlab, LookupTexture>();
-/** The outline polygons, once per served set and opened artifact. */
+/** The outline polygons, once per served set, opened artifact and zoom bucket. */
 const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]}>();
@@ -277,6 +277,8 @@ export type OutlineDatum = {
   height: number;
   /** Whether the artifact's layer is flat — its outline is drawn only while hovered or opened. */
   flat: boolean;
+  /** Whether the outline is under `MIN_OUTLINE_PX` on both axes at this zoom — drawn only while hovered or opened. */
+  tiny: boolean;
   /** The fill and line alphas (0–255) and the line width in pixels this outline draws with. */
   fill: number;
   line: number;
@@ -305,7 +307,30 @@ export type OutlineOptions = {
   hovered: bigint | null;
   level: number | undefined;
   scheme: 'light' | 'dark';
+  /** deck's zoom, for the outline's size on screen. */
+  zoom: number;
 };
+
+/**
+ * An outline whose screen-space box is under this many pixels on both axes is not drawn: a
+ * shape a few pixels across reads as a dark shard, not a contour. It stays in the data at zero
+ * alpha so the artifact still answers a pick, and its label rule is unchanged.
+ */
+export const MIN_OUTLINE_PX = 12;
+
+/** The pixel extent of an artifact's outline at `zoom`, from its served `box` (else its hull's extent). */
+export function outlinePixels(a: Artifact, zoom: number): [number, number] | null {
+  const scale = 2 ** zoom; // pixels per world unit
+  if (a.box) return [gridToWorld(a.box[2] - a.box[0]) * scale, gridToWorld(a.box[3] - a.box[1]) * scale];
+  if (a.hull && a.hull.length >= 3) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const [x, y] of a.hull) {
+      x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
+    }
+    return [gridToWorld(x1 - x0) * scale, gridToWorld(y1 - y0) * scale];
+  }
+  return null;
+}
 
 /** Whether a layer's artifacts stand beside one another with no lineage (`hierarchy.kind: 'flat'`). */
 export function isFlatLayer(meta: Meta | null, layer: string): boolean {
@@ -319,6 +344,8 @@ export function isFlatLayer(meta: Meta | null, layer: string): boolean {
  * clusters, say — overlap into a mesh when every hull is drawn, so its outlines draw only for
  * the hovered and the opened artifact and colour does the rest; the others are in the data at
  * zero alpha so they still answer a pick. The opened one is strong with the boards' 0.16 fill.
+ * An outline under `MIN_OUTLINE_PX` on both axes at `o.zoom` is likewise kept at zero alpha,
+ * unless it is the hovered or the opened one.
  */
 export function outlineData(a: ArtifactsProjection, meta: Meta | null, o: OutlineOptions): OutlineDatum[] {
   const data: OutlineDatum[] = [];
@@ -336,6 +363,8 @@ export function outlineData(a: ArtifactsProjection, meta: Meta | null, o: Outlin
     const opened = artifact.tesseraId === o.opened;
     const hovered = !opened && artifact.tesseraId === o.hovered;
     const height = heights.get(artifact.tesseraId) ?? 0;
+    const px = outlinePixels(artifact, o.zoom);
+    const tiny = px !== null && px[0] < MIN_OUTLINE_PX && px[1] < MIN_OUTLINE_PX;
     let fill = 0;
     let line = 0;
     let width = 0.8;
@@ -347,11 +376,11 @@ export function outlineData(a: ArtifactsProjection, meta: Meta | null, o: Outlin
       fill = HOVER_FILL[o.scheme];
       line = HOVER_LINE;
       width = 1;
-    } else if (!flat) {
+    } else if (!flat && !tiny) {
       fill = height === 0 ? FILL_ALPHA[o.scheme] : 0;
       line = HAIRLINE_ALPHA[o.scheme];
     }
-    data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened, hovered, depth, height, flat, fill, line, width});
+    data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened, hovered, depth, height, flat, tiny, fill, line, width});
   }
   return data;
 }
@@ -932,10 +961,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const opened = this.props.openedArtifact ?? null;
     const hovered = this.props.hoveredArtifact ?? null;
     const scheme = this.props.scheme ?? 'dark';
-    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${hovered ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
+    const zoom = this.context.viewport?.zoom ?? 0;
+    const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
+    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${hovered ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}|${bucket}` : '';
     let held = a ? heldOutlines.get(a.served) : undefined;
     if (a && (!held || held.key !== key)) {
-      held = {key, data: outlineData(a, r.meta, {opened, hovered, level: this.props.clusterLevel, scheme})};
+      held = {key, data: outlineData(a, r.meta, {opened, hovered, level: this.props.clusterLevel, scheme, zoom})};
       heldOutlines.set(a.served, held);
     }
     const data = held?.data ?? NO_OUTLINES;
@@ -1002,8 +1033,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
         data.push({id: artifact.tesseraId, position, text: name, size, offset: [seam, p.dy], colour, kind: 'name'});
         data.push({id: artifact.tesseraId, position, text: countText, size: size * 0.82, offset: [seam + size * 0.35, p.dy + size * 0.08], colour, kind: 'count'});
         if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: 11, offset: [p.dx, p.dy + size * 0.78 + 3], colour, kind: 'topic'});
-        // A leader only where the label sits well clear of its centroid — a small nudge needs none.
-        if (p.leader && Math.hypot(p.dx, p.dy) > size * 2.5) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
+        // A leader wherever the label moved: the placement bounds the move (`MAX_DISPLACEMENT`),
+        // so a leader is a short tie to the centroid and never a line across the map.
+        if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
       }
       held = {key, data, leaders};
       heldLabels.set(a.served, held);
