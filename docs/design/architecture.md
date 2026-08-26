@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 49
+**Status:** Draft for review — revision 50
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -1037,6 +1037,40 @@ Definitions only; the arguments are in the referenced sections.
 
 ## Appendix C — Accepted residual disclosure channels
 
+> **⊘ This register is due a refinement, and the shape of it is agreed** (owner direction,
+> 2026-08-26; not yet acted on, which is what this note says). Twenty-nine rows now hold three
+> different kinds of thing, and the mixture is why the ones that matter do not stand out.
+> **Content disclosure** — a raw match count over unauthorised records (C8), corpus-global
+> statistics under ranking (C9), a caller's optimistic generating set the service then serves
+> faithfully (C12), a vocabulary offering values the viewer cannot see (C11), existence-probing a
+> stable identifier (C17), membership inferable from density (C1) — is what the register is for.
+> **Activity and cost signals** — service time against a tile's row span, latency against
+> compartment fan-out, filter and decompression time, a stamp's rate of change (C4, C14, C15, C19,
+> C21, C24, C25, C26) — are eight rows saying one thing about the whole engine: it does work
+> proportional to data, and the timing of that work is observable. They want one section with one
+> posture, not a row per code path and a ninth with the next query feature. **Records that a check
+> found nothing** — C2 says so in as many words — are notes that a check happened, and belong
+> beside the mechanism they checked, as [decision 0024](../decisions/0024-leak-register-scope-is-viewer-inference.md)
+> put the fragment cache's integrity argument in §8.5 rather than here.
+>
+> Two consequences to fix with it. **`Accepted` carries two opposite meanings** — a real risk
+> carried deliberately (C12, High) and a row whose own mitigation says it *reveals nothing about
+> data* (C14) — so a status cannot be read without the prose. And **the register ratchets**: every
+> wire addition asks whether it needs a row, the answer that looks safe is always yes, and there is
+> no rule for what does not warrant one. The membership column of decision 0099 is the specimen —
+> a datum the server deliberately serves, drafted as a residual disclosure because something had
+> been added to the wire.
+>
+> **The inclusion test to apply meanwhile**, which is the refinement's centre: *a row exists only
+> where a viewer, reading responses they are entitled to, can end up knowing something about data
+> they were not served.* Data the service **serves** never qualifies, however sensitive — it is a
+> disclosure decision taken at the point of service, and its argument belongs with the mechanism
+> that serves it. Data a client can already **derive** never qualifies, as the paragraph below
+> already says. What survives that test is the register's subject.
+>
+> The scope rule and the exhaustiveness claim are not in question: a small enumerable surface is
+> what makes *anything not listed is a bug* mean something.
+
 I2 requires displayed quantities to derive from visible data only. These are the known exceptions. Anything not listed is a bug, not a trade-off.
 
 **The register's scope is what a viewer can infer.** Every row is a channel reachable by someone holding a token and reading responses: cluster membership inferred from density, corpus activity inferred from a generation stamp's rate of change, correlation joined across sessions. Data at rest is out of scope. An authorisation result persisted to disk — §8.5's fragment cache — is threatened by an attacker with filesystem access, which is a different reader, a different mitigation and a different audience, and its integrity argument therefore lives with the mechanism, in §8.5. That narrower scope is what makes exhaustiveness possible: a register that also enumerated everywhere data lives would be a list of storage locations, and nobody could say when such a list was complete.
@@ -1223,6 +1257,17 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r50** — **the register is due a refinement, and the note says so** (2026-08-26, **owner
+  direction on the day**, which is what licenses this edit to Appendix C). No row is added, removed
+  or changed and no invariant moves: Appendix C gains a ⊘ note at its head recording that its
+  twenty-nine rows hold three different kinds of thing — content disclosure, activity and cost
+  signals, and records of checks that found nothing — that `Accepted` carries two opposite
+  meanings, and that with no inclusion test the register ratchets. The note carries the test to
+  apply meanwhile: a row exists only where a viewer, reading responses they are entitled to, can
+  end up knowing something about data they were **not** served; served data and derivable data
+  never qualify. Raised while ruling on the client work's membership column (decision 0099), whose
+  proposed row is the specimen the note names.
 
 - **r49** — **two annotations for the artifact serving path** (2026-08-21, **owner-approved on the
   day**, which is what licenses an edit to Appendix C here). The artifact scale campaign's adversarial
