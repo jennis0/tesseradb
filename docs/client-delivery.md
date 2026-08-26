@@ -190,13 +190,20 @@ deck 80, components 69, react 10, spike 5, wire-example 7, plain-html 4, canvas-
 `check-doc-links.py` clean; harness **9 of 9** headed on notebook-2m4 — its ninth claim now reads
 **16 of 16** sampled ordinals drawn in a colour beside the 16 that resolve to a served artifact,
 which are different questions and were the same number only by accident — `modes.mjs` **15 of 15**;
-`smoke` OK on notebook-2m4, `smoke-artifacts` OK on 2m4, `smoke-budget` OK on notebook-2m4. The
+`smoke` and `smoke-artifacts` OK on 2m4, `smoke-budget` OK on notebook-2m4 while the machine was
+quiet. The
 smoke scripts now excuse the one console error a healthy run produces — Chromium's
 `ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the driver abandoned when the view
 moved, which the harness has exempted since step 3 and which failed `smoke.mjs` on `main` too.
-`smoke-artifacts` runs its layer × principal grid, which is twenty-five settles on notebook-2m4's
-five layers and does not finish inside a ten-minute budget there; it is run on 2m4, as at the
-review. The harness's fourth claim — no count against a stale view — is **timing-dependent**: it
+**The smoke scripts launch headless swiftshader and ignore `--executable`, so notebook-2m4 is at
+the edge of what they can drive.** `smoke-artifacts` runs a layer × principal grid, which is
+twenty-five settles on that corpus's five layers and does not finish inside a ten-minute budget;
+`smoke.mjs` did not finish either under load; and `smoke-budget` reads `0, 0, -849,156, …` marks
+across its zoom steps when the box is busy, because a software-GL frame at 2.4M outlasts its
+settle window — **identically on `main`**, checked by reverting the branch's client tree and
+running it there. They are run on 2m4, as at the review, and `smoke-budget` passes on
+notebook-2m4 when the machine is quiet. Giving them the headed browser the harness takes is the
+obvious repair and is not made here. The harness's fourth claim — no count against a stale view — is **timing-dependent**: it
 failed twice and then passed four times on the same tree, and its evidence now reports how many
 revalidations had their key moved, so a run that fails says which half of the claim went.
 
