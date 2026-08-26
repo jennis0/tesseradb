@@ -122,3 +122,50 @@ Two things in that table are worth knowing before demonstrating with it.
   and dropped when it does not, so `--scale 2m4` in one terminal and `--scale notebook` in
   another leave a picker offering both.
 - `TESSERA_BIN` serves a binary built elsewhere, so a second worktree does not rebuild the crate.
+
+## The whole corpus through the same pipeline — `notebook-2m4`
+
+Added 2026-08-26, at the owner's ask that every layer be tested at 2.4M. `data/notebook-2m4-live/`
+is the full 2,422,486-paper corpus through the same notebook pipeline (UMAP computed there rather
+than reused), with a fourth clustering the sample does not have: `clusters/toponymy`, four tiered
+levels of 16 / 46 / 161 / 574 topics named by a language model from exemplar titles, and a label
+layer over it. Its declaration was already in the current form (the writer wrote it); the one edit
+is `hull` on the three clusterings, as on the sample. `tessera check`: 16 sources, 1 view, 2
+vocabularies, 6 attributes, 7 layers. `./run_demo.sh --scale notebook-2m4` serves it on viewer
+37590, session 49308, control 45726.
+
+`topics/toponymy` attaches to `clusters/toponymy` — every one of its 797 artifacts names that
+layer, and their generating sets are the exemplars per topic (11,955 member rows over 797 labels,
+about six each) — so it is declared as that layer's `[layer.labels]`, not the HDBSCAN layer's.
+
+| | |
+|---|---|
+| build | **5m13s** wall, 4.7 GiB peak (under `TESSERA_BUILD_MEMORY_MAX=24G`), 1.4 GB on disk |
+| items | 2,422,486 in 2,329,942 distinct cells (96.2% keep a position of their own), none clamped |
+| terms | 177 — 176 categories plus `public`; 4,163,155 pairs |
+| layers | 7 declared, 11 served levels; the layouts all row-served |
+| artifacts | k-means 64 · HDBSCAN 257 · toponymy 16 + 46 + 161 + 574 · taxonomy 38 + 171 · a label per cluster of the three clusterings |
+| presets | narrow 243 (`chem-ph`) · sparse 47,142 (1.9%) · medium 360,239 (15%) · heavy 1,216,255 (50%) · full 2,422,486 |
+
+`/v1/meta` names the seven layers: the three of the sample's shape plus `clusters/toponymy`
+tiered with its four titled levels and `topics/toponymy` flat depending on it. The HDBSCAN cut at
+`artifact_budget: 20` is again 19 artifacts, 18 with a `parent_id` in the response (budget 5 → 5);
+the full principal is served all 257 with 257 labels, **257 of 257 carrying their cluster's
+masked count**.
+
+Served artifacts by principal, whole extent, no budget:
+
+| principal | visible | `kmeans` | `hdbscan` | `toponymy` (4 levels) | `taxonomy` | `topics/kmeans` | `topics/hdbscan` | `topics/toponymy` |
+|---|---|---|---|---|---|---|---|---|
+| full | 2,422,486 | 64 | 257 | 797 | 209 | 64 | 257 | 797 |
+| heavy | 1,216,255 | 64 | 253 | 781 | 202 | 0 | 1 | 243 |
+| medium | 360,239 | 64 | 146 | 485 | 181 | 0 | 0 | 56 |
+| sparse | 47,142 | 53 | 23 | 175 | 144 | 0 | 0 | 1 |
+| narrow | 243 | 2 | 0 | 3 | 28 | 0 | 0 | 0 |
+
+At this scale the proportional floor bites where it did not on the sample: a two-category
+principal at 15% is served 146 of 257 HDBSCAN clusters, not all of them. And the toponymy labels
+are the ones to demonstrate labels with: a generating set of six exemplars is small enough that a
+50% principal holds every document behind 243 of 797 names, where the TF-IDF topics' 200-title
+sets are held by nobody but the full principal (one exception under *heavy* — a cluster's second,
+smaller-set fallback text).
