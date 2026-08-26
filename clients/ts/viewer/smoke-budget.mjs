@@ -61,15 +61,28 @@ const readPanels = () =>
 
 console.log('zoom_step  depth  tiles      marks       visible          limitedBy  requests');
 const marks = [];
+const visibles = [];
 for (let step = 0; step <= 5; step++) {
   if (step > 0) {
-    await page.mouse.move(640, 400);
+    // Over the corpus's centre, clear of the overlay's floating cards.
+    await page.mouse.move(870, 450);
     await page.mouse.wheel(0, -400);
     await page.waitForTimeout(settle);
+  }
+  // A response paints as its slices land, so the marks are read once they have stopped moving.
+  for (let last = -1, stable = 0, tries = 0; stable < 4 && tries < 150; tries++) {
+    await page.waitForTimeout(400);
+    const now = await page.evaluate(() => window.__tesseraProbe?.marks ?? -1);
+    if (now === last) stable++;
+    else {
+      stable = 0;
+      last = now;
+    }
   }
   const before = statuses.length;
   const p = await readPanels();
   marks.push(Number((p.actual ?? '0').replace(/,/g, '')));
+  visibles.push(Number(p.visible ?? 0));
   console.log(
     `${String(step).padEnd(10)} ${String(p.depth).padEnd(6)} ${String(p.tiles).padEnd(10)} ` +
       `${String(p.actual).padEnd(11)} ${String(p.visible).padEnd(16)} ` +
@@ -79,11 +92,16 @@ for (let step = 0; step <= 5; step++) {
 
 const shed = statuses.filter((s) => s === 429).length;
 const ok = statuses.filter((s) => s === 200).length;
-const nonZero = marks.filter((m) => m > 0);
+// The budget can be met only where at least that many are visible: a step whose view holds
+// fewer marks than the budget is read from the strip's own visible count and left out of the
+// spread — a zoom into sparse ground says nothing about the depth choice.
+const budget = 500_000;
+const eligible = marks.filter((m, i) => m > 0 && visibles[i] >= budget);
+const nonZero = eligible;
 const spread = nonZero.length ? Math.max(...nonZero) / Math.min(...nonZero) : Infinity;
 
 console.log(`\nviewport requests: ${statuses.length} total, ${ok} ok, ${shed} shed (429)`);
-console.log(`marks across zoom: ${marks.join(', ')}`);
+console.log(`marks across zoom: ${marks.join(', ')} (${eligible.length} of ${marks.length} steps with at least the budget visible)`);
 console.log(`spread (max/min over non-zero): ${spread.toFixed(2)}x   [MVP was ~25x]`);
 console.log(`console errors: ${errors.length ? errors.slice(0, 3).join(' | ') : 'none'}`);
 
@@ -93,7 +111,8 @@ await browser.close();
 const failures = [];
 if (shed > 0) console.log(`note: ${shed} request(s) shed with 429 and retried`);
 if (errors.length) failures.push(`${errors.length} console errors`);
-if (nonZero.length < 4) failures.push('fewer than four zoom steps returned marks');
+if (marks.filter((m) => m > 0).length < 4) failures.push('fewer than four zoom steps returned marks');
+if (eligible.length < 2) failures.push('fewer than two zoom steps had the budget visible — the spread was not measured');
 if (spread > 6) failures.push(`marks spread ${spread.toFixed(1)}x across zoom (want <6x)`);
 if (failures.length) {
   console.error(`FAILED: ${failures.join('; ')}`);
