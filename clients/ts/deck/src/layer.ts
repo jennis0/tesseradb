@@ -211,8 +211,25 @@ const heldStandIn = new WeakMap<object, {key: string; buffers: StandInBuffers}>(
 const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array}>();
 /** Frames whose slab-residency check has run — once per `marks` object, not once per paint. */
 const checkedMarks = new WeakSet<object>();
-/** The wash image, once per `tiles` object. */
-const heldWash = new WeakMap<object, {depth: number; image: ImageData | null; bounds: [number, number, number, number]}>();
+/** The wash image, once per `tiles` object; `pending` while it is being built off the paint path. */
+type HeldWash = {depth: number; image: ImageData | null; bounds: [number, number, number, number]; pending: boolean};
+const heldWash = new WeakMap<object, HeldWash>();
+/** The last wash built, drawn while the next is being built. */
+let lastWash: HeldWash | null = null;
+/** The pending wash build, one at a time: a newer `tiles` object supersedes an unbuilt older one. */
+let washTimer: ReturnType<typeof setTimeout> | null = null;
+/** How long `tiles` must stand still before the wash is rebuilt — the settle, not the frame. */
+const WASH_SETTLE_MS = 200;
+/** What the empty sublayers are given, once, so their descriptors are stable across paints. */
+const EMPTY_F32 = new Float32Array(0);
+const EMPTY_U8 = new Uint8Array(0);
+const EMPTY_IDS = new BigUint64Array(0);
+const EMPTY_IMAGE = typeof ImageData !== 'undefined' ? new ImageData(1, 1) : null;
+const NO_OUTLINES: OutlineDatum[] = [];
+const NO_LABELS: LabelDatum[] = [];
+const NO_LEADERS: LeaderDatum[] = [];
+const NO_SHAPES: {polygon: [number, number][]}[] = [];
+const NO_POINTS: [number, number][] = [];
 /** The column encoding the slab's colour attribute holds, kept while the map colours by cluster. */
 const heldColumnEncoding = new WeakMap<MarkSlab, {encoding: Encoding; colourBy: string | null}>();
 /** A lookup texture per slab, for a host that handed none in. */
@@ -389,7 +406,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     if (r.status === 'refused' || !r.marks || r.marks.bands.length === 0 && r.marks.standIn.length === 0 && !r.marks.count.exact) {
       if (!r.marks) slab.clear();
       this.props.onDrawn?.(0, 0);
-      return [...this.outlineLayers(r, timings), ...this.labelLayers(r, timings), ...this.selectionLayers()];
+      // Every sublayer, empty: the programs link now, during the wait for the first response,
+      // and the first paint with marks pays no shader compile (see `warmMarksLayers`).
+      return [...this.outlineLayers(r, timings), this.washLayer(null, 0), ...this.warmMarksLayers(), ...this.labelLayers(r, timings), ...this.selectionLayers()];
     }
 
     // The slab's colour attribute holds the **column** colouring. Colouring by cluster is the
@@ -423,7 +442,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       }
     }
 
-    if (this.props.wash && r.tiles) {
+    if (this.props.wash) {
       const washStarted = performance.now();
       layers.push(this.washLayer(r.tiles, r.depth));
       timings.washMs = performance.now() - washStarted;
@@ -432,7 +451,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // Layers toggle `visible`; they are never omitted — deck destroys an absent layer and re-uploads
     // everything it held when it returns. One layer per retained slab partition, addressed by slot,
     // so a depth flip is a swap and flipping back uploads nothing.
-    for (const held of slab.layers()) {
+    const partitions = slab.layers();
+    if (partitions.length === 0) layers.push(...this.warmMarksLayers());
+    for (const held of partitions) {
       layers.push(
         new MarksLayer(
           this.getSubLayerProps({id: `marks-p${held.slot}`}),
@@ -494,6 +515,46 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return layers;
   }
 
+  /**
+   * The mark layers with nothing in them — the first partition's slot and the stand-ins — so
+   * that their programs are linked at the first paint of the session rather than at the first
+   * paint with marks. luma links synchronously when a pipeline is made (its shader-layout
+   * introspection forces the link to complete), and every program of this composite cost
+   * 130–190 ms on the main thread at the moment the first million marks arrived — the largest
+   * single block in that paint. An empty layer draws nothing and uploads nothing; a layer that
+   * later fills keeps its id, so deck updates it rather than making it again.
+   */
+  private warmMarksLayers(): Layer[] {
+    return [
+      new MarksLayer(
+        this.getSubLayerProps({id: 'marks-p0'}),
+        {
+          visible: false,
+          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
+          tesseraIds: EMPTY_IDS,
+          useLut: false,
+          lutTexture: null,
+          radiusUnits: 'pixels' as const,
+          getRadius: this.props.radius,
+          pickable: false,
+          parameters: {depthCompare: 'always' as const}
+        } as never
+      ),
+      new ScatterplotLayer(
+        this.getSubLayerProps({id: 'marks-standin'}),
+        {
+          visible: false,
+          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true)}},
+          tesseraIds: EMPTY_IDS,
+          radiusUnits: 'pixels' as const,
+          getRadius: this.props.radius,
+          pickable: false,
+          parameters: {depthCompare: 'always' as const}
+        } as never
+      )
+    ];
+  }
+
   private standInBuffers(marks: MarksProjection, colourBy: string | null): StandInBuffers {
     const key = colourBy ?? '';
     const held = heldStandIn.get(marks.standIn);
@@ -511,27 +572,64 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return colours;
   }
 
-  /** The density wash, rebuilt once per `tiles` object — the settle's work, never the frame's. */
-  private washLayer(tiles: TilesProjection, depth: number): Layer | null {
-    let held = heldWash.get(tiles);
-    if (!held || held.depth !== depth) {
-      const binned = binDensity(tiles.tiles, depth);
-      const image = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
-      held = {
-        depth,
-        image: image && typeof ImageData !== 'undefined' ? new ImageData(image.data, image.width, image.height) : null,
-        bounds: image ? image.bounds : [0, 0, 0, 0]
-      };
-      heldWash.set(tiles, held);
+  /**
+   * The density wash, rebuilt once per `tiles` object — and **off the paint path**. Binning and
+   * filtering the wash over a full viewport's tiles (65,536 at depth 8) is 60–70 ms, and it sat
+   * inside the first paint with marks. Now a new `tiles` object schedules the build on a
+   * macrotask, the paint draws the previous wash (or none) meanwhile, and the layer asks for an
+   * update when the image is ready — one frame later, never inside the frame that draws the
+   * marks. The image still comes from the exact tiles' counts and nothing else (§5.10).
+   *
+   * `tiles` null draws the empty layer, so the bitmap program links with the rest at the first
+   * paint of the session.
+   */
+  private washLayer(tiles: TilesProjection | null, depth: number): Layer {
+    let image: ImageData | null = null;
+    let bounds: [number, number, number, number] = [0, 0, 1, 1];
+    if (tiles) {
+      let held = heldWash.get(tiles);
+      if (!held || held.depth !== depth) {
+        if (!held || !held.pending) {
+          // Keep the last wash drawn while this one is built: no flash to nothing at a settle.
+          held = {depth, image: lastWash?.image ?? null, bounds: lastWash?.bounds ?? [0, 0, 1, 1], pending: true};
+          heldWash.set(tiles, held);
+          const build = () => {
+            washTimer = null;
+            const binned = binDensity(tiles.tiles, depth);
+            const built = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
+            const entry = {
+              depth,
+              image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
+              bounds: built ? built.bounds : ([0, 0, 1, 1] as [number, number, number, number]),
+              pending: false
+            };
+            heldWash.set(tiles, entry);
+            lastWash = entry;
+            // The layer that is current for this id, which may no longer be this instance.
+            const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
+            // A discarded instance has no manager to ask; the next paint reads the memo anyway.
+            if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
+            current.setNeedsUpdate();
+            current.setNeedsRedraw();
+          };
+          // Debounced to the settle: while a response streams in, every fold hands the layer a
+          // new `tiles` object a frame apart, and a wash per frame would cost more than the
+          // marks it sits under. The last one asked for is the one built.
+          if (typeof setTimeout !== 'undefined') {
+            if (washTimer !== null) clearTimeout(washTimer);
+            washTimer = setTimeout(build, WASH_SETTLE_MS);
+          } else build();
+        }
+      }
+      image = held.image;
+      bounds = held.bounds;
     }
-    // No image is no layer: a BitmapLayer given no image throws in its texture transform, and a
-    // wash that comes and goes is a few-kilobyte texture, not a re-upload worth keeping a layer for.
-    if (!held.image) return null;
-    const [x0, y0, x1, y1] = held.bounds;
+    const [x0, y0, x1, y1] = bounds;
     return new BitmapLayer(
       this.getSubLayerProps({id: 'wash'}),
       {
-        image: held.image,
+        visible: image !== null,
+        image: image ?? EMPTY_IMAGE,
         // `[left, bottom, right, top]`: row 0 of the image is the lowest tile row, and under the
         // y-down orthographic view that is the smaller world y — so `top` is `y0`.
         bounds: [x0, y1, x1, y0],
@@ -551,12 +649,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    */
   private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number}): Layer[] {
     const a = r.artifacts;
-    if (!a || a.served.length === 0) return [];
     const started = performance.now();
     const opened = this.props.openedArtifact ?? null;
-    const key = `${a.version}|${a.palette}|${opened ?? ''}`;
-    let held = heldOutlines.get(a.served);
-    if (!held || held.key !== key) {
+    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}` : '';
+    let held = a ? heldOutlines.get(a.served) : undefined;
+    if (a && (!held || held.key !== key)) {
       const data: OutlineDatum[] = [];
       for (const artifact of a.served) {
         const polygon = outlineOf(artifact);
@@ -567,14 +664,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       held = {key, data};
       heldOutlines.set(a.served, held);
     }
+    const data = held?.data ?? NO_OUTLINES;
     timings.outlinesMs = performance.now() - started;
-    timings.outlines = held.data.length;
-    if (held.data.length === 0) return [];
+    timings.outlines = data.length;
+    // The layer exists from the first paint, empty, so its program is linked before it is needed.
     return [
       new PolygonLayer(
         this.getSubLayerProps({id: 'outlines'}),
         {
-          data: held.data,
+          visible: data.length > 0,
+          data,
           getPolygon: (d: OutlineDatum) => d.polygon,
           filled: true,
           getFillColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 36] : [0, 0, 0, 0]),
@@ -584,7 +683,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           getLineWidth: (d: OutlineDatum) => (d.opened ? 2 : 1),
           lineWidthMinPixels: 1,
           pickable: this.props.pickable,
-          artifactIds: held.data.map((d) => d.id),
+          artifactIds: data.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
           updateTriggers: {getFillColor: key, getLineColor: key, getLineWidth: key}
         } as never
@@ -600,16 +699,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    * deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
    */
   private labelLayers(r: Resolved, timings: {labelsMs: number; labels: number}): Layer[] {
-    const a = r.artifacts;
-    if (!this.props.labels || !a || a.served.length === 0) return [];
+    const a = this.props.labels ? r.artifacts : null;
     const viewport = this.context.viewport;
-    if (!viewport) return [];
     const started = performance.now();
-    const zoom = viewport.zoom;
+    const zoom = viewport?.zoom ?? 0;
     const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
-    const key = `${a.version}|${a.palette}|${bucket}`;
-    let held = heldLabels.get(a.served);
-    if (!held || held.key !== key) {
+    const key = a ? `${a.version}|${a.palette}|${bucket}` : '';
+    let held = a ? heldLabels.get(a.served) : undefined;
+    if (a && viewport && (!held || held.key !== key)) {
       const placed = a.served.filter((x) => x.centroid !== null);
       const largest = placed.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
       const scale = 2 ** zoom; // pixels per world unit
@@ -642,15 +739,19 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       held = {key, data, leaders};
       heldLabels.set(a.served, held);
     }
+    const data = held?.data ?? NO_LABELS;
+    const leaders = held?.leaders ?? NO_LEADERS;
     timings.labelsMs = performance.now() - started;
-    timings.labels = held.data.length;
+    timings.labels = data.length;
+    // Both layers exist from the first paint, empty, so their programs are linked before needed.
     const layers: Layer[] = [];
-    if (held.leaders.length > 0) {
+    {
       layers.push(
         new LineLayer(
           this.getSubLayerProps({id: 'label-leaders'}),
           {
-            data: held.leaders,
+            visible: leaders.length > 0,
+            data: leaders,
             getSourcePosition: (d: LeaderDatum) => d.from,
             getTargetPosition: (d: LeaderDatum) => d.to,
             getColor: [200, 205, 212, 140],
@@ -666,7 +767,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       new TextLayer(
         this.getSubLayerProps({id: 'labels'}),
         {
-          data: held.data,
+          visible: data.length > 0,
+          data,
           getPosition: (d: LabelDatum) => d.position,
           getText: (d: LabelDatum) => d.text,
           getSize: (d: LabelDatum) => d.size,
@@ -683,7 +785,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           characterSet: 'auto',
           lineHeight: 1.1,
           pickable: this.props.pickable,
-          artifactIds: held.data.map((d) => d.id),
+          artifactIds: data.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
           updateTriggers: {getPixelOffset: key, getSize: key}
         } as never
@@ -700,14 +802,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const shape: [number, number][] | null =
       polygon && polygon.length >= 2 ? polygon : box ? [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]] : null;
     const live = this.props.drag != null || this.props.dragPolygon != null;
-    if (shape) {
+    // Both layers exist from the first paint, empty, so their programs are linked before needed.
+    {
       layers.push(
         new PolygonLayer(
           this.getSubLayerProps({id: 'region'}),
           {
-            data: [{polygon: shape}],
+            visible: shape !== null,
+            data: shape ? [{polygon: shape}] : NO_SHAPES,
             getPolygon: (d: {polygon: number[][]}) => d.polygon,
-            filled: shape.length >= 3,
+            filled: (shape?.length ?? 0) >= 3,
             getFillColor: [255, 210, 90, 28],
             stroked: true,
             getLineColor: AMBER,
@@ -720,12 +824,13 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       );
     }
     const at = this.props.selectedWorldXY;
-    if (at) {
+    {
       layers.push(
         new ScatterplotLayer(
           this.getSubLayerProps({id: 'picked'}),
           {
-            data: [at],
+            visible: at !== null && at !== undefined,
+            data: at ? [at] : NO_POINTS,
             getPosition: (d: [number, number]) => d,
             getFillColor: AMBER,
             radiusUnits: 'pixels' as const,

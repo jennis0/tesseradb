@@ -418,7 +418,9 @@ export function createStore(options: StoreOptions): Store {
         revalidateAfterMs: options.replica?.revalidateAfterMs,
         onPhase: (kind, ms, n) => {
           options.replica?.onPhase?.(kind, ms, n);
-          if (kind === 'store') presenter?.absorbed();
+          // A stored slice is drawable now: the driver derives at most once per its gap while
+          // the response streams in, so the first marks arrive with the first slice.
+          if (kind === 'piece') presenter?.absorbed();
         },
         now: () => clock.now()
       }

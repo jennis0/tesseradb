@@ -121,7 +121,41 @@ const MAX_TILES_PER_REQUEST = 25_000;
 const ABSORB_SLICE_MS = 6;
 
 /** A macrotask, which is what lets a pending `requestAnimationFrame` run. A microtask would not. */
+/**
+ * A frame's worth of yield. **Measured, twice**: with `setTimeout(0)` between slices, and again
+ * with `scheduler.yield()`, no animation frame ran while a million-point response was split —
+ * the thread was never idle long enough for the frame to win, the composed slices sat behind a
+ * tick that could not fire, and the first marks painted only after the last slice. So when a
+ * frame is overdue (nothing has drawn for a frame's time), the loop waits for the next animation
+ * frame and continues in a macrotask *after* it — the frame paints what the slices so far
+ * composed — and otherwise yields a macrotask as before. One frame per overdue slice costs
+ * throughput, which is the point: slow-while-loading is accepted, and a map that shows its first
+ * response as it lands is the design's claim (§5.10).
+ */
+const FRAME_MS = 16;
+/** How long after the last slice the frame pulse keeps listening, so a quiet page runs no loop. */
+const PULSE_MS = 500;
+let lastFrameAt = 0;
+let pulseUntil = 0;
+let pulsing = false;
+/** Note each animation frame's time while an absorb is running; stops itself when none is. */
+function pulse(): void {
+  if (pulsing || typeof requestAnimationFrame === 'undefined') return;
+  pulsing = true;
+  const note = () => {
+    lastFrameAt = performance.now();
+    if (lastFrameAt < pulseUntil) requestAnimationFrame(note);
+    else pulsing = false;
+  };
+  requestAnimationFrame(note);
+}
 function yieldToFrame(): Promise<void> {
+  if (typeof requestAnimationFrame !== 'undefined') {
+    const now = performance.now();
+    pulseUntil = now + PULSE_MS;
+    pulse();
+    if (now - lastFrameAt > FRAME_MS) return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+  }
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
@@ -493,6 +527,9 @@ export class Replica {
       for (const band of slice) bands.push(band);
       storeMs += performance.now() - stored;
       slices++;
+      // Each slice is drawable the moment it is stored: the consumer may present between slices,
+      // so the first marks of a large response are on screen while the rest is still being split.
+      this.opts.onPhase?.('piece', took, slice.length);
       if (!splitter.done()) await yieldToFrame();
     }
     this.opts.onPhase?.('split', splitMs, bands.length);
