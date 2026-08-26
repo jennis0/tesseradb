@@ -4,7 +4,8 @@ import {
   CLUSTER_PREFIX,
   NEUTRAL,
   NO_ORDINAL,
-  WORLD_SIZE,
+  gridToWorld,
+  gridToWorldXY,
   type Artifact,
   type ArtifactsProjection,
   type LegendProjection,
@@ -59,9 +60,6 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  * level, highlight, the cluster/column switch — is a rewrite of it or a uniform, never a pass
  * over the points (decision 0100).
  */
-
-/** Wire artifact geometry is 32 bits per axis (contracts §3.2); the world is 512 units across. */
-export const GRID32_PER_WORLD_UNIT = 2 ** 32 / WORLD_SIZE;
 
 export type TesseraLayerProps = CompositeLayerProps & {
   /** A store to read every projection below from, for a host that would otherwise wire each. */
@@ -239,8 +237,8 @@ export function artifactName(a: Artifact): string {
 
 /** A served artifact's outline in world space: its hull, else its box, else nothing. */
 export function outlineOf(a: Artifact): [number, number][] | null {
-  const w = (v: number) => v / GRID32_PER_WORLD_UNIT;
-  if (a.hull && a.hull.length >= 3) return a.hull.map(([x, y]) => [w(x), w(y)]);
+  const w = gridToWorld;
+  if (a.hull && a.hull.length >= 3) return a.hull.map(gridToWorldXY);
   if (a.box) return [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
   return null;
 }
@@ -625,8 +623,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
         byId.set(artifact.tesseraId, {artifact, text: `${name}\n${countText}`, size});
         candidates.push({
           id: artifact.tesseraId,
-          x: (artifact.centroid![0] / GRID32_PER_WORLD_UNIT) * scale,
-          y: (artifact.centroid![1] / GRID32_PER_WORLD_UNIT) * scale,
+          x: gridToWorld(artifact.centroid![0]) * scale,
+          y: gridToWorld(artifact.centroid![1]) * scale,
           width: Math.max(name.length, countText.length) * size * 0.62 + 8,
           height: size * 2.4 + 4,
           priority: count
@@ -636,7 +634,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       const leaders: LeaderDatum[] = [];
       for (const p of placeLabels(candidates) as PlacedLabel[]) {
         const {artifact, text, size} = byId.get(p.id)!;
-        const position: [number, number] = [artifact.centroid![0] / GRID32_PER_WORLD_UNIT, artifact.centroid![1] / GRID32_PER_WORLD_UNIT];
+        const position = gridToWorldXY(artifact.centroid!);
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
         data.push({id: artifact.tesseraId, position, text, size, offset: [p.dx, p.dy], colour: a.colours.get(ordinal) ?? NEUTRAL});
         if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});

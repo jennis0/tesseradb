@@ -1,4 +1,4 @@
-export {TesseraLayer, artifactName, clusterLayerOf, encodingOf, encodingSignature, outlineOf, GRID32_PER_WORLD_UNIT, type TesseraLayerProps} from './layer.js';
+export {TesseraLayer, artifactName, clusterLayerOf, encodingOf, encodingSignature, outlineOf, type TesseraLayerProps} from './layer.js';
 export {LookupTexture, buildLut, dimmed, LUT_WIDTH, LUT_SHIFT, type LutInputs} from './lut.js';
 export {MarksLayer, type MarksLayerProps} from './marks-layer.js';
 export {placeLabels, labelSize, type LabelCandidate, type PlacedLabel} from './labels.js';

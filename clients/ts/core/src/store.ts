@@ -2,7 +2,7 @@ import {ArtifactChannel, servedLineage, type ArtifactChannelState, type ServedLi
 import {SessionArtifactTable} from './artifactTable.js';
 import type {Composition} from './compose.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
-import {dataToWorldXY, MAX_DEPTH, WORLD_SIZE} from './coords.js';
+import {dataToWorldXY, gridToWorld, MAX_DEPTH, WORLD_SIZE} from './coords.js';
 import {tileRectOfBbox} from './budget.js';
 import {rectContainsTile} from './rects.js';
 import {worldBbox} from './prefetch.js';
@@ -1011,15 +1011,11 @@ export function createStore(options: StoreOptions): Store {
     const artifact = projections.artifacts.served.find((a) => a.tesseraId === artifactId);
     const box = artifact?.box;
     if (!box || !meta) return null;
-    // The box is in grid (cell) units; convert to data coordinates through the quantisation.
-    const q = meta.quantisation;
-    const toData = (cell: number, min: number, max: number) => min + (cell / 65536) * (max - min);
-    return [
-      toData(box[0], q.xMin, q.xMax),
-      toData(box[1], q.yMin, q.yMax),
-      toData(box[2], q.xMin, q.xMax),
-      toData(box[3], q.yMin, q.yMax)
-    ];
+    // The box is in the wire's 32-bit grid units (contracts §3.2), the same units the outlines
+    // draw from: through world space, by the one conversion every reader of wire geometry uses.
+    const [x0, y0] = dataXY(gridToWorld(box[0]), gridToWorld(box[1]));
+    const [x1, y1] = dataXY(gridToWorld(box[2]), gridToWorld(box[3]));
+    return [x0, y0, x1, y1];
   }
 
   function dataXY(worldX: number, worldY: number): [number, number] {
