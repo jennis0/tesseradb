@@ -169,3 +169,39 @@ are the ones to demonstrate labels with: a generating set of six exemplars is sm
 50% principal holds every document behind 243 of 797 names, where the TF-IDF topics' 200-title
 sets are held by nobody but the full principal (one exception under *heavy* — a cluster's second,
 smaller-set fallback text).
+
+### The root chain collapsed (2026-08-26)
+
+At the overview the HDBSCAN layer's budgeted cut showed nothing but the near-root: the condensed
+tree emits a node for every paper that detaches near the top, so the tree's first 25 levels were a
+chain — 2.42M → 1.84M members, one small sibling shed per step, every label the `(no distinctive
+terms)` placeholder — and a single-depth cut at budget 20 spent its whole budget walking it.
+
+Two changes to the notebook's writer, and `notebooks/collapse-hdbscan.py` applying the same rule
+to a directory written before it: a node whose largest child holds more than 90% of its members is
+dropped and its children re-parented to the nearest kept ancestor (the root kept whatever its
+shape; leaves never dropped); and a cluster with no distinctive terms gets no topic row rather
+than a placeholder. On `notebook-2m4-live`: **257 nodes, depth 58 → 197 nodes, depth 11**; 60
+chain nodes collapsed, 129 leaves untouched, fan-out now 58 binary splits, three three-way, and
+the root's 26; topics 257 → 195 (60 on collapsed nodes, 2 placeholders); member rows 89.3M →
+12.8M. Rebuilt in 4m13s, 4.5 GiB peak, 1.4 GB.
+
+**What the cut shows now**, full principal, `clusters/hdbscan` + `topics/hdbscan`:
+
+| budget | clusters | labels | note |
+|---|---|---|---|
+| 20 | 1 | 0 | the root alone — depth 1 is 26 nodes and does not fit |
+| 26 | 1 | 0 | root + 26 is 27 |
+| 30 | 27 | 25 | the root, its 1.84M child, and 25 real top-level splits with real topics (`codes solar magnetic`, `gamma-ray x-ray galaxies`, `language translation text`, …); the two unlabelled are the root and the 1.84M node |
+| 60 | 53 | 51 | |
+| 100 | 71 | 69 | |
+| 200 | 197 | 195 | the whole tree |
+
+The 25 small clusters the chain shed one per level are genuine siblings — each is a selected
+cluster of 6,000–91,000 papers that detached from the corpus before its first large split — so
+the honest tree has 26 nodes at depth 1, and the engine's cut resolves to one depth for the whole
+tree (`cut.rs`: a per-branch depth is deliberately unbuilt). So **a budget under 27 shows the root
+alone on this corpus**, and a client default of 20 shows nothing beneath it; the tree is right and
+the budget is the knob. Under the narrower presets the wide root is not reached and the cut behaves
+as before: sparse (47,142 visible) is served 21 clusters and its budget-20 cut is 20; medium 95
+and 16. Labels: 195 of 195 carry their cluster's count.

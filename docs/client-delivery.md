@@ -78,7 +78,9 @@ sees a label — are in [the memo](evidence/memos/2026-08-25-notebook-corpus-as-
 dataset document is now merged across invocations and written without the viewer. The whole
 corpus through the same pipeline, `data/notebook-2m4-live/` with its four-level toponymy layer and
 its labels, is the `notebook-2m4` scale on 37590/49308/45726: built in 5m13s at 4.7 GiB peak, seven
-layers on `/v1/meta`, every layer served under five measured principals (the memo's second table).
+layers on `/v1/meta`, every layer served under five measured principals (the memo's second table). Its HDBSCAN root chain is collapsed (the notebook's writer and `notebooks/collapse-hdbscan.py`:
+257 nodes at depth 58 → 197 at depth 11, placeholder topics dropped); the honest tree has 26 nodes
+at depth 1, so a single-depth cut under a budget of 27 serves the root alone at the full principal.
 
 **Step 4's notes** (2026-08-25). The plain-HTML example's app server is the claim-minting proxy
 under `builtin:passthrough` and its README says so where a C1 developer reads it (design §5.3);
