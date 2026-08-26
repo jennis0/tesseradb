@@ -63,6 +63,7 @@ client steps can see what they wait on):
 | S5 | D8 — the fetch-model hint in `/v1/meta` | nothing; the store observes | not started |
 | S6 | D11 — the selection operand; the export verb; the runtime-artifact path | *filter to this*, *export*, *save* | not started |
 | S7 | D14 — a verified-assertion auth plugin | C1's production token story | not started |
+| S8 | membership by predicate — a k-means layer whose membership is *nearest model centroid*, so every point is a member and colour covers the corpus (artifact-system §10's specified-not-built path) | k-means colouring beyond the sampled members | **deferred** by the owner 2026-08-25; a client-side Voronoi over served centroids was declined the same day — it would bake a classification into our client that the wire does not carry, so a C2/C3 client would draw a different map; decision 0099 stands |
 
 **The notebook corpus is the demo's fifth dataset** (2026-08-26, track `corpus`): `data/notebook/`'s
 declarations migrated to the configuration surface (the notebook's writer already produced the
