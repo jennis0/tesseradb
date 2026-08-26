@@ -1,3 +1,5 @@
+import {NO_ORDINAL, type ArtifactsProjection, type Band} from '@tesseradb/client';
+
 /**
  * What a deck.gl pick on a `TesseraLayer` resolved to.
  *
@@ -38,4 +40,21 @@ export function resolvePick(info: PickInfo): Picked {
   }
   const worldXY = info.coordinate ? ([info.coordinate[0]!, info.coordinate[1]!] as [number, number]) : null;
   return {kind: 'mark', id: ids[info.index]!, worldXY};
+}
+
+/**
+ * The served artifact a mark is a member of, for a hover: the mark's ordinal for the first layer
+ * on, resolved up the session table to the served set at `level` (the deepest served when
+ * undefined). Null where the band carries no column for the layer, the mark is under no
+ * artifact, or the walk fails — exactly the marks that draw neutral under cluster colour.
+ */
+export function artifactOfMark(band: Band, i: number, artifacts: ArtifactsProjection, level?: number): bigint | null {
+  const layer = artifacts.layers[0];
+  if (!layer) return null;
+  const column = band.membership[layer];
+  if (!column) return null;
+  const ordinal = column.ordinals[i] ?? NO_ORDINAL;
+  const served = artifacts.table.resolve(ordinal, artifacts.servedOrdinals, level);
+  if (served === NO_ORDINAL) return null;
+  return artifacts.table.entry(served)?.tesseraId ?? null;
 }

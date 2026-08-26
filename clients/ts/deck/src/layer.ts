@@ -22,6 +22,7 @@ import {binDensity, filterDensity} from './density.js';
 import {labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {LookupTexture} from './lut.js';
 import {MarksLayer} from './marks-layer.js';
+import {deckOpacity, markStyle} from './marks-style.js';
 import {MarkSlab, type GpuSlab} from './slab.js';
 
 /**
@@ -85,6 +86,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
   /** The picked mark's world position, for its marker. */
   selectedWorldXY?: [number, number] | null;
   openedArtifact?: bigint | null;
+  /** The artifact under the pointer — its outline or label, or a mark it holds. */
+  hoveredArtifact?: bigint | null;
   /** The selected region's world shape, and the live shape while it is being drawn. */
   region?: [number, number, number, number] | null;
   regionPolygon?: [number, number][] | null;
@@ -92,11 +95,29 @@ export type TesseraLayerProps = CompositeLayerProps & {
   dragPolygon?: [number, number][] | null;
   /** Whether the density wash is drawn under the points. */
   wash?: boolean;
-  radius?: number;
+  /** A fixed mark radius in pixels; null sizes the marks by their count and the zoom (`markStyle`). */
+  radius?: number | null;
   /** How many marks a paint ended up drawing, for the host's probe. */
   onDrawn?: ((drawn: number, provisional: number) => void) | null;
-  /** Per-settle work, in ms — the slab sync, the wash bin, the lookup texture, the outlines, the labels, the whole layer build — for the harness. */
-  onTimings?: ((t: {slabMs: number; washMs: number; lutMs: number; outlinesMs: number; labelsMs: number; layersMs: number; lutWrites: number; outlines: number; labels: number}) => void) | null;
+  /** Per-settle work, in ms — the slab sync, the wash bin, the lookup texture, the outlines, the labels, the whole layer build — and the mark style drawn, for the harness. */
+  onTimings?: ((t: LayerTimings) => void) | null;
+};
+
+export type LayerTimings = {
+  slabMs: number;
+  washMs: number;
+  lutMs: number;
+  outlinesMs: number;
+  labelsMs: number;
+  layersMs: number;
+  lutWrites: number;
+  outlines: number;
+  labels: number;
+  /** The mark style the paint drew: radius in pixels and composited alpha, from `markStyle`. */
+  markRadius: number;
+  markAlpha: number;
+  /** The resident count the style was chosen for. */
+  markCount: number;
 };
 
 /** How zoom is bucketed for label placement: a quarter of a zoom level. */
@@ -245,14 +266,159 @@ const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]}>();
 
-type OutlineDatum = {id: bigint; polygon: [number, number][]; colour: Rgba; opened: boolean; depth: number; height: number};
+export type OutlineDatum = {
+  id: bigint;
+  polygon: [number, number][];
+  colour: Rgba;
+  opened: boolean;
+  hovered: boolean;
+  /** The artifact's depth in the served tree, and how far it stands above the deepest drawn descendant. */
+  depth: number;
+  height: number;
+  /** Whether the artifact's layer is flat — its outline is drawn only while hovered or opened. */
+  flat: boolean;
+  /** The fill and line alphas (0–255) and the line width in pixels this outline draws with. */
+  fill: number;
+  line: number;
+  width: number;
+};
 type LabelDatum = {id: bigint; position: [number, number]; text: string; size: number; offset: [number, number]; colour: Rgba; kind: 'name' | 'count' | 'topic'};
 type LeaderDatum = {from: [number, number]; to: [number, number]};
 
-/** The faint outline's alpha per ground: the boards' 0.16 on light, 0.22 on dark. */
-const HAIRLINE_ALPHA: Record<'light' | 'dark', number> = {light: 44, dark: 60};
-/** The base fill alpha of a contour per ground; each level down adds a little. */
-const FILL_ALPHA: Record<'light' | 'dark', number> = {light: 6, dark: 10};
+/** The hairline's alpha per ground: the boards' 0.16 on light, 0.22 on dark (`datamap_layers2`). */
+const HAIRLINE_ALPHA: Record<'light' | 'dark', number> = {light: 41, dark: 56};
+/**
+ * The fill of a contour at the cut's leaves per ground — the boards' 6–10%: the points carry
+ * the colour and the contour frames it. An ancestor draws its hairline and no fill, so a deep
+ * chain of near-identical hulls (HDBSCAN's condensed tree) never stacks into a wash.
+ */
+const FILL_ALPHA: Record<'light' | 'dark', number> = {light: 18, dark: 23};
+/** The hovered outline: a fuller fill and a firmer line than the hairline, less than the opened one's. */
+const HOVER_FILL: Record<'light' | 'dark', number> = {light: 26, dark: 33};
+const HOVER_LINE = 150;
+/** The opened outline: the boards' 0.16 fill and a strong line. */
+const OPENED_FILL = 41;
+const OPENED_LINE = 200;
+
+export type OutlineOptions = {
+  opened: bigint | null;
+  hovered: bigint | null;
+  level: number | undefined;
+  scheme: 'light' | 'dark';
+};
+
+/** Whether a layer's artifacts stand beside one another with no lineage (`hierarchy.kind: 'flat'`). */
+export function isFlatLayer(meta: Meta | null, layer: string): boolean {
+  return meta?.layers.find((l) => l.name === layer)?.hierarchy.kind === 'flat';
+}
+
+/**
+ * The served outlines and how each draws (§5.10, the boards' `datamap_layers2`). A nested
+ * layer's artifacts draw as contours: a hairline each, a faint fill at the cut's leaves, parents
+ * first so a child reads as a level inside its parent. A **flat** layer's artifacts — k-means
+ * clusters, say — overlap into a mesh when every hull is drawn, so its outlines draw only for
+ * the hovered and the opened artifact and colour does the rest; the others are in the data at
+ * zero alpha so they still answer a pick. The opened one is strong with the boards' 0.16 fill.
+ */
+export function outlineData(a: ArtifactsProjection, meta: Meta | null, o: OutlineOptions): OutlineDatum[] {
+  const data: OutlineDatum[] = [];
+  const depths = servedDepths(a);
+  const ordered = [...a.served].sort((x, y) => (depths.get(x.tesseraId) ?? 0) - (depths.get(y.tesseraId) ?? 0));
+  const heights = heightsBelow(a, depths, o.level);
+  const flatOf = new Map<string, boolean>();
+  for (const artifact of ordered) {
+    const depth = depths.get(artifact.tesseraId) ?? 0;
+    if (o.level !== undefined && depth > o.level) continue;
+    const polygon = outlineOf(artifact);
+    if (!polygon) continue;
+    const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
+    const flat = flatOf.get(artifact.layer) ?? flatOf.set(artifact.layer, isFlatLayer(meta, artifact.layer)).get(artifact.layer)!;
+    const opened = artifact.tesseraId === o.opened;
+    const hovered = !opened && artifact.tesseraId === o.hovered;
+    const height = heights.get(artifact.tesseraId) ?? 0;
+    let fill = 0;
+    let line = 0;
+    let width = 0.8;
+    if (opened) {
+      fill = OPENED_FILL;
+      line = OPENED_LINE;
+      width = 1.2;
+    } else if (hovered) {
+      fill = HOVER_FILL[o.scheme];
+      line = HOVER_LINE;
+      width = 1;
+    } else if (!flat) {
+      fill = height === 0 ? FILL_ALPHA[o.scheme] : 0;
+      line = HAIRLINE_ALPHA[o.scheme];
+    }
+    data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened, hovered, depth, height, flat, fill, line, width});
+  }
+  return data;
+}
+
+/**
+ * How many labels a viewport of `width` × `height` pixels is given: the top N by masked count
+ * are placed and the rest wait for a zoom (§5.10). One per 36,000 px² — twenty-eight on a
+ * 1280 × 800 viewport — and never fewer than eight.
+ */
+export function labelBudget(width: number, height: number): number {
+  return Math.max(8, Math.floor((width * height) / 36_000));
+}
+
+export type LabelText = {artifact: Artifact; name: string; countText: string; size: number; topic: string | null};
+
+/**
+ * The label candidates for a served set at `zoom`: the cut's leaves (or the chosen level's
+ * artifacts) **that have a text to draw** — an artifact with no supplied text and no attached
+ * topic draws no label, never its key, which is an id — the top `budget` of them by masked
+ * count, each with its name, count and topic and the pixel box the placement needs.
+ */
+export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, zoom: number, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
+  const placed = a.served.filter((x) => x.centroid !== null);
+  // A dependent layer's artifacts — a clustering's topic labels — draw their text beneath the
+  // name of whatever they sit on, italic and small, and are placed with it: they are not
+  // candidates of their own (§5.10, D13).
+  const dependent = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
+  const topicOf = attachedTopics(a, meta);
+  const depths = servedDepths(a);
+  // At a chosen level, the names are that level's; else the deepest served (the cut's leaves).
+  const leaves = new Set(a.served.filter((x) => !a.lineage.childrenOf.has(x.tesseraId)).map((x) => x.tesseraId));
+  const named = placed
+    .filter((x) => !dependent.has(x.layer) && (level !== undefined ? (depths.get(x.tesseraId) ?? 0) === level : leaves.has(x.tesseraId)))
+    .filter((x) => hasText(x) || topicOf.has(x.tesseraId))
+    .sort((x, y) => Number(y.maskedCount - x.maskedCount))
+    .slice(0, Math.max(0, budget));
+  const largest = named.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
+  const scale = 2 ** zoom; // pixels per world unit
+  const candidates: LabelCandidate[] = [];
+  const byId = new Map<bigint, LabelText>();
+  for (const artifact of named) {
+    const count = Number(artifact.maskedCount);
+    const size = labelSize(count, largest);
+    const attached = topicOf.get(artifact.tesseraId) ?? null;
+    // A cluster with no name of its own takes its topic as the name (a labelled clustering);
+    // one with both draws the topic beneath in italic (the boards).
+    const name = hasText(artifact) ? artifactName(artifact) : attached!;
+    const topic = hasText(artifact) ? attached : null;
+    const countText = count.toLocaleString('en-GB');
+    byId.set(artifact.tesseraId, {artifact, name, countText, size, topic});
+    const width = (name.length * 0.62 + countText.length * 0.55 + 2) * size + 8;
+    candidates.push({
+      id: artifact.tesseraId,
+      x: gridToWorld(artifact.centroid![0]) * scale,
+      y: gridToWorld(artifact.centroid![1]) * scale,
+      width: Math.max(width, topic ? topic.length * 11 * 0.5 : 0),
+      height: size * 1.5 + (topic ? 14 : 0),
+      priority: count
+    });
+  }
+  return {candidates, byId};
+}
+
+/** Whether an artifact carries a text to draw: its first supplied content, non-empty. */
+export function hasText(a: Artifact): boolean {
+  return (a.content[0] ?? '').length > 0;
+}
 
 /** What to call an artifact: its supplied text where the layer publishes any, else its key. */
 export function artifactName(a: Artifact): string {
@@ -381,8 +547,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     regionPolygon: null,
     drag: null,
     dragPolygon: null,
+    hoveredArtifact: null,
     wash: true,
-    radius: 1.6,
+    radius: null,
     pickable: true,
     onDrawn: null,
     onTimings: null
@@ -471,7 +638,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
 
   override renderLayers(): LayersList {
     const started = performance.now();
-    const timings = {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0};
+    const timings: LayerTimings = {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0};
     this.state.zoomBucket = Math.round((this.context.viewport?.zoom ?? 0) * LABEL_ZOOM_STEP);
     const layers = this.buildLayers(timings);
     timings.layersMs = performance.now() - started;
@@ -480,7 +647,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return layers;
   }
 
-  private buildLayers(timings: {slabMs: number; washMs: number; lutMs: number; outlinesMs: number; labelsMs: number; outlines: number; labels: number}): LayersList {
+  private buildLayers(timings: LayerTimings): LayersList {
     const r = this.resolved();
     const {slab} = this.props;
     const layers: (Layer | null)[] = [];
@@ -549,6 +716,16 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       timings.washMs = performance.now() - washStarted;
     }
 
+    // The marks' size and alpha follow the resident count and the zoom (`markStyle`): small and
+    // translucent at a million so density reads through them, larger and more solid as the count
+    // falls. A style change is two uniforms, never a pass over the points.
+    const standIn = this.standInBuffers(r.marks, column.colourBy);
+    const style = markStyle(slab.drawn + standIn.count, this.context.viewport?.zoom ?? 0, this.props.radius ?? null);
+    const opacity = deckOpacity(style.alpha);
+    timings.markRadius = style.radius;
+    timings.markAlpha = style.alpha;
+    timings.markCount = slab.drawn + standIn.count;
+
     // Layers toggle `visible`; they are never omitted — deck destroys an absent layer and re-uploads
     // everything it held when it returns. One layer per retained slab partition, addressed by slot,
     // so a depth flip is a swap and flipping back uploads nothing.
@@ -570,8 +747,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
             useLut,
             lutTexture: lut.gpu,
             radiusUnits: 'pixels' as const,
-            getRadius: this.props.radius,
+            getRadius: style.radius,
             radiusMinPixels: 1,
+            opacity,
             pickable: this.props.pickable && held.active,
             parameters: {depthCompare: 'always' as const}
           } as never
@@ -579,11 +757,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       );
     }
 
-    // The stand-ins: drawn at full alpha like any other mark. What guards the reading is the
+    // The stand-ins: drawn at the same alpha as any other mark. What guards the reading is the
     // number channel — no count is shown against a non-exact tile — not the alpha channel. They
     // carry no ordinal and draw neutral under cluster colour: a stand-in is a superset drawn for
     // ground not yet held, and exact-only colour waits for the band (§5.10).
-    const standIn = this.standInBuffers(r.marks, column.colourBy);
     const colours = this.standInColours(standIn, useLut ? {kind: 'unmapped'} : encoding, useLut ? 'unmapped' : encodingKey);
     if (colours.length !== standIn.count * 4) {
       throw new Error(
@@ -601,8 +778,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           },
           tesseraIds: standIn.ids,
           radiusUnits: 'pixels' as const,
-          getRadius: this.props.radius,
+          getRadius: style.radius,
           radiusMinPixels: 1,
+          opacity,
           pickable: this.props.pickable,
           parameters: {depthCompare: 'always' as const}
         } as never
@@ -636,7 +814,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           useLut: false,
           lutTexture: null,
           radiusUnits: 'pixels' as const,
-          getRadius: this.props.radius,
+          getRadius: this.props.radius ?? 1.6,
           pickable: false,
           parameters: {depthCompare: 'always' as const}
         } as never
@@ -648,7 +826,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true)}},
           tesseraIds: EMPTY_IDS,
           radiusUnits: 'pixels' as const,
-          getRadius: this.props.radius,
+          getRadius: this.props.radius ?? 1.6,
           pickable: false,
           parameters: {depthCompare: 'always' as const}
         } as never
@@ -752,25 +930,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const a = r.artifacts;
     const started = performance.now();
     const opened = this.props.openedArtifact ?? null;
+    const hovered = this.props.hoveredArtifact ?? null;
     const scheme = this.props.scheme ?? 'dark';
-    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
+    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${hovered ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldOutlines.get(a.served) : undefined;
     if (a && (!held || held.key !== key)) {
-      const data: OutlineDatum[] = [];
-      const depths = servedDepths(a);
-      const level = this.props.clusterLevel;
-      // Parents first, so a child's fill draws over its parent's and nesting reads as levels.
-      const ordered = [...a.served].sort((x, y) => (depths.get(x.tesseraId) ?? 0) - (depths.get(y.tesseraId) ?? 0));
-      const heights = heightsBelow(a, depths, level);
-      for (const artifact of ordered) {
-        const depth = depths.get(artifact.tesseraId) ?? 0;
-        if (level !== undefined && depth > level) continue;
-        const polygon = outlineOf(artifact);
-        if (!polygon) continue;
-        const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
-        data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened: artifact.tesseraId === opened, depth, height: heights.get(artifact.tesseraId) ?? 0});
-      }
-      held = {key, data};
+      held = {key, data: outlineData(a, r.meta, {opened, hovered, level: this.props.clusterLevel, scheme})};
       heldOutlines.set(a.served, held);
     }
     const data = held?.data ?? NO_OUTLINES;
@@ -784,15 +949,15 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           visible: data.length > 0,
           data,
           getPolygon: (d: OutlineDatum) => d.polygon,
+          // Filled even at zero alpha: the fill is what answers a pick, and a flat layer's
+          // outline is invisible until hovered while its hull still names the artifact under
+          // the pointer (deck's picking pass reads the picking colour, never the fill's alpha).
           filled: true,
-          // A faint tint that is strongest at the cut's leaves and fades over the ancestors above
-          // them, so nesting reads as the boards' contours and a deep chain of near-identical
-          // hulls (HDBSCAN's condensed tree) does not stack into a wash; the opened one stronger.
-          getFillColor: (d: OutlineDatum) => [d.colour[0], d.colour[1], d.colour[2], d.opened ? 28 : Math.max(0, FILL_ALPHA[scheme] - 3 * d.height)],
+          getFillColor: (d: OutlineDatum) => [d.colour[0], d.colour[1], d.colour[2], d.fill],
           stroked: true,
-          getLineColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 200] : [d.colour[0], d.colour[1], d.colour[2], HAIRLINE_ALPHA[scheme]]),
+          getLineColor: (d: OutlineDatum) => [d.colour[0], d.colour[1], d.colour[2], d.line],
           lineWidthUnits: 'pixels' as const,
-          getLineWidth: (d: OutlineDatum) => (d.opened ? 1.2 : 0.8),
+          getLineWidth: (d: OutlineDatum) => d.width,
           lineWidthMinPixels: 0.8,
           pickable: this.props.pickable,
           artifactIds: data.map((d) => d.id),
@@ -816,44 +981,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const started = performance.now();
     const zoom = viewport?.zoom ?? 0;
     const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
-    const key = a ? `${a.version}|${a.palette}|${bucket}|${this.props.clusterLevel ?? ''}` : '';
+    const budget = viewport ? labelBudget(viewport.width, viewport.height) : 0;
+    const key = a ? `${a.version}|${a.palette}|${bucket}|${budget}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldLabels.get(a.served) : undefined;
     if (a && viewport && (!held || held.key !== key)) {
-      const placed = a.served.filter((x) => x.centroid !== null);
-      // A dependent layer's artifacts — a clustering's topic labels — draw their text beneath the
-      // name of whatever they sit on, italic and small, and are placed with it: they are not
-      // candidates of their own (§5.10, D13).
-      const dependent = new Set(r.meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-      const topicOf = attachedTopics(a, r.meta);
-      const depths = servedDepths(a);
-      const level = this.props.clusterLevel;
-      // At a chosen level, the names are that level's; else the deepest served (the cut's leaves).
-      const leaves = new Set(a.served.filter((x) => !a.lineage.childrenOf.has(x.tesseraId)).map((x) => x.tesseraId));
-      const named = placed.filter((x) => !dependent.has(x.layer) && (level !== undefined ? (depths.get(x.tesseraId) ?? 0) === level : leaves.has(x.tesseraId)));
-      const largest = named.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
       const scale = 2 ** zoom; // pixels per world unit
-      const candidates: LabelCandidate[] = [];
-      const byId = new Map<bigint, {artifact: Artifact; name: string; countText: string; size: number; topic: string | null}>();
-      for (const artifact of named) {
-        const count = Number(artifact.maskedCount);
-        const size = labelSize(count, largest);
-        const name = artifact.content.length > 0 ? artifactName(artifact) : (topicOf.get(artifact.tesseraId) ?? artifactName(artifact));
-        const countText = count.toLocaleString('en-GB');
-        // A cluster with no name of its own takes its topic as the name (a labelled clustering);
-        // one with both draws the topic beneath in italic (the boards).
-        const attached = topicOf.get(artifact.tesseraId) ?? null;
-        const topic = artifact.content.length > 0 ? attached : null;
-        byId.set(artifact.tesseraId, {artifact, name, countText, size, topic});
-        const width = (name.length * 0.62 + countText.length * 0.55 + 2) * size + 8;
-        candidates.push({
-          id: artifact.tesseraId,
-          x: gridToWorld(artifact.centroid![0]) * scale,
-          y: gridToWorld(artifact.centroid![1]) * scale,
-          width: Math.max(width, topic ? topic.length * 11 * 0.5 : 0),
-          height: size * 1.5 + (topic ? 14 : 0),
-          priority: count
-        });
-      }
+      const {candidates, byId} = labelCandidates(a, r.meta, this.props.clusterLevel, zoom, budget);
       const data: LabelDatum[] = [];
       const leaders: LeaderDatum[] = [];
       for (const p of placeLabels(candidates) as PlacedLabel[]) {

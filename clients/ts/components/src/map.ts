@@ -10,7 +10,7 @@ import {
   type Store,
   type SelectionShape
 } from '@tesseradb/client';
-import {LookupTexture, MarkSlab, TesseraLayer, clusterLayerOf, encodingOf, encodingSignature, resolvePick, type Picked} from '@tesseradb/deck';
+import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, encodingOf, encodingSignature, resolvePick, type Picked} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -72,6 +72,10 @@ export type MapProbe = {
     /** What the last paint drew of the artifacts: outlines and placed labels. */
     outlines: number;
     labels: number;
+    /** The mark style the last paint drew — radius in pixels and composited alpha — and the resident count it was chosen for. */
+    markRadius: number;
+    markAlpha: number;
+    markCount: number;
     /** Frame gaps over the last two seconds, ms. */
     frame: {mean: number; p95: number; n: number};
     /** Per-response decode, reported by the host through the store's instruments. */
@@ -248,13 +252,16 @@ export class TesseraMap extends TesseraElement {
   /** A deck.gl layer drawn under the points — a geographic corpus's basemap (§5.3). */
   @property({attribute: false}) accessor basemap: Layer | null = null;
   @property({type: Boolean}) accessor wash = true;
-  @property({type: Number}) accessor radius = 1.6;
+  /** A fixed mark radius in pixels; unset, the marks are sized by their count and the zoom (`markStyle`). */
+  @property({type: Number}) accessor radius: number | null = null;
   /** The mode and fit control cluster — the map's own, not a slot. */
   @property({type: Boolean, attribute: 'no-controls'}) accessor noControls = false;
   /** Which corner the toolbar sits in: top-left docked, top-right overlay (the boards). */
   @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' = 'top-left';
 
   @state() accessor hover: {x: number; y: number; title: string; lines: string[]} | null = null;
+  /** The artifact under the pointer — its outline, its label, or a mark it holds — for the outline's highlight. */
+  @state() accessor hoveredArtifact: bigint | null = null;
   @state() accessor drag: [number, number, number, number] | null = null;
   @state() accessor dragPolygon: [number, number][] | null = null;
 
@@ -269,7 +276,7 @@ export class TesseraMap extends TesseraElement {
     encoding: 'uniform',
     view: {depth: 0, status: 'idle', stale: false, visible: 0, matched: 0, served: 0, provisional: 0},
     region: null,
-    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
+    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
     cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: []}
   };
 
@@ -331,7 +338,7 @@ export class TesseraMap extends TesseraElement {
       if (changed.has('budget') && this.budget > 0) s.setBudget(this.budget);
       if (changed.has('palette')) s.setPalette(this.palette);
     }
-    if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel')) this.paint();
+    if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel') || changed.has('hoveredArtifact')) this.paint();
   }
 
   /**
@@ -444,11 +451,21 @@ export class TesseraMap extends TesseraElement {
       p.region = null;
       this.paint();
     }
+    // The opened artifact is a property of the layer, read at a paint: an open or a close
+    // repaints so the outline highlights (the layer's own subscription redraws the projections,
+    // not the properties the host computes).
+    const opened = sel.artifact?.id ?? null;
+    if (opened !== this.paintedOpened) {
+      this.paintedOpened = opened;
+      this.paint();
+    }
     super.onStoreChange();
   }
 
   private probedArtifacts: object | null = null;
   private probedComposition: object | null = null;
+  /** The opened artifact the last paint drew, so a change repaints once. */
+  private paintedOpened: bigint | null = null;
   private regionShape: SelectionShape | null = null;
 
   /** See {@link MapProbe.cluster}: a sample of carried ordinals, each resolved through the table. */
@@ -543,6 +560,7 @@ export class TesseraMap extends TesseraElement {
           clusterLevel: this.clusterLevel ?? undefined,
           selectedWorldXY: this.selectedWorldXY,
           openedArtifact: s.get('selection').artifact?.id ?? null,
+          hoveredArtifact: this.hoveredArtifact,
           region: this.regionWorld,
           regionPolygon: this.regionPolygon,
           drag: this.drag,
@@ -566,7 +584,10 @@ export class TesseraMap extends TesseraElement {
               layersMs: t.layersMs,
               lutWrites: t.lutWrites,
               outlines: t.outlines,
-              labels: t.labels
+              labels: t.labels,
+              markRadius: t.markRadius,
+              markAlpha: t.markAlpha,
+              markCount: t.markCount
             });
           }
         })
@@ -584,8 +605,14 @@ export class TesseraMap extends TesseraElement {
 
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
+    if (picked.kind === 'artifact') {
+      if (this.hover) this.hover = null;
+      this.hoveredArtifact = picked.id;
+      return;
+    }
     if (picked.kind !== 'mark') {
       if (this.hover) this.hover = null;
+      this.hoveredArtifact = null;
       return;
     }
     // The hint: the first tooltip field as the title (a `title` column, typically), the rest as
@@ -594,8 +621,12 @@ export class TesseraMap extends TesseraElement {
     const fields = this.tooltipFields.split(/[\s,]+/).filter(Boolean);
     const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
     const slot = /marks-p(\d+)$/.exec(layerId);
+    const at = slot ? this.slab.markAt(Number(slot[1]), info.index) : null;
+    // A mark under the pointer names the artifact it is a member of, through the ordinal it
+    // carries and the table — so a flat layer's hull shows while its points are hovered.
+    const artifacts = this.resolvedStore?.get('artifacts') ?? null;
+    this.hoveredArtifact = at && artifacts ? artifactOfMark(at.band, at.i, artifacts, this.clusterLevel ?? undefined) : null;
     if (fields.length > 0 && slot) {
-      const at = this.slab.markAt(Number(slot[1]), info.index);
       if (at) {
         for (const f of fields) {
           const column = at.band.scalars[f];

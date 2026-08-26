@@ -1,4 +1,4 @@
-export {TesseraLayer, artifactName, clusterLayerOf, encodingOf, encodingSignature, outlineOf, servedDepths, heightsBelow, smoothClosed, attachedTopics, displayName, type TesseraLayerProps} from './layer.js';
+export {TesseraLayer, artifactName, hasText, clusterLayerOf, encodingOf, encodingSignature, outlineOf, outlineData, isFlatLayer, labelBudget, labelCandidates, servedDepths, heightsBelow, smoothClosed, attachedTopics, displayName, type TesseraLayerProps, type LayerTimings, type OutlineDatum, type OutlineOptions, type LabelText} from './layer.js';
 export {LookupTexture, buildLut, dimmed, LUT_WIDTH, LUT_SHIFT, type LutInputs} from './lut.js';
 export {MarksLayer, type MarksLayerProps} from './marks-layer.js';
 export {placeLabels, labelSize, type LabelCandidate, type PlacedLabel} from './labels.js';
@@ -17,5 +17,6 @@ export {
   type Encoding
 } from './colour.js';
 export {binDensity, filterDensity, DENSITY_SUPERSAMPLE, WASH_HUE, type DensityImage} from './density.js';
-export {resolvePick, type Picked, type PickInfo} from './pick.js';
+export {resolvePick, artifactOfMark, type Picked, type PickInfo} from './pick.js';
 export {materialiseStandIn, type StandInBuffers} from './assemble.js';
+export {markStyle, deckOpacity, type MarkStyle} from './marks-style.js';
