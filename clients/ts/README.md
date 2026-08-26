@@ -60,15 +60,25 @@ Two things here exist **only** to let a browser talk to a local bundle, and neit
 to copy:
 
 - **`serve.dev_cors_origins`** in `tessera.toml` lets an enumerated browser origin call the viewer
-  and session planes. It is off unless typed, has no wildcard and no environment variable, and the
-  server logs a warning at `warn` when it is on.
+  **and session** planes. It is off unless typed, has no wildcard and no environment variable, and
+  the server logs a warning at `warn` when it is on. Opening the session plane to a browser is the
+  part that makes it development-only.
 - **`VITE_TESSERA_SESSION_CREDENTIAL`** puts the deployment's *session credential* into the browser
   bundle, because `POST /session/authorise` is gated by it and the viewer re-authorises whenever
   you switch principal.
 
-The documented integration topology is **T2 with verified assertions** — credential construction
-at the integrator's app server, where the authority is (client-interaction §7). Nothing here
-revises that.
+**A production browser origin list does exist, and it is a different key.**
+`serve.cors_origins` ([decision 0102](../../docs/decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md))
+is enumerated in the same way — no wildcard, none by default — and covers the **viewer plane
+only**, so a page it names may present a *token* and can no more reach `/session/authorise` than
+any other origin. It is silent at startup rather than warned about, because a deployment that
+types it has said something deliberate. That is the key a drop-in `<tessera-explorer>` on a
+customer's page runs on; `dev_cors_origins` is not, and the two are not interchangeable.
+
+The token still comes from somewhere the credential is held. The documented integration topology
+is **T2 with verified assertions** — credential construction at the integrator's app server, where
+the authority is (client-interaction §7) — and `cors_origins` does not revise that: it decides
+which page may *present* the token that server minted, not who may mint one.
 
 ## Embedding the elements
 
