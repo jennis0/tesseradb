@@ -800,7 +800,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // everything it held when it returns. One layer per retained slab partition, addressed by slot,
     // so a depth flip is a swap and flipping back uploads nothing.
     const partitions = slab.layers();
-    if (partitions.length === 0) layers.push(...this.warmMarksLayers());
+    // The slab's own warm layer only: the stand-in layer is added below whatever the partitions
+    // hold, and pushing the warm one here too gave deck two layers under `marks-standin`, which it
+    // warned about and resolved by keeping one of them.
+    if (partitions.length === 0) layers.push(...this.warmMarksLayers(false));
     for (const held of partitions) {
       layers.push(
         new MarksLayer(
@@ -884,8 +887,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    * single block in that paint. An empty layer draws nothing and uploads nothing; a layer that
    * later fills keeps its id, so deck updates it rather than making it again.
    */
-  private warmMarksLayers(): Layer[] {
-    return [
+  private warmMarksLayers(standIn = true): Layer[] {
+    const layers: Layer[] = [
       new MarksLayer(
         this.getSubLayerProps({id: 'marks-p0'}),
         {
@@ -899,22 +902,27 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           pickable: false,
           parameters: {depthCompare: 'always' as const}
         } as never
-      ),
-      new MarksLayer(
-        this.getSubLayerProps({id: 'marks-standin'}),
-        {
-          visible: false,
-          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
-          tesseraIds: EMPTY_IDS,
-          useLut: false,
-          lutTexture: null,
-          radiusUnits: 'pixels' as const,
-          getRadius: this.props.radius ?? 1.6,
-          pickable: false,
-          parameters: {depthCompare: 'always' as const}
-        } as never
       )
     ];
+    if (standIn) {
+      layers.push(
+        new MarksLayer(
+          this.getSubLayerProps({id: 'marks-standin'}),
+          {
+            visible: false,
+            data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
+            tesseraIds: EMPTY_IDS,
+            useLut: false,
+            lutTexture: null,
+            radiusUnits: 'pixels' as const,
+            getRadius: this.props.radius ?? 1.6,
+            pickable: false,
+            parameters: {depthCompare: 'always' as const}
+          } as never
+        )
+      );
+    }
+    return layers;
   }
 
   private standInBuffers(marks: MarksProjection, colourBy: string | null, layer: string): StandInBuffers {

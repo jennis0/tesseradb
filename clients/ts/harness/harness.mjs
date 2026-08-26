@@ -271,7 +271,16 @@ const staleState = await untilState(['stale'], 30_000);
   );
 }
 await page.unroute('**/v1/viewport');
-if (staleState === 'stale') await strip.locator('[part="refresh"]').first().click();
+// **Clicked in a retry loop, not once.** While the moved key is in play the strip alternates
+// between the stale row and the counts row on each arriving response — the replica observes the
+// server's real key, the next derive stamps the moved one — and each flip replaces the button, so
+// a single click races the re-render and times out with *element was detached from the DOM*. That
+// flake is not a claim: claim 4 has already been checked, and this click only puts the page back
+// to `shown` for the claims after it. Seen on `main` as well as on the branch.
+for (let tries = 0; tries < 10 && (await stripState().catch(() => null)) === 'stale'; tries++) {
+  await strip.locator('[part="refresh"]').first().click({timeout: 5_000}).catch(() => {});
+  await page.waitForTimeout(500);
+}
 await untilState(['shown'], 60_000);
 await settled();
 
