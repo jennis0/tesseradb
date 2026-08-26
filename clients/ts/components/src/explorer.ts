@@ -193,7 +193,9 @@ export class TesseraExplorer extends TesseraElement {
       ${this.has('selection') && region ? html`<slot name="selection"><tessera-selection></tessera-selection></slot>` : nothing}
       ${this.has('detail') ? detail : nothing}
     </aside>`;
-    return html`<div part="frame" @tessera-artifactselect=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))} @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}>
+    // Selecting an artifact — from the list or the map — shows its card and highlights its
+    // outline; it never moves the camera. Fit is the card's own button.
+    return html`<div part="frame" @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))}>
       <tessera-map
         colour-by=${this.colourBy || nothing}
         layers=${this.layers || nothing}

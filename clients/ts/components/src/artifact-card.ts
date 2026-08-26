@@ -72,8 +72,7 @@ export class TesseraArtifactCard extends TesseraElement {
     const {artifact, refusal} = this.shown;
     const heading = html`<h2 part="title">Artifact</h2>`;
     if (refusal) {
-      return html`${heading}<span part="state" data-state="refused"><span class="badge">refused</span><span part="refusal">${refusal.code}: ${refusal.detail}</span></span>
-        <div class="muted">one refusal covers every withheld case; nothing here tells them apart</div>`;
+      return html`${heading}<span part="state" data-state="refused"><span class="badge">refused</span><span part="refusal">${refusal.code}: ${refusal.detail}</span></span>`;
     }
     if (!artifact) {
       if (!this.resolvedStore) return html`${heading}${renderState('detached', null)}`;
@@ -81,9 +80,10 @@ export class TesseraArtifactCard extends TesseraElement {
     }
     const s = this.resolvedStore;
     const served = s?.get('artifacts').served ?? [];
+    // A live projection read: the artifact's own row and its children are whatever the channel
+    // has served for the view *now*, and this renders again on every answer.
     const here = served.find((a) => a.tesseraId === artifact.id);
-    const parent = here && here.parentId !== null ? served.find((a) => a.tesseraId === here.parentId) : undefined;
-    const children = served.filter((a) => a.parentId === artifact.id);
+    const children = served.filter((a) => a.parentId === artifact.id).sort((a, b) => (a.maskedCount < b.maskedCount ? 1 : a.maskedCount > b.maskedCount ? -1 : 0));
     const stale = s?.get('status').stale ?? false;
     const count: Masked = {value: Number(artifact.detail.maskedCount), exact: true};
     const id = idString(artifact.id);
@@ -91,14 +91,12 @@ export class TesseraArtifactCard extends TesseraElement {
     return html`${heading}
       <span part="state" data-state="shown"></span>
       <div part="headline">${here ? artifactName(here) : (artifact.detail.key ?? `#${id}`)}</div>
-      <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members you can see"></tessera-count></div>
+      <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members visible to you"></tessera-count></div>
+      ${here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       ${row('layer', artifact.detail.layer)}
-      ${row('key', artifact.detail.key ?? '— none supplied —')}
-      ${row('tessera_id', id)}
-      ${here ? row('inside', parent ? artifactName(parent) : '— nothing you were served —') : nothing}
-      ${here && here.content.length > 1 ? row('content', here.content.slice(1).join(' · ')) : nothing}
+      ${artifact.detail.key ? row('key', artifact.detail.key) : nothing}
       ${children.length > 0
-        ? html`<div class="muted">holds ${children.length.toLocaleString('en-GB')} served below it</div>
+        ? html`<div part="label" class="children-label">Children in this view</div>
             <ul part="children">
               ${children.map(
                 (c: Artifact) => html`<li part="child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)}>
@@ -108,8 +106,7 @@ export class TesseraArtifactCard extends TesseraElement {
               )}
             </ul>`
         : nothing}
-      <button part="fit" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>fit</button>
-      <div class="muted">the number the map carries, from the same predicate; there is no membership and no declared size behind it</div>`;
+      <button part="fit" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>Fit to cluster</button>`;
   }
 }
 
