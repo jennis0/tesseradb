@@ -81,6 +81,7 @@ layers on `/v1/meta`, every layer served under five measured principals (the mem
 257 nodes at depth 58 → 197 at depth 11, placeholder topics dropped); the honest tree has 26 nodes
 at depth 1, so a single-depth cut under a budget of 27 serves the root alone at the full principal.
 | S9 | a per-branch cut of a nested tree under `artifact_budget` — the engine cuts the whole tree at one depth, so a root of 26 children is served alone under any budget below 27 and the overview shows one artifact | the overview's cut; the client's base budget could fall to the labels a viewport fits | **closed 2026-08-26, not a defect.** The engine bisects for the deepest depth that fits and serves depth 0 when even the roots do not — the budget is a *resolution* knob and never a selection, because dropping nodes to reach a number is the sampling [decision 0083](decisions/0083-the-frontier-is-a-request-time-budget.md) forbids. A mixed-resolution frontier would also stop every shape on screen being the same kind of thing: a level-1 cluster of 900,000 beside a level-4 cluster of 3,000 reads as two peers. The 1 → 27 step at the overview is the tree's own 26-wide root, not the rule; the client asks for a budget that suits the viewport |
+| S10 | a tiered layer's **level** on the wire — the artifacts frame carries no `level` column and the request no level selector, so a client has only `parent_id` to reconstruct a resolution from | the level a tiered layer draws at; the bytes a chosen level costs | **found 2026-08-26** ([the memo](evidence/memos/2026-08-26-tiered-levels.md)). Counting parent links puts 490 of `clusters/toponymy`'s 797 artifacts at the wrong level and draws 186 at level 0 where 16 are declared — the layer's edges skip levels (90 of 611) and 170 artifacts have no parent to be given, their members being unclustered at every coarser rung. `taxonomy/arxiv` hides it: two levels, complete single-step edges, so depth and level cannot disagree. A `level` column repairs the drawing; a level selector also bounds the response (797 artifacts, 181,286 bytes at every budget today). Owner's choice; server work not started |
 
 **Step 4's notes** (2026-08-25). The plain-HTML example's app server is the claim-minting proxy
 under `builtin:passthrough` and its README says so where a C1 developer reads it (design §5.3);
@@ -180,8 +181,11 @@ also paying for the depth beneath it (S9); the wire gives a dependent artifact n
 target id, so a topic label can be placed only through its count (exact where
 counts are distinct, unattached where two share one); the server serves a tiered layer whole
 whatever `artifact_budget` says (toponymy: 797 at budget 42, 819 KB), so the client cuts by level
-itself; 170 of toponymy's 797 artifacts name a parent that is not served alongside them, so the
-client draws them as roots; the notebook 50,000 corpus counts zero — every tile arrives without
+itself, and it cuts by the wrong thing — the wire names no level, so the client counts parent links
+instead and draws 186 artifacts at level 0 where the layer declares 16
+([the memo](evidence/memos/2026-08-26-tiered-levels.md): the 170 extra hold no member any coarser
+artifact holds, so they have no parent to be given, and 90 of the edges that do exist skip a level);
+the notebook 50,000 corpus counts zero — every tile arrives without
 counts and the strip reads `0 shown · 0 matched · 0 visible` while 49,944 marks draw (present
 before this track's changes; the 2.4M corpus counts).
 
