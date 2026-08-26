@@ -104,6 +104,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `performance-suite.md` | Provisional — under review | 9 |
 | `records-and-search.md` | Provisional — under review | 29 |
+| `selection-operand.md` | Provisional — under review | 5 |
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
