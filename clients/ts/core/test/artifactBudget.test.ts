@@ -4,6 +4,8 @@ import {BASE_ARTIFACT_BUDGET, MAX_ARTIFACT_BUDGET, artifactBudgetFor, levelForBu
 describe('the artifact budget follows the zoom (design §6)', () => {
   it('is the base at the overview, doubles per zoom level, and is capped', () => {
     expect(artifactBudgetFor(0)).toBe(BASE_ARTIFACT_BUDGET);
+    // Wide enough that a root of 26 children is served with its children, not alone (the tree is cut at one depth).
+    expect(artifactBudgetFor(0)).toBe(48);
     expect(artifactBudgetFor(-2)).toBe(BASE_ARTIFACT_BUDGET);
     expect(artifactBudgetFor(1)).toBe(BASE_ARTIFACT_BUDGET * 2);
     expect(artifactBudgetFor(3)).toBe(BASE_ARTIFACT_BUDGET * 8);
