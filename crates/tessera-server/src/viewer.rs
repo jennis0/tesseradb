@@ -35,9 +35,11 @@ use crate::health::{healthz, readyz};
 use crate::state::{AppState, GatePermits};
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // The dev-only browser seam: absent `serve.dev_cors_origins` mounts nothing, so the seam is
-    // structurally absent from this router rather than present and configured empty.
-    let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
+    // Both browser seams land here and only here: `serve.dev_cors_origins` (development) and
+    // `serve.cors_origins` (production token presentation, decision 0102). With neither set the
+    // layer is `None` and the seam is structurally absent from this router rather than present
+    // and configured empty.
+    let cors = crate::cors::viewer_layer(&state);
     let router = Router::new()
         .route("/v1/meta", get(meta))
         .route("/v1/categories/{column}", get(categories))
@@ -47,7 +49,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .with_state(state);
-    match dev_cors {
+    match cors {
         Some(layer) => router.layer(layer),
         None => router,
     }
