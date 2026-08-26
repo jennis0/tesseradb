@@ -142,7 +142,8 @@ type Resolved = {
 const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [36, 87, 163], dark: [134, 176, 240]};
 /** Label ink and its halo per ground (`datamap_layers2`). */
 const INK: Record<'light' | 'dark', [number, number, number]> = {light: [36, 39, 43], dark: [236, 238, 240]};
-const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 235], dark: [12, 14, 17, 235]};
+/** The halo's own colour: the boards' 0.85 on both grounds (`gen.py`'s `datamap_layers`). */
+const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 217], dark: [12, 14, 17, 217]};
 /**
  * The halo's width as a fraction of the em, following the boards' 0.32 em stroke painted under
  * the fill — half of which shows outside the glyph, so about 0.16 em of outline: 1.9 px on a
