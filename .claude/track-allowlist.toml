@@ -12,7 +12,7 @@
 # Path syntax: shell glob, matched with bash `[[ path == pattern ]]`, so `*` spans `/`. Paths
 # are repo-relative, exactly as `git diff --name-only` prints them.
 #
-# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (merged). Wave 4 merged. Wave 5 (owner review 2026-08-25): corpus (the notebook corpus as the demo) and ui (bugs and the boards), in parallel.
+# Wave 1 tracks (merged 2026-08-25): step01, docs6, s3. Wave 2: step2 (merged). Wave 3: step3 (merged). Wave 4 merged. Wave 5 merged. Wave 6 (owner rulings 2026-08-26): s1 (the CORS surface), designs6 (the selection operand's design), smoke (the headed path), toponymy (the tiered layer's levels).
 
 # FROZEN (controller, 2026-08-25). Decisions and the two normative designs change only through
 # the owner; scripts are the checks themselves; authz and plugin crates are outside this campaign.
@@ -164,4 +164,35 @@ paths = [
   "clients/ts/react/*",
   "clients/ts/README.md",
   "docs/evidence/mockups/client-components/*",
+]
+
+# Wave 6 — the owner's rulings of 2026-08-26 (controller). `s1` builds decision 0102's surface;
+# `designs6` writes the selection operand's design and takes it through review (no code); `smoke`
+# gives the smoke scripts the headed browser the harness already has; `toponymy` finds why a
+# tiered layer's level 0 serves 186 artifacts where the pipeline declares 16. All four branch from
+# main at the wave-5 merge.
+[track.s1]
+paths = [
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "docs/design/configuration.md",
+  "clients/ts/README.md",
+]
+
+[track.designs6]
+paths = [
+  "docs/design/selection-operand.md",
+  "docs/design/README.md",
+]
+
+[track.smoke]
+paths = [
+  "clients/ts/viewer/*",
+  "clients/ts/harness/*",
+]
+
+[track.toponymy]
+paths = [
+  "notebooks/*",
+  "docs/evidence/memos/2026-08-26-tiered-levels.md",
 ]
