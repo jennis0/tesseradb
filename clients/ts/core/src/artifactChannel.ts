@@ -225,7 +225,8 @@ export class ArtifactChannel {
     const refs: ArtifactRef[] = artifacts.map((a) => ({
       tesseraId: a.tesseraId,
       layer: a.layer,
-      parentId: a.parentId
+      parentId: a.parentId,
+      centroid: a.centroid
     }));
     const taken = this.table.take(refs);
     this.releaseHeld();

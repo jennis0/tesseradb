@@ -104,3 +104,35 @@ describe('the level walk and retained references', () => {
     expect(table.ordinalOf('clusters/x', 10n)).toBe(NO_ORDINAL);
   });
 });
+
+describe('the table is what a colour is built from (§5.10)', () => {
+  it('carries geometry, lists what is live, and stamps a version when it changes', () => {
+    const table = new SessionArtifactTable();
+    const before = table.version;
+    const [a, b] = table.take([
+      {tesseraId: 1n, layer: 'l', parentId: null, centroid: [10, 20]},
+      {tesseraId: 2n, layer: 'l', parentId: 1n}
+    ]);
+    expect(table.version).toBeGreaterThan(before);
+    expect(table.entry(a!)!.centroid).toEqual([10, 20]);
+    // An artifact first named by a frame that declared no centroid takes one when a later frame
+    // does — geometry arriving late is a colour arriving late, not a second identity.
+    expect(table.entry(b!)!.centroid).toBeNull();
+    const named = table.version;
+    table.take([{tesseraId: 2n, layer: 'l', parentId: 1n, centroid: [30, 40]}]);
+    expect(table.entry(b!)!.centroid).toEqual([30, 40]);
+    expect(table.version).toBeGreaterThan(named);
+    expect(table.entry(b!)!.parentOrdinal).toBe(a);
+
+    expect(table.liveEntries().map((e) => e.ordinal).sort()).toEqual([a, b].sort());
+    // Naming what is already named moves nothing.
+    const settled = table.version;
+    table.take([{tesseraId: 1n, layer: 'l', parentId: null, centroid: [10, 20]}]);
+    expect(table.version).toBe(settled);
+
+    // A freed ordinal leaves the live list and stamps the version.
+    table.release([a!, a!, a!]);
+    expect(table.liveEntries().map((e) => e.ordinal)).toEqual([b]);
+    expect(table.version).toBeGreaterThan(settled);
+  });
+});

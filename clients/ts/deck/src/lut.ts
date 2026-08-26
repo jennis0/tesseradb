@@ -13,9 +13,17 @@ import {NEUTRAL, NO_ORDINAL, type ArtifactsProjection, type Rgba} from '@tessera
  * refcounts, not by the layer. A per-point colour rewrite at several million marks is tens of
  * milliseconds and a 12 MB upload per interaction, and is the construction refused.
  *
- * `lut[o]` is the colour of `resolve(o)`: the walk up `o`'s parent links to the artifact served
- * at the chosen level (`SessionArtifactTable.resolve`), neutral where the walk fails — an edge
- * never seen, or the cut moved finer. Nothing here is a geometric guess (decision 0099).
+ * `lut[o]` is the colour of `resolve(o)`: the walk up `o`'s parent links to the nearest artifact
+ * a colour is known for at the chosen level (`SessionArtifactTable.resolve`), neutral where the
+ * walk fails — an edge never seen. Nothing here is a geometric guess (decision 0099).
+ *
+ * **The walk stops at what is colourable, not at what the current view was served.** The colour
+ * map covers every artifact the session table holds (`store.ts`), which includes the ones a
+ * point response's own frame named while the debounced artifact channel was still on the last
+ * cut. Resolving against the channel's set alone drew a band neutral for as long as it took the
+ * channel to catch up, and again for every band held under a coarser cut once it had — the grey
+ * banding on a zoom in. A point coloured this way still wears the colour of an artifact the wire
+ * said it belongs to, which is what exact-only asks (§5.10).
  *
  * The texture is a fixed 1,024 texels wide and grows in rows, so an ordinal's texel is
  * `(o & 1023, o >> 10)` with no division in the shader.
@@ -26,7 +34,7 @@ export const LUT_WIDTH = 1024;
 export const LUT_SHIFT = 10;
 
 export type LutInputs = {
-  artifacts: Pick<ArtifactsProjection, 'table' | 'servedOrdinals' | 'colours'>;
+  artifacts: Pick<ArtifactsProjection, 'table' | 'colours'>;
   /** The level to colour at — `undefined` colours at the deepest served (§5.10). */
   level?: number;
   /** The opened artifact's ordinal: full colour for it and what resolves to it, the rest dimmed. */
@@ -44,14 +52,14 @@ export function dimmed(c: Rgba): Rgba {
  * of what it resolves to. Returns the rows the texture needs, a power of two.
  */
 export function buildLut(inputs: LutInputs): {data: Uint8Array; rows: number; range: number} {
-  const {table, servedOrdinals, colours} = inputs.artifacts;
+  const {table, colours} = inputs.artifacts;
   const range = Math.max(1, table.range);
   let rows = 1;
   while (rows * LUT_WIDTH < range) rows *= 2;
   const data = new Uint8Array(LUT_WIDTH * rows * 4);
   const highlight = inputs.highlight ?? NO_ORDINAL;
-  // The resolve is memoised per served ordinal: every ordinal resolving to the same artifact gets
-  // the same bytes, and there are at most `served` distinct answers.
+  // The resolve is memoised per resolved ordinal: every ordinal resolving to the same artifact
+  // gets the same bytes, and there are at most `colours.size` distinct answers.
   const bytesOf = new Map<number, Rgba>();
   const colourOf = (resolved: number): Rgba => {
     let c = bytesOf.get(resolved);
@@ -73,7 +81,7 @@ export function buildLut(inputs: LutInputs): {data: Uint8Array; rows: number; ra
       write(o, NEUTRAL);
       continue;
     }
-    const resolved = table.resolve(o, servedOrdinals, inputs.level);
+    const resolved = table.resolve(o, colours, inputs.level);
     write(o, resolved === NO_ORDINAL ? (highlight !== NO_ORDINAL ? dimmed(NEUTRAL) : NEUTRAL) : colourOf(resolved));
   }
   return {data, rows, range};

@@ -93,6 +93,13 @@ export type MapProbe = {
     coverage: {current: number; stale: number};
     servedIds: string[];
     sample: {ordinal: number; resolvedId: string | null}[];
+    /**
+     * How many of the sampled ordinals the lookup texture draws in a colour — resolved against
+     * the colours, which cover every artifact the session table holds, not only the served set
+     * (§5.10). `resolvedId` answers a narrower question: which *served* artifact the ordinal
+     * opens to. The two differ exactly where a band is held under a cut the view has moved off.
+     */
+    coloured: number;
   };
   [extra: string]: unknown;
 };
@@ -277,7 +284,7 @@ export class TesseraMap extends TesseraElement {
     view: {depth: 0, status: 'idle', stale: false, visible: 0, matched: 0, served: 0, provisional: 0},
     region: null,
     timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
-    cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: []}
+    cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: [], coloured: 0}
   };
 
   readonly slab = new MarkSlab();
@@ -473,6 +480,7 @@ export class TesseraMap extends TesseraElement {
     const a = artifacts as unknown as import('@tesseradb/client').ArtifactsProjection;
     const layer = clusterLayer ?? a.layers[0] ?? null;
     const sample: {ordinal: number; resolvedId: string | null}[] = [];
+    let coloured = 0;
     if (layer) {
       for (const band of bands) {
         const m = band.membership[layer];
@@ -481,12 +489,13 @@ export class TesseraMap extends TesseraElement {
           const ordinal = m.distinct[i]!;
           const resolved = a.table.resolve(ordinal, a.servedOrdinals, this.clusterLevel ?? undefined);
           const entry = resolved === 0 ? null : a.table.entry(resolved);
+          if (a.table.resolve(ordinal, a.colours, this.clusterLevel ?? undefined) !== 0) coloured += 1;
           sample.push({ordinal, resolvedId: entry ? idString(entry.tesseraId) : null});
         }
         if (sample.length >= 16) break;
       }
     }
-    return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: a.served.map((x) => idString(x.tesseraId)), sample};
+    return {layer, layersOn: a.layers, coverage: a.coverage, servedIds: a.served.map((x) => idString(x.tesseraId)), sample, coloured};
   }
 
   /** Release the store this map built, and the `Deck`, now. */

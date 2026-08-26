@@ -50,31 +50,48 @@ function served() {
     {tesseraId: 3n, layer: 'l', parentId: 1n}
   ]);
   const arts = [artifact(1n, 2 ** 31 + 100), artifact(2n, 2 ** 31 + 1e9, 1n), artifact(3n, 2 ** 31 - 1e9, 1n)];
-  const named = [root!, a!, b!].map((ordinal, i) => ({ordinal, artifact: arts[i]!}));
-  return {table, root: root!, a: a!, b: b!, arts, named, servedOrdinals: new Set([root!, a!, b!])};
+  const named = [root!, a!, b!].map((ordinal, i) => ({ordinal, centroid: arts[i]!.centroid}));
+  return {table, root: root!, a: a!, b: b!, arts, named};
 }
 
 describe('buildLut', () => {
   it('colours each ordinal by what it resolves to, neutral for 0 and for a freed slot', () => {
-    const {table, root, a, named, servedOrdinals} = served();
+    const {table, root, a, named} = served();
     const colours = artifactColours(named, 'positional');
-    const lut = buildLut({artifacts: {table, servedOrdinals, colours}});
+    const lut = buildLut({artifacts: {table, colours}});
     expect(lut.rows).toBe(1);
     expect(lut.data.length).toBe(LUT_WIDTH * 4);
     expect([...lut.data.subarray(0, 4)]).toEqual([...NEUTRAL]);
     expect([...lut.data.subarray(a * 4, a * 4 + 4)]).toEqual([...colours.get(a)!]);
     // The level walk: at level 0 the child resolves to the root's colour.
-    const atRoot = buildLut({artifacts: {table, servedOrdinals, colours}, level: 0});
+    const atRoot = buildLut({artifacts: {table, colours}, level: 0});
     expect([...atRoot.data.subarray(a * 4, a * 4 + 4)]).toEqual([...colours.get(root)!]);
-    // Nothing served: every ordinal neutral.
-    const none = buildLut({artifacts: {table, servedOrdinals: new Set(), colours}});
+    // Nothing colourable: every ordinal neutral.
+    const none = buildLut({artifacts: {table, colours: new Map()}});
     expect([...none.data.subarray(a * 4, a * 4 + 4)]).toEqual([...NEUTRAL]);
   });
 
+  it('colours an ordinal the current view was not served, and walks up to one it has a colour for', () => {
+    // The banding on a zoom in: the cut moves finer, the channel's served set moves with it, and
+    // every band held under the coarser cut named artifacts no longer in it. A walk cannot go
+    // down, so those points drew neutral until the tile was refetched.
+    const {table, root, a, named} = served();
+    // The colour map is the whole table's, so the child is coloured though only the root is in
+    // the view's served set.
+    const whole = artifactColours(named, 'positional');
+    expect([...buildLut({artifacts: {table, colours: whole}}).data.subarray(a * 4, a * 4 + 4)]).toEqual([...whole.get(a)!]);
+
+    // And where a colour genuinely is not known for the ordinal — an artifact evicted from the
+    // table's colour map — the walk goes *up* to the parent that is, not to neutral.
+    const parentOnly = new Map(whole);
+    parentOnly.delete(a);
+    expect([...buildLut({artifacts: {table, colours: parentOnly}}).data.subarray(a * 4, a * 4 + 4)]).toEqual([...whole.get(root)!]);
+  });
+
   it('highlights the opened artifact and dims the rest', () => {
-    const {table, a, b, named, servedOrdinals} = served();
+    const {table, a, b, named} = served();
     const colours = artifactColours(named, 'positional');
-    const lut = buildLut({artifacts: {table, servedOrdinals, colours}, highlight: a});
+    const lut = buildLut({artifacts: {table, colours}, highlight: a});
     expect([...lut.data.subarray(a * 4, a * 4 + 4)]).toEqual([...colours.get(a)!]);
     expect([...lut.data.subarray(b * 4, b * 4 + 4)]).toEqual([...dimmed(colours.get(b)!)]);
     expect(lut.data[b * 4 + 3]).toBeLessThan(colours.get(b)![3]);
@@ -83,14 +100,14 @@ describe('buildLut', () => {
   it('grows in rows of a power of two with the table range', () => {
     const table = new SessionArtifactTable();
     table.take(Array.from({length: 3000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null})));
-    const lut = buildLut({artifacts: {table, servedOrdinals: new Set(), colours: new Map()}});
+    const lut = buildLut({artifacts: {table, colours: new Map()}});
     expect(lut.rows).toBe(4);
   });
 });
 
 describe('every colouring interaction is a texture rewrite, never an attribute upload (decision 0100)', () => {
   it('palette, level, highlight and the switch write the texture and not the buffers', () => {
-    const {table, a, b, root, named, servedOrdinals} = served();
+    const {table, a, b, root, named} = served();
     const device = fakeDevice();
     const slab = new MarkSlab();
     slab.attach(device);
@@ -103,7 +120,7 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     const uploadsAfterBands = device.bufferWrites;
     expect(uploadsAfterBands).toBeGreaterThan(0);
     const inputs = (palette: 'positional' | 'spread', level?: number, highlight?: number) => ({
-      artifacts: {table, servedOrdinals, colours: artifactColours(named, palette)},
+      artifacts: {table, colours: artifactColours(named, palette)},
       level,
       highlight
     });

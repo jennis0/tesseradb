@@ -32,6 +32,8 @@ interface Window {
       coverage: {current: number; stale: number};
       servedIds: string[];
       sample: {ordinal: number; resolvedId: string | null}[];
+      /** How many of the sampled ordinals the lookup texture draws in a colour (§5.10). */
+      coloured: number;
     };
     /** The three lanes' timings, kept by the demo (design §5.10's measurement); absent on any other page. */
     lanes?: {

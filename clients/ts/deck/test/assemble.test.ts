@@ -161,6 +161,35 @@ describe('assemble', () => {
     assertAssemblyMatchesServed(out);
   });
 
+  it('carries the membership ordinal of every stand-in mark, indexed and whole alike', () => {
+    // The banding the owner saw on the 2.4M demo: a stand-in drew neutral though the band it
+    // came from knew each point's cluster, so mid-zoom the map went grey tile by tile.
+    const whole = band(4, 32n, 3);
+    whole.membership = {clusters: {ordinals: Uint32Array.from([7, 7, 9]), distinct: Uint32Array.from([7, 9])}};
+    const out = assemble(frame(2, [band(2, 0n, 2)], [whole]), [], 'clusters');
+    expect(out.provisional).toBe(1);
+    // A density-matched prefix takes the prefix of the ordinals, in step with the ids.
+    expect([...out.standIn.ordinals]).toEqual([7]);
+
+    // An ancestor stands in through an index list; the ordinals follow the same indices.
+    const ancestor: Band = {
+      ...band(6, 0n, 3),
+      ids: BigUint64Array.from([1n, 2n, 3n]),
+      positions: Float32Array.from([10, 4, 12, 4, 18, 4]),
+      membership: {clusters: {ordinals: Uint32Array.from([4, 5, 6]), distinct: Uint32Array.from([4, 5, 6])}},
+      served: 3
+    };
+    const indexed = assemble(frame(6, [], [ancestor], {x0: 1, y0: 0, x1: 1, y1: 0}), [], 'clusters');
+    expect([...indexed.standIn.ids]).toEqual([1n, 2n]);
+    expect([...indexed.standIn.ordinals]).toEqual([4, 5]);
+  });
+
+  it('gives a stand-in ordinal 0 for a layer its band never carried', () => {
+    const out = assemble(frame(2, [band(2, 0n, 2)], [band(4, 32n, 1)]), [], 'clusters');
+    expect(out.provisional).toBe(1);
+    expect([...out.standIn.ordinals]).toEqual([0]);
+  });
+
   it('folds a column across exact bands and stand-ins alike', () => {
     // The colour domain and the category ranks are accumulators, so they fold rather than needing
     // the concatenated column exact bands no longer build.

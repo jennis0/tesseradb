@@ -681,8 +681,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const {slab} = this.props;
     const layers: (Layer | null)[] = [];
 
-    // The lookup texture is rewritten whenever the served set, the palette, the level or the
-    // highlight moved — O(table range), never O(points) — and the device it lives on is deck's.
+    // The lookup texture is rewritten whenever the table, the served set, the palette, the level
+    // or the highlight moved — O(table range), never O(points) — and the device it lives on is
+    // deck's. **The table's own version is in the key**: a point response names artifacts the
+    // debounced channel has not served yet, and without it those ordinals kept the texture's
+    // neutral until the channel's next answer bumped `version`.
     const lut = this.lut();
     const lutStarted = performance.now();
     if (this.context.device && !lut.gpu) lut.attach(this.context.device);
@@ -692,7 +695,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     if (r.artifacts) {
       lut.update(
         {artifacts: r.artifacts, level: this.props.clusterLevel, highlight: highlightOrdinal},
-        `${r.artifacts.version}|${r.artifacts.palette}|${r.artifacts.table.range}|${this.props.clusterLevel ?? ''}|${highlightOrdinal}`
+        `${r.artifacts.version}|${r.artifacts.table.version}|${r.artifacts.palette}|${r.artifacts.table.range}|${this.props.clusterLevel ?? ''}|${highlightOrdinal}`
       );
     }
     timings.lutMs = performance.now() - lutStarted;
@@ -748,7 +751,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // The marks' size and alpha follow the resident count and the zoom (`markStyle`): small and
     // translucent at a million so density reads through them, larger and more solid as the count
     // falls. A style change is two uniforms, never a pass over the points.
-    const standIn = this.standInBuffers(r.marks, column.colourBy);
+    const standIn = this.standInBuffers(r.marks, column.colourBy, membershipLayer);
     const style = markStyle(slab.drawn + standIn.count, this.context.viewport?.zoom ?? 0, this.props.radius ?? null);
     const opacity = deckOpacity(style.alpha);
     timings.markRadius = style.radius;
@@ -787,25 +790,36 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     }
 
     // The stand-ins: drawn at the same alpha as any other mark. What guards the reading is the
-    // number channel — no count is shown against a non-exact tile — not the alpha channel. They
-    // carry no ordinal and draw neutral under cluster colour: a stand-in is a superset drawn for
-    // ground not yet held, and exact-only colour waits for the band (§5.10).
-    const colours = this.standInColours(standIn, useLut ? {kind: 'unmapped'} : encoding, useLut ? 'unmapped' : encodingKey);
+    // number channel — no count is shown against a non-exact tile — not the alpha channel.
+    //
+    // **They carry their ordinal and colour through the same texture as any other mark.** A
+    // stand-in oversamples the ground it covers, but each mark in it is a real point of a real
+    // band carrying the ordinal the response that served it named, so its colour is exact in
+    // §5.10's sense. Drawing them neutral put a grey band over every tile the deeper cut had not
+    // reached yet — up to 56% of the marks on screen mid-zoom on the 2.4M corpus — and that grey
+    // is what read as colour reloading on a zoom in.
+    const colours = this.standInColours(standIn, encoding, encodingKey);
     if (colours.length !== standIn.count * 4) {
       throw new Error(
         `colour buffer covers ${colours.length / 4} of ${standIn.count} stand-in marks. Colour is presentation and must never decide what is drawn.`
       );
     }
     layers.push(
-      new ScatterplotLayer(
+      new MarksLayer(
         this.getSubLayerProps({id: 'marks-standin'}),
         {
           visible: standIn.count > 0,
           data: {
             length: standIn.count,
-            attributes: {getPosition: binary(standIn.positions, 2), getFillColor: binary(colours, 4, true)}
+            attributes: {
+              getPosition: binary(standIn.positions, 2),
+              getFillColor: binary(colours, 4, true),
+              getOrdinal: binary(standIn.ordinals, 1)
+            }
           },
           tesseraIds: standIn.ids,
+          useLut,
+          lutTexture: lut.gpu,
           radiusUnits: 'pixels' as const,
           getRadius: style.radius,
           radiusMinPixels: 1,
@@ -848,12 +862,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           parameters: {depthCompare: 'always' as const}
         } as never
       ),
-      new ScatterplotLayer(
+      new MarksLayer(
         this.getSubLayerProps({id: 'marks-standin'}),
         {
           visible: false,
-          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true)}},
+          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
           tesseraIds: EMPTY_IDS,
+          useLut: false,
+          lutTexture: null,
           radiusUnits: 'pixels' as const,
           getRadius: this.props.radius ?? 1.6,
           pickable: false,
@@ -863,11 +879,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     ];
   }
 
-  private standInBuffers(marks: MarksProjection, colourBy: string | null): StandInBuffers {
-    const key = colourBy ?? '';
+  private standInBuffers(marks: MarksProjection, colourBy: string | null, layer: string): StandInBuffers {
+    const key = `${colourBy ?? ''}|${layer}`;
     const held = heldStandIn.get(marks.standIn);
     if (held && held.key === key) return held.buffers;
-    const buffers = materialiseStandIn(marks.standIn, colourBy ? [colourBy] : []);
+    const buffers = materialiseStandIn(marks.standIn, colourBy ? [colourBy] : [], layer);
     heldStandIn.set(marks.standIn, {key, buffers});
     return buffers;
   }
