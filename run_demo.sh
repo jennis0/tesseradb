@@ -10,14 +10,16 @@
 #   ./run_demo.sh                 # build what is missing, serve every scale, open the viewer
 #   ./run_demo.sh --scale 2m4     # one scale only. Repeatable; the order is the picker's order
 #   ./run_demo.sh --scale notebook # the notebook corpus: the HDBSCAN tree, its topics, the taxonomy
+#   ./run_demo.sh --scale notebook-2m4  # the same pipeline over the whole corpus, plus toponymy
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have, on its own
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
 # ## The five scales, and why they differ
 #
-#     scale      items          prose indexed        bundle
-#     notebook   50,000         title + abstract     ~50 MB
+#     scale         items          prose indexed        bundle
+#     notebook      50,000         title + abstract     ~35 MB
+#     notebook-2m4  2,422,486      title + abstract     ~2.3 GB
 #     2m4        2,422,486      title + abstract     ~1.4 GB
 #     25m        25,200,000     title                ~2.7 GB
 #     250m       250,000,000    none                 ~5 GB
@@ -32,6 +34,9 @@
 # written in the corpus's own vocabulary — an arXiv category is a term — where the others' are the
 # integer ids of a synthetic dictionary, so its presets read `math.AG` rather than `14`. The item
 # count is whatever the notebook sampled, read from the points file rather than tabled here.
+# `notebook-2m4` is `data/notebook-2m4-live/`: the whole corpus through the same pipeline, with a
+# fourth clustering — `clusters/toponymy`, four tiered levels named by a language model — and a
+# label layer over it. It builds in minutes rather than seconds.
 #
 # The two large scales are worth starting deliberately rather than by default: between them they
 # are ~135 GB of bundle and the better part of an afternoon to build. `--scale 2m4 --scale 25m`
@@ -209,18 +214,21 @@ items_of() {
   case "$1" in
     2m4) echo 2422486 ;; 25m) echo 25200000 ;; 250m) echo 250000000 ;; 1b) echo 1000000000 ;;
     # The notebook decides its own sample; the Parquet footer is the record of what it chose.
-    notebook) python3 -c "import pyarrow.parquet as pq, sys; print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" \
-                "$DATA/notebook/points.parquet" ;;
+    notebook*) python3 -c "import pyarrow.parquet as pq, sys; print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" \
+                "$(notebook_dir_of "$1")/points.parquet" ;;
     *) echo 0 ;;
   esac
 }
-prose_of()   { case "$1" in 2m4|notebook) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
-viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; *) echo 0 ;; esac; }
-session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; *) echo 0 ;; esac; }
-control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; *) echo 0 ;; esac; }
+prose_of()   { case "$1" in 2m4|notebook*) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
+viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; notebook-2m4) echo 37590 ;; *) echo 0 ;; esac; }
+session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; notebook-2m4) echo 49308 ;; *) echo 0 ;; esac; }
+control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; notebook-2m4) echo 45726 ;; *) echo 0 ;; esac; }
+# The two notebook scales are directories the notebook wrote, each holding its points, its
+# per-layer files and its own declaration; empty for every other scale.
+notebook_dir_of() { case "$1" in notebook) echo "$DATA/notebook" ;; notebook-2m4) echo "$DATA/notebook-2m4-live" ;; *) echo '' ;; esac; }
 # The declaration each scale is built from. The notebook writes its own beside its files, with
 # every source path relative to it (configuration.md §3); the demo scales share one generator.
-schema_of()  { case "$1" in notebook) echo "$DATA/notebook/schema.toml" ;; *) echo "$DATA/demo/config-$1.toml" ;; esac; }
+schema_of()  { case "$1" in notebook*) echo "$(notebook_dir_of "$1")/schema.toml" ;; *) echo "$DATA/demo/config-$1.toml" ;; esac; }
 
 # `--bundle` is the escape hatch: one server, one entry in the picker, no build.
 if [[ -n "$bundle_override" ]]; then
@@ -280,7 +288,7 @@ build_scale() {
   bundle="$(bundle_of "$scale")"
   config="$(schema_of "$scale")"
   points="$DATA/demo/points-$scale.parquet"
-  [[ "$scale" == notebook ]] && points="$DATA/notebook/points.parquet"
+  [[ -n "$(notebook_dir_of "$scale")" ]] && points="$(notebook_dir_of "$scale")/points.parquet"
 
   [[ $rebuild -eq 1 ]] && rm -rf "$bundle"
   # `CURRENT` is written last, so its presence — not the directory's — is what says the build
@@ -300,15 +308,15 @@ build_scale() {
   # The notebook's declaration names every file it reads, so the points and the declaration are
   # the two worth checking here; `tessera check` in the build reports the rest by name.
   local -a fixtures=("$points" "$config")
-  [[ "$scale" == notebook ]] || fixtures+=("$DATA/demo/archive.parquet"
+  [[ -n "$(notebook_dir_of "$scale")" ]] || fixtures+=("$DATA/demo/archive.parquet"
            "$DATA/demo/primary_category.parquet"
            "$DATA/scaled/pairs/categories-subclass.pairs.parquet")
   for f in "${fixtures[@]}"; do
     [[ -f "$f" ]] || {
       echo "missing fixture: $f" >&2
-      if [[ "$scale" == notebook ]]; then
+      if [[ -n "$(notebook_dir_of "$scale")" ]]; then
         echo "the notebook corpus is written by notebooks/arxiv-corpus.ipynb:" >&2
-        echo "  notebooks/run-corpus.sh --notebook --build-only" >&2
+        echo "  notebooks/run-corpus.sh --notebook --build-only --out $(notebook_dir_of "$scale")" >&2
         exit 1
       fi
       echo "build the demo inputs first:" >&2
@@ -351,7 +359,7 @@ build_scale() {
   # build refuses rather than silently dropping the entities it cannot place. The notebook's
   # files are all one corpus, so it takes no limit.
   local -a limit=(--limit "$(items_of "$scale")")
-  [[ "$scale" == notebook ]] && limit=()
+  [[ -n "$(notebook_dir_of "$scale")" ]] && limit=()
   # `--mint-id-key` starts a throwaway identity lineage, which is right for a demo bundle and
   # wrong for anything else — every `tessera_id` it mints is meaningless outside this directory,
   # and in particular means nothing to the *other* scale's bundle. A real deployment puts its key
@@ -473,9 +481,9 @@ RANKS="$DATA/scaled/pairs/categories-subclass.pairs.parquet.term-ranks.json"
 for scale in "${scales[@]}"; do
   terms="0..200"
   ranks="$RANKS"
-  if [[ "$scale" == notebook ]]; then
-    ranks="$DEV/presets/notebook.term-ranks.json"
-    terms="$(python3 - "$DATA/notebook/points.parquet" "$ranks" <<'CANDIDATES'
+  if [[ -n "$(notebook_dir_of "$scale")" ]]; then
+    ranks="$DEV/presets/$scale.term-ranks.json"
+    terms="$(python3 - "$(notebook_dir_of "$scale")/points.parquet" "$ranks" <<'CANDIDATES'
 import collections, json, sys
 import pyarrow.parquet as pq
 counts = collections.Counter(
@@ -505,6 +513,7 @@ fresh="$DEV/presets/datasets-this-run.json"
     label="$scale"
     case "$scale" in
       notebook) label="arXiv $(items_of notebook | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook corpus: HDBSCAN tree, topics, taxonomy" ;;
+      notebook-2m4) label="arXiv $(items_of notebook-2m4 | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook pipeline, whole corpus: HDBSCAN tree, toponymy, topics, taxonomy" ;;
       2m4) label="arXiv 2.4M · titles + abstracts" ;;
       25m) label="arXiv 25M · titles" ;;
       250m) label="arXiv 250M · no prose" ;;

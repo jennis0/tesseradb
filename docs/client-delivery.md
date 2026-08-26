@@ -74,7 +74,10 @@ two levels, a topic label layer depending on each clustering), a budgeted cut wi
 and labels carrying text and their target's count (263 of 263 equal). The numbers, the per-principal
 served counts and one caveat — the labels' `all` content requirement means only the full principal
 sees a label — are in [the memo](evidence/memos/2026-08-25-notebook-corpus-as-demo.md). The
-dataset document is now merged across invocations and written without the viewer.
+dataset document is now merged across invocations and written without the viewer. The whole
+corpus through the same pipeline, `data/notebook-2m4-live/` with its four-level toponymy layer and
+its labels, is the `notebook-2m4` scale on 37590/49308/45726: built in 5m13s at 4.7 GiB peak, seven
+layers on `/v1/meta`, every layer served under five measured principals (the memo's second table).
 
 **Step 4's notes** (2026-08-25). The plain-HTML example's app server is the claim-minting proxy
 under `builtin:passthrough` and its README says so where a C1 developer reads it (design §5.3);
