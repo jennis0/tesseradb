@@ -64,6 +64,17 @@ client steps can see what they wait on):
 | S6 | D11 — the selection operand; the export verb; the runtime-artifact path | *filter to this*, *export*, *save* | not started |
 | S7 | D14 — a verified-assertion auth plugin | C1's production token story | not started |
 
+**The notebook corpus is the demo's fifth dataset** (2026-08-26, track `corpus`): `data/notebook/`'s
+declarations migrated to the configuration surface (the notebook's writer already produced the
+current form; the files on disk were reshaped to match it, and `hull` added to the clusterings'
+computed content), built in 5 s, and served by `./run_demo.sh --scale notebook` on 37589/49307/45725
+beside 2m4 — five layers on `/v1/meta` (k-means flat, HDBSCAN nested, the taxonomy tiered with its
+two levels, a topic label layer depending on each clustering), a budgeted cut with `parent_id`s,
+and labels carrying text and their target's count (263 of 263 equal). The numbers, the per-principal
+served counts and one caveat — the labels' `all` content requirement means only the full principal
+sees a label — are in [the memo](evidence/memos/2026-08-25-notebook-corpus-as-demo.md). The
+dataset document is now merged across invocations and written without the viewer.
+
 **Step 4's notes** (2026-08-25). The plain-HTML example's app server is the claim-minting proxy
 under `builtin:passthrough` and its README says so where a C1 developer reads it (design §5.3);
 its production-topology paragraph is the same-origin proxy of `/v1/*`, with D10's `cors_origins`
