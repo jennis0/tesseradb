@@ -187,7 +187,9 @@ before this track's changes; the 2.4M corpus counts).
 
 **Gate after points 9 and 10** (2026-08-26): `check-clients.sh` green (core 228 with 6 skipped,
 deck 80, components 69, react 10, spike 5, wire-example 7, plain-html 4, canvas-store 3);
-`check-doc-links.py` clean; harness **9 of 9** headed on notebook-2m4, `modes.mjs` **15 of 15**;
+`check-doc-links.py` clean; harness **9 of 9** headed on notebook-2m4 — its ninth claim now reads
+**16 of 16** sampled ordinals drawn in a colour beside the 16 that resolve to a served artifact,
+which are different questions and were the same number only by accident — `modes.mjs` **15 of 15**;
 `smoke` OK on notebook-2m4, `smoke-artifacts` OK on 2m4, `smoke-budget` OK on notebook-2m4. The
 smoke scripts now excuse the one console error a healthy run produces — Chromium's
 `ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the driver abandoned when the view
@@ -195,8 +197,16 @@ moved, which the harness has exempted since step 3 and which failed `smoke.mjs` 
 `smoke-artifacts` runs its layer × principal grid, which is twenty-five settles on notebook-2m4's
 five layers and does not finish inside a ten-minute budget there; it is run on 2m4, as at the
 review. The harness's fourth claim — no count against a stale view — is **timing-dependent**: it
-failed twice and then passed three times on the same tree, and its evidence now reports how many
+failed twice and then passed four times on the same tree, and its evidence now reports how many
 revalidations had their key moved, so a run that fails says which half of the claim went.
+
+Two loose ends were found while re-measuring and fixed here. deck warned `Multiple new layers with
+same id tessera-marks-standin` on any frame the slab had no partition for — the warm sublayers and
+the real stand-in layer were both pushed under that id, and deck kept one of the two. And the
+harness's click on the strip's *Refresh*, which is not a claim but the way back to `shown` for the
+claims after it, raced the strip's own re-render and timed out with *element was detached from the
+DOM*, on `main` as well as here: while the moved content key is in play the strip alternates
+between the stale row and the counts row as responses land. It retries now.
 
 ## What each step owes a measurement
 
