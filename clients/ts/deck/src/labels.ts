@@ -3,6 +3,10 @@
  * priority into a spatial hash — O(K) for K labels, so 10⁴ labels cost what a few hundred
  * do — with a leader line when a label had to move off its centroid to fit.
  *
+ * A label moves at most `MAX_DISPLACEMENT` pixels from its centroid. Beyond that a leader
+ * would cross the map from a name to a shape it does not sit on, which the boards never show,
+ * so the label is dropped instead and waits for a zoom.
+ *
  * Everything here is in **screen pixels relative to the centroids**, so the answer is
  * translation-invariant: a pan moves every centroid by the same vector and changes no overlap,
  * and the caller re-places only when the zoom bucket or the served set changes.
@@ -24,6 +28,9 @@ export type LabelCandidate = {
 };
 
 export type PlacedLabel = {id: bigint; dx: number; dy: number; leader: boolean};
+
+/** How far a label may sit from its centroid, in pixels — a nudge with a short leader, never a line across the map. */
+export const MAX_DISPLACEMENT = 40;
 
 /** The spatial hash's cell, in pixels: a few labels a cell, so an overlap check reads a few. */
 const CELL = 64;
@@ -59,26 +66,34 @@ class SpatialHash {
   }
 }
 
-/** The offsets tried, in order: the centroid itself, then a ring one label away, then a wider one. */
-function offsetsFor(width: number, height: number): [number, number][] {
+/**
+ * The offsets tried, in order: the centroid itself, then a ring one label away, then a wider
+ * one — keeping only those within `maxDisplacement` of the centroid, so a wide label's sideways
+ * tries (a label's own width away) are never taken.
+ */
+function offsetsFor(width: number, height: number, maxDisplacement: number): [number, number][] {
   const out: [number, number][] = [[0, 0]];
   for (const ring of [1, 2]) {
     const dx = ring * (width + 6);
     const dy = ring * (height + 6);
     for (const [ux, uy] of [[0, -1], [0, 1], [1, 0], [-1, 0], [1, -1], [-1, -1], [1, 1], [-1, 1]] as [number, number][]) {
-      out.push([ux * dx, uy * dy]);
+      if (Math.hypot(ux * dx, uy * dy) <= maxDisplacement) out.push([ux * dx, uy * dy]);
     }
   }
   return out;
 }
 
-/** Place `candidates`, highest priority first; each placed label is centred on `(x + dx, y + dy)`. */
-export function placeLabels(candidates: readonly LabelCandidate[]): PlacedLabel[] {
+/**
+ * Place `candidates`, highest priority first; each placed label is centred on `(x + dx, y + dy)`
+ * and carries a leader when it moved. A label that fits nowhere within `maxDisplacement` of its
+ * centroid is left out.
+ */
+export function placeLabels(candidates: readonly LabelCandidate[], maxDisplacement = MAX_DISPLACEMENT): PlacedLabel[] {
   const order = [...candidates].sort((a, b) => b.priority - a.priority);
   const hash = new SpatialHash();
   const placed: PlacedLabel[] = [];
   for (const c of order) {
-    for (const [dx, dy] of offsetsFor(c.width, c.height)) {
+    for (const [dx, dy] of offsetsFor(c.width, c.height, maxDisplacement)) {
       const r: Rect = {x0: c.x + dx - c.width / 2, y0: c.y + dy - c.height / 2, x1: c.x + dx + c.width / 2, y1: c.y + dy + c.height / 2};
       if (!hash.free(r)) continue;
       hash.take(r);

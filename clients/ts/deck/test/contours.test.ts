@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection} from '@tesseradb/client';
-import {outlineData, outlineOf, servedDepths, smoothClosed} from '../src/layer.js';
+import {MIN_OUTLINE_PX, outlineData, outlineOf, outlinePixels, servedDepths, smoothClosed} from '../src/layer.js';
 
 /** The boards' contours: a served hull smoothed, and nesting read from the served tree. */
 
@@ -62,10 +62,10 @@ describe('outlineData', () => {
 
   it('a flat layer outlines only the hovered and the opened artifact, and keeps the rest pickable at zero alpha', () => {
     const p = projection([artifact(1n, null), artifact(2n, null), artifact(3n, null)]);
-    const none = outlineData(p, meta('flat'), {opened: null, hovered: null, level: undefined, scheme: 'light'});
+    const none = outlineData(p, meta('flat'), {opened: null, hovered: null, level: undefined, scheme: 'light', zoom: 0});
     expect(none.length).toBe(3);
     expect(none.every((d) => d.flat && d.fill === 0 && d.line === 0)).toBe(true);
-    const some = alphas(outlineData(p, meta('flat'), {opened: 2n, hovered: 3n, level: undefined, scheme: 'light'}));
+    const some = alphas(outlineData(p, meta('flat'), {opened: 2n, hovered: 3n, level: undefined, scheme: 'light', zoom: 0}));
     expect(some['1']).toEqual([0, 0, 0.8]);
     expect(some['2']).toEqual([41, 200, 1.2]);
     expect(some['3']![0]).toBeGreaterThan(0);
@@ -75,7 +75,7 @@ describe('outlineData', () => {
   it('a nested layer keeps its contours: a hairline each, the boards’ 6–10% fill at the leaves and none above', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
     for (const scheme of ['light', 'dark'] as const) {
-      const data = outlineData(p, meta('nested'), {opened: null, hovered: null, level: undefined, scheme});
+      const data = outlineData(p, meta('nested'), {opened: null, hovered: null, level: undefined, scheme, zoom: 0});
       expect(data.map((d) => String(d.id))).toEqual(['1', '2', '3']);
       const leaf = data[2]!;
       expect(leaf.fill / 255).toBeGreaterThanOrEqual(0.06);
@@ -92,18 +92,50 @@ describe('outlineData', () => {
 
   it('the opened artifact is strong whatever its layer, and the hovered one is firmer than a hairline', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n)]);
-    const data = alphas(outlineData(p, meta('nested'), {opened: 1n, hovered: 2n, level: undefined, scheme: 'dark'}));
+    const data = alphas(outlineData(p, meta('nested'), {opened: 1n, hovered: 2n, level: undefined, scheme: 'dark', zoom: 0}));
     expect(data['1']).toEqual([41, 200, 1.2]);
     expect(data['2']![1]).toBeGreaterThan(56);
     // Hovering the opened one changes nothing: opened wins.
-    const same = alphas(outlineData(p, meta('nested'), {opened: 1n, hovered: 1n, level: undefined, scheme: 'dark'}));
+    const same = alphas(outlineData(p, meta('nested'), {opened: 1n, hovered: 1n, level: undefined, scheme: 'dark', zoom: 0}));
     expect(same['1']).toEqual([41, 200, 1.2]);
   });
 
   it('a level cuts the outlines below it', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
-    const data = outlineData(p, meta('nested'), {opened: null, hovered: null, level: 1, scheme: 'light'});
+    const data = outlineData(p, meta('nested'), {opened: null, hovered: null, level: 1, scheme: 'light', zoom: 0});
     expect(data.map((d) => String(d.id))).toEqual(['1', '2']);
     expect(data[1]!.fill).toBeGreaterThan(0);
+  });
+
+  it('an outline under 12 px on both axes is kept at zero alpha — it answers a pick and draws nothing', () => {
+    // A shard: 2⁻⁸ of the grid a side — two world units — is 8 px at zoom 2 and 32 px at zoom 4.
+    const side = 2 ** 24;
+    const shard: Artifact = {...artifact(2n, null), box: [0, 0, side, side], hull: [[0, 0], [side, 0], [side, side]]};
+    const p = projection([artifact(1n, null), shard]);
+    expect(outlinePixels(shard, 2)!.map((v) => Math.round(v))).toEqual([8, 8]);
+    expect(outlinePixels(shard, 4)!.map((v) => Math.round(v))).toEqual([32, 32]);
+    const at = (zoom: number, opts: Partial<Parameters<typeof outlineData>[2]> = {}) => outlineData(p, meta('nested'), {opened: null, hovered: null, level: undefined, scheme: 'dark', zoom, ...opts});
+    const small = at(2);
+    expect(small.map((d) => String(d.id))).toEqual(['1', '2']);
+    expect(small[1]!.tiny).toBe(true);
+    expect([small[1]!.fill, small[1]!.line]).toEqual([0, 0]);
+    expect(small[0]!.tiny).toBe(false);
+    expect(small[0]!.line).toBeGreaterThan(0);
+    // Zoomed in until it is 32 px across, it draws as any leaf does.
+    const large = at(4);
+    expect(large[1]!.tiny).toBe(false);
+    expect(large[1]!.fill).toBeGreaterThan(0);
+    expect(large[1]!.line).toBeGreaterThan(0);
+    // Tiny on one axis only is not tiny: a long thin hull still draws.
+    const strip: Artifact = {...artifact(3n, null), box: [0, 0, side * 8, side], hull: null};
+    const thin = outlineData(projection([strip]), meta('nested'), {opened: null, hovered: null, level: undefined, scheme: 'dark', zoom: 2});
+    expect(thin[0]!.tiny).toBe(false);
+    // Hovered or opened, a tiny outline draws — the pick found it, so it is shown.
+    expect(at(2, {hovered: 2n})[1]!.line).toBe(150);
+    expect(at(2, {opened: 2n})[1]!.line).toBe(200);
+    // The hull's extent stands in where there is no box.
+    const hullOnly: Artifact = {...shard, box: null};
+    expect(outlinePixels(hullOnly, 2)!.map((v) => Math.round(v))).toEqual([8, 8]);
+    expect(MIN_OUTLINE_PX).toBe(12);
   });
 });
