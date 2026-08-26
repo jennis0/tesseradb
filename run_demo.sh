@@ -9,17 +9,29 @@
 #
 #   ./run_demo.sh                 # build what is missing, serve every scale, open the viewer
 #   ./run_demo.sh --scale 2m4     # one scale only. Repeatable; the order is the picker's order
+#   ./run_demo.sh --scale notebook # the notebook corpus: the HDBSCAN tree, its topics, the taxonomy
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have, on its own
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
-# ## The four scales, and why they differ
+# ## The five scales, and why they differ
 #
-#     scale   items          prose indexed        bundle
-#     2m4     2,422,486      title + abstract     ~1.4 GB
-#     25m     25,200,000     title                ~2.7 GB
-#     250m    250,000,000    none                 ~5 GB
-#     1b      1,000,000,000  none                 ~20 GB
+#     scale      items          prose indexed        bundle
+#     notebook   50,000         title + abstract     ~50 MB
+#     2m4        2,422,486      title + abstract     ~1.4 GB
+#     25m        25,200,000     title                ~2.7 GB
+#     250m       250,000,000    none                 ~5 GB
+#     1b         1,000,000,000  none                 ~20 GB
+#
+# `notebook` is the odd one out, and it is in the picker for what the other four lack. They
+# publish one flat k-means layer; `notebook` is `data/notebook/`, which `notebooks/arxiv-corpus.ipynb`
+# writes — a uniform sample of the same corpus carrying **five declared layers**: k-means flat
+# under a `{ count = 50 }` floor, HDBSCAN's condensed tree nested under `{ fraction = 0.05 }`, a
+# TF-IDF topic label attached to every cluster of each, and arXiv's own classification as a tiered
+# layer whose two levels are joined by containment edges. It builds in seconds. Its principals are
+# written in the corpus's own vocabulary — an arXiv category is a term — where the others' are the
+# integer ids of a synthetic dictionary, so its presets read `math.AG` rather than `14`. The item
+# count is whatever the notebook sampled, read from the points file rather than tabled here.
 #
 # The two large scales are worth starting deliberately rather than by default: between them they
 # are ~135 GB of bundle and the better part of an afternoon to build. `--scale 2m4 --scale 25m`
@@ -30,7 +42,7 @@
 # controls from `/v1/meta`, so the abstract box is simply absent on the large bundle — the honest
 # rendering of a column that is not there, and not a case the client special-cases.
 #
-# Both are built from `data/demo/`, which `probes/build_demo_datasets.py` writes. Run that first if
+# The four arXiv scales are built from `data/demo/`, which `probes/build_demo_datasets.py` writes. Run that first if
 # the directory is missing; it needs `probes/build_prose.py`'s output, which is a scan of the raw
 # arXiv snapshot.
 #
@@ -178,17 +190,37 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-say "building the release binary"
-cargo build --release -p tessera-cli
+# `TESSERA_BIN` serves a binary built elsewhere — a second worktree sharing one machine's release
+# build rather than paying for its own — and is otherwise this checkout's, built here.
+if [[ -n "${TESSERA_BIN:-}" ]]; then
+  BIN="$TESSERA_BIN"
+  [[ -x "$BIN" ]] || { echo "TESSERA_BIN=$BIN is not an executable" >&2; exit 1; }
+  say "using $BIN"
+else
+  say "building the release binary"
+  cargo build --release -p tessera-cli
+  BIN="./target/release/tessera"
+fi
 
 # Per scale: items, the label the picker shows, and the port triple. Ports are fixed per scale
 # rather than allocated, so a `curl` in a second terminal keeps working across restarts and the
 # smoke scripts need no discovery step.
-items_of()   { case "$1" in 2m4) echo 2422486 ;; 25m) echo 25200000 ;; 250m) echo 250000000 ;; 1b) echo 1000000000 ;; *) echo 0 ;; esac; }
-prose_of()   { case "$1" in 2m4) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
-viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; *) echo 0 ;; esac; }
-session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; *) echo 0 ;; esac; }
-control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; *) echo 0 ;; esac; }
+items_of() {
+  case "$1" in
+    2m4) echo 2422486 ;; 25m) echo 25200000 ;; 250m) echo 250000000 ;; 1b) echo 1000000000 ;;
+    # The notebook decides its own sample; the Parquet footer is the record of what it chose.
+    notebook) python3 -c "import pyarrow.parquet as pq, sys; print(pq.ParquetFile(sys.argv[1]).metadata.num_rows)" \
+                "$DATA/notebook/points.parquet" ;;
+    *) echo 0 ;;
+  esac
+}
+prose_of()   { case "$1" in 2m4|notebook) echo '"title","abstract"' ;; 25m) echo '"title"' ;; *) echo '' ;; esac; }
+viewer_of()  { case "$1" in 2m4) echo 37585 ;; 25m) echo 37586 ;; 250m) echo 37587 ;; 1b) echo 37588 ;; notebook) echo 37589 ;; *) echo 0 ;; esac; }
+session_of() { case "$1" in 2m4) echo 49303 ;; 25m) echo 49304 ;; 250m) echo 49305 ;; 1b) echo 49306 ;; notebook) echo 49307 ;; *) echo 0 ;; esac; }
+control_of() { case "$1" in 2m4) echo 45721 ;; 25m) echo 45722 ;; 250m) echo 45723 ;; 1b) echo 45724 ;; notebook) echo 45725 ;; *) echo 0 ;; esac; }
+# The declaration each scale is built from. The notebook writes its own beside its files, with
+# every source path relative to it (configuration.md §3); the demo scales share one generator.
+schema_of()  { case "$1" in notebook) echo "$DATA/notebook/schema.toml" ;; *) echo "$DATA/demo/config-$1.toml" ;; esac; }
 
 # `--bundle` is the escape hatch: one server, one entry in the picker, no build.
 if [[ -n "$bundle_override" ]]; then
@@ -196,6 +228,7 @@ if [[ -n "$bundle_override" ]]; then
   scales=(custom)
   items_of()   { echo 0; }
   prose_of()   { echo ''; }
+  schema_of()  { echo ''; }
   viewer_of()  { echo 37585; }
   session_of() { echo 49303; }
   control_of() { echo 45721; }
@@ -223,7 +256,7 @@ cache = "$DEV/$scale/cache"
 wal   = "$DEV/$scale/wal.log"
 
 [build]
-schema = "$DATA/demo/config-$scale.toml"
+schema = "$(schema_of "$scale")"
 
 [plugin]
 module = "builtin:passthrough"
@@ -245,8 +278,9 @@ EOF
 build_scale() {
   local scale="$1" bundle points config
   bundle="$(bundle_of "$scale")"
+  config="$(schema_of "$scale")"
   points="$DATA/demo/points-$scale.parquet"
-  config="$DATA/demo/config-$scale.toml"
+  [[ "$scale" == notebook ]] && points="$DATA/notebook/points.parquet"
 
   [[ $rebuild -eq 1 ]] && rm -rf "$bundle"
   # `CURRENT` is written last, so its presence — not the directory's — is what says the build
@@ -263,11 +297,20 @@ build_scale() {
     rm -rf "$bundle"
   fi
 
-  for f in "$points" "$config" "$DATA/demo/archive.parquet" \
-           "$DATA/demo/primary_category.parquet" \
-           "$DATA/scaled/pairs/categories-subclass.pairs.parquet"; do
+  # The notebook's declaration names every file it reads, so the points and the declaration are
+  # the two worth checking here; `tessera check` in the build reports the rest by name.
+  local -a fixtures=("$points" "$config")
+  [[ "$scale" == notebook ]] || fixtures+=("$DATA/demo/archive.parquet"
+           "$DATA/demo/primary_category.parquet"
+           "$DATA/scaled/pairs/categories-subclass.pairs.parquet")
+  for f in "${fixtures[@]}"; do
     [[ -f "$f" ]] || {
       echo "missing fixture: $f" >&2
+      if [[ "$scale" == notebook ]]; then
+        echo "the notebook corpus is written by notebooks/arxiv-corpus.ipynb:" >&2
+        echo "  notebooks/run-corpus.sh --notebook --build-only" >&2
+        exit 1
+      fi
       echo "build the demo inputs first:" >&2
       echo "  reference/.venv/bin/python probes/build_prose.py \\" >&2
       echo "      ~/.cache/kagglehub/datasets/Cornell-University/arxiv/versions/296/arxiv-metadata-oai-snapshot.json \\" >&2
@@ -305,7 +348,10 @@ build_scale() {
   # the builtin reports no memory.
   local t0=$SECONDS
   # `--limit` matches the points file: the pairs file covers a larger corpus, and an unlimited
-  # build refuses rather than silently dropping the entities it cannot place.
+  # build refuses rather than silently dropping the entities it cannot place. The notebook's
+  # files are all one corpus, so it takes no limit.
+  local -a limit=(--limit "$(items_of "$scale")")
+  [[ "$scale" == notebook ]] && limit=()
   # `--mint-id-key` starts a throwaway identity lineage, which is right for a demo bundle and
   # wrong for anything else — every `tessera_id` it mints is meaningless outside this directory,
   # and in particular means nothing to the *other* scale's bundle. A real deployment puts its key
@@ -346,9 +392,9 @@ build_scale() {
   fi
   "${scope[@]}" \
   /usr/bin/time -v -o "$DEV/build-$scale.time" \
-  ./target/release/tessera build \
+  "$BIN" build \
     --deployment "$DEV/tessera-$scale.toml" \
-    --limit "$(items_of "$scale")" \
+    "${limit[@]}" \
     ${TESSERA_BUILD_MEMORY_BUDGET:+--memory-budget "$TESSERA_BUILD_MEMORY_BUDGET"} \
     $mint_external --mint-id-key --no-oracle-pairs
   local peak
@@ -381,7 +427,7 @@ start_scale() {
   write_deployment "$scale"
 
   say "starting tessera serve for $scale on :$viewer_port"
-  ./target/release/tessera serve --deployment "$DEV/tessera-$scale.toml" &
+  "$BIN" serve --deployment "$DEV/tessera-$scale.toml" &
   SERVE_PIDS+=($!)
   local pid=${SERVE_PIDS[-1]}
 
@@ -408,12 +454,6 @@ VITE_TESSERA_SESSION_URL=http://127.0.0.1:$(session_of "${scales[0]}")
 VITE_TESSERA_SESSION_CREDENTIAL=$TESSERA_SESSION_CRED
 EOF
 
-if [[ $run_viewer -eq 0 ]]; then
-  say "servers only; Ctrl-C to stop"
-  wait
-  exit 0
-fi
-
 cd "$REPO/clients/ts"
 [[ -d node_modules ]] || { say "npm ci"; npm ci; }
 
@@ -421,25 +461,50 @@ cd "$REPO/clients/ts"
 
 # Presets are measured **per bundle**: a term id names a different set in each dictionary, so one
 # shared list would mislabel every principal on whichever bundle it was not measured against.
+#
+# The candidates differ by corpus. The demo scales' dictionary is synthetic and its terms are the
+# integers `0..200`, ranked by `scripts/rank_terms.py` so coverage principals can be composed. The
+# notebook's terms are arXiv categories, read off the points file's `categories` column; the ranks
+# are counted from the same column here, in the same `[{term, pairs}]` shape, so the one script
+# composes the same five bands over both — narrow, sparse, medium, heavy, full.
 say "measuring principals per dataset"
 mkdir -p "$(dirname "$DATASETS")" "$DEV/presets"
 RANKS="$DATA/scaled/pairs/categories-subclass.pairs.parquet.term-ranks.json"
 for scale in "${scales[@]}"; do
+  terms="0..200"
+  ranks="$RANKS"
+  if [[ "$scale" == notebook ]]; then
+    ranks="$DEV/presets/notebook.term-ranks.json"
+    terms="$(python3 - "$DATA/notebook/points.parquet" "$ranks" <<'CANDIDATES'
+import collections, json, sys
+import pyarrow.parquet as pq
+counts = collections.Counter(
+    t for cats in pq.read_table(sys.argv[1], columns=["categories"]).column("categories").to_pylist()
+    for t in (cats or []))
+ranked = [{"term": t, "pairs": n} for t, n in counts.most_common()]
+open(sys.argv[2], "w").write(json.dumps(ranked) + "\n")
+print(",".join(r["term"] for r in ranked))
+CANDIDATES
+)"
+  fi
   node scripts/measure-principals.mjs \
     --viewer "http://127.0.0.1:$(viewer_of "$scale")" \
     --session "http://127.0.0.1:$(session_of "$scale")" \
-    --terms 0..200 --out "$DEV/presets/$scale.json" \
-    ${RANKS:+$([[ -f "$RANKS" ]] && echo --ranks "$RANKS")}
+    --terms "$terms" --out "$DEV/presets/$scale.json" \
+    $([[ -f "$ranks" ]] && echo --ranks "$ranks")
 done
 
+# This run's entries, one per scale, in the order given: the viewer opens on the first.
+fresh="$DEV/presets/datasets-this-run.json"
 {
-  echo '{"datasets":['
+  echo '['
   first=1
   for scale in "${scales[@]}"; do
     [[ $first -eq 1 ]] || echo ','
     first=0
     label="$scale"
     case "$scale" in
+      notebook) label="arXiv $(items_of notebook | sed ':a;s/\B[0-9]\{3\}\>/,&/;ta') · notebook corpus: HDBSCAN tree, topics, taxonomy" ;;
       2m4) label="arXiv 2.4M · titles + abstracts" ;;
       25m) label="arXiv 25M · titles" ;;
       250m) label="arXiv 250M · no prose" ;;
@@ -453,9 +518,37 @@ done
     cat "$DEV/presets/$scale.json"
     printf '}'
   done
-  echo ']}'
-} > "$DATASETS"
+  echo ']'
+} > "$fresh"
+
+# **Merged with what is already running, not overwritten.** Two invocations serve two sets of
+# scales on their fixed ports — `--scale 2m4` in one terminal, `--scale notebook` in another — and
+# the picker should offer both. An entry this run did not write is kept if its viewer plane still
+# answers `/readyz` and dropped if it does not, so the document names what is actually up.
+python3 - "$DATASETS" "$fresh" <<'MERGE'
+import json, pathlib, sys, urllib.request
+dest, fresh = pathlib.Path(sys.argv[1]), json.loads(pathlib.Path(sys.argv[2]).read_text())
+mine = {d["id"] for d in fresh}
+kept = []
+if dest.exists():
+    for d in json.loads(dest.read_text()).get("datasets", []):
+        if d["id"] in mine:
+            continue
+        try:
+            urllib.request.urlopen(d["viewerUrl"] + "/readyz", timeout=2)
+            kept.append(d)
+        except Exception:
+            print(f"  dropping {d['id']}: nothing answers at {d['viewerUrl']}")
+dest.write_text(json.dumps({"datasets": fresh + kept}, indent=2) + "\n")
+print(f"  {', '.join(d['id'] for d in fresh)} written" + (f"; {', '.join(d['id'] for d in kept)} kept" if kept else ""))
+MERGE
 echo "wrote $DATASETS"
+
+if [[ $run_viewer -eq 0 ]]; then
+  say "servers only; Ctrl-C to stop"
+  wait
+  exit 0
+fi
 
 say "viewer on http://localhost:$VITE_PORT — Ctrl-C to stop everything"
 echo "Opens on the broadest principal, the largest mark budget, coloured by archive."
