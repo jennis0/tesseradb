@@ -245,9 +245,12 @@ const isRevalidation = (route) => {
     return false;
   }
 };
+/** Revalidations the harness moved the key under — nought of them is a different failure from one. */
+let movedKeys = 0;
 await page.route('**/v1/viewport', async (route) => {
   if (!isRevalidation(route)) return route.continue();
   const response = await route.fetch();
+  movedKeys += 1;
   await route.fulfill({response, headers: {...response.headers(), etag: '"harness-moved-content-key"'}});
 });
 await page.waitForTimeout(61_000);
@@ -264,11 +267,20 @@ const staleState = await untilState(['stale'], 30_000);
   check(
     'no count renders against a stale view, and a refresh control is present',
     staleState === 'stale' && counts.length === 0 && refresh === 1,
-    `state=${staleState}, ${counts.length} counts rendered, ${refresh} refresh control(s)`
+    `state=${staleState}, ${counts.length} counts rendered, ${refresh} refresh control(s); ${movedKeys} revalidation(s) had their key moved`
   );
 }
 await page.unroute('**/v1/viewport');
-if (staleState === 'stale') await strip.locator('[part="refresh"]').first().click();
+// **Clicked in a retry loop, not once.** While the moved key is in play the strip alternates
+// between the stale row and the counts row on each arriving response — the replica observes the
+// server's real key, the next derive stamps the moved one — and each flip replaces the button, so
+// a single click races the re-render and times out with *element was detached from the DOM*. That
+// flake is not a claim: claim 4 has already been checked, and this click only puts the page back
+// to `shown` for the claims after it. Seen on `main` as well as on the branch.
+for (let tries = 0; tries < 10 && (await stripState().catch(() => null)) === 'stale'; tries++) {
+  await strip.locator('[part="refresh"]').first().click({timeout: 5_000}).catch(() => {});
+  await page.waitForTimeout(500);
+}
 await untilState(['shown'], 60_000);
 await settled();
 
@@ -421,7 +433,7 @@ await page.waitForTimeout(800);
   check(
     'a coloured point’s ordinal resolves to a served artifact',
     clusterOption !== null && probe?.encoding === `cluster|${probe.cluster.layer}` && sample.length > 0 && foreign.length === 0,
-    `colour-by ${probe?.encoding}; ${sample.length} ordinals sampled from the marks on screen, ${sample.length - unresolved.length} resolve to one of ${served.size} served artifacts, ${unresolved.length} neutral, ${foreign.length} to an artifact not served; ${probe?.lutWrites} lookup-texture writes so far`
+    `colour-by ${probe?.encoding}; ${sample.length} ordinals sampled from the marks on screen, ${sample.length - unresolved.length} resolve to one of ${served.size} served artifacts, ${foreign.length} to an artifact not served, ${probe?.cluster.coloured ?? 0} drawn in a colour; ${probe?.lutWrites} lookup-texture writes so far`
   );
 }
 const clusterShot = shot.replace(/\.png$/, '-cluster.png');

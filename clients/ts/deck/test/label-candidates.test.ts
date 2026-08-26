@@ -30,15 +30,16 @@ describe('labelCandidates', () => {
     const p = projection([artifact(1n, 100n, ['quantum error correction']), artifact(2n, 900n), artifact(3n, 50n, [''])]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
-    expect(byId.get(1n)!.name).toBe('quantum error correction');
-    expect([...byId.values()].some((t) => t.name.startsWith('c-'))).toBe(false);
+    // Wrapped to short lines, and the whole name is still there.
+    expect(byId.get(1n)!.lines).toEqual(['quantum error', 'correction']);
+    expect([...byId.values()].some((t) => t.lines.join(' ').startsWith('c-'))).toBe(false);
   });
 
   it('a nameless cluster with a topic attached takes the topic as its name', () => {
     const p = projection([artifact(1n, 100n), artifact(2n, 40n), artifact(9n, 100n, ['decoders, thresholds'], 'topics')]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
-    expect(byId.get(1n)!.name).toBe('decoders, thresholds');
+    expect(byId.get(1n)!.lines.join(' ')).toBe('decoders, thresholds');
     expect(byId.get(1n)!.topic).toBeNull();
   });
 

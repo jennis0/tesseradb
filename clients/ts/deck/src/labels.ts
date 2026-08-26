@@ -104,7 +104,51 @@ export function placeLabels(candidates: readonly LabelCandidate[], maxDisplaceme
   return placed;
 }
 
-/** The pixel size of an artifact's name, by its masked count within a narrow band (§5.10). */
+/**
+ * The pixel size of an artifact's name, by its masked count within a narrow band (§5.10) — the
+ * boards' own band (`gen.py`'s `datamap_layers`: `12 + 10·√(size/max)`).
+ *
+ * Raised from 10–15 px on the owner's reading of the 2.4M demo, where the names were hard to read
+ * over the marks. The band is still narrow: the largest cluster's name is under twice the
+ * smallest's, so size reads as a rank and never as a second scale.
+ */
 export function labelSize(count: number, largest: number): number {
-  return 10 + 5 * Math.sqrt(Math.max(0, count) / Math.max(1, largest));
+  return 12 + 10 * Math.sqrt(Math.max(0, count) / Math.max(1, largest));
+}
+
+/**
+ * How many characters a line of a name may hold before it wraps, and how many lines a name may
+ * take. A name at these sizes ran to three hundred pixels on one line over the map's own marks;
+ * two or three short lines read at a glance and pack far better into the spatial hash, which
+ * sees the wrapped box.
+ */
+export const MAX_LABEL_LINE_CHARS = 14;
+export const MAX_LABEL_LINES = 3;
+/** The line box as a multiple of the font size, for the wrapped block's height. */
+export const LABEL_LINE_HEIGHT = 1.15;
+
+/**
+ * A name as up to {@link MAX_LABEL_LINES} lines of at most `maxChars` each — greedy over words,
+ * never hyphenating, so a word longer than the limit takes a line of its own. What will not fit
+ * is elided onto the last line, because a name cut off without a mark reads as a different name.
+ */
+export function wrapLabel(text: string, maxChars = MAX_LABEL_LINE_CHARS, maxLines = MAX_LABEL_LINES): string[] {
+  const words = text.split(/\s+/).filter((w) => w.length > 0);
+  if (words.length === 0) return [text];
+  const lines: string[] = [];
+  let line = '';
+  for (const word of words) {
+    if (line.length === 0) line = word;
+    else if (line.length + 1 + word.length <= maxChars) line += ` ${word}`;
+    else if (lines.length + 1 < maxLines) {
+      lines.push(line);
+      line = word;
+    } else {
+      // The last line takes what is left, marked as elided rather than silently truncated.
+      line = `${line} ${word}`;
+      if (line.length > maxChars + 2) return [...lines, `${line.slice(0, maxChars + 1).trimEnd()}…`];
+    }
+  }
+  lines.push(line);
+  return lines;
 }

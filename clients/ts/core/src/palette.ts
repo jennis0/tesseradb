@@ -1,5 +1,3 @@
-import type {Artifact} from './types.js';
-
 /**
  * The artifact palette (design §5.10, decision 0099's default): **positional**. An artifact's
  * hue comes from its angle about the corpus extent's centre and its lightness from its distance,
@@ -71,31 +69,40 @@ export function positionalColour(centroid: readonly [number, number], scheme: Pa
 /** The neutral: *not known here yet*, which is what a point wears until the wire names it. */
 export const NEUTRAL: Rgba = [118, 126, 140, 200];
 
+/** An artifact a colour is wanted for: its ordinal in the session table, and where it sits. */
+export type Placed = {ordinal: number; centroid: readonly [number, number] | null};
+
 /**
- * A colour per served artifact, by ordinal. Positional colours ignore the set; spread colours
- * are assigned around the hue circle in angle order, so neighbours on the map are neighbours in
- * hue and the whole circle is used however few are served. An artifact with no centroid takes
- * the neutral.
+ * A colour per artifact, by ordinal. Positional colours ignore the set; spread colours are
+ * assigned around the hue circle in angle order, so neighbours on the map are neighbours in hue
+ * and the whole circle is used however few there are. An artifact with no centroid takes the
+ * neutral.
+ *
+ * The caller passes **every artifact the session table holds**, not only the set the current
+ * view was served: a band held under a coarser cut names artifacts the channel has moved off,
+ * and its points wear those artifacts' colours — exact, since membership in the artifact is what
+ * the wire said — rather than going neutral until a refetch. Under `spread` the hue assignment
+ * therefore moves with the table rather than with one response's served set.
  */
 export function artifactColours(
-  served: readonly {ordinal: number; artifact: Artifact}[],
+  placedIn: readonly Placed[],
   kind: PaletteKind,
   scheme: PaletteScheme = 'dark'
 ): Map<number, Rgba> {
   const out = new Map<number, Rgba>();
   if (kind === 'positional') {
-    for (const {ordinal, artifact} of served) {
-      out.set(ordinal, artifact.centroid ? positionalColour(artifact.centroid, scheme) : NEUTRAL);
+    for (const {ordinal, centroid} of placedIn) {
+      out.set(ordinal, centroid ? positionalColour(centroid, scheme) : NEUTRAL);
     }
     return out;
   }
-  const placed = served.filter((s) => s.artifact.centroid !== null).map((s) => ({...s, ...polarOf(s.artifact.centroid!)}));
+  const placed = placedIn.filter((s) => s.centroid !== null).map((s) => ({...s, ...polarOf(s.centroid!)}));
   placed.sort((a, b) => a.angle - b.angle);
   placed.forEach(({ordinal, radius}, i) => {
     const [sat, l] = shade(radius, scheme);
     const [r, g, b] = hslToRgb((i * 360) / placed.length + HUE_OFFSET, sat, l);
     out.set(ordinal, [r, g, b, ALPHA]);
   });
-  for (const {ordinal, artifact} of served) if (!artifact.centroid) out.set(ordinal, NEUTRAL);
+  for (const {ordinal, centroid} of placedIn) if (!centroid) out.set(ordinal, NEUTRAL);
   return out;
 }

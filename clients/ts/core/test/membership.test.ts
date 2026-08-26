@@ -3,6 +3,7 @@ import {makeData, makeVector, tableToIPC, Table, Uint64, vectorFromArray} from '
 import {decodeViewport} from '../src/decode.js';
 import {bandsOfResult, BandCache, distinctOrdinals} from '../src/bands.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
+import {GRID32_CENTRE, artifactColours} from '../src/palette.js';
 import type {Artifact, ViewportResult} from '../src/types.js';
 
 /**
@@ -235,5 +236,60 @@ describe('the membership golden (captured against the demo layer, the layer name
     for (const id of m.ids) expect(servedIds.has(id)).toBe(true);
     // Every layer the column names is a layer in the artifacts frame.
     expect(r.artifacts.every((a) => a.layer === layers[0])).toBe(true);
+  });
+});
+
+describe('a band is coloured by the response that carried it (§5.10)', () => {
+  /** The same artifact, with a centroid — what a positional colour is a function of. */
+  const placed = (id: bigint, dx: number, parentId: bigint | null = null): Artifact => ({
+    ...artifact(id, parentId),
+    centroid: [GRID32_CENTRE + dx, GRID32_CENTRE]
+  });
+
+  it('takes each artifact’s centroid from the frame that named it, the point path’s included', () => {
+    const table = new SessionArtifactTable();
+    bandsOfResult(result([2], [1, 1], [10n], [placed(10n, 1e9)]), 3, meta(table));
+    const parent = table.ordinalOf('l', 10n);
+    expect(table.entry(parent)!.centroid).toEqual([GRID32_CENTRE + 1e9, GRID32_CENTRE]);
+    // Every live ordinal is colourable, and the colour is the centroid's.
+    const colours = artifactColours(
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
+      'positional'
+    );
+    expect(colours.get(parent)).toBeDefined();
+  });
+
+  it('keeps a coarse band coloured when a finer response moves the cut under it', () => {
+    const table = new SessionArtifactTable();
+    // The coarse cut: one parent, and a band whose points belong to it.
+    const coarse = bandsOfResult(result([2], [1, 1], [10n], [placed(10n, 1e9)]), 3, meta(table));
+    const parent = table.ordinalOf('l', 10n);
+    // A zoom in. The point response's own artifacts frame carries the children — the debounced
+    // `k = 0` channel is still two hundred milliseconds behind on the coarse cut.
+    const fine = bandsOfResult(
+      result([2], [1, 2], [20n, 21n], [placed(20n, 9e8, 10n), placed(21n, 11e8, 10n)]),
+      3,
+      meta(table)
+    );
+    const children = [table.ordinalOf('l', 20n), table.ordinalOf('l', 21n)];
+    expect(children.every((o) => o !== NO_ORDINAL)).toBe(true);
+
+    const colours = artifactColours(
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
+      'positional'
+    );
+    // Every ordinal on screen — the coarse band's and the finer band's alike — resolves to
+    // something coloured. Nothing draws neutral, which is the banding the owner saw.
+    const onScreen = [...coarse[0]!.membership['l']!.distinct, ...fine[0]!.membership['l']!.distinct];
+    expect(onScreen.length).toBe(3);
+    for (const ordinal of onScreen) expect(table.resolve(ordinal, colours)).not.toBe(NO_ORDINAL);
+    // The finer band's points wear their own artifacts' colours, not the parent's.
+    expect(colours.get(children[0]!)).not.toEqual(colours.get(parent));
+
+    // Against the finer cut's served set alone — which is what the lookup texture used to walk
+    // to — the coarse band's ordinal resolves to nothing, and its points drew grey.
+    expect(table.resolve(parent, new Set(children))).toBe(NO_ORDINAL);
+    // And a level chosen coarser still walks up: the children colour as their parent.
+    expect(table.resolve(children[0]!, colours, 0)).toBe(parent);
   });
 });

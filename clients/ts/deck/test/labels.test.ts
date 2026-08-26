@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {MAX_DISPLACEMENT, labelSize, placeLabels, type LabelCandidate} from '../src/labels.js';
+import {MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, labelSize, placeLabels, wrapLabel, type LabelCandidate} from '../src/labels.js';
 
 const at = (id: number, x: number, y: number, priority: number, width = 60, height = 24): LabelCandidate => ({id: BigInt(id), x, y, width, height, priority});
 
@@ -65,8 +65,38 @@ describe('label placement (§5.10)', () => {
   });
 
   it('sizes a name by masked count within a narrow band', () => {
-    expect(labelSize(0, 1000)).toBe(10);
-    expect(labelSize(1000, 1000)).toBe(15);
-    expect(labelSize(250, 1000)).toBeCloseTo(12.5);
+    // The boards' band (`gen.py`'s `datamap_layers`), raised from 10–15 px on the owner's
+    // reading of the 2.4M demo: the largest name is under twice the smallest.
+    expect(labelSize(0, 1000)).toBe(12);
+    expect(labelSize(1000, 1000)).toBe(22);
+    expect(labelSize(250, 1000)).toBeCloseTo(17);
+  });
+});
+
+describe('wrapping a name (§5.10)', () => {
+  it('breaks on words, keeps every line short, and never hyphenates', () => {
+    expect(wrapLabel('quantum error correction')).toEqual(['quantum error', 'correction']);
+    expect(wrapLabel('graph')).toEqual(['graph']);
+    // A word longer than the line takes a line of its own rather than being cut.
+    expect(wrapLabel('electroencephalography signals')).toEqual(['electroencephalography', 'signals']);
+    for (const line of wrapLabel('dark matter haloes in cosmological simulations')) {
+      expect(line.length).toBeLessThanOrEqual(MAX_LABEL_LINE_CHARS + 2);
+    }
+  });
+
+  it('elides rather than silently truncating what will not fit in three lines', () => {
+    const lines = wrapLabel('one two three four five six seven eight nine ten eleven twelve');
+    expect(lines.length).toBe(3);
+    expect(lines[2]!.endsWith('…')).toBe(true);
+  });
+
+  it('places a wrapped label by the box it actually draws', () => {
+    // Two labels a line apart on the same anchor: the taller wrapped box refuses the overlap the
+    // one-line box would have allowed.
+    const box = (id: bigint, y: number, height: number): LabelCandidate => ({id, x: 0, y, width: 100, height, priority: Number(id)});
+    const tall = placeLabels([box(2n, 0, 40), box(1n, 30, 40)]);
+    expect(tall.length).toBe(1);
+    const short = placeLabels([box(2n, 0, 12), box(1n, 30, 12)]);
+    expect(short.length).toBe(2);
   });
 });

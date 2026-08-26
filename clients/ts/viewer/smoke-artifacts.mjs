@@ -220,8 +220,19 @@ if (!results.some((r) => r.served !== null)) {
   console.error('ARTIFACT SMOKE FAILED: no principal was served a cluster count from any layer — the list never showed one');
   process.exit(1);
 }
-console.log('--- console errors ---');
+/**
+ * The one console error a healthy run still produces: Chromium logs
+ * `ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the client abandoned mid-flight,
+ * which is what a superseded request *is* — the driver aborts the one in flight when the view
+ * moves. The harness has exempted it since step 3; these scripts had not, so a run against a
+ * corpus large enough for a response to still be streaming when the next gesture lands failed on
+ * the client working as designed. Nothing else is excused.
+ */
+const isSupersededAbort = (text) => /ERR_INCOMPLETE_CHUNKED_ENCODING/.test(text);
+
+console.log('--- console errors (a superseded request’s abort excepted) ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
+const unexplained = consoleErrors.filter((e) => !isSupersededAbort(e));
 
 // A layer with a criterion must hide clusters from someone, or the control is not being exercised.
 const criterionRows = results.filter((r) => /min\d+/.test(r.layer ?? ''));
@@ -229,7 +240,7 @@ if (criterionRows.length > 0) {
   const servedCounts = new Set(criterionRows.map((r) => r.served ?? 0));
   if (servedCounts.size < 2) failures.push('the criterion layer served the same number of clusters to every principal');
 }
-if (consoleErrors.length) failures.push(`${consoleErrors.length} console error(s)`);
+if (unexplained.length) failures.push(`${unexplained.length} console error(s)`);
 
 if (failures.length) {
   console.error(`ARTIFACT SMOKE FAILED: ${failures.join('; ')}`);

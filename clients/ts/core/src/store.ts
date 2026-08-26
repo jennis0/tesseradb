@@ -162,9 +162,15 @@ export type ArtifactsProjection = {
   version: number;
   /** The session artifact table, for a consumer resolving ordinals (§5.10). */
   table: SessionArtifactTable;
-  /** The served set's ordinals — what `table.resolve` walks up to. */
+  /** The served set's ordinals — what an opened artifact resolves through. */
   servedOrdinals: ReadonlySet<number>;
-  /** Each served ordinal's colour under the palette; an ordinal not here resolves to neutral. */
+  /**
+   * A colour for **every ordinal the session table holds**, not only the served set's (§5.10).
+   * A band held under a coarser cut, or one fetched a moment before the channel caught up with
+   * a finer one, names artifacts that are not in `servedOrdinals`; its points still wear the
+   * colour of an artifact the wire said they belong to, which is exact. An ordinal not here —
+   * one whose whole parent chain was never seen — resolves to neutral.
+   */
   colours: ReadonlyMap<number, Rgba>;
   palette: PaletteKind;
   /**
@@ -559,6 +565,7 @@ export function createStore(options: StoreOptions): Store {
     }
     replaceProjection('tiles', {tiles: frame.tiles});
     accumulateEncoding(frame);
+    refreshColours();
     checkColourCoverage();
 
     if (replica) {
@@ -591,14 +598,12 @@ export function createStore(options: StoreOptions): Store {
   function onArtifacts(state: ArtifactChannelState): void {
     recomputeStale();
     // The served set's ordinals: the channel took its reference before it emitted, so every
-    // served artifact is named. Colours are O(served) under either palette.
+    // served artifact is named. They are what an opened artifact resolves through; the colours
+    // are built over the whole table, which is a superset of them.
     const servedOrdinals = new Set<number>();
-    const named: {ordinal: number; artifact: Artifact}[] = [];
     for (const a of state.artifacts) {
       const ordinal = table.ordinalOf(a.layer, a.tesseraId);
-      if (ordinal === 0) continue;
-      servedOrdinals.add(ordinal);
-      named.push({ordinal, artifact: a});
+      if (ordinal !== 0) servedOrdinals.add(ordinal);
     }
     replaceProjection('artifacts', {
       ...projections.artifacts,
@@ -611,21 +616,57 @@ export function createStore(options: StoreOptions): Store {
       version: state.version,
       table,
       servedOrdinals,
-      colours: artifactColours(named, palette, scheme),
+      colours: colourTable(),
       palette
     });
     checkColourCoverage();
+  }
+
+  /** The table's version the held `colours` map was built at — a rebuild only when it moved. */
+  let colouredAt = -1;
+
+  /**
+   * A colour per live ordinal (§5.10). O(live), which the ordinals' refcounts bound by resident
+   * marks, and only when the table has actually gained or lost an entry — a response that names
+   * artifacts already known rebuilds nothing.
+   */
+  function colourTable(): Map<number, Rgba> {
+    colouredAt = table.version;
+    return artifactColours(
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
+      palette,
+      scheme
+    );
+  }
+
+  /**
+   * Rebuild the colours if a response has named artifacts the table had not seen — the point
+   * path's own artifacts frames, which arrive ahead of the debounced channel's.
+   */
+  function refreshColours(): void {
+    if (table.version === colouredAt) return;
+    replaceProjection('artifacts', {...projections.artifacts, colours: colourTable(), palette});
   }
 
   /** Bands already asked for again under this served-set version — a refetch is asked once. */
   const colourAsked = new Map<BandKey, number>();
 
   /**
-   * Colour coverage (§5.10): per band in view, over its distinct list — never its points — is
-   * every ordinal resolvable to the served set, for every layer on? A band that is not, or that
-   * lacks the column for a layer on (fetched before the layer was), is colour-stale: it keeps
-   * drawing what resolves, and its tile is asked for again after novel ground, once per served
-   * set, through the replica's coverage retraction and the driver's ordinary plan.
+   * Colour coverage (§5.10): per band in view, over its distinct list — never its points — does
+   * every ordinal resolve to something colourable, for every layer on? A band that has one that
+   * does not, or that lacks the column for a layer on (fetched before the layer was), is
+   * colour-stale: it keeps drawing what resolves, and its tile is asked for again after novel
+   * ground, once per served set, through the replica's coverage retraction and the driver's
+   * ordinary plan.
+   *
+   * **Against the colours, not against the channel's latest served set** — a deviation from
+   * §5.10's wording, reported with the change. Resolving against the served set alone made every
+   * band in view stale the moment a zoom moved the cut finer, because a walk cannot go down: on
+   * the 2.4M corpus one notch retracted 2,267 of 15,006 bands, refetching tiles that had just
+   * arrived, and drew them neutral meanwhile. A band whose ordinals resolve to an artifact the
+   * table holds is coloured, exactly, by an artifact the wire said its points belong to; it needs
+   * no refetch to be correct. What remains stale is what colour-staleness is for: a band with no
+   * column for a layer just switched on, and one whose parent chain was never seen.
    */
   function checkColourCoverage(): void {
     const a = projections.artifacts;
@@ -653,7 +694,7 @@ export function createStore(options: StoreOptions): Store {
           break;
         }
         for (let i = 0; i < m.distinct.length; i++) {
-          if (table.resolve(m.distinct[i]!, a.servedOrdinals) === 0) {
+          if (table.resolve(m.distinct[i]!, a.colours) === 0) {
             ok = false;
             break;
           }
@@ -820,12 +861,8 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function recolour(): void {
-    const a = projections.artifacts;
-    const named = a.served
-      .map((artifact) => ({ordinal: table.ordinalOf(artifact.layer, artifact.tesseraId), artifact}))
-      .filter((n) => n.ordinal !== 0);
-    // O(served): the colours move, the ordinals do not, and the vis side rewrites its texture.
-    replaceProjection('artifacts', {...a, colours: artifactColours(named, palette, scheme), palette});
+    // O(live): the colours move, the ordinals do not, and the vis side rewrites its texture.
+    replaceProjection('artifacts', {...projections.artifacts, colours: colourTable(), palette});
   }
 
   function setPalette(kind: PaletteKind): void {

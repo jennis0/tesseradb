@@ -1,11 +1,7 @@
 import {describe, expect, it} from 'vitest';
-import {GRID32_CENTRE, NEUTRAL, artifactColours, hslToRgb, polarOf, positionalColour} from '../src/palette.js';
-import type {Artifact} from '../src/types.js';
+import {GRID32_CENTRE, NEUTRAL, artifactColours, hslToRgb, polarOf, positionalColour, type Placed} from '../src/palette.js';
 
-const at = (x: number, y: number, ordinal: number): {ordinal: number; artifact: Artifact} => ({
-  ordinal,
-  artifact: {layer: 'l', tesseraId: BigInt(ordinal), key: null, maskedCount: 1n, centroid: [x, y], box: null, hull: null, content: [], parentId: null}
-});
+const at = (x: number, y: number, ordinal: number): Placed => ({ordinal, centroid: [x, y]});
 
 describe('the positional palette (§5.10, decision 0099)', () => {
   it('is a function of the centroid alone — stable under pan and across served sets', () => {
@@ -35,7 +31,7 @@ describe('the positional palette (§5.10, decision 0099)', () => {
 
   it('spreads hues evenly over the served set in angle order, and neutral for an artifact with no centroid', () => {
     const c = GRID32_CENTRE;
-    const spread = artifactColours([at(c + 10, c, 1), at(c, c + 10, 2), at(c - 10, c, 3), {ordinal: 4, artifact: {...at(0, 0, 4).artifact, centroid: null}}], 'spread');
+    const spread = artifactColours([at(c + 10, c, 1), at(c, c + 10, 2), at(c - 10, c, 3), {ordinal: 4, centroid: null}], 'spread');
     // Evenly spaced from the boards' hue origin (an offset of 0.95 of the circle), on the dark ground.
     const origin = 0.95 * 360;
     expect(spread.get(1)!.slice(0, 3)).toEqual(hslToRgb(origin, 0.62, 0.64));

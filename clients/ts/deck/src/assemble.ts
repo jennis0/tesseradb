@@ -38,6 +38,18 @@ export type Assembled = {
     ids: BigUint64Array;
     positions: Float32Array;
     scalars: Record<string, ScalarColumn>;
+    /**
+     * The membership ordinal per stand-in mark for the layer it was materialised for, `0` where
+     * the band carried no column — the same attribute the slab writes for an exact band, so a
+     * stand-in draws through the lookup texture rather than neutral (§5.10).
+     *
+     * A stand-in is a *set* that oversamples the ground it covers, but each mark in it is a real
+     * point of a real band, carrying the ordinal the response that served it named. Colouring it
+     * by the artifact it is a member of is therefore exact — the density is the superset, not the
+     * membership — and drawing it neutral said *not known here yet* about a point whose cluster
+     * the client was holding.
+     */
+    ordinals: Float32Array;
   };
   tiles: AssembledTile[];
   exactDrawn: number;
@@ -115,25 +127,30 @@ export type StandInBuffers = Assembled['standIn'] & {count: number};
  * columns a renderer is colouring by. `TesseraLayer` memoises this on the piece list's identity,
  * which `fold` preserves whenever nothing was filtered.
  */
-export function materialiseStandIn(pieces: readonly StandInPiece[], columns: Iterable<string>): StandInBuffers {
+export function materialiseStandIn(pieces: readonly StandInPiece[], columns: Iterable<string>, layer = ''): StandInBuffers {
   const total = pieces.reduce((n, piece) => n + pieceLength(piece), 0);
-  return {...concatenatePieces(pieces, total, columns), count: total};
+  return {...concatenatePieces(pieces, total, columns, layer), count: total};
 }
 
 function concatenatePieces(
   pieces: readonly StandInPiece[],
   total: number,
-  columns: Iterable<string>
+  columns: Iterable<string>,
+  layer = ''
 ): Assembled['standIn'] {
   const ids = new BigUint64Array(total);
   const positions = new Float32Array(total * 2);
+  // Zeros where the layer names none: ordinal 0 is *no artifact*, which the texture draws neutral.
+  const ordinals = new Float32Array(total);
   let o = 0;
   for (const piece of pieces) {
+    const membership = layer ? piece.band.membership[layer] : undefined;
     if (piece.indices) {
       for (const i of piece.indices) {
         ids[o] = piece.band.ids[i]!;
         positions[o * 2] = piece.band.positions[i * 2]!;
         positions[o * 2 + 1] = piece.band.positions[i * 2 + 1]!;
+        if (membership) ordinals[o] = membership.ordinals[i]!;
         o++;
       }
     } else {
@@ -141,6 +158,7 @@ function concatenatePieces(
       const len = pieceLength(piece);
       ids.set(piece.band.ids.subarray(0, len), o);
       positions.set(piece.band.positions.subarray(0, len * 2), o * 2);
+      if (membership) ordinals.set(membership.ordinals.subarray(0, len), o);
       o += len;
     }
   }
@@ -149,7 +167,7 @@ function concatenatePieces(
     const column = assembleScalar(name, pieces, total);
     if (column) scalars[name] = column;
   }
-  return {ids, positions, scalars};
+  return {ids, positions, scalars, ordinals};
 }
 
 function fromComposition(c: Composition, standIn: Assembled['standIn']): Assembled {
@@ -180,15 +198,16 @@ function fromComposition(c: Composition, standIn: Assembled['standIn']): Assembl
 export function materialise(
   c: Composition,
   held: Assembled | null,
-  columns: Iterable<string>
+  columns: Iterable<string>,
+  layer = ''
 ): Assembled {
   if (held && held.composition.standIn === c.standIn) return fromComposition(c, held.standIn);
-  return fromComposition(c, concatenatePieces(c.standIn, c.provisional, columns));
+  return fromComposition(c, concatenatePieces(c.standIn, c.provisional, columns, layer));
 }
 
 /** Compose and materialise a replica frame in one step — the shape the tests drive. */
-export function assemble(frame: ReplicaFrame, columns?: Iterable<string>): Assembled {
-  return materialise(compose(frame), null, columns ?? []);
+export function assemble(frame: ReplicaFrame, columns?: Iterable<string>, layer = ''): Assembled {
+  return materialise(compose(frame), null, columns ?? [], layer);
 }
 
 /** Fold fresh exact bands into a frame already on screen — see {@link materialise}. */

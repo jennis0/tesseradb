@@ -19,7 +19,7 @@ import {
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {buildColourAttribute, type Encoding} from './colour.js';
 import {binDensity, filterDensity} from './density.js';
-import {labelSize, placeLabels, type LabelCandidate, type PlacedLabel} from './labels.js';
+import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {LookupTexture} from './lut.js';
 import {MarksLayer} from './marks-layer.js';
 import {deckOpacity, markStyle} from './marks-style.js';
@@ -142,7 +142,14 @@ type Resolved = {
 const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [36, 87, 163], dark: [134, 176, 240]};
 /** Label ink and its halo per ground (`datamap_layers2`). */
 const INK: Record<'light' | 'dark', [number, number, number]> = {light: [36, 39, 43], dark: [236, 238, 240]};
-const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 190], dark: [12, 14, 17, 180]};
+/** The halo's own colour: the boards' 0.85 on both grounds (`gen.py`'s `datamap_layers`). */
+const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 217], dark: [12, 14, 17, 217]};
+/**
+ * The halo's width as a fraction of the em, following the boards' 0.32 em stroke painted under
+ * the fill — half of which shows outside the glyph, so about 0.16 em of outline: 1.9 px on a
+ * 12 px name and 3.5 px on a 22 px one.
+ */
+const HALO_EM = 0.16;
 const CHROME: [number, number, number, number] = [234, 238, 243, 240];
 const PLATE: [number, number, number, number] = [13, 15, 18, 235];
 
@@ -264,7 +271,7 @@ const ownLut = new WeakMap<MarkSlab, LookupTexture>();
 /** The outline polygons, once per served set, opened artifact and zoom bucket. */
 const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
-const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]}>();
+const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]; placed: number}>();
 
 export type OutlineDatum = {
   id: bigint;
@@ -284,7 +291,17 @@ export type OutlineDatum = {
   line: number;
   width: number;
 };
-type LabelDatum = {id: bigint; position: [number, number]; text: string; size: number; offset: [number, number]; colour: Rgba; kind: 'name' | 'count' | 'topic'};
+type LabelDatum = {
+  id: bigint;
+  position: [number, number];
+  text: string;
+  size: number;
+  offset: [number, number];
+  colour: Rgba;
+  kind: 'name' | 'count' | 'topic';
+  /** Where the offset sits on the run: a wrapped name centres, the last line ends at the seam. */
+  anchor: 'start' | 'middle' | 'end';
+};
 type LeaderDatum = {from: [number, number]; to: [number, number]};
 
 /** The hairline's alpha per ground: the boards' 0.16 on light, 0.22 on dark (`datamap_layers2`). */
@@ -394,7 +411,23 @@ export function labelBudget(width: number, height: number): number {
   return Math.max(8, Math.floor((width * height) / 36_000));
 }
 
-export type LabelText = {artifact: Artifact; name: string; countText: string; size: number; topic: string | null};
+export type LabelText = {
+  artifact: Artifact;
+  /** The name as it is drawn: up to three short lines (`wrapLabel`). */
+  lines: string[];
+  countText: string;
+  size: number;
+  topic: string | null;
+};
+
+/** The width of a run of text at a font size, in pixels — the model the placement box uses. */
+const NAME_EM = 0.58;
+const COUNT_EM = 0.55;
+/** The count's size relative to the name's, and the gap between the last line and it. */
+const COUNT_SCALE = 0.82;
+const COUNT_GAP_EM = 0.35;
+/** The topic line beneath the block, in pixels. */
+const TOPIC_SIZE = 12;
 
 /**
  * The label candidates for a served set at `zoom`: the cut's leaves (or the chosen level's
@@ -430,14 +463,19 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
     const name = hasText(artifact) ? artifactName(artifact) : attached!;
     const topic = hasText(artifact) ? attached : null;
     const countText = count.toLocaleString('en-GB');
-    byId.set(artifact.tesseraId, {artifact, name, countText, size, topic});
-    const width = (name.length * 0.62 + countText.length * 0.55 + 2) * size + 8;
+    // **The wrapped box is what is placed.** A name is drawn as up to three short lines, so the
+    // spatial hash packs against the block the viewer sees and the 40 px displacement rule is
+    // measured against it — a one-line box three hundred pixels wide overlapped everything.
+    const lines = wrapLabel(name);
+    byId.set(artifact.tesseraId, {artifact, lines, countText, size, topic});
+    const widest = lines.reduce((w, line) => Math.max(w, line.length * NAME_EM * size), 0);
+    const lastLine = lines[lines.length - 1]!.length * NAME_EM * size + countText.length * COUNT_EM * size * COUNT_SCALE + COUNT_GAP_EM * size;
     candidates.push({
       id: artifact.tesseraId,
       x: gridToWorld(artifact.centroid![0]) * scale,
       y: gridToWorld(artifact.centroid![1]) * scale,
-      width: Math.max(width, topic ? topic.length * 11 * 0.5 : 0),
-      height: size * 1.5 + (topic ? 14 : 0),
+      width: Math.max(widest, lastLine, topic ? topic.length * TOPIC_SIZE * 0.5 : 0) + 8,
+      height: lines.length * size * LABEL_LINE_HEIGHT + (topic ? TOPIC_SIZE + 3 : 0),
       priority: count
     });
   }
@@ -681,8 +719,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const {slab} = this.props;
     const layers: (Layer | null)[] = [];
 
-    // The lookup texture is rewritten whenever the served set, the palette, the level or the
-    // highlight moved — O(table range), never O(points) — and the device it lives on is deck's.
+    // The lookup texture is rewritten whenever the table, the served set, the palette, the level
+    // or the highlight moved — O(table range), never O(points) — and the device it lives on is
+    // deck's. **The table's own version is in the key**: a point response names artifacts the
+    // debounced channel has not served yet, and without it those ordinals kept the texture's
+    // neutral until the channel's next answer bumped `version`.
     const lut = this.lut();
     const lutStarted = performance.now();
     if (this.context.device && !lut.gpu) lut.attach(this.context.device);
@@ -692,7 +733,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     if (r.artifacts) {
       lut.update(
         {artifacts: r.artifacts, level: this.props.clusterLevel, highlight: highlightOrdinal},
-        `${r.artifacts.version}|${r.artifacts.palette}|${r.artifacts.table.range}|${this.props.clusterLevel ?? ''}|${highlightOrdinal}`
+        `${r.artifacts.version}|${r.artifacts.table.version}|${r.artifacts.palette}|${r.artifacts.table.range}|${this.props.clusterLevel ?? ''}|${highlightOrdinal}`
       );
     }
     timings.lutMs = performance.now() - lutStarted;
@@ -748,7 +789,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // The marks' size and alpha follow the resident count and the zoom (`markStyle`): small and
     // translucent at a million so density reads through them, larger and more solid as the count
     // falls. A style change is two uniforms, never a pass over the points.
-    const standIn = this.standInBuffers(r.marks, column.colourBy);
+    const standIn = this.standInBuffers(r.marks, column.colourBy, membershipLayer);
     const style = markStyle(slab.drawn + standIn.count, this.context.viewport?.zoom ?? 0, this.props.radius ?? null);
     const opacity = deckOpacity(style.alpha);
     timings.markRadius = style.radius;
@@ -759,7 +800,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // everything it held when it returns. One layer per retained slab partition, addressed by slot,
     // so a depth flip is a swap and flipping back uploads nothing.
     const partitions = slab.layers();
-    if (partitions.length === 0) layers.push(...this.warmMarksLayers());
+    // The slab's own warm layer only: the stand-in layer is added below whatever the partitions
+    // hold, and pushing the warm one here too gave deck two layers under `marks-standin`, which it
+    // warned about and resolved by keeping one of them.
+    if (partitions.length === 0) layers.push(...this.warmMarksLayers(false));
     for (const held of partitions) {
       layers.push(
         new MarksLayer(
@@ -787,25 +831,36 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     }
 
     // The stand-ins: drawn at the same alpha as any other mark. What guards the reading is the
-    // number channel — no count is shown against a non-exact tile — not the alpha channel. They
-    // carry no ordinal and draw neutral under cluster colour: a stand-in is a superset drawn for
-    // ground not yet held, and exact-only colour waits for the band (§5.10).
-    const colours = this.standInColours(standIn, useLut ? {kind: 'unmapped'} : encoding, useLut ? 'unmapped' : encodingKey);
+    // number channel — no count is shown against a non-exact tile — not the alpha channel.
+    //
+    // **They carry their ordinal and colour through the same texture as any other mark.** A
+    // stand-in oversamples the ground it covers, but each mark in it is a real point of a real
+    // band carrying the ordinal the response that served it named, so its colour is exact in
+    // §5.10's sense. Drawing them neutral put a grey band over every tile the deeper cut had not
+    // reached yet — up to 56% of the marks on screen mid-zoom on the 2.4M corpus — and that grey
+    // is what read as colour reloading on a zoom in.
+    const colours = this.standInColours(standIn, encoding, encodingKey);
     if (colours.length !== standIn.count * 4) {
       throw new Error(
         `colour buffer covers ${colours.length / 4} of ${standIn.count} stand-in marks. Colour is presentation and must never decide what is drawn.`
       );
     }
     layers.push(
-      new ScatterplotLayer(
+      new MarksLayer(
         this.getSubLayerProps({id: 'marks-standin'}),
         {
           visible: standIn.count > 0,
           data: {
             length: standIn.count,
-            attributes: {getPosition: binary(standIn.positions, 2), getFillColor: binary(colours, 4, true)}
+            attributes: {
+              getPosition: binary(standIn.positions, 2),
+              getFillColor: binary(colours, 4, true),
+              getOrdinal: binary(standIn.ordinals, 1)
+            }
           },
           tesseraIds: standIn.ids,
+          useLut,
+          lutTexture: lut.gpu,
           radiusUnits: 'pixels' as const,
           getRadius: style.radius,
           radiusMinPixels: 1,
@@ -832,8 +887,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    * single block in that paint. An empty layer draws nothing and uploads nothing; a layer that
    * later fills keeps its id, so deck updates it rather than making it again.
    */
-  private warmMarksLayers(): Layer[] {
-    return [
+  private warmMarksLayers(standIn = true): Layer[] {
+    const layers: Layer[] = [
       new MarksLayer(
         this.getSubLayerProps({id: 'marks-p0'}),
         {
@@ -847,27 +902,34 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           pickable: false,
           parameters: {depthCompare: 'always' as const}
         } as never
-      ),
-      new ScatterplotLayer(
-        this.getSubLayerProps({id: 'marks-standin'}),
-        {
-          visible: false,
-          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true)}},
-          tesseraIds: EMPTY_IDS,
-          radiusUnits: 'pixels' as const,
-          getRadius: this.props.radius ?? 1.6,
-          pickable: false,
-          parameters: {depthCompare: 'always' as const}
-        } as never
       )
     ];
+    if (standIn) {
+      layers.push(
+        new MarksLayer(
+          this.getSubLayerProps({id: 'marks-standin'}),
+          {
+            visible: false,
+            data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
+            tesseraIds: EMPTY_IDS,
+            useLut: false,
+            lutTexture: null,
+            radiusUnits: 'pixels' as const,
+            getRadius: this.props.radius ?? 1.6,
+            pickable: false,
+            parameters: {depthCompare: 'always' as const}
+          } as never
+        )
+      );
+    }
+    return layers;
   }
 
-  private standInBuffers(marks: MarksProjection, colourBy: string | null): StandInBuffers {
-    const key = colourBy ?? '';
+  private standInBuffers(marks: MarksProjection, colourBy: string | null, layer: string): StandInBuffers {
+    const key = `${colourBy ?? ''}|${layer}`;
     const held = heldStandIn.get(marks.standIn);
     if (held && held.key === key) return held.buffers;
-    const buffers = materialiseStandIn(marks.standIn, colourBy ? [colourBy] : []);
+    const buffers = materialiseStandIn(marks.standIn, colourBy ? [colourBy] : [], layer);
     heldStandIn.set(marks.standIn, {key, buffers});
     return buffers;
   }
@@ -1020,30 +1082,50 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       const {candidates, byId} = labelCandidates(a, r.meta, this.props.clusterLevel, zoom, budget);
       const data: LabelDatum[] = [];
       const leaders: LeaderDatum[] = [];
+      let placed = 0;
       for (const p of placeLabels(candidates) as PlacedLabel[]) {
-        const {artifact, name, countText, size, topic} = byId.get(p.id)!;
+        placed += 1;
+        const {artifact, lines, countText, size, topic} = byId.get(p.id)!;
         const position = gridToWorldXY(artifact.centroid!);
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
         const colour = a.colours.get(ordinal) ?? NEUTRAL;
-        // The name, then the count beside it — smaller and lighter — then the topic beneath.
-        // The name ends and the count starts at one seam, so the width estimates cannot overlap.
-        const nameWidth = name.length * 0.58 * size;
-        const countWidth = countText.length * 0.55 * size * 0.82;
-        const seam = p.dx - (nameWidth + countWidth + size * 0.35) / 2 + nameWidth;
-        data.push({id: artifact.tesseraId, position, text: name, size, offset: [seam, p.dy], colour, kind: 'name'});
-        data.push({id: artifact.tesseraId, position, text: countText, size: size * 0.82, offset: [seam + size * 0.35, p.dy + size * 0.08], colour, kind: 'count'});
-        if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: 11, offset: [p.dx, p.dy + size * 0.78 + 3], colour, kind: 'topic'});
+        // The name over up to three lines, centred on the anchor; the count beside the **last**
+        // line — smaller and lighter — then the topic beneath the block. The last line ends and
+        // the count starts at one seam, so the two width estimates cannot overlap.
+        const step = size * LABEL_LINE_HEIGHT;
+        const top = p.dy - ((lines.length - 1) * step) / 2;
+        const last = lines[lines.length - 1]!;
+        const lastWidth = last.length * NAME_EM * size;
+        const countWidth = countText.length * COUNT_EM * size * COUNT_SCALE;
+        const seam = p.dx - (lastWidth + countWidth + size * COUNT_GAP_EM) / 2 + lastWidth;
+        lines.forEach((line, i) => {
+          const isLast = i === lines.length - 1;
+          data.push({
+            id: artifact.tesseraId,
+            position,
+            text: line,
+            size,
+            offset: [isLast ? seam : p.dx, top + i * step],
+            colour,
+            kind: 'name',
+            anchor: isLast ? 'end' : 'middle'
+          });
+        });
+        const baseline = top + (lines.length - 1) * step;
+        data.push({id: artifact.tesseraId, position, text: countText, size: size * COUNT_SCALE, offset: [seam + size * COUNT_GAP_EM, baseline + size * 0.08], colour, kind: 'count', anchor: 'start'});
+        if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: TOPIC_SIZE, offset: [p.dx, baseline + size * 0.78 + 3], colour, kind: 'topic', anchor: 'middle'});
         // A leader wherever the label moved: the placement bounds the move (`MAX_DISPLACEMENT`),
         // so a leader is a short tie to the centroid and never a line across the map.
         if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
       }
-      held = {key, data, leaders};
+      held = {key, data, leaders, placed};
       heldLabels.set(a.served, held);
     }
     const data = held?.data ?? NO_LABELS;
     const leaders = held?.leaders ?? NO_LEADERS;
     timings.labelsMs = performance.now() - started;
-    timings.labels = data.length;
+    // Labels placed, not text rows: a wrapped name is several rows of one label.
+    timings.labels = held?.placed ?? 0;
     // Both layers exist from the first paint, empty, so their programs are linked before needed.
     const layers: Layer[] = [];
     {
@@ -1079,11 +1161,17 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           sizeUnits: 'pixels' as const,
           getColor: kind === 'name' ? ink : ([ink[0], ink[1], ink[2], kind === 'count' ? 184 : 178] as [number, number, number, number]),
           getPixelOffset: (d: LabelDatum) => d.offset,
-          getTextAnchor: (kind === 'name' ? 'end' : kind === 'count' ? 'start' : 'middle') as 'start' | 'middle' | 'end',
+          getTextAnchor: (d: LabelDatum) => d.anchor,
           getAlignmentBaseline: 'center' as const,
           fontFamily: 'IBM Plex Sans, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-          fontSettings: {sdf: true, buffer: 4},
-          outlineWidth: kind === 'name' ? 2.5 : 2,
+          // **The halo is the distance field's, so it is bounded by the atlas's padding.** deck
+          // scales `outlineWidth` by `fontSettings.radius` and clips the field at `buffer` glyph
+          // pixels; with its defaults (buffer 4 at a 64 px atlas) the widest outline a 12 px name
+          // could draw was about a third of a pixel, whatever `outlineWidth` said — which is why
+          // the names read as unhaloed over the marks. A padded atlas buys the boards' outline
+          // (`gen.py` paints its labels with a stroke of 0.32 em under the fill).
+          fontSettings: {sdf: true, buffer: 12, radius: 12, cutoff: 0.25},
+          outlineWidth: HALO_EM * 64,
           outlineColor: HALO[scheme],
           characterSet: 'auto',
           pickable: this.props.pickable && kind === 'name',

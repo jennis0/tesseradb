@@ -222,15 +222,20 @@ type ResponseNaming = {
 };
 
 function nameResponse(result: ViewportResult, table: SessionArtifactTable): {naming: ResponseNaming[]; release: () => void} {
-  const parentOf = new Map<string, bigint | null>();
-  for (const a of result.artifacts) parentOf.set(`${a.layer} ${a.tesseraId}`, a.parentId);
+  // The response's own artifacts frame is the only source of a `parentId` (decision 0087) and,
+  // for the artifacts this response's points belong to, of a centroid — which is what colours
+  // them. Feeding both here is what lets a band be coloured by the response that carried it,
+  // rather than waiting on the `k = 0` channel two hundred milliseconds behind the gesture.
+  const frameOf = new Map<string, {parentId: bigint | null; centroid: readonly [number, number] | null}>();
+  for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentId: a.parentId, centroid: a.centroid});
   const naming: ResponseNaming[] = [];
   const held: Uint32Array[] = [];
   for (const [layer, column] of Object.entries(result.membership)) {
     const refs: ArtifactRef[] = [];
     for (let d = 0; d < column.ids.length; d++) {
       const id = column.ids[d]!;
-      refs.push({tesseraId: id, layer, parentId: parentOf.get(`${layer} ${id}`) ?? null});
+      const known = frameOf.get(`${layer} ${id}`);
+      refs.push({tesseraId: id, layer, parentId: known?.parentId ?? null, centroid: known?.centroid ?? null});
     }
     const ordinals = table.take(refs);
     held.push(ordinals);
