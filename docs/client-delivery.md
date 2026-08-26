@@ -106,6 +106,8 @@ board-crop/screenshot pair per element and state.
 | 6 | words instead of icons in the interaction menu | **done**: pan, box, lasso, a rule, fit as `gen.py`'s icons, top-left docked and top-right overlay |
 | 7 | the mode toolbar is buggy — select tools do nothing, then pan breaks | **done**: deck's input layer saw a selection's pointerdown and never its pointerup, so its session stayed pressed; the gestures are now taken in the capture phase before the canvas sees them. `harness/modes.mjs` drives every transition with human-paced pointer input: 13 of 15 against the old handlers, 15 of 15 now |
 | 8 | text like *how many artifacts a layer holds is never published…* in a panel | **done**: every explanatory sentence is out of the panels — a state is one line — and in `clients/ts/README.md` (*What the panels do not say*) |
+| 9 | zooming in causes notable reloading on colour — points go grey in bands, then slowly regain colour | **done** (2026-08-26, on the running 2.4M demo): two things drew grey. Stand-ins carried no ordinal and were written `unmapped` under cluster colour — 56% of the marks on screen mid-zoom — though each stand-in mark is a real point of a real band carrying the ordinal the response that served it named; they now travel with their ordinals and read the same lookup texture. And the colour walk stopped at the artifact channel's latest served set, which is 200 ms behind the gesture, so a band arriving from the point path named artifacts the colour map had never seen and a band held under a coarser cut named artifacts the channel had moved off — a parent walk cannot go down. The session table now carries each entry's `centroid` from whichever response's frame named it, and the store colours **every live ordinal**. Measured below |
+| 10 | the text is quite hard to read — bigger, wrapped to smaller widths, more of a border against the coloured points | **done**: the name's size band raised to the boards' own (`gen.py`'s `datamap_layers`, `12 + 10·√(count/max)` — 12–22 px, was 10–15); a name wraps on words to at most three lines of fourteen characters, the count beside the last line and the topic beneath, with the **wrapped** box driving the spatial hash and the 40 px displacement rule; the halo is the distance field's, which needed a padded atlas before it could draw at all. Measured below |
 
 **Measured at the review** (2026-08-26, harness headed on 2m4's full principal; re-run before
 quoting): decode as seen from the main thread median 21.9 ms, p95 88 ms; the largest response
@@ -134,6 +136,38 @@ placement unchanged and the candidates cut to what has text and to the budget. T
 (k-means, 64 hulls in view) draws no hull at rest, one while hovered, one strong while opened.
 Harness **9 of 9** headed, `modes.mjs` **15 of 15**, `smoke`, `smoke-artifacts`, `smoke-budget` OK.
 
+**Measured for colour on a zoom in** (2026-08-26, headed Chromium 1208 on notebook-2m4's full
+preset at 1440 × 900, five zoom notches from the overview at 260 wheel units each; the probe's
+`view.provisional` and `cluster.coverage`; re-run before quoting). Bands that go **colour-stale**,
+which is what retracts a tile and refetches it: 1,572 of 15,018 when colour by cluster is first
+chosen and 2,267 of 15,006 at the first notch, then 0 — **0 at every one of the six points after**.
+Stand-in marks drawn neutral, mid-zoom before the settle: 748,282 then 2,702,504 (of 4,841,708 on
+screen — 56%) then 1,676,221 then 1,156,345 — **none after, at any notch**. The costs are
+unchanged: the lookup texture is rewritten on the table's version as well as the served set's, which
+is O(table range) and measured at 0.10–0.20 ms a settle; the coverage check is 4.4–9.0 ms over
+15,018–41,862 bands.
+
+**The one deviation from §5.10, reported rather than taken quietly.** The design defines a band as
+colour-current when every ordinal it carries "resolves to something served now", and the store now
+resolves against the **colours** — every artifact the session table holds — instead. Resolving
+against the channel's served set made every band in view stale the moment a zoom moved the cut
+finer, refetching tiles that had just arrived and drawing them neutral until they came back. A band
+whose ordinals resolve to an artifact the table holds is coloured, exactly, by an artifact the wire
+said its points belong to, so it needs no refetch to be correct; what stays stale is what
+staleness is for — a band with no column for a layer just switched on (the harness's layer-switch
+refill still measures it), and one whose parent chain was never seen. The design is the
+controller's file and is not edited here.
+
+**Measured for the labels** (same run and viewport). Labels placed: 26 → **31** at the overview,
+46 → **68** at the first notch, 52 → **85** three notches in — wrapping narrows the box the spatial
+hash packs against, so raising the size band placed more names rather than fewer. The name's size
+band is 12–22 px (was 10–15); a line is at most fourteen characters over at most three lines; the
+halo is 0.16 em, which is 1.9 px on the smallest name and 3.5 px on the largest. The halo needed
+the atlas, not the prop: deck divides `outlineWidth` by `fontSettings.radius` and clips the glyph's
+distance field at `fontSettings.buffer` atlas pixels — 4 at a 64 px atlas by default — so the
+previous `outlineWidth: 2.5` could draw about **a third of a pixel** on a 12 px name whatever it
+said. `fontSettings.buffer` is 12 now. Label placement stays O(artifacts): 0.30–0.40 ms a settle.
+
 **Found and not fixed here** (the server or the corpus): the server cuts a nested tree at one
 depth, so the overview's `artifact_budget` cannot ask for the first split of a wide root without
 also paying for the depth beneath it (S9); the wire gives a dependent artifact no centroid and no
@@ -144,6 +178,19 @@ itself; 170 of toponymy's 797 artifacts name a parent that is not served alongsi
 client draws them as roots; the notebook 50,000 corpus counts zero — every tile arrives without
 counts and the strip reads `0 shown · 0 matched · 0 visible` while 49,944 marks draw (present
 before this track's changes; the 2.4M corpus counts).
+
+**Gate after points 9 and 10** (2026-08-26): `check-clients.sh` green (core 228 with 6 skipped,
+deck 80, components 69, react 10, spike 5, wire-example 7, plain-html 4, canvas-store 3);
+`check-doc-links.py` clean; harness **9 of 9** headed on notebook-2m4, `modes.mjs` **15 of 15**;
+`smoke` OK on notebook-2m4, `smoke-artifacts` OK on 2m4, `smoke-budget` OK on notebook-2m4. The
+smoke scripts now excuse the one console error a healthy run produces — Chromium's
+`ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the driver abandoned when the view
+moved, which the harness has exempted since step 3 and which failed `smoke.mjs` on `main` too.
+`smoke-artifacts` runs its layer × principal grid, which is twenty-five settles on notebook-2m4's
+five layers and does not finish inside a ten-minute budget there; it is run on 2m4, as at the
+review. The harness's fourth claim — no count against a stale view — is **timing-dependent**: it
+failed twice and then passed three times on the same tree, and its evidence now reports how many
+revalidations had their key moved, so a run that fails says which half of the claim went.
 
 ## What each step owes a measurement
 
