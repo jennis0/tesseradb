@@ -72,6 +72,17 @@ export class TesseraLegend extends TesseraElement {
     emit(this, 'tessera-colourchange', {colourBy: chosen});
   }
 
+  /** The level the map colours and labels at: `null` is the deepest served (the cut's leaves). */
+  @property({type: Number, attribute: 'cluster-level'}) accessor level: number | null = null;
+  /** The level drawn when none is chosen (the explorer's, from the budget); shown in the first option. */
+  @property({type: Number, attribute: false}) accessor autoLevel: number | null = null;
+
+  private chooseLevel(value: string): void {
+    const level = value === '' ? null : Number(value);
+    this.level = level;
+    emit(this, 'tessera-levelchange', {level});
+  }
+
   private chooseLayers(value: string): void {
     const s = this.resolvedStore;
     if (!s) return;
@@ -108,10 +119,31 @@ export class TesseraLegend extends TesseraElement {
             </select></div>
         </div>`
       : nothing;
+    // The level select follows what the cut served: the depths present in the served tree of the
+    // colouring layer, titled from `meta.levels` where the layer is tiered, else *level N*.
+    const cluster = clusterLayerOf(colourBy);
+    const clusterMeta = cluster ? meta.layers.find((l) => l.name === cluster) : null;
+    const depths = new Set<number>();
+    if (cluster) {
+      for (const x of artifacts.served) {
+        if (x.layer !== cluster) continue;
+        const e = artifacts.table.entry(artifacts.table.ordinalOf(x.layer, x.tesseraId));
+        if (e) depths.add(e.level);
+      }
+    }
+    const levelsServed = [...depths].sort((x, y) => x - y);
+    const levelSelect =
+      this.selectable && cluster && levelsServed.length > 1
+        ? html`<div class="col" style="margin-top:8px"><span class="xs muted">Level</span>
+            <select part="level-select" aria-label="Level" @change=${(e: Event) => this.chooseLevel((e.target as HTMLSelectElement).value)}>
+              <option value="" ?selected=${this.level === null}>${this.autoLevel === null ? 'deepest served' : `auto · ${clusterMeta?.levels.find((x) => x.level === this.autoLevel)?.title ?? `level ${this.autoLevel}`}`}</option>
+              ${levelsServed.map((l) => html`<option value=${l} ?selected=${this.level === l}>${clusterMeta?.levels.find((x) => x.level === l)?.title ?? `level ${l}`}</option>`)}
+            </select></div>`
+        : nothing;
     const heading = this.selectable ? nothing : html`<h2 part="title">Colour</h2>`;
     const swatch = (c: Rgba | readonly number[], text: string, title = '') =>
       html`<div class="row"><span part="swatch" style=${`background:${rgb(c as Rgba)}`}></span><span class="v" title=${title}>${text}</span></div>`;
-    const wrap = (body: unknown) => html`<div class="panel">${heading}${selects}${body}</div>`;
+    const wrap = (body: unknown) => html`<div class="panel">${heading}${selects}${levelSelect}${body}</div>`;
     if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
 
     if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);

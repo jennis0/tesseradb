@@ -1,7 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
-import {artifactName} from '@tesseradb/deck';
+import {attachedTopics, displayName} from '@tesseradb/deck';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState} from './states.js';
@@ -70,7 +70,8 @@ export class TesseraArtifactList extends TesseraElement {
     if (a.served.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in this view</span></div>`;
     const stale = this.resolvedStore?.get('status').stale ?? false;
     const opened = this.resolvedStore?.get('selection').artifact?.id ?? null;
-    const listed = flatten(a.lineage);
+    const topics = attachedTopics(a, this.resolvedStore?.get('meta') ?? null);
+    const listed = flatten(a.lineage).filter(({artifact}) => !topics.size || !(this.resolvedStore?.get('meta')?.layers.find((l) => l.name === artifact.layer)?.depsOn.length));
     const shown = listed.slice(0, this.rows);
     const n = a.lineage.linked ? a.lineage.roots.length : a.served.length;
     return html`<div class="panel">${heading(`${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`)}
@@ -92,7 +93,7 @@ export class TesseraArtifactList extends TesseraElement {
               if (e.key === 'Enter' || e.key === ' ') this.open(artifact);
             }}
           >
-            <span part="name" class="name" title=${artifact.layer}>${artifactName(artifact)}</span>
+            <span part="name" class="name" title=${artifact.layer}>${displayName(artifact, topics)}</span>
             <tessera-count part="count" .masked=${masked} .stale=${stale}></tessera-count>
           </li>`;
         })}

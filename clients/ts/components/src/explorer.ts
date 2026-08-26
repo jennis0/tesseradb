@@ -2,7 +2,8 @@ import {ContextProvider} from '@lit/context';
 import {css, html, nothing} from 'lit';
 import {property, state} from 'lit/decorators.js';
 import type {Store} from '@tesseradb/client';
-import {activeCount, emptyDraft} from '@tesseradb/client';
+import {activeCount, artifactBudgetFor, emptyDraft, levelForBudget} from '@tesseradb/client';
+import {clusterLayerOf} from '@tesseradb/deck';
 import {TesseraElement} from './base.js';
 import {storeContext} from './context.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -280,6 +281,8 @@ export class TesseraExplorer extends TesseraElement {
   @property({attribute: 'tooltip-fields'}) accessor tooltipFields = '';
   @property({type: Number}) accessor budget = 0;
   @state() accessor sheet: Sheet | null = null;
+  /** The level chosen through the legend's select; the map colours and labels at it. */
+  @state() accessor level: number | null = null;
 
   private provider = new ContextProvider(this, {context: storeContext, initialValue: null});
   /** Which of the two selections changed last — what the detail region shows. */
@@ -326,11 +329,16 @@ export class TesseraExplorer extends TesseraElement {
     const active = s ? activeCount(s.get('filters').draft) : 0;
     const artifacts = s?.get('artifacts');
     const inView = artifacts && artifacts.status === 'shown' ? (artifacts.lineage.linked ? artifacts.lineage.roots.length : artifacts.served.length) : 0;
+    // The level drawn: the one chosen through the legend, else — for a tiered layer the server
+    // served whole — the level the view's budget would have cut at (design §6), else the deepest
+    // served. The legend shows which; the map colours, outlines and labels at it.
+    const autoLevel = this.autoLevel();
+    const level = this.level ?? autoLevel;
     const hasDetail = Boolean(selection?.item || selection?.artifact || selection?.artifactRefusal || selection?.itemRefusal || this.map?.lastPick);
     // The detail region shows whichever changed last.
     const showArtifact = this.lastDetail === 'artifact' && (selection?.artifact || selection?.artifactRefusal);
     const detail = html`<slot name="detail">${showArtifact ? html`<tessera-artifact-card></tessera-artifact-card>` : html`<tessera-item-card .pick=${this.map?.lastPick ?? null}></tessera-item-card>`}</slot>`;
-    const toolbar = html`<slot name="toolbar"><tessera-legend selectable></tessera-legend></slot>`;
+    const toolbar = html`<slot name="toolbar"><tessera-legend selectable .level=${this.level} .autoLevel=${autoLevel} @tessera-levelchange=${(e: CustomEvent<{level: number | null}>) => (this.level = e.detail.level)}></tessera-legend></slot>`;
     const layersPanel = html`<slot name="layers"><tessera-layer-picker></tessera-layer-picker></slot>`;
     const filters = html`<slot name="filters"><tessera-filter-panel></tessera-filter-panel></slot>`;
     const list = html`<slot name="artifacts"><tessera-artifact-list></tessera-artifact-list></slot>`;
@@ -382,6 +390,8 @@ export class TesseraExplorer extends TesseraElement {
         tooltip-fields=${this.tooltipFields}
         budget=${this.budget || nothing}
         controls-corner=${this.layout === 'overlay' ? 'top-right' : 'top-left'}
+        .clusterLevel=${level}
+        @tessera-viewchange=${() => this.requestUpdate()}
         @tessera-pick=${() => this.requestUpdate()}
         @tessera-hover=${() => nothing}
         @click=${() => this.requestUpdate()}
@@ -400,6 +410,27 @@ export class TesseraExplorer extends TesseraElement {
       </div>
       ${meta ? nothing : nothing}
     </div>`;
+  }
+
+  /** See `render`: the level a tiered layer draws at when nothing was chosen. */
+  private autoLevel(): number | null {
+    const s = this.resolvedStore;
+    const meta = s?.get('meta');
+    const a = s?.get('artifacts');
+    if (!s || !meta || !a) return null;
+    const layer = clusterLayerOf(s.get('legend').colourBy) ?? a.layers[0] ?? null;
+    const declared = layer ? meta.layers.find((l) => l.name === layer) : null;
+    if (!declared || declared.levels.length === 0) return null;
+    const counts: number[] = [];
+    for (const x of a.served) {
+      if (x.layer !== layer) continue;
+      const e = a.table.entry(a.table.ordinalOf(x.layer, x.tesseraId));
+      if (!e) continue;
+      counts[e.level] = (counts[e.level] ?? 0) + 1;
+    }
+    for (let i = 0; i < counts.length; i++) counts[i] ??= 0;
+    if (counts.length <= 1) return null;
+    return levelForBudget(counts, artifactBudgetFor(this.map?.zoom ?? 0));
   }
 
   /** The card's `×`: drop the selection it shows. */

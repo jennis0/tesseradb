@@ -12,6 +12,7 @@ import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
 import {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, type WorldPolygon} from './region.js';
 import {layerClosure} from './layers.js';
+import {artifactBudgetFor} from './artifactBudget.js';
 import {artifactColours, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
 import type {Band, BandKey} from './bands.js';
 import {bandKey} from './bands.js';
@@ -407,9 +408,12 @@ export function createStore(options: StoreOptions): Store {
         // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on
         // — and `[]` on the replica's counts-only revalidation, which absorbs no points and would
         // pay the artifact pass for a frame nobody reads.
+        // The point path carries the same budget as the channel, so a point's membership column
+        // names the deepest artifact of the *same* cut the panels show.
+        const zoom = presenter?.view?.view.zoom ?? 0;
         return client.viewport(
           tok,
-          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn},
+          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn, ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)})},
           signal,
           background
         );
@@ -530,6 +534,9 @@ export function createStore(options: StoreOptions): Store {
       served += tile.counts.served;
     }
 
+    // A frame on screen ends *Starting session…*: the session answered, whatever the driver's
+    // status says about the request still streaming.
+    if (!projections.status.sessionWarm && frame.exactDrawn + frame.provisional > 0) replaceProjection('status', {...projections.status, sessionWarm: true});
     replaceProjection('view', {
       composition: frame,
       depth: frame.depth,

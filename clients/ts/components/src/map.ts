@@ -733,6 +733,11 @@ export class TesseraMap extends TesseraElement {
     this.pushView();
   }
 
+  /** The camera's zoom: 0 when the 512-unit world fills 512 px, +1 per doubling. */
+  get zoom(): number {
+    return this.viewState.zoom;
+  }
+
   /** Fit the whole extent. */
   fit(): void {
     const {width, height} = this.size;

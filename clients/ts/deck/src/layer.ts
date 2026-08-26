@@ -4,7 +4,6 @@ import {
   CLUSTER_PREFIX,
   NEUTRAL,
   NO_ORDINAL,
-  GRID32_PER_WORLD_UNIT as GRID32_PER_WORLD,
   gridToWorld,
   gridToWorldXY,
   type Artifact,
@@ -246,12 +245,14 @@ const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]}>();
 
-type OutlineDatum = {id: bigint; polygon: [number, number][]; colour: Rgba; opened: boolean};
+type OutlineDatum = {id: bigint; polygon: [number, number][]; colour: Rgba; opened: boolean; depth: number; height: number};
 type LabelDatum = {id: bigint; position: [number, number]; text: string; size: number; offset: [number, number]; colour: Rgba; kind: 'name' | 'count' | 'topic'};
 type LeaderDatum = {from: [number, number]; to: [number, number]};
 
 /** The faint outline's alpha per ground: the boards' 0.16 on light, 0.22 on dark. */
 const HAIRLINE_ALPHA: Record<'light' | 'dark', number> = {light: 44, dark: 60};
+/** The base fill alpha of a contour per ground; each level down adds a little. */
+const FILL_ALPHA: Record<'light' | 'dark', number> = {light: 6, dark: 10};
 
 /** What to call an artifact: its supplied text where the layer publishes any, else its key. */
 export function artifactName(a: Artifact): string {
@@ -260,12 +261,103 @@ export function artifactName(a: Artifact): string {
   return a.key ?? `#${a.tesseraId}`;
 }
 
-/** A served artifact's outline in world space: its hull, else its box, else nothing. */
-export function outlineOf(a: Artifact): [number, number][] | null {
+/**
+ * Chaikin's corner cutting, `iterations` times, on a closed polygon: each edge is replaced by its
+ * quarter and three-quarter points, so a hull's corners round off into the boards' contours
+ * while every vertex stays inside the hull's own convex extent. Exact geometry from the wire,
+ * smoothed — nothing is contoured from marks (decision 0099).
+ */
+export function smoothClosed(polygon: readonly [number, number][], iterations = 3): [number, number][] {
+  let out = polygon.slice() as [number, number][];
+  for (let it = 0; it < iterations && out.length >= 3; it++) {
+    const next: [number, number][] = [];
+    for (let i = 0; i < out.length; i++) {
+      const a = out[i]!;
+      const b = out[(i + 1) % out.length]!;
+      next.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]], [0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+    }
+    out = next;
+  }
+  return out;
+}
+
+/** A served artifact's outline in world space: its hull, else its box, else nothing — smoothed. */
+export function outlineOf(a: Artifact, smooth = true): [number, number][] | null {
   const w = gridToWorld;
-  if (a.hull && a.hull.length >= 3) return a.hull.map(gridToWorldXY);
-  if (a.box) return [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
-  return null;
+  let raw: [number, number][] | null = null;
+  if (a.hull && a.hull.length >= 3) raw = a.hull.map(gridToWorldXY);
+  else if (a.box) raw = [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
+  if (!raw) return null;
+  return smooth ? smoothClosed(raw) : raw;
+}
+
+/**
+ * The text a dependent layer's artifacts (a clustering's topic labels) attach to the served
+ * artifacts of their generating layer. A dependent artifact carries its target's masked count
+ * and no id (D13), and no centroid on this wire: it is attached to the served artifact of its
+ * generating layer with the same count, and left unattached where two share one — a count is
+ * not an identity. A target id on the wire (S4's drill-down route, awaiting a ruling) would make
+ * this exact.
+ */
+export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<bigint, string> {
+  const topicOf = new Map<bigint, string>();
+  if (!meta) return topicOf;
+  const dependent = new Set(meta.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name));
+  const byCount = new Map<string, Artifact[]>();
+  for (const x of a.served) {
+    if (dependent.has(x.layer)) continue;
+    const k = `${x.layer}|${x.maskedCount}`;
+    (byCount.get(k) ?? byCount.set(k, []).get(k)!).push(x);
+  }
+  for (const t of a.served) {
+    if (!dependent.has(t.layer) || t.content.length === 0) continue;
+    const generating = meta.layers.find((l) => l.name === t.layer)?.depsOn ?? [];
+    for (const g of generating) {
+      const targets = byCount.get(`${g}|${t.maskedCount}`);
+      if (targets && targets.length === 1) topicOf.set(targets[0]!.tesseraId, t.content[0]!);
+    }
+  }
+  return topicOf;
+}
+
+/** What to call a served artifact where a topic is attached and it has no name of its own. */
+export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string {
+  if (artifact.content.length > 0) return artifactName(artifact);
+  return topics.get(artifact.tesseraId) ?? artifactName(artifact);
+}
+
+/**
+ * How far each served artifact stands above the deepest served descendant beneath it (a leaf is
+ * 0), within the levels drawn — the fill fades with this, not with depth from the root.
+ */
+export function heightsBelow(a: ArtifactsProjection, depths: Map<bigint, number>, level: number | undefined): Map<bigint, number> {
+  const height = new Map<bigint, number>();
+  const drawn = (id: bigint) => level === undefined || (depths.get(id) ?? 0) <= level;
+  const of = (id: bigint, guard = 0): number => {
+    const known = height.get(id);
+    if (known !== undefined) return known;
+    let h = 0;
+    if (guard < 1024) for (const c of a.lineage.childrenOf.get(id) ?? []) if (drawn(c.tesseraId)) h = Math.max(h, of(c.tesseraId, guard + 1) + 1);
+    height.set(id, h);
+    return h;
+  };
+  for (const artifact of a.served) if (drawn(artifact.tesseraId)) of(artifact.tesseraId);
+  return height;
+}
+
+/** The depth of each served artifact in the served tree: a root is 0, a child one deeper. */
+export function servedDepths(a: ArtifactsProjection): Map<bigint, number> {
+  const depth = new Map<bigint, number>();
+  const of = (id: bigint, guard = 0): number => {
+    const known = depth.get(id);
+    if (known !== undefined) return known;
+    const artifact = a.lineage.byId.get(id);
+    const parent = artifact && artifact.parentId !== null && a.lineage.byId.has(artifact.parentId) && guard < 1024 ? of(artifact.parentId, guard + 1) + 1 : 0;
+    depth.set(id, parent);
+    return parent;
+  };
+  for (const artifact of a.served) of(artifact.tesseraId);
+  return depth;
 }
 
 export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
@@ -661,15 +753,22 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const started = performance.now();
     const opened = this.props.openedArtifact ?? null;
     const scheme = this.props.scheme ?? 'dark';
-    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${scheme}` : '';
+    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldOutlines.get(a.served) : undefined;
     if (a && (!held || held.key !== key)) {
       const data: OutlineDatum[] = [];
-      for (const artifact of a.served) {
+      const depths = servedDepths(a);
+      const level = this.props.clusterLevel;
+      // Parents first, so a child's fill draws over its parent's and nesting reads as levels.
+      const ordered = [...a.served].sort((x, y) => (depths.get(x.tesseraId) ?? 0) - (depths.get(y.tesseraId) ?? 0));
+      const heights = heightsBelow(a, depths, level);
+      for (const artifact of ordered) {
+        const depth = depths.get(artifact.tesseraId) ?? 0;
+        if (level !== undefined && depth > level) continue;
         const polygon = outlineOf(artifact);
         if (!polygon) continue;
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
-        data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened: artifact.tesseraId === opened});
+        data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened: artifact.tesseraId === opened, depth, height: heights.get(artifact.tesseraId) ?? 0});
       }
       held = {key, data};
       heldOutlines.set(a.served, held);
@@ -686,7 +785,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           data,
           getPolygon: (d: OutlineDatum) => d.polygon,
           filled: true,
-          getFillColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 18] : [0, 0, 0, 0]),
+          // A faint tint that is strongest at the cut's leaves and fades over the ancestors above
+          // them, so nesting reads as the boards' contours and a deep chain of near-identical
+          // hulls (HDBSCAN's condensed tree) does not stack into a wash; the opened one stronger.
+          getFillColor: (d: OutlineDatum) => [d.colour[0], d.colour[1], d.colour[2], d.opened ? 28 : Math.max(0, FILL_ALPHA[scheme] - 3 * d.height)],
           stroked: true,
           getLineColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 200] : [d.colour[0], d.colour[1], d.colour[2], HAIRLINE_ALPHA[scheme]]),
           lineWidthUnits: 'pixels' as const,
@@ -714,7 +816,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const started = performance.now();
     const zoom = viewport?.zoom ?? 0;
     const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
-    const key = a ? `${a.version}|${a.palette}|${bucket}` : '';
+    const key = a ? `${a.version}|${a.palette}|${bucket}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldLabels.get(a.served) : undefined;
     if (a && viewport && (!held || held.key !== key)) {
       const placed = a.served.filter((x) => x.centroid !== null);
@@ -722,8 +824,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       // name of whatever they sit on, italic and small, and are placed with it: they are not
       // candidates of their own (§5.10, D13).
       const dependent = new Set(r.meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-      const topics = placed.filter((x) => dependent.has(x.layer));
-      const named = placed.filter((x) => !dependent.has(x.layer));
+      const topicOf = attachedTopics(a, r.meta);
+      const depths = servedDepths(a);
+      const level = this.props.clusterLevel;
+      // At a chosen level, the names are that level's; else the deepest served (the cut's leaves).
+      const leaves = new Set(a.served.filter((x) => !a.lineage.childrenOf.has(x.tesseraId)).map((x) => x.tesseraId));
+      const named = placed.filter((x) => !dependent.has(x.layer) && (level !== undefined ? (depths.get(x.tesseraId) ?? 0) === level : leaves.has(x.tesseraId)));
       const largest = named.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
       const scale = 2 ** zoom; // pixels per world unit
       const candidates: LabelCandidate[] = [];
@@ -731,26 +837,20 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       for (const artifact of named) {
         const count = Number(artifact.maskedCount);
         const size = labelSize(count, largest);
-        const name = artifactName(artifact);
+        const name = artifact.content.length > 0 ? artifactName(artifact) : (topicOf.get(artifact.tesseraId) ?? artifactName(artifact));
         const countText = count.toLocaleString('en-GB');
-        // The topic beneath: the dependent artifact nearest this centroid, within a label's reach.
-        let topic: string | null = null;
-        let best = Infinity;
-        for (const t of topics) {
-          const d = Math.hypot(t.centroid![0] - artifact.centroid![0], t.centroid![1] - artifact.centroid![1]) * (scale / GRID32_PER_WORLD);
-          if (d < best && d < size * 6) {
-            best = d;
-            topic = t.content[0] ?? null;
-          }
-        }
+        // A cluster with no name of its own takes its topic as the name (a labelled clustering);
+        // one with both draws the topic beneath in italic (the boards).
+        const attached = topicOf.get(artifact.tesseraId) ?? null;
+        const topic = artifact.content.length > 0 ? attached : null;
         byId.set(artifact.tesseraId, {artifact, name, countText, size, topic});
-        const width = (name.length * 0.56 + countText.length * 0.5 + 2) * size + 8;
+        const width = (name.length * 0.62 + countText.length * 0.55 + 2) * size + 8;
         candidates.push({
           id: artifact.tesseraId,
           x: gridToWorld(artifact.centroid![0]) * scale,
           y: gridToWorld(artifact.centroid![1]) * scale,
           width: Math.max(width, topic ? topic.length * 11 * 0.5 : 0),
-          height: size * 1.35 + (topic ? 13 : 0),
+          height: size * 1.5 + (topic ? 14 : 0),
           priority: count
         });
       }

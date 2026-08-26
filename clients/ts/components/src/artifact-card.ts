@@ -1,7 +1,7 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import type {Artifact, ArtifactDetail, Masked, Refusal} from '@tesseradb/client';
-import {artifactName} from '@tesseradb/deck';
+import {attachedTopics, displayName} from '@tesseradb/deck';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
@@ -99,7 +99,9 @@ export class TesseraArtifactCard extends TesseraElement {
       return html`<div class="panel">${heading}<span part="state" data-state="empty">No cluster selected</span></div>`;
     }
     const s = this.resolvedStore;
-    const served = s?.get('artifacts').served ?? [];
+    const artifacts = s?.get('artifacts');
+    const served = artifacts?.served ?? [];
+    const topics = artifacts ? attachedTopics(artifacts, s?.get('meta') ?? null) : new Map<bigint, string>();
     // A live projection read: the artifact's own row and its children are whatever the channel
     // has served for the view *now*, and this renders again on every answer.
     const here = served.find((a) => a.tesseraId === artifact.id);
@@ -109,9 +111,9 @@ export class TesseraArtifactCard extends TesseraElement {
     const id = idString(artifact.id);
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
-      <div part="headline" class="card-title">${here ? artifactName(here) : (artifact.detail.key ?? `#${id}`)}</div>
+      <div part="headline" class="card-title">${here ? displayName(here, topics) : (artifact.detail.key ?? `#${id}`)}</div>
       <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members visible to you"></tessera-count></div>
-      ${here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
+      ${here && here.content.length > 0 && topics.has(here.tesseraId) ? html`<p part="content">${topics.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       <div class="field">
         <div class="k">layer</div><div part="value" class="v">${artifact.detail.layer}</div>
         ${artifact.detail.key ? html`<div class="k">key</div><div part="value" class="v">${artifact.detail.key}</div>` : nothing}
@@ -121,7 +123,7 @@ export class TesseraArtifactCard extends TesseraElement {
             <ul part="children" class="list">
               ${children.map(
                 (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)}>
-                  <span part="name" class="name">${artifactName(c)}</span>
+                  <span part="name" class="name">${displayName(c, topics)}</span>
                   <tessera-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
               )}

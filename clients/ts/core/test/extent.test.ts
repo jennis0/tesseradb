@@ -5,6 +5,7 @@ import type {FrameScheduler} from '../src/presented.js';
 import {GRID32, gridToWorld, WORLD_SIZE} from '../src/coords.js';
 import {outlineOf} from '../../deck/src/layer.js';
 import {createStore} from '../src/store.js';
+import {artifactBudgetFor} from '../src/artifactBudget.js';
 import type {Artifact, Meta, ViewportResponse, ViewportResult} from '../src/types.js';
 
 /**
@@ -130,6 +131,13 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     scheduler.flush();
     await clock.advance(600);
     expect(store.get('artifacts').served.map((a) => a.tesseraId)).toEqual([7n]);
+    // Both asks — the channel's `k = 0` and the point path's — carry the view's artifact budget.
+    const asks = (client.viewport as unknown as {mock: {calls: [string, {k?: number; layers?: string[]; artifactBudget?: number}][]}}).mock.calls.map((c) => c[1]);
+    const channel = asks.filter((r) => r.k === 0 && Array.isArray(r.layers) && r.layers.length > 0);
+    const points = asks.filter((r) => r.k !== 0);
+    expect(channel.length).toBeGreaterThan(0);
+    expect(points.length).toBeGreaterThan(0);
+    for (const r of [...channel, ...points]) expect(r.artifactBudget).toBe(artifactBudgetFor(Math.log2(800 / 512)));
 
     const extent = store.extentOf(7n)!;
     expect(extent).not.toBeNull();
@@ -141,7 +149,7 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     for (const v of extent) expect(v).toBeLessThanOrEqual(200);
 
     // The same box, as the outline draws it: world units, one conversion for both readers.
-    const outline = outlineOf(FAR)!;
+    const outline = outlineOf(FAR, false)!;
     expect(outline[0]).toEqual([gridToWorld(FAR.box![0]), gridToWorld(FAR.box![1])]);
     expect(outline[0]![0]).toBeCloseTo(WORLD_SIZE * 0.75, 6);
     const [wx0, wy0] = outline[0]!;
