@@ -248,6 +248,7 @@ export class TesseraMap extends TesseraElement {
   private announcedItem: object | null = null;
   private announcedArtifact: object | null = null;
   private dragStart: [number, number] | null = null;
+  private dragPointer: number | null = null;
   private metaSeen = false;
   private frameGaps: number[] = [];
   private frameLoop: number | null = null;
@@ -586,6 +587,18 @@ export class TesseraMap extends TesseraElement {
     return [xy[0]!, xy[1]!];
   }
 
+  /**
+   * The selection gestures are taken in the **capture phase, before deck's own input layer sees
+   * them**. deck (mjolnir/hammer) listens for `pointerdown` on its canvas and for the move and
+   * up on `window`; the old handlers ran on the canvas's parent in the bubble phase and stopped
+   * propagation there, so hammer saw every selection's `pointerdown` and never its `pointerup`.
+   * Its input session stayed pressed: the next mouse movement — button up, on the way to the
+   * *pan* button — read as a drag, the camera followed the pointer once the controller was back
+   * on, and the real pan drag that followed did nothing because hammer's session was already in
+   * flight. Found with human-paced pointer input in a real browser; the fast synthetic drag did
+   * not stay pressed long enough to show it. Stopping the `pointerdown` before it reaches the
+   * canvas means hammer never opens a session for a selection, so there is nothing to close.
+   */
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
     const lasso = this.mode === 'lasso';
@@ -593,14 +606,16 @@ export class TesseraMap extends TesseraElement {
     const at = this.unproject(e);
     if (!at) return;
     this.dragStart = at;
+    this.dragPointer = e.pointerId;
     if (lasso) this.dragPolygon = [at];
     else this.drag = [at[0], at[1], at[0], at[1]];
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.stopPropagation();
+    e.preventDefault();
   };
 
   private onPointerMove = (e: PointerEvent): void => {
-    if (!this.dragStart) return;
+    if (!this.dragStart || e.pointerId !== this.dragPointer) return;
     const at = this.unproject(e);
     if (!at) return;
     if (this.dragPolygon) {
@@ -616,13 +631,16 @@ export class TesseraMap extends TesseraElement {
   };
 
   private onPointerUp = (e: PointerEvent): void => {
-    if (!this.dragStart) return;
+    if (!this.dragStart || e.pointerId !== this.dragPointer) return;
     const box = this.drag;
     const polygon = this.dragPolygon;
     this.dragStart = null;
+    this.dragPointer = null;
     this.drag = null;
     this.dragPolygon = null;
     e.stopPropagation();
+    // A cancel, or a capture lost to the platform, ends the gesture and selects nothing.
+    if (e.type !== 'pointerup') return;
     const s = this.resolvedStore;
     if (!s || !s.get('meta')) return;
     if (polygon) {
@@ -765,20 +783,21 @@ export class TesseraMap extends TesseraElement {
     const overlay = state === 'shown' || state === 'stale' || state === 'detached' ? nothing : html`<div part="overlay">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>`;
     return html`<div
         part="canvas"
-        @pointerdown=${this.onPointerDown}
-        @pointermove=${this.onPointerMove}
-        @pointerup=${this.onPointerUp}
-        @pointercancel=${this.onPointerUp}
+        @pointerdown=${{handleEvent: this.onPointerDown, capture: true}}
+        @pointermove=${{handleEvent: this.onPointerMove, capture: true}}
+        @pointerup=${{handleEvent: this.onPointerUp, capture: true}}
+        @pointercancel=${{handleEvent: this.onPointerUp, capture: true}}
+        @lostpointercapture=${{handleEvent: this.onPointerUp, capture: true}}
       ></div>
       ${state === 'stale' ? html`<div part="overlay" style="align-items:flex-start;justify-content:center">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>` : overlay}
       <div class="corner top-left">
         ${this.noControls
           ? nothing
           : html`<div part="controls" role="toolbar" aria-label="map mode">
-              <button type="button" aria-pressed=${this.mode === 'pan'} title="pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>pan</button>
-              <button type="button" aria-pressed=${this.mode === 'box'} title="drag a box to select" @click=${() => (this.mode = 'box')}>box</button>
-              <button type="button" aria-pressed=${this.mode === 'lasso'} title="draw a shape to select" @click=${() => (this.mode = 'lasso')}>lasso</button>
-              <button type="button" title="fit the whole extent" @click=${() => this.fit()}>fit</button>
+              <button type="button" aria-label="Pan" aria-pressed=${this.mode === 'pan'} title="Pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>pan</button>
+              <button type="button" aria-label="Box select" aria-pressed=${this.mode === 'box'} title="Box select" @click=${() => (this.mode = 'box')}>box</button>
+              <button type="button" aria-label="Lasso select" aria-pressed=${this.mode === 'lasso'} title="Lasso select" @click=${() => (this.mode = 'lasso')}>lasso</button>
+              <button type="button" aria-label="Fit to extent" title="Fit to extent" @click=${() => this.fit()}>fit</button>
             </div>`}
         <slot name="top-left"></slot>
       </div>
