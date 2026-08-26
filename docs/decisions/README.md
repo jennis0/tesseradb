@@ -119,3 +119,4 @@ prevent.
 | [0099](0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md) | 2026-08-25 | The map's look follows DataMapPlot, and colour by cluster is exact only |
 | [0100](0100-the-render-target-is-multi-million-marks-and-ten-thousand-artifacts.md) | 2026-08-25 | The render target is multi-million marks and 10⁴-plus artifacts a layer |
 | [0101](0101-the-client-is-never-responsible-for-disclosure.md) | 2026-08-24 | The client is never responsible for disclosure; its obligations are truthfulness |
+| [0102](0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md) | 2026-08-26 | The viewer plane gains an enumerated production CORS origin list; the session plane does not |

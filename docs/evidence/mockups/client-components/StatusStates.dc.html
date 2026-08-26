@@ -1,0 +1,150 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&amp;family=IBM+Plex+Sans+Condensed:wght@500;600&amp;family=IBM+Plex+Mono:wght@400;500&amp;display=swap"><style>
+  body { margin: 0; } a { color: #2457a3; } a:hover { color: #1a3f78; }
+  .tx { 
+  --tessera-surface: #fbfbfa; --tessera-surface-2: #f2f2ef; --tessera-surface-3: #e7e7e2;
+  --tessera-ink: #1c1f23; --tessera-ink-2: #555b63; --tessera-ink-3: #6f757d;
+  --tessera-line: #d6d6d0; --tessera-line-2: #e6e6e1;
+  --tessera-accent: #2457a3; --tessera-accent-ink: #ffffff; --tessera-accent-soft: #e4ecf8;
+  --tessera-warn: #7a5600; --tessera-warn-soft: #fff1cf;
+  --tessera-refuse: #a12b2b; --tessera-refuse-soft: #fbe5e5;
+  --tessera-ok: #226b44;
+  --tessera-map-bg: #f7f7f4; --tessera-map-grid: #e9e9e4;
+  --tessera-radius: 4px; --tessera-font: 'IBM Plex Sans', system-ui, sans-serif;
+  --tessera-font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+  --tessera-shadow: 0 1px 2px rgba(20,22,25,0.08), 0 4px 16px rgba(20,22,25,0.08);
+  --tessera-map-height: 420px;
+ }
+  .tx.dark { 
+  --tessera-surface: #151719; --tessera-surface-2: #1d2024; --tessera-surface-3: #272b30;
+  --tessera-ink: #e8eaec; --tessera-ink-2: #aab0b7; --tessera-ink-3: #868d95;
+  --tessera-line: #30353b; --tessera-line-2: #262a2f;
+  --tessera-accent: #86b0f0; --tessera-accent-ink: #0d1a2e; --tessera-accent-soft: #1f2d42;
+  --tessera-warn: #e6b84a; --tessera-warn-soft: #3a2e0e;
+  --tessera-refuse: #f29a9a; --tessera-refuse-soft: #3e1c1c;
+  --tessera-ok: #6cc38e;
+  --tessera-map-bg: #0c0e11; --tessera-map-grid: #191c20;
+  --tessera-shadow: 0 1px 2px rgba(0,0,0,0.4), 0 6px 20px rgba(0,0,0,0.45);
+ }
+
+  .tx { font-family: var(--tessera-font); color: var(--tessera-ink); background: var(--tessera-surface);
+        font-size: 13px; line-height: 1.45; -webkit-font-smoothing: antialiased; }
+  .tx * { box-sizing: border-box; }
+  .tx button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  .tx :focus-visible { outline: 2px solid var(--tessera-accent); outline-offset: 2px; }
+  .mono { font-family: var(--tessera-font-mono); font-variant-numeric: tabular-nums; }
+  .num { font-family: var(--tessera-font-mono); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .muted { color: var(--tessera-ink-2); }
+  .faint { color: var(--tessera-ink-3); }
+  .sm { font-size: 12px; }
+  .xs { font-size: 11px; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .col { display: flex; flex-direction: column; }
+  .grow { flex-grow: 1; }
+  .hd { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--tessera-ink-2); }
+
+  /* map */
+  .tx-map { position: relative; background: var(--tessera-map-bg); overflow: hidden; }
+  .tx-map .corner { position: absolute; display: flex; flex-direction: column; gap: 8px; }
+  .tx-map .tl { top: 12px; left: 12px; } .tx-map .tr { top: 12px; right: 12px; }
+  .tx-map .bl { bottom: 12px; left: 12px; } .tx-map .br { bottom: 12px; right: 12px; }
+  .ctl { display: flex; flex-direction: column; background: var(--tessera-surface); border: 1px solid var(--tessera-line);
+         border-radius: var(--tessera-radius); box-shadow: var(--tessera-shadow); overflow: hidden; }
+  .ctl button { width: 36px; height: 36px; display: grid; place-items: center; color: var(--tessera-ink-2);
+                border-bottom: 1px solid var(--tessera-line-2); }
+  .ctl button:last-child { border-bottom: 0; }
+  .ctl button.on { background: var(--tessera-accent-soft); color: var(--tessera-accent); }
+  .ctl .sep { height: 6px; background: var(--tessera-surface-2); border-bottom: 1px solid var(--tessera-line-2); }
+
+  /* status strip */
+  .tx-status { display: inline-flex; align-items: center; gap: 0; background: var(--tessera-surface);
+               border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius);
+               box-shadow: var(--tessera-shadow); height: 36px; font-size: 12px; white-space: nowrap; }
+  .tx-status > * { display: flex; align-items: center; gap: 6px; padding: 0 12px; height: 100%; }
+  .tx-status > * + * { border-left: 1px solid var(--tessera-line-2); }
+  .tx-status .badge { font-weight: 600; }
+  .tx-status .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tessera-ok); }
+  .tx-status .count { gap: 5px; }
+  .tx-status .count b { font-weight: 500; font-family: var(--tessera-font-mono); font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .tx-status .count span { color: var(--tessera-ink-2); }
+  .tx-status .warn { background: var(--tessera-warn-soft); color: var(--tessera-warn); font-weight: 600; }
+  .tx-status .refuse { background: var(--tessera-refuse-soft); color: var(--tessera-refuse); font-weight: 600; }
+  .tx-status .quiet { color: var(--tessera-ink-2); }
+  .tx-status button.act { padding: 0 10px; height: 26px; margin: 0 6px 0 0; border-radius: 3px; font-weight: 600; font-size: 12px;
+                          background: var(--tessera-accent); color: var(--tessera-accent-ink); display: inline-flex; align-items: center; gap: 6px; }
+  .tx-status.narrow > * { padding: 0 8px; }
+  .tx-status.narrow .count b { font-size: 12px; }
+  .tx-status .skel { display: inline-block; height: 10px; width: 44px; border-radius: 2px; background: var(--tessera-surface-3); }
+
+  /* panels */
+  .panel { border-bottom: 1px solid var(--tessera-line-2); padding: 14px 16px; }
+  .panel:last-child { border-bottom: 0; }
+  .panel .hd { margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; align-items: baseline; }
+  .kv .k { color: var(--tessera-ink-2); }
+  .kv .v { font-family: var(--tessera-font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px 0 8px; border-radius: 3px;
+          background: var(--tessera-accent-soft); color: var(--tessera-accent); font-size: 12px; font-weight: 500; }
+  .chip svg { opacity: 0.8; }
+  .input { white-space: nowrap; overflow: hidden; height: 30px; border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius); background: var(--tessera-surface);
+           padding: 0 10px; display: flex; align-items: center; gap: 8px; color: var(--tessera-ink); font-size: 13px; }
+  .input.ph { color: var(--tessera-ink-3); }
+  .select { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; height: 30px; border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius); background: var(--tessera-surface);
+            padding: 0 8px 0 10px; display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 13px; }
+  .seg { display: inline-flex; border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius); overflow: hidden; height: 28px; }
+  .seg button { padding: 0 10px; font-size: 12px; color: var(--tessera-ink-2); }
+  .seg button.on { background: var(--tessera-surface-3); color: var(--tessera-ink); font-weight: 600; }
+  .check { display: flex; align-items: center; gap: 8px; height: 26px; }
+  .check .bx { width: 15px; height: 15px; border: 1.5px solid var(--tessera-ink-3); border-radius: 3px; display: grid; place-items: center; }
+  .check .bx.on { background: var(--tessera-accent); border-color: var(--tessera-accent); color: var(--tessera-accent-ink); }
+  .radio { display: flex; align-items: center; gap: 8px; height: 26px; }
+  .radio .bx { width: 15px; height: 15px; border: 1.5px solid var(--tessera-ink-3); border-radius: 50%; display: grid; place-items: center; }
+  .radio .bx.on { border-color: var(--tessera-accent); }
+  .radio .bx.on::after { content: ''; width: 7px; height: 7px; border-radius: 50%; background: var(--tessera-accent); }
+  .sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+  .btn { height: 30px; padding: 0 12px; border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius);
+         display: inline-flex; align-items: center; gap: 6px; font-weight: 500; font-size: 12.5px; background: var(--tessera-surface); }
+  .btn.primary { background: var(--tessera-accent); color: var(--tessera-accent-ink); border-color: var(--tessera-accent); }
+  .btn.off { color: var(--tessera-ink-3); border-style: dashed; cursor: not-allowed; }
+  .list > .item { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 6px; border-radius: 3px; }
+  .list > .item.on { background: var(--tessera-accent-soft); }
+  .list > .item .n { margin-left: auto; font-family: var(--tessera-font-mono); font-variant-numeric: tabular-nums; color: var(--tessera-ink-2); font-size: 12px; }
+  .list > .item.child { padding-left: 24px; }
+  .card-title { font-size: 14.5px; font-weight: 600; line-height: 1.35; text-wrap: pretty; }
+  .field { display: grid; grid-template-columns: 112px 1fr; gap: 6px 12px; align-items: baseline; }
+  .field .k { color: var(--tessera-ink-2); font-size: 12px; }
+  .field .v { font-size: 13px; }
+  .tip { position: absolute; background: var(--tessera-surface); border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius);
+         box-shadow: var(--tessera-shadow); padding: 8px 10px; max-width: 260px; font-size: 12px; }
+  .state { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: var(--tessera-radius);
+           background: var(--tessera-surface-2); color: var(--tessera-ink-2); font-size: 12px; }
+  .state.refuse { background: var(--tessera-refuse-soft); color: var(--tessera-refuse); }
+  .state.warn { background: var(--tessera-warn-soft); color: var(--tessera-warn); }
+  .skel { display: inline-block; height: 10px; border-radius: 2px; background: var(--tessera-surface-3); }
+  .drawer { border-top: 1px solid var(--tessera-line-2); margin-top: 10px; padding-top: 10px; }
+  .sidebar { background: var(--tessera-surface); border-left: 1px solid var(--tessera-line); overflow: hidden; }
+  .float { background: var(--tessera-surface); border: 1px solid var(--tessera-line); border-radius: var(--tessera-radius); box-shadow: var(--tessera-shadow); }
+
+
+</style>
+</helmet>
+
+<div class="tx" style="width:960px; height:1200px; padding:28px 32px; display:flex; flex-direction:column; gap:22px;">
+  <div class="col" style="gap:4px"><div class="hd">tessera-status · compact</div>
+    <span class="sm muted">Every panel renders the same states through the same part. Strip is an aria-live region.</span></div>
+  <div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">detached</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="quiet" part="state">No data</div></div><span class="xs faint">No store and no data. Not "empty", not "refused".</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">session</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="badge quiet" part="state" title="The first request materialises what you may see; it can take a few seconds."><span class="dot" style="background:var(--tessera-ink-3)"></span>Starting session…</div></div><span class="xs faint">First request: the visible set is being materialised.</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">loading</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="badge quiet" part="state"><span class="dot" style="background:var(--tessera-ink-3)"></span>Loading</div><div class="count"><span class="skel"></span><span>shown</span></div><div class="count"><span class="skel"></span><span>matched</span></div><div class="count"><span class="skel"></span><span>visible</span></div></div><span class="xs faint">A request is in flight. No numbers.</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">retrying</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="badge quiet" part="state"><span class="dot" style="background:var(--tessera-warn)"></span>Retrying</div><div class="quiet" title="The server asked for a pause; retrying after Retry-After.">2 of 5</div><div class="count"><span class="skel"></span><span>shown</span></div><div class="count"><span class="skel"></span><span>matched</span></div><div class="count"><span class="skel"></span><span>visible</span></div></div><span class="xs faint">Server busy; retrying after Retry-After. Still no numbers.</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">shown</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="badge" part="state"><span class="dot"></span>Current</div><div class="count" part="count"><b>4,812</b><span>shown</span></div><div class="count" part="count"><b>12,465</b><span>matched</span></div><div class="count" part="count"><b>181,900</b><span>visible</span></div></div><span class="xs faint">The only state that carries numbers.</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">empty</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="badge" part="state"><span class="dot"></span>Current</div><div class="count"><b>0</b><span>shown</span></div><div class="count"><b>0</b><span>matched</span></div><div class="count"><b>0</b><span>visible</span></div><div class="quiet">nothing in this region</div></div><span class="xs faint">An answer: nothing in this region.</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">refused</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="refuse" part="state"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="" aria-hidden="true"><path d="M8 2l6.5 11.5h-13L8 2z"/><path d="M8 6.5v3M8 11.5v.5"/></svg>Refused</div><div class="quiet mono">422 contract</div></div><span class="xs faint">The refusal and its code. Never rendered as an empty map.</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">expired</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="refuse" part="state"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="" aria-hidden="true"><rect x="3" y="7" width="10" height="7" rx="1"/><path d="M5 7V5a3 3 0 0 1 6 0v2"/></svg>Session expired</div><div><button class="act" part="refresh">Sign in again</button></div></div><span class="xs faint">The token's lifetime ended. A way back in.</span></div></div><div style="display:grid; grid-template-columns: 110px 1fr; gap: 16px; align-items:center;"><div class="mono sm muted">stale</div><div class="col" style="gap:5px; align-items:flex-start"><div class="tx-status" role="status" aria-live="polite" title="Shown is a sample of matched; filters narrow matched and never move visible. Depth 9 · 3,312 tiles · 0 provisional · replica 41 MB, 93% from cache."><div class="warn" part="state"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg>Corpus updated</div><div class="count" part="count" style="opacity:0.45"><b>4,812</b><span>shown</span></div><div class="count" part="count" style="opacity:0.45"><b>12,465</b><span>matched</span></div><div class="count" part="count" style="opacity:0.45"><b>181,900</b><span>visible</span></div><div><button class="act" part="refresh"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></svg>Refresh</button></div></div><span class="xs faint">The corpus moved: numbers dim, refresh appears.</span></div></div>
+  <div class="col" style="gap:8px; margin-top:8px"><div class="hd">tessera-status · expanded (optional), stale</div>
+    <div class="float" style="width:336px"><div class="panel"><div class="hd">View <span class="row sm" style="text-transform:none;letter-spacing:0;font-weight:500;color:var(--tessera-ok)"><span class="dot" style="width:8px;height:8px;border-radius:50%;background:var(--tessera-ok);display:inline-block"></span>Current</span></div><div class="state warn" style="margin-bottom:10px"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="" aria-hidden="true"><circle cx="8" cy="8" r="6"/><path d="M8 4.5V8l2.5 1.5"/></svg><span class="grow">The corpus changed since this view was drawn</span><button class="btn primary" style="height:26px"><svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9"/><path d="M13.5 2.5v3h-3"/></svg>Refresh</button></div><div class="kv" style="opacity:0.45"><div class="k">Shown</div><div class="v">4,812</div><div class="k">Matched by filters</div><div class="v">12,465</div><div class="k">Visible to you here</div><div class="v">181,900</div></div><p class="xs faint" style="margin:8px 0 0">Shown is a sample of matched. Filters narrow matched and never move visible.</p><div class="kv sm" style="margin-top:10px"><div class="k">Region</div><div class="v">depth 9 · 3,312 tiles</div><div class="k">Provisional marks</div><div class="v">0</div></div><details class="drawer"><summary class="sm muted" style="cursor:pointer">Replica</summary><div class="kv sm" style="margin-top:8px"><div class="k">Held</div><div class="v">41.2 MB · 1.18M points · 118 bands</div><div class="k">Last view</div><div class="v">93% from cache · 2 tiles fetched</div><div class="k">Look-ahead</div><div class="v">3 rings · 1.1 MB</div></div></details></div></div></div>
+</div>
+</x-dc>
+
+</body>
+</html>

@@ -25,8 +25,8 @@ What authority that call carries is the auth plugin's business, not the client's
 plugin is `builtin:passthrough`, which takes bare claims: the server behind this page asserts
 what its user may see, and Tessera believes it. **Under `builtin:passthrough` this server is the
 claim-minting proxy** — the shape client-interaction §7 documents as the anti-pattern — by
-construction, until a verified-assertion plugin exists (design client-components D14, server-side,
-asked for). A working example that is quietly that shape is how the anti-pattern ships, so this
+construction, and no plugin that verifies an assertion from your own identity provider is planned
+(owner, 2026-08-26). A working example that is quietly that shape is how the anti-pattern ships, so this
 one says what it is: the claims it mints are exactly as trustworthy as the sign-in behind it.
 
 ## In production
