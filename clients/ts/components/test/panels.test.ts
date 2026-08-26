@@ -41,12 +41,14 @@ describe('<tessera-item-card>', () => {
     el.item = {id: 12345678901234567890n, detail: {fields: {note: 'x', title: 'A title', submitted_at: 1_700_000_000_000_000}, externalId: null}};
     await settle(host);
     const names = deepAll(host, '[part="field"]').map((f) => f.getAttribute('data-name'));
-    expect(names).toEqual(['tessera_id', 'submitted_at', 'title', 'note']);
+    // The title first, then the fields in declared-then-extra order, then the id; the absent
+    // `archive` is not rendered — position never lies.
+    expect(names).toEqual(['title', 'submitted_at', 'note', 'tessera_id']);
     expect(deep(host, '[part="field"][data-name="tessera_id"] [part="value"]')?.textContent).toBe('12345678901234567890');
-    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('2023-11-14T22:13:20.000Z');
+    expect(deep(host, '[part="field"][data-name="submitted_at"] [part="value"]')?.textContent).toBe('2023-11-14');
     expect(deep(host, 'slot[name="field-title"]')).not.toBeNull();
     expect(host.textContent).toContain('my link');
-    expect(deep(host, '.muted')?.textContent).toContain('no value for archive');
+    expect(deep(host, '[part="field"][data-name="archive"]')).toBeNull();
   });
 
   it('fires tessera-open with the id as a decimal string, bubbling and composed', async () => {
@@ -67,12 +69,12 @@ describe('<tessera-item-card>', () => {
     el.pick = {kind: 'miss'};
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('empty');
-    expect(host.shadowRoot ?? deep(host, '[part="state"]')?.textContent).toContain('nothing under the cursor');
+    expect(deep(host, '[part="state"]')?.textContent).toContain('Nothing under the cursor');
 
     el.pick = {kind: 'broken', index: 7, layer: 'tessera-marks-p1', hasIds: false, idCount: 0};
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
-    expect(deep(host, '[part="refusal"]')?.textContent).toContain('a layer fault, not a miss');
+    expect(deep(host, '[part="refusal"]')?.textContent).toContain('Layer fault');
 
     el.pick = null;
     el.refusal = {code: 'not-found', detail: 'nope'};
@@ -114,6 +116,26 @@ describe('<tessera-filter>', () => {
     expect(ticks[0]).toBe('zz.unlisted');
   });
 
+  it('a category is a search over the enumeration with the top few as checkboxes and Show N more', async () => {
+    const host = await mount('<tessera-filter column="archive"></tessera-filter>');
+    const el = host.querySelector('tessera-filter') as TesseraFilter;
+    const store = fakeStore({meta: META, status: status({})});
+    const values = Array.from({length: 171}, (_, i) => ({code: i, key: `cat-${String(i).padStart(3, '0')}`, title: null}));
+    store.set('filters', {draft: {archive: {family: 'category', keys: []}}, expr: null, values: {archive: values}, valueErrors: {}});
+    el.store = store;
+    await settle(host);
+    // Never a scrolling list of 171: four checkboxes and the rest behind one button.
+    expect(deepAll(host, '[part="tick"]').length).toBe(4);
+    expect(deep(host, '[part="more"]')?.textContent).toBe('Show 167 more…');
+    // Typing narrows the list to what matches.
+    const entry = deep(host, '[part="entry"]') as HTMLInputElement;
+    entry.value = 'cat-16';
+    entry.dispatchEvent(new Event('input'));
+    await settle(host);
+    expect(deepAll(host, '[part="tick"]').length).toBe(10);
+    expect(deep(host, '[part="more"]')).toBeNull();
+  });
+
   it('renders a refused enumeration as a refusal beside a free entry, not as an absent control', async () => {
     const host = await mount('<tessera-filter column="archive"></tessera-filter>');
     const el = host.querySelector('tessera-filter') as TesseraFilter;
@@ -132,7 +154,7 @@ describe('<tessera-filter>', () => {
     store.set('filters', {draft: {title: {family: 'text', query: '', mode: 'all'}}, expr: null, values: {}, valueErrors: {}});
     el.store = store;
     await settle(host);
-    expect(deepAll(host, 'option').map((o) => o.getAttribute('value'))).toEqual(['all', 'any', 'phrase']);
+    expect(deepAll(host, '[part="mode"] button').map((o) => o.getAttribute('data-mode'))).toEqual(['all', 'phrase']);
     const entry = deep(host, '[part="entry"]') as HTMLInputElement;
     entry.value = 'graph';
     entry.dispatchEvent(new Event('input'));

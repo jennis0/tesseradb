@@ -11,6 +11,10 @@ import {tokens} from './tokens.js';
  * (`@tesseradb/client`), so a host writing its own status line uses this and gets it for free —
  * "12,040 of 12,040" against a cluster is false, not secret, and this element cannot render it.
  *
+ * `figure="shown"` renders a sample's shown figure alone, for a strip whose next cell is the
+ * total: the element still carries the total on `data-total`, so *both figures or neither* holds
+ * — the cell is empty exactly when the pair would be — and a reader of the parts can check it.
+ *
  * `part="count"` carries `data-kind` (`sample` or `scalar`), `data-exact`, and `data-empty` when
  * the rule rendered nothing, so the acceptance harness can read the decision and not just the
  * text.
@@ -23,14 +27,13 @@ export class TesseraCount extends LitElement {
         display: inline;
       }
       [part='count'] {
-        color: var(--tessera-fg-strong);
+        color: var(--tessera-ink);
+        font-family: var(--tessera-font-mono);
         font-variant-numeric: tabular-nums;
-      }
-      [part='count'][data-exact='false'] {
-        color: var(--tessera-fg);
+        font-weight: 500;
       }
       [part='label'] {
-        color: var(--tessera-fg-muted);
+        color: var(--tessera-ink-2);
         margin-left: 0.4em;
       }
     `
@@ -40,16 +43,20 @@ export class TesseraCount extends LitElement {
   @property({attribute: false}) accessor masked: Masked | null = null;
   @property({type: Boolean}) accessor stale = false;
   @property() accessor label = '';
+  @property() accessor figure: 'both' | 'shown' = 'both';
 
   override render() {
     const kind = this.count ? 'sample' : this.masked ? 'scalar' : 'none';
-    const text = this.count ? formatCount(this.count, {stale: this.stale}) : this.masked ? formatMasked(this.masked, {stale: this.stale}) : '';
+    const pair = this.count ? formatCount(this.count, {stale: this.stale}) : this.masked ? formatMasked(this.masked, {stale: this.stale}) : '';
+    const text = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[0]! : pair;
+    const total = this.count && this.figure === 'shown' && pair !== '' ? pair.split(' of ')[1] : undefined;
     const exact = this.count ? this.count.exact : this.masked ? this.masked.exact : false;
     return html`<span
         part="count"
         data-kind=${kind}
         data-exact=${exact ? 'true' : 'false'}
         data-empty=${text === '' ? 'true' : 'false'}
+        data-total=${total ?? nothing}
         >${text}</span
       >${this.label && text !== '' ? html`<span part="label">${this.label}</span>` : nothing}`;
   }

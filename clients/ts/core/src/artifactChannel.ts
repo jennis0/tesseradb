@@ -6,6 +6,7 @@ import {worldBbox, type Viewport} from './prefetch.js';
 import type {ViewState} from './driver.js';
 import type {Artifact, Quantisation} from './types.js';
 import {SessionArtifactTable, type ArtifactRef} from './artifactTable.js';
+import {artifactBudgetFor} from './artifactBudget.js';
 
 /**
  * The annotation channel: which artifacts the current view is served, and what each one's masked
@@ -91,7 +92,7 @@ export type ArtifactChannelOptions = {
 export class ArtifactChannel {
   private inFlight: AbortController | null = null;
   private timer: unknown = null;
-  private view: {bbox: [number, number, number, number]; depth: number} | null = null;
+  private view: {bbox: [number, number, number, number]; depth: number; zoom: number} | null = null;
   private readonly clock: ArtifactChannelClock;
   private readonly settleMs: number;
   private readonly table: SessionArtifactTable | null;
@@ -194,7 +195,7 @@ export class ArtifactChannel {
     if (this.opts.maxTiles !== undefined) {
       while (asked > 0 && rectArea(tileRectOfBbox(bbox, asked)) > this.opts.maxTiles) asked -= 1;
     }
-    this.view = {bbox, depth: asked};
+    this.view = {bbox, depth: asked, zoom: view.zoom};
     return true;
   }
 
@@ -261,7 +262,10 @@ export class ArtifactChannel {
           // The counts and the artifacts frame, and no points at all: this channel draws none, and
           // the points on screen are the point path's business.
           k: 0,
-          layers
+          layers,
+          // A budgeted cut for the view (design §6): the coarse ancestors at the overview, refined
+          // as the zoom deepens, rather than every artifact of a nested or tiered layer at once.
+          artifactBudget: artifactBudgetFor(view.zoom)
         },
         signal.signal
       );

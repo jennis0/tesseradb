@@ -4,7 +4,8 @@ import {
   CLUSTER_PREFIX,
   NEUTRAL,
   NO_ORDINAL,
-  WORLD_SIZE,
+  gridToWorld,
+  gridToWorldXY,
   type Artifact,
   type ArtifactsProjection,
   type LegendProjection,
@@ -60,9 +61,6 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  * over the points (decision 0100).
  */
 
-/** Wire artifact geometry is 32 bits per axis (contracts §3.2); the world is 512 units across. */
-export const GRID32_PER_WORLD_UNIT = 2 ** 32 / WORLD_SIZE;
-
 export type TesseraLayerProps = CompositeLayerProps & {
   /** A store to read every projection below from, for a host that would otherwise wire each. */
   store?: Store | null;
@@ -82,6 +80,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
   clusterLevel?: number;
   /** Whether names and counts are drawn at the centroids. */
   labels?: boolean;
+  /** The ground the map is drawn on; the ink, halo and outline weights follow it (the boards). */
+  scheme?: 'light' | 'dark';
   /** The picked mark's world position, for its marker. */
   selectedWorldXY?: [number, number] | null;
   openedArtifact?: bigint | null;
@@ -117,7 +117,11 @@ type Resolved = {
   status: PresentedStatus;
 };
 
-const AMBER: [number, number, number, number] = [255, 210, 90, 255];
+/** The selection's colour: the accent, as the boards draw the lasso (`gen.py`'s `lasso_layer`). */
+const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [36, 87, 163], dark: [134, 176, 240]};
+/** Label ink and its halo per ground (`datamap_layers2`). */
+const INK: Record<'light' | 'dark', [number, number, number]> = {light: [36, 39, 43], dark: [236, 238, 240]};
+const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 190], dark: [12, 14, 17, 180]};
 const CHROME: [number, number, number, number] = [234, 238, 243, 240];
 const PLATE: [number, number, number, number] = [13, 15, 18, 235];
 
@@ -213,8 +217,25 @@ const heldStandIn = new WeakMap<object, {key: string; buffers: StandInBuffers}>(
 const heldStandInColours = new WeakMap<object, {key: string; colours: Uint8Array}>();
 /** Frames whose slab-residency check has run — once per `marks` object, not once per paint. */
 const checkedMarks = new WeakSet<object>();
-/** The wash image, once per `tiles` object. */
-const heldWash = new WeakMap<object, {depth: number; image: ImageData | null; bounds: [number, number, number, number]}>();
+/** The wash image, once per `tiles` object; `pending` while it is being built off the paint path. */
+type HeldWash = {depth: number; image: ImageData | null; bounds: [number, number, number, number]; pending: boolean};
+const heldWash = new WeakMap<object, HeldWash>();
+/** The last wash built, drawn while the next is being built. */
+let lastWash: HeldWash | null = null;
+/** The pending wash build, one at a time: a newer `tiles` object supersedes an unbuilt older one. */
+let washTimer: ReturnType<typeof setTimeout> | null = null;
+/** How long `tiles` must stand still before the wash is rebuilt — the settle, not the frame. */
+const WASH_SETTLE_MS = 200;
+/** What the empty sublayers are given, once, so their descriptors are stable across paints. */
+const EMPTY_F32 = new Float32Array(0);
+const EMPTY_U8 = new Uint8Array(0);
+const EMPTY_IDS = new BigUint64Array(0);
+const EMPTY_IMAGE = typeof ImageData !== 'undefined' ? new ImageData(1, 1) : null;
+const NO_OUTLINES: OutlineDatum[] = [];
+const NO_LABELS: LabelDatum[] = [];
+const NO_LEADERS: LeaderDatum[] = [];
+const NO_SHAPES: {polygon: [number, number][]}[] = [];
+const NO_POINTS: [number, number][] = [];
 /** The column encoding the slab's colour attribute holds, kept while the map colours by cluster. */
 const heldColumnEncoding = new WeakMap<MarkSlab, {encoding: Encoding; colourBy: string | null}>();
 /** A lookup texture per slab, for a host that handed none in. */
@@ -224,11 +245,14 @@ const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]}>();
 
-type OutlineDatum = {id: bigint; polygon: [number, number][]; colour: Rgba; opened: boolean};
-type LabelDatum = {id: bigint; position: [number, number]; text: string; size: number; offset: [number, number]; colour: Rgba};
+type OutlineDatum = {id: bigint; polygon: [number, number][]; colour: Rgba; opened: boolean; depth: number; height: number};
+type LabelDatum = {id: bigint; position: [number, number]; text: string; size: number; offset: [number, number]; colour: Rgba; kind: 'name' | 'count' | 'topic'};
 type LeaderDatum = {from: [number, number]; to: [number, number]};
 
-const HAIRLINE_ALPHA = 110;
+/** The faint outline's alpha per ground: the boards' 0.16 on light, 0.22 on dark. */
+const HAIRLINE_ALPHA: Record<'light' | 'dark', number> = {light: 44, dark: 60};
+/** The base fill alpha of a contour per ground; each level down adds a little. */
+const FILL_ALPHA: Record<'light' | 'dark', number> = {light: 6, dark: 10};
 
 /** What to call an artifact: its supplied text where the layer publishes any, else its key. */
 export function artifactName(a: Artifact): string {
@@ -237,12 +261,103 @@ export function artifactName(a: Artifact): string {
   return a.key ?? `#${a.tesseraId}`;
 }
 
-/** A served artifact's outline in world space: its hull, else its box, else nothing. */
-export function outlineOf(a: Artifact): [number, number][] | null {
-  const w = (v: number) => v / GRID32_PER_WORLD_UNIT;
-  if (a.hull && a.hull.length >= 3) return a.hull.map(([x, y]) => [w(x), w(y)]);
-  if (a.box) return [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
-  return null;
+/**
+ * Chaikin's corner cutting, `iterations` times, on a closed polygon: each edge is replaced by its
+ * quarter and three-quarter points, so a hull's corners round off into the boards' contours
+ * while every vertex stays inside the hull's own convex extent. Exact geometry from the wire,
+ * smoothed — nothing is contoured from marks (decision 0099).
+ */
+export function smoothClosed(polygon: readonly [number, number][], iterations = 3): [number, number][] {
+  let out = polygon.slice() as [number, number][];
+  for (let it = 0; it < iterations && out.length >= 3; it++) {
+    const next: [number, number][] = [];
+    for (let i = 0; i < out.length; i++) {
+      const a = out[i]!;
+      const b = out[(i + 1) % out.length]!;
+      next.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]], [0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
+    }
+    out = next;
+  }
+  return out;
+}
+
+/** A served artifact's outline in world space: its hull, else its box, else nothing — smoothed. */
+export function outlineOf(a: Artifact, smooth = true): [number, number][] | null {
+  const w = gridToWorld;
+  let raw: [number, number][] | null = null;
+  if (a.hull && a.hull.length >= 3) raw = a.hull.map(gridToWorldXY);
+  else if (a.box) raw = [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
+  if (!raw) return null;
+  return smooth ? smoothClosed(raw) : raw;
+}
+
+/**
+ * The text a dependent layer's artifacts (a clustering's topic labels) attach to the served
+ * artifacts of their generating layer. A dependent artifact carries its target's masked count
+ * and no id (D13), and no centroid on this wire: it is attached to the served artifact of its
+ * generating layer with the same count, and left unattached where two share one — a count is
+ * not an identity. A target id on the wire (S4's drill-down route, awaiting a ruling) would make
+ * this exact.
+ */
+export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<bigint, string> {
+  const topicOf = new Map<bigint, string>();
+  if (!meta) return topicOf;
+  const dependent = new Set(meta.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name));
+  const byCount = new Map<string, Artifact[]>();
+  for (const x of a.served) {
+    if (dependent.has(x.layer)) continue;
+    const k = `${x.layer}|${x.maskedCount}`;
+    (byCount.get(k) ?? byCount.set(k, []).get(k)!).push(x);
+  }
+  for (const t of a.served) {
+    if (!dependent.has(t.layer) || t.content.length === 0) continue;
+    const generating = meta.layers.find((l) => l.name === t.layer)?.depsOn ?? [];
+    for (const g of generating) {
+      const targets = byCount.get(`${g}|${t.maskedCount}`);
+      if (targets && targets.length === 1) topicOf.set(targets[0]!.tesseraId, t.content[0]!);
+    }
+  }
+  return topicOf;
+}
+
+/** What to call a served artifact where a topic is attached and it has no name of its own. */
+export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string {
+  if (artifact.content.length > 0) return artifactName(artifact);
+  return topics.get(artifact.tesseraId) ?? artifactName(artifact);
+}
+
+/**
+ * How far each served artifact stands above the deepest served descendant beneath it (a leaf is
+ * 0), within the levels drawn — the fill fades with this, not with depth from the root.
+ */
+export function heightsBelow(a: ArtifactsProjection, depths: Map<bigint, number>, level: number | undefined): Map<bigint, number> {
+  const height = new Map<bigint, number>();
+  const drawn = (id: bigint) => level === undefined || (depths.get(id) ?? 0) <= level;
+  const of = (id: bigint, guard = 0): number => {
+    const known = height.get(id);
+    if (known !== undefined) return known;
+    let h = 0;
+    if (guard < 1024) for (const c of a.lineage.childrenOf.get(id) ?? []) if (drawn(c.tesseraId)) h = Math.max(h, of(c.tesseraId, guard + 1) + 1);
+    height.set(id, h);
+    return h;
+  };
+  for (const artifact of a.served) if (drawn(artifact.tesseraId)) of(artifact.tesseraId);
+  return height;
+}
+
+/** The depth of each served artifact in the served tree: a root is 0, a child one deeper. */
+export function servedDepths(a: ArtifactsProjection): Map<bigint, number> {
+  const depth = new Map<bigint, number>();
+  const of = (id: bigint, guard = 0): number => {
+    const known = depth.get(id);
+    if (known !== undefined) return known;
+    const artifact = a.lineage.byId.get(id);
+    const parent = artifact && artifact.parentId !== null && a.lineage.byId.has(artifact.parentId) && guard < 1024 ? of(artifact.parentId, guard + 1) + 1 : 0;
+    depth.set(id, parent);
+    return parent;
+  };
+  for (const artifact of a.served) of(artifact.tesseraId);
+  return depth;
 }
 
 export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
@@ -259,6 +374,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     lut: null,
     clusterLevel: undefined,
     labels: true,
+    scheme: 'dark',
     selectedWorldXY: null,
     openedArtifact: null,
     region: null,
@@ -391,7 +507,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     if (r.status === 'refused' || !r.marks || r.marks.bands.length === 0 && r.marks.standIn.length === 0 && !r.marks.count.exact) {
       if (!r.marks) slab.clear();
       this.props.onDrawn?.(0, 0);
-      return [...this.outlineLayers(r, timings), ...this.labelLayers(r, timings), ...this.selectionLayers()];
+      // Every sublayer, empty: the programs link now, during the wait for the first response,
+      // and the first paint with marks pays no shader compile (see `warmMarksLayers`).
+      return [...this.outlineLayers(r, timings), this.washLayer(null, 0), ...this.warmMarksLayers(), ...this.labelLayers(r, timings), ...this.selectionLayers()];
     }
 
     // The slab's colour attribute holds the **column** colouring. Colouring by cluster is the
@@ -425,7 +543,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
       }
     }
 
-    if (this.props.wash && r.tiles) {
+    if (this.props.wash) {
       const washStarted = performance.now();
       layers.push(this.washLayer(r.tiles, r.depth));
       timings.washMs = performance.now() - washStarted;
@@ -434,7 +552,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     // Layers toggle `visible`; they are never omitted — deck destroys an absent layer and re-uploads
     // everything it held when it returns. One layer per retained slab partition, addressed by slot,
     // so a depth flip is a swap and flipping back uploads nothing.
-    for (const held of slab.layers()) {
+    const partitions = slab.layers();
+    if (partitions.length === 0) layers.push(...this.warmMarksLayers());
+    for (const held of partitions) {
       layers.push(
         new MarksLayer(
           this.getSubLayerProps({id: `marks-p${held.slot}`}),
@@ -496,6 +616,46 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return layers;
   }
 
+  /**
+   * The mark layers with nothing in them — the first partition's slot and the stand-ins — so
+   * that their programs are linked at the first paint of the session rather than at the first
+   * paint with marks. luma links synchronously when a pipeline is made (its shader-layout
+   * introspection forces the link to complete), and every program of this composite cost
+   * 130–190 ms on the main thread at the moment the first million marks arrived — the largest
+   * single block in that paint. An empty layer draws nothing and uploads nothing; a layer that
+   * later fills keeps its id, so deck updates it rather than making it again.
+   */
+  private warmMarksLayers(): Layer[] {
+    return [
+      new MarksLayer(
+        this.getSubLayerProps({id: 'marks-p0'}),
+        {
+          visible: false,
+          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true), getOrdinal: binary(EMPTY_F32, 1)}},
+          tesseraIds: EMPTY_IDS,
+          useLut: false,
+          lutTexture: null,
+          radiusUnits: 'pixels' as const,
+          getRadius: this.props.radius,
+          pickable: false,
+          parameters: {depthCompare: 'always' as const}
+        } as never
+      ),
+      new ScatterplotLayer(
+        this.getSubLayerProps({id: 'marks-standin'}),
+        {
+          visible: false,
+          data: {length: 0, attributes: {getPosition: binary(EMPTY_F32, 2), getFillColor: binary(EMPTY_U8, 4, true)}},
+          tesseraIds: EMPTY_IDS,
+          radiusUnits: 'pixels' as const,
+          getRadius: this.props.radius,
+          pickable: false,
+          parameters: {depthCompare: 'always' as const}
+        } as never
+      )
+    ];
+  }
+
   private standInBuffers(marks: MarksProjection, colourBy: string | null): StandInBuffers {
     const key = colourBy ?? '';
     const held = heldStandIn.get(marks.standIn);
@@ -513,27 +673,64 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     return colours;
   }
 
-  /** The density wash, rebuilt once per `tiles` object — the settle's work, never the frame's. */
-  private washLayer(tiles: TilesProjection, depth: number): Layer | null {
-    let held = heldWash.get(tiles);
-    if (!held || held.depth !== depth) {
-      const binned = binDensity(tiles.tiles, depth);
-      const image = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
-      held = {
-        depth,
-        image: image && typeof ImageData !== 'undefined' ? new ImageData(image.data, image.width, image.height) : null,
-        bounds: image ? image.bounds : [0, 0, 0, 0]
-      };
-      heldWash.set(tiles, held);
+  /**
+   * The density wash, rebuilt once per `tiles` object — and **off the paint path**. Binning and
+   * filtering the wash over a full viewport's tiles (65,536 at depth 8) is 60–70 ms, and it sat
+   * inside the first paint with marks. Now a new `tiles` object schedules the build on a
+   * macrotask, the paint draws the previous wash (or none) meanwhile, and the layer asks for an
+   * update when the image is ready — one frame later, never inside the frame that draws the
+   * marks. The image still comes from the exact tiles' counts and nothing else (§5.10).
+   *
+   * `tiles` null draws the empty layer, so the bitmap program links with the rest at the first
+   * paint of the session.
+   */
+  private washLayer(tiles: TilesProjection | null, depth: number): Layer {
+    let image: ImageData | null = null;
+    let bounds: [number, number, number, number] = [0, 0, 1, 1];
+    if (tiles) {
+      let held = heldWash.get(tiles);
+      if (!held || held.depth !== depth) {
+        if (!held || !held.pending) {
+          // Keep the last wash drawn while this one is built: no flash to nothing at a settle.
+          held = {depth, image: lastWash?.image ?? null, bounds: lastWash?.bounds ?? [0, 0, 1, 1], pending: true};
+          heldWash.set(tiles, held);
+          const build = () => {
+            washTimer = null;
+            const binned = binDensity(tiles.tiles, depth);
+            const built = binned && binned.filled > 0 ? filterDensity(binned, depth) : null;
+            const entry = {
+              depth,
+              image: built && typeof ImageData !== 'undefined' ? new ImageData(built.data, built.width, built.height) : null,
+              bounds: built ? built.bounds : ([0, 0, 1, 1] as [number, number, number, number]),
+              pending: false
+            };
+            heldWash.set(tiles, entry);
+            lastWash = entry;
+            // The layer that is current for this id, which may no longer be this instance.
+            const current = (this.getCurrentLayer?.() as TesseraLayer | null) ?? this;
+            // A discarded instance has no manager to ask; the next paint reads the memo anyway.
+            if (!current.lifecycle || /Discarded|Finalized/.test(String(current.lifecycle))) return;
+            current.setNeedsUpdate();
+            current.setNeedsRedraw();
+          };
+          // Debounced to the settle: while a response streams in, every fold hands the layer a
+          // new `tiles` object a frame apart, and a wash per frame would cost more than the
+          // marks it sits under. The last one asked for is the one built.
+          if (typeof setTimeout !== 'undefined') {
+            if (washTimer !== null) clearTimeout(washTimer);
+            washTimer = setTimeout(build, WASH_SETTLE_MS);
+          } else build();
+        }
+      }
+      image = held.image;
+      bounds = held.bounds;
     }
-    // No image is no layer: a BitmapLayer given no image throws in its texture transform, and a
-    // wash that comes and goes is a few-kilobyte texture, not a re-upload worth keeping a layer for.
-    if (!held.image) return null;
-    const [x0, y0, x1, y1] = held.bounds;
+    const [x0, y0, x1, y1] = bounds;
     return new BitmapLayer(
       this.getSubLayerProps({id: 'wash'}),
       {
-        image: held.image,
+        visible: image !== null,
+        image: image ?? EMPTY_IMAGE,
         // `[left, bottom, right, top]`: row 0 of the image is the lowest tile row, and under the
         // y-down orthographic view that is the smaller world y — so `top` is `y0`.
         bounds: [x0, y1, x1, y0],
@@ -553,40 +750,52 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    */
   private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number}): Layer[] {
     const a = r.artifacts;
-    if (!a || a.served.length === 0) return [];
     const started = performance.now();
     const opened = this.props.openedArtifact ?? null;
-    const key = `${a.version}|${a.palette}|${opened ?? ''}`;
-    let held = heldOutlines.get(a.served);
-    if (!held || held.key !== key) {
+    const scheme = this.props.scheme ?? 'dark';
+    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
+    let held = a ? heldOutlines.get(a.served) : undefined;
+    if (a && (!held || held.key !== key)) {
       const data: OutlineDatum[] = [];
-      for (const artifact of a.served) {
+      const depths = servedDepths(a);
+      const level = this.props.clusterLevel;
+      // Parents first, so a child's fill draws over its parent's and nesting reads as levels.
+      const ordered = [...a.served].sort((x, y) => (depths.get(x.tesseraId) ?? 0) - (depths.get(y.tesseraId) ?? 0));
+      const heights = heightsBelow(a, depths, level);
+      for (const artifact of ordered) {
+        const depth = depths.get(artifact.tesseraId) ?? 0;
+        if (level !== undefined && depth > level) continue;
         const polygon = outlineOf(artifact);
         if (!polygon) continue;
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
-        data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened: artifact.tesseraId === opened});
+        data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened: artifact.tesseraId === opened, depth, height: heights.get(artifact.tesseraId) ?? 0});
       }
       held = {key, data};
       heldOutlines.set(a.served, held);
     }
+    const data = held?.data ?? NO_OUTLINES;
     timings.outlinesMs = performance.now() - started;
-    timings.outlines = held.data.length;
-    if (held.data.length === 0) return [];
+    timings.outlines = data.length;
+    // The layer exists from the first paint, empty, so its program is linked before it is needed.
     return [
       new PolygonLayer(
         this.getSubLayerProps({id: 'outlines'}),
         {
-          data: held.data,
+          visible: data.length > 0,
+          data,
           getPolygon: (d: OutlineDatum) => d.polygon,
           filled: true,
-          getFillColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 36] : [0, 0, 0, 0]),
+          // A faint tint that is strongest at the cut's leaves and fades over the ancestors above
+          // them, so nesting reads as the boards' contours and a deep chain of near-identical
+          // hulls (HDBSCAN's condensed tree) does not stack into a wash; the opened one stronger.
+          getFillColor: (d: OutlineDatum) => [d.colour[0], d.colour[1], d.colour[2], d.opened ? 28 : Math.max(0, FILL_ALPHA[scheme] - 3 * d.height)],
           stroked: true,
-          getLineColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 255] : [d.colour[0], d.colour[1], d.colour[2], HAIRLINE_ALPHA]),
+          getLineColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 200] : [d.colour[0], d.colour[1], d.colour[2], HAIRLINE_ALPHA[scheme]]),
           lineWidthUnits: 'pixels' as const,
-          getLineWidth: (d: OutlineDatum) => (d.opened ? 2 : 1),
-          lineWidthMinPixels: 1,
+          getLineWidth: (d: OutlineDatum) => (d.opened ? 1.2 : 0.8),
+          lineWidthMinPixels: 0.8,
           pickable: this.props.pickable,
-          artifactIds: held.data.map((d) => d.id),
+          artifactIds: data.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
           updateTriggers: {getFillColor: key, getLineColor: key, getLineWidth: key}
         } as never
@@ -602,60 +811,87 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    * deck's `TextLayer` with `characterSet: 'auto'` and an SDF halo.
    */
   private labelLayers(r: Resolved, timings: {labelsMs: number; labels: number}): Layer[] {
-    const a = r.artifacts;
-    if (!this.props.labels || !a || a.served.length === 0) return [];
+    const a = this.props.labels ? r.artifacts : null;
     const viewport = this.context.viewport;
-    if (!viewport) return [];
     const started = performance.now();
-    const zoom = viewport.zoom;
+    const zoom = viewport?.zoom ?? 0;
     const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
-    const key = `${a.version}|${a.palette}|${bucket}`;
-    let held = heldLabels.get(a.served);
-    if (!held || held.key !== key) {
+    const key = a ? `${a.version}|${a.palette}|${bucket}|${this.props.clusterLevel ?? ''}` : '';
+    let held = a ? heldLabels.get(a.served) : undefined;
+    if (a && viewport && (!held || held.key !== key)) {
       const placed = a.served.filter((x) => x.centroid !== null);
-      const largest = placed.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
+      // A dependent layer's artifacts — a clustering's topic labels — draw their text beneath the
+      // name of whatever they sit on, italic and small, and are placed with it: they are not
+      // candidates of their own (§5.10, D13).
+      const dependent = new Set(r.meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
+      const topicOf = attachedTopics(a, r.meta);
+      const depths = servedDepths(a);
+      const level = this.props.clusterLevel;
+      // At a chosen level, the names are that level's; else the deepest served (the cut's leaves).
+      const leaves = new Set(a.served.filter((x) => !a.lineage.childrenOf.has(x.tesseraId)).map((x) => x.tesseraId));
+      const named = placed.filter((x) => !dependent.has(x.layer) && (level !== undefined ? (depths.get(x.tesseraId) ?? 0) === level : leaves.has(x.tesseraId)));
+      const largest = named.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
       const scale = 2 ** zoom; // pixels per world unit
       const candidates: LabelCandidate[] = [];
-      const byId = new Map<bigint, {artifact: Artifact; text: string; size: number}>();
-      for (const artifact of placed) {
+      const byId = new Map<bigint, {artifact: Artifact; name: string; countText: string; size: number; topic: string | null}>();
+      for (const artifact of named) {
         const count = Number(artifact.maskedCount);
         const size = labelSize(count, largest);
-        const name = artifactName(artifact);
+        const name = artifact.content.length > 0 ? artifactName(artifact) : (topicOf.get(artifact.tesseraId) ?? artifactName(artifact));
         const countText = count.toLocaleString('en-GB');
-        byId.set(artifact.tesseraId, {artifact, text: `${name}\n${countText}`, size});
+        // A cluster with no name of its own takes its topic as the name (a labelled clustering);
+        // one with both draws the topic beneath in italic (the boards).
+        const attached = topicOf.get(artifact.tesseraId) ?? null;
+        const topic = artifact.content.length > 0 ? attached : null;
+        byId.set(artifact.tesseraId, {artifact, name, countText, size, topic});
+        const width = (name.length * 0.62 + countText.length * 0.55 + 2) * size + 8;
         candidates.push({
           id: artifact.tesseraId,
-          x: (artifact.centroid![0] / GRID32_PER_WORLD_UNIT) * scale,
-          y: (artifact.centroid![1] / GRID32_PER_WORLD_UNIT) * scale,
-          width: Math.max(name.length, countText.length) * size * 0.62 + 8,
-          height: size * 2.4 + 4,
+          x: gridToWorld(artifact.centroid![0]) * scale,
+          y: gridToWorld(artifact.centroid![1]) * scale,
+          width: Math.max(width, topic ? topic.length * 11 * 0.5 : 0),
+          height: size * 1.5 + (topic ? 14 : 0),
           priority: count
         });
       }
       const data: LabelDatum[] = [];
       const leaders: LeaderDatum[] = [];
       for (const p of placeLabels(candidates) as PlacedLabel[]) {
-        const {artifact, text, size} = byId.get(p.id)!;
-        const position: [number, number] = [artifact.centroid![0] / GRID32_PER_WORLD_UNIT, artifact.centroid![1] / GRID32_PER_WORLD_UNIT];
+        const {artifact, name, countText, size, topic} = byId.get(p.id)!;
+        const position = gridToWorldXY(artifact.centroid!);
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
-        data.push({id: artifact.tesseraId, position, text, size, offset: [p.dx, p.dy], colour: a.colours.get(ordinal) ?? NEUTRAL});
-        if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
+        const colour = a.colours.get(ordinal) ?? NEUTRAL;
+        // The name, then the count beside it — smaller and lighter — then the topic beneath.
+        // The name ends and the count starts at one seam, so the width estimates cannot overlap.
+        const nameWidth = name.length * 0.58 * size;
+        const countWidth = countText.length * 0.55 * size * 0.82;
+        const seam = p.dx - (nameWidth + countWidth + size * 0.35) / 2 + nameWidth;
+        data.push({id: artifact.tesseraId, position, text: name, size, offset: [seam, p.dy], colour, kind: 'name'});
+        data.push({id: artifact.tesseraId, position, text: countText, size: size * 0.82, offset: [seam + size * 0.35, p.dy + size * 0.08], colour, kind: 'count'});
+        if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: 11, offset: [p.dx, p.dy + size * 0.78 + 3], colour, kind: 'topic'});
+        // A leader only where the label sits well clear of its centroid — a small nudge needs none.
+        if (p.leader && Math.hypot(p.dx, p.dy) > size * 2.5) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
       }
       held = {key, data, leaders};
       heldLabels.set(a.served, held);
     }
+    const data = held?.data ?? NO_LABELS;
+    const leaders = held?.leaders ?? NO_LEADERS;
     timings.labelsMs = performance.now() - started;
-    timings.labels = held.data.length;
+    timings.labels = data.length;
+    // Both layers exist from the first paint, empty, so their programs are linked before needed.
     const layers: Layer[] = [];
-    if (held.leaders.length > 0) {
+    {
       layers.push(
         new LineLayer(
           this.getSubLayerProps({id: 'label-leaders'}),
           {
-            data: held.leaders,
+            visible: leaders.length > 0,
+            data: leaders,
             getSourcePosition: (d: LeaderDatum) => d.from,
             getTargetPosition: (d: LeaderDatum) => d.to,
-            getColor: [200, 205, 212, 140],
+            getColor: [...INK[this.props.scheme ?? 'dark'], 100] as [number, number, number, number],
+            updateTriggers: {getColor: this.props.scheme},
             widthUnits: 'pixels' as const,
             getWidth: 1,
             pickable: false,
@@ -664,32 +900,38 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
         )
       );
     }
-    layers.push(
+    const scheme = this.props.scheme ?? 'dark';
+    const ink = [...INK[scheme], 255] as [number, number, number, number];
+    const text = (id: string, kind: LabelDatum['kind'], rows: LabelDatum[], extra: Record<string, unknown>) =>
       new TextLayer(
-        this.getSubLayerProps({id: 'labels'}),
+        this.getSubLayerProps({id}),
         {
-          data: held.data,
+          visible: rows.length > 0,
+          data: rows,
           getPosition: (d: LabelDatum) => d.position,
           getText: (d: LabelDatum) => d.text,
           getSize: (d: LabelDatum) => d.size,
           sizeUnits: 'pixels' as const,
-          getColor: [240, 243, 247, 255],
+          getColor: kind === 'name' ? ink : ([ink[0], ink[1], ink[2], kind === 'count' ? 184 : 178] as [number, number, number, number]),
           getPixelOffset: (d: LabelDatum) => d.offset,
-          getTextAnchor: 'middle' as const,
+          getTextAnchor: (kind === 'name' ? 'end' : kind === 'count' ? 'start' : 'middle') as 'start' | 'middle' | 'end',
           getAlignmentBaseline: 'center' as const,
-          fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-          fontWeight: 600,
+          fontFamily: 'IBM Plex Sans, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
           fontSettings: {sdf: true, buffer: 4},
-          outlineWidth: 5,
-          outlineColor: [8, 10, 14, 220],
+          outlineWidth: kind === 'name' ? 2.5 : 2,
+          outlineColor: HALO[scheme],
           characterSet: 'auto',
-          lineHeight: 1.1,
-          pickable: this.props.pickable,
-          artifactIds: held.data.map((d) => d.id),
+          pickable: this.props.pickable && kind === 'name',
+          artifactIds: rows.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
-          updateTriggers: {getPixelOffset: key, getSize: key}
+          updateTriggers: {getPixelOffset: key, getSize: key, getColor: scheme},
+          ...extra
         } as never
-      )
+      );
+    layers.push(
+      text('labels', 'name', data.filter((d) => d.kind === 'name'), {fontWeight: 600}),
+      text('label-counts', 'count', data.filter((d) => d.kind === 'count'), {fontWeight: 400}),
+      text('label-topics', 'topic', data.filter((d) => d.kind === 'topic'), {fontWeight: 400, fontStyle: 'italic'})
     );
     return layers;
   }
@@ -702,40 +944,47 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const shape: [number, number][] | null =
       polygon && polygon.length >= 2 ? polygon : box ? [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]] : null;
     const live = this.props.drag != null || this.props.dragPolygon != null;
-    if (shape) {
+    const scheme = this.props.scheme ?? 'dark';
+    const accent = ACCENT[scheme];
+    // Both layers exist from the first paint, empty, so their programs are linked before needed.
+    {
       layers.push(
         new PolygonLayer(
           this.getSubLayerProps({id: 'region'}),
           {
-            data: [{polygon: shape}],
+            visible: shape !== null,
+            data: shape ? [{polygon: shape}] : NO_SHAPES,
             getPolygon: (d: {polygon: number[][]}) => d.polygon,
-            filled: shape.length >= 3,
-            getFillColor: [255, 210, 90, 28],
+            filled: (shape?.length ?? 0) >= 3,
+            getFillColor: [...accent, live ? 20 : 30] as [number, number, number, number],
             stroked: true,
-            getLineColor: AMBER,
+            getLineColor: [...accent, live ? 255 : 230] as [number, number, number, number],
             lineWidthUnits: 'pixels' as const,
-            getLineWidth: live ? 1 : 1.5,
+            getLineWidth: 1.5,
             pickable: false,
-            parameters: {depthCompare: 'always' as const}
+            parameters: {depthCompare: 'always' as const},
+            updateTriggers: {getFillColor: [live, scheme], getLineColor: [live, scheme]}
           } as never
         )
       );
     }
     const at = this.props.selectedWorldXY;
-    if (at) {
+    {
       layers.push(
         new ScatterplotLayer(
           this.getSubLayerProps({id: 'picked'}),
           {
-            data: [at],
+            visible: at !== null && at !== undefined,
+            data: at ? [at] : NO_POINTS,
             getPosition: (d: [number, number]) => d,
-            getFillColor: AMBER,
+            getFillColor: [0, 0, 0, 0],
             radiusUnits: 'pixels' as const,
-            getRadius: 5,
+            getRadius: 6,
             stroked: true,
-            getLineColor: [20, 20, 20, 255],
+            getLineColor: [...INK[scheme], 255] as [number, number, number, number],
             lineWidthUnits: 'pixels' as const,
-            getLineWidth: 1.5,
+            getLineWidth: 2,
+            updateTriggers: {getLineColor: scheme},
             pickable: false,
             parameters: {depthCompare: 'always' as const}
           } as never

@@ -390,6 +390,45 @@ request cover every tile the view touches.
 `[serve] stage_timing = true`. Absence is a configuration fact, not an error, and the stats panel
 says so.
 
+## What the panels do not say
+
+The elements answer and never explain (owner, 2026-08-25): a panel's state is one line — *Nothing
+here*, *Refused · 422 contract*, *Corpus updated · Refresh* — and the reasoning behind each number
+lives here instead.
+
+- **Shown, matched, visible.** *Shown* is a sample of *matched*; filters narrow *matched* and never
+  move *visible*, which is the grant. The strip's shown cell carries its total on `data-total`, so
+  the rule *both figures or neither* holds with the total drawn as the visible cell beside it.
+- **Starting session…** The first request of a session materialises what this principal may see,
+  which can take seconds at 10⁹; the strip says so once and then says *Loading*.
+- **Corpus updated.** The numbers were drawn against a corpus that has since moved; the cells are
+  blank until *Refresh* redraws them. A number against a stale view is never rendered.
+- **Refused · 422.** A `422 contract` refusal is the host page's bug — a request the server would
+  never have accepted — not the server's.
+- **Nothing here.** An empty answer for this principal — an answer, not a failure — and
+  indistinguishable from a region no principal has anything in.
+- **A layer's size is never published.** What you reach of a layer is answered artifact by
+  artifact, by the viewport; the picker offers a layer with its closure and no count.
+- **A cluster's number** is members visible to this principal over the whole artifact — never
+  its size, and never over the viewport. It holds steady during a pan. One refusal covers every
+  withheld case (a suppressed artifact, one below its criterion, one this principal cannot
+  reach, one that never existed) and nothing tells them apart.
+- **Colour by cluster is exact only.** A point wears a cluster's colour because the wire named it
+  a member; neutral means *not known here yet*, never a guess. The strip's hover reads *colours
+  exact* or *refreshing N tiles*.
+- **A legend lists the values on screen**, not the whole vocabulary, and a numeric ramp spans the
+  marks served, not the corpus. A refused column draws every mark unmapped; every served mark is
+  still on the map.
+- **A typed category value is submitted, never validated**: values a principal cannot list may
+  still be filtered by, and an unresolvable one is an empty answer — the control never says *no
+  such value*.
+- **A selection's numbers are inexact** where a counted cell is wider than a screen pixel: they
+  are exact for the cells asked, not for the shape drawn, and render with `≈`. *Filter to this*,
+  *Export* and *Save as artifact* wait on server verbs (D11) and are greyed with the reason on
+  hover.
+- **A miss is not a fault.** Nothing under the cursor is the ordinary case; a mark whose layer
+  carried no identity is a fault in the map and the card says *Layer fault*.
+
 ## Why the points sit on a grid
 
 They are on a lattice at high zoom, and it is the fixtures, not the renderer.

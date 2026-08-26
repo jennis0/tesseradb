@@ -18,6 +18,24 @@ export const MAX_DEPTH = 16;
 export const TILE_SIZE = 512;
 export const WORLD_SIZE = 512;
 export const CELLS_PER_WORLD_UNIT = CELL_GRID / WORLD_SIZE; // 128
+/**
+ * Wire artifact geometry — `centroid`, `box`, `hull` — is 32 bits per axis (contracts §3.2 item 4,
+ * the same units as `code`), which is 2^16 finer than the cell grid. One constant, used by every
+ * reader of that geometry, because two readers with their own divisor is how `fit` landed off
+ * the corpus while the outlines drew in place.
+ */
+export const GRID32 = 2 ** 32;
+export const GRID32_PER_WORLD_UNIT = GRID32 / WORLD_SIZE;
+
+/** A wire geometry coordinate (32-bit grid units) to deck.gl world units. */
+export function gridToWorld(v: number): number {
+  return v / GRID32_PER_WORLD_UNIT;
+}
+
+/** A wire geometry point to a world point. */
+export function gridToWorldXY(p: readonly [number, number]): [number, number] {
+  return [gridToWorld(p[0]), gridToWorld(p[1])];
+}
 
 export type TileIndex = {x: number; y: number; z: number};
 export type CellBox = {cx0: number; cy0: number; cx1: number; cy1: number};

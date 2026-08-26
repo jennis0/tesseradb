@@ -23,8 +23,9 @@ and `@tesseradb/components`, box selection, and the viewer as the explorer plus 
 is built (branch `client/step-3`): the membership column consumed end to end, the lookup texture,
 the four artifact elements, wire geometry drawn, lasso, the sidecar retired. Step 5 is built (branch
 `client/step-5`): the `tesseradb` package with the widget as its `[widget]` extra, run by hand in
-JupyterLab and Marimo. Step 4 and the server tracks are ahead; the design
-is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
+JupyterLab and Marimo. Step 4 is built (branch `client/step-4`) and step 5 with it; **the owner's review of the built
+explorer is answered on `client/ui`** — see *Reviewed by the owner* below. The server tracks are
+ahead; the design is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
 recorded as decisions 0095–0101; the open decisions and what each gates are in the handover's §1.
 
 **The smoke scripts ran for steps 0–1 on a rebuilt demo bundle** (2026-08-25, integration). Every
@@ -87,6 +88,38 @@ none on (the example leaves that to the user; the demo does not). Under headless
 plain page's box selection took 156 s from mouse-up to the panel — the same main-thread draw the
 step-3 measurements describe, not the store (262 ms headed at step 3); re-measure headed before
 quoting. Vue and Svelte are documented in the examples' README and not checked.
+
+**Reviewed by the owner, 2026-08-25** — eight points on the built explorer, and where each stands
+after the `ui` track (branch `client/ui`, 2026-08-26). The design boards
+(`docs/evidence/mockups/client-components/shots/`) are the acceptance; the track's report carries a
+board-crop/screenshot pair per element and state.
+
+| # | the owner's point | where it stands |
+|---|---|---|
+| 1 | the filter panel is ugly and unusable with 171 categories | **done**: chips with × and *Clear all*; a category is a search over the enumeration with the top four as checkboxes and *Show N more…* (171 never listed at once); text is a field with *all words / phrase*; ranges two inputs — `ExplorerOverlay.png` |
+| 2 | initial load at 1.8M points is laggy and the loading pill says nothing | **done**: measured headed (Chromium 1208, RTX 3080) on 2m4's full principal, 996,488 marks — before: first marks at 1.86 s all at once in a 275 ms task, frame gaps 328/289/276 ms; after: first marks at 1.29–1.55 s streaming to 996,488 by 1.9–2.1 s, the longest task during streaming 63–85 ms (the 209 ms and 169 ms left are WebGL context creation and the warm shader link, before any data). The pill is gone; the strip's *Starting session…* and *Loading* rows are the progress. Under software GL (headless swiftshader) a frame is seconds, so slices are stored without presenting and the response paints once, as before |
+| 3 | clicking an artifact shows nothing; click-to-filter is not wanted | **done**: a click selects — the card and the highlighted outline — and never moves the camera or filters; *Fit to cluster* is the card's button; the card is a live read of the served set (children as the channel answers) |
+| 4 | no way to see the HDBSCAN and toponymy artifacts | **done with the corpus track's 2.4M corpus** (viewer 37590): the channel and the point path carry `artifact_budget` (`BASE × 2^zoom`, 24 at the overview, capped at 2,048 — `core/src/artifactBudget.ts`), so HDBSCAN is served a 41-artifact cut at the overview and 143 three notches in; a tiered layer the server serves whole (toponymy, 797 at every budget) draws at the level the budget would have cut — `levelForBudget` — and the legend's *Level* select shows `auto · 16 topics…`, refining to 574 on zoom, or a chosen level. Topic labels attach to their cluster by the count a dependent carries (D13) and name it where it has no name of its own |
+| 5 | it does not look like the designs | **done**: every element restyled to `gen.py`'s tokens and markup — `Main.png`, `ExplorerOverlay.png`, `StatusStates.png` (nine states), `SelectionFlow.png`, `ExplorerNarrow.png`; light and dark follow the host's `color-scheme` |
+| 6 | words instead of icons in the interaction menu | **done**: pan, box, lasso, a rule, fit as `gen.py`'s icons, top-left docked and top-right overlay |
+| 7 | the mode toolbar is buggy — select tools do nothing, then pan breaks | **done**: deck's input layer saw a selection's pointerdown and never its pointerup, so its session stayed pressed; the gestures are now taken in the capture phase before the canvas sees them. `harness/modes.mjs` drives every transition with human-paced pointer input: 13 of 15 against the old handlers, 15 of 15 now |
+| 8 | text like *how many artifacts a layer holds is never published…* in a panel | **done**: every explanatory sentence is out of the panels — a state is one line — and in `clients/ts/README.md` (*What the panels do not say*) |
+
+**Measured at the review** (2026-08-26, harness headed on 2m4's full principal; re-run before
+quoting): decode as seen from the main thread median 21.9 ms, p95 88 ms; the largest response
+748,096 points in 77 ms in the worker, 88 ms as seen; absorb split median 20 ms, longest slice
+11 ms; per settle slab sync 2.4 ms, lookup texture 0.1 ms, layer build 2.8 ms, coverage check 2.0 ms
+over 16,100 bands; per frame mean 16.7 ms, p95 17.6 ms; box selection 262 ms select-to-counted.
+**Harness 9 of 9**; `smoke`, `smoke-artifacts`, `smoke-budget` OK on 2m4.
+
+**Found and not fixed here** (the server or the corpus): the wire gives a dependent artifact no
+centroid and no target id, so a topic label can be placed only through its count (exact where
+counts are distinct, unattached where two share one); the server serves a tiered layer whole
+whatever `artifact_budget` says (toponymy: 797 at budget 42, 819 KB), so the client cuts by level
+itself; 170 of toponymy's 797 artifacts name a parent that is not served alongside them, so the
+client draws them as roots; the notebook 50,000 corpus counts zero — every tile arrives without
+counts and the strip reads `0 shown · 0 matched · 0 visible` while 49,944 marks draw (present
+before this track's changes; the 2.4M corpus counts).
 
 ## What each step owes a measurement
 

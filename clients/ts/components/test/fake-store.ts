@@ -68,6 +68,8 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     openArtifact: async (...args: unknown[]) => {
       calls.push({name: 'openArtifact', args});
     },
+    clearSelection: spy('clearSelection'),
+    setScheme: spy('setScheme'),
     select: spy('select'),
     extentOf: () => null,
     dataXY: (x, y) => [x, y],

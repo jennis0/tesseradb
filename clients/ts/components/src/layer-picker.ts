@@ -7,13 +7,10 @@ import {chrome, tokens} from './tokens.js';
 
 /**
  * `<tessera-layer-picker>` — which annotation layers the map draws, from `meta.layers` (design
- * §5.3 tier 2, decision 0096). One entry per layer **with its closure**: a clustering's labels
- * are a second layer that `depends_on` it, so the entry names both and the store names every
- * layer in it in the request. Usually one is on; several only for different kinds of feature.
- *
- * The list is gate-filtered by the server, so it is the whole of what this principal may know
- * exists; a layer they cannot reach is absent by the route a never-registered one takes. Never
- * a count of a layer's artifacts: the wire carries none.
+ * §5.3 tier 2, decision 0096): the LAYERS checklist of the boards, one entry per layer **with its
+ * closure** — a clustering's labels are a second layer that `depends_on` it, so one entry names
+ * both and the store names every layer in it in the request. Never a count of a layer's
+ * artifacts: the wire carries none.
  */
 export class TesseraLayerPicker extends TesseraElement {
   static override styles = [
@@ -22,24 +19,20 @@ export class TesseraLayerPicker extends TesseraElement {
     css`
       :host {
         display: block;
-        max-width: 260px;
-        padding: var(--tessera-space) calc(var(--tessera-space) * 1.6);
-        background: var(--tessera-panel-bg);
-        border: 1px solid var(--tessera-border);
-        border-radius: var(--tessera-radius);
       }
       [part='entry'] {
         display: flex;
-        align-items: baseline;
-        gap: var(--tessera-space);
+        align-items: center;
+        gap: 8px;
+        height: 26px;
         cursor: pointer;
       }
-      [part='entry'] input {
-        margin: 0;
-      }
-      [part='closure'] {
-        color: var(--tessera-fg-muted);
-        font-size: var(--tessera-font-size-small);
+      [part='name'] {
+        font-family: var(--tessera-font-mono);
+        font-size: 12px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
     `
   ];
@@ -61,23 +54,21 @@ export class TesseraLayerPicker extends TesseraElement {
     const s = this.resolvedStore;
     const heading = html`<h2 part="title">Layers</h2>`;
     const meta = s?.get('meta') ?? null;
-    if (!s || !meta) return html`${heading}${renderState(stateOf(s?.get('status')), s?.get('status'))}`;
+    if (!s || !meta) return html`<div class="panel">${heading}${renderState(stateOf(s?.get('status')), s?.get('status'))}</div>`;
     const entries = this.entries();
-    if (entries.length === 0) {
-      return html`${heading}<span part="state" data-state="empty"><span class="muted">this principal reaches no layer here — which is also what a deployment with none looks like</span></span>`;
-    }
+    if (entries.length === 0) return html`<div class="panel">${heading}<span part="state" data-state="empty">No layers</span></div>`;
     const on = new Set(s.get('artifacts').layers);
-    return html`${heading}
+    return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
-      ${entries.map((e) => {
-        const rest = e.closure.filter((n) => n !== e.root.name);
-        return html`<label part="entry" data-layer=${e.root.name}>
-          <input type="checkbox" .checked=${on.has(e.root.name)} @change=${(ev: Event) => this.toggle(e, (ev.target as HTMLInputElement).checked)} />
-          <span part="name">${e.root.title || e.root.name}</span>
-          ${rest.length > 0 ? html`<span part="closure">with ${rest.map((n) => meta.layers.find((l) => l.name === n)?.title || n).join(', ')}</span>` : nothing}
-        </label>`;
-      })}
-      <div class="muted">how many artifacts a layer holds is never published: what you reach of one is answered artifact by artifact, by the viewport</div>`;
+      <div class="col">
+        ${entries.map(
+          (e) => html`<label part="entry" class="check" data-layer=${e.root.name} title=${e.closure.length > 1 ? e.closure.join(' + ') : nothing}>
+            <input type="checkbox" .checked=${on.has(e.root.name)} @change=${(ev: Event) => this.toggle(e, (ev.target as HTMLInputElement).checked)} />
+            <span part="name">${e.root.name}</span>
+          </label>`
+        )}
+      </div>
+    </div>`;
   }
 }
 

@@ -72,8 +72,10 @@ describe('<tessera-status> renders every state through part="state"', () => {
     const host = await mount('<tessera-status></tessera-status>');
     (host.querySelector('tessera-status') as TesseraStatus).store = fakeStore({status: status({}), view});
     await settle(host);
-    const texts = deepAll(host, '[part="count"]').map((c) => c.textContent);
-    expect(texts).toEqual(['500 of 12,040', '3,210', '12,040']);
+    const counts = deepAll(host, '[part="count"]');
+    expect(counts.map((c) => c.textContent)).toEqual(['500', '3,210', '12,040']);
+    // The sample's total is the visible cell beside it, and the cell carries it: both figures.
+    expect(counts[0]!.getAttribute('data-total')).toBe('12,040');
   });
 
   it('fires tessera-expired once, composed, on the expired transition', async () => {
@@ -126,7 +128,8 @@ describe('<tessera-selection> — a panel renders the states the same way', () =
     store.set('region', {shape, status: 'shown', refusal: null, visible: {value: 900, exact: false}, matched: {value: 800, exact: false}, served: {shown: 2, total: 800, exact: true}, depth: 6, tiles: 100, held});
     await settle(host);
     const counts = deepAll(host, '[part="count"]');
-    expect(counts.map((c) => c.textContent)).toEqual(['2 of 800', '≈ 800', '≈ 900']);
+    expect(counts.map((c) => c.textContent)).toEqual(['2', '≈ 800', '≈ 900']);
+    expect(counts[0]!.getAttribute('data-total')).toBe('800');
     expect(counts[1]!.getAttribute('data-exact')).toBe('false');
     expect(deepAll(host, '[part="item"]').length).toBe(2);
     const greyed = deepAll(host, '[part="action"][disabled]');

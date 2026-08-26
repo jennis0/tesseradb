@@ -11,11 +11,12 @@ import {
   type SelectionShape
 } from '@tesseradb/client';
 import {LookupTexture, MarkSlab, TesseraLayer, clusterLayerOf, encodingOf, encodingSignature, resolvePick, type Picked} from '@tesseradb/deck';
-import type {PaletteKind} from '@tesseradb/client';
+import type {PaletteKind, PaletteScheme} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import type {PickOutcome} from './item-card.js';
 import {renderState, stateOf, type PanelState} from './states.js';
+import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
@@ -152,27 +153,56 @@ export class TesseraMap extends TesseraElement {
       }
       [part='controls'] {
         display: flex;
-        gap: 4px;
+        flex-direction: column;
+        background: var(--tessera-surface);
+        border: 1px solid var(--tessera-line);
+        border-radius: var(--tessera-radius);
+        box-shadow: var(--tessera-shadow);
+        overflow: hidden;
         pointer-events: auto;
       }
       [part='controls'] button {
-        padding: 2px 8px;
+        width: 36px;
+        height: 36px;
+        display: grid;
+        place-items: center;
+        color: var(--tessera-ink-2);
+        border-bottom: 1px solid var(--tessera-line-2);
+        border-radius: 0;
+      }
+      [part='controls'] button:last-child {
+        border-bottom: 0;
       }
       [part='controls'] button[aria-pressed='true'] {
-        border-color: var(--tessera-accent);
+        background: var(--tessera-accent-soft);
         color: var(--tessera-accent);
+      }
+      [part='controls'] .sep {
+        height: 6px;
+        background: var(--tessera-surface-2);
+        border-bottom: 1px solid var(--tessera-line-2);
       }
       [part='tooltip'] {
         position: absolute;
         z-index: 4;
         pointer-events: none;
-        padding: 4px 8px;
-        background: var(--tessera-panel-bg);
-        border: 1px solid var(--tessera-border);
+        padding: 8px 10px;
+        max-width: 260px;
+        background: var(--tessera-surface);
+        border: 1px solid var(--tessera-line);
         border-radius: var(--tessera-radius);
-        font-size: var(--tessera-font-size-small);
-        white-space: nowrap;
-        transform: translate(12px, 12px);
+        box-shadow: var(--tessera-shadow);
+        font-size: 12px;
+        transform: translate(14px, 14px);
+      }
+      [part='tooltip'] .t {
+        font-weight: 500;
+        line-height: 1.35;
+      }
+      [part='tooltip'] .s {
+        margin-top: 3px;
+        font-size: 11px;
+        color: var(--tessera-ink-2);
       }
       [part='overlay'] {
         position: absolute;
@@ -185,10 +215,17 @@ export class TesseraMap extends TesseraElement {
       }
       [part='overlay'] [part='state'] {
         pointer-events: auto;
-        padding: var(--tessera-space) calc(var(--tessera-space) * 2);
-        background: var(--tessera-panel-bg);
-        border: 1px solid var(--tessera-border);
+        padding: 10px 14px;
+        background: var(--tessera-surface);
+        border: 1px solid var(--tessera-line);
         border-radius: var(--tessera-radius);
+        box-shadow: var(--tessera-shadow);
+        font-size: 13px;
+        font-weight: 600;
+      }
+      [part='overlay'] [part='state'][data-state='refused'],
+      [part='overlay'] [part='state'][data-state='expired'] {
+        background: var(--tessera-refuse-soft);
       }
     `
   ];
@@ -214,8 +251,10 @@ export class TesseraMap extends TesseraElement {
   @property({type: Number}) accessor radius = 1.6;
   /** The mode and fit control cluster — the map's own, not a slot. */
   @property({type: Boolean, attribute: 'no-controls'}) accessor noControls = false;
+  /** Which corner the toolbar sits in: top-left docked, top-right overlay (the boards). */
+  @property({attribute: 'controls-corner'}) accessor controlsCorner: 'top-left' | 'top-right' = 'top-left';
 
-  @state() accessor hover: {x: number; y: number; lines: string[]} | null = null;
+  @state() accessor hover: {x: number; y: number; title: string; lines: string[]} | null = null;
   @state() accessor drag: [number, number, number, number] | null = null;
   @state() accessor dragPolygon: [number, number][] | null = null;
 
@@ -248,6 +287,7 @@ export class TesseraMap extends TesseraElement {
   private announcedItem: object | null = null;
   private announcedArtifact: object | null = null;
   private dragStart: [number, number] | null = null;
+  private dragPointer: number | null = null;
   private metaSeen = false;
   private frameGaps: number[] = [];
   private frameLoop: number | null = null;
@@ -294,8 +334,23 @@ export class TesseraMap extends TesseraElement {
     if (changed.has('mode') || changed.has('drag') || changed.has('dragPolygon') || changed.has('basemap') || changed.has('wash') || changed.has('radius') || changed.has('clusterLevel')) this.paint();
   }
 
+  /**
+   * The ground the map draws on, from the host's `color-scheme`: `dark` or `light` as declared,
+   * else the system preference. The positional palette's lightness follows it (§5.10).
+   */
+  private scheme(): PaletteScheme {
+    if (typeof getComputedStyle === 'undefined') return 'dark';
+    const declared = getComputedStyle(this).colorScheme ?? '';
+    const dark = /dark/.test(declared);
+    const light = /light/.test(declared);
+    if (dark && !light) return 'dark';
+    if (light && !dark) return 'light';
+    return typeof matchMedia !== 'undefined' && matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
   protected override onStoreAdopted(store: Store): void {
     this.slab.clear();
+    store.setScheme(this.scheme());
     this.metaSeen = false;
     this.selectedWorldXY = null;
     this.regionWorld = null;
@@ -494,6 +549,7 @@ export class TesseraMap extends TesseraElement {
           dragPolygon: this.dragPolygon,
           wash: this.wash,
           radius: this.radius,
+          scheme: this.scheme(),
           onDrawn: (drawn, provisional) => {
             const p = this.probe;
             p.paints += 1;
@@ -532,7 +588,9 @@ export class TesseraMap extends TesseraElement {
       if (this.hover) this.hover = null;
       return;
     }
-    const lines = [`#${idString(picked.id)}`];
+    // The hint: the first tooltip field as the title (a `title` column, typically), the rest as
+    // one muted line beneath — the boards' `tooltip`. With no fields, the id.
+    const values: string[] = [];
     const fields = this.tooltipFields.split(/[\s,]+/).filter(Boolean);
     const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
     const slot = /marks-p(\d+)$/.exec(layerId);
@@ -543,11 +601,13 @@ export class TesseraMap extends TesseraElement {
           const column = at.band.scalars[f];
           if (!column) continue;
           const raw = (column.values as ArrayLike<unknown>)[at.i];
-          lines.push(`${f}: ${column.arrowType === 'timestamp_us' ? new Date(Number(raw) / 1000).toISOString().slice(0, 10) : String(raw)}`);
+          values.push(column.arrowType === 'timestamp_us' ? new Date(Number(raw) / 1000).toISOString().slice(0, 4) : String(raw));
         }
       }
     }
-    this.hover = {x: info.x, y: info.y, lines};
+    const title = values[0] ?? `#${idString(picked.id)}`;
+    const lines = values.slice(1);
+    this.hover = {x: info.x, y: info.y, title, lines};
     emit(this, 'tessera-hover', {id: idString(picked.id), x: info.x, y: info.y});
   }
 
@@ -586,6 +646,18 @@ export class TesseraMap extends TesseraElement {
     return [xy[0]!, xy[1]!];
   }
 
+  /**
+   * The selection gestures are taken in the **capture phase, before deck's own input layer sees
+   * them**. deck (mjolnir/hammer) listens for `pointerdown` on its canvas and for the move and
+   * up on `window`; the old handlers ran on the canvas's parent in the bubble phase and stopped
+   * propagation there, so hammer saw every selection's `pointerdown` and never its `pointerup`.
+   * Its input session stayed pressed: the next mouse movement — button up, on the way to the
+   * *pan* button — read as a drag, the camera followed the pointer once the controller was back
+   * on, and the real pan drag that followed did nothing because hammer's session was already in
+   * flight. Found with human-paced pointer input in a real browser; the fast synthetic drag did
+   * not stay pressed long enough to show it. Stopping the `pointerdown` before it reaches the
+   * canvas means hammer never opens a session for a selection, so there is nothing to close.
+   */
   private onPointerDown = (e: PointerEvent): void => {
     if (e.button !== 0) return;
     const lasso = this.mode === 'lasso';
@@ -593,14 +665,16 @@ export class TesseraMap extends TesseraElement {
     const at = this.unproject(e);
     if (!at) return;
     this.dragStart = at;
+    this.dragPointer = e.pointerId;
     if (lasso) this.dragPolygon = [at];
     else this.drag = [at[0], at[1], at[0], at[1]];
     (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
     e.stopPropagation();
+    e.preventDefault();
   };
 
   private onPointerMove = (e: PointerEvent): void => {
-    if (!this.dragStart) return;
+    if (!this.dragStart || e.pointerId !== this.dragPointer) return;
     const at = this.unproject(e);
     if (!at) return;
     if (this.dragPolygon) {
@@ -616,13 +690,16 @@ export class TesseraMap extends TesseraElement {
   };
 
   private onPointerUp = (e: PointerEvent): void => {
-    if (!this.dragStart) return;
+    if (!this.dragStart || e.pointerId !== this.dragPointer) return;
     const box = this.drag;
     const polygon = this.dragPolygon;
     this.dragStart = null;
+    this.dragPointer = null;
     this.drag = null;
     this.dragPolygon = null;
     e.stopPropagation();
+    // A cancel, or a capture lost to the platform, ends the gesture and selects nothing.
+    if (e.type !== 'pointerup') return;
     const s = this.resolvedStore;
     if (!s || !s.get('meta')) return;
     if (polygon) {
@@ -654,6 +731,11 @@ export class TesseraMap extends TesseraElement {
     this.viewState = {...this.viewState, ...next};
     this.deck?.setProps({viewState: this.viewState});
     this.pushView();
+  }
+
+  /** The camera's zoom: 0 when the 512-unit world fills 512 px, +1 per doubling. */
+  get zoom(): number {
+    return this.viewState.zoom;
   }
 
   /** Fit the whole extent. */
@@ -762,32 +844,40 @@ export class TesseraMap extends TesseraElement {
   override render() {
     const status = this.resolvedStore?.get('status') ?? null;
     const state: PanelState = stateOf(status);
-    const overlay = state === 'shown' || state === 'stale' || state === 'detached' ? nothing : html`<div part="overlay">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>`;
+    // Loading and retrying are the strip's to say; the map draws only what must never read as an
+    // empty corpus: a refusal, an expiry, an empty answer.
+    const overlay = state === 'refused' || state === 'expired' || state === 'empty' ? html`<div part="overlay">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>` : nothing;
+    const controls = this.noControls
+      ? nothing
+      : html`<div part="controls" role="toolbar" aria-label="Map tools">
+          <button type="button" aria-label="Pan" aria-pressed=${this.mode === 'pan'} title="Pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>${icon('pan')}</button>
+          <button type="button" aria-label="Box select" aria-pressed=${this.mode === 'box'} title="Box select" @click=${() => (this.mode = 'box')}>${icon('box')}</button>
+          <button type="button" aria-label="Lasso select" aria-pressed=${this.mode === 'lasso'} title="Lasso select" @click=${() => (this.mode = 'lasso')}>${icon('lasso')}</button>
+          <div class="sep"></div>
+          <button type="button" aria-label="Fit to extent" title="Fit to extent" @click=${() => this.fit()}>${icon('fit')}</button>
+        </div>`;
     return html`<div
         part="canvas"
-        @pointerdown=${this.onPointerDown}
-        @pointermove=${this.onPointerMove}
-        @pointerup=${this.onPointerUp}
-        @pointercancel=${this.onPointerUp}
+        @pointerdown=${{handleEvent: this.onPointerDown, capture: true}}
+        @pointermove=${{handleEvent: this.onPointerMove, capture: true}}
+        @pointerup=${{handleEvent: this.onPointerUp, capture: true}}
+        @pointercancel=${{handleEvent: this.onPointerUp, capture: true}}
+        @lostpointercapture=${{handleEvent: this.onPointerUp, capture: true}}
       ></div>
-      ${state === 'stale' ? html`<div part="overlay" style="align-items:flex-start;justify-content:center">${renderState(state, status, {onRefresh: () => this.resolvedStore?.refresh()})}</div>` : overlay}
+      ${overlay}
       <div class="corner top-left">
-        ${this.noControls
-          ? nothing
-          : html`<div part="controls" role="toolbar" aria-label="map mode">
-              <button type="button" aria-pressed=${this.mode === 'pan'} title="pan (shift-drag selects)" @click=${() => (this.mode = 'pan')}>pan</button>
-              <button type="button" aria-pressed=${this.mode === 'box'} title="drag a box to select" @click=${() => (this.mode = 'box')}>box</button>
-              <button type="button" aria-pressed=${this.mode === 'lasso'} title="draw a shape to select" @click=${() => (this.mode = 'lasso')}>lasso</button>
-              <button type="button" title="fit the whole extent" @click=${() => this.fit()}>fit</button>
-            </div>`}
+        ${this.controlsCorner === 'top-left' ? controls : nothing}
         <slot name="top-left"></slot>
       </div>
-      <div class="corner top-right"><slot name="top-right"></slot></div>
+      <div class="corner top-right">
+        ${this.controlsCorner === 'top-right' ? controls : nothing}
+        <slot name="top-right"></slot>
+      </div>
       <div class="corner bottom-left"><slot name="bottom-left"></slot></div>
       <div class="corner bottom-right"><slot name="bottom-right"></slot></div>
       ${this.hover
         ? html`<div part="tooltip" style=${`left:${this.hover.x}px;top:${this.hover.y}px`}>
-            <slot name="tooltip">${this.hover.lines.map((l) => html`<div>${l}</div>`)}</slot>
+            <slot name="tooltip"><div class="t">${this.hover.title}</div>${this.hover.lines.length > 0 ? html`<div class="s">${this.hover.lines.join(' · ')}</div>` : nothing}</slot>
           </div>`
         : nothing}`;
   }

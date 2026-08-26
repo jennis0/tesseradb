@@ -2,7 +2,7 @@ import {ArtifactChannel, servedLineage, type ArtifactChannelState, type ServedLi
 import {SessionArtifactTable} from './artifactTable.js';
 import type {Composition} from './compose.js';
 import {NO_COUNT, NO_MASKED, type Count, type Masked} from './counts.js';
-import {dataToWorldXY, MAX_DEPTH, WORLD_SIZE} from './coords.js';
+import {dataToWorldXY, gridToWorld, MAX_DEPTH, WORLD_SIZE} from './coords.js';
 import {tileRectOfBbox} from './budget.js';
 import {rectContainsTile} from './rects.js';
 import {worldBbox} from './prefetch.js';
@@ -12,7 +12,8 @@ import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
 import {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, type WorldPolygon} from './region.js';
 import {layerClosure} from './layers.js';
-import {artifactColours, type PaletteKind, type Rgba} from './palette.js';
+import {artifactBudgetFor} from './artifactBudget.js';
+import {artifactColours, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
 import type {Band, BandKey} from './bands.js';
 import {bandKey} from './bands.js';
 import {Replica, type ReplicaOptions} from './replica.js';
@@ -249,6 +250,10 @@ export interface Store {
   setBudget(budget: number): void;
   pick(id: bigint): Promise<void>;
   openArtifact(id: bigint): Promise<void>;
+  /** Drop the picked point and the opened artifact — a card's close. */
+  clearSelection(): void;
+  /** The colour scheme the map draws on, so the positional palette reads on its ground (§5.10). */
+  setScheme(scheme: PaletteScheme): void;
   select(shape: SelectionShape | null): void;
   /** A data-coordinates bbox for an artifact — what a map's `fitTo` uses. */
   extentOf(artifactId: bigint): [number, number, number, number] | null;
@@ -308,6 +313,7 @@ export function createStore(options: StoreOptions): Store {
   let budget = options.budget ?? 500_000;
   let colourBy: string | null = null;
   let palette: PaletteKind = options.palette ?? 'positional';
+  let scheme: PaletteScheme = 'dark';
   let contentKeyAtFrame = '';
   let selection: SelectionShape | null = null;
 
@@ -402,9 +408,12 @@ export function createStore(options: StoreOptions): Store {
         // (§5.10): that is what puts the membership column on each band. `[]` until a layer is on
         // — and `[]` on the replica's counts-only revalidation, which absorbs no points and would
         // pay the artifact pass for a frame nobody reads.
+        // The point path carries the same budget as the channel, so a point's membership column
+        // names the deepest artifact of the *same* cut the panels show.
+        const zoom = presenter?.view?.view.zoom ?? 0;
         return client.viewport(
           tok,
-          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn},
+          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn, ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)})},
           signal,
           background
         );
@@ -418,7 +427,9 @@ export function createStore(options: StoreOptions): Store {
         revalidateAfterMs: options.replica?.revalidateAfterMs,
         onPhase: (kind, ms, n) => {
           options.replica?.onPhase?.(kind, ms, n);
-          if (kind === 'store') presenter?.absorbed();
+          // A stored slice is drawable now: the driver derives at most once per its gap while
+          // the response streams in, so the first marks arrive with the first slice.
+          if (kind === 'piece' || kind === 'store') presenter?.absorbed();
         },
         now: () => clock.now()
       }
@@ -523,6 +534,9 @@ export function createStore(options: StoreOptions): Store {
       served += tile.counts.served;
     }
 
+    // A frame on screen ends *Starting session…*: the session answered, whatever the driver's
+    // status says about the request still streaming.
+    if (!projections.status.sessionWarm && frame.exactDrawn + frame.provisional > 0) replaceProjection('status', {...projections.status, sessionWarm: true});
     replaceProjection('view', {
       composition: frame,
       depth: frame.depth,
@@ -597,7 +611,7 @@ export function createStore(options: StoreOptions): Store {
       version: state.version,
       table,
       servedOrdinals,
-      colours: artifactColours(named, palette),
+      colours: artifactColours(named, palette, scheme),
       palette
     });
     checkColourCoverage();
@@ -805,15 +819,29 @@ export function createStore(options: StoreOptions): Store {
     checkColourCoverage();
   }
 
-  function setPalette(kind: PaletteKind): void {
-    if (kind === palette) return;
-    palette = kind;
+  function recolour(): void {
     const a = projections.artifacts;
     const named = a.served
       .map((artifact) => ({ordinal: table.ordinalOf(artifact.layer, artifact.tesseraId), artifact}))
       .filter((n) => n.ordinal !== 0);
     // O(served): the colours move, the ordinals do not, and the vis side rewrites its texture.
-    replaceProjection('artifacts', {...a, colours: artifactColours(named, kind), palette: kind});
+    replaceProjection('artifacts', {...a, colours: artifactColours(named, palette, scheme), palette});
+  }
+
+  function setPalette(kind: PaletteKind): void {
+    if (kind === palette) return;
+    palette = kind;
+    recolour();
+  }
+
+  function setScheme(next: PaletteScheme): void {
+    if (next === scheme) return;
+    scheme = next;
+    recolour();
+  }
+
+  function clearSelection(): void {
+    replaceProjection('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
   }
 
   function setColourBy(column: string | null): void {
@@ -1011,15 +1039,11 @@ export function createStore(options: StoreOptions): Store {
     const artifact = projections.artifacts.served.find((a) => a.tesseraId === artifactId);
     const box = artifact?.box;
     if (!box || !meta) return null;
-    // The box is in grid (cell) units; convert to data coordinates through the quantisation.
-    const q = meta.quantisation;
-    const toData = (cell: number, min: number, max: number) => min + (cell / 65536) * (max - min);
-    return [
-      toData(box[0], q.xMin, q.xMax),
-      toData(box[1], q.yMin, q.yMax),
-      toData(box[2], q.xMin, q.xMax),
-      toData(box[3], q.yMin, q.yMax)
-    ];
+    // The box is in the wire's 32-bit grid units (contracts §3.2), the same units the outlines
+    // draw from: through world space, by the one conversion every reader of wire geometry uses.
+    const [x0, y0] = dataXY(gridToWorld(box[0]), gridToWorld(box[1]));
+    const [x1, y1] = dataXY(gridToWorld(box[2]), gridToWorld(box[3]));
+    return [x0, y0, x1, y1];
   }
 
   function dataXY(worldX: number, worldY: number): [number, number] {
@@ -1088,6 +1112,8 @@ export function createStore(options: StoreOptions): Store {
     setBudget,
     pick,
     openArtifact,
+    clearSelection,
+    setScheme,
     select,
     extentOf,
     dataXY,

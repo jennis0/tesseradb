@@ -1,22 +1,21 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
-import {artifactName} from '@tesseradb/deck';
+import {attachedTopics, displayName} from '@tesseradb/deck';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
-import {renderState, stateOf} from './states.js';
+import {renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-artifact-list>` — what the layers served for this view, as a list or a tree built
- * from `parentId`, each with its content and its `Masked` count (design §5.3 tier 2, §6). A
- * click selects and fits.
+ * `<tessera-artifact-list>` — what the layers served for this view (design §5.3 tier 2, §6): the
+ * boards' *IN VIEW · N clusters* list, a tree built from `parentId` with a row's children beneath
+ * it, each with its name and its `Masked` count, the opened one highlighted. A click selects —
+ * the card and the outline — and never moves the camera.
  *
  * The count is over the whole membership as this principal sees it and does not move with the
- * viewport; only *whether* an artifact appears depends on where you are looking. An absent
- * artifact carries no reason, and one whose parent was not served is a root of what was given —
- * there is no "hidden" row because there is nothing on the wire to fill one from.
+ * viewport; only *whether* an artifact appears depends on where you are looking.
  */
 export class TesseraArtifactList extends TesseraElement {
   static override styles = [
@@ -25,10 +24,6 @@ export class TesseraArtifactList extends TesseraElement {
     css`
       :host {
         display: block;
-        padding: var(--tessera-space) calc(var(--tessera-space) * 1.6);
-        background: var(--tessera-panel-bg);
-        border: 1px solid var(--tessera-border);
-        border-radius: var(--tessera-radius);
       }
       [part='items'] {
         list-style: none;
@@ -38,24 +33,13 @@ export class TesseraArtifactList extends TesseraElement {
         overflow-y: auto;
       }
       [part='item'] {
-        display: flex;
-        justify-content: space-between;
-        gap: var(--tessera-space);
-        padding: 1px 0;
-        padding-left: calc(var(--depth, 0) * 12px);
-        cursor: pointer;
+        padding-left: calc(6px + var(--depth, 0) * 18px);
       }
-      [part='item']:hover,
-      [part='item'][data-opened] {
-        color: var(--tessera-fg-strong);
-      }
-      [part='item'][data-opened] [part='name'] {
-        color: var(--tessera-accent);
-      }
-      [part='name'] {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+      [part='item'] tessera-count::part(count) {
+        margin-left: auto;
+        color: var(--tessera-ink-2);
+        font-size: 12px;
+        font-weight: 400;
       }
     `
   ];
@@ -76,45 +60,46 @@ export class TesseraArtifactList extends TesseraElement {
 
   override render() {
     const a = this.shown;
-    const heading = html`<h2 part="title">Artifacts</h2>`;
-    if (!a) return html`${heading}${renderState('detached', null)}`;
-    if (a.layers.length === 0) return html`${heading}<span part="state" data-state="empty"><span class="muted">no layer on</span></span>`;
-    if (a.status === 'idle' || a.status === 'loading') return html`${heading}${renderState('loading', this.resolvedStore?.get('status') ?? null)}`;
+    const heading = (summary: unknown = nothing) => html`<h2 part="title">In view<span class="summary">${summary}</span></h2>`;
+    if (!a) return html`<div class="panel">${heading()}${renderState('detached', null)}</div>`;
+    if (a.layers.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">No layer on</span></div>`;
+    if (a.status === 'idle' || a.status === 'loading') return html`<div class="panel">${heading()}${renderState('loading', this.resolvedStore?.get('status') ?? null)}</div>`;
     if (a.status === 'refused') {
-      return html`${heading}<span part="state" data-state="refused"><span class="badge">refused</span><span part="refusal">${a.refusal?.code}: ${a.refusal?.detail} — not an empty view</span></span>`;
+      return html`<div class="panel">${heading()}<span part="state" data-state="refused"><span part="refusal">${a.refusal?.code}: ${a.refusal?.detail}</span></span></div>`;
     }
-    if (a.served.length === 0) {
-      return html`${heading}<span part="state" data-state="empty"><span class="muted">nothing served here — no artifact in this view has a member this principal can see, or none clears its layer's criterion; the response does not say which</span></span>`;
-    }
+    if (a.served.length === 0) return html`<div class="panel">${heading()}<span part="state" data-state="empty">Nothing in this view</span></div>`;
     const stale = this.resolvedStore?.get('status').stale ?? false;
     const opened = this.resolvedStore?.get('selection').artifact?.id ?? null;
-    const listed = flatten(a.lineage);
+    const topics = attachedTopics(a, this.resolvedStore?.get('meta') ?? null);
+    const listed = flatten(a.lineage).filter(({artifact}) => !topics.size || !(this.resolvedStore?.get('meta')?.layers.find((l) => l.name === artifact.layer)?.depsOn.length));
     const shown = listed.slice(0, this.rows);
-    return html`${heading}
+    const n = a.lineage.linked ? a.lineage.roots.length : a.served.length;
+    return html`<div class="panel">${heading(`${n.toLocaleString('en-GB')} cluster${n === 1 ? '' : 's'}`)}
       <span part="state" data-state="shown"></span>
-      <div class="muted">${a.served.length.toLocaleString('en-GB')} served${a.lineage.linked ? `, ${a.lineage.roots.length.toLocaleString('en-GB')} at the top` : ''}</div>
-      <ul part="items">
+      <ul part="items" class="list">
         ${shown.map(({artifact, depth}) => {
           const masked: Masked = {value: Number(artifact.maskedCount), exact: true};
           return html`<li
             part="item"
+            class="item"
             role="button"
             tabindex="0"
             style=${`--depth:${depth}`}
             data-id=${idString(artifact.tesseraId)}
+            aria-selected=${opened === artifact.tesseraId ? 'true' : 'false'}
             ?data-opened=${opened === artifact.tesseraId}
             @click=${() => this.open(artifact)}
             @keydown=${(e: KeyboardEvent) => {
               if (e.key === 'Enter' || e.key === ' ') this.open(artifact);
             }}
           >
-            <span part="name" title=${artifact.layer}>${artifactName(artifact)}</span>
+            <span part="name" class="name" title=${artifact.layer}>${displayName(artifact, topics)}</span>
             <tessera-count part="count" .masked=${masked} .stale=${stale}></tessera-count>
           </li>`;
         })}
       </ul>
-      ${listed.length > shown.length ? html`<div class="muted">…and ${(listed.length - shown.length).toLocaleString('en-GB')} more</div>` : nothing}
-      <div class="muted">members visible to this principal, over the whole artifact — never its size, and never over the viewport</div>`;
+      ${listed.length > shown.length ? html`<div class="muted xs">and ${(listed.length - shown.length).toLocaleString('en-GB')} more</div>` : nothing}
+    </div>`;
   }
 }
 

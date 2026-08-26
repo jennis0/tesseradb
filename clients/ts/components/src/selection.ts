@@ -3,18 +3,20 @@ import {property} from 'lit/decorators.js';
 import {REGION_HELD_LIMIT, type RegionProjection} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
+import {icon} from './icons.js';
 import {chrome, tokens} from './tokens.js';
 import './count.js';
 
 /**
- * `<tessera-selection>` — the selected region (design §5.3 tier 2, §5.11): its three numbers
- * through `<tessera-count>` — `visible` and `matched` as `Masked`, inexact where a counted cell
- * exceeded a pixel; `served` as the held marks inside against `matched`, both figures always —
- * the served items inside as a list (click picks), and the actions.
+ * `<tessera-selection>` — the selected region (design §5.3 tier 2, §5.11), as the boards draw it
+ * (`SelectionFlow.png`): *Shown inside · Matched inside · Visible inside* through
+ * `<tessera-count>` — `visible` and `matched` as `Masked`, inexact where a counted cell exceeded a
+ * pixel; `served` as the held marks inside against `matched`, both figures always — the shown
+ * items as a list (click picks), and the actions.
  *
- * *Clear* works now. *Filter to this*, *export* and *save as artifact* are greyed with the
- * reason on hover rather than omitted: each is a server-side verb asked for in D11 — the
- * selection operand, the bulk-export verb, the runtime-artifact path — and ⊘ none is built.
+ * *Clear* works now. *Filter to this* and *Export* are greyed with the reason on hover rather
+ * than omitted: each is a server-side verb asked for in D11 — the selection operand, the
+ * bulk-export verb — and ⊘ neither is built.
  */
 export class TesseraSelection extends TesseraElement {
   static override styles = [
@@ -23,39 +25,35 @@ export class TesseraSelection extends TesseraElement {
     css`
       :host {
         display: block;
-        padding: var(--tessera-space) calc(var(--tessera-space) * 1.6);
-        background: var(--tessera-panel-bg);
-        border: 1px solid var(--tessera-border);
-        border-radius: var(--tessera-radius);
       }
       [part='counts'] {
-        display: flex;
-        flex-wrap: wrap;
-        gap: calc(var(--tessera-space) * 1.5);
-        margin-bottom: var(--tessera-space);
+        margin-bottom: 4px;
+      }
+      [part='counts'] tessera-count::part(count) {
+        font-weight: 500;
+      }
+      [part='counts'] tessera-count::part(label) {
+        display: none;
+      }
+      .items-label {
+        margin: 10px 0 4px;
       }
       [part='items'] {
-        max-height: 132px;
-        overflow-y: auto;
-        border: 1px solid var(--tessera-border);
-        border-radius: var(--tessera-radius);
-        padding: 4px 6px;
-        margin-bottom: var(--tessera-space);
         list-style: none;
-        margin-top: 0;
-        padding-left: 6px;
+        margin: 0;
+        padding: 0;
+        max-height: 160px;
+        overflow-y: auto;
       }
       [part='item'] {
-        cursor: pointer;
-        font-variant-numeric: tabular-nums;
-      }
-      [part='item']:hover {
-        color: var(--tessera-fg-strong);
+        font-family: var(--tessera-font-mono);
+        font-size: 12px;
       }
       [part='actions'] {
         display: flex;
         flex-wrap: wrap;
-        gap: var(--tessera-space);
+        gap: 6px;
+        margin-top: 12px;
       }
     `
   ];
@@ -69,55 +67,52 @@ export class TesseraSelection extends TesseraElement {
 
   override render() {
     const r = this.shown;
-    const heading = html`<h2 part="title">Selection</h2>`;
-    if (!r) return html`${heading}<span part="state" data-state="detached"></span>`;
+    const heading = (shape: string = '') => html`<h2 part="title">Selection<span class="summary">${shape}</span></h2>`;
+    if (!r) return html`<div class="panel">${heading()}<span part="state" data-state="detached"></span></div>`;
     const stale = this.resolvedStore?.get('status').stale ?? false;
     const state = r.status === 'shown' ? (stale ? 'stale' : 'shown') : r.status;
-    const shape = r.shape.kind === 'box' ? `box ${r.shape.bbox.map((v) => v.toFixed(1)).join(', ')}` : `lasso (${r.shape.points.length} points)`;
+    const kv = (label: string, count: unknown) => html`<div class="k">${label}</div><div class="v">${count}</div>`;
     const counts =
       r.status === 'shown'
-        ? html`<div part="counts">
-            <tessera-count part="count-served" .count=${r.served} .stale=${stale} label="held marks inside"></tessera-count>
-            <tessera-count part="count-matched" .masked=${r.matched} .stale=${stale} label="matched"></tessera-count>
-            <tessera-count part="count-visible" .masked=${r.visible} .stale=${stale} label="visible"></tessera-count>
+        ? html`<div part="counts" class="kv">
+            ${kv('Shown inside', html`<tessera-count part="count-served" .count=${r.served} .stale=${stale} figure="shown"></tessera-count>`)}
+            ${kv('Matched inside', html`<tessera-count part="count-matched" .masked=${r.matched} .stale=${stale}></tessera-count>`)}
+            ${kv('Visible inside', html`<tessera-count part="count-visible" .masked=${r.visible} .stale=${stale}></tessera-count>`)}
           </div>`
         : nothing;
     const stateRegion =
       r.status === 'loading'
-        ? html`<span part="state" data-state="loading"><span class="badge">counting</span><span class="skeleton" aria-hidden="true"></span></span>`
+        ? html`<span part="state" data-state="loading"><span class="dot"></span>Counting<span class="skel" aria-hidden="true"></span></span>`
         : r.status === 'refused'
-          ? html`<span part="state" data-state="refused"><span class="badge">refused</span><span part="refusal">${r.refusal?.code}: ${r.refusal?.detail}</span></span>`
-          : html`<span part="state" data-state=${state}
-              >${stale ? html`<span class="badge">stale</span>` : nothing}<span class="muted"
-                >${shape} · counted at depth ${r.depth} over ${r.tiles.toLocaleString('en-GB')} cells${r.visible.exact
-                  ? ''
-                  : ' — a cell is wider than a pixel here, so the numbers are exact for the cells, not the shape'}</span
-              ></span
-            >`;
+          ? html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${r.refusal?.code}</span></span>`
+          : html`<span part="state" data-state=${state} title=${`counted at depth ${r.depth} over ${r.tiles.toLocaleString('en-GB')} cells`}>${stale ? html`${icon('clock', 14)}Corpus updated` : nothing}</span>`;
     const ids = Array.from(r.held.ids, idString);
-    const disabled = (reason: string) => html`<button part="action" type="button" disabled title=${reason}>`;
-    return html`${heading}${stateRegion}${counts}
+    // Greyed with the reason on hover, never omitted: each waits on a server verb (D11).
+    const waiting = (label: unknown, reason: string) => html`<button part="action" class="btn off" type="button" disabled title=${reason}>${label}</button>`;
+    return html`<div class="panel">${heading(r.shape.kind)}${stateRegion}${counts}
       ${ids.length > 0
-        ? html`<ul part="items" aria-label="held marks inside the selection">
+        ? html`<div part="label" class="xs muted items-label">Shown items</div>
+          <ul part="items" class="list" aria-label="held marks inside the selection">
             ${ids.map(
-              (id) => html`<li part="item" tabindex="0" role="button"
+              (id) => html`<li part="item" class="item" tabindex="0" role="button"
                   @click=${() => void this.resolvedStore?.pick(BigInt(id))}
                   @keydown=${(e: KeyboardEvent) => {
                     if (e.key === 'Enter' || e.key === ' ') void this.resolvedStore?.pick(BigInt(id));
-                  }}>${id}</li>`
+                  }}><span class="name">${id}</span></li>`
             )}
-            ${r.held.count > ids.length ? html`<li class="muted">…and ${(r.held.count - ids.length).toLocaleString('en-GB')} more held (the first ${REGION_HELD_LIMIT} listed)</li>` : nothing}
+            ${r.held.count > ids.length ? html`<li class="muted xs">and ${(r.held.count - ids.length).toLocaleString('en-GB')} more (the first ${REGION_HELD_LIMIT} listed)</li>` : nothing}
           </ul>`
         : nothing}
       <div part="actions">
-        <button part="action" type="button" @click=${() => {
+        <button part="action" class="btn" type="button" @click=${() => {
           this.resolvedStore?.select(null);
           emit(this, 'tessera-selectchange', {shape: null});
-        }}>clear</button>
-        ${disabled('the selection operand is not built (D11, asked for): a region cannot yet be composed with the other filters')}filter to this</button>
-        ${disabled('the bulk-export verb is not built (D11, asked for)')}export</button>
-        ${disabled('the runtime-artifact path is not built (D11, asked for)')}save as artifact</button>
-      </div>`;
+        }}>${icon('close', 13)}Clear</button>
+        ${waiting(html`${icon('filter', 13)}Filter to this`, 'Needs the selection operand (not yet served)')}
+        ${waiting('Export', 'Needs the export verb (not yet served)')}
+        ${waiting('Save as artifact', 'Needs the runtime-artifact path (not yet served)')}
+      </div>
+    </div>`;
   }
 }
 

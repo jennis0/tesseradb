@@ -41,7 +41,7 @@ page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
 // Look-ahead off: it issues requests while the view is still, which is every moment this script
 // measures in, and none of them are this instrument's business.
-await page.goto(`${url}?prefetch=0`, {waitUntil: 'load'});
+await page.goto(`${url}${url.includes('?') ? '&' : '?'}prefetch=0`, {waitUntil: 'load'});
 
 /** Wait until the mark count stops moving — every figure below is only meaningful once it has. */
 const settled = async (limitMs = 45_000) => {
@@ -79,8 +79,8 @@ const artifactList = async () =>
       const n = Number(text.replaceAll(',', ''));
       if (name && Number.isFinite(n)) counts[name] = n;
     }
-    const served = /([\d,]+) served/.exec(scope.textContent ?? '');
-    return {state, served: served ? Number(served[1].replaceAll(',', '')) : null, empty: /nothing served here/.test(scope.textContent ?? ''), counts};
+    const served = /([\d,]+) clusters?/.exec(scope.textContent ?? '');
+    return {state, served: served ? Number(served[1].replaceAll(',', '')) : null, empty: /Nothing in this view/.test(scope.textContent ?? ''), counts};
   });
 
 /** What the map drew of the artifacts, from the probe: outlines, placed labels, the layers on. */
