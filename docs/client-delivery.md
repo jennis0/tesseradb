@@ -65,7 +65,6 @@ client steps can see what they wait on):
 | S6 | D11 — the selection operand; the export verb; the runtime-artifact path | *filter to this*, *export*, *save* | not started |
 | S7 | D14 — a verified-assertion auth plugin | C1's production token story | not started |
 | S8 | membership by predicate — a k-means layer whose membership is *nearest model centroid*, so every point is a member and colour covers the corpus (artifact-system §10's specified-not-built path) | k-means colouring beyond the sampled members | **deferred** by the owner 2026-08-25; a client-side Voronoi over served centroids was declined the same day — it would bake a classification into our client that the wire does not carry, so a C2/C3 client would draw a different map; decision 0099 stands |
-| S9 | a per-branch artifact cut — `cut.rs` resolves one depth for the whole tree, so a root with 26 children serves only itself under any budget below 27, and a budget that reaches one branch's leaves is far past another's (found 2026-08-25 on the collapsed notebook-2m4 tree; per-branch depth is noted there as deliberately unbuilt) | the overview under a small budget; label count at the overview | **asked for** 2026-08-25; the client's overview budget is raised past the observed fan-out meanwhile |
 **The notebook corpus is the demo's fifth dataset** (2026-08-26, track `corpus`): `data/notebook/`'s
 declarations migrated to the configuration surface (the notebook's writer already produced the
 current form; the files on disk were reshaped to match it, and `hull` added to the clusterings'
