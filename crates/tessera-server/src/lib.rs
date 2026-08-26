@@ -329,6 +329,7 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         session_credential,
         operator_credential,
         dev_cors_origins: config.dev_cors_origins.clone(),
+        cors_origins: config.cors_origins.clone(),
         #[cfg(feature = "fault-injection")]
         faults,
     });
@@ -337,6 +338,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // session token and the session credential to this process. It is a development affordance;
     // T2 (server-mediated, with verified assertions) remains the documented integration topology —
     // client-interaction §7 tabulates the four topologies and names the two anti-patterns.
+    //
+    // `serve.cors_origins` gets no warning of its own. It is a deployment's deliberate statement
+    // about which pages may present its tokens, not a seam left open by accident, and a warning
+    // on every start would train an operator to read this one past as well (decision 0102).
     if !config.dev_cors_origins.is_empty() {
         tracing::warn!(
             origins = ?config.dev_cors_origins,

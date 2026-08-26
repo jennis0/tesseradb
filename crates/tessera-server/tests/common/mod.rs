@@ -238,7 +238,7 @@ pub async fn spawn_server_with_stream_flush(
         max_k,
         generous_test_gate(),
         generous_ingest_limits(),
-        Vec::new(),
+        CorsOrigins::none(),
         stream_flush_bytes,
         stream_write_stall_ms,
         Arc::new(FaultSwitchboard::new()),
@@ -331,7 +331,7 @@ pub async fn mount_server(engine: Engine, max_k: usize, compute_gate: ComputeGat
         max_k,
         compute_gate,
         generous_ingest_limits(),
-        Vec::new(),
+        CorsOrigins::none(),
     )
     .await
 }
@@ -376,20 +376,56 @@ pub async fn mount_server_with_ingest_limits(
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
 ) -> TestServer {
-    mount_server_with(engine, max_k, compute_gate, ingest_limits, Vec::new()).await
+    mount_server_with(engine, max_k, compute_gate, ingest_limits, CorsOrigins::none()).await
 }
 
-/// Like [`spawn_server`], but with `serve.dev_cors_origins` set — `tests/cors.rs` only.
+/// The two CORS origin lists, named rather than positional.
+///
+/// Two `Vec<String>` parameters side by side is exactly the shape a caller transposes, and
+/// transposing these two is the bug decision 0102 exists to prevent — the production list reaching
+/// the session plane. Naming them costs a struct and makes the mistake unwriteable.
+#[derive(Default, Clone)]
+pub struct CorsOrigins {
+    /// `serve.dev_cors_origins` — viewer *and* session planes.
+    pub dev: Vec<String>,
+    /// `serve.cors_origins` — viewer plane only.
+    pub production: Vec<String>,
+}
+
+impl CorsOrigins {
+    /// Neither list set: no layer on any plane.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The development list alone.
+    pub fn dev(origins: &[&str]) -> Self {
+        Self {
+            dev: origins.iter().map(|o| o.to_string()).collect(),
+            production: Vec::new(),
+        }
+    }
+
+    /// The production list alone.
+    pub fn production(origins: &[&str]) -> Self {
+        Self {
+            dev: Vec::new(),
+            production: origins.iter().map(|o| o.to_string()).collect(),
+        }
+    }
+}
+
+/// Like [`spawn_server`], but with the CORS origin lists set — `tests/cors.rs` only.
 ///
 /// A separate entry point rather than a parameter on the existing ones: `Engine` is not `Clone`,
 /// so a test cannot re-mount an already-serving one, and widening `mount_server`'s signature would
-/// churn every call site in `tests/http.rs` and `tests/http_write.rs` for a key none of them care
+/// churn every call site in `tests/http.rs` and `tests/http_write.rs` for keys none of them care
 /// about.
 pub async fn spawn_server_with_cors(
     bundle_root: &Path,
     cache_dir: &Path,
     wal_path: &Path,
-    dev_cors_origins: Vec<String>,
+    cors: CorsOrigins,
 ) -> TestServer {
     let config = default_engine_config();
     let max_k = config.max_k;
@@ -400,14 +436,14 @@ pub async fn spawn_server_with_cors(
         max_k,
         generous_test_gate(),
         generous_ingest_limits(),
-        dev_cors_origins,
+        cors,
     )
     .await
 }
 
 /// The shared body of the three entry points above, with **both** parameter sets explicit.
 ///
-/// The ingest bounds and `serve.dev_cors_origins` each have a parameterised variant of
+/// The ingest bounds and the CORS origin lists each have a parameterised variant of
 /// `mount_server`. Rather than nest one inside the other, both delegate to this: each named entry
 /// point keeps its own defaults, and a test that needs both calls this directly.
 async fn mount_server_with(
@@ -415,14 +451,14 @@ async fn mount_server_with(
     max_k: usize,
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
-    dev_cors_origins: Vec<String>,
+    cors: CorsOrigins,
 ) -> TestServer {
     mount_server_with_flush(
         engine,
         max_k,
         compute_gate,
         ingest_limits,
-        dev_cors_origins,
+        cors,
         1 << 20,
         10_000,
         Arc::new(FaultSwitchboard::new()),
@@ -445,7 +481,7 @@ pub async fn mount_server_with_faults(
         max_k,
         compute_gate,
         generous_ingest_limits(),
-        Vec::new(),
+        CorsOrigins::none(),
         1 << 20,
         10_000,
         faults,
@@ -462,7 +498,7 @@ async fn mount_server_with_flush(
     max_k: usize,
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
-    dev_cors_origins: Vec<String>,
+    cors: CorsOrigins,
     stream_flush_bytes: usize,
     stream_write_stall_ms: u64,
     faults: Arc<FaultSwitchboard>,
@@ -491,7 +527,8 @@ async fn mount_server_with_flush(
         stream_deadline_ms: 60_000,
         session_credential: SESSION_CREDENTIAL.to_string(),
         operator_credential: OPERATOR_CREDENTIAL.to_string(),
-        dev_cors_origins,
+        dev_cors_origins: cors.dev,
+        cors_origins: cors.production,
         faults,
     });
 

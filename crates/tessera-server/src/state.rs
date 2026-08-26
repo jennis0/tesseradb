@@ -563,6 +563,12 @@ pub struct AppState {
     /// no CORS layer at all. See [`crate::cors`] for why this is a development affordance and why
     /// the control plane never consults it.
     pub dev_cors_origins: Vec<String>,
+    /// `serve.cors_origins` — the production origin list, **read by the viewer router and by
+    /// nothing else** (decision 0102). Empty is the default. The session plane does not consult
+    /// it: `/session/authorise` is gated by the session credential, which a browser must never
+    /// hold, and [`crate::cors::session_layer`] is what makes that structural rather than
+    /// remembered.
+    pub cors_origins: Vec<String>,
     /// The write executor's fault switchboard — the faults build only (decision 0071), absent
     /// from the struct in a default build rather than present and inert. The same `Arc` the
     /// executor consults, so `/control/faults/*` arms the thread that actually pauses. Bearer

@@ -101,6 +101,16 @@ pub enum ConfigError {
     BadAddr(String),
     /// Only `builtin:passthrough` is available; the wasmtime plugin host is not built.
     UnsupportedPlugin(String),
+    /// A CORS origin list carries `*`.
+    ///
+    /// Refused rather than dropped, and refused for both lists. The reason is decision 0102's and
+    /// not the layer's: an origin list is a deployment's statement about which pages may present
+    /// its tokens, and a wildcard says every page, which is the one thing an enumerated list is
+    /// for not saying. (`tower_http`'s `AllowOrigin::list` also panics on one, so an unchecked
+    /// wildcard would be a process that dies at router construction rather than at parse.)
+    CorsWildcard {
+        key: &'static str,
+    },
     /// `serve.k_min = 0`, which switches off §7.2's floor clause — the **I7 guarantee** that a
     /// non-empty tile always draws at least one mark. With no floor, a tile whose visible items all
     /// sit above θ serves nothing, and the sparsest principals' maps go blank exactly where I7
@@ -474,6 +484,13 @@ impl std::fmt::Display for ConfigError {
                  reached by setting a width. Set 'compaction_window_start = \"off\"' if the \
                  intent is to fold whenever there is work, and let compaction_max_segments say \
                  how much work"
+            ),
+            ConfigError::CorsWildcard { key } => write!(
+                f,
+                "serve.{key} contains \"*\". A CORS origin list is enumerated or it is absent: it \
+                 is this deployment's statement about which pages may present its session tokens \
+                 in a browser, and a wildcard says every page there has ever been. Name the \
+                 origins, or remove the key and let the layer be absent"
             ),
             ConfigError::FloorClauseDisabled => write!(
                 f,
@@ -889,6 +906,15 @@ struct RawServe {
     /// integration pattern. See [`crate::cors`].
     #[serde(default)]
     dev_cors_origins: Option<Vec<String>>,
+    /// Browser origins permitted to call the **viewer plane** in a deployment.
+    ///
+    /// The production half of the pair, and it stops at the viewer plane: `/session/authorise` is
+    /// gated by the session credential, which a browser must never hold, so no origin list opens
+    /// it (decision 0102). Absent means no layer, and a wildcard is refused — an origin list is a
+    /// deployment's statement about which pages may present its tokens, and `*` is not a
+    /// statement. Unlike `dev_cors_origins` this is silent at startup. See [`crate::cors`].
+    #[serde(default)]
+    cors_origins: Option<Vec<String>>,
 }
 
 /// The control plane's listen target: a real unix socket, or (tests, and the documented Windows
@@ -946,6 +972,10 @@ pub struct Config {
     /// not a layer that allows nothing. See [`crate::cors`] for why this is a development
     /// affordance rather than an integration feature.
     pub dev_cors_origins: Vec<String>,
+    /// `serve.cors_origins` — the production origin list, viewer plane only (decision 0102).
+    /// Empty is the default and mounts nothing. Both lists may be set; a duplicate origin across
+    /// the two is not an error. See [`crate::cors`].
+    pub cors_origins: Vec<String>,
     /// **Where** the session bearer secret comes from, not what it is. Read at
     /// [`crate::prepare`], never at parse: `tessera build` reads this same file and has no
     /// business requiring a serving secret to be exported before it will write a bundle. What
@@ -2035,6 +2065,20 @@ fn parse(text: &str) -> Result<Config> {
     if theta_target_marks == 0 {
         return Err(ConfigError::ThetaTargetZero);
     }
+
+    // Both CORS lists are enumerated or absent (decision 0102), so a wildcard is refused here
+    // rather than dropped downstream: dropping it would leave an operator who asked for open CORS
+    // with a *working* server and no CORS, which is a worse answer than a refusal naming the key.
+    let dev_cors_origins = raw.serve.dev_cors_origins.unwrap_or_default();
+    let cors_origins = raw.serve.cors_origins.unwrap_or_default();
+    for (key, origins) in [
+        ("dev_cors_origins", &dev_cors_origins),
+        ("cors_origins", &cors_origins),
+    ] {
+        if origins.iter().any(|origin| origin.trim() == "*") {
+            return Err(ConfigError::CorsWildcard { key });
+        }
+    }
     let max_underlay_offset = raw
         .serve
         .max_underlay_offset
@@ -2492,7 +2536,8 @@ fn parse(text: &str) -> Result<Config> {
             .max_category_values
             .unwrap_or(DEFAULT_MAX_CATEGORY_VALUES),
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
-        dev_cors_origins: raw.serve.dev_cors_origins.unwrap_or_default(),
+        dev_cors_origins,
+        cors_origins,
         session_credential,
         operator_credential,
         compute_threads,
@@ -3324,6 +3369,83 @@ compaction_after_deletions = 9000
         let toml = valid_toml("dev_cors_origins = [\"http://localhost:5173\"]");
         let config = parse(&toml).expect("a config naming a CORS origin must load");
         assert_eq!(config.dev_cors_origins, vec!["http://localhost:5173"]);
+        assert!(
+            config.cors_origins.is_empty(),
+            "the dev key must not populate the production list — they are two postures, not one \
+             list with two spellings"
+        );
+    }
+
+    /// `serve.cors_origins` — the production list (decision 0102) — defaults to empty on the same
+    /// fail-closed reasoning, and round-trips beside the development key rather than instead of
+    /// it. Both may be set: a laptop pointed at a deployment that also serves a drop-in.
+    #[test]
+    fn cors_origins_defaults_to_empty_and_round_trips_beside_the_dev_key() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let config = parse(&valid_toml("")).expect("a config naming no CORS origins must load");
+        assert!(config.cors_origins.is_empty());
+
+        let toml = valid_toml(
+            "dev_cors_origins = [\"http://localhost:5173\"]\n\
+             cors_origins = [\"https://app.example\", \"https://docs.example\"]",
+        );
+        let config = parse(&toml).expect("both lists together must load");
+        assert_eq!(config.dev_cors_origins, vec!["http://localhost:5173"]);
+        assert_eq!(
+            config.cors_origins,
+            vec!["https://app.example", "https://docs.example"]
+        );
+    }
+
+    /// A duplicate origin across the two lists is not an error. The viewer plane matches an origin
+    /// by equality against the concatenation, so a repeat costs a comparison and nothing else —
+    /// and refusing it would make the ordinary case (a dev origin still listed after the
+    /// production one arrives) a startup failure for no disclosure reason.
+    #[test]
+    fn an_origin_in_both_lists_is_not_an_error() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let toml = valid_toml(
+            "dev_cors_origins = [\"https://app.example\"]\n\
+             cors_origins = [\"https://app.example\"]",
+        );
+        let config = parse(&toml).expect("a duplicated origin must load");
+        assert_eq!(config.dev_cors_origins, config.cors_origins);
+    }
+
+    /// A wildcard is refused at parse, in **either** list, naming the key that carries it.
+    ///
+    /// Decision 0102's list is enumerated or absent. Dropping the wildcard instead would leave an
+    /// operator who asked for open CORS with a working server and no CORS; allowing it would hand
+    /// every page there has ever been the right to present this deployment's tokens.
+    #[test]
+    fn a_wildcard_origin_is_refused_in_either_list() {
+        std::env::set_var("TESSERA_TEST_SESSION_CRED", "s");
+        std::env::set_var("TESSERA_TEST_OPERATOR_CRED", "o");
+        let err = parse(&valid_toml("cors_origins = [\"*\"]")).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::CorsWildcard {
+                    key: "cors_origins"
+                }
+            ),
+            "{err}"
+        );
+        let err = parse(&valid_toml(
+            "dev_cors_origins = [\"http://localhost:5173\", \" * \"]",
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigError::CorsWildcard {
+                    key: "dev_cors_origins"
+                }
+            ),
+            "surrounding whitespace must not smuggle a wildcard past the check: {err}"
+        );
     }
 
     // ---- The write-path and admission knobs --------------------------------------------------

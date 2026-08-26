@@ -17,10 +17,13 @@ use crate::health::{healthz, readyz};
 use crate::state::AppState;
 
 pub fn router(state: Arc<AppState>) -> Router {
-    // The dev-only browser seam covers this plane as well as the viewer plane: a browser calls
-    // `/session/authorise` before it can call anything on the viewer plane, so a seam that missed
-    // this plane would cover nothing.
-    let dev_cors = crate::cors::dev_layer(&state.dev_cors_origins);
+    // The **development** seam covers this plane as well as the viewer plane: on a laptop the
+    // browser calls `/session/authorise` before it can call anything on the viewer plane, so a
+    // dev seam that missed this plane would cover nothing. `serve.cors_origins` — the production
+    // list — deliberately does not reach here: this route is gated by the session credential,
+    // which a browser must never hold (decision 0102). `session_layer` reads the dev list itself,
+    // so this call site has no way to widen it.
+    let dev_cors = crate::cors::session_layer(&state);
     let router = Router::new()
         .route("/session/authorise", post(authorise))
         .route("/session/revoke", post(revoke))

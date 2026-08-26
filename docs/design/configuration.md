@@ -759,6 +759,34 @@ schema = "schema.toml"            # the corpus declaration. This is the default
 env = "TESSERA_IDENTITY_KEY"      # the variable carrying the key, never the key. This is the default
 ```
 
+**Two of the serving side's keys belong in this document even so**, because they are disclosure
+controls rather than tuning and §1's closure argument applies to them: a control nobody has
+enumerated is a control nobody has reasoned about. Both name browser origins, both are absent by
+default, and **neither takes a wildcard** — a list carrying `*` is refused at startup, naming the
+key, because an origin list is a deployment's statement about which pages may call it and `*` is
+not a statement.
+
+| Key | | Which planes | Value |
+|---|---|---|---|
+| `serve.dev_cors_origins` | O | viewer **and session** | a development affordance. It opens `/session/authorise` to a browser, which means the page holds the deployment's **session credential** — the secret that decides who may mint tokens at all. Logged at `warn` on every start |
+| `serve.cors_origins` | O | **viewer only** | the production list ([decision 0102](../decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md)). A page it names may present a **token** — already per-principal, already scoped to what the server decided that principal may see, already expiring — and can reach `/session/authorise` no more than any other origin can. Silent at startup |
+
+**The difference between them is which bearer a browser ends up holding**, and that is why the
+production key stops at the viewer plane rather than covering both for symmetry. Letting a named
+origin present a token creates no authority that did not already exist; letting one present the
+credential creates the authority to mint tokens for anybody. Both lists may be set at once, and an
+origin appearing in both is not an error.
+
+**An origin list is not an authorisation boundary**, and nothing in the engine may come to treat it
+as one. It decides which page a browser will hand a response to. What the response *contains* is
+settled by the bearer and by `M_auth`, before CORS is consulted at all — which is also why the six
+headers a client keys and revalidates a replica by are explicitly exposed (`delta-serving.md` §2):
+a browser that cannot read them is a browser that cannot cache, not one that is being protected
+from something. The control plane is never wrapped by either list.
+
+The rest of `[serve]` and all of `[ingest]` are tuning, documented at SA §7 under its own rule —
+performance knobs default, disclosure controls do not.
+
 **Every path in it resolves against its own directory**, on the same rule a `source` follows — a
 relative `bundle.path` that moved with the shell's working directory would make `cd crates &&
 tessera serve` open a different bundle from the one `tessera build` had just written. Both
@@ -1192,6 +1220,17 @@ disclosing nothing.
 
 
 ## Appendix R — review trail
+
+**2026-08-26 — the two CORS origin lists are enumerated here.** §3 gains the pair. They are the
+serving side's keys and this document had deferred all of those to SA §7, which was right for
+tuning and wrong for these two: they are disclosure controls, and §1's whole argument is that the
+leak register is exhaustive *because* the surface is enumerable. `serve.cors_origins` is new
+([decision 0102](../decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md)) — the
+production origin list, **viewer plane only**, silent at startup — and it sits beside
+`dev_cors_origins`, which is a development affordance precisely because it also opens the session
+plane and so puts the credential that mints tokens in front of a browser. Both refuse a wildcard at
+parse; previously neither was checked, and a `*` in either would have panicked the process at
+router construction rather than being refused by name.
 
 **2026-08-20 — `[sources]` names the files, `[defaults]` replaces `[corpus]`, and an attribute may
 read from its own.** Two shapes went, and both were arbitrary. A `source` was a path, so a file
