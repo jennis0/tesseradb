@@ -19,7 +19,8 @@
 //
 // The claims, each checked rather than eyeballed:
 //   1. only `shown` renders a count — sampled from the first paint, through loading;
-//   2. both figures render or neither — the sample's text is `a of b` or empty;
+//   2. both figures render or neither — the strip's shown cell renders its figure only with its
+//      total carried beside it (`data-total`, the visible cell's number), or renders nothing;
 //   3. a refusal renders as one — the viewport route is refused under the page, and the strip
 //      shows the refusal with no count;
 //   4. no count renders against a stale view, and a refresh control is present — the artifact
@@ -108,7 +109,7 @@ const stripCounts = async () => {
   const out = [];
   for (let i = 0; i < n; i++) {
     const el = parts.nth(i);
-    out.push({text: ((await el.textContent()) ?? '').trim(), empty: (await el.getAttribute('data-empty')) === 'true'});
+    out.push({text: ((await el.textContent()) ?? '').trim(), empty: (await el.getAttribute('data-empty')) === 'true', total: await el.getAttribute('data-total')});
   }
   return out;
 };
@@ -146,7 +147,7 @@ const settled = async (limitMs = 45_000) => {
 // ---- 1 and 2: only shown renders a count; both figures or neither -------------------------------
 
 console.log('--- claims ---');
-await page.goto(`${url}?prefetch=0`, {waitUntil: 'load'});
+await page.goto(`${url}${url.includes('?') ? '&' : '?'}prefetch=0`, {waitUntil: 'load'});
 
 // Sample from the first paint: every (state, counts) pair observed while the session comes up.
 const samples = [];
@@ -181,8 +182,9 @@ await settled();
 {
   const counts = await stripCounts();
   const shown = counts[0]?.text ?? '';
-  const both = /^\d[\d,]* of \d[\d,]*$/.test(shown) || shown === '';
-  check('both figures render or neither', both && counts.length === 3, `strip reads "${counts.map((c) => c.text).join(' · ')}"`);
+  const total = counts[0]?.total ?? null;
+  const both = (/^\d[\d,]*$/.test(shown) && total !== null && total === counts[2]?.text) || (shown === '' && total === null);
+  check('both figures render or neither', both && counts.length === 3, `strip reads "${counts.map((c) => c.text).join(' · ')}", shown of ${total}`);
 }
 const baseline = await stripCounts();
 
@@ -224,7 +226,7 @@ const refusedState = await untilState(['refused', 'expired'], 30_000);
   );
 }
 await page.unroute('**/v1/viewport');
-await page.locator('tessera-map [part="controls"] button', {hasText: 'fit'}).first().click().catch(() => {});
+await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
 await untilState(['shown'], 60_000);
 await settled();
 
@@ -251,9 +253,9 @@ await page.route('**/v1/viewport', async (route) => {
 await page.waitForTimeout(61_000);
 // A nudge the ring already covers: the view is scheduled again, nothing novel is fetched, and
 // the lapsed interval sends the revalidation.
-await page.mouse.move(640, 400);
+await page.mouse.move(900, 450);
 await page.mouse.down();
-await page.mouse.move(652, 406, {steps: 2});
+await page.mouse.move(912, 456, {steps: 2});
 await page.mouse.up();
 const staleState = await untilState(['stale'], 30_000);
 {
@@ -275,15 +277,16 @@ await settled();
 // The overview: the world is 512 px at zoom 0, so any cover under the 4,096-tile bound is coarser
 // than a pixel. The box is shift-dragged in pan mode, which is the shortcut §5.3 names.
 await page.locator('tessera-map').first().focus();
-await page.locator('tessera-map [part="controls"] button', {hasText: 'fit'}).first().click().catch(() => {});
+await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
 await settled();
 const requestsBefore = viewportRequests.length;
 const selectStarted = Date.now();
-// Clear of the toolbar's panels top-left and the sidebar right: the box is on the canvas.
+// Clear of the floating panels — the left card ends at x = 632 in the demo's overlay and the
+// right one starts at 1108 — so the box is on the canvas.
 await page.keyboard.down('Shift');
-await page.mouse.move(620, 250);
+await page.mouse.move(700, 250);
 await page.mouse.down();
-await page.mouse.move(900, 520, {steps: 8});
+await page.mouse.move(1000, 520, {steps: 8});
 await page.mouse.up();
 await page.keyboard.up('Shift');
 const selection = page.locator('tessera-selection').first();
@@ -365,7 +368,7 @@ const listCounts = async () =>
     })
     .catch(() => ({}));
 
-await page.locator('tessera-map [part="controls"] button', {hasText: 'fit'}).first().click().catch(() => {});
+await page.locator('tessera-map [part="controls"] button[aria-label="Fit to extent"]').first().click().catch(() => {});
 // The demo opens with a layer on; the example page leaves that to the layer picker, so a page
 // with none on has its first layer turned on here — a precondition of the two claims below.
 if ((await page.evaluate(() => window.__tesseraProbeOf()?.cluster.layersOn.length ?? 0)) === 0) {
@@ -378,12 +381,12 @@ await settled();
 await page.waitForTimeout(1500);
 const countsBefore = await listCounts();
 // Two notches in and a drag: the served set may change, the count beside an artifact may not.
-await page.mouse.move(640, 400);
+await page.mouse.move(900, 450);
 await page.mouse.wheel(0, -400);
 await settled();
-await page.mouse.move(640, 400);
+await page.mouse.move(900, 450);
 await page.mouse.down();
-await page.mouse.move(500, 320, {steps: 6});
+await page.mouse.move(760, 380, {steps: 6});
 await page.mouse.up();
 await settled();
 await page.waitForTimeout(1500);
@@ -434,7 +437,7 @@ const dataset = await page
   .catch(() => page.title().then((t) => `${t} (no instruments panel; the bundle is whatever the demo serves)`));
 // Drive a few zoom notches so the settle work and the frame gaps are measured under load.
 for (const notch of [-400, -400, 400, 400]) {
-  await page.mouse.move(640, 400);
+  await page.mouse.move(900, 450);
   await page.mouse.wheel(0, notch);
   await settled();
 }

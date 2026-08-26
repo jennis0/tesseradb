@@ -1,5 +1,6 @@
 import {html, nothing, type TemplateResult} from 'lit';
 import type {StatusProjection} from '@tesseradb/client';
+import {icon} from './icons.js';
 
 /**
  * The eight states, uniformly (design client-components §5.4). Every panel renders them through
@@ -20,6 +21,9 @@ import type {StatusProjection} from '@tesseradb/client';
  * `expired` wins over `refused` because it is a refusal with a name; `stale` is `shown` with the
  * picture marked older than the numbers, and the only state besides `shown` a number appears in
  * — through the formatter, which renders nothing against it.
+ *
+ * What a state *says* is one line — an answer, never an explanation of how Tessera works
+ * (owner, 2026-08-25): the words are the boards' (`StatusStates.png`).
  */
 export type PanelState = 'detached' | 'loading' | 'retrying' | 'shown' | 'empty' | 'refused' | 'expired' | 'stale';
 
@@ -53,11 +57,31 @@ export type StateActions = {
   onReauthorise?: (() => void) | null;
 };
 
+/** The word for a state, as the strip's badge says it. */
+export function stateWord(state: PanelState, status: StatusProjection | null | undefined): string {
+  switch (state) {
+    case 'detached':
+      return 'No data';
+    case 'loading':
+      return status && !status.sessionWarm ? 'Starting session…' : 'Loading';
+    case 'retrying':
+      return 'Retrying';
+    case 'shown':
+    case 'empty':
+      return 'Current';
+    case 'refused':
+      return 'Refused';
+    case 'expired':
+      return 'Session expired';
+    case 'stale':
+      return 'Corpus updated';
+  }
+}
+
 /**
  * The state region. Rendered by every panel in the same markup: a `part="state"` carrying
- * `data-state`, a badge naming the state, and the words the state needs — a skeleton while
- * loading, "empty" as an answer rather than a blank, a refusal's code with a `422` named as the
- * host's bug, the refresh control when stale, the prompt when expired.
+ * `data-state`, and the one line the state needs — a skeleton while loading, an answer when
+ * empty, the refusal's code, the refresh control when stale, the way back in when expired.
  */
 export function renderState(
   state: PanelState,
@@ -70,43 +94,20 @@ export function renderState(
       // Nothing — neither "empty" nor "refused", both of which are answers.
       return html`<span part="state" data-state="detached"></span>`;
     case 'loading':
-      return html`<span part="state" data-state="loading"
-        ><span class="badge">loading</span
-        >${status && !status.sessionWarm
-          ? html`<span class="muted">establishing the session — the first request materialises this principal's visible set</span>`
-          : html`<span class="skeleton" aria-hidden="true"></span>`}</span
-      >`;
+      return html`<span part="state" data-state="loading"><span class="dot quiet"></span>${stateWord(state, status)}${status && !status.sessionWarm ? nothing : html`<span class="skel" aria-hidden="true"></span>`}</span>`;
     case 'retrying':
-      return html`<span part="state" data-state="retrying"
-        ><span class="badge">retrying</span><span class="skeleton" aria-hidden="true"></span
-      ></span>`;
+      return html`<span part="state" data-state="retrying"><span class="dot warn"></span>Retrying<span class="skel" aria-hidden="true"></span></span>`;
     case 'shown':
       return html`<span part="state" data-state="shown"></span>`;
     case 'empty':
-      return html`<span part="state" data-state="empty"
-        ><span class="badge">empty</span><span class="muted">nothing here for this principal — an answer, not a failure</span></span
-      >`;
+      return html`<span part="state" data-state="empty">Nothing here</span>`;
     case 'refused':
-      return html`<span part="state" data-state="refused"
-        ><span class="badge">refused</span
-        ><span part="refusal"
-          >${refusal ? `${refusal.code}: ${refusal.detail}` : 'the request was refused'}${refusal?.code === 'contract' ||
-          /^422/.test(refusal?.detail ?? '')
-            ? ' — a 422 is the host’s bug, not the server’s'
-            : ''}</span
-        ></span
-      >`;
+      return html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${refusal ? `${refusal.code}${refusal.detail ? ' · ' + refusal.detail : ''}` : ''}</span></span>`;
     case 'expired':
-      return html`<span part="state" data-state="expired"
-        ><span class="badge">expired</span><span part="refusal">the session ended</span
-        >${actions.onReauthorise
-          ? html`<button part="reauthorise" type="button" @click=${actions.onReauthorise}>sign in again</button>`
-          : nothing}</span
-      >`;
+      return html`<span part="state" data-state="expired">${icon('lock', 14)}Session expired${actions.onReauthorise
+          ? html`<button part="reauthorise" class="btn primary" type="button" @click=${actions.onReauthorise}>Sign in again</button>`
+          : nothing}</span>`;
     case 'stale':
-      return html`<span part="state" data-state="stale"
-        ><span class="badge">stale</span><span class="muted">the corpus moved — the numbers are current, the picture is older</span
-        ><button part="refresh" type="button" @click=${actions.onRefresh ?? undefined}>refresh</button></span
-      >`;
+      return html`<span part="state" data-state="stale">${icon('clock', 14)}Corpus updated<button part="refresh" class="btn primary" type="button" @click=${actions.onRefresh ?? undefined}>${icon('refresh', 13)}Refresh</button></span>`;
   }
 }

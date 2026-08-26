@@ -1,6 +1,6 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, NEUTRAL, type Rgba} from '@tesseradb/client';
+import {CLUSTER_PREFIX, NEUTRAL, layerEntries, type Rgba} from '@tesseradb/client';
 import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck';
 import {TesseraElement, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -11,9 +11,9 @@ import {chrome, tokens} from './tokens.js';
  * `<tessera-legend>` — what the colours mean (design §5.3 tier 2): the values marks on screen
  * carry, resolved per column and never per vocabulary; a numeric domain as a ramp, derived from
  * the marks served and never a corpus-wide range; under cluster colour, the served artifacts in
- * their colours. `selectable` adds the colour-by selector, which offers the rendered columns and
- * *cluster* per layer that is on — exact only (decision 0099): a point wears a cluster's colour
- * only because the wire named it a member.
+ * their colours. `selectable` renders the boards' *Colour by* select — the rendered columns and
+ * *clusters* per layer that is on (exact only, decision 0099) — beside a *Layers · N of M on*
+ * select that turns one layer on or off; the readout below is what the swatches say.
  */
 export class TesseraLegend extends TesseraElement {
   static override styles = [
@@ -22,32 +22,35 @@ export class TesseraLegend extends TesseraElement {
     css`
       :host {
         display: block;
-        padding: var(--tessera-space) calc(var(--tessera-space) * 1.6);
-        background: var(--tessera-panel-bg);
-        border: 1px solid var(--tessera-border);
-        border-radius: var(--tessera-radius);
-        max-width: 260px;
       }
-      select {
-        width: 100%;
-        margin-bottom: var(--tessera-space);
+      .selects {
+        display: flex;
+        gap: 10px;
+      }
+      .selects .col {
+        gap: 4px;
+        flex: 1 1 0;
+        min-width: 0;
       }
       [part='swatches'] {
         max-height: 180px;
         overflow-y: auto;
+        margin-top: 10px;
+      }
+      [part='swatches'] .row {
+        height: 24px;
       }
       [part='swatch'] {
         display: inline-block;
         width: 10px;
         height: 10px;
         border-radius: 2px;
-        margin-right: 6px;
-        vertical-align: middle;
+        flex: none;
       }
       [part='ramp'] {
         height: 8px;
         border-radius: var(--tessera-radius);
-        margin: 4px 0;
+        margin: 10px 0 4px;
       }
       .v {
         overflow: hidden;
@@ -58,6 +61,8 @@ export class TesseraLegend extends TesseraElement {
   ];
 
   @property({type: Boolean}) accessor selectable = false;
+  /** Whether the readout (swatches, ramp) renders under the selects. */
+  @property({type: Boolean}) accessor readout = false;
 
   private choose(value: string): void {
     const s = this.resolvedStore;
@@ -67,78 +72,86 @@ export class TesseraLegend extends TesseraElement {
     emit(this, 'tessera-colourchange', {colourBy: chosen});
   }
 
+  private chooseLayers(value: string): void {
+    const s = this.resolvedStore;
+    if (!s) return;
+    const roots = value === '' ? [] : [value];
+    s.setLayers(roots);
+    emit(this, 'tessera-layerchange', {layers: roots});
+  }
+
   override render() {
     const s = this.resolvedStore;
-    const heading = html`<h2 part="title">Colour</h2>`;
     const meta = s?.get('meta') ?? null;
-    if (!s || !meta) return html`${heading}${renderState(stateOf(s?.get('status')), s?.get('status'))}`;
+    if (!s || !meta) return html`<div class="panel">${this.selectable ? nothing : html`<h2 part="title">Colour</h2>`}${renderState(stateOf(s?.get('status')), s?.get('status'))}</div>`;
     const legend = s.get('legend');
     const artifacts = s.get('artifacts');
     const columns = meta.declaredScalars.filter((c) => c.render);
     const colourBy = legend.colourBy;
-    const select = this.selectable
-      ? html`<select part="select" aria-label="colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
-          <option value="" ?selected=${colourBy === null}>uniform</option>
-          ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${c.name} · ${c.category ? 'category' : c.arrowType}</option>`)}
-          ${artifacts.layers.map((l) => {
-            const value = `${CLUSTER_PREFIX}${l}`;
-            return html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>cluster · ${meta.layers.find((x) => x.name === l)?.title || l}</option>`;
-          })}
-        </select>`
+    const entries = layerEntries(meta.layers);
+    const on = entries.filter((e) => artifacts.layers.includes(e.root.name));
+    const selects = this.selectable
+      ? html`<div class="selects">
+          <div class="col"><span class="xs muted">Colour by</span>
+            <select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
+              <option value="" ?selected=${colourBy === null}>none</option>
+              ${artifacts.layers.map((l) => {
+                const value = `${CLUSTER_PREFIX}${l}`;
+                return html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>clusters</option>`;
+              })}
+              ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${c.name}</option>`)}
+            </select></div>
+          <div class="col"><span class="xs muted">Layers</span>
+            <select part="layers-select" aria-label="Layers" @change=${(e: Event) => this.chooseLayers((e.target as HTMLSelectElement).value)}>
+              <option value="" ?selected=${on.length === 0}>${on.length} of ${entries.length} on</option>
+              ${entries.map((e) => html`<option value=${e.root.name} ?selected=${on.length === 1 && on[0]!.root.name === e.root.name}>${e.root.name}</option>`)}
+            </select></div>
+        </div>`
       : nothing;
+    const heading = this.selectable ? nothing : html`<h2 part="title">Colour</h2>`;
     const swatch = (c: Rgba | readonly number[], text: string, title = '') =>
-      html`<div class="row"><span><span part="swatch" style=${`background:${rgb(c as Rgba)}`}></span><span class="v" title=${title}>${text}</span></span></div>`;
+      html`<div class="row"><span part="swatch" style=${`background:${rgb(c as Rgba)}`}></span><span class="v" title=${title}>${text}</span></div>`;
+    const wrap = (body: unknown) => html`<div class="panel">${heading}${selects}${body}</div>`;
+    if (!this.readout && this.selectable) return wrap(html`<span part="state" data-state="shown"></span>`);
 
-    if (colourBy === null) {
-      return html`${heading}${select}<span part="state" data-state="shown"></span><div class="muted">every mark one colour — pick a column, or a cluster layer that is on</div>`;
-    }
+    if (colourBy === null) return wrap(html`<span part="state" data-state="shown"></span>`);
     const clusterLayer = clusterLayerOf(colourBy);
     if (clusterLayer) {
       const named = artifacts.served.filter((a) => a.layer === clusterLayer);
-      return html`${heading}${select}
-        <span part="state" data-state="shown"></span>
+      return wrap(html`<span part="state" data-state="shown"></span>
         <div part="swatches">
           ${named.slice(0, 40).map((a) => swatch(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a)))}
-          ${named.length > 40 ? html`<div class="muted">…and ${named.length - 40} more served</div>` : nothing}
-          ${swatch(NEUTRAL, 'not known here yet')}
-        </div>
-        <div class="muted">exact only: a point wears a cluster's colour because the wire named it a member; neutral is not a guess. ${artifacts.coverage.stale > 0 ? `refreshing ${artifacts.coverage.stale} tiles` : 'colours exact'}</div>`;
+          ${named.length > 40 ? html`<div class="muted xs">and ${named.length - 40} more</div>` : nothing}
+          ${swatch(NEUTRAL, 'not yet known')}
+        </div>`);
     }
     const column = columns.find((c) => c.name === colourBy);
-    if (!column) return html`${heading}${select}<span part="state" data-state="refused"><span part="refusal">no such rendered column</span></span>`;
+    if (!column) return wrap(html`<span part="state" data-state="refused"><span part="refusal">no such column</span></span>`);
     const error = legend.categoryErrors[colourBy];
-    if (error) {
-      return html`${heading}${select}<span part="state" data-state="refused"><span class="badge">refused</span><span part="refusal">${error.code}: ${error.detail}</span></span>
-        <div class="muted">drawn unmapped — every served mark is still on the map, only its value is unnamed</div>`;
-    }
+    if (error) return wrap(html`<span part="state" data-state="refused"><span part="refusal">${error.code}: ${error.detail}</span></span>`);
     if (column.category) {
       const values = legend.categories[colourBy];
-      if (!values) return html`${heading}${select}${renderState('loading', s.get('status'))}`;
+      if (!values) return wrap(renderState('loading', s.get('status')));
       const shown = paletteValues(values, legend.ranks[colourBy] ?? {});
       const overflow = values.length - shown.length;
-      return html`${heading}${select}
-        <span part="state" data-state="shown"></span>
+      return wrap(html`<span part="state" data-state="shown"></span>
         <div part="swatches">
           ${shown.map(({value, rank}) => swatch(colourOfRank(rank), value.title && value.title !== value.key ? `${value.key} — ${value.title}` : value.key, `code ${value.code}`))}
           ${overflow > 0 ? swatch(UNMAPPED, `${overflow} rarer value${overflow === 1 ? '' : 's'}`) : nothing}
-          ${swatch(UNMAPPED, 'absent / unresolved')}
-        </div>
-        <div class="muted">values on screen, not the whole vocabulary</div>`;
+          ${swatch(UNMAPPED, 'other')}
+        </div>`);
     }
     const domain = legend.domains[colourBy];
-    if (!domain) return html`${heading}${select}<span part="state" data-state="empty"><span class="muted">no numeric values on screen</span></span>`;
+    if (!domain) return wrap(html`<span part="state" data-state="empty">No values on screen</span>`);
     const stops = Array.from({length: 12}, (_, i) => rgb(colourOfFraction(i / 11))).join(', ');
     const fmt = (n: number) => {
       if (column.arrowType === 'timestamp_us') return new Date(n / 1000).toISOString().slice(0, 10);
       if (Math.abs(n) >= 1e6 || (n !== 0 && Math.abs(n) < 1e-3)) return n.toExponential(2);
       return n.toLocaleString('en-GB');
     };
-    return html`${heading}${select}
-      <span part="state" data-state="shown"></span>
+    return wrap(html`<span part="state" data-state="shown"></span>
       <div part="ramp" style=${`background:linear-gradient(to right, ${stops})`}></div>
-      <div class="row"><span part="label">min</span><span part="value">${fmt(domain.min)}</span></div>
-      <div class="row"><span part="label">max</span><span part="value">${fmt(domain.max)}</span></div>
-      <div class="muted">range of marks served, not of the corpus</div>`;
+      <div class="kv sm"><span part="label">min</span><span part="value" class="v">${fmt(domain.min)}</span><span part="label">max</span><span part="value" class="v">${fmt(domain.max)}</span></div>`);
   }
 }
 

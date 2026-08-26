@@ -392,10 +392,13 @@ async function activate(dataset: Dataset): Promise<void> {
       s.meta = meta;
       s.view = meta.views[0]!.id;
       s.mTarget = meta.selection.thetaTargetMarks;
-      s.colourBy = rendered.some((c) => c.name === DEFAULT_COLOUR_BY)
-        ? DEFAULT_COLOUR_BY
-        : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.artifactLayer = meta.layers[0]?.name ?? null;
+      // The demo opens coloured by cluster where a layer exists (the boards), else by a column.
+      s.colourBy = s.artifactLayer
+        ? `cluster:${s.artifactLayer}`
+        : rendered.some((c) => c.name === DEFAULT_COLOUR_BY)
+          ? DEFAULT_COLOUR_BY
+          : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.switching = false;
     });
     trace.event('session', {

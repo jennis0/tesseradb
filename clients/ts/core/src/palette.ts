@@ -17,6 +17,8 @@ import type {Artifact} from './types.js';
 export type Rgba = readonly [number, number, number, number];
 
 export type PaletteKind = 'positional' | 'spread';
+/** The ground a colour is drawn on — the boards' light and dark values differ in lightness. */
+export type PaletteScheme = 'light' | 'dark';
 
 /** The grid is 2³² per axis; the extent's centre and its half-width in the same units. */
 export const GRID32_CENTRE = 2 ** 31;
@@ -50,12 +52,19 @@ export function polarOf(centroid: readonly [number, number]): {angle: number; ra
   return {angle, radius};
 }
 
+/** The lightness and saturation of a hue on each ground (`gen.py`'s `position_colours`). */
+function shade(radius: number, scheme: PaletteScheme): [number, number] {
+  return scheme === 'dark' ? [0.62, 0.64 + 0.08 * radius] : [0.58, 0.4 - 0.08 * radius];
+}
+
+/** The hue offset the boards apply, so the map's quadrants take the boards' colours. */
+const HUE_OFFSET = (0.5 + 0.45) * 360;
+
 /** The positional colour of one centroid. */
-export function positionalColour(centroid: readonly [number, number]): Rgba {
+export function positionalColour(centroid: readonly [number, number], scheme: PaletteScheme = 'dark'): Rgba {
   const {angle, radius} = polarOf(centroid);
-  // Lighter at the centre, deeper toward the rim; saturation held so every hue reads on a dark
-  // ground and under the density wash.
-  const [r, g, b] = hslToRgb(angle, 0.68, 0.66 - 0.22 * radius);
+  const [s, l] = shade(radius, scheme);
+  const [r, g, b] = hslToRgb(angle + HUE_OFFSET, s, l);
   return [r, g, b, ALPHA];
 }
 
@@ -70,19 +79,21 @@ export const NEUTRAL: Rgba = [118, 126, 140, 200];
  */
 export function artifactColours(
   served: readonly {ordinal: number; artifact: Artifact}[],
-  kind: PaletteKind
+  kind: PaletteKind,
+  scheme: PaletteScheme = 'dark'
 ): Map<number, Rgba> {
   const out = new Map<number, Rgba>();
   if (kind === 'positional') {
     for (const {ordinal, artifact} of served) {
-      out.set(ordinal, artifact.centroid ? positionalColour(artifact.centroid) : NEUTRAL);
+      out.set(ordinal, artifact.centroid ? positionalColour(artifact.centroid, scheme) : NEUTRAL);
     }
     return out;
   }
   const placed = served.filter((s) => s.artifact.centroid !== null).map((s) => ({...s, ...polarOf(s.artifact.centroid!)}));
   placed.sort((a, b) => a.angle - b.angle);
   placed.forEach(({ordinal, radius}, i) => {
-    const [r, g, b] = hslToRgb((i * 360) / placed.length, 0.68, 0.66 - 0.22 * radius);
+    const [sat, l] = shade(radius, scheme);
+    const [r, g, b] = hslToRgb((i * 360) / placed.length + HUE_OFFSET, sat, l);
     out.set(ordinal, [r, g, b, ALPHA]);
   });
   for (const {ordinal, artifact} of served) if (!artifact.centroid) out.set(ordinal, NEUTRAL);

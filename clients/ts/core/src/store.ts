@@ -12,7 +12,7 @@ import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
 import {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, type WorldPolygon} from './region.js';
 import {layerClosure} from './layers.js';
-import {artifactColours, type PaletteKind, type Rgba} from './palette.js';
+import {artifactColours, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
 import type {Band, BandKey} from './bands.js';
 import {bandKey} from './bands.js';
 import {Replica, type ReplicaOptions} from './replica.js';
@@ -249,6 +249,10 @@ export interface Store {
   setBudget(budget: number): void;
   pick(id: bigint): Promise<void>;
   openArtifact(id: bigint): Promise<void>;
+  /** Drop the picked point and the opened artifact — a card's close. */
+  clearSelection(): void;
+  /** The colour scheme the map draws on, so the positional palette reads on its ground (§5.10). */
+  setScheme(scheme: PaletteScheme): void;
   select(shape: SelectionShape | null): void;
   /** A data-coordinates bbox for an artifact — what a map's `fitTo` uses. */
   extentOf(artifactId: bigint): [number, number, number, number] | null;
@@ -308,6 +312,7 @@ export function createStore(options: StoreOptions): Store {
   let budget = options.budget ?? 500_000;
   let colourBy: string | null = null;
   let palette: PaletteKind = options.palette ?? 'positional';
+  let scheme: PaletteScheme = 'dark';
   let contentKeyAtFrame = '';
   let selection: SelectionShape | null = null;
 
@@ -420,7 +425,7 @@ export function createStore(options: StoreOptions): Store {
           options.replica?.onPhase?.(kind, ms, n);
           // A stored slice is drawable now: the driver derives at most once per its gap while
           // the response streams in, so the first marks arrive with the first slice.
-          if (kind === 'piece') presenter?.absorbed();
+          if (kind === 'piece' || kind === 'store') presenter?.absorbed();
         },
         now: () => clock.now()
       }
@@ -599,7 +604,7 @@ export function createStore(options: StoreOptions): Store {
       version: state.version,
       table,
       servedOrdinals,
-      colours: artifactColours(named, palette),
+      colours: artifactColours(named, palette, scheme),
       palette
     });
     checkColourCoverage();
@@ -807,15 +812,29 @@ export function createStore(options: StoreOptions): Store {
     checkColourCoverage();
   }
 
-  function setPalette(kind: PaletteKind): void {
-    if (kind === palette) return;
-    palette = kind;
+  function recolour(): void {
     const a = projections.artifacts;
     const named = a.served
       .map((artifact) => ({ordinal: table.ordinalOf(artifact.layer, artifact.tesseraId), artifact}))
       .filter((n) => n.ordinal !== 0);
     // O(served): the colours move, the ordinals do not, and the vis side rewrites its texture.
-    replaceProjection('artifacts', {...a, colours: artifactColours(named, kind), palette: kind});
+    replaceProjection('artifacts', {...a, colours: artifactColours(named, palette, scheme), palette});
+  }
+
+  function setPalette(kind: PaletteKind): void {
+    if (kind === palette) return;
+    palette = kind;
+    recolour();
+  }
+
+  function setScheme(next: PaletteScheme): void {
+    if (next === scheme) return;
+    scheme = next;
+    recolour();
+  }
+
+  function clearSelection(): void {
+    replaceProjection('selection', {item: null, itemRefusal: null, artifact: null, artifactRefusal: null});
   }
 
   function setColourBy(column: string | null): void {
@@ -1086,6 +1105,8 @@ export function createStore(options: StoreOptions): Store {
     setBudget,
     pick,
     openArtifact,
+    clearSelection,
+    setScheme,
     select,
     extentOf,
     dataXY,

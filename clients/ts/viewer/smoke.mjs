@@ -99,8 +99,8 @@ const litPixels = () =>
 
 /**
  * The three counts, read through the status strip's parts — shadow-piercing locators, never an
- * id in a panel's markup (design §9). `shown` renders as `served of visible`; the other two are
- * one figure each. A count that rendered nothing (stale, inexact, not shown) reads as null.
+ * id in a panel's markup (design §9). `shown` renders its figure with the total on `data-total`;
+ * the other two are one figure each. A count that rendered nothing (stale, inexact, not shown) reads as null.
  */
 const counts = async () => {
   const text = async (part) => {
@@ -108,9 +108,12 @@ const counts = async () => {
     if ((await el.count()) === 0) return '';
     return (await el.textContent()) ?? '';
   };
-  const shown = /([\d,]+) of ([\d,]+)/.exec(await text('count-shown'));
+  // The shown cell renders its figure with the total on `data-total` (the visible cell's number).
+  const shownEl = page.locator('tessera-status [part="count-shown"] [part="count"]').first();
+  const served = (await text('count-shown')).trim();
+  const visible = (await shownEl.count()) > 0 ? await shownEl.getAttribute('data-total') : null;
   const matched = (await text('count-matched')).trim();
-  return shown ? {served: shown[1], visible: shown[2], matched} : null;
+  return served && visible ? {served, visible, matched} : null;
 };
 
 // Success criterion 3, checked rather than asserted by eye: a different principal must produce a
@@ -150,7 +153,7 @@ if (options > 0) {
 // view is *still*, which is exactly when a colour switch is measured — so with it on, a request
 // nobody made lands inside the window and reads as the encoding refetching. The knob is the same
 // A/B the cache measurements use; the principal and zoom sections above ran with it on.
-await page.goto(`${url}?prefetch=0`, {waitUntil: 'load'});
+await page.goto(`${url}${url.includes('?') ? '&' : '?'}prefetch=0`, {waitUntil: 'load'});
 await page.waitForTimeout(settleMs);
 await settled();
 

@@ -3,19 +3,22 @@ import {property} from 'lit/decorators.js';
 import type {DeclaredScalar, ItemDetail, Meta, Refusal} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
+import {icon} from './icons.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
 
 /**
- * `<tessera-item-card>` — the selected point (design §5.3 tier 2). Its fields **by name, in
- * declaration order**: `/v1/items` omits a field the item carries no value for, so position lies
- * and a card reading positionally would misattribute every field after the first gap. A text
- * column lives in the record blob and never appears in a viewport response, so this is the only
- * place its prose is ever seen. A category arrives already resolved to its key.
+ * `<tessera-item-card>` — the selected point (design §5.3 tier 2), as the boards draw it: the
+ * title, then the fields **by name, in declaration order** as a label/value grid, then *Open* and
+ * *Copy id*. `/v1/items` omits a field the item carries no value for, so position lies and a card
+ * reading positionally would misattribute every field after the first gap. A text column lives in
+ * the record blob and never appears in a viewport response, so this is the only place its prose
+ * is ever seen. A category arrives already resolved to its key.
  *
- * A slot per field — `field-<name>` — so a host renders a title as a link into their application
- * without replacing the card, and a `tessera-open` event (the id as a decimal string) for the
- * same purpose.
+ * The title is the first declared text column that has a value (`title` by name where there is
+ * one); a slot per field — `field-<name>` — lets a host render one as a link into their
+ * application without replacing the card, and `tessera-open` (the id as a decimal string) does
+ * the same for *Open*.
  *
  * **A miss and a broken pick are different.** Nothing under the cursor is the ordinary case; a
  * hit whose layer carried no identity is a fault in the map and says so, rather than reading as
@@ -33,18 +36,12 @@ export class TesseraItemCard extends TesseraElement {
     css`
       :host {
         display: block;
-        padding: var(--tessera-space) calc(var(--tessera-space) * 1.6);
-        background: var(--tessera-panel-bg);
-        border: 1px solid var(--tessera-border);
-        border-radius: var(--tessera-radius);
       }
-      [part='field'] {
-        display: flex;
-        justify-content: space-between;
-        gap: calc(var(--tessera-space) * 1.6);
+      .card-title {
+        margin-bottom: 10px;
       }
       [part='field'][data-prose] {
-        display: block;
+        grid-column: 1 / -1;
       }
       [part='field'][data-prose] [part='value'] {
         display: -webkit-box;
@@ -54,9 +51,15 @@ export class TesseraItemCard extends TesseraElement {
         overflow: hidden;
         overflow-wrap: anywhere;
       }
-      [part='open'] {
-        width: 100%;
-        margin-top: var(--tessera-space);
+      .field .v.mono {
+        font-size: 12px;
+      }
+      .actions {
+        margin-top: 12px;
+      }
+      [part='close'] {
+        display: inline-flex;
+        color: var(--tessera-ink-3);
       }
     `
   ];
@@ -77,48 +80,53 @@ export class TesseraItemCard extends TesseraElement {
 
   override render() {
     const {item, refusal, meta} = this.shown;
-    const heading = html`<h2 part="title">Item</h2>`;
+    const heading = html`<h2 part="title">Item<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'item'})}>${icon('close', 14)}</button></h2>`;
     if (refusal) {
       // A refusal from `/v1/items` is a refusal, never an empty item.
-      return html`${heading}<span part="state" data-state="refused"><span class="badge">refused</span><span part="refusal">${refusal.code}: ${refusal.detail}</span></span>`;
+      return html`<div class="panel">${heading}<span part="state" data-state="refused"><span part="refusal">${refusal.code}: ${refusal.detail}</span></span></div>`;
     }
     if (!item) {
       const pick = this.pick;
       if (pick?.kind === 'broken') {
-        return html`${heading}<span part="state" data-state="refused"><span class="badge">fault</span
-            ><span part="refusal"
-              >picked mark ${pick.index} on ${pick.layer ?? 'an unnamed layer'}, which carried
-              ${pick.hasIds ? `only ${pick.idCount} identities` : 'no identities'} — a layer fault, not a miss</span
-            ></span>`;
+        return html`<div class="panel">${heading}<span part="state" data-state="refused"><span part="refusal">Layer fault: mark ${pick.index} on ${pick.layer ?? 'an unnamed layer'} carried ${pick.hasIds ? `${pick.idCount} identities` : 'no identity'}</span></span></div>`;
       }
-      if (pick?.kind === 'miss') return html`${heading}<span part="state" data-state="empty"><span class="muted">nothing under the cursor — click a mark</span></span>`;
-      const status = this.resolvedStore?.get('status');
-      const state = stateOf(status);
-      if (state === 'detached') return html`${heading}${renderState('detached', null)}`;
-      return html`${heading}<span part="state" data-state="empty"><span class="muted">click a mark</span></span>`;
+      if (pick?.kind === 'miss') return html`<div class="panel">${heading}<span part="state" data-state="empty">Nothing under the cursor</span></div>`;
+      const state = stateOf(this.resolvedStore?.get('status'));
+      if (state === 'detached') return html`<div class="panel">${heading}${renderState('detached', null)}</div>`;
+      return html`<div class="panel">${heading}<span part="state" data-state="empty">No item selected</span></div>`;
     }
     const declared = meta?.declaredScalars ?? [];
     const {fields, externalId} = item.detail;
     const names = Object.keys(fields);
     const ordered = [...declared.map((c) => c.name).filter((n) => n in fields), ...names.filter((n) => !declared.some((c) => c.name === n))];
-    const absent = declared.filter((c) => !(c.name in fields)).map((c) => c.name);
     const id = idString(item.id);
-    return html`${heading}
+    // The title: a declared text column named `title` with a value, else the first with prose.
+    const titleName = ordered.find((n) => n === 'title' && typeof fields[n] === 'string') ?? ordered.find((n) => declared.find((c) => c.name === n)?.arrowType === 'utf8' && typeof fields[n] === 'string');
+    const rest = ordered.filter((n) => n !== titleName);
+    const copy = () => void navigator.clipboard?.writeText(id);
+    return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
-      <div part="field" data-name="tessera_id"><span part="label">tessera_id</span><span part="value">${id}</span></div>
-      ${ordered.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
-      ${absent.length > 0 ? html`<div class="muted">no value for ${absent.join(', ')}</div>` : nothing}
-      ${externalId ? html`<div part="field" data-name="external_id"><span part="label">external id (base64)</span><span part="value">${externalId}</span></div>` : nothing}
-      <button part="open" type="button" @click=${() => emit(this, 'tessera-open', {id, fields, externalId})}>open</button>`;
+      ${titleName ? html`<div part="field" class="card-title" data-name=${titleName}><slot name=${`field-${titleName}`}><span part="value">${String(fields[titleName])}</span></slot></div>` : nothing}
+      <div class="field">
+        ${rest.map((name) => this.field(name, fields[name], declared.find((c) => c.name === name)))}
+        <div part="field" data-name="tessera_id" style="display:contents"><span part="label" class="k">tessera_id</span><span part="value" class="v mono">${id}</span></div>
+        ${externalId ? html`<div part="field" data-name="external_id" style="display:contents"><span part="label" class="k">external_id</span><span part="value" class="v mono">${externalId}</span></div>` : nothing}
+      </div>
+      <div class="row actions">
+        <button part="open" class="btn" type="button" @click=${() => emit(this, 'tessera-open', {id, fields, externalId})}>${icon('open', 14)}Open</button>
+        <button part="copy" class="btn quiet" type="button" @click=${copy}>Copy id</button>
+      </div>
+    </div>`;
   }
 
-  /** One field, presented by its declared type; prose gets a block rather than a row. */
+  /** One field, presented by its declared type; prose spans the grid. */
   private field(name: string, value: unknown, column: DeclaredScalar | undefined) {
     const text = present(value, column);
     const prose = text.length > 60;
-    return html`<div part="field" data-name=${name} ?data-prose=${prose}>
-      <span part="label">${name}</span>
-      <slot name=${`field-${name}`}><span part="value" title=${prose ? text : nothing}>${text}</span></slot>
+    const mono = column?.arrowType === 'timestamp_us';
+    return html`<div part="field" data-name=${name} ?data-prose=${prose} style=${prose ? nothing : 'display:contents'}>
+      <span part="label" class="k">${name}</span>
+      <slot name=${`field-${name}`}><span part="value" class=${`v${mono ? ' mono' : ''}`} title=${prose ? text : nothing}>${text}</span></slot>
     </div>`;
   }
 }
@@ -127,7 +135,7 @@ export class TesseraItemCard extends TesseraElement {
 export function present(value: unknown, column: DeclaredScalar | undefined): string {
   if (value === null || value === undefined) return '—';
   if (column?.arrowType === 'timestamp_us' && (typeof value === 'number' || typeof value === 'bigint')) {
-    return new Date(Number(value) / 1000).toISOString();
+    return new Date(Number(value) / 1000).toISOString().slice(0, 10);
   }
   if (typeof value === 'number') return Number.isInteger(value) ? value.toLocaleString('en-GB') : String(value);
   if (typeof value === 'boolean') return value ? 'yes' : 'no';

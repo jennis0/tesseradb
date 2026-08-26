@@ -76,7 +76,7 @@ describe('<tessera-layer-picker>', () => {
     const entries = deepAll(host, '[part="entry"]').map((e) => e.getAttribute('data-layer'));
     // `labels` depends on `clusters`, so it is inside that entry and not one of its own.
     expect(entries).toEqual(['clusters', 'districts']);
-    expect(deep(host, '[part="entry"][data-layer="clusters"] [part="closure"]')?.textContent).toContain('labels');
+    expect(deep(host, '[part="entry"][data-layer="clusters"]')?.getAttribute('title')).toContain('labels');
     expect(host.shadowRoot?.textContent ?? deepAll(host, '*').map((e) => e.textContent).join(' ')).not.toMatch(/\d+ artifacts/);
     const box = deep(host, '[part="entry"][data-layer="clusters"] input') as HTMLInputElement;
     box.checked = true;
@@ -113,7 +113,7 @@ describe('<tessera-artifact-list>', () => {
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
     store.set('artifacts', artifactsProjection([]));
     await settle(host);
-    expect(deep(host, '[part="state"]')?.textContent).toContain('nothing served here');
+    expect(deep(host, '[part="state"]')?.textContent).toContain('Nothing in this view');
   });
 });
 
@@ -147,22 +147,24 @@ describe('<tessera-artifact-card>', () => {
 
 describe('<tessera-legend selectable>', () => {
   it('offers cluster colour only for a layer that is on, and sends cluster:<layer>', async () => {
-    const host = await mount('<tessera-legend selectable></tessera-legend>');
+    const host = await mount('<tessera-legend selectable readout></tessera-legend>');
     const store = fakeStore({meta: META, status: status({})});
     (host.querySelector('tessera-legend') as unknown as {store: unknown}).store = store;
     await settle(host);
-    expect(deepAll(host, 'option').map((o) => o.getAttribute('value'))).toEqual(['', 'archive']);
+    const colourOptions = () => deepAll(host, '[part="select"] option').map((o) => o.getAttribute('value'));
+    expect(colourOptions()).toEqual(['', 'archive']);
     store.set('artifacts', artifactsProjection([artifact(1n, 100n)], ['clusters']));
     await settle(host);
-    expect(deepAll(host, 'option').map((o) => o.getAttribute('value'))).toEqual(['', 'archive', 'cluster:clusters']);
-    const select = deep(host, 'select') as HTMLSelectElement;
+    expect(colourOptions()).toEqual(['', 'cluster:clusters', 'archive']);
+    // The Layers select beside it: one of three on, and each root offered.
+    expect(deepAll(host, '[part="layers-select"] option').map((o) => o.textContent)).toEqual(['1 of 2 on', 'clusters', 'districts']);
+    const select = deep(host, '[part="select"]') as HTMLSelectElement;
     select.value = 'cluster:clusters';
     select.dispatchEvent(new Event('change'));
     expect(store.calls.find((c) => c.name === 'setColourBy')?.args[0]).toBe('cluster:clusters');
     store.set('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy: 'cluster:clusters'});
     await settle(host);
     expect(deepAll(host, '[part="swatch"]').length).toBe(2); // the served artifact and the neutral
-    expect(deep(host, '.muted')?.textContent).toContain('colours exact');
   });
 
   it('is a readout without selectable', async () => {

@@ -4,6 +4,7 @@ import {
   CLUSTER_PREFIX,
   NEUTRAL,
   NO_ORDINAL,
+  GRID32_PER_WORLD_UNIT as GRID32_PER_WORLD,
   gridToWorld,
   gridToWorldXY,
   type Artifact,
@@ -80,6 +81,8 @@ export type TesseraLayerProps = CompositeLayerProps & {
   clusterLevel?: number;
   /** Whether names and counts are drawn at the centroids. */
   labels?: boolean;
+  /** The ground the map is drawn on; the ink, halo and outline weights follow it (the boards). */
+  scheme?: 'light' | 'dark';
   /** The picked mark's world position, for its marker. */
   selectedWorldXY?: [number, number] | null;
   openedArtifact?: bigint | null;
@@ -115,7 +118,11 @@ type Resolved = {
   status: PresentedStatus;
 };
 
-const AMBER: [number, number, number, number] = [255, 210, 90, 255];
+/** The selection's colour: the accent, as the boards draw the lasso (`gen.py`'s `lasso_layer`). */
+const ACCENT: Record<'light' | 'dark', [number, number, number]> = {light: [36, 87, 163], dark: [134, 176, 240]};
+/** Label ink and its halo per ground (`datamap_layers2`). */
+const INK: Record<'light' | 'dark', [number, number, number]> = {light: [36, 39, 43], dark: [236, 238, 240]};
+const HALO: Record<'light' | 'dark', [number, number, number, number]> = {light: [247, 247, 244, 190], dark: [12, 14, 17, 180]};
 const CHROME: [number, number, number, number] = [234, 238, 243, 240];
 const PLATE: [number, number, number, number] = [13, 15, 18, 235];
 
@@ -240,10 +247,11 @@ const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]}>();
 
 type OutlineDatum = {id: bigint; polygon: [number, number][]; colour: Rgba; opened: boolean};
-type LabelDatum = {id: bigint; position: [number, number]; text: string; size: number; offset: [number, number]; colour: Rgba};
+type LabelDatum = {id: bigint; position: [number, number]; text: string; size: number; offset: [number, number]; colour: Rgba; kind: 'name' | 'count' | 'topic'};
 type LeaderDatum = {from: [number, number]; to: [number, number]};
 
-const HAIRLINE_ALPHA = 110;
+/** The faint outline's alpha per ground: the boards' 0.16 on light, 0.22 on dark. */
+const HAIRLINE_ALPHA: Record<'light' | 'dark', number> = {light: 44, dark: 60};
 
 /** What to call an artifact: its supplied text where the layer publishes any, else its key. */
 export function artifactName(a: Artifact): string {
@@ -274,6 +282,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     lut: null,
     clusterLevel: undefined,
     labels: true,
+    scheme: 'dark',
     selectedWorldXY: null,
     openedArtifact: null,
     region: null,
@@ -651,7 +660,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const a = r.artifacts;
     const started = performance.now();
     const opened = this.props.openedArtifact ?? null;
-    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}` : '';
+    const scheme = this.props.scheme ?? 'dark';
+    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${scheme}` : '';
     let held = a ? heldOutlines.get(a.served) : undefined;
     if (a && (!held || held.key !== key)) {
       const data: OutlineDatum[] = [];
@@ -676,12 +686,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           data,
           getPolygon: (d: OutlineDatum) => d.polygon,
           filled: true,
-          getFillColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 36] : [0, 0, 0, 0]),
+          getFillColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 18] : [0, 0, 0, 0]),
           stroked: true,
-          getLineColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 255] : [d.colour[0], d.colour[1], d.colour[2], HAIRLINE_ALPHA]),
+          getLineColor: (d: OutlineDatum) => (d.opened ? [d.colour[0], d.colour[1], d.colour[2], 200] : [d.colour[0], d.colour[1], d.colour[2], HAIRLINE_ALPHA[scheme]]),
           lineWidthUnits: 'pixels' as const,
-          getLineWidth: (d: OutlineDatum) => (d.opened ? 2 : 1),
-          lineWidthMinPixels: 1,
+          getLineWidth: (d: OutlineDatum) => (d.opened ? 1.2 : 0.8),
+          lineWidthMinPixels: 0.8,
           pickable: this.props.pickable,
           artifactIds: data.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
@@ -708,33 +718,59 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     let held = a ? heldLabels.get(a.served) : undefined;
     if (a && viewport && (!held || held.key !== key)) {
       const placed = a.served.filter((x) => x.centroid !== null);
-      const largest = placed.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
+      // A dependent layer's artifacts — a clustering's topic labels — draw their text beneath the
+      // name of whatever they sit on, italic and small, and are placed with it: they are not
+      // candidates of their own (§5.10, D13).
+      const dependent = new Set(r.meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
+      const topics = placed.filter((x) => dependent.has(x.layer));
+      const named = placed.filter((x) => !dependent.has(x.layer));
+      const largest = named.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
       const scale = 2 ** zoom; // pixels per world unit
       const candidates: LabelCandidate[] = [];
-      const byId = new Map<bigint, {artifact: Artifact; text: string; size: number}>();
-      for (const artifact of placed) {
+      const byId = new Map<bigint, {artifact: Artifact; name: string; countText: string; size: number; topic: string | null}>();
+      for (const artifact of named) {
         const count = Number(artifact.maskedCount);
         const size = labelSize(count, largest);
         const name = artifactName(artifact);
         const countText = count.toLocaleString('en-GB');
-        byId.set(artifact.tesseraId, {artifact, text: `${name}\n${countText}`, size});
+        // The topic beneath: the dependent artifact nearest this centroid, within a label's reach.
+        let topic: string | null = null;
+        let best = Infinity;
+        for (const t of topics) {
+          const d = Math.hypot(t.centroid![0] - artifact.centroid![0], t.centroid![1] - artifact.centroid![1]) * (scale / GRID32_PER_WORLD);
+          if (d < best && d < size * 6) {
+            best = d;
+            topic = t.content[0] ?? null;
+          }
+        }
+        byId.set(artifact.tesseraId, {artifact, name, countText, size, topic});
+        const width = (name.length * 0.56 + countText.length * 0.5 + 2) * size + 8;
         candidates.push({
           id: artifact.tesseraId,
           x: gridToWorld(artifact.centroid![0]) * scale,
           y: gridToWorld(artifact.centroid![1]) * scale,
-          width: Math.max(name.length, countText.length) * size * 0.62 + 8,
-          height: size * 2.4 + 4,
+          width: Math.max(width, topic ? topic.length * 11 * 0.5 : 0),
+          height: size * 1.35 + (topic ? 13 : 0),
           priority: count
         });
       }
       const data: LabelDatum[] = [];
       const leaders: LeaderDatum[] = [];
       for (const p of placeLabels(candidates) as PlacedLabel[]) {
-        const {artifact, text, size} = byId.get(p.id)!;
+        const {artifact, name, countText, size, topic} = byId.get(p.id)!;
         const position = gridToWorldXY(artifact.centroid!);
         const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
-        data.push({id: artifact.tesseraId, position, text, size, offset: [p.dx, p.dy], colour: a.colours.get(ordinal) ?? NEUTRAL});
-        if (p.leader) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
+        const colour = a.colours.get(ordinal) ?? NEUTRAL;
+        // The name, then the count beside it — smaller and lighter — then the topic beneath.
+        // The name ends and the count starts at one seam, so the width estimates cannot overlap.
+        const nameWidth = name.length * 0.58 * size;
+        const countWidth = countText.length * 0.55 * size * 0.82;
+        const seam = p.dx - (nameWidth + countWidth + size * 0.35) / 2 + nameWidth;
+        data.push({id: artifact.tesseraId, position, text: name, size, offset: [seam, p.dy], colour, kind: 'name'});
+        data.push({id: artifact.tesseraId, position, text: countText, size: size * 0.82, offset: [seam + size * 0.35, p.dy + size * 0.08], colour, kind: 'count'});
+        if (topic) data.push({id: artifact.tesseraId, position, text: topic, size: 11, offset: [p.dx, p.dy + size * 0.78 + 3], colour, kind: 'topic'});
+        // A leader only where the label sits well clear of its centroid — a small nudge needs none.
+        if (p.leader && Math.hypot(p.dx, p.dy) > size * 2.5) leaders.push({from: position, to: [position[0] + p.dx / scale, position[1] + p.dy / scale]});
       }
       held = {key, data, leaders};
       heldLabels.set(a.served, held);
@@ -754,7 +790,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
             data: leaders,
             getSourcePosition: (d: LeaderDatum) => d.from,
             getTargetPosition: (d: LeaderDatum) => d.to,
-            getColor: [200, 205, 212, 140],
+            getColor: [...INK[this.props.scheme ?? 'dark'], 100] as [number, number, number, number],
+            updateTriggers: {getColor: this.props.scheme},
             widthUnits: 'pixels' as const,
             getWidth: 1,
             pickable: false,
@@ -763,33 +800,38 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
         )
       );
     }
-    layers.push(
+    const scheme = this.props.scheme ?? 'dark';
+    const ink = [...INK[scheme], 255] as [number, number, number, number];
+    const text = (id: string, kind: LabelDatum['kind'], rows: LabelDatum[], extra: Record<string, unknown>) =>
       new TextLayer(
-        this.getSubLayerProps({id: 'labels'}),
+        this.getSubLayerProps({id}),
         {
-          visible: data.length > 0,
-          data,
+          visible: rows.length > 0,
+          data: rows,
           getPosition: (d: LabelDatum) => d.position,
           getText: (d: LabelDatum) => d.text,
           getSize: (d: LabelDatum) => d.size,
           sizeUnits: 'pixels' as const,
-          getColor: [240, 243, 247, 255],
+          getColor: kind === 'name' ? ink : ([ink[0], ink[1], ink[2], kind === 'count' ? 184 : 178] as [number, number, number, number]),
           getPixelOffset: (d: LabelDatum) => d.offset,
-          getTextAnchor: 'middle' as const,
+          getTextAnchor: (kind === 'name' ? 'end' : kind === 'count' ? 'start' : 'middle') as 'start' | 'middle' | 'end',
           getAlignmentBaseline: 'center' as const,
-          fontFamily: 'Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
-          fontWeight: 600,
+          fontFamily: 'IBM Plex Sans, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
           fontSettings: {sdf: true, buffer: 4},
-          outlineWidth: 5,
-          outlineColor: [8, 10, 14, 220],
+          outlineWidth: kind === 'name' ? 2.5 : 2,
+          outlineColor: HALO[scheme],
           characterSet: 'auto',
-          lineHeight: 1.1,
-          pickable: this.props.pickable,
-          artifactIds: data.map((d) => d.id),
+          pickable: this.props.pickable && kind === 'name',
+          artifactIds: rows.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
-          updateTriggers: {getPixelOffset: key, getSize: key}
+          updateTriggers: {getPixelOffset: key, getSize: key, getColor: scheme},
+          ...extra
         } as never
-      )
+      );
+    layers.push(
+      text('labels', 'name', data.filter((d) => d.kind === 'name'), {fontWeight: 600}),
+      text('label-counts', 'count', data.filter((d) => d.kind === 'count'), {fontWeight: 400}),
+      text('label-topics', 'topic', data.filter((d) => d.kind === 'topic'), {fontWeight: 400, fontStyle: 'italic'})
     );
     return layers;
   }
@@ -802,6 +844,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const shape: [number, number][] | null =
       polygon && polygon.length >= 2 ? polygon : box ? [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]] : null;
     const live = this.props.drag != null || this.props.dragPolygon != null;
+    const scheme = this.props.scheme ?? 'dark';
+    const accent = ACCENT[scheme];
     // Both layers exist from the first paint, empty, so their programs are linked before needed.
     {
       layers.push(
@@ -812,13 +856,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
             data: shape ? [{polygon: shape}] : NO_SHAPES,
             getPolygon: (d: {polygon: number[][]}) => d.polygon,
             filled: (shape?.length ?? 0) >= 3,
-            getFillColor: [255, 210, 90, 28],
+            getFillColor: [...accent, live ? 20 : 30] as [number, number, number, number],
             stroked: true,
-            getLineColor: AMBER,
+            getLineColor: [...accent, live ? 255 : 230] as [number, number, number, number],
             lineWidthUnits: 'pixels' as const,
-            getLineWidth: live ? 1 : 1.5,
+            getLineWidth: 1.5,
             pickable: false,
-            parameters: {depthCompare: 'always' as const}
+            parameters: {depthCompare: 'always' as const},
+            updateTriggers: {getFillColor: [live, scheme], getLineColor: [live, scheme]}
           } as never
         )
       );
@@ -832,13 +877,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
             visible: at !== null && at !== undefined,
             data: at ? [at] : NO_POINTS,
             getPosition: (d: [number, number]) => d,
-            getFillColor: AMBER,
+            getFillColor: [0, 0, 0, 0],
             radiusUnits: 'pixels' as const,
-            getRadius: 5,
+            getRadius: 6,
             stroked: true,
-            getLineColor: [20, 20, 20, 255],
+            getLineColor: [...INK[scheme], 255] as [number, number, number, number],
             lineWidthUnits: 'pixels' as const,
-            getLineWidth: 1.5,
+            getLineWidth: 2,
+            updateTriggers: {getLineColor: scheme},
             pickable: false,
             parameters: {depthCompare: 'always' as const}
           } as never

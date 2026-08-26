@@ -133,17 +133,34 @@ const ABSORB_SLICE_MS = 6;
  * response as it lands is the design's claim (§5.10).
  */
 const FRAME_MS = 16;
+/** The most an absorb slice waits for a frame before continuing anyway. */
+const FRAME_WAIT_MAX_MS = 300;
 /** How long after the last slice the frame pulse keeps listening, so a quiet page runs no loop. */
 const PULSE_MS = 500;
 let lastFrameAt = 0;
+let lastFrameGap = 0;
 let pulseUntil = 0;
 let pulsing = false;
+/**
+ * A frame slower than this is a renderer that cannot afford a paint per slice — software GL
+ * draws a million marks in seconds — so the slices are stored without presenting and the
+ * response paints once, as it did before slices could paint at all.
+ */
+const SLOW_FRAME_MS = 250;
+function framesFlowing(): boolean {
+  if (typeof requestAnimationFrame === 'undefined') return true;
+  // The last gap, and the current one: a frame overdue by more than the threshold is a slow
+  // renderer mid-paint, however quick the frames before it were.
+  return pulsing && lastFrameGap > 0 && lastFrameGap < SLOW_FRAME_MS && performance.now() - lastFrameAt < SLOW_FRAME_MS;
+}
 /** Note each animation frame's time while an absorb is running; stops itself when none is. */
 function pulse(): void {
   if (pulsing || typeof requestAnimationFrame === 'undefined') return;
   pulsing = true;
   const note = () => {
-    lastFrameAt = performance.now();
+    const now = performance.now();
+    lastFrameGap = lastFrameAt > 0 ? now - lastFrameAt : 0;
+    lastFrameAt = now;
     if (lastFrameAt < pulseUntil) requestAnimationFrame(note);
     else pulsing = false;
   };
@@ -154,7 +171,22 @@ function yieldToFrame(): Promise<void> {
     const now = performance.now();
     pulseUntil = now + PULSE_MS;
     pulse();
-    if (now - lastFrameAt > FRAME_MS) return new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 0)));
+    if (now - lastFrameAt > FRAME_MS) {
+      // Bounded: under software GL a frame can take seconds, and an absorb paced one slice per
+      // frame would take minutes — so the wait is for a frame *or* {@link FRAME_WAIT_MAX_MS},
+      // whichever comes first. Folds coalesce on the presenter (the newest wins), so a slow
+      // renderer paints what has landed when it can.
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          resolve();
+        };
+        requestAnimationFrame(() => setTimeout(finish, 0));
+        setTimeout(finish, FRAME_WAIT_MAX_MS);
+      });
+    }
   }
   return new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -529,7 +561,7 @@ export class Replica {
       slices++;
       // Each slice is drawable the moment it is stored: the consumer may present between slices,
       // so the first marks of a large response are on screen while the rest is still being split.
-      this.opts.onPhase?.('piece', took, slice.length);
+      if (framesFlowing()) this.opts.onPhase?.('piece', took, slice.length);
       if (!splitter.done()) await yieldToFrame();
     }
     this.opts.onPhase?.('split', splitMs, bands.length);

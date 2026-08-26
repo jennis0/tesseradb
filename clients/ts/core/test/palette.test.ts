@@ -25,19 +25,22 @@ describe('the positional palette (§5.10, decision 0099)', () => {
     expect(polarOf([c, c + 100]).angle).toBe(90);
     expect(polarOf([c, c]).radius).toBe(0);
     expect(polarOf([0, c]).radius).toBe(1);
-    const near = positionalColour([c + 1000, c]);
-    const far = positionalColour([2 ** 32 - 1, c]);
-    // Same hue (red), nearer is lighter.
     const lum = (rgb: readonly number[]) => rgb[0]! + rgb[1]! + rgb[2]!;
-    expect(lum(near)).toBeGreaterThan(lum(far));
+    // The same hue at both distances; on a dark ground the rim is lighter, on a light ground
+    // the rim is deeper (the boards' `position_colours`).
+    expect(lum(positionalColour([2 ** 32 - 1, c], 'dark'))).toBeGreaterThan(lum(positionalColour([c + 1000, c], 'dark')));
+    expect(lum(positionalColour([c + 1000, c], 'light'))).toBeGreaterThan(lum(positionalColour([2 ** 32 - 1, c], 'light')));
+    expect(positionalColour([c + 1000, c], 'light')).not.toEqual(positionalColour([c + 1000, c], 'dark'));
   });
 
   it('spreads hues evenly over the served set in angle order, and neutral for an artifact with no centroid', () => {
     const c = GRID32_CENTRE;
     const spread = artifactColours([at(c + 10, c, 1), at(c, c + 10, 2), at(c - 10, c, 3), {ordinal: 4, artifact: {...at(0, 0, 4).artifact, centroid: null}}], 'spread');
-    expect(spread.get(1)!.slice(0, 3)).toEqual(hslToRgb(0, 0.68, 0.66));
-    expect(spread.get(2)!.slice(0, 3)).toEqual(hslToRgb(120, 0.68, 0.66));
-    expect(spread.get(3)!.slice(0, 3)).toEqual(hslToRgb(240, 0.68, 0.66));
+    // Evenly spaced from the boards' hue origin (an offset of 0.95 of the circle), on the dark ground.
+    const origin = 0.95 * 360;
+    expect(spread.get(1)!.slice(0, 3)).toEqual(hslToRgb(origin, 0.62, 0.64));
+    expect(spread.get(2)!.slice(0, 3)).toEqual(hslToRgb(origin + 120, 0.62, 0.64));
+    expect(spread.get(3)!.slice(0, 3)).toEqual(hslToRgb(origin + 240, 0.62, 0.64));
     expect(spread.get(4)).toEqual(NEUTRAL);
   });
 
