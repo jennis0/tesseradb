@@ -2,7 +2,7 @@ import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {CLUSTER_PREFIX, NEUTRAL, layerEntries, type Rgba} from '@tesseradb/client';
 import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck';
-import {TesseraElement, emit} from './base.js';
+import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState, stateOf} from './states.js';
 import {chrome, tokens} from './tokens.js';
@@ -152,7 +152,7 @@ export class TesseraLegend extends TesseraElement {
       const named = artifacts.served.filter((a) => a.layer === clusterLayer);
       return wrap(html`<span part="state" data-state="shown"></span>
         <div part="swatches">
-          ${named.slice(0, 40).map((a) => swatch(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a)))}
+          ${named.slice(0, 40).map((a) => swatch(artifacts.colours.get(artifacts.table.ordinalOf(a.layer, a.tesseraId)) ?? NEUTRAL, artifactName(a) ?? UNNAMED))}
           ${named.length > 40 ? html`<div class="muted xs">and ${named.length - 40} more</div>` : nothing}
           ${swatch(NEUTRAL, 'not yet known')}
         </div>`);
