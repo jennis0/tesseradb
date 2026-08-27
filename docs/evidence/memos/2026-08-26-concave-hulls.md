@@ -5,7 +5,9 @@
 [`annotations.md`](../../design/annotations.md) §4.2; the construction lives in
 `crates/tessera-engine/src/derived.rs`.
 **Measured on:** `notebook-2m4`'s `clusters/hdbscan` layer — 197 artifacts, 6,146 … 2,422,486
-members — at **full** membership, on a release build, one thread. Re-run before quoting:
+members — at **full** membership, on a release build, one thread. Timings vary about ±4% run to run
+on this machine; the tables below are one run, and the shape and vertex figures are exact and
+repeat. Re-run before quoting:
 `TESSERA_HULL_BUNDLE=<bundle root> cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture`.
 
 ## What changed, and what it costs
