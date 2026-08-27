@@ -114,3 +114,19 @@ describe('events', () => {
     expect(seen!.detail.id).toBe('18446744073709551615');
   });
 });
+
+describe('<tessera-map> defaults', () => {
+  it('draws no density wash unless a host asks for one', async () => {
+    // Owner direction, 2026-08-26: how density should be rendered is its own conversation, and
+    // the wash was confounding a pass over the map's hierarchy. The property and the machinery
+    // behind it are untouched — only the default moved.
+    await import('../src/map.js');
+    const map = document.createElement('tessera-map') as unknown as {wash: boolean};
+    expect(map.wash).toBe(false);
+    const asked = document.createElement('div');
+    asked.innerHTML = '<tessera-map wash></tessera-map>';
+    document.body.append(asked);
+    expect((asked.firstElementChild as unknown as {wash: boolean}).wash).toBe(true);
+    asked.remove();
+  });
+});

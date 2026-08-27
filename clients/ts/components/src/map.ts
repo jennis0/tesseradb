@@ -258,7 +258,13 @@ export class TesseraMap extends TesseraElement {
   @property({type: Number, attribute: 'cluster-level'}) accessor clusterLevel: number | null = null;
   /** A deck.gl layer drawn under the points — a geographic corpus's basemap (§5.3). */
   @property({attribute: false}) accessor basemap: Layer | null = null;
-  @property({type: Boolean}) accessor wash = true;
+  /**
+   * Whether the single-hue density wash is drawn under the points. **Off by default** (owner
+   * direction, 2026-08-26): how density should be rendered is its own conversation, and the wash
+   * was confounding a pass over the map's hierarchy. The machinery is untouched — `wash` turns it
+   * on and the layer still builds it from the exact tiles' counts (decision 0097).
+   */
+  @property({type: Boolean}) accessor wash = false;
   /** A fixed mark radius in pixels; unset, the marks are sized by their count and the zoom (`markStyle`). */
   @property({type: Number}) accessor radius: number | null = null;
   /** The mode and fit control cluster — the map's own, not a slot. */
