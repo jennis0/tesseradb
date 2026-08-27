@@ -1,0 +1,5 @@
+# Derived from the parquet corpus, 173 MB, rebuilt by `load.py` in about 15 seconds.
+cache/
+# The per-artifact rings, written by `measure.py` for `figures.py`, `overlap.py` and `dp_sweep.py`.
+rings-*.pkl
+__pycache__/
