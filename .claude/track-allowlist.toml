@@ -217,3 +217,14 @@ paths = [
   "docs/design/annotations.md",
   "docs/evidence/memos/2026-08-26-concave-hulls.md",
 ]
+
+# Wave 8 — the shape question (controller, 2026-08-27). An investigation, not a build: what shape
+# family a served hull should be for a density clustering, what else is worth carrying, and how a
+# layer author chooses. Owns its design document and its probe directory.
+[track.shape]
+paths = [
+  "docs/design/artifact-shapes.md",
+  "docs/evidence/memos/2026-08-27-artifact-shapes.md",
+  "probes/2026-08-27-artifact-shapes/*",
+  "docs/design/README.md",
+]
