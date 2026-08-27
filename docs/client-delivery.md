@@ -16,18 +16,30 @@ order and §11 for the decisions.
 
 ## Where it stands
 
-Steps 0 and 1 are built (branch `client/step-0-1`): the presented frame moved into the client and
-the headless store is `@tesseradb/client`'s main export, the scope rename to `@tesseradb/*` landed
-with it, and the viewer consumes the store. Step 2 is built (branch `client/step-2`): `@tesseradb/deck`
-and `@tesseradb/components`, box selection, and the viewer as the explorer plus instruments. Step 3
-is built (branch `client/step-3`): the membership column consumed end to end, the lookup texture,
-the four artifact elements, wire geometry drawn, lasso, the sidecar retired. Step 5 is built (branch
-`client/step-5`): the `tesseradb` package with the widget as its `[widget]` extra, run by hand in
-JupyterLab and Marimo. Step 4 is built (branch `client/step-4`) and step 5 with it; **the owner's review of the built
-explorer is answered on `client/ui`, and his second review — of the 2.4M map — on `client/look`**
-— see the two *Reviewed by the owner* sections below. The server tracks are
-ahead; the design is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
-recorded as decisions 0095–0101; the open decisions and what each gates are in the handover's §1.
+**All six steps and the server track the design depended on are merged to `main`** (2026-08-27).
+Read this section for the state; the tables below for what each step owes and what is left.
+
+- **The client** is five packages: `@tesseradb/client` (the headless store), `@tesseradb/deck`,
+  `@tesseradb/components` (thirteen elements), `@tesseradb/react`, `@tesseradb/viewer`, plus the
+  Python `tesseradb` with the widget as its `[widget]` extra, run by hand in JupyterLab and Marimo.
+  Three example pages are in the gate, and C3's documents — contracts r39, the OpenAPI description
+  with the test that keeps it true, worked decodes in `pyarrow` and `apache-arrow`, the obligations
+  page — are written.
+- **The wire gained** the per-point membership column (D12), `layers` as *omitted means none* with
+  the string `"all"` (D9), and a dependent artifact carrying its target's masked count (D13). The
+  viewer plane gained `serve.cors_origins` (D10, [decision 0102](decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md)).
+  A served hull is now a **concave** shape over the masked members rather than a convex wrap.
+- **Two owner reviews are answered**, both recorded below: the first on the built explorer (the
+  four bugs and the boards), the second on the 2.4M map (the glow, the polygons, and the hierarchy
+  reading as clutter). The map now draws colour and names at rest, a hull only for the hovered and
+  the opened artifact, labels on the frontier alone, and the density wash off by default.
+- **Three demo corpora** are served by `run_demo.sh`: `notebook-2m4` (2.42M, seven layers — the one
+  to judge on), `notebook` (50,000, the same shape), and `2m4` (k-means only, the original).
+- **What is not built** is in the server-tracks table: the selection operand and its verbs (S6,
+  designed and reviewed, not built), the fetch-model hint (S5, declined), predicate membership for
+  k-means (S8, deferred), a per-branch cut (S9, closed as not a defect), and the tiered layer's
+  `level` on the wire (S10). The design is at **r5**, with what the building changed in its
+  Appendix R; the owner's rulings are decisions 0095–0102.
 
 **The smoke scripts ran for steps 0–1 on a rebuilt demo bundle** (2026-08-25, integration). Every
 prebuilt bundle predated manifest fields the current binary requires (`vocabularies`, `visibility`),
