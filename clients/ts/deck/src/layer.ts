@@ -112,7 +112,9 @@ export type LayerTimings = {
   labelsMs: number;
   layersMs: number;
   lutWrites: number;
+  /** The served shapes the outline layer holds, and how many of them actually draw. */
   outlines: number;
+  outlinesDrawn: number;
   labels: number;
   /** The mark style the paint drew: radius in pixels and composited alpha, from `markStyle`. */
   markRadius: number;
@@ -670,7 +672,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
 
   override renderLayers(): LayersList {
     const started = performance.now();
-    const timings: LayerTimings = {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0};
+    const timings: LayerTimings = {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, outlinesDrawn: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0};
     this.state.zoomBucket = Math.round((this.context.viewport?.zoom ?? 0) * LABEL_ZOOM_STEP);
     const layers = this.buildLayers(timings);
     timings.layersMs = performance.now() - started;
@@ -986,7 +988,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    *
    * The shapes do not depend on the zoom, so the memo survives a zoom that re-places the labels.
    */
-  private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number}): Layer[] {
+  private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number; outlinesDrawn: number}): Layer[] {
     const a = r.artifacts;
     const started = performance.now();
     const opened = this.props.openedArtifact ?? null;
@@ -1001,6 +1003,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const data = held?.data ?? NO_OUTLINES;
     timings.outlinesMs = performance.now() - started;
     timings.outlines = data.length;
+    timings.outlinesDrawn = data.reduce((n, d) => n + (d.fill > 0 || d.line > 0 ? 1 : 0), 0);
     // The layer exists from the first paint, empty, so its program is linked before it is needed.
     return [
       new PolygonLayer(

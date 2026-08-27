@@ -72,19 +72,30 @@ const artifactList = async () =>
     const scope = root.shadowRoot ?? root;
     const state = scope.querySelector('[part="state"]')?.getAttribute('data-state') ?? null;
     const counts = {};
+    const names = {};
     for (const item of scope.querySelectorAll('[part="item"]')) {
+      // **Keyed by the row's id, not by its name.** An artifact with no supplied text draws a
+      // neutral placeholder rather than its key, so keying by what the row says would collapse
+      // every nameless cluster of a layer onto one entry and compare a cluster with itself. The
+      // `tessera_id` is opaque and the same for every principal (I10), which is the identity this
+      // script needs to hold one cluster still across a switch.
+      const id = item.getAttribute('data-id') ?? '';
       const name = item.querySelector('[part="name"]')?.textContent?.trim() ?? '';
       const countEl = item.querySelector('tessera-count');
       const text = (countEl?.shadowRoot ?? countEl)?.querySelector('[part="count"]')?.textContent ?? '';
       const n = Number(text.replaceAll(',', ''));
-      if (name && Number.isFinite(n)) counts[name] = n;
+      if (id && Number.isFinite(n)) {
+        counts[id] = n;
+        names[id] = name;
+      }
     }
     const served = /([\d,]+) clusters?/.exec(scope.textContent ?? '');
-    return {state, served: served ? Number(served[1].replaceAll(',', '')) : null, empty: /Nothing in this view/.test(scope.textContent ?? ''), counts};
+    return {state, served: served ? Number(served[1].replaceAll(',', '')) : null, empty: /Nothing in this view/.test(scope.textContent ?? ''), counts, names};
   });
 
 /**
- * What the map drew of the artifacts, from the probe: outlines, placed labels, the layers on —
+ * What the map holds and draws of the artifacts, from the probe: the served shapes the outline
+ * layer carries, how many of those draw, placed labels, the layers on —
  * and how many served artifacts carry a text, read off the explorer's store, since an artifact
  * with no text draws no label (its key is an id, never a name).
  */
@@ -93,7 +104,7 @@ const drawn = async () =>
     const p = window.__tesseraProbe;
     const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
     const named = explorer?.store?.get('artifacts').served.filter((a) => (a.content[0] ?? '').length > 0).length ?? 0;
-    return p ? {outlines: p.timings.outlines, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length, named} : null;
+    return p ? {outlines: p.timings.outlines, outlinesDrawn: p.timings.outlinesDrawn, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length, named} : null;
   });
 
 // The picker is rendered from `/v1/meta`, so nothing can be counted until the first response has
@@ -144,16 +155,28 @@ for (const p of [Math.max(0, principals - 3), principals - 1]) {
   shotsTaken.push({label, file, list: await artifactList(), drawn: await drawn()});
 }
 
+// Opening a cluster draws its hull, and only its hull — the other half of the rule the checks
+// below assert. A row of the list, which is DOM, because deck's own pick does not fire here.
+let openedDrawn = null;
+{
+  const row = page.locator('tessera-artifact-list [part="item"]').first();
+  if (await row.count()) {
+    await row.click({timeout: 30_000}).catch(() => {});
+    await page.waitForTimeout(2000);
+    openedDrawn = (await drawn())?.outlinesDrawn ?? null;
+  }
+}
+
 await browser.close();
 
 console.log('--- clusters served, by layer and principal ---');
 for (const r of results) {
   const sample = Object.entries(r.counts)
     .slice(0, 3)
-    .map(([k, v]) => `${k}=${v.toLocaleString()}`)
+    .map(([k, v]) => `#${k.slice(-6)}=${v.toLocaleString()}`)
     .join(' ');
   console.log(
-    `  ${(r.layer ?? '?').padEnd(28)} ${r.principal.padEnd(26)} served=${String(r.served ?? (r.empty ? 0 : '?')).padStart(4)}  outlines=${String(r.drawn?.outlines ?? '?').padStart(3)} labels=${String(r.drawn?.labels ?? '?').padStart(3)}  ${sample}`
+    `  ${(r.layer ?? '?').padEnd(28)} ${r.principal.padEnd(26)} served=${String(r.served ?? (r.empty ? 0 : '?')).padStart(4)}  shapes=${String(r.drawn?.outlines ?? '?').padStart(3)} drawn=${String(r.drawn?.outlinesDrawn ?? '?').padStart(2)} labels=${String(r.drawn?.labels ?? '?').padStart(3)}  ${sample}`
   );
 }
 console.log('--- the same cluster, across principals ---');
@@ -170,6 +193,8 @@ const failures = [];
  * "absent" would manufacture evidence for the very claim this script exists to check.
  */
 const LIST_ROWS = 40;
+/** What a row with no supplied text and no attached topic draws — never a name, never an id. */
+const NO_NAME = '\u2014';
 const readingOf = (row, key) => {
   const count = row.counts[key];
   if (count !== undefined) return String(count);
@@ -180,16 +205,20 @@ for (const [layer, rows] of byLayer) {
   const keys = new Set(rows.flatMap((r) => Object.keys(r.counts)));
   for (const key of [...keys].slice(0, 3)) {
     const across = rows.map((r) => `${r.principal.split(' ')[0]}=${readingOf(r, key)}`);
-    console.log(`  ${layer} ${key}: ${across.join('  ')}`);
+    // The id identifies; a name, where the layer publishes one, is added for the reader. The
+    // placeholder a nameless row draws is not an identity and is never printed as one.
+    const named = rows.map((r) => r.names[key]).find((n) => n && n !== NO_NAME);
+    console.log(`  ${layer} #${key.slice(-6)}${named ? ` (${named})` : ''}: ${across.join('  ')}`);
   }
   const anyKey = [...keys][0];
   if (anyKey) {
     const values = rows.map((r) => r.counts[anyKey]).filter((v) => v !== undefined);
-    if (new Set(values).size < 2) failures.push(`${layer}: every principal saw the same count for ${anyKey}`);
+    const anyName = `#${anyKey.slice(-6)}`;
+    if (new Set(values).size < 2) failures.push(`${layer}: every principal saw the same count for ${anyName}`);
     const absentSomewhere = rows.some((r) => readingOf(r, anyKey) === 'absent');
     const presentSomewhere = rows.some((r) => r.counts[anyKey] !== undefined);
     console.log(
-      `  => ${layer}: ${anyKey} ${
+      `  => ${layer}: ${anyName} ${
         absentSomewhere && presentSomewhere
           ? 'is served to one principal and absent for another'
           : 'is served to every principal that lists it — presence differs only under a criterion'
@@ -197,16 +226,23 @@ for (const [layer, rows] of byLayer) {
     );
   }
 }
-console.log('--- geometry drawn (the wire’s, per principal) ---');
+console.log(`--- the opened cluster's hull: ${openedDrawn ?? 'not opened'} drawn ---`);
+console.log('--- geometry held and drawn (the wire’s, per principal) ---');
 for (const s of shotsTaken) {
-  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} outlines, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
+  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} shapes held, ${s.drawn?.outlinesDrawn ?? 0} drawn, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
 }
-// A hull must render under two principals — the geometry is the wire's, derived per principal,
-// and a map that drew none would pass every count check while showing a bare field. A label
-// renders wherever a served artifact carries a text, and never where none does: a layer whose
-// artifacts have keys alone draws no label, since a key is an id.
-const drewHull = shotsTaken.filter((s) => (s.drawn?.outlines ?? 0) > 0);
-if (drewHull.length < 2) failures.push(`a hull rendered under ${drewHull.length} of 2 principals`);
+// The served geometry must reach the layer under two principals — it is the wire's, derived per
+// principal, and a map that held none would pass every count check while showing a bare field.
+// **None of it draws at rest**: a hull is drawn only for the hovered and the opened artifact
+// (the owner's review, 2026-08-26), and the rest sit at zero alpha so they still answer a pick.
+// A label renders wherever a served artifact carries a text, and never where none does: a layer
+// whose artifacts have keys alone draws no label, since a key is an id.
+const heldHull = shotsTaken.filter((s) => (s.drawn?.outlines ?? 0) > 0);
+if (heldHull.length < 2) failures.push(`served geometry reached the layer under ${heldHull.length} of 2 principals`);
+for (const s of shotsTaken) {
+  if ((s.drawn?.outlinesDrawn ?? 0) > 0) failures.push(`${s.label}: ${s.drawn.outlinesDrawn} hull(s) drawn with nothing hovered or opened`);
+}
+if (openedDrawn !== 1) failures.push(`opening a cluster drew ${openedDrawn} hull(s), not 1`);
 for (const s of shotsTaken) {
   const named = s.drawn?.named ?? 0;
   const labels = s.drawn?.labels ?? 0;
