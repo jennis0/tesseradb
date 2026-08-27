@@ -81,6 +81,10 @@ Then, depending on what you are after:
   other, and [`selection-operand.md`](selection-operand.md) is how: the shape decomposed against the
   Morton cells so the interior is bitmap arithmetic and only the boundary takes a per-point test.
   Provisional, nothing built, three rulings open.
+- **What an artifact's shape is.** [`artifact-shapes.md`](artifact-shapes.md) — the `hull` a viewer
+  is served: which geometric family it belongs to, how its α is derived rather than dialled, why it
+  is one ring, and who chooses. Provisional; the shape it recommends is not the shape that is built,
+  and §8's five rulings are open.
 - **How any of it is checked.** [`conformance.md`](conformance.md) for the invariants and the leak
   register; [`correctness-suite.md`](correctness-suite.md) for whether the data itself is right —
   every stage from build to the fold, every column family in each of its three homes, a read
@@ -133,6 +137,7 @@ architecture design.
 | [`annotations.md`](annotations.md) | Normative | The annotation **model**: what an artifact, an edge and a layer are, and what governs whether one is served — one containment test plus one existence criterion, replacing three gates in two sections. Supersedes `derived-artifact-gating.md` (deleted 2026-08-15). Promoted 2026-08-16 with five ⊘ items open and allocated to stages |
 | [`annotation-representation.md`](annotation-representation.md) | Normative | What the model is made of: membership in entity space on disk and row space at request time, addressing, the visibility predicate, the fold's artifact pass, and serving. Carries the measurement campaign and its three harness bugs as negative results. Built through the delivery record's stages; [`artifact-system.md`](artifact-system.md) describes what stands |
 | [`annotation-write-cycle.md`](annotation-write-cycle.md) | Normative | How artifacts, levels and layers behave under write: their own operations, and what a point-side event obliges artifact-side. Normative for the annotation write cycle where the two documents above disagree with it; defers to `write-path.md` for the point side. Built through the delivery record's stages |
+| [`artifact-shapes.md`](artifact-shapes.md) | Provisional | Which geometric family a derived `hull` is, how its α is fixed, whether the wire may carry more than one ring, and who chooses. Measures the built shape against the alternatives on the real layer and finds that its limit is the **vertex budget**, not the construction, and that multi-modality is rare and mask-stable. **Nothing in it is built**; §8 carries five owner rulings, the first being whether `hull` names the dig or the χ-shape |
 | [`artifact-system.md`](artifact-system.md) | Descriptive | **Start here for artifacts**: what is actually built and how it works — the model, storage, serving routes, the client's view, and the couplings to build/ingest and the map lifecycle. Decides nothing; the normative documents above win |
 | [`measurement.md`](measurement.md) | Provisional | What the suite measures and why: the axes, the denominators, the reporting conventions, and which figures may be published |
 | [`performance-suite.md`](performance-suite.md) | Provisional | The per-item surface's performance suite: `records-and-search.md` §6.4's budget table as the index, the read and write arms that discharge it, layer count as an axis, and the gates. **Nothing in it is built**, and its audit finds two of §6.4's eleven rows carrying an engine-level figure, none carrying one at 10⁹ |
