@@ -184,8 +184,8 @@ release-mode Rust process against the engine's own dig on the same gathered posi
 | the 2,422,484-member artifact | 1.43–1.55 s | 0.27–0.34 s | 0.04 s | **0.16 s** |
 
 The triangulated route is 7.6–8.1× the dig over the layer and about 11× on the largest artifact, and
-a single artifact's triangulation crosses a second on its own. That is the price refused: **24% more
-hull bytes and a shape 8% looser in area than the χ-shape would have given.** The refusal is about
+a single artifact's triangulation crosses a second on its own. That is the price refused: **the
+χ-shape would have sent 24% fewer hull bytes and drawn a shape 7% tighter in area.** The refusal is about
 the triangulation and nothing else — if the workspace ever carries one for another reason, the peel
 itself is cheap and this is the first thing to revisit.
 
@@ -218,8 +218,10 @@ against that exact partition over 197 artifacts:
 | exact (Delaunay) | α | — | 7 |
 
 The exact partition finds 223 rings where the grid at α/2 finds 215. A finer grid does not converge
-on the exact answer, because no grid can: the best a neighbourhood-of-cells join can do is √2·α as
-the cell shrinks. α/2 is where the curve flattens.
+on the exact answer, because no grid can: joining occupied cells within a fixed neighbourhood is
+complete only when that neighbourhood's own diameter exceeds α, so it always joins members further
+apart than α, and the best such a rule can do is √2·α as the cell shrinks. α/2 is where the measured
+agreement stops improving — α/3 and α/4 do not beat it on this layer, and each costs more cells.
 
 ## 6. Holes
 
@@ -349,7 +351,7 @@ check which found nothing sit beside the mechanism it checked rather than in the
   family whose failure mode is lying about the ground is the wrong default whatever its frequency
   (§3). **C: the engine does not acquire a triangulation** — measured Rust against Rust, 1.4–1.5 s
   for the 2.4M-member artifact's Delaunay against 0.16 s for the whole dig, 7.6–8.1× over the layer
-  (§4.1). **A: the dig is kept**, which C forces; the χ-shape's 24% fewer bytes and 8% tighter area
+  (§4.1). **A: the dig is kept**, which C forces; the χ-shape's 24% fewer bytes and 7% tighter area
   are the stated price. **B: the budget stays 64**, now per artifact and shared across rings, so
   several groups do not multiply the wire. **E: nobody chooses** — one family leaves nothing to
   declare, and the rule that survives is that no request field names a family or an α (§8).
