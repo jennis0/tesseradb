@@ -47,7 +47,9 @@ class Artifact(NamedTuple):
     masked_count: int
     centroid: tuple[float, float] | None
     box: tuple[int, int, int, int] | None
-    hull: list[tuple[int, int]] | None
+    #: One entry per ring — a membership that is several separated clouds is several rings
+    #: (`artifact-shapes.md`; the wire's `hull_x`/`hull_y` are `list<list<uint32>>`).
+    hull: list[list[tuple[int, int]]] | None
     #: One content, entire, positional to the layer's declared kinds. Empty means the layer
     #: declares no supplied content — never that content was withheld.
     content: list[str]
@@ -217,7 +219,9 @@ def decode_frames(data: bytes):
                                     columns["box_max_y"][row],
                                 )
                             ),
-                            hull=None if hx is None else list(zip(hx, hy)),
+                            hull=None
+                            if hx is None
+                            else [list(zip(rx, ry)) for rx, ry in zip(hx, hy)],
                             content=list(columns["content"][row] or []),
                         )
                     )

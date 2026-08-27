@@ -1042,11 +1042,15 @@ components:
           description: "`[min_x, min_y, max_x, max_y]`, grid units."
         hull:
           type: array
+          description: "The hull's **rings**, one per separated group of the visible members — a membership that is two clouds is two rings, never one polygon over the gap between them. Never nested: no ring encloses another."
           items:
             type: array
-            minItems: 2
-            maxItems: 2
-            items: { type: integer, minimum: 0 }
+            description: One closed ring, counter-clockwise from its lowest vertex, in grid units.
+            items:
+              type: array
+              minItems: 2
+              maxItems: 2
+              items: { type: integer, minimum: 0 }
         content:
           type: array
           items: { type: string }
