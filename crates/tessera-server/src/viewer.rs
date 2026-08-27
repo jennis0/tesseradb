@@ -1467,8 +1467,10 @@ struct ArtifactResp {
     centroid: Option<[f64; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     r#box: Option<[u32; 4]>,
+    /// The hull's **rings**, one per separated group of the visible members — a membership that is
+    /// two clouds is two rings, not one polygon over the gap between them.
     #[serde(skip_serializing_if = "Option::is_none")]
-    hull: Option<Vec<[u32; 2]>>,
+    hull: Option<Vec<Vec<[u32; 2]>>>,
     /// The publisher's supplied content — one entry of the ranked `contents`, entire, positional to the layer's declared
     /// kinds. Empty where the layer declares none; never partial, because an artifact whose content
     /// this principal may not read is a `404`.

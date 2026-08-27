@@ -7,8 +7,9 @@ use arrow::ipc::reader::StreamReader;
 use tessera_types::{EntityId, Handle};
 use tessera_wire::handles::HandleTable;
 use tessera_wire::{
-    points_frame, split_frames, sub_cells_frame, tiles_frame, trailer_frame, ScalarColumn,
-    FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
+    artifacts_frame, points_frame, split_frames, sub_cells_frame, tiles_frame, trailer_frame,
+    ArtifactRow, ScalarColumn, FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES,
+    FRAME_TRAILER,
 };
 
 /// (a) Handle stability + per-session isolation: the same entity, minted in two independent
@@ -281,4 +282,94 @@ fn a_body_cut_at_any_byte_boundary_never_splits_cleanly_short() {
             }
         }
     }
+}
+
+/// **The hull travels as a list of rings, and a reader that expects one ring fails rather than
+/// concatenating them.** Both halves are the point of the nesting: a flat encoding with a separate
+/// offsets column would let a reader that ignored the offsets draw a chord from the end of one ring
+/// to the start of the next, silently and in the shape of a real boundary.
+#[test]
+fn the_artifacts_frame_carries_a_hull_as_a_list_of_rings() {
+    let two_rings = vec![
+        vec![[1u32, 2], [3, 4], [5, 6]],
+        vec![[70, 80], [90, 100], [110, 120], [130, 140]],
+    ];
+    let rows = vec![
+        ArtifactRow {
+            layer: "clusters/a",
+            tessera_id: 7,
+            masked_count: 12,
+            hull: Some(&two_rings),
+            ..Default::default()
+        },
+        // A layer that declares no hull: null, and null is never *withheld*.
+        ArtifactRow {
+            layer: "clusters/a",
+            tessera_id: 8,
+            masked_count: 3,
+            hull: None,
+            ..Default::default()
+        },
+    ];
+
+    let bytes = artifacts_frame(&rows);
+    let frames = split_frames(&bytes).expect("one well-formed frame");
+    assert_eq!(frames[0].0, FRAME_ARTIFACTS);
+    let batch = StreamReader::try_new(std::io::Cursor::new(frames[0].1), None)
+        .expect("arrow stream")
+        .next()
+        .expect("one batch")
+        .expect("decodes");
+
+    // The schema says *rings*, so a decoder written against the single-ring shape stops here.
+    let schema = batch.schema();
+    for name in ["hull_x", "hull_y"] {
+        let field = schema.field_with_name(name).expect("column present");
+        let DataType::List(ring) = field.data_type() else {
+            panic!("{name} is not a list");
+        };
+        assert_eq!(
+            ring.data_type(),
+            &DataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
+                "item",
+                DataType::UInt32,
+                false
+            ))),
+            "{name} is a list of vertices, not a list of rings"
+        );
+    }
+
+    let axis = |name: &str| -> Vec<Option<Vec<Vec<u32>>>> {
+        let column = batch.column_by_name(name).unwrap();
+        let outer = column
+            .as_any()
+            .downcast_ref::<arrow::array::ListArray>()
+            .unwrap();
+        (0..outer.len())
+            .map(|i| {
+                outer.is_valid(i).then(|| {
+                    let rings = outer.value(i);
+                    let rings = rings
+                        .as_any()
+                        .downcast_ref::<arrow::array::ListArray>()
+                        .expect("a hull column is a list of rings");
+                    (0..rings.len())
+                        .map(|r| {
+                            let v = rings.value(r);
+                            let v = v
+                                .as_any()
+                                .downcast_ref::<arrow::array::UInt32Array>()
+                                .unwrap();
+                            (0..v.len()).map(|k| v.value(k)).collect()
+                        })
+                        .collect()
+                })
+            })
+            .collect()
+    };
+    let (xs, ys) = (axis("hull_x"), axis("hull_y"));
+    assert_eq!(xs[0], Some(vec![vec![1, 3, 5], vec![70, 90, 110, 130]]));
+    assert_eq!(ys[0], Some(vec![vec![2, 4, 6], vec![80, 100, 120, 140]]));
+    assert_eq!(xs[1], None, "an undeclared hull is null, not an empty list");
+    assert_eq!(ys[1], None);
 }
