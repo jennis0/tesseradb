@@ -262,7 +262,10 @@ pub struct ArtifactRow<'a> {
     pub centroid: Option<[f64; 2]>,
     /// `[qx_min, qy_min, qx_max, qy_max]`.
     pub bbox: Option<[u32; 4]>,
-    pub hull: Option<&'a [[u32; 2]]>,
+    /// The hull's rings, each a closed ring of vertices in grid units. **Several rings, one per
+    /// separated group of the visible members** — a membership that is two clouds is drawn as two
+    /// shapes rather than as one polygon over the gap between them.
+    pub hull: Option<&'a [Vec<[u32; 2]>]>,
     /// The publisher's supplied content — **one entry of the ranked `contents`, entire**, one value per kind the layer
     /// declares, in declaration order. Empty where the layer declares none.
     ///
@@ -294,18 +297,27 @@ pub struct ArtifactRow<'a> {
 /// **The geometry columns are nullable and the schema is fixed**, because one response carries
 /// artifacts from several layers and layers declare different vocabularies. A null is *this layer
 /// declares no centroid*; it is never *withheld*, since an artifact whose content could not be
-/// served is absent entirely (decision 0076). The hull travels as two `List<UInt32>` columns rather
-/// than one interleaved list so that a client reads an axis without a stride.
+/// served is absent entirely (decision 0076).
+///
+/// **The hull travels as two `List<List<UInt32>>` columns** — one per axis so that a client reads an
+/// axis without a stride, and nested so that the ring boundaries are in the type rather than in a
+/// convention. A reader written against the single-ring shape descends one level, finds a list where
+/// it expected a `UInt32`, and fails; a flat encoding with a separate offsets column would let the
+/// same reader concatenate every ring into one polygon and draw a chord between them, silently.
+/// The two axes carry the same ring structure by construction, and a decoder that zips them should
+/// check the lengths agree rather than assume it (`contracts.md` §3.2).
 ///
 /// # Panics
 ///
 /// Panics on Arrow construction failure.
 pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
-    // One definition of the hull's element field, used by the schema and by the builders below:
-    // a `ListBuilder` builds a **nullable** item field by default, and a vertex is never null — a
-    // hull is a list of positions or it is absent entirely. Declaring it twice is how the two drift
-    // into the mismatch Arrow then refuses at batch construction.
-    let item = || Arc::new(Field::new("item", DataType::UInt32, false));
+    // One definition of each of the hull's two nested element fields, used by the schema and by the
+    // builders below: a `ListBuilder` builds a **nullable** item field by default, and neither a
+    // vertex nor a ring is ever null — a hull is a list of rings of positions, or it is absent
+    // entirely. Declaring them twice is how the two drift into the mismatch Arrow then refuses at
+    // batch construction.
+    let vertex = || Arc::new(Field::new("item", DataType::UInt32, false));
+    let ring = || Arc::new(Field::new("item", DataType::List(vertex()), false));
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("layer", DataType::Utf8, false),
@@ -319,16 +331,8 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Field::new("box_min_y", DataType::UInt32, true),
         Field::new("box_max_x", DataType::UInt32, true),
         Field::new("box_max_y", DataType::UInt32, true),
-        Field::new(
-            "hull_x",
-            DataType::List(item()),
-            true,
-        ),
-        Field::new(
-            "hull_y",
-            DataType::List(item()),
-            true,
-        ),
+        Field::new("hull_x", DataType::List(ring()), true),
+        Field::new("hull_y", DataType::List(ring()), true),
         // One list per artifact, positional to its layer's declared kinds. A list rather than a
         // column per kind, because one response carries artifacts from several layers and their
         // declarations differ; the client reads the kinds from `/v1/meta` and zips.
@@ -343,14 +347,20 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Field::new("parent_id", DataType::UInt64, true),
     ]));
 
-    let mut hull_x = ListBuilder::new(UInt32Builder::new()).with_field(item());
-    let mut hull_y = ListBuilder::new(UInt32Builder::new()).with_field(item());
+    let mut hull_x = ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
+        .with_field(ring());
+    let mut hull_y = ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
+        .with_field(ring());
     for row in rows {
         match row.hull {
-            Some(vertices) => {
-                for v in vertices {
-                    hull_x.values().append_value(v[0]);
-                    hull_y.values().append_value(v[1]);
+            Some(rings) => {
+                for r in rings {
+                    for v in r {
+                        hull_x.values().values().append_value(v[0]);
+                        hull_y.values().values().append_value(v[1]);
+                    }
+                    hull_x.values().append(true);
+                    hull_y.values().append(true);
                 }
                 hull_x.append(true);
                 hull_y.append(true);

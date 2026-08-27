@@ -626,7 +626,8 @@ pub struct ArtifactRow {
     /// is *the layer declares none* and never *withheld*.
     pub centroid: Option<[f64; 2]>,
     pub bbox: Option<[u32; 4]>,
-    pub hull: Option<Vec<[u32; 2]>>,
+    /// The hull's **rings**, one per separated group of the visible members.
+    pub hull: Option<Vec<Vec<[u32; 2]>>>,
 }
 
 fn str_col(
@@ -738,6 +739,9 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             .unwrap();
                         a.is_valid(i).then(|| a.value(i))
                     };
+                    // One axis of the hull, as **a list of rings**. The two levels are the schema's,
+                    // not a convention: a decoder written against the single-ring shape fails its
+                    // downcast here rather than concatenating the rings into one polygon.
                     let hull_axis = |col: usize, i: usize| {
                         let a = batch
                             .column(col)
@@ -745,18 +749,40 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             .downcast_ref::<arrow::array::ListArray>()
                             .unwrap();
                         a.is_valid(i).then(|| {
-                            let values = a.value(i);
-                            let values = values
+                            let rings = a.value(i);
+                            let rings = rings
                                 .as_any()
-                                .downcast_ref::<arrow::array::UInt32Array>()
-                                .unwrap();
-                            (0..values.len()).map(|k| values.value(k)).collect::<Vec<_>>()
+                                .downcast_ref::<arrow::array::ListArray>()
+                                .expect("hull_x/hull_y are a list of rings");
+                            (0..rings.len())
+                                .map(|r| {
+                                    let values = rings.value(r);
+                                    let values = values
+                                        .as_any()
+                                        .downcast_ref::<arrow::array::UInt32Array>()
+                                        .unwrap();
+                                    (0..values.len()).map(|k| values.value(k)).collect::<Vec<_>>()
+                                })
+                                .collect::<Vec<_>>()
                         })
                     };
                     for i in 0..batch.num_rows() {
                         let hull = match (hull_axis(10, i), hull_axis(11, i)) {
                             (Some(xs), Some(ys)) => {
-                                Some(xs.into_iter().zip(ys).map(|(x, y)| [x, y]).collect())
+                                assert_eq!(
+                                    xs.len(),
+                                    ys.len(),
+                                    "the two axes disagree about how many rings this hull has"
+                                );
+                                Some(
+                                    xs.into_iter()
+                                        .zip(ys)
+                                        .map(|(rx, ry)| {
+                                            assert_eq!(rx.len(), ry.len(), "a ring's axes differ in length");
+                                            rx.into_iter().zip(ry).map(|(x, y)| [x, y]).collect()
+                                        })
+                                        .collect(),
+                                )
                             }
                             (None, None) => None,
                             _ => panic!("a hull with one axis and not the other"),

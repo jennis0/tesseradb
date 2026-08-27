@@ -705,12 +705,14 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     // members, so their hull cannot reach further out than the full one.
     let broad_hull = b.hull.as_ref().unwrap();
     let narrow_hull = n.hull.as_ref().unwrap();
-    let bounds = |h: &Vec<[u32; 2]>| {
+    // Over every ring, because a hull is a list of them.
+    let bounds = |h: &Vec<Vec<[u32; 2]>>| {
+        let v = || h.iter().flatten();
         [
-            h.iter().map(|v| v[0]).min().unwrap(),
-            h.iter().map(|v| v[1]).min().unwrap(),
-            h.iter().map(|v| v[0]).max().unwrap(),
-            h.iter().map(|v| v[1]).max().unwrap(),
+            v().map(|p| p[0]).min().unwrap(),
+            v().map(|p| p[1]).min().unwrap(),
+            v().map(|p| p[0]).max().unwrap(),
+            v().map(|p| p[1]).max().unwrap(),
         ]
     };
     let (bb, nb) = (bounds(broad_hull), bounds(narrow_hull));

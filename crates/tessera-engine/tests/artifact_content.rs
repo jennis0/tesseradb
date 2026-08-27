@@ -225,9 +225,9 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
     ];
     assert_eq!(bbox, want, "the box bounds the visible members exactly");
 
-    // Every hull vertex is a visible member's position. A vertex that is not is a position this
-    // principal was never entitled to, arriving as geometry.
-    for vertex in &hull {
+    // Every hull vertex, in every ring, is a visible member's position. A vertex that is not is a
+    // position this principal was never entitled to, arriving as geometry.
+    for vertex in hull.iter().flatten() {
         assert!(
             visible.contains(vertex),
             "{vertex:?} is not the position of any member this principal can see"
@@ -235,7 +235,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
     }
     // A hull with a vertex outside the box would be incoherent; a hull *inside* the box's corners
     // is ordinary, since the corners need not be occupied.
-    for vertex in &hull {
+    for vertex in hull.iter().flatten() {
         assert!(vertex[0] >= want[0] && vertex[0] <= want[2]);
         assert!(vertex[1] >= want[1] && vertex[1] <= want[3]);
     }
@@ -282,13 +282,13 @@ fn the_served_hull_is_tighter_than_its_wrap_and_holds_every_visible_member() {
 
         for member in &visible {
             assert!(
-                ring::contains(&hull, *member),
-                "{member:?} is a member this principal sees and it fell outside its hull"
+                hull.iter().any(|r| ring::contains(r, *member)),
+                "{member:?} is a member this principal sees and it fell outside every ring of its hull"
             );
         }
         let wrap = ring::convex_hull(&visible);
         assert!(
-            ring::double_area(&hull) < ring::double_area(&wrap),
+            hull.iter().map(|r| ring::double_area(r)).sum::<i128>() < ring::double_area(&wrap),
             "the served hull is the convex wrap, not a shape that follows the members"
         );
     }

@@ -1,4 +1,5 @@
-//! **The measurement campaign behind the concave hull** — `docs/evidence/memos/2026-08-26-concave-hulls.md`.
+//! **The measurement campaign behind the served hull** — the figures `docs/design/artifact-shapes.md`
+//! §6 cites, and before it `docs/evidence/memos/2026-08-26-concave-hulls.md`.
 //!
 //! Ignored by default, because the corpus it reads is not in the repository. Run it as
 //!
@@ -8,17 +9,16 @@
 //! ```
 //!
 //! The convex hull here is a **second implementation**, written from the definition rather than
-//! shared with the engine's: it is both the baseline the concave shape is timed against and the
+//! shared with the engine's: it is both the baseline the served shape is timed against and the
 //! oracle its containment is checked against on real memberships, and a baseline that called the
 //! code under test would measure nothing. The properties themselves are tested in
 //! `tessera_engine::derived`'s own tests and, through the serving path, in `artifact_content.rs`.
 
-use croaring::Bitmap;
-use std::path::{Path, PathBuf};
 use std::time::Instant;
-use tessera_engine::derived::{compute, ComputedProperty, RowLocator};
-use tessera_store::read::{open_bundle, SegmentData};
+use tessera_engine::derived::{compute, ComputedProperty};
 
+#[path = "common/corpus.rs"]
+mod corpus;
 #[path = "common/ring.rs"]
 mod ring;
 use ring::{contains, convex_hull, double_area};
@@ -26,62 +26,14 @@ use ring::{contains, convex_hull, double_area};
 #[test]
 #[ignore]
 fn measure_against_the_corpus() {
-    let Ok(root) = std::env::var("TESSERA_HULL_BUNDLE") else {
-        panic!("set TESSERA_HULL_BUNDLE to a bundle root (the directory holding CURRENT)");
-    };
-    let root = PathBuf::from(root);
-    let layer_pack = std::env::var("TESSERA_HULL_PACK")
-        .unwrap_or_else(|_| "partitions/default/members/members-000000-000.tsmb".into());
-    let partition = std::env::var("TESSERA_HULL_PARTITION").unwrap_or_else(|_| "default".into());
-    let view_name = std::env::var("TESSERA_HULL_VIEW").unwrap_or_else(|_| "s0".into());
-
-    let bundle = open_bundle(&root).expect("bundle opens");
-    // The pack path in the side-manifest is relative to the published prefix, which `CURRENT` names.
-    let current: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).expect("CURRENT")).unwrap();
-    let prefix = root.join(current["prefix"].as_str().expect("prefix"));
-    let part = &bundle.partitions[&partition];
-    let view = &part.views[&view_name];
-
-    let row_bases: std::collections::HashMap<&str, u32> = view
-        .row_space
-        .extents()
-        .iter()
-        .map(|e| (e.seg_id.as_str(), e.row_base))
-        .collect();
-    let mut segments: Vec<(&SegmentData, u32)> = view
-        .segments
-        .iter()
-        .map(|s| {
-            let base = row_bases.get(s.seg_id.as_str()).copied().unwrap_or(0);
-            (s.as_ref(), base)
-        })
-        .collect();
-    segments.sort_unstable_by_key(|&(_, base)| base);
-    let locator = RowLocator::new(segments);
-
-    let pack = tessera_store::membership::MembershipPack::open(&prefix.join(Path::new(&layer_pack)))
-        .expect("membership pack opens");
-
+    let corpus = corpus::open();
     let mut rows: Vec<Row> = Vec::new();
-    for (ordinal, blob) in pack.iter() {
-        if blob.is_empty() {
-            continue;
-        }
-        let Some((record, _)) =
-            tessera_lifecycle::membership::decode_record(tessera_types::EntityId::new(1), blob)
-        else {
-            continue;
-        };
-        let visible = view.row_space.project_base(&record.members);
-        if visible.is_empty() {
-            continue;
-        }
 
+    for (ordinal, visible) in &corpus.memberships {
         // The three costs, separated: reading a position per member is what a `box` already pays, so
         // it is the floor both hulls sit on and not part of either's own cost.
         let t0 = Instant::now();
-        let positions = gather(&visible, &locator);
+        let positions = corpus::gather(visible, &corpus.locator);
         let gather_ms = t0.elapsed().as_secs_f64() * 1e3;
         if positions.len() < 3 {
             continue;
@@ -92,55 +44,73 @@ fn measure_against_the_corpus() {
         let wrap_ms = t1.elapsed().as_secs_f64() * 1e3;
 
         let t2 = Instant::now();
-        let shape = compute(&[ComputedProperty::Hull], &visible, &locator)
+        let shape = compute(&[ComputedProperty::Hull], visible, &corpus.locator)
             .hull
             .expect("declared");
         let shape_ms = t2.elapsed().as_secs_f64() * 1e3 - gather_ms;
 
         // Containment against the whole membership, on real positions — the property the
-        // construction rests on, checked where the memberships are not of our own making.
+        // construction rests on, checked where the memberships are not of our own making. With
+        // several rings the claim is *some* ring, and the foreign-ring count below says whether it
+        // was ever more than one.
         assert!(
-            positions.iter().all(|m| contains(&shape, *m)),
-            "ordinal {ordinal}: a member fell outside its shape"
+            positions
+                .iter()
+                .all(|m| shape.iter().any(|r| contains(r, *m))),
+            "ordinal {ordinal}: a member fell outside every ring of its shape"
         );
+        let mut foreign = 0usize;
+        if shape.len() > 1 {
+            for m in &positions {
+                if shape.iter().filter(|r| contains(r, *m)).count() > 1 {
+                    foreign += 1;
+                }
+            }
+        }
 
         // A visual check is the point of the change, so the shapes themselves are dumpable: set
-        // `TESSERA_HULL_DUMP` to a directory and each artifact's members, wrap and shape are written
+        // `TESSERA_HULL_DUMP` to a directory and each artifact's members, wrap and rings are written
         // there as CSV for whatever will draw them.
         if let Ok(dir) = std::env::var("TESSERA_HULL_DUMP") {
-            let dump = |name: &str, pts: &[[u32; 2]]| {
+            let dump = |name: String, pts: &[[u32; 2]]| {
                 let body: String = pts.iter().map(|p| format!("{},{}\n", p[0], p[1])).collect();
                 std::fs::write(format!("{dir}/{ordinal}-{name}.csv"), body).unwrap();
             };
-            dump("wrap", &wrap);
-            dump("shape", &shape);
+            dump("wrap".into(), &wrap);
+            for (k, r) in shape.iter().enumerate() {
+                dump(format!("shape-{k}"), r);
+            }
             let stride = (positions.len() / 20_000).max(1);
             let thinned: Vec<[u32; 2]> = positions.iter().copied().step_by(stride).collect();
-            dump("members", &thinned);
+            dump("members".into(), &thinned);
         }
 
         rows.push(Row {
             members: positions.len(),
             wrap: wrap.len(),
-            shape: shape.len(),
+            shape: shape.iter().map(|r| r.len()).sum(),
+            rings: shape.len(),
+            foreign,
             gather_ms,
             wrap_ms,
             shape_ms,
-            ratio: double_area(&shape) as f64 / (double_area(&wrap) as f64).max(1.0),
+            ratio: shape.iter().map(|r| double_area(r)).sum::<i128>() as f64
+                / (double_area(&wrap) as f64).max(1.0),
         });
     }
 
     rows.sort_unstable_by_key(|r| r.members);
-    println!("members,wrap_vertices,shape_vertices,gather_ms,wrap_ms,shape_ms,area_ratio");
+    println!("members,wrap_vertices,shape_vertices,rings,gather_ms,wrap_ms,shape_ms,area_ratio");
     for r in &rows {
         println!(
-            "{},{},{},{:.3},{:.3},{:.3},{:.4}",
-            r.members, r.wrap, r.shape, r.gather_ms, r.wrap_ms, r.shape_ms, r.ratio
+            "{},{},{},{},{:.3},{:.3},{:.3},{:.4}",
+            r.members, r.wrap, r.shape, r.rings, r.gather_ms, r.wrap_ms, r.shape_ms, r.ratio
         );
     }
 
     let total_wrap: usize = rows.iter().map(|r| r.wrap).sum();
     let total_shape: usize = rows.iter().map(|r| r.shape).sum();
+    let total_rings: usize = rows.iter().map(|r| r.rings).sum();
     let at_budget = rows.iter().filter(|r| r.shape >= r.wrap + 64).count();
     let undug = rows.iter().filter(|r| r.shape == r.wrap).count();
     println!(
@@ -150,12 +120,17 @@ fn measure_against_the_corpus() {
         rows[rows.len() - 1].members
     );
     println!(
-        "wire vertices {} → {} ({} → {} bytes at 8 per vertex, +{:.1}%); {at_budget} at the budget, {undug} not dug at all",
+        "wire vertices {} → {} ({} → {} bytes at 8 per vertex plus 4 per ring, +{:.1}%); {at_budget} at the budget, {undug} not dug at all",
         total_wrap,
         total_shape,
         total_wrap * 8,
-        total_shape * 8,
-        100.0 * (total_shape as f64 / total_wrap as f64 - 1.0)
+        total_shape * 8 + total_rings * 4,
+        100.0 * ((total_shape * 8 + total_rings * 4) as f64 / (total_wrap * 8) as f64 - 1.0)
+    );
+    println!(
+        "rings: {total_rings} over the layer; {} artifacts carry more than one; {} members inside more than one ring of their own artifact",
+        rows.iter().filter(|r| r.rings > 1).count(),
+        rows.iter().map(|r| r.foreign).sum::<usize>(),
     );
     let sum = |f: fn(&Row) -> f64| rows.iter().map(f).sum::<f64>();
     println!(
@@ -186,16 +161,10 @@ struct Row {
     members: usize,
     wrap: usize,
     shape: usize,
+    rings: usize,
+    foreign: usize,
     gather_ms: f64,
     wrap_ms: f64,
     shape_ms: f64,
     ratio: f64,
-}
-
-/// The positions `compute` reads, gathered through the same locator.
-fn gather(visible: &Bitmap, locator: &RowLocator<'_>) -> Vec<[u32; 2]> {
-    visible
-        .iter()
-        .filter_map(|row| locator.position(row).map(|(x, y)| [x, y]))
-        .collect()
 }

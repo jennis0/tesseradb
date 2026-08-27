@@ -34,11 +34,12 @@
 //! should not pay hull cost for every artifact on screen, which is what the layer's declaration is
 //! for — a **cost** control, not a security one, since every value it can take is safe.
 //!
-//! The hull is the expensive one and got dearer: it is a **concave** shape over the visible members
-//! rather than their convex wrap ([`concave_hull`]), which costs a sort, a bucketing pass and a
-//! bounded number of digs — 1.5× the convex path over a whole 197-artifact layer, measured in
-//! `docs/evidence/memos/2026-08-26-concave-hulls.md`. It discloses nothing the wrap did not, and
-//! the argument is in [`concave_hull`]'s own documentation rather than restated here.
+//! The hull is the expensive one: it is a **concave** shape over the visible members rather than
+//! their convex wrap, and **one ring per separated group of them** rather than one ring per
+//! artifact ([`concave_rings`]) — a sort, a grouping pass, a bucketing pass and a bounded number of
+//! digs, 1.6× the convex path over a whole 197-artifact layer (`docs/design/artifact-shapes.md`
+//! §6). It discloses nothing the wrap did not, and the argument is in [`concave_rings`]'s own
+//! documentation rather than restated here.
 
 use croaring::Bitmap;
 use tessera_spatial::morton::unsplit32;
@@ -58,11 +59,15 @@ pub struct DerivedContent {
     pub centroid: Option<[f64; 2]>,
     /// `[qx_min, qy_min, qx_max, qy_max]`, grid units.
     pub bbox: Option<[u32; 4]>,
-    /// The hull's vertices, counter-clockwise, grid units — a **concave (alpha) shape** over the
-    /// visible members, not their convex wrap. A membership of one visible member gives one vertex,
-    /// of two gives two: the hull of a point set is that point set when it is degenerate, and
-    /// rounding it up to a triangle would draw an area no member occupies.
-    pub hull: Option<Vec<[u32; 2]>>,
+    /// The hull's rings, each counter-clockwise from its lowest vertex, in grid units — a
+    /// **concave (alpha) shape** over the visible members, not their convex wrap, and **one ring per
+    /// α-group of those members** rather than one ring per artifact ([`concave_rings`]).
+    ///
+    /// Rings are ordered by their first vertex, so the value is a function of the member positions
+    /// and not of the order they were gathered in. A membership of one visible member gives one ring
+    /// of one vertex, of two gives one ring of two: the hull of a point set is that point set when
+    /// it is degenerate, and rounding it up to a triangle would draw an area no member occupies.
+    pub hull: Option<Vec<Vec<[u32; 2]>>>,
 }
 
 impl DerivedContent {
@@ -163,26 +168,28 @@ pub fn compute(
                 }
                 out.bbox = Some(b);
             }
-            ComputedProperty::Hull => out.hull = Some(concave_hull(&positions)),
+            ComputedProperty::Hull => out.hull = Some(concave_rings(&positions)),
         }
     }
     out
 }
 
-/// The vertices digging may add on top of the convex hull's own.
+/// The vertices digging may add on top of the groups' convex wraps, **per artifact and not per
+/// ring**.
 ///
 /// **A budget for the digging, not an absolute cap, and the difference is forced.** Every vertex is
-/// a visible member's position and the shape contains every visible member, so the convex hull's
-/// own vertex count is a floor: reducing it means either dropping a member outside the shape or
-/// inventing a vertex no member occupies, and both are worse than a wide polygon. What digging adds
-/// is what a cap can bound, and this bounds it at 64 vertices — 512 bytes of `hull_x`/`hull_y` per
-/// artifact at the worst case, against the convex hull's own count, which is what already rode on
+/// a visible member's position and each ring contains every member of its own group, so the groups'
+/// wrap vertex counts are a floor: reducing them means either dropping a member outside every ring
+/// or inventing a vertex no member occupies, and both are worse than a wide polygon. What digging
+/// adds is what a cap can bound, and this bounds it at 64 vertices — 512 bytes of `hull_x`/`hull_y`
+/// per artifact at the worst case, against the wraps' own count, which is what already rode on
 /// every response. **64 is where the knee was measured**
 /// (`docs/evidence/memos/2026-08-26-concave-hulls.md`): over one 197-artifact layer it gives shapes
 /// 14% tighter in area for four times the hull bytes, and doubling it again buys 5 more points of
 /// area for another 43 KB. The fidelity cost of running out is that a shape stops refining its
 /// *shortest* remaining bridges, because digging spends the budget longest edge first — a coarser
-/// shape, never a wrong one, since it still holds every member and is still inside the wrap.
+/// shape, never a wrong one, since it still holds every member and every ring is still inside its
+/// group's wrap.
 const DIG_BUDGET: usize = 64;
 
 /// How many times the median edge an edge must exceed before it is treated as bridging a void.
@@ -197,41 +204,52 @@ const DIG_BUDGET: usize = 64;
 /// convex hull unchanged.
 const BRIDGE_FACTOR: i128 = 3;
 
-/// A concave (alpha) shape over the visible members, counter-clockwise, on the integer grid.
+/// A concave (alpha) shape over the visible members: **one simple ring per α-group**,
+/// counter-clockwise from each ring's lowest vertex, on the integer grid.
 ///
 /// **Why not the convex wrap.** An HDBSCAN cluster is an irregular density region — crescent,
 /// branching, often both — and its convex hull swallows the empty space between the arms, overlaps
 /// every sibling and draws single straight edges across the whole viewport. The vertices honestly
 /// describe a shape the cluster does not have, which is why no client-side smoothing can repair it.
 ///
+/// **Why not one ring.** A membership can be two separated clouds, and a single ring around both
+/// claims the ground between them — a claim about where the members are that no α corrects, because
+/// digging works inward from a boundary and a gap with a ring on both sides is not reachable from
+/// either. So the members are grouped first ([`alpha_groups`]) and a ring is dug per group. The
+/// order is what matters: the separation is decided before the vertex budget is spent, so it is
+/// never a casualty of a cap.
+///
 /// **It discloses nothing the convex wrap did not.** The inputs are the same (`membership ∩
 /// M_auth`, gathered by [`compute`] and nothing else), the derivation is the same per-request one,
-/// every vertex is a visible member's position either way, and the result is a *subset* of the
-/// convex hull — so it says less about where the members this viewer cannot see are sitting, not
-/// more. No leak-register row: nothing here lets a viewer end up knowing something about data they
-/// were not served (`architecture.md` Appendix C's inclusion test).
+/// every vertex is a visible member's position either way, and every ring is a *subset* of the
+/// convex hull — so the shape says less about where the members this viewer cannot see are sitting,
+/// not more. Several rings say less again: they are the same members drawn without the ground
+/// between them. No leak-register row: nothing here lets a viewer end up knowing something about
+/// data they were not served (`architecture.md` Appendix C's inclusion test).
 ///
-/// **The construction: dig inward from the convex hull.** Start at the convex hull, which contains
-/// every member. Repeatedly take the longest edge `(a, b)` that exceeds α, find the member `c`
-/// closest to the line through `a` and `b` among those on the interior side of `a → b` that project
-/// inside the segment ([`Buckets::nearest_inside`]), and replace the edge with `(a, c)` and
-/// `(c, b)` — carving the triangle `a c b` out of the shape.
+/// **The construction: dig inward from each group's convex wrap.** Start each group at its convex
+/// wrap, which contains that group's members. Repeatedly take the longest edge `(a, b)` above α
+/// **across every ring**, find the member `c` of that ring's own group closest to the line through
+/// `a` and `b` among those on the interior side of `a → b` that project inside the segment
+/// ([`Buckets::nearest_inside`]), and replace the edge with `(a, c)` and `(c, b)` — carving the
+/// triangle `a c b` out of that ring.
 ///
 /// Two properties fall out of `c` being the *closest*:
 ///
 /// - **Containment is preserved.** The triangle `a c b` lies inside the strip between the
 ///   perpendiculars at `a` and at `b`, because `c` does and projection is affine — so a member
 ///   strictly inside it is itself a candidate, and being strictly closer to the line than `c`
-///   contradicts `c`'s minimality. The triangle is empty, so removing it removes no member, and the
-///   shape contains every member at every step by induction from the convex hull.
+///   contradicts `c`'s minimality. The triangle is empty, so removing it removes no member, and
+///   each ring contains every member of its own group at every step by induction from that group's
+///   convex hull.
 /// - **No arithmetic epsilon.** Minimising the perpendicular distance to the line through `a` and
 ///   `b` is minimising the cross product `(b − a) × (p − a)`, since the divisor `|ab|` is fixed per
 ///   edge. That is exact in `i128` (see [`convex_hull_of_sorted`] on why not `i64`), so the shape is a
 ///   function of the member positions and of nothing else — no float, no platform drift, no
 ///   tie-break that depends on iteration order.
 ///
-/// A dig is refused, and its edge retired, when there is no such member or when the shape would stop
-/// being simple — including when `c` already sits on the boundary, which would make the ring touch
+/// A dig is refused, and its edge retired, when there is no such member or when that ring would
+/// stop being simple — including when `c` already sits on the ring, which would make it touch
 /// itself. **A point set in convex position is therefore returned unchanged**: every member is a
 /// convex hull vertex or lies along one of its edges, so every candidate is on the boundary already
 /// and no dig is admissible, whatever α is.
@@ -242,53 +260,222 @@ const BRIDGE_FACTOR: i128 = 3;
 /// the measured corpus is; the failing shape is a comb of teeth flush with its own wrap, and there
 /// the answer is the wrap rather than a wrong shape.
 ///
-/// Cost is `O(n)` to bucket the members plus, per dig, one pruned pass over the buckets and one
-/// pass over the boundary, against the convex hull's `O(n log n)` sort, which still dominates.
-/// Measured over 197 artifacts of 6,146 … 2,422,486 members in
-/// `docs/evidence/memos/2026-08-26-concave-hulls.md`: 1.5× the convex path over a whole layer, and
-/// 158 ms against 129 ms on its largest artifact.
-fn concave_hull(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
+/// **What it does not carry is a hole.** Digging only ever moves a boundary inward, so an enclosed
+/// void — one with members all the way around it — is not reachable and no ring encloses another.
+/// The family that does produce interior rings is the α-complex, and it drops members outside its
+/// own shape, which is the display contradiction the exact-only rule exists to prevent
+/// (`artifact-shapes.md` §3 and its ruling F).
+///
+/// Cost is `O(n)` to group and to bucket the members plus, per dig, one pruned pass over the
+/// buckets and one pass over the ring, against the convex hull's `O(n log n)` sort, which still
+/// dominates. Measured over 197 artifacts of 6,146 … 2,422,484 members in
+/// `docs/design/artifact-shapes.md` §6.
+fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
     let mut p: Vec<[u32; 2]> = points.to_vec();
     p.sort_unstable();
     p.dedup();
     let convex = convex_hull_of_sorted(&p);
     // One member is that point and two are that segment, exactly as before: an area no member
-    // occupies asserts more than the data does, and there is nothing to dig into.
+    // occupies asserts more than the data does, and there is nothing to dig into or to group.
     if convex.len() < 3 {
-        return convex;
+        return vec![convex];
     }
 
     let alpha_sq = bridge_threshold(&convex);
-    let grid = Buckets::build(&p);
-    let budget = convex.len() + DIG_BUDGET;
-    let mut poly: Vec<Vertex> = convex
-        .into_iter()
-        .map(|pos| Vertex { pos, retired: false })
-        .collect();
+    let (labels, groups) = alpha_groups(&p, alpha_sq);
+    let mut rings: Vec<Ring> = if groups == 1 {
+        // The whole membership is one group, which is the ordinary case; the wrap is already
+        // computed and the members are already sorted.
+        vec![Ring::new(convex, &p)]
+    } else {
+        let mut members: Vec<Vec<[u32; 2]>> = vec![Vec::new(); groups];
+        for (i, q) in p.iter().enumerate() {
+            members[labels[i] as usize].push(*q);
+        }
+        members
+            .iter()
+            .map(|m| Ring::new(convex_hull_of_sorted(m), m))
+            .collect()
+    };
 
-    while poly.len() < budget {
-        let Some(i) = longest_bridge(&poly, alpha_sq) else {
+    // **One budget for the artifact, spent longest bridge first across every ring**, so a shape's
+    // vertex count is the sum of its groups' wraps plus at most [`DIG_BUDGET`] — the same bound the
+    // wire carried when there was one ring, and not a budget that multiplies with the group count.
+    let mut inserted = 0usize;
+    while inserted < DIG_BUDGET {
+        let Some((r, i)) = longest_bridge(&rings, alpha_sq) else {
             break;
         };
-        let n = poly.len();
-        let (a, b) = (poly[i].pos, poly[(i + 1) % n].pos);
-        match grid.nearest_inside(a, b) {
-            Some(c) if dig_is_admissible(&poly, i, c) => {
+        let ring = &mut rings[r];
+        let n = ring.poly.len();
+        let (a, b) = (ring.poly[i].pos, ring.poly[(i + 1) % n].pos);
+        match ring.grid.nearest_inside(a, b) {
+            Some(c) if dig_is_admissible(&ring.poly, i, c) => {
                 // The replaced edge's flag goes with it; `poly[i]` now carries `(a, c)` and the
                 // inserted vertex carries `(c, b)`, both fresh.
-                poly.insert(
+                ring.poly.insert(
                     i + 1,
                     Vertex {
                         pos: c,
                         retired: false,
                     },
                 );
+                inserted += 1;
             }
-            _ => poly[i].retired = true,
+            _ => ring.poly[i].retired = true,
         }
     }
 
-    poly.into_iter().map(|v| v.pos).collect()
+    let mut out: Vec<Vec<[u32; 2]>> = rings
+        .into_iter()
+        .map(|r| r.poly.into_iter().map(|v| v.pos).collect())
+        .collect();
+    // Ordered by first vertex. Groups partition the members, so no two rings start at the same
+    // position and the order is total — a shape is a ring list, not a ring list up to permutation.
+    out.sort_unstable();
+    out
+}
+
+/// One group's ring under construction, with the buckets over that group's own members.
+struct Ring {
+    poly: Vec<Vertex>,
+    grid: Buckets,
+}
+
+impl Ring {
+    /// `members` must be sorted and deduplicated, and `convex` must be their convex wrap.
+    fn new(convex: Vec<[u32; 2]>, members: &[[u32; 2]]) -> Ring {
+        Ring {
+            poly: convex
+                .into_iter()
+                .map(|pos| Vertex { pos, retired: false })
+                .collect(),
+            grid: Buckets::build(members),
+        }
+    }
+}
+
+/// How many cells of the grouping grid span α.
+///
+/// **Two, and the trade it sets is measured.** The grouping joins members whose cells are within
+/// this many cells of each other along both axes, so a cell side of α/`GROUP_CELLS_PER_ALPHA` makes
+/// the join *complete* — every pair within α is joined — while joining members as far apart as
+/// √2·(1 + 1/`GROUP_CELLS_PER_ALPHA`)·α, which at 2 is 2.12α. Over the 197-artifact measurement
+/// layer the result agrees with exact single-linkage at α on 192 artifacts and coarsens the rest;
+/// at one cell per α it agrees on 190, and at four on 192 (`artifact-shapes.md` §6). The exact
+/// alternative needs a Delaunay triangulation, which is the route ruling C measured and declined.
+const GROUP_CELLS_PER_ALPHA: u64 = 2;
+
+/// The α-groups of the visible members: one label per member, and how many groups there are.
+///
+/// **Grid connectivity at α, conservative in the direction that cannot lie.** The members are
+/// bucketed into a square grid anchored at their own bounding box, with a cell side of
+/// α/[`GROUP_CELLS_PER_ALPHA`], and two members are joined when their cells are within
+/// [`GROUP_CELLS_PER_ALPHA`] cells of each other along both axes. A displacement of at most α moves
+/// a cell index by at most that many cells per axis, so **every pair within α lands in one group**:
+/// the grouping never separates members that single-linkage at α would join. It does join members
+/// further apart than α, and that is the safe direction — an over-joined group draws the single
+/// ring the wire drew before, while an over-split one would claim a gap the members do not have.
+///
+/// **The grid never holds more cells than there are members.** Where the members are so scattered
+/// that a cell side of α/[`GROUP_CELLS_PER_ALPHA`] would need more, the side doubles until they
+/// fit, which only ever joins more. That keeps the pass `O(members)` with no data-dependent worst
+/// case — the exact route, cutting the Delaunay edges longer than α, has none either but costs a
+/// triangulation, measured at 1.4 s on the largest artifact of the measurement layer against 0.16 s
+/// for the whole dig (`artifact-shapes.md` §6).
+fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for q in p {
+        x0 = x0.min(q[0]);
+        y0 = y0.min(q[1]);
+        x1 = x1.max(q[0]);
+        y1 = y1.max(q[1]);
+    }
+    let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
+    // α as a length. The square root is the only float in this module and it is safe here: it fixes
+    // a *cell size*, and every join the grid then makes is decided by integer cell indices, so no
+    // rounding of it can change the answer for two members it does not put in adjacent cells.
+    let alpha = (alpha_sq as f64).sqrt();
+    let mut side = (alpha / GROUP_CELLS_PER_ALPHA as f64).ceil().max(1.0) as u64;
+    let (mut nx, mut ny) = (wx.div_ceil(side), wy.div_ceil(side));
+    while nx.saturating_mul(ny) > p.len() as u64 {
+        side = side.saturating_mul(2);
+        nx = wx.div_ceil(side);
+        ny = wy.div_ceil(side);
+    }
+
+    let total = (nx * ny) as usize;
+    let cell = |q: &[u32; 2]| -> usize {
+        let cx = (q[0] - x0) as u64 / side;
+        let cy = (q[1] - y0) as u64 / side;
+        (cy * nx + cx) as usize
+    };
+    let mut occupied = vec![false; total];
+    for q in p {
+        occupied[cell(q)] = true;
+    }
+
+    // Union-find over the *cells*, not the members: the grid has at most one cell per member and
+    // usually far fewer, so the join costs a bounded sweep over cells rather than a neighbourhood
+    // query per member.
+    let mut parent: Vec<u32> = (0..total as u32).collect();
+    let r = GROUP_CELLS_PER_ALPHA as i64;
+    for cy in 0..ny as i64 {
+        for cx in 0..nx as i64 {
+            let k = (cy * nx as i64 + cx) as usize;
+            if !occupied[k] {
+                continue;
+            }
+            // Half the neighbourhood; the other half is reached from the cell on its own side.
+            for dx in 0..=r {
+                for dy in -r..=r {
+                    if dx == 0 && dy <= 0 {
+                        continue;
+                    }
+                    let (ax, ay) = (cx + dx, cy + dy);
+                    if ax < 0 || ay < 0 || ax >= nx as i64 || ay >= ny as i64 {
+                        continue;
+                    }
+                    let j = (ay * nx as i64 + ax) as usize;
+                    if occupied[j] {
+                        union(&mut parent, k, j);
+                    }
+                }
+            }
+        }
+    }
+
+    // Labels are minted in cell order, so they are a function of the positions rather than of the
+    // order the members were gathered in.
+    let mut label = vec![u32::MAX; total];
+    let mut groups = 0u32;
+    for k in 0..total {
+        if !occupied[k] {
+            continue;
+        }
+        let root = find(&mut parent, k as u32) as usize;
+        if label[root] == u32::MAX {
+            label[root] = groups;
+            groups += 1;
+        }
+        label[k] = label[root];
+    }
+    (p.iter().map(|q| label[cell(q)]).collect(), groups as usize)
+}
+
+fn find(parent: &mut [u32], mut i: u32) -> u32 {
+    while parent[i as usize] != i {
+        parent[i as usize] = parent[parent[i as usize] as usize];
+        i = parent[i as usize];
+    }
+    i
+}
+
+fn union(parent: &mut [u32], a: usize, b: usize) {
+    let (ra, rb) = (find(parent, a as u32), find(parent, b as u32));
+    if ra != rb {
+        parent[ra as usize] = rb;
+    }
 }
 
 /// One boundary vertex, and whether the edge leaving it has been retired — an edge whose dig was
@@ -309,23 +496,36 @@ fn bridge_threshold(convex: &[[u32; 2]]) -> i128 {
     BRIDGE_FACTOR * BRIDGE_FACTOR * lengths[lengths.len() / 2]
 }
 
-/// The index of the longest live edge above α, or `None` when the shape has stopped bridging.
-fn longest_bridge(poly: &[Vertex], alpha_sq: i128) -> Option<usize> {
-    let n = poly.len();
-    let mut best: Option<(i128, usize)> = None;
-    for i in 0..n {
-        if poly[i].retired {
+/// The ring and edge index of the longest live edge above α, or `None` when no ring is still
+/// bridging.
+///
+/// **Across every ring, not one ring at a time**, because the budget is the artifact's: spending it
+/// on a group's longest remaining bridge is what the single-ring construction did, and doing it per
+/// ring in turn would spend vertices on a small group's short bridges while a large group's long
+/// one went undug.
+fn longest_bridge(rings: &[Ring], alpha_sq: i128) -> Option<(usize, usize)> {
+    let mut best: Option<(i128, usize, usize)> = None;
+    for (r, ring) in rings.iter().enumerate() {
+        let n = ring.poly.len();
+        // A degenerate ring — one member, or two, or members in convex position along a line — has
+        // no interior to dig into.
+        if n < 3 {
             continue;
         }
-        let length = sq_len(poly[i].pos, poly[(i + 1) % n].pos);
-        if length <= alpha_sq {
-            continue;
-        }
-        if best.is_none_or(|(b, _)| length > b) {
-            best = Some((length, i));
+        for i in 0..n {
+            if ring.poly[i].retired {
+                continue;
+            }
+            let length = sq_len(ring.poly[i].pos, ring.poly[(i + 1) % n].pos);
+            if length <= alpha_sq {
+                continue;
+            }
+            if best.is_none_or(|(b, _, _)| length > b) {
+                best = Some((length, r, i));
+            }
         }
     }
-    best.map(|(_, i)| i)
+    best.map(|(_, r, i)| (r, i))
 }
 
 /// Whether replacing edge `i` with `(a, c)` and `(c, b)` leaves a simple polygon.
@@ -577,7 +777,7 @@ fn segments_meet(p1: [u32; 2], p2: [u32; 2], p3: [u32; 2], p4: [u32; 2]) -> bool
 }
 
 /// Andrew's monotone chain, counter-clockwise, on the integer grid, over members already sorted and
-/// deduplicated — [`concave_hull`] does that once and then buckets the same vector, rather than
+/// deduplicated — [`concave_rings`] does that once and then buckets the same vector, rather than
 /// sorting it twice. It is the shape digging starts from, and the shape a point set in convex
 /// position keeps.
 ///
@@ -615,7 +815,7 @@ fn convex_hull_of_sorted(p: &[[u32; 2]]) -> Vec<[u32; 2]> {
 
 /// The convex hull of an arbitrary member list — the reference shape the tests below compare the
 /// concave one against. The serving path reaches [`convex_hull_of_sorted`] through
-/// [`concave_hull`], which has already sorted.
+/// [`concave_rings`], which has already sorted.
 #[cfg(test)]
 fn convex_hull(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
     let mut p: Vec<[u32; 2]> = points.to_vec();
@@ -747,10 +947,18 @@ mod tests {
         true
     }
 
+    /// The single ring of a membership that is one α-group, with that being asserted rather than
+    /// assumed — a test that silently accepted a second ring would stop testing what it says.
+    fn one_ring(members: &[[u32; 2]]) -> Vec<[u32; 2]> {
+        let rings = concave_rings(members);
+        assert_eq!(rings.len(), 1, "expected one group, got {}", rings.len());
+        rings.into_iter().next().unwrap()
+    }
+
     #[test]
     fn the_shape_contains_every_member() {
         let members = moon();
-        let hull = concave_hull(&members);
+        let hull = one_ring(&members);
         for m in &members {
             assert!(contains(&hull, *m), "member {m:?} fell outside {hull:?}");
         }
@@ -758,7 +966,7 @@ mod tests {
 
     #[test]
     fn the_shape_is_a_simple_ring() {
-        let hull = concave_hull(&moon());
+        let hull = one_ring(&moon());
         assert!(hull.len() >= 3);
         assert!(is_simple(&hull), "the ring crosses itself: {hull:?}");
     }
@@ -769,7 +977,7 @@ mod tests {
     fn a_crescent_is_tighter_than_its_convex_wrap() {
         let members = moon();
         let convex = convex_hull(&members);
-        let concave = concave_hull(&members);
+        let concave = one_ring(&members);
 
         assert!(
             double_area(&concave) < double_area(&convex),
@@ -805,7 +1013,7 @@ mod tests {
             .collect();
         ring.sort_unstable();
         ring.dedup();
-        assert_eq!(concave_hull(&ring), convex_hull(&ring));
+        assert_eq!(one_ring(&ring), convex_hull(&ring));
     }
 
     /// Digging spends a bounded budget, longest edge first, so a shape's vertex count is its wrap's
@@ -816,7 +1024,7 @@ mod tests {
     fn the_vertex_budget_holds() {
         let members = flower();
         let convex = convex_hull(&members);
-        let concave = concave_hull(&members);
+        let concave = one_ring(&members);
         assert!(
             concave.len() <= convex.len() + DIG_BUDGET,
             "{} vertices over a wrap of {}",
@@ -852,22 +1060,171 @@ mod tests {
         members.push([1500, 1195]);
         members.push([2000, 1195]);
         members.push([2500, 1195]);
-        let hull = concave_hull(&members);
+        // The three bridging members chain the two blocks into one group, so this is still one ring
+        // — which is what makes it a test of the dug edge rather than of the grouping.
+        let hull = one_ring(&members);
         assert!(is_simple(&hull));
         for m in &members {
             assert!(contains(&hull, *m), "{m:?} fell outside {hull:?}");
         }
     }
 
+    /// Two disks of radius 400 whose centres are 3,000 apart — a membership that is honestly two
+    /// clouds, with a gap far wider than any α its own wrap can produce.
+    fn two_clouds() -> Vec<[u32; 2]> {
+        sample(3000, 2000, |x, y| {
+            (x + 1500) * (x + 1500) + y * y <= 400 * 400
+                || (x - 1500) * (x - 1500) + y * y <= 400 * 400
+        })
+    }
+
+    /// **The multi-ring ruling, at its own case.** A membership that is two separated clouds gets a
+    /// ring each, every member is inside exactly one of them, and the pair claims a fraction of the
+    /// ground the one ring spanning both would claim.
+    #[test]
+    fn two_separated_clouds_get_a_ring_each() {
+        let members = two_clouds();
+        let rings = concave_rings(&members);
+        assert_eq!(rings.len(), 2, "two clouds gave {} rings", rings.len());
+
+        for m in &members {
+            let inside = rings.iter().filter(|r| contains(r, *m)).count();
+            assert_eq!(inside, 1, "{m:?} is inside {inside} rings, not exactly one");
+        }
+        for r in &rings {
+            assert!(is_simple(r), "a ring crosses itself: {r:?}");
+            for v in r {
+                assert!(members.contains(v), "{v:?} is not a member's position");
+            }
+        }
+
+        let wrap = convex_hull(&members);
+        let drawn: i128 = rings.iter().map(|r| double_area(r)).sum();
+        assert!(
+            drawn * 2 < double_area(&wrap),
+            "two rings claim {drawn} against the wrap's {} — the gap is still being drawn",
+            double_area(&wrap)
+        );
+    }
+
+    /// **The grouping never separates members single-linkage at α would join**, which is the whole
+    /// of its soundness: it may join members further apart, and that only ever draws the wider
+    /// shape the wire drew before. Checked exhaustively against the definition on a cloud small
+    /// enough to compare every pair.
+    #[test]
+    fn a_pair_within_alpha_is_never_split_across_groups() {
+        let members = two_clouds();
+        let mut p = members.clone();
+        p.sort_unstable();
+        p.dedup();
+        let alpha_sq = bridge_threshold(&convex_hull_of_sorted(&p));
+        let (labels, groups) = alpha_groups(&p, alpha_sq);
+        assert!(groups > 1, "the fixture is supposed to be more than one group");
+
+        let mut joined = 0usize;
+        for i in 0..p.len() {
+            for j in (i + 1)..p.len() {
+                if sq_len(p[i], p[j]) <= alpha_sq {
+                    assert_eq!(
+                        labels[i], labels[j],
+                        "{:?} and {:?} are within α and landed in different groups",
+                        p[i], p[j]
+                    );
+                    joined += 1;
+                }
+            }
+        }
+        assert!(joined > 0, "no pair was within α, so nothing was tested");
+    }
+
+    /// The rings are a function of the member positions and not of the order they arrive in: the
+    /// ring order is fixed by each ring's own lowest vertex, and groups partition the members, so
+    /// no two rings can start at the same position.
+    #[test]
+    fn the_rings_do_not_depend_on_the_order_the_members_arrive_in() {
+        let members = two_clouds();
+        let forwards = concave_rings(&members);
+        let backwards: Vec<[u32; 2]> = members.iter().copied().rev().collect();
+        assert_eq!(forwards, concave_rings(&backwards));
+
+        let mut starts: Vec<[u32; 2]> = forwards.iter().map(|r| r[0]).collect();
+        let sorted = {
+            let mut s = starts.clone();
+            s.sort_unstable();
+            s
+        };
+        assert_eq!(starts, sorted, "the rings are not ordered by their first vertex");
+        starts.dedup();
+        assert_eq!(starts.len(), forwards.len(), "two rings start at one position");
+    }
+
+    /// **A void with members all the way around it stays inside the ring, and that is the decision
+    /// rather than an oversight.** Digging works inward from a boundary, so an enclosed void is not
+    /// reachable from one; the family that does produce interior rings is the α-complex, and it
+    /// leaves members outside their own shape. The residual is stated here so a reader meets it at
+    /// the mechanism: an annulus of members is drawn as a disk.
+    #[test]
+    fn an_enclosed_void_is_drawn_as_filled_because_the_wire_carries_no_holes() {
+        let members = sample(6000, 1000, |x, y| {
+            let r = x * x + y * y;
+            (600 * 600..=1000 * 1000).contains(&r)
+        });
+        let rings = concave_rings(&members);
+        assert_eq!(rings.len(), 1, "an annulus is one group");
+        assert!(
+            contains(&rings[0], [2_000_000, 2_000_000]),
+            "the hole is outside the ring, so a hole was carried after all"
+        );
+        for m in &members {
+            assert!(contains(&rings[0], *m));
+        }
+    }
+
+    /// **The budget is the artifact's, not the ring's.** Several groups share one allowance of
+    /// digs, spent on the longest bridge anywhere, so the wire bound is the sum of the groups'
+    /// wraps plus [`DIG_BUDGET`] — the bound one ring carried, and not one that multiplies with the
+    /// group count.
+    #[test]
+    fn the_budget_is_shared_across_the_rings() {
+        // Three flowers, far enough apart to be three groups, each with valleys to spend on.
+        let mut members = Vec::new();
+        for (k, offset) in [0u32, 40_000, 80_000].into_iter().enumerate() {
+            for m in flower() {
+                members.push([m[0] + offset, m[1] + (k as u32) * 3]);
+            }
+        }
+        let rings = concave_rings(&members);
+        assert_eq!(rings.len(), 3, "three flowers gave {} rings", rings.len());
+
+        let mut floor = 0usize;
+        for r in &rings {
+            let own: Vec<[u32; 2]> = members
+                .iter()
+                .copied()
+                .filter(|m| contains(r, *m))
+                .collect();
+            floor += convex_hull(&own).len();
+            assert!(is_simple(r));
+        }
+        let vertices: usize = rings.iter().map(|r| r.len()).sum();
+        assert!(
+            vertices <= floor + DIG_BUDGET,
+            "{vertices} vertices over three wraps of {floor} — the budget multiplied"
+        );
+        for m in &members {
+            assert!(rings.iter().any(|r| contains(r, *m)), "{m:?} fell outside every ring");
+        }
+    }
+
     /// The degenerate cases keep the behaviour the convex wrap had, on the shape that replaced it.
     #[test]
     fn a_degenerate_shape_is_the_members_themselves() {
-        assert_eq!(concave_hull(&[[3, 4]]), vec![[3, 4]]);
-        assert_eq!(concave_hull(&[[3, 4], [3, 4]]), vec![[3, 4]]);
-        assert_eq!(concave_hull(&[[0, 0], [1, 1]]), vec![[0, 0], [1, 1]]);
+        assert_eq!(concave_rings(&[[3, 4]]), vec![vec![[3, 4]]]);
+        assert_eq!(concave_rings(&[[3, 4], [3, 4]]), vec![vec![[3, 4]]]);
+        assert_eq!(concave_rings(&[[0, 0], [1, 1]]), vec![vec![[0, 0], [1, 1]]]);
         assert_eq!(
-            concave_hull(&[[0, 0], [1, 1], [2, 2]]),
-            vec![[0, 0], [2, 2]],
+            concave_rings(&[[0, 0], [1, 1], [2, 2]]),
+            vec![vec![[0, 0], [2, 2]]],
             "collinear members leave two endpoints"
         );
     }
@@ -876,9 +1233,9 @@ mod tests {
     /// between two existing vertices.
     #[test]
     fn the_shape_starts_at_the_lowest_vertex_and_winds_counter_clockwise() {
-        let hull = concave_hull(&[[10, 0], [0, 10], [0, 0], [10, 10]]);
+        let hull = one_ring(&[[10, 0], [0, 10], [0, 0], [10, 10]]);
         assert_eq!(hull, vec![[0, 0], [10, 0], [10, 10], [0, 10]]);
-        let moon = concave_hull(&moon());
+        let moon = one_ring(&moon());
         assert_eq!(moon[0], *moon.iter().min().unwrap());
         assert!(double_area(&moon) > 0, "the ring winds clockwise");
     }
@@ -892,8 +1249,8 @@ mod tests {
         // A deterministic thinning — the narrow principal sees one member in three.
         let narrow: Vec<[u32; 2]> = broad.iter().copied().step_by(3).collect();
 
-        let broad_hull = concave_hull(&broad);
-        let narrow_hull = concave_hull(&narrow);
+        let broad_hull = one_ring(&broad);
+        let narrow_hull = one_ring(&narrow);
         assert_ne!(broad_hull, narrow_hull, "the thinning changed nothing");
 
         for v in &narrow_hull {
@@ -904,7 +1261,7 @@ mod tests {
         }
         // Recomputed over the same set it is the same shape: no request input, no iteration-order
         // tie-break, no float.
-        assert_eq!(narrow_hull, concave_hull(&narrow));
+        assert_eq!(narrow_hull, one_ring(&narrow));
     }
 
     #[test]
