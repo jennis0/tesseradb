@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {LEVEL_SIZES, MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, WITHIN_LEVEL_PX, labelSize, placeLabels, wrapLabel, type LabelCandidate} from '../src/labels.js';
+import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, labelSize, placeLabels, wrapLabel, type LabelCandidate} from '../src/labels.js';
 
 const at = (id: number, x: number, y: number, priority: number, width = 60, height = 24): LabelCandidate => ({id: BigInt(id), x, y, width, height, priority});
 
@@ -64,23 +64,42 @@ describe('label placement (§5.10)', () => {
     expect(MAX_DISPLACEMENT).toBe(40);
   });
 
-  it('sizes a name by its level, a clear step at each, the count only ordering within one', () => {
-    // Coarser is larger, and the step is never crossed: a level's largest name (its whole
-    // tie-break spent) stays under the smallest name of the level above it.
-    expect(LEVEL_SIZES.map((_, rank) => labelSize(rank, 0, 1000))).toEqual([...LEVEL_SIZES]);
-    for (let rank = 1; rank < LEVEL_SIZES.length; rank++) {
-      const largestHere = labelSize(rank, 1000, 1000);
-      const smallestAbove = labelSize(rank - 1, 0, 1000);
-      expect(largestHere).toBeLessThan(smallestAbove);
-      // And the step is a step, not a ramp: at least a fifth larger one level up.
-      expect(smallestAbove / LEVEL_SIZES[rank]!).toBeGreaterThan(1.15);
+  it('sizes a name by its masked count, on a logarithmic band over the range drawn', () => {
+    // The ends are the range's ends: the largest count on screen is the largest name on screen.
+    expect(labelSize(380_069, 176, 380_069)).toBeCloseTo(LABEL_SIZE_MAX, 6);
+    expect(labelSize(176, 176, 380_069)).toBeCloseTo(LABEL_SIZE_MIN, 6);
+    // Monotone in the count, and never outside the band.
+    let previous = 0;
+    for (const count of [176, 1_000, 29_369, 87_295, 380_069]) {
+      const size = labelSize(count, 176, 380_069);
+      expect(size).toBeGreaterThan(previous);
+      expect(size).toBeGreaterThanOrEqual(LABEL_SIZE_MIN);
+      expect(size).toBeLessThanOrEqual(LABEL_SIZE_MAX);
+      previous = size;
     }
-    // Within a level the count adds at most WITHIN_LEVEL_PX, and monotonically.
-    expect(labelSize(1, 1000, 1000) - labelSize(1, 0, 1000)).toBeCloseTo(WITHIN_LEVEL_PX, 6);
-    expect(labelSize(1, 250, 1000)).toBeGreaterThan(labelSize(1, 100, 1000));
-    // A rank past the ladder floors rather than shrinking away, and a negative rank is the top.
-    expect(labelSize(99, 0, 1000)).toBe(LEVEL_SIZES[LEVEL_SIZES.length - 1]);
-    expect(labelSize(-1, 0, 1000)).toBe(LEVEL_SIZES[0]);
+    // **Logarithmic, not linear**: the owner's pair. 29,369 against 380,069 is 7.7% of the range
+    // linearly — a name on the floor — and half of it on the band, which is what the eye reads.
+    const midway = (labelSize(29_369, 176, 380_069) - LABEL_SIZE_MIN) / (LABEL_SIZE_MAX - LABEL_SIZE_MIN);
+    expect(midway).toBeGreaterThan(0.55);
+    expect(midway).toBeLessThan(0.75);
+    // A count ten times another is a fixed step whatever the decade — the point of the band.
+    const step = (n: number) => labelSize(n * 10, 1, 1e6) - labelSize(n, 1, 1e6);
+    expect(step(10)).toBeCloseTo(step(10_000), 6);
+    // Out-of-range and absurd inputs land inside the band rather than off it: a count of zero is
+    // a count of one, and one outside the range extends it rather than escaping the ends.
+    expect(labelSize(0, 176, 380_069)).toBe(LABEL_SIZE_MIN);
+    expect(labelSize(1e9, 176, 380_069)).toBe(LABEL_SIZE_MAX);
+    expect(labelSize(-5, 176, 380_069)).toBe(LABEL_SIZE_MIN);
+  });
+
+  it('a frontier with no range — one name, or every count equal — takes the top of the band', () => {
+    // Nothing to divide by, and no division done: the largest count on screen draws largest, and
+    // where every count is the largest that holds of all of them.
+    expect(labelSize(4_812, 4_812, 4_812)).toBe(LABEL_SIZE_MAX);
+    expect(labelSize(1, 1, 1)).toBe(LABEL_SIZE_MAX);
+    expect(labelSize(0, 0, 0)).toBe(LABEL_SIZE_MAX);
+    // And an empty frontier's sentinel range (no candidate at all) does not produce a NaN.
+    expect(Number.isFinite(labelSize(500, Number.POSITIVE_INFINITY, 0))).toBe(true);
   });
 });
 

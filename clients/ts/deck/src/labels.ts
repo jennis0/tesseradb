@@ -105,27 +105,36 @@ export function placeLabels(candidates: readonly LabelCandidate[], maxDisplaceme
 }
 
 /**
- * The pixel size of an artifact's name: **its level in the drawn frontier first**, its masked
- * count only to break a tie inside a level.
+ * The pixel size of an artifact's name: **its masked count**, on a logarithmic band over the
+ * counts the drawn frontier holds.
  *
- * The counts on one screen of the 2.4M map ran 176–598 — under one order of magnitude — so the
- * square-root band over the count that stood here (`12 + 10·√(count/max)`) spent its whole range
- * making every name within a pixel of every other, while the distinction that does separate them,
- * how coarse a region is, was not drawn at all (the owner's review, 2026-08-26).
+ * **Level is not encoded, and was for a day.** Stepping the size by depth assumed depth in the
+ * tree tracks scale; that holds in a balanced tree and HDBSCAN's condensed tree is not one. On
+ * the 2.4M map *image object video* at 29,369 members drew a step larger than *algebras equations
+ * spaces* at 380,069 because it sat one level shallower. Size reads as importance and the eye
+ * reads the count, so the two encodings were fighting each other. What carries the hierarchy is
+ * the frontier rule instead: only the frontier is labelled, a frontier partitions the drawn view,
+ * so the counts on screen are directly comparable and the count is the thing worth drawing.
  *
- * The levels present in one drawn frontier are few, so each gets a step of its own rather than a
- * place on a ramp: {@link LEVEL_SIZES} from the coarsest, about a quarter larger at each step,
- * floored at the last. The count then adds at most {@link WITHIN_LEVEL_PX}, which is small enough
- * that a level's largest name stays under the next level up's smallest — the step is never
- * crossed, so size reads as level and the count only orders what shares one.
+ * The band is **logarithmic** because these counts span three or four orders of magnitude —
+ * 380,069 against 176 on one screen. A linear map, and a square-root one, spend the range on the
+ * top few and leave everything else on the floor. Its ends are the level ladder's ends,
+ * {@link LABEL_SIZE_MIN} to {@link LABEL_SIZE_MAX}, so nothing else about the map's weight moves.
+ *
+ * A frontier of one artifact, and one whose counts are all equal, have no range to divide by:
+ * the name takes the top of the band. The largest count on screen draws at the largest size, and
+ * where every count is the largest that holds of all of them.
  */
-export const LEVEL_SIZES = [24, 19, 15, 12.5] as const;
-/** How much the masked count may add inside a level — a tie-break, never a second scale. */
-export const WITHIN_LEVEL_PX = 1.5;
+export const LABEL_SIZE_MIN = 12.5;
+export const LABEL_SIZE_MAX = 24;
 
-export function labelSize(rank: number, count: number, largestInLevel: number): number {
-  const step = LEVEL_SIZES[Math.min(Math.max(0, Math.trunc(rank)), LEVEL_SIZES.length - 1)]!;
-  return step + WITHIN_LEVEL_PX * Math.sqrt(Math.max(0, count) / Math.max(1, largestInLevel));
+export function labelSize(count: number, smallest: number, largest: number): number {
+  const c = Math.max(1, count);
+  const lo = Math.max(1, Math.min(smallest, c));
+  const hi = Math.max(lo, largest, c);
+  const span = Math.log(hi / lo);
+  if (span <= 0) return LABEL_SIZE_MAX;
+  return LABEL_SIZE_MIN + (LABEL_SIZE_MAX - LABEL_SIZE_MIN) * (Math.log(c / lo) / span);
 }
 
 /**

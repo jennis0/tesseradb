@@ -51,7 +51,7 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  * filtered so the tile grid never shows (decision 0097); the marks — one `MarksLayer` per
  * retained slab partition, addressed by slot, plus the stand-ins — in their membership colour
  * through the lookup texture when colouring by cluster, else the column's colour; names and
- * counts at the frontier's centroids — sized by level — placed by priority into a spatial hash
+ * counts at the frontier's centroids — sized by masked count — placed by priority into a spatial hash
  * with leader lines; the picked mark; and the selected region as the shape drawn — a box or a lasso, never
  * its cells.
  *
@@ -408,9 +408,10 @@ export function frontier(a: ArtifactsProjection, level: number | undefined, dept
  * which is an id — the top `budget` of them by masked count, each with its name, count and topic
  * and the pixel box the placement needs.
  *
- * **A name's size is its level's**, over the levels the drawn set actually holds: the frontier is
- * ordered coarsest first and each level takes a step of {@link labelSize}'s ladder, the masked
- * count adding only enough to order what shares a level.
+ * **A name's size is its masked count's**, on {@link labelSize}'s logarithmic band over the range
+ * the drawn frontier holds. The range is taken over the candidates that survive the budget, which
+ * is what is on screen: the largest name is the largest count drawn, and the smallest the
+ * smallest.
  */
 export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, zoom: number, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
   const placed = a.served.filter((x) => x.centroid !== null);
@@ -426,18 +427,20 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
     .filter((x) => hasText(x) || topicOf.has(x.tesseraId))
     .sort((x, y) => Number(y.maskedCount - x.maskedCount))
     .slice(0, Math.max(0, budget));
-  // The levels the labels drawn actually stand at, coarsest first — a rank each, and the largest
-  // count within each, which is all the count is allowed to say.
-  const depthOf = (x: Artifact) => depths.get(x.tesseraId) ?? 0;
-  const rankOf = new Map([...new Set(named.map(depthOf))].sort((p, q) => p - q).map((d, i) => [d, i]));
-  const largestIn = new Map<number, number>();
-  for (const x of named) largestIn.set(depthOf(x), Math.max(largestIn.get(depthOf(x)) ?? 1, Number(x.maskedCount)));
+  // The range the band is drawn over: the counts of the names that will actually be on screen.
+  let smallest = Number.POSITIVE_INFINITY;
+  let largest = 0;
+  for (const x of named) {
+    const count = Number(x.maskedCount);
+    if (count < smallest) smallest = count;
+    if (count > largest) largest = count;
+  }
   const scale = 2 ** zoom; // pixels per world unit
   const candidates: LabelCandidate[] = [];
   const byId = new Map<bigint, LabelText>();
   for (const artifact of named) {
     const count = Number(artifact.maskedCount);
-    const size = labelSize(rankOf.get(depthOf(artifact)) ?? 0, count, largestIn.get(depthOf(artifact)) ?? 1);
+    const size = labelSize(count, smallest, largest);
     const attached = topicOf.get(artifact.tesseraId) ?? null;
     // A cluster with no name of its own takes its topic as the name (a labelled clustering);
     // one with both draws the topic beneath in italic (the boards).
@@ -1032,7 +1035,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * Names and counts at each artifact's `centroid`, sized by masked count within a narrow band,
+   * Names and counts at each artifact's `centroid`, sized by masked count on a logarithmic band,
    * placed by priority into a spatial hash — a few hundred fit a viewport and the rest wait for
    * a zoom — with a leader line where a label moved. A dependent artifact draws at its own
    * declared centroid with the count the wire carries for it (its target's, D13). Free text is
