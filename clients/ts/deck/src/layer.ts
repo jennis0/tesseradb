@@ -480,33 +480,30 @@ export function artifactName(a: Artifact): string | null {
 }
 
 /**
- * Chaikin's corner cutting, `iterations` times, on a closed polygon: each edge is replaced by its
- * quarter and three-quarter points, so a hull's corners round off into the boards' contours
- * while every vertex stays inside the hull's own convex extent. Exact geometry from the wire,
- * smoothed — nothing is contoured from marks (decision 0099).
+ * A served artifact's outline in world space: its hull, else its box, else nothing — **the wire's
+ * own vertices, in the wire's own order, and nothing else**.
+ *
+ * The hull was smoothed here by three rounds of Chaikin's corner cutting, on the reading that
+ * every vertex it produced stayed inside the hull's convex extent. That held only while the served
+ * hull *was* convex. It is now a concave shape that follows the cluster's arms (annotations §4.2),
+ * and Chaikin cuts a **reflex** corner outward: the triangle it removes at a reflex vertex lies
+ * outside the polygon, so a smoothed contour bulged past the served shape at every concavity, by
+ * up to a quarter of the shorter adjacent edge. It is a display matter and not a disclosure —
+ * the client invents no vertex from data — but a drawn shape must not claim area the served shape
+ * does not have, and every vertex the engine sends is a visible member's own position, which is
+ * exactly the property smoothing threw away.
+ *
+ * So the smoothing is gone rather than made reflex-aware. The shape no longer needs it: its
+ * corners are the members', not a convex wrap's artefacts, and at the 52–87 vertices the concave
+ * path produces they are small. It also cost eight times the vertices on every served outline —
+ * about 130 to 700 on one shape — and an outline is materialised for every served artifact,
+ * drawn or not, because the polygon is what answers a pick.
  */
-export function smoothClosed(polygon: readonly [number, number][], iterations = 3): [number, number][] {
-  let out = polygon.slice() as [number, number][];
-  for (let it = 0; it < iterations && out.length >= 3; it++) {
-    const next: [number, number][] = [];
-    for (let i = 0; i < out.length; i++) {
-      const a = out[i]!;
-      const b = out[(i + 1) % out.length]!;
-      next.push([0.75 * a[0] + 0.25 * b[0], 0.75 * a[1] + 0.25 * b[1]], [0.25 * a[0] + 0.75 * b[0], 0.25 * a[1] + 0.75 * b[1]]);
-    }
-    out = next;
-  }
-  return out;
-}
-
-/** A served artifact's outline in world space: its hull, else its box, else nothing — smoothed. */
-export function outlineOf(a: Artifact, smooth = true): [number, number][] | null {
+export function outlineOf(a: Artifact): [number, number][] | null {
   const w = gridToWorld;
-  let raw: [number, number][] | null = null;
-  if (a.hull && a.hull.length >= 3) raw = a.hull.map(gridToWorldXY);
-  else if (a.box) raw = [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
-  if (!raw) return null;
-  return smooth ? smoothClosed(raw) : raw;
+  if (a.hull && a.hull.length >= 3) return a.hull.map(gridToWorldXY);
+  if (a.box) return [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
+  return null;
 }
 
 /**
