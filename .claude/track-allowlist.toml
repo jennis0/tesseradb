@@ -247,3 +247,15 @@ paths = [
   "Cargo.toml",
   "crates/tessera-engine/Cargo.toml",
 ]
+
+# Wave 9b — the client reads several rings (controller, 2026-08-27). The wire's hull became
+# `list<list<uint32>>`; the decoder reads a flat list and the pick path assumes one polygon per
+# artifact. Specified in `artifact-shapes.md` §9.
+[track.ringsclient]
+paths = [
+  "clients/ts/core/*",
+  "clients/ts/deck/*",
+  "clients/ts/components/*",
+  "clients/ts/harness/*",
+  "clients/ts/viewer/*",
+]
