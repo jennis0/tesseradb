@@ -102,6 +102,24 @@ describe('<tessera-artifact-list>', () => {
     expect(store.calls.find((c) => c.name === 'openArtifact')?.args[0]).toBe(3n);
   });
 
+  it('shows a count and a neutral placeholder where a row has no name — never the key', async () => {
+    const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
+    // `c-2` has no supplied text and no topic attached: its key is an id and is not a name.
+    const served = [artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n)];
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection(served)});
+    (host.querySelector('tessera-artifact-list') as unknown as {store: unknown}).store = store;
+    await settle(host);
+    const nameless = deep(host, '[part="item"][data-id="2"] [part="name"]');
+    expect(nameless?.textContent?.trim()).toBe('\u2014');
+    expect(nameless?.hasAttribute('data-unnamed')).toBe(true);
+    expect(deepText(deep(host, '[part="item"][data-id="2"] [part="count"]')).trim()).toBe('40');
+    // Nowhere in the list — not in a title, not in a row — does the key appear.
+    expect(deepText(host)).not.toContain('c-2');
+    expect(deepAll(host, '[part="item"]').map((r) => r.outerHTML).join(' ')).not.toContain('c-2');
+    // A named row is unmarked, so the placeholder can be styled apart from a real name.
+    expect(deep(host, '[part="item"][data-id="1"] [part="name"]')?.hasAttribute('data-unnamed')).toBe(false);
+  });
+
   it('renders no layer on, loading, a refusal and an empty answer as themselves', async () => {
     const host = await mount('<tessera-artifact-list></tessera-artifact-list>');
     const store = fakeStore({meta: META, status: status({})});
@@ -133,6 +151,24 @@ describe('<tessera-artifact-card>', () => {
     expect(deepText(deep(host, '[part="count"]'))).toContain('100');
     expect(deepAll(host, '[part="child"]').length).toBe(0);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('shown');
+  });
+
+  it('shows the placeholder in the headline where a cluster has no name, and the key only as the key', async () => {
+    const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
+    const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n), artifact(2n, 40n, 1n)])});
+    (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n}}, artifactRefusal: null});
+    await settle(host);
+    expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe('\u2014');
+    expect(deepAll(host, '[part="child"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['\u2014']);
+    // The key is still there — under the field that says it is a key, which is where it belongs.
+    const fields = deepAll(host, '[part="value"]').map((v) => v.textContent);
+    expect(fields).toContain('c-1');
+    // And the artifact the card was opened on before the channel answered shows the placeholder
+    // rather than falling back to the key it carries in the drill-down.
+    store.set('artifacts', artifactsProjection([]));
+    await settle(host);
+    expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe('\u2014');
   });
 
   it('renders a refusal as one', async () => {

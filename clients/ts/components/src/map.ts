@@ -69,8 +69,13 @@ export type MapProbe = {
     layersMs: number;
     /** Lookup-texture writes since the map was made — what a colouring interaction costs. */
     lutWrites: number;
-    /** What the last paint drew of the artifacts: outlines and placed labels. */
+    /**
+     * What the last paint held and drew of the artifacts: the served shapes the outline layer
+     * carries, how many of those actually draw — the hovered and the opened one, the rest at zero
+     * alpha so they still answer a pick — and the labels placed.
+     */
     outlines: number;
+    outlinesDrawn: number;
     labels: number;
     /** The mark style the last paint drew — radius in pixels and composited alpha — and the resident count it was chosen for. */
     markRadius: number;
@@ -258,7 +263,13 @@ export class TesseraMap extends TesseraElement {
   @property({type: Number, attribute: 'cluster-level'}) accessor clusterLevel: number | null = null;
   /** A deck.gl layer drawn under the points — a geographic corpus's basemap (§5.3). */
   @property({attribute: false}) accessor basemap: Layer | null = null;
-  @property({type: Boolean}) accessor wash = true;
+  /**
+   * Whether the single-hue density wash is drawn under the points. **Off by default** (owner
+   * direction, 2026-08-26): how density should be rendered is its own conversation, and the wash
+   * was confounding a pass over the map's hierarchy. The machinery is untouched — `wash` turns it
+   * on and the layer still builds it from the exact tiles' counts (decision 0097).
+   */
+  @property({type: Boolean}) accessor wash = false;
   /** A fixed mark radius in pixels; unset, the marks are sized by their count and the zoom (`markStyle`). */
   @property({type: Number}) accessor radius: number | null = null;
   /** The mode and fit control cluster — the map's own, not a slot. */
@@ -283,7 +294,7 @@ export class TesseraMap extends TesseraElement {
     encoding: 'uniform',
     view: {depth: 0, status: 'idle', stale: false, visible: 0, matched: 0, served: 0, provisional: 0},
     region: null,
-    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
+    timings: {slabMs: 0, washMs: 0, lutMs: 0, outlinesMs: 0, labelsMs: 0, layersMs: 0, lutWrites: 0, outlines: 0, outlinesDrawn: 0, labels: 0, markRadius: 0, markAlpha: 0, markCount: 0, frame: {mean: 0, p95: 0, n: 0}, decodeMs: []},
     cluster: {layer: null, layersOn: [], coverage: {current: 0, stale: 0}, servedIds: [], sample: [], coloured: 0}
   };
 
@@ -592,6 +603,7 @@ export class TesseraMap extends TesseraElement {
               labelsMs: t.labelsMs,
               layersMs: t.layersMs,
               lutWrites: t.lutWrites,
+              outlinesDrawn: t.outlinesDrawn,
               outlines: t.outlines,
               labels: t.labels,
               markRadius: t.markRadius,

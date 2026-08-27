@@ -2,7 +2,7 @@ import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import type {Artifact, ArtifactDetail, Masked, Refusal} from '@tesseradb/client';
 import {attachedTopics, displayName} from '@tesseradb/deck';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {icon} from './icons.js';
 import {renderState} from './states.js';
@@ -16,6 +16,9 @@ import './count.js';
  * pan by construction**: the count is the drill-down's, over the whole membership as this
  * principal sees it, and moves with the mask and never with the viewport. The children are a live
  * read of the served set — whatever the channel has answered for the view now.
+ *
+ * A cluster with no name — no supplied text and no topic attached — shows {@link UNNAMED} in the
+ * headline and never its key, which is an id: the key has a field of its own that says so.
  *
  * One refusal covers every withheld case and nothing here tells them apart.
  */
@@ -111,7 +114,7 @@ export class TesseraArtifactCard extends TesseraElement {
     const id = idString(artifact.id);
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
-      <div part="headline" class="card-title">${here ? displayName(here, topics) : (artifact.detail.key ?? `#${id}`)}</div>
+      <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>
       <div part="count"><tessera-count .masked=${count} .stale=${stale} label="members visible to you"></tessera-count></div>
       ${here && here.content.length > 0 && topics.has(here.tesseraId) ? html`<p part="content">${topics.get(here.tesseraId)}</p>` : here && here.content.length > 1 ? html`<p part="content">${here.content.slice(1).join(' · ')}</p>` : nothing}
       <div class="field">
@@ -123,7 +126,7 @@ export class TesseraArtifactCard extends TesseraElement {
             <ul part="children" class="list">
               ${children.map(
                 (c: Artifact) => html`<li part="child" class="item child" role="button" tabindex="0" data-id=${idString(c.tesseraId)} @click=${() => void s?.openArtifact(c.tesseraId)}>
-                  <span part="name" class="name">${displayName(c, topics)}</span>
+                  <span part="name" class="name">${displayName(c, topics) ?? UNNAMED}</span>
                   <tessera-count .masked=${{value: Number(c.maskedCount), exact: true} as Masked} .stale=${stale}></tessera-count>
                 </li>`
               )}

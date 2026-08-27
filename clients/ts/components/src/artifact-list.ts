@@ -2,7 +2,7 @@ import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
 import {type Artifact, type ArtifactsProjection, type Masked, type ServedLineage} from '@tesseradb/client';
 import {attachedTopics, displayName} from '@tesseradb/deck';
-import {TesseraElement, emit, idString} from './base.js';
+import {TesseraElement, UNNAMED, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
 import {renderState} from './states.js';
 import {chrome, tokens} from './tokens.js';
@@ -13,6 +13,9 @@ import './count.js';
  * boards' *IN VIEW · N clusters* list, a tree built from `parentId` with a row's children beneath
  * it, each with its name and its `Masked` count, the opened one highlighted. A click selects —
  * the card and the outline — and never moves the camera.
+ *
+ * A row for an artifact with no name — no supplied text and no topic attached — shows its count
+ * beside {@link UNNAMED} and never its key, which is an id (the owner's review, 2026-08-26).
  *
  * The count is over the whole membership as this principal sees it and does not move with the
  * viewport; only *whether* an artifact appears depends on where you are looking.
@@ -34,6 +37,9 @@ export class TesseraArtifactList extends TesseraElement {
       }
       [part='item'] {
         padding-left: calc(6px + var(--depth, 0) * 18px);
+      }
+      [part='name'][data-unnamed] {
+        color: var(--tessera-ink-2);
       }
       [part='item'] tessera-count::part(count) {
         margin-left: auto;
@@ -93,7 +99,9 @@ export class TesseraArtifactList extends TesseraElement {
               if (e.key === 'Enter' || e.key === ' ') this.open(artifact);
             }}
           >
-            <span part="name" class="name" title=${artifact.layer}>${displayName(artifact, topics)}</span>
+            <span part="name" class="name" title=${artifact.layer} ?data-unnamed=${displayName(artifact, topics) === null}
+              >${displayName(artifact, topics) ?? UNNAMED}</span
+            >
             <tessera-count part="count" .masked=${masked} .stale=${stale}></tessera-count>
           </li>`;
         })}

@@ -1,8 +1,8 @@
 import {describe, expect, it} from 'vitest';
-import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection} from '@tesseradb/client';
-import {MIN_OUTLINE_PX, outlineData, outlineOf, outlinePixels, servedDepths, smoothClosed} from '../src/layer.js';
+import {SessionArtifactTable, gridToWorldXY, servedLineage, type Artifact, type ArtifactsProjection} from '@tesseradb/client';
+import {outlineData, outlineOf, servedDepths} from '../src/layer.js';
 
-/** The boards' contours: a served hull smoothed, and nesting read from the served tree. */
+/** The served shape as it is drawn, and which of the served shapes the map actually draws. */
 
 const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact => ({
   layer: 'clusters',
@@ -22,28 +22,62 @@ function projection(served: Artifact[]): ArtifactsProjection {
   return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, table, servedOrdinals: new Set(ordinals), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
-describe('smoothClosed', () => {
-  it('rounds a square into a closed curve that stays inside the square', () => {
-    const square: [number, number][] = [[0, 0], [10, 0], [10, 10], [0, 10]];
-    const out = smoothClosed(square, 3);
-    expect(out.length).toBe(4 * 2 ** 3);
-    for (const [x, y] of out) {
-      expect(x).toBeGreaterThanOrEqual(0);
-      expect(x).toBeLessThanOrEqual(10);
-      expect(y).toBeGreaterThanOrEqual(0);
-      expect(y).toBeLessThanOrEqual(10);
+/** The area of a closed ring — the shoelace, unsigned. */
+const area = (ring: readonly [number, number][]) => {
+  let twice = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i]!;
+    const b = ring[(i + 1) % ring.length]!;
+    twice += a[0] * b[1] - b[0] * a[1];
+  }
+  return Math.abs(twice) / 2;
+};
+
+/** Whether a point is inside a closed ring — a crossing count, for the containment check below. */
+const inside = (p: [number, number], ring: readonly [number, number][]) => {
+  let odd = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]!;
+    const [xj, yj] = ring[j]!;
+    if (yi > p[1] !== yj > p[1] && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) odd = !odd;
+  }
+  return odd;
+};
+
+describe('outlineOf', () => {
+  it('draws the wire’s own vertices, in order, and covers no ground the served shape does not', () => {
+    // A notched ring — the shape the concave (alpha) hull now produces (annotations §4.2). Its
+    // reflex corner is where corner cutting used to bulge: Chaikin replaces a corner with a chord
+    // between points on the two edges, and at a **reflex** corner the triangle that chord spans
+    // lies outside the polygon, so the drawn ring reached into the notch by up to a quarter of the
+    // shorter adjacent edge. (The ring's total area still fell — the convex corners take more off
+    // than the reflex one puts on — so an area comparison alone would have missed it.)
+    const g = 2 ** 32 - 1;
+    const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
+    const drawn = outlineOf({...artifact(1n, null), hull: notched})!;
+    // The wire's vertices, in the wire's order, through the one grid-to-world conversion.
+    expect(drawn).toEqual(notched.map(gridToWorldXY));
+    const side = drawn[1]![0];
+    // Three quarters of the square: the notch is out, and nothing rounded it back in.
+    expect(area(drawn) / (side * side)).toBeCloseTo(0.75, 6);
+    // And nothing in the notch is inside the drawn ring — the point three Chaikin rounds put
+    // there sits at (0.47, 0.55) of the side, which is where this check is aimed.
+    for (const [fx, fy] of [[0.47, 0.55], [0.4, 0.6], [0.25, 0.75], [0.49, 0.51]] as [number, number][]) {
+      expect(inside([fx * side, fy * side], drawn)).toBe(false);
     }
-    // The corners are cut: no vertex sits on a corner any more.
-    expect(out.some(([x, y]) => (x === 0 || x === 10) && (y === 0 || y === 10))).toBe(false);
-    // Fewer than three vertices is not a polygon and passes through untouched.
-    expect(smoothClosed([[0, 0], [1, 1]])).toEqual([[0, 0], [1, 1]]);
+    // The interior is still the interior: the three quadrants that are the shape.
+    for (const [fx, fy] of [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75]] as [number, number][]) {
+      expect(inside([fx * side, fy * side], drawn)).toBe(true);
+    }
   });
 
-  it('outlineOf smooths the wire hull by default and leaves it exact on request', () => {
+  it('falls back to the box, and to nothing where the wire carries neither', () => {
     const a = artifact(1n, null);
-    expect(outlineOf(a, false)!.length).toBe(4);
-    expect(outlineOf(a)!.length).toBe(32);
-    expect(outlineOf(a)![0]![0]).toBeGreaterThan(0);
+    expect(outlineOf(a)!.length).toBe(4);
+    expect(outlineOf({...a, hull: null})!.length).toBe(4);
+    expect(outlineOf({...a, hull: null, box: null})).toBeNull();
+    // A degenerate hull is not a polygon, and the box answers instead.
+    expect(outlineOf({...a, hull: [[0, 0], [1, 1]]})!.length).toBe(4);
   });
 });
 
@@ -56,86 +90,58 @@ describe('servedDepths', () => {
 });
 
 describe('outlineData', () => {
-  const meta = (kind: 'flat' | 'nested') =>
-    ({layers: [{name: 'clusters', hierarchy: {kind, pruneChildren: false}, depsOn: []}]}) as unknown as import('@tesseradb/client').Meta;
   const alphas = (data: ReturnType<typeof outlineData>) => Object.fromEntries(data.map((d) => [String(d.id), [d.fill, d.line, d.width]]));
 
-  it('a flat layer outlines only the hovered and the opened artifact, and keeps the rest pickable at zero alpha', () => {
-    const p = projection([artifact(1n, null), artifact(2n, null), artifact(3n, null)]);
-    const none = outlineData(p, meta('flat'), {opened: null, hovered: null, level: undefined, scheme: 'light', zoom: 0});
-    expect(none.length).toBe(3);
-    expect(none.every((d) => d.flat && d.fill === 0 && d.line === 0)).toBe(true);
-    const some = alphas(outlineData(p, meta('flat'), {opened: 2n, hovered: 3n, level: undefined, scheme: 'light', zoom: 0}));
+  it('draws a hull only for the hovered and the opened artifact — a nested layer included', () => {
+    // Three levels of one chain: at rest not one of them draws, though all three are in the data.
+    const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
+    for (const scheme of ['light', 'dark'] as const) {
+      const rest = outlineData(p, {opened: null, hovered: null, level: undefined, scheme});
+      expect(rest.map((d) => String(d.id))).toEqual(['1', '2', '3']);
+      expect(rest.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
+      // Every one still carries its polygon, which is what answers a pick.
+      expect(rest.every((d) => d.polygon.length >= 3)).toBe(true);
+    }
+    const some = alphas(outlineData(p, {opened: 2n, hovered: 3n, level: undefined, scheme: 'light'}));
     expect(some['1']).toEqual([0, 0, 0.8]);
     expect(some['2']).toEqual([41, 200, 1.2]);
     expect(some['3']![0]).toBeGreaterThan(0);
     expect(some['3']![1]).toBe(150);
   });
 
-  it('a nested layer keeps its contours: a hairline each, the boards’ 6–10% fill at the leaves and none above', () => {
-    const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
-    for (const scheme of ['light', 'dark'] as const) {
-      const data = outlineData(p, meta('nested'), {opened: null, hovered: null, level: undefined, scheme, zoom: 0});
-      expect(data.map((d) => String(d.id))).toEqual(['1', '2', '3']);
-      const leaf = data[2]!;
-      expect(leaf.fill / 255).toBeGreaterThanOrEqual(0.06);
-      expect(leaf.fill / 255).toBeLessThanOrEqual(0.1);
-      expect(leaf.line).toBeGreaterThan(0);
-      expect(leaf.line / 255).toBeLessThan(0.25);
-      expect(leaf.width).toBe(0.8);
-      for (const above of data.slice(0, 2)) {
-        expect(above.fill).toBe(0);
-        expect(above.line).toBe(leaf.line);
-      }
-    }
+  it('a flat layer draws the same way — one rule, not two', () => {
+    const p = projection([artifact(1n, null), artifact(2n, null), artifact(3n, null)]);
+    const none = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
+    expect(none.length).toBe(3);
+    expect(none.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
+    const some = alphas(outlineData(p, {opened: 2n, hovered: 3n, level: undefined, scheme: 'light'}));
+    expect(some['2']).toEqual([41, 200, 1.2]);
+    expect(some['3']![1]).toBe(150);
   });
 
-  it('the opened artifact is strong whatever its layer, and the hovered one is firmer than a hairline', () => {
+  it('the opened artifact is strong whatever its layer, and the hovered one is firmer than nothing', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n)]);
-    const data = alphas(outlineData(p, meta('nested'), {opened: 1n, hovered: 2n, level: undefined, scheme: 'dark', zoom: 0}));
+    const data = alphas(outlineData(p, {opened: 1n, hovered: 2n, level: undefined, scheme: 'dark'}));
     expect(data['1']).toEqual([41, 200, 1.2]);
-    expect(data['2']![1]).toBeGreaterThan(56);
+    expect(data['2']![1]).toBe(150);
+    expect(data['2']![0]).toBeGreaterThan(0);
     // Hovering the opened one changes nothing: opened wins.
-    const same = alphas(outlineData(p, meta('nested'), {opened: 1n, hovered: 1n, level: undefined, scheme: 'dark', zoom: 0}));
+    const same = alphas(outlineData(p, {opened: 1n, hovered: 1n, level: undefined, scheme: 'dark'}));
     expect(same['1']).toEqual([41, 200, 1.2]);
   });
 
-  it('a level cuts the outlines below it', () => {
+  it('a level cuts the outlines below it, and the hover rule holds inside it', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
-    const data = outlineData(p, meta('nested'), {opened: null, hovered: null, level: 1, scheme: 'light', zoom: 0});
+    const data = outlineData(p, {opened: null, hovered: null, level: 1, scheme: 'light'});
     expect(data.map((d) => String(d.id))).toEqual(['1', '2']);
-    expect(data[1]!.fill).toBeGreaterThan(0);
+    expect(data.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
+    const hovered = outlineData(p, {opened: null, hovered: 2n, level: 1, scheme: 'light'});
+    expect(hovered.find((d) => d.id === 2n)!.line).toBe(150);
   });
 
-  it('an outline under 12 px on both axes is kept at zero alpha — it answers a pick and draws nothing', () => {
-    // A shard: 2⁻⁸ of the grid a side — two world units — is 8 px at zoom 2 and 32 px at zoom 4.
-    const side = 2 ** 24;
-    const shard: Artifact = {...artifact(2n, null), box: [0, 0, side, side], hull: [[0, 0], [side, 0], [side, side]]};
-    const p = projection([artifact(1n, null), shard]);
-    expect(outlinePixels(shard, 2)!.map((v) => Math.round(v))).toEqual([8, 8]);
-    expect(outlinePixels(shard, 4)!.map((v) => Math.round(v))).toEqual([32, 32]);
-    const at = (zoom: number, opts: Partial<Parameters<typeof outlineData>[2]> = {}) => outlineData(p, meta('nested'), {opened: null, hovered: null, level: undefined, scheme: 'dark', zoom, ...opts});
-    const small = at(2);
-    expect(small.map((d) => String(d.id))).toEqual(['1', '2']);
-    expect(small[1]!.tiny).toBe(true);
-    expect([small[1]!.fill, small[1]!.line]).toEqual([0, 0]);
-    expect(small[0]!.tiny).toBe(false);
-    expect(small[0]!.line).toBeGreaterThan(0);
-    // Zoomed in until it is 32 px across, it draws as any leaf does.
-    const large = at(4);
-    expect(large[1]!.tiny).toBe(false);
-    expect(large[1]!.fill).toBeGreaterThan(0);
-    expect(large[1]!.line).toBeGreaterThan(0);
-    // Tiny on one axis only is not tiny: a long thin hull still draws.
-    const strip: Artifact = {...artifact(3n, null), box: [0, 0, side * 8, side], hull: null};
-    const thin = outlineData(projection([strip]), meta('nested'), {opened: null, hovered: null, level: undefined, scheme: 'dark', zoom: 2});
-    expect(thin[0]!.tiny).toBe(false);
-    // Hovered or opened, a tiny outline draws — the pick found it, so it is shown.
-    expect(at(2, {hovered: 2n})[1]!.line).toBe(150);
-    expect(at(2, {opened: 2n})[1]!.line).toBe(200);
-    // The hull's extent stands in where there is no box.
-    const hullOnly: Artifact = {...shard, box: null};
-    expect(outlinePixels(hullOnly, 2)!.map((v) => Math.round(v))).toEqual([8, 8]);
-    expect(MIN_OUTLINE_PX).toBe(12);
+  it('parents are ordered before their children, so an opened child draws over an opened parent', () => {
+    const p = projection([artifact(3n, 2n), artifact(1n, null), artifact(2n, 1n)]);
+    const data = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'dark'});
+    expect(data.map((d) => d.depth)).toEqual([0, 1, 2]);
   });
 });

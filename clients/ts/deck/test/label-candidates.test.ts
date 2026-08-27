@@ -1,9 +1,12 @@
 import {describe, expect, it} from 'vitest';
 import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
-import {labelBudget, labelCandidates} from '../src/layer.js';
-import {placeLabels} from '../src/labels.js';
+import {artifactName, displayName, frontier, labelBudget, labelCandidates} from '../src/layer.js';
+import {LEVEL_SIZES, placeLabels} from '../src/labels.js';
 
-/** Which artifacts get a label, and how many (§5.10): a text to draw, the top N by masked count. */
+/**
+ * Which artifacts get a label (§5.10, the owner's review 2026-08-26): the frontier of the served
+ * set, a text to draw, the top N by masked count — and a size that says which level it is.
+ */
 
 const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'clusters', parentId: bigint | null = null): Artifact => ({
   layer,
@@ -25,6 +28,46 @@ function projection(served: Artifact[]): ArtifactsProjection {
 
 const META = {layers: [{name: 'clusters', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: []}, {name: 'topics', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: ['clusters']}]} as unknown as Meta;
 
+const ids = (s: Iterable<bigint>) => [...s].map(String).sort();
+
+describe('frontier', () => {
+  it('is every served artifact with no served child — an ancestor of something drawn is not on it', () => {
+    // A chain 1 → 2 → 3 and a sibling 4 under 2: the frontier is 3 and 4, not the chain above.
+    const p = projection([artifact(1n, 900n), artifact(2n, 500n, [], 'clusters', 1n), artifact(3n, 300n, [], 'clusters', 2n), artifact(4n, 200n, [], 'clusters', 2n)]);
+    expect(ids(frontier(p, undefined))).toEqual(['3', '4']);
+  });
+
+  it('a flat layer is all frontier — nothing has a served child', () => {
+    const p = projection([artifact(1n, 9n), artifact(2n, 8n), artifact(3n, 7n)]);
+    expect(ids(frontier(p, undefined))).toEqual(['1', '2', '3']);
+  });
+
+  it('an artifact whose parent was withheld is a root, and a leaf if it has no served child', () => {
+    const p = projection([artifact(1n, 9n), artifact(7n, 8n, [], 'clusters', 99n)]);
+    expect(ids(frontier(p, undefined))).toEqual(['1', '7']);
+  });
+
+  it('at a chosen level it is that level and every branch that stopped above it', () => {
+    // 1 → 2 → 3 is three deep; 4 is a child of 1 and stops there. At level 1 the frontier is 2
+    // (the level) and 4 (a branch the level did not reach) — never 1, whose child 2 is drawn.
+    const p = projection([artifact(1n, 900n), artifact(2n, 500n, [], 'clusters', 1n), artifact(3n, 300n, [], 'clusters', 2n), artifact(4n, 200n, [], 'clusters', 1n)]);
+    expect(ids(frontier(p, 1))).toEqual(['2', '4']);
+    expect(ids(frontier(p, 0))).toEqual(['1']);
+    expect(ids(frontier(p, 9))).toEqual(['3', '4']);
+  });
+});
+
+describe('naming', () => {
+  it('an artifact with no supplied text has no name — never its key', () => {
+    expect(artifactName(artifact(1n, 5n, ['quantum error correction']))).toBe('quantum error correction');
+    expect(artifactName(artifact(1n, 5n))).toBeNull();
+    expect(artifactName(artifact(1n, 5n, ['']))).toBeNull();
+    const topics = new Map([[2n, 'decoders, thresholds']]);
+    expect(displayName(artifact(2n, 5n), topics)).toBe('decoders, thresholds');
+    expect(displayName(artifact(3n, 5n), topics)).toBeNull();
+  });
+});
+
 describe('labelCandidates', () => {
   it('an artifact with no text draws no label — never its key', () => {
     const p = projection([artifact(1n, 100n, ['quantum error correction']), artifact(2n, 900n), artifact(3n, 50n, [''])]);
@@ -35,12 +78,52 @@ describe('labelCandidates', () => {
     expect([...byId.values()].some((t) => t.lines.join(' ').startsWith('c-'))).toBe(false);
   });
 
+  it('only the frontier is labelled — an ancestor of something drawn draws nothing', () => {
+    const p = projection([
+      artifact(1n, 900n, ['the whole corpus']),
+      artifact(2n, 500n, ['a big split'], 'clusters', 1n),
+      artifact(3n, 300n, ['a small split'], 'clusters', 2n),
+      artifact(4n, 200n, ['another small split'], 'clusters', 2n)
+    ]);
+    const {candidates} = labelCandidates(p, META, undefined, 0, 10);
+    expect(candidates.map((c) => String(c.id))).toEqual(['3', '4']);
+  });
+
   it('a nameless cluster with a topic attached takes the topic as its name', () => {
     const p = projection([artifact(1n, 100n), artifact(2n, 40n), artifact(9n, 100n, ['decoders, thresholds'], 'topics')]);
     const {candidates, byId} = labelCandidates(p, META, undefined, 0, 10);
     expect(candidates.map((c) => String(c.id))).toEqual(['1']);
     expect(byId.get(1n)!.lines.join(' ')).toBe('decoders, thresholds');
     expect(byId.get(1n)!.topic).toBeNull();
+  });
+
+  it('size encodes level first: a step per level drawn, the count only ordering within one', () => {
+    // Two branches: 2 stops at depth 1, 3 and 4 are at depth 2. The frontier holds two levels,
+    // so it draws two sizes — the coarser one larger, whatever the counts say.
+    const p = projection([
+      artifact(1n, 900n, ['root']),
+      artifact(2n, 400n, ['stops here'], 'clusters', 1n),
+      artifact(3n, 500n, ['deeper and bigger'], 'clusters', 1n),
+      artifact(5n, 300n, ['deeper still'], 'clusters', 3n),
+      artifact(6n, 100n, ['deeper too'], 'clusters', 3n)
+    ]);
+    const {byId} = labelCandidates(p, META, undefined, 0, 10);
+    expect([...byId.keys()].map(String).sort()).toEqual(['2', '5', '6']);
+    const coarse = byId.get(2n)!.size;
+    const fine = [byId.get(5n)!.size, byId.get(6n)!.size];
+    // The shallower name is a step larger than either deeper one, though 5 outweighs it 300:400
+    // only within its own level.
+    expect(coarse).toBeCloseTo(LEVEL_SIZES[0]! + 1.5, 6);
+    for (const f of fine) expect(f).toBeLessThan(coarse);
+    expect(fine[0]).toBeGreaterThan(fine[1]!);
+  });
+
+  it('one level drawn is one size — a flat layer reads as a flat layer', () => {
+    const served = Array.from({length: 5}, (_, i) => artifact(BigInt(i + 1), BigInt(1000 - i * 100), [`cluster ${i}`]));
+    const {byId} = labelCandidates(projection(served), META, undefined, 0, 10);
+    const sizes = [...byId.values()].map((t) => t.size);
+    expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThan(1.6);
+    expect(Math.max(...sizes)).toBeCloseTo(LEVEL_SIZES[0]! + 1.5, 6);
   });
 
   it('takes the top N by masked count, and the placement then drops what overlaps', () => {

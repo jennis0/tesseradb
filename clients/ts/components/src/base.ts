@@ -146,6 +146,16 @@ export abstract class TesseraElement extends LitElement {
   }
 }
 
+/**
+ * What a row shows where an artifact has no name — no supplied text and no topic attached to it.
+ *
+ * Never its key. A key is an identifier its layer's author chose (`hdb-2422486`, `tp2-000002`);
+ * drawn in the place a name goes it reads as a cluster called that, which the owner's review of
+ * 2026-08-26 caught in the *IN VIEW* list. The count beside it is what the row is actually for,
+ * and the key still shows under the card's field that says *key*.
+ */
+export const UNNAMED = '\u2014';
+
 /** A custom event that bubbles through shadow roots, so a host listens on any ancestor (§5.7). */
 export function emit(from: HTMLElement, name: string, detail: unknown): void {
   from.dispatchEvent(new CustomEvent(name, {detail, bubbles: true, composed: true}));

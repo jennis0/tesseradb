@@ -24,7 +24,8 @@ is built (branch `client/step-3`): the membership column consumed end to end, th
 the four artifact elements, wire geometry drawn, lasso, the sidecar retired. Step 5 is built (branch
 `client/step-5`): the `tesseradb` package with the widget as its `[widget]` extra, run by hand in
 JupyterLab and Marimo. Step 4 is built (branch `client/step-4`) and step 5 with it; **the owner's review of the built
-explorer is answered on `client/ui`** — see *Reviewed by the owner* below. The server tracks are
+explorer is answered on `client/ui`, and his second review — of the 2.4M map — on `client/look`**
+— see the two *Reviewed by the owner* sections below. The server tracks are
 ahead; the design is at r4, reviewed across three lenses, with the owner's rulings of 2026-08-24/25 in its §11 and
 recorded as decisions 0095–0101; the open decisions and what each gates are in the handover's §1.
 
@@ -219,6 +220,84 @@ harness's click on the strip's *Refresh*, which is not a claim but the way back 
 claims after it, raced the strip's own re-render and timed out with *element was detached from the
 DOM*, on `main` as well as here: while the moved content key is in play the strip alternates
 between the stale row and the counts row as responses land. It retries now.
+
+**Reviewed by the owner again, 2026-08-26** — on a screenshot of `clusters/hdbscan` zoomed in:
+*the dot glow is way too strong*; *the group polygons remain really ugly*; and *something is not
+quite right about the way we render the stacked layers — hierarchy gets lost in the label size, and
+the multiple overlapping layers make it hard to read*. Answered on the `look` track (branch
+`client/look`).
+
+| # | the owner's point | where it stands |
+|---|---|---|
+| 11 | the group polygons are ugly, and the stacked layers make the map hard to read | **done**: a hull is drawn only for the **hovered and the opened** artifact, on every layer, nested included. A response carries a frontier *and its ancestors*, so drawing every served hull gave a region its own contour plus its parent's plus its grandparent's — translucent fills stacking into a wash with no cue that the big shape contained the small ones, and the long straight chords crossing the screenshot were single edges of the large ancestors. The rule already held for a flat layer and the argument one level up is the same: exact colour already says where a cluster is and how far it reaches, per principal (decision 0099). At rest the map is colour and names. Every other artifact stays in the data at zero alpha, which is what answers a pick — the flat path's own arrangement, reused rather than forked. The fill that faded with height below, the flat/nested split and the twelve-pixel floor went with the hairlines |
+| 12 | hierarchy gets lost — an ancestor of something drawn is labelled beside it | **done**: **only the frontier is labelled**. A served artifact with a served child in the same response draws no label; `frontier` computes it from `parentId` over the served set, which `lineage` already holds, so nothing new is asked of the wire. With no chosen level this is the cut's leaves, as before; with one it is that level's artifacts **and** every shallower branch the level cut away, which the plain `depth === level` test dropped. Checked against the running corpus below |
+| 13 | label size spends its whole range on the wrong distinction | **done**: **size encodes level first**. `12 + 10·√(count/max)` over counts that ran 176–598 on one screen made every name within a pixel of every other. Each level of the drawn frontier now takes a step: **24, 19, 15, 12.5 px** from the coarsest, floored at the last, plus at most **1.5 px** for the largest count within a level — small enough that a level's largest name stays under the next level up's smallest, so the step is never crossed and the count only orders what shares a level. The key is never drawn as a name anywhere: `artifactName` and `displayName` answer nothing where there is no supplied text and no attached topic, and the *IN VIEW* list, the cluster card's headline and its children draw a neutral em dash beside the count instead of `hdb-2422486` and `tp2-000002`. The key keeps the card's field that says *key* |
+| 14 | the dot glow is way too strong, at every zoom | **done**: two things made it, and both come down — `markStyle`'s band, and deck's own half-pixel feather. Measured below |
+| 15 | the density wash confounds the pass | **done**: `<tessera-map>`'s `wash` defaults **false** (owner direction: how density should be rendered is a separate conversation). Only the default moved — `<tessera-map wash>` turns it on and the layer still builds the image from the exact tiles' counts, filtered so the grid never shows (decision 0097) |
+
+**The marks' style, recalibrated** (2026-08-26, headed Chromium 1208 on notebook-2m4's full
+principal at 1440 × 900, the probe's `markRadius` / `markAlpha` / `markCount`; re-run before
+quoting). The band was `1.2 + 1.0(1−t) + 0.08z` px at `0.5 + 0.3(1−t) + 0.02z`; it is now
+**`1.1 + 0.6(1−t) + 0.05z` px at `0.34 + 0.44(1−t) + 0.015z`**, capped at 0.9, over the same
+`t = clamp((log10(marks) − 2) / 4, 0, 1)`. The sparse end is pinned where the boards put it — at the
+boards' own count (about 1,600 marks) 1.53 px at 0.65 against their 1.5 px at 0.68 light / 0.78
+dark, and a hundred marks land on 0.78 exactly — and everything above it comes down. On
+`clusters/hdbscan`: the overview **1.10 px at 0.34** over 1,012,813 resident marks (was 1.20 at
+0.50); three notches in **1.25 px at 0.385** over 2,451,556 (was 1.44 at 0.56).
+
+**The second half of the glow was deck's, not ours, and is the larger one.** deck's
+`ScatterplotLayer` feathers a disc over a **half pixel** either side of its radius, so a 1.2 px mark
+reached 1.7 px and most of that area was ramp rather than disc — the feather is worst exactly where
+the marks are smallest, which is where the blooming was. `markStyle` now returns `antialiasing`,
+off below **1.4 px** and on above it, so the feather is kept where it is an edge and dropped where
+it is the mark. Together that is about **half the ink** a mark laid down: alpha times the footprint
+the feather reaches, 0.34 × π·1.1² against 0.5 × π·1.45². Judged at the overview and three notches
+in on both grounds; the demo declares `color-scheme: dark`, so the light ground was seen by
+overriding it on the page, as at the previous review.
+
+**The frontier, checked against the response** rather than assumed: `clusters/hdbscan` at the
+overview on the full principal serves 71 artifacts of the layer at depths 0–3, and the frontier is
+the **58 leaves at depths 1, 2 and 3** — the real splits. The root and the twelve internal nodes of
+the near-root chain draw no label. Three levels are present, so three sizes are drawn. A tiered
+layer at a chosen level (`clusters/toponymy`, 574 topics three notches in) has one level in its
+frontier and draws one size, which is the same rule saying there is no step to make. Labels placed,
+overview then three notches in: `clusters/hdbscan` 10 → 7 and 23 → 27; `clusters/toponymy` 7 → 5 and
+13 → 16. Fewer at the overview is what a larger coarsest step costs; the placement is unchanged.
+
+**A hull that could not be smoothed any more.** `outlineOf` ran three rounds of Chaikin's corner
+cutting over the served hull, on a comment claiming every vertex stayed inside the hull's convex
+extent. That held only while the hull was convex; it is now a concave (alpha) shape over the masked
+members (annotations §4.2). Chaikin replaces a corner with a chord between points on its two edges,
+and at a **reflex** corner the triangle that chord spans lies *outside* the polygon — so the drawn
+contour reached into every concavity by up to a quarter of the shorter adjacent edge. On the notched
+square in the test, three rounds put the boundary through (0.47, 0.55) of a side where the served
+shape has nothing, **while the ring's total area fell**, because the convex corners take off more
+than the reflex one puts back: an area comparison alone would have missed it, so the test is a
+containment one. It is a display matter and not a disclosure — the client invents no vertex from
+data — but a drawn shape must not claim ground the served shape does not have. The smoothing is
+**gone** rather than made reflex-aware: the shape no longer needs it, its corners being the members'
+own positions rather than a convex wrap's artefacts, and it cost eight times the vertices on every
+served outline (about 130 to 700 on one shape) with an outline materialised for every served
+artifact, drawn or not, because the polygon is what answers a pick.
+
+**Two things the smoke scripts stopped checking, and now check again.** `smoke-artifacts.mjs` keyed
+its list rows by **what the row said**, so once a nameless artifact drew a placeholder instead of its
+key every nameless cluster of a layer collapsed onto one entry and *the same cluster across
+principals* compared a cluster with itself — one row where 2m4's k-means has twenty-four. It keys by
+`data-id` now, the opaque `tessera_id`, which is the same for every principal (I10). And *a hull
+rendered under two principals* read `timings.outlines`, which counts the shapes the layer **holds**
+rather than the ones that draw, so it would have passed against a map that drew nothing;
+`LayerTimings` gains `outlinesDrawn` and the script asserts what the rule says. On 2m4: **24 shapes
+held, 0 drawn at rest, 1 drawn on opening a cluster**.
+
+**Gate after this pass** (2026-08-26): `check-clients.sh` green (core 228 with 6 skipped, deck 90,
+components 72, react 10, spike 5, wire-example 7, plain-html 4, canvas-store 3);
+`check-doc-links.py` 0 errors over 735 files (15 warnings, all pre-existing citation drift under
+`probes/`); harness **9 of 9** and `modes.mjs` **15 of 15** headed on notebook-2m4; `smoke`,
+`smoke-artifacts` and `smoke-budget` OK on 2m4. The demo servers were left running throughout and
+the branch's viewer was served on its own port, reached through a same-origin proxy — the running
+deployments enumerate only `http://localhost:5173` in `serve.dev_cors_origins` and restarting them
+to add an origin was not worth the interruption.
 
 ## What each step owes a measurement
 
