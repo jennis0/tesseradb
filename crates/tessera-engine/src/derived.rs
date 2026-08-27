@@ -38,7 +38,7 @@
 //! their convex wrap, and **one ring per separated group of them** rather than one ring per
 //! artifact ([`concave_rings`]) — a sort, a grouping pass, a bucketing pass and a bounded number of
 //! digs, 1.6× the convex path over a whole 197-artifact layer (`docs/design/artifact-shapes.md`
-//! §6). It discloses nothing the wrap did not, and the argument is in [`concave_rings`]'s own
+//! §7). It discloses nothing the wrap did not, and the argument is in [`concave_rings`]'s own
 //! documentation rather than restated here.
 
 use croaring::Bitmap;
@@ -264,12 +264,12 @@ const BRIDGE_FACTOR: i128 = 3;
 /// void — one with members all the way around it — is not reachable and no ring encloses another.
 /// The family that does produce interior rings is the α-complex, and it drops members outside its
 /// own shape, which is the display contradiction the exact-only rule exists to prevent
-/// (`artifact-shapes.md` §3 and its ruling F).
+/// (`artifact-shapes.md` §4, and §6 for the decision and its residual).
 ///
 /// Cost is `O(n)` to group and to bucket the members plus, per dig, one pruned pass over the
 /// buckets and one pass over the ring, against the convex hull's `O(n log n)` sort, which still
 /// dominates. Measured over 197 artifacts of 6,146 … 2,422,484 members in
-/// `docs/design/artifact-shapes.md` §6.
+/// `docs/design/artifact-shapes.md` §7.
 fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
     let mut p: Vec<[u32; 2]> = points.to_vec();
     p.sort_unstable();
@@ -362,7 +362,7 @@ impl Ring {
 /// the join *complete* — every pair within α is joined — while joining members as far apart as
 /// √2·(1 + 1/`GROUP_CELLS_PER_ALPHA`)·α, which at 2 is 2.12α. Over the 197-artifact measurement
 /// layer the result agrees with exact single-linkage at α on 192 artifacts and coarsens the rest;
-/// at one cell per α it agrees on 190, and at four on 192 (`artifact-shapes.md` §6). The exact
+/// at one cell per α it agrees on 190, and at four on 192 (`artifact-shapes.md` §5). The exact
 /// alternative needs a Delaunay triangulation, which is the route ruling C measured and declined.
 const GROUP_CELLS_PER_ALPHA: u64 = 2;
 
@@ -382,7 +382,7 @@ const GROUP_CELLS_PER_ALPHA: u64 = 2;
 /// fit, which only ever joins more. That keeps the pass `O(members)` with no data-dependent worst
 /// case — the exact route, cutting the Delaunay edges longer than α, has none either but costs a
 /// triangulation, measured at 1.4 s on the largest artifact of the measurement layer against 0.16 s
-/// for the whole dig (`artifact-shapes.md` §6).
+/// for the whole dig (`artifact-shapes.md` §4.1).
 fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) {
     let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
     for q in p {
@@ -392,9 +392,12 @@ fn alpha_groups(p: &[[u32; 2]], alpha_sq: i128) -> (Vec<u32>, usize) {
         y1 = y1.max(q[1]);
     }
     let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
-    // α as a length. The square root is the only float in this module and it is safe here: it fixes
-    // a *cell size*, and every join the grid then makes is decided by integer cell indices, so no
-    // rounding of it can change the answer for two members it does not put in adjacent cells.
+    // α as a length. The square root is the only float in this module, and it is safe here for two
+    // reasons rather than one: it is IEEE-754 correctly rounded, so it is identical on every
+    // platform; and it is rounded *up* to a whole grid unit, so `2 · side ≥ α` holds with an
+    // integer's margin that a last-bit error cannot cross — which is the inequality the
+    // completeness argument above rests on. Every join is then an integer comparison of cell
+    // indices.
     let alpha = (alpha_sq as f64).sqrt();
     let mut side = (alpha / GROUP_CELLS_PER_ALPHA as f64).ceil().max(1.0) as u64;
     let (mut nx, mut ny) = (wx.div_ceil(side), wy.div_ceil(side));

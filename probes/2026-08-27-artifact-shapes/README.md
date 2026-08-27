@@ -1,8 +1,23 @@
 # What shape should a served artifact have
 
-The measurement campaign behind [`docs/design/artifact-shapes.md`](../../docs/design/artifact-shapes.md).
-Every figure that document cites is produced here, and this directory is the place to re-run before
-quoting one.
+The family survey behind [`docs/design/artifact-shapes.md`](../../docs/design/artifact-shapes.md).
+Most of the figures that document cites are produced here, and this directory is the place to re-run
+before quoting one.
+
+**Two of them are not, and deliberately.** The figures a *ruling* rests on are Rust against Rust in
+one release-mode process, because a Qhull-in-C against numpy-in-Python column compares
+implementations rather than algorithms — which is why this probe could not settle ruling C and said
+so. Those live with the engine and are re-run from there:
+
+| | |
+|---|---|
+| `crates/tessera-engine/tests/hull_triangulation.rs` | **Ruling C**: a Rust Delaunay against the Rust dig, over the same 197 memberships; the χ-peel it would have bought; the grid grouping against exact single-linkage at α |
+| `crates/tessera-engine/tests/hull_geometry.rs` | What the **served** shape costs — vertices, rings, wire bytes, area, containment — over any layer of a built bundle |
+
+```bash
+TESSERA_HULL_BUNDLE=<bundle root> \
+  cargo test --release -p tessera-engine --test hull_triangulation -- --ignored --nocapture
+```
 
 **Corpus.** `notebook-2m4`, read from `data/notebook-2m4-live/*.parquet` — `clusters/hdbscan`
 (197 artifacts, 6,146 … 2,422,484 distinct member positions), `clusters/kmeans` (64, the convex-ish
@@ -78,6 +93,18 @@ committed; the `results-*.json` files and the `*.md` tables are the measurement 
 - **Multi-modality is rare on this layer**: 3 of 197 artifacts have two components holding 5% of
   members at full membership, and 1 has two at 10%. It does not grow under uniform random masks
   down to 0.2% of members. A *correlated* mask is not measured and should not be claimed either way.
+  **This measurement answered the wrong question and was overruled** (owner, 2026-08-27): the wire is
+  not shaped by one corpus's statistics, and the design carries several rings whatever the frequency
+  here. It is left standing because it is true, and because what it does *not* cover — a correlated
+  mask, a clustering that is not density-based — is the shape of the argument that overrode it.
+- **A Rust triangulation is too expensive to carry**: 1.4–1.5 s for the 2,422,484-member artifact's
+  Delaunay alone, against 0.16 s for the whole dig, and 7.6–8.1× over the layer. The Python column in
+  this probe suggested the opposite and was refused as evidence for the right reason.
+- **No grid can compute single-linkage at α exactly.** Joining occupied cells within a fixed
+  neighbourhood is complete only if the neighbourhood's own diameter exceeds α, so it always joins
+  members further apart than α; the best such a rule can do is √2·α as the cell shrinks. At the cell
+  side the engine uses it agrees with the exact partition on 192 of 197 artifacts and coarsens the
+  rest.
 - **The flush-flank limitation the engine's memo records is not what binds it.** 13 digs were
   refused over the whole layer; 108 of 197 artifacts stop at the vertex budget with a bridging edge
   still live.

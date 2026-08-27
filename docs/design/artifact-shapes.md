@@ -1,417 +1,361 @@
 # The shape of a served artifact
 
-**Status:** Provisional — an investigation and a design, 2026-08-27. **What remains before it
-becomes normative:** the five owner rulings in §8 (which family the `hull` vocabulary word names,
-whether the vertex budget stays a flat 64, whether the wire carries more than one ring, who
-declares the family, and whether the engine acquires a triangulation), and the one measurement §8's
-recommendation rests on that this probe could not take — what a Rust Delaunay costs against a Rust
-dig. **Nothing here is built**: `main` serves the shape §2 describes, and every claim about an
-alternative is a claim about a probe.
+**Status:** Normative — 2026-08-28. It governs what the `hull` vocabulary word means, and
+`annotations.md` §4.2 and `contracts.md` §3.2 defer to it on the shape's geometry. The rulings that
+closed it are in Appendix R.
 
-**Owns:** which geometric family the derived `hull` belongs to, how its parameter is fixed, how many
-rings it may have, who chooses, and what a client must do with the answer. It does not own the
-declaration syntax (`annotations.md` §4.2), the wire columns (`contracts.md` §3.2) or the closure
-rule that makes any of it safe (**I2**, restated at the artifact).
+**Owns:** which geometric family the derived `hull` belongs to, how its parameter is fixed, how its
+members are grouped into rings, whether it carries holes, and what a client must do with the answer.
+It does not own the declaration syntax (`annotations.md` §4.2), the wire columns (`contracts.md`
+§3.2) or the closure rule that makes any of it safe (**I2**, restated at the artifact).
 
-**Reads with:** [`annotations.md`](annotations.md) §4.2 (what `hull` means today and the closure
-rule); [`contracts.md`](contracts.md) §3.2 item 4 (the artifacts frame — `hull_x` and `hull_y`, two
-same-length `list<uint32>`); [`architecture.md`](architecture.md) §4 (**I2**) and Appendix C's head
-note (the inclusion test §7 applies); [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)
-(exact only); [decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)
-(the automatic-with-override shape §5 tests against);
-[`2026-08-26-concave-hulls.md`](../evidence/memos/2026-08-26-concave-hulls.md) (what the built shape
-costs).
+**Reads with:** [`annotations.md`](annotations.md) §4.2 (what a layer declares and the closure
+rule); [`contracts.md`](contracts.md) §3.2 item 4 (the artifacts frame);
+[`architecture.md`](architecture.md) §4 (**I2**) and Appendix C's head note (the inclusion test §10
+applies); [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)
+(exact only); [`2026-08-26-concave-hulls.md`](../evidence/memos/2026-08-26-concave-hulls.md) (what
+the single-ring shape cost, before this).
 
-**Measured in** [`probes/2026-08-27-artifact-shapes/`](../../probes/2026-08-27-artifact-shapes/),
-over `notebook-2m4`'s `clusters/hdbscan` — 197 artifacts, 6,146 … 2,422,484 distinct member
-positions — at **full membership**, with `clusters/kmeans` (64 artifacts) as a control. Every
-quantity below is from that probe unless it names the memo. The probe reimplements the engine's
-construction in Python and **agrees with the engine's published figures exactly** — 3,278 wrap
-vertices and 12,388 shape vertices over the layer, area 0.870 median and 0.858 mean and 0.290
-minimum, 108 of 197 artifacts at the vertex budget (`validate.py`) — which is what licenses
-comparing anything else against it.
+**Measured in** two places, and the distinction matters. The family survey is
+[`probes/2026-08-27-artifact-shapes/`](../../probes/2026-08-27-artifact-shapes/), a Python
+reimplementation that reproduces the engine's published figures exactly before comparing anything
+against them. The two figures a *ruling* rests on are Rust against Rust in one process —
+`crates/tessera-engine/tests/hull_triangulation.rs` for what a triangulation costs, and
+`hull_geometry.rs` for what the served shape costs — because a Qhull-in-C against numpy-in-Python
+column compares implementations rather than algorithms. Both read `notebook-2m4`: `clusters/hdbscan`
+(197 artifacts, 6,146 … 2,422,486 members), with `clusters/kmeans` (64), `clusters/toponymy` level 3
+(574) and `topics/hdbscan` (195) as controls.
 
-## 1. What the problem is
+## 1. What a viewer receives
+
+For each served artifact whose layer declares `hull`, over `membership ∩ M_auth` and nothing else:
+
+- The visible members are partitioned into **α-groups** (§5).
+- Each group is drawn as **one simple ring**, counter-clockwise from its lowest vertex, dug inward
+  from that group's convex wrap (§4).
+- The rings are ordered by their first vertex, and travel as two `list<list<uint32>>` columns, one
+  per axis (`contracts.md` §3.2 item 4).
+
+Two parameters, and **neither is a caller's to set**. **α** is three times the median edge of the
+visible members' own convex wrap — a length in the cloud's own units, robust because a single long
+chord across a concavity is exactly the outlier a median ignores. It fixes both the grouping and
+the digging. The **vertex budget** is 64 digs *per artifact*, spent longest bridge first across
+every ring, so several groups do not multiply the wire.
+
+What the shape guarantees:
+
+- **Every vertex is a visible member's position.** No invented point, no cell corner, no smoothing.
+- **Every member is inside the ring of its own group**, boundary included.
+- **Each ring is simple** — it does not cross or touch itself.
+- **Each ring is inside its group's convex wrap**, so the whole shape is inside the wrap of the
+  visible members.
+- **A degenerate group is its members.** One member is a ring of one vertex, two are a ring of two:
+  rounding either up to a triangle would draw an area no member occupies.
+- **It is a function of the member positions alone** — exact `i128` arithmetic throughout, apart
+  from one square root that turns α² into the grouping grid's cell side. That square root is
+  IEEE-754 correctly rounded and so is identical on every platform, its result is rounded up to a
+  whole grid unit, and every join it then decides is an integer comparison of cell indices. Two
+  principals' shapes differ only because their memberships do.
+
+What it does **not** guarantee, stated because it is the property a reader will assume: a member may
+lie inside a *second* ring of the same artifact, where one group wraps around another. Measured over
+four layers: **0 on `clusters/hdbscan`, `clusters/toponymy` level 3 and `topics/hdbscan`, and 24
+member positions on `clusters/kmeans`.** It costs nothing operationally — both rings carry the same
+`tessera_id`, so a pick answers the same artifact either way — and it claims no ground the single
+ring did not.
+
+## 2. Why not the convex wrap
 
 A cluster found by density is an irregular region. Its convex wrap swallows the space between its
 arms, draws single straight chords across the viewport, and lies on top of clusters that share none
-of its members. The shape `main` serves is a concave one and is a large improvement on that. It is
-not the end of the question, for a reason the whole-layer picture shows and the per-artifact tables
-confirm: **on the artifacts large enough to matter, the shape it serves is nearly the convex wrap**.
+of its members. Three measurements say the same thing three ways, over `clusters/hdbscan`:
 
-Three measurements say the same thing three ways.
-
-| | convex wrap | shape on `main` | χ-shape (§3) |
+| | convex wrap | the dig at budget 64 | the α-complex over the same members |
 |---|---|---|---|
-| fill, artifacts of 50,000–200,000 members (23) | 0.834 | 0.893 | **0.995** |
-| fill, artifacts of 200,000+ members (11) | 0.742 | 0.796 | **0.996** |
-| layer area covered by two shapes on **different branches** | 24.52% | 15.86% | **1.39%** |
+| fill, artifacts of 50,000–200,000 members (23) | 0.834 | 0.893 | 1.000 |
+| fill, artifacts of 200,000+ members (11) | 0.742 | 0.796 | 1.000 |
+| layer area covered by two shapes on **different branches** | 24.52% | 15.86% | — |
 
 *Fill* is the share of the drawn shape that the α-complex over the same members at the same α also
 covers — the members' own footprint at that scale — so `1 − fill` is void the shape claims. The
-overlap row excludes ancestor–descendant pairs, since a parent legitimately covers its children;
-what remains is two artifacts drawn over the same ground with no member in common (`overlap.py`).
+overlap row excludes ancestor–descendant pairs, since a parent legitimately covers its children. The
+middle column is the **single-ring** dig, which is what all three were measured on; grouping the
+members (§5) only removes area, so they are an upper bound on what the shape now claims.
 
-The cause is not the construction. It is the **budget**: 108 of 197 artifacts stop at the 64-vertex
-cap, and every one of those 108 stops with a bridging edge still live — the shape ran out of
-vertices, not of concavity. Across the whole layer only **13** digs were refused for want of a
-candidate or for simplicity, so the limitation the memo records — a concavity whose flanks are
-flush with the edge bridging it cannot be dug — is real and is **not** what binds. Raising the
-budget closes the gap: at 1,024 the dig reaches fill 0.993 against the χ-shape's 0.992
-(`budget_sweep.py`, 186 artifacts under 200,000 members).
+**The limit is the budget, not the construction.** 108 of 197 artifacts stop at the 64-vertex cap,
+and every one of those stops with a bridging edge still live; only 13 digs over the whole layer were
+refused for want of a candidate. Raising the budget closes the gap and closes it expensively: the
+dig inserts one vertex per pass along the current longest edge, so at 1,024 vertices it reaches fill
+0.993 for 2.7× the wire a triangulation-following shape needs for 0.992. §4 is where that trade is
+settled.
 
-**It closes it expensively.** The dig inserts one vertex per pass along the current longest edge,
-which is a coarse way to spend a vertex; the χ-shape follows a triangulation's own boundary.
+## 3. Why not one ring
 
-Over the **186 artifacts under 200,000 members**, which is what this probe's Python dig can reach
-at a 1,024-vertex budget:
+A membership can be two separated clouds, and one ring around both claims the ground between them.
+No α corrects it: digging works inward from a boundary, and a gap with a ring on both sides is not
+reachable from either — the shape either draws a polygon over the gap or, in a family free to
+degenerate, a filament of near-zero area between the blobs that reads as a line on the map.
 
-| construction | vertices | wire bytes | area / wrap | fill | artifacts at budget |
-|---|---|---|---|---|---|
-| dig, budget 64 (`main`) | 11,428 | 91,424 | 0.864 | 0.977 | 97 / 186 |
-| dig, budget 128 | 16,162 | 129,296 | 0.821 | 0.988 | 52 / 186 |
-| dig, budget 256 | 20,139 | 161,112 | 0.807 | 0.991 | 17 / 186 |
-| dig, budget 512 | 22,328 | 178,624 | 0.804 | 0.992 | 4 / 186 |
-| dig, budget 1,024 | 22,681 | 181,448 | 0.804 | 0.993 | 0 / 186 |
-| **χ-shape** | **8,364** | **66,912** | 0.832 | 0.992 | — |
+**The frequency is not the argument, and this is the point on which the measurement was overruled.**
+On `clusters/hdbscan` at full membership, 3 of 197 artifacts have two components holding at least 5%
+of their members, and only 0.1% of member rows sit outside their artifact's largest component; the
+count does not rise under uniform random masks down to 0.2% of members, because α is measured in the
+cloud's own units and follows the cloud as it thins. But the wire is not shaped by one corpus's
+statistics. The `clusters/kmeans` control on the same bundle is already twice as modal; a
+*spatially correlated* mask — which is what a real mask is, since terms correlate with position in
+an embedding — is **not measured and should not be claimed either way**; and a clustering that is
+not density-based has no reason to be unimodal at all. A shape family whose failure mode is lying
+about the ground is the wrong default whatever its frequency here.
 
-The χ-shape reaches the dig's best fidelity for **37% of its bytes**, and for 73% of what the dig
-already sends at budget 64.
+What splitting buys, measured on the shape as built: the tightest artifact on `clusters/hdbscan`
+goes from **0.290 of its convex wrap to 0.093**. The whole-layer cost is 1.7% more hull bytes and 8%
+more time (§7).
 
-## 2. The construction on `main`, and where it fails
+**The split is decided before the budget is spent**, and that ordering is the design. The
+alternative — discovering the split during the dig, by letting a pinching dig separate the ring
+instead of being refused — is a smaller change to the code and was declined: it splits only where 64
+digs happen to reach, so the separation the ruling is about would become a function of a cap. 108 of
+197 artifacts exhaust that cap.
 
-Start at the convex wrap, repeatedly replace the longest edge above α with two edges through the
-member closest to it, refuse the dig when no member qualifies or when the ring would stop being
-simple, and stop after 64 insertions. `annotations.md` §4.2 states it; `derived.rs` implements it.
-
-Its properties are the ones that matter and it keeps all of them: every vertex is a visible
-member's position, every visible member is inside, the result is a subset of the wrap, and the
-arithmetic is exact in `i128` so the shape is a function of the member positions and of nothing
-else. **Nothing below asks to give any of those up.**
-
-Where it fails:
-
-- **The budget binds, and binds worst where the map is busiest.** Above, and in the memo's own size
-  table.
-- **A vertex bought is not a vertex spent well.** The dig at 1,024 vertices and the χ-shape at 8,364
-  over the same 186 artifacts reach the same fill; the dig uses 2.7× the wire to do it.
-- **α is sound and its value is not obviously right.** Three times the median edge of the
-  principal's own convex wrap is scale-free and robust, and it is **mask-stable**, which is a
-  stronger property than it was given credit for: over 40 artifacts masked to uniform random
-  subsets down to 0.2% of their members, with α recomputed per subset exactly as the engine does,
-  the χ-shape's median fill stays between 0.984 and 0.996 and the count of artifacts whose members
-  fall into more than one component does not rise (`mask_sweep.py`). The value 3 is a different
-  question, and it interacts with the budget:
-
-| α (× median wrap edge) | dig vertices | dig area/wrap | dig fill | dig at budget | χ vertices | χ area/wrap | χ fill |
-|---|---|---|---|---|---|---|---|
-| 1 | 15,656 | 0.823 | 0.846 | 185 / 197 | 28,886 | 0.633 | 0.995 |
-| 1.5 | 15,070 | 0.826 | 0.910 | 166 / 197 | 18,828 | 0.700 | 0.995 |
-| 2 | 14,272 | 0.841 | 0.961 | 140 / 197 | 14,057 | 0.754 | 0.995 |
-| **3** | 12,388 | 0.870 | 0.976 | 108 / 197 | 9,441 | 0.825 | 0.992 |
-| 5 | 9,953 | 0.917 | 0.982 | 68 / 197 | 6,192 | 0.911 | 0.988 |
-| 8 | 7,202 | 1.000 | 0.982 | 41 / 197 | 4,602 | 1.000 | 0.987 |
-
-  Read the dig's column and α is not a tightness knob at all: **the dig's fidelity is worse at a
-  finer α**, because a finer α finds more bridges than 64 vertices can dig and the budget spends
-  them on the longest ones. 3 is close to where that stops hurting, which is a defensible place to
-  have landed. Read the χ column and α is what it is supposed to be — a monotone tightness knob
-  whose fidelity does not move. **At α = 8 both families return the convex wrap**, which is what
-  makes the wrap the honest answer at a coarse enough scale rather than a failure mode.
-- **The 64 is a magic number reached by a knee that no longer holds.** The memo found the knee by
-  trading area against bytes at a fixed construction. Once the construction is in question the knee
-  moves: the χ-shape at 8,364 vertices beats the dig at 22,681.
-
-## 3. The families
+## 4. The family
 
 The admissibility test is one question, and it decides most of the survey: **does every vertex
 correspond to a visible member's position, or does the shape claim ground no member occupies?** A
 shape whose vertices are members says exactly what the data says; a shape whose vertices are
-invented asserts a boundary the members never drew, and it costs the simplest form of the
-disclosure argument in §7. This is the same objection that keeps a degenerate hull a point rather
-than rounding it up to a triangle.
+invented asserts a boundary the members never drew, and it costs the simplest form of the disclosure
+argument in §10. This is the same objection that keeps a degenerate hull a point rather than
+rounding it up to a triangle.
 
-| family | vertices are members | contains every member | rings | wire, whole layer | what it claims that is not true |
-|---|---|---|---|---|---|
-| convex wrap | yes | yes | 1 | 26,224 B | 14.3% of its area is void; 24.5% of the layer's drawn area is one artifact over an unrelated one |
-| **α shape, dig (`main`)** | yes | yes | 1 | 99,104 B | 2.4% void at the median, 20.4% at 200,000+ members |
-| **χ-shape** (Duckham et al.) | yes | yes | 1 | 75,528 B | 0.8% void at the median; on a genuinely multi-modal membership it draws filaments between the blobs |
-| α-complex proper | yes | **no** | 1 … 10 | 80,648 B | nothing — it is the members' footprint; that is why it is the fill denominator |
-| k-NN hull (Moreira–Santos) | yes | yes, by restart | 1 | not measured | nothing geometric; it may not terminate (below) |
-| covariance ellipse | **no** | **no** | 1 | 48 v, fixed | an ellipse the cluster is not, excluding members and covering ground no member occupies |
-| buffered union (dilate and union) | **no** | yes | 1 … n | 78 v on one artifact | a disc's worth of ground around every member |
-| density level set | **no** | **no** | 21 on one artifact | 3,584 v on one artifact | a contour of a raster, at a level nothing in the data picks |
-| any of the above, Douglas–Peucker | yes (keeps a **subset**) | **no** | unchanged | see below | a corner cut past the members it enclosed |
-| any of the above, Chaikin or spline | **no** | **no** | unchanged | 832 v where 208 went in | a smooth boundary the members do not have |
+| family | vertices are members | contains every member | what it claims that is not true |
+|---|---|---|---|
+| convex wrap | yes | yes | 14.3% of its area is void; 24.5% of the layer's drawn area is one artifact over an unrelated one |
+| **the dig, per group** (built) | yes | yes | at most 2.4% void at the median and 20.4% at 200,000+ members, those being the single ring's |
+| χ-shape (Duckham et al.) | yes | yes | 0.8% void at the median; needs a triangulation (§4.1) |
+| α-complex proper | yes | **no** | nothing — it is the members' footprint; that is why it is the fill denominator |
+| k-NN hull (Moreira–Santos) | yes | yes, by restart | nothing geometric; it may not terminate |
+| covariance ellipse | **no** | **no** | an ellipse the cluster is not, excluding members and covering ground no member occupies |
+| buffered union (dilate and union) | **no** | yes | a disc's worth of ground around every member |
+| density level set | **no** | **no** | a contour of a raster, at a level nothing in the data picks |
+| any of the above, Douglas–Peucker | yes (keeps a **subset**) | **no** | a corner cut past the members it enclosed |
+| any of the above, Chaikin or spline | **no** | **no** | a smooth boundary the members do not have |
 
-Four of these are out on the vertex test alone. Rendered side by side over one 98,225-member
-cluster in `figures/families-hdb-2422728.png`, where the ellipse and the level set are visibly
-describing something other than the cluster.
+Four are out on the vertex test alone.
 
 **The α-complex is the interesting rejection.** It is the textbook object, it is the only family
-whose fill is 1.000 by construction, and it costs *fewer* bytes than the dig. It fails on
-containment: over the layer it leaves 24 members outside their own artifact's shape (2 of 197
-artifacts), and on the k-means control 137 (4 of 64). A member outside its artifact's shape is a
-point the client would draw in the cluster's colour, outside the cluster's outline — the exact
-display contradiction decision 0099's *exact only* exists to prevent. It is retained here as the
-**fill denominator** and as the thing a multi-ring wire would be carrying, not as a candidate.
+whose fill is 1.000 by construction, it costs fewer bytes than the dig, and it yields components and
+holes without being asked. It fails on containment: over `clusters/hdbscan` it leaves 24 members
+outside their own artifact's shape (2 of 197 artifacts), and on the k-means control 137 (4 of 64). A
+member outside its artifact's shape is a point the client would draw in the cluster's colour,
+outside the cluster's outline — the display contradiction [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)'s
+*exact only* exists to prevent. It is retained as the fill denominator, not as a candidate.
 
 **The k-NN hull terminates when it feels like it.** The Moreira–Santos walk restarts with `k + 1`
 whenever it self-intersects or strands a member, and the paper bounds nothing. On one
-16,929-member cluster (`knn_scaling.py`): at 400 sampled members it needs `k = 40`, at 800 `k = 64`,
-at 1,500 `k = 120`, and at 3,000 it dead-ends at every `k` up to 120. `k` is a neighbour *count*,
-not a length, so it does not transfer across memberships of different density — and a service that
-derives a shape per request per principal is handed a different density every time. **Not
-recommended, and the reason is termination, not shape.**
+16,929-member cluster: at 400 sampled members it needs `k = 40`, at 800 `k = 64`, at 1,500 `k = 120`,
+and at 3,000 it dead-ends at every `k` up to 120. `k` is a neighbour *count*, not a length, so it
+does not transfer across memberships of different density — and a service that derives a shape per
+request per principal is handed a different density every time. Refused for termination, not shape.
 
-**Simplification is not free, and Douglas–Peucker is the only post-process that keeps the vertex
-property** — it selects a subset of its input, so a simplified χ-shape still has only members for
-vertices. What it does not keep is containment. Over the layer (`dp_sweep.py`):
+**Douglas–Peucker is the only post-process that keeps the vertex property**, since it selects a
+subset of its input. What it does not keep is containment: over the layer, at a tolerance of α/32 it
+already leaves 12,866 members outside, at α/8 130,585, at α/2 712,003. There is no tolerance at
+which containment survives. A containment-preserving, outward-only simplification is not measured
+here.
 
-| tolerance | vertices | wire bytes | area / χ | members left outside |
+### 4.1 What a triangulation costs, and why the dig keeps the job
+
+The χ-shape is the better shape. It follows a Delaunay triangulation's own boundary — peel the
+triangle behind the longest boundary edge above α, unless its third vertex is already on the
+boundary — where the dig inserts one vertex per pass along the current longest edge, which is a
+coarse way to spend a vertex. Over `clusters/hdbscan`, run per α-group exactly as the dig is:
+
+| | vertices | rings | wire bytes | area / wrap, mean |
 |---|---|---|---|---|
-| none | 9,441 | 75,528 | 1.000 | 0 |
-| α/32 | 5,442 | 43,536 | 0.999 | 12,866 (0.10%) |
-| α/16 | 4,375 | 35,000 | 0.996 | 44,219 (0.35%) |
-| α/8 | 3,322 | 26,576 | 0.990 | 130,585 (1.02%) |
-| α/4 | 2,337 | 18,696 | 0.978 | 309,227 (2.41%) |
-| α/2 | 1,494 | 11,952 | 0.961 | 712,003 (5.56%) |
+| the dig, per group (built) | 12,497 | 215 | 100,836 | 0.852 |
+| χ-shape, per group | 9,424 | 223 | 76,284 | 0.789 |
 
-There is no tolerance at which containment survives. A containment-preserving simplification would
-have to be outward-only and is not measured here.
+**It costs a Delaunay triangulation, and the triangulation is the whole objection.** Timed in one
+release-mode Rust process against the engine's own dig on the same gathered positions
+(`hull_triangulation.rs`):
 
-**The χ-shape is the recommendation.** Take the Delaunay triangulation of the members; the boundary
-starts as the convex wrap; repeatedly remove the triangle behind the longest boundary edge above α,
-**unless its third vertex is already on the boundary**. That last clause is the whole of it: it is
-what keeps the result one simple ring with no holes and no pinch points, and it is why the χ-shape
-degrades to a filament rather than to a hole where the dig degrades to the wrap. Every vertex is a
-member, every member stays inside (measured: 0 outside over 197 + 64 artifacts), and the result is
-inside the convex wrap because a triangulation of the members fills exactly that wrap.
+| | Delaunay | components from it | χ-peel | **the dig** |
+|---|---|---|---|---|
+| whole layer, 197 artifacts | 5.0–5.3 s | 1.0–1.1 s | 0.17–0.18 s | **0.82 s** |
+| the 2,422,484-member artifact | 1.43–1.55 s | 0.27–0.34 s | 0.04 s | **0.16 s** |
 
-Its cost is a **Delaunay triangulation the workspace does not have**, which is one of the two
-reasons the memo declined the α-complex. In this probe, Qhull triangulates and the peel runs in
-18.4 s + 6.4 s over 186 artifacts against 6.7 s for the numpy dig at budget 64 and 23.1 s at
-budget 1,024 — but the dig here is a numpy loop and Qhull is C, so **that column compares
-implementations, not algorithms, and is not evidence.** What the engine's dig costs is measured
-(841 ms over the layer, memo); what a Rust triangulator costs is not measured at all. §8's ruling C
-names it.
+The triangulated route is 7.6–8.1× the dig over the layer and about 11× on the largest artifact, and
+a single artifact's triangulation crosses a second on its own. That is the price refused: **24% more
+hull bytes and a shape 8% looser in area than the χ-shape would have given.** The refusal is about
+the triangulation and nothing else — if the workspace ever carries one for another reason, the peel
+itself is cheap and this is the first thing to revisit.
 
-## 4. One ring or several
+## 5. Grouping the members
 
-The wire carries one ring, and an HDBSCAN cluster in a UMAP projection can be several separated
-blobs. How often it is, on this corpus, is the measurement this section exists for. Two members are
-in one component when a chain of members steps between them in steps of at most α — the same α the
-shape uses; the Euclidean minimum spanning tree is a subgraph of the Delaunay triangulation, so
-cutting Delaunay edges longer than α gives exactly the single-linkage components at α.
+Two members belong to one group when a chain of members steps between them in steps of at most α.
+That is single-linkage at α, and it is computed conservatively rather than exactly.
 
-**On `clusters/hdbscan`, at full membership, multi-modality is rare.**
+**Grid connectivity at α.** The members are bucketed into a square grid anchored at their own
+bounding box, with a cell side of α/2, and two members are joined when their cells are within two
+cells of each other along both axes. A displacement of at most α moves a cell index by at most two
+per axis, so **every pair within α lands in one group**: the grouping never separates members
+single-linkage would join. It does join members up to 2.12α apart, and that is the safe direction —
+an over-joined group draws the single ring the wire drew before, while an over-split one would claim
+a gap the members do not have. Where the members are so scattered that a grid at that resolution
+would hold more cells than there are members, the cell side doubles until they fit, which only ever
+joins more. The pass is `O(members)` with no data-dependent worst case.
 
-- Artifacts with two or more components holding at least 5% of members: **3 of 197**. At 10%: **1**.
-- Members outside their artifact's largest component: **8,321 of 12,808,677 member rows (0.1%)**.
-- The α-complex — the shape that is free to be disconnected — has more than one ring on **4 of
-  197** artifacts, and a hole on **2**, three holes in total.
+**The exact route is the one ruled out in §4.1.** The Euclidean minimum spanning tree is a subgraph
+of the Delaunay triangulation, so cutting the triangulation's edges longer than α gives exactly the
+single-linkage components — and costs the triangulation. What the approximation gives up, measured
+against that exact partition over 197 artifacts:
 
-**It does not grow under a mask.** Over 40 artifacts thinned to uniform random subsets at 50%, 20%,
-5%, 1% and 0.2% of their members, with α recomputed from each subset's own wrap, the count of
-multi-modal artifacts is 2, 1, 0, 1 and 1 of 40, and 1 of the 33 that still have 16 members at
-0.2% — flat rather than rising. The explanation is α's own definition: it is measured in the
-cloud's own units, so it follows the cloud as the cloud thins. **This is measured against a uniform random mask only.** A real
-mask follows terms, terms correlate with position in an embedding, and a spatially correlated mask
-will break a cloud more than a uniform one does; that case is **not measured** and should not be
-claimed either way.
+| cell side | joins members up to | agrees exactly | artifacts with more than one ring |
+|---|---|---|---|
+| α | 2.83α | 190 / 197 | 2 |
+| **α/2** | **2.12α** | **192 / 197** | **4** |
+| α/3 | 1.89α | 191 / 197 | 3 |
+| α/4 | 1.77α | 192 / 197 | 4 |
+| exact (Delaunay) | α | — | 7 |
 
-**It is a property of the clustering, not of the map.** On the `clusters/kmeans` control the same
-measurement gives **4 of 64** artifacts multi-modal at 5%, 1.9% of member rows outside their
-largest component, and an α-complex with more than one ring on 7 of 64 — one of them with **51**
-rings. k-means cells are convex by construction, and it shows in the other direction too: on that
-layer every family's precision is exactly 1.000, meaning no k-means cluster's shape contains a
-single point belonging to another. HDBSCAN's do: 81 of 197 convex wraps, 50 of 197 dig shapes and
-27 of 197 χ-shapes contain more than 10% foreign points.
+The exact partition finds 223 rings where the grid at α/2 finds 215. A finer grid does not converge
+on the exact answer, because no grid can: the best a neighbourhood-of-cells join can do is √2·α as
+the cell shrinks. α/2 is where the curve flattens.
 
-**The recommendation is one ring, and it is not a claim that one ring is always honest.** On the
-three multi-modal artifacts the single ring is visibly a lie in one of two ways
-(`figures/multimodal.png`): the dig draws a polygon over the gaps (fill 0.089 on the worst), and
-the χ-shape draws a spider — filaments of near-zero area joining the blobs, which claims almost no
-ground but reads as lines on the map and is awkward to pick. The α-complex draws ten rings and is
-right.
+## 6. Holes
 
-What carrying several rings would cost, so the ruling is made with it in view:
+**The wire carries no holes, and no ring encloses another.** Three reasons, in the order they bind.
 
-- **The wire.** Two same-length `list<uint32>` columns become either a list of lists, or the same
-  two columns plus a third `list<uint32>` of ring start offsets. Either is a schema change to one
-  frame under decision 0048's rules, and neither is expensive: the whole layer's rings add 4 bytes
-  each.
-- **The client's drawing.** deck's `PolygonLayer` takes a simple ring or a ring-with-holes in one
-  datum, and a **disconnected** shape is not one datum: it becomes several outline rows sharing one
-  `tessera_id`, and the pick path's `artifactIds` parallel array stops being one row per artifact.
-- **The client's containment reasoning.** Nothing in the client tests containment today — decision
-  0099 forbids the geometric guess, and `extentOf` reads the served `box`, not the hull — so a
-  multi-ring shape changes **nothing** there. That is the cheapest half of this question and it is
-  worth saying plainly.
-- **The truthfulness rules.** They do not move. A ring per component says *the members are here and
-  here*; one ring around both says *the members are somewhere in this region*. The first is
-  strictly more true, which is why the α-complex is the object a multi-ring wire would carry — and
-  the α-complex is the family that drops members, so a multi-ring wire would want a
-  **containment-preserving** disconnected shape, which is the χ-shape run per component. That is a
-  design, not a parameter, and it is why this is ruling D rather than a default.
+The construction cannot produce one. Digging moves a boundary inward from a group's convex wrap, so
+a void with members all the way around it is never reachable; the family that does emit interior
+rings is the α-complex, which is refused for leaving members outside its own shape (§4). Carrying
+holes would therefore mean changing the family, not adding a column.
 
-## 5. Who chooses
+Nothing would consume them. A hole is a claim — *no members here* — of exactly the same kind as the
+outer boundary and exactly as exact, so a client could honour it. But no client tests a point
+against a served shape: [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)
+forbids the geometric guess, and `extentOf` reads the served `box`. A hole would be drawn and never
+used, and it would need a third level of nesting on the wire and an even-odd rule in the pick path
+to be drawn correctly at all.
 
-Four surfaces, against the question the brief asks and the property §7 must preserve.
+The residual is small and is stated rather than hidden. **An annulus of members is drawn as a
+disk** — a unit test says exactly that, so a reader meets the decision at the mechanism. Over
+`clusters/hdbscan` the α-complex, which is free to have them, has a hole on 2 of 197 artifacts and
+three holes in total. Revisit this with §4.1: a triangulation is what both the χ-shape and a hole
+would need, so they are one question and would be reopened together.
 
-**The layer author, at declaration.** `ComputedProperty` is `Centroid | Box | Hull` and cannot
-express a family. It could: `hull` gains a family name and, if the family has one, its α factor.
-The author knows what produced the layer, which is the thing the choice actually depends on — the
-k-means control needs no concavity at all and the HDBSCAN layer needs a great deal.
+## 7. What it costs
 
-**The service, automatically, with a declared override**, which is exactly decision 0094's shape
-for the serving layout. **The argument does not transfer, and the reason is short: 0094's choice
-puts nothing on the wire.** Both layouts answer identically, so a fold may flip one freely. A shape
-family is *on the wire* — it is the bytes of `hull_x` and `hull_y` — so an automatic flip at a fold
-would change what every client draws, for the same `tessera_id` and the same principal, with no
-version move and nothing in the response saying so. What does transfer is the *measurement* half:
-the service can measure a layer's shape and **report** which family fits, in the way decision 0092
-has the build report a layer's shape without binding anything to it.
+Measured at **full membership**, which is the largest input the derivation takes; a masked principal
+gathers fewer positions and digs a smaller cloud. Release build, one thread; timings vary about ±4%
+run to run.
 
-**The viewer, per request.** This is the one to be careful about, in both directions.
+| layer | artifacts | members | rings | > 1 ring | wrap vertices | shape vertices | hull bytes | wrap | shape | area / wrap |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `clusters/hdbscan` | 197 | 6,146 … 2,422,486 | 215 | 4 | 3,278 | 12,497 | 100,836 | 573 ms | 906 ms | 0.852 mean, 0.093 min |
+| `clusters/kmeans` | 64 | 13,658 … 73,360 | 190 | 7 | 1,587 | 5,494 | 44,712 | 92 ms | 170 ms | 0.874 mean, 0.017 min |
+| `clusters/toponymy` L3 | 574 | 1,211 … 11,682 | 618 | 18 | 7,846 | 25,237 | 204,368 | 57 ms | 153 ms | 0.798 mean, 0.012 min |
+| `topics/hdbscan` | 195 | 200 | 197 | 2 | 2,098 | 3,833 | 31,452 | 1 ms | 3 ms | 0.874 mean, 0.113 min |
 
-It does not leak. Every family in §3 is a function of `membership ∩ M_auth` and of nothing else; a
-caller who asks for the same membership under five families receives five functions of the same
-visible members, and the union of five functions of a set is still a function of that set. There is
-no *disclosure* argument against a per-request family, and inventing one would be the failure mode
-CLAUDE.md names — a refusal outside the disclosure surface that looks principled.
+*Hull bytes* is 8 per vertex plus 4 per ring, and excludes the Arrow list offsets and validity, which
+do not move with the shape. Position gathering — one read per member, which a declared `box` already
+pays — is 181 ms over `clusters/hdbscan` and 46 ms on its largest artifact, and sits under both
+columns.
 
-The arguments against it are cost and coherence. The shape is derived per request per principal
-already, so a family is not a new axis of work — but a *selectable* family is a reason to ask
-twice, and two responses would carry different geometry for one `tessera_id` within one session,
-which is a stronger version of the caching hazard `contracts.md` §3.2 already warns about across
-principals. And the viewer has no basis on which to choose: the right family follows the clustering
-that produced the layer, which the viewer cannot see.
+Against the single ring it replaces, on `clusters/hdbscan`: **12,388 → 12,497 vertices, 99,104 →
+100,836 bytes (+1.7%), 841 → 906 ms (+8%)**. The extra vertices are the additional groups' own
+wraps; the extra time is the grouping pass. The shape's area is 0.858 → 0.852 of the wrap on
+average, and 0.290 → 0.093 at its tightest — the whole gain is on the multi-modal artifacts, which
+is what the ruling was about.
 
-**A dialable α is the one that must not exist**, and for a sharper reason than a dialable family.
-α is a length. A caller free to vary it receives a monotone family of nested shapes over the same
-members and can read the cloud's boundary at every scale — which is more than any one response
-gives, even though it is still bounded by `membership ∩ M_auth`. It is a probe in the brief's sense
-whether or not it crosses the register's inclusion test, and the derivation of α from the
-principal's own wrap is what closes it. **Keep that.**
+## 8. Who chooses
 
-**Recommended: the layer author declares the family; the build reports what it measured; nothing
-flips at a fold; no request field names a family or an α.** If that is wrong, the cost is a layer
-declared with a family that suits it badly — visible on the map, fixed by editing one declaration
-and rebuilding, and disclosing nothing. That is the cheapest wrong answer of the four.
+**Nobody, and no request field names a family or an α.** There is one family, so there is nothing to
+declare; if a second is ever added, the choice belongs to the layer author at declaration, because
+the right family follows the clustering that produced the layer, which is what the author knows and
+neither the service nor the viewer can see. The service may *measure* a layer's shape and report
+what it found, in the way [decision 0092](../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)
+has the build report a layer's shape without binding anything to it. It must not flip one at a fold:
+[decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)'s
+automatic-with-override shape does not transfer, because a serving layout puts nothing on the wire
+and both layouts answer identically, where a shape family *is* the bytes of `hull_x` and `hull_y`.
 
-## 6. What the client must do
+**A dialable α is the one that must not exist**, and for a sharper reason than a dialable family. A
+family is a function of `membership ∩ M_auth` like everything else here, and five families over one
+membership are five functions of the same visible members — there is no disclosure argument against
+one, and inventing one would be a refusal outside the disclosure surface. α is a *length*. A caller
+free to vary it receives a monotone family of nested shapes over the same members and can read the
+cloud's boundary at every scale, which is more than any one response gives. Deriving α from the
+principal's own wrap is what closes that, and it is why α is not a declared per-layer key either.
 
-**Drawing.** Nothing changes for a single-ring shape of any family: `outlineOf` maps the wire's
-vertices through `gridToWorld` and hands them to a `PolygonLayer`, and it already refuses to smooth
-them, because Chaikin cuts a reflex corner *outward* and a drawn shape must not claim area the
-served shape does not have. A χ-shape has more reflex corners than the dig's, which makes that rule
-matter more rather than differently. Vertex counts are of the same order — the dig's largest is 94
-and the χ-shape's is 208 over this layer — so the outline path's per-artifact cost does not change
-character. A multi-ring shape needs one outline datum per outer ring, with holes as inner rings of
-the datum that contains them.
+## 9. What the client must do
 
-**Picking.** The outline polygon is what answers a pick — filled at zero alpha so the pick pass
-sees it — and the parallel `artifactIds` array assumes one polygon per artifact. A multi-ring shape
-breaks that assumption and nothing else: the fix is a map from row to artifact rather than an index
-match. A filament, which is what a single-ring χ-shape draws across a multi-modal membership, is
-pickable in the sense that it has area, and not in the sense that anyone can hit it.
+**Drawing.** One outline datum per ring, all of them carrying the artifact's `tessera_id`.
+`outlineOf` maps a ring's vertices through `gridToWorld` and hands them to a `PolygonLayer`, and it
+must keep refusing to smooth them: Chaikin cuts a reflex corner *outward*, and a drawn shape must
+not claim area the served shape does not have. Vertex counts do not change character — the largest
+shape on `clusters/hdbscan` is 144 vertices across at most 10 rings — so the per-artifact cost is
+what it was.
+
+**Picking.** The outline polygon is what answers a pick, filled at zero alpha so the pick pass sees
+it, and the parallel `artifactIds` array assumes one polygon per artifact. That assumption is what
+breaks, and it is the only thing that does: the fix is a map from row to artifact rather than an
+index match. Two rings of one artifact may overlap (§1), and it costs nothing — both carry the same
+identifier, so the pick answers the same artifact either way.
 
 **`extentOf` and fit.** Unaffected. It reads the served `box`, which is the members' bounding box
 whatever the hull is, and a hull is never the right thing to fit a viewport to — the box is a
-superset of every family here.
+superset of every ring.
+
+**Decoding.** `hull_x` and `hull_y` are `list<list<uint32>>`: descend two levels, and **check that
+the two axes agree on the ring count and on each ring's length** rather than assuming it. They agree
+by construction, and a decoder that assumes it will misdraw silently on the day something else does
+not. A single-level decode fails its downcast, which is the point of the nesting.
 
 **The truthfulness rules do not move.** A hull is a display of where the visible members are; it is
-never evidence of membership, and no client tests a point against it (decision 0099). A shape that
-is tighter, that has holes, or that has several rings says *less* about the members a principal
-cannot see, never more, so nothing the client is obliged to do gets harder as the shape gets
-honest.
+never evidence of membership, and no client tests a point against it (decision 0099). A shape that is
+tighter, or that has several rings, says *less* about the members a principal cannot see, never more,
+so nothing the client is obliged to do gets harder as the shape gets honest.
 
-## 7. Disclosure
+## 10. Disclosure
 
 Appendix C's inclusion test: *a row exists only where a viewer, reading responses they are entitled
-to, can end up knowing something about data they were not served.* Applied to every family
-recommended or rejected above:
+to, can end up knowing something about data they were not served.*
 
 - The input is `membership ∩ M_auth` and nothing else, which is the closure rule of
-  `annotations.md` §4.2 and **I2** at the artifact. α derives from the same visible members.
-- Every vertex of the χ-shape, the dig, the wrap, the α-complex and the k-NN hull is a visible
-  member's position. The ellipse, the buffered union, the level set and every smoothing invent
-  vertices — which is an argument against them and **not** a disclosure, since an invented vertex
-  is a function of the same visible members too. They are refused on truthfulness, not on leakage,
-  and §3 says so in that order.
-- Every recommended shape is a **subset of the convex wrap**, so it says strictly less about where
-  the members a principal cannot see are sitting.
+  `annotations.md` §4.2 and **I2** at the artifact. α and the grouping derive from the same visible
+  members.
+- Every vertex is a visible member's position — including the single vertex of a one-member group,
+  which is the same property every hull vertex has always had, and the same one the `box` already
+  exposes at the extremes.
+- The whole shape is a **subset of the convex wrap** of the visible members, so it says strictly less
+  about where the members a principal cannot see are sitting. Several rings say less again: they are
+  the same members drawn without the ground between them.
 
 **No register row, and this note is where that is recorded** — Appendix C's head note asks that a
 check which found nothing sit beside the mechanism it checked rather than in the register.
 
-The one property that must be preserved by whatever §5 is ruled: **no request field may name a
-family or an α**. §5 argues that a family is not a disclosure and an α is a probe; the rule that
-follows is the same either way, and it is cheaper to keep than to reason about per feature.
-
-## 8. The open decisions
-
-**A — Which family does `hull` name?**
-1. Keep the dig at budget 64, as built. Cheapest; leaves the largest artifacts at fill 0.796 and
-   the layer at 15.9% cross-branch overlap.
-2. Keep the dig and raise the budget (§1's table; 512 is where it stops binding). No dependency,
-   no new code beyond a constant. Costs 2× the wire the shape sends today for fill 0.992.
-3. **Replace it with the χ-shape.** Same fidelity as (2) for 37% of its bytes and 73% of today's.
-   Costs a Delaunay triangulation the workspace does not carry.
-
-*Recommended: 3, subject to C.* If it is wrong, the cost is a dependency and a rewrite of one
-function; the shape's properties are unchanged, so nothing downstream moves.
-
-**B — Does the vertex budget stay a flat 64?** The 64 was a knee measured against the dig. Under
-(3) the χ-shape's own peel stops at α with no cap at all, and its largest shape on this layer is
-208 vertices — 1,664 bytes. Either keep a cap (the peel is longest-edge-first, so a cap gives a
-coarser shape and never a wrong one, exactly as the dig's does) or drop it. *Recommended: keep a
-cap, well above the measured maximum, as a wire-size guard rather than a fidelity control.*
-
-**C — Does the engine acquire a triangulation?** A is not rulable without this and this probe
-cannot answer it: Qhull-in-C against numpy-in-Python is not a comparison. The measurement that
-settles it is a Rust Delaunay over the same 197 memberships timed against `derived.rs`'s dig on the
-same machine, which is an afternoon and no design. *Recommended: take that measurement before
-ruling A; if a Rust triangulation of the 2.4M-member artifact costs more than about 1 s, rule A2
-instead.*
-
-**D — Does the wire carry more than one ring?** Measured need at full membership: 3 of 197
-artifacts on `clusters/hdbscan`, 4 of 64 on `clusters/kmeans`, and flat under a uniform mask —
-with a correlated mask unmeasured. Carrying several rings costs a third column, one outline datum
-per ring in the client, and a change to the pick path's index assumption; it changes no
-truthfulness rule and no leak-register row. *Recommended: one ring, and the χ-shape's filament as
-the honest degradation. Revisit if a layer arrives whose clustering is not density-based —
-k-means is already twice as modal, and the 51-ring artifact on that layer is what this looks like
-when it goes wrong.*
-
-> **RULED 2026-08-27: several rings.** The owner overrides the recommendation, and the reason is
-> that the measurement above answers the wrong question: it says multi-modality is rare *on this
-> corpus*, and the wire is not shaped by one corpus's statistics. Multi-modal memberships exist
-> generally — the k-means control on this very bundle is already twice as modal, a correlated mask
-> is unmeasured, and a clustering that is not density-based has no reason to be unimodal at all. A
-> single ring around two separated components is a claim about where the members are that no α
-> corrects, and a shape family whose failure mode is *lying about the ground* is the wrong default
-> whatever its frequency here. **A and C are re-opened in this light**: the χ-shape is defined to
-> keep one simple polygon, while an α-complex yields components naturally, so the family question
-> and the multi-ring question are one question and are answered together.
-
-**E — Who chooses (§5)?** The options are: the layer author at declaration; the service
-automatically with a declared override (decision 0094's shape); the viewer per request. *Recommended:
-the author declares, the build reports what it measured, nothing flips at a fold, and no request
-field names a family or an α.*
-
 ## Appendix R — Review trail
 
-- **r1** — Drafted 2026-08-27 from the investigation in
-  [`probes/2026-08-27-artifact-shapes/`](../../probes/2026-08-27-artifact-shapes/). Not yet
-  reviewed. Three findings shape it and each is a measurement rather than a judgement: the built
-  shape's limit is its **vertex budget** and not the flush-flank case its own documentation
-  records (108 of 197 artifacts stop at the budget with a bridge live, against 13 refused digs over
-  the whole layer); **multi-modality is rare on this layer and mask-stable** (3 of 197 at full
-  membership, flat under uniform random masks down to 0.2%), which is the opposite of what the
-  brief expected and is the reason ruling D recommends against a multi-ring wire; and the
-  **χ-shape reaches the dig's best fidelity for 37% of its wire**, which is the reason ruling A
-  recommends replacing the construction rather than raising its budget. The comparison the ruling
-  most needs — a Rust triangulation against the Rust dig — is **not measured**, and ruling C says
-  so rather than estimating it.
+- **r1** — Drafted 2026-08-27 as an investigation from
+  [`probes/2026-08-27-artifact-shapes/`](../../probes/2026-08-27-artifact-shapes/), with five open
+  rulings. Three measurements shaped it: the built shape's limit is its **vertex budget** and not
+  the flush-flank case its own documentation records (108 of 197 artifacts stop at the budget with a
+  bridge live, against 13 refused digs over the whole layer); **multi-modality is rare on this layer
+  and mask-stable** (3 of 197 at full membership, flat under uniform random masks down to 0.2%);
+  and the **χ-shape reaches the dig's best fidelity for 37% of its wire**.
+- **r2 — 2026-08-28. Promoted, and the shape changed.** Six rulings, in the order they fell.
+  **D (owner, 2026-08-27): several rings**, overriding r1's recommendation, on the ground that the
+  measurement answered the wrong question — the wire is not shaped by one corpus's statistics, and a
+  family whose failure mode is lying about the ground is the wrong default whatever its frequency
+  (§3). **C: the engine does not acquire a triangulation** — measured Rust against Rust, 1.4–1.5 s
+  for the 2.4M-member artifact's Delaunay against 0.16 s for the whole dig, 7.6–8.1× over the layer
+  (§4.1). **A: the dig is kept**, which C forces; the χ-shape's 24% fewer bytes and 8% tighter area
+  are the stated price. **B: the budget stays 64**, now per artifact and shared across rings, so
+  several groups do not multiply the wire. **E: nobody chooses** — one family leaves nothing to
+  declare, and the rule that survives is that no request field names a family or an α (§8).
+  **F (new): no holes** — the construction cannot produce one, nothing would consume one under
+  decision 0099, and the residual is an annulus drawn as a disk (§6). Two findings are recorded as
+  negative results rather than smoothed over: **a member may lie inside a second ring of its own
+  artifact** where one group wraps around another (24 positions on `clusters/kmeans`, 0 on three
+  other layers), and **grid grouping is not exact** — it agrees with single-linkage at α on 192 of
+  197 artifacts and coarsens the rest, and no grid can converge on exactness (§5).

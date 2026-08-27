@@ -359,7 +359,8 @@ A layer declares which derived properties its artifacts expose, from a closed vo
 implements — **`centroid`, `box` and `hull` as built** (Stage 3), each computed from the visible
 rows and served in the grid units the point path already uses, so a client needs no quantisation
 extent to draw one. **`hull` is a concave (alpha) shape over the visible members, not their convex
-wrap** — see below. A name outside the vocabulary is **refused at registration** rather than
+wrap, and it carries one ring per separated group of them rather than one ring per artifact** — see
+below. A name outside the vocabulary is **refused at registration** rather than
 accepted and quietly omitted: an artifact served without content its layer declared cannot be told
 apart, by a client, from one whose content was withheld — and nothing is withheld from a served
 artifact. ⊘ **`extractive_terms` is specified and not implemented**, and is therefore refused with
@@ -380,19 +381,29 @@ the carved triangle empty of members, so the shape contains every visible member
 whole construction is exact integer arithmetic, so it is a function of the member positions and of
 nothing else.
 
+**And it is several rings where the members are several clouds.** A membership can be two separated
+regions, and one ring around both claims the ground between them — a claim digging cannot undo,
+because it works inward from a boundary and a gap with a ring on both sides is reachable from
+neither. So the visible members are grouped first, at the same α, and a ring is dug per group; each
+ring holds every member of its own group. The geometry, the grouping rule and what it gives up are
+[`artifact-shapes.md`](artifact-shapes.md)'s, which is normative for them.
+
 Two parameters, and **neither is a caller's to set**. **α is derived from the shape's own edges** —
 three times the median edge of that principal's convex wrap — so two principals' shapes differ only
 because their memberships do, and a request cannot dial one; a densely sampled convex cloud keeps
 its wrap unchanged, and a point set in convex position keeps it exactly, whatever α is. And digging
-spends a **bounded vertex budget**, longest edge first, so a shape carries at most 64 vertices beyond
-what its wrap carried. The budget rather than an absolute cap is forced: every vertex is a visible
-member's position and every member is inside, so the wrap's own vertex count is a floor — going below
-it means either leaving a member outside the shape or inventing a vertex no member occupies.
+spends a **bounded vertex budget**, longest edge first and **per artifact rather than per ring**, so
+a shape carries at most 64 vertices beyond what its groups' wraps carried and several groups do not
+multiply the wire. The budget rather than an absolute cap is forced: every vertex is a visible
+member's position and every member is inside a ring, so the wraps' own vertex count is a floor —
+going below it means either leaving a member outside every ring or inventing a vertex no member
+occupies.
 
 **No leak-register row follows, and the argument is short.** The inputs are the same
 `membership ∩ M_auth`, the derivation is the same per-request one, every vertex is a visible member's
 position either way, and the result is a *subset* of the convex hull — it says less about where the
-members a principal cannot see are sitting, not more. Nothing here lets a viewer end up knowing
+members a principal cannot see are sitting, not more. Several rings say less again: they are the
+same members drawn without the ground between them. Nothing here lets a viewer end up knowing
 something about data they were not served, which is the register's inclusion test
 (design Appendix C's head note). Measured on the 2.4M-document corpus in
 [`2026-08-26-concave-hulls.md`](../evidence/memos/2026-08-26-concave-hulls.md): shapes 14% tighter in
@@ -1048,6 +1059,14 @@ followed through — the first finding that C4's structural closure does not sur
 population, which is the sharpest finding in the document and did not come from drafting it.
 
 ## Appendix R
+
+**r8 — 2026-08-28. A hull is several rings.** §4.2 records that `hull` carries one ring per
+separated group of the visible members rather than one ring per artifact, and that the vertex budget
+is the artifact's and not the ring's, so several groups do not multiply the wire. The geometry, the
+grouping rule and what it gives up move to [`artifact-shapes.md`](artifact-shapes.md), promoted to
+normative the same day, which this section now defers to; the disclosure argument is unchanged and
+gains one clause — several rings say less than one, being the same members drawn without the ground
+between them. No rule moves and no gate changes.
 
 **r7 — 2026-08-26. The served hull is a concave shape.** §4.2 records what `hull` now means — an
 alpha shape over the visible members in place of their convex wrap — with the construction, the two
