@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, labelSize, placeLabels, wrapLabel, type LabelCandidate} from '../src/labels.js';
+import {LEVEL_SIZES, MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, WITHIN_LEVEL_PX, labelSize, placeLabels, wrapLabel, type LabelCandidate} from '../src/labels.js';
 
 const at = (id: number, x: number, y: number, priority: number, width = 60, height = 24): LabelCandidate => ({id: BigInt(id), x, y, width, height, priority});
 
@@ -64,12 +64,23 @@ describe('label placement (§5.10)', () => {
     expect(MAX_DISPLACEMENT).toBe(40);
   });
 
-  it('sizes a name by masked count within a narrow band', () => {
-    // The boards' band (`gen.py`'s `datamap_layers`), raised from 10–15 px on the owner's
-    // reading of the 2.4M demo: the largest name is under twice the smallest.
-    expect(labelSize(0, 1000)).toBe(12);
-    expect(labelSize(1000, 1000)).toBe(22);
-    expect(labelSize(250, 1000)).toBeCloseTo(17);
+  it('sizes a name by its level, a clear step at each, the count only ordering within one', () => {
+    // Coarser is larger, and the step is never crossed: a level's largest name (its whole
+    // tie-break spent) stays under the smallest name of the level above it.
+    expect(LEVEL_SIZES.map((_, rank) => labelSize(rank, 0, 1000))).toEqual([...LEVEL_SIZES]);
+    for (let rank = 1; rank < LEVEL_SIZES.length; rank++) {
+      const largestHere = labelSize(rank, 1000, 1000);
+      const smallestAbove = labelSize(rank - 1, 0, 1000);
+      expect(largestHere).toBeLessThan(smallestAbove);
+      // And the step is a step, not a ramp: at least a fifth larger one level up.
+      expect(smallestAbove / LEVEL_SIZES[rank]!).toBeGreaterThan(1.15);
+    }
+    // Within a level the count adds at most WITHIN_LEVEL_PX, and monotonically.
+    expect(labelSize(1, 1000, 1000) - labelSize(1, 0, 1000)).toBeCloseTo(WITHIN_LEVEL_PX, 6);
+    expect(labelSize(1, 250, 1000)).toBeGreaterThan(labelSize(1, 100, 1000));
+    // A rank past the ladder floors rather than shrinking away, and a negative rank is the top.
+    expect(labelSize(99, 0, 1000)).toBe(LEVEL_SIZES[LEVEL_SIZES.length - 1]);
+    expect(labelSize(-1, 0, 1000)).toBe(LEVEL_SIZES[0]);
   });
 });
 

@@ -105,15 +105,27 @@ export function placeLabels(candidates: readonly LabelCandidate[], maxDisplaceme
 }
 
 /**
- * The pixel size of an artifact's name, by its masked count within a narrow band (§5.10) — the
- * boards' own band (`gen.py`'s `datamap_layers`: `12 + 10·√(size/max)`).
+ * The pixel size of an artifact's name: **its level in the drawn frontier first**, its masked
+ * count only to break a tie inside a level.
  *
- * Raised from 10–15 px on the owner's reading of the 2.4M demo, where the names were hard to read
- * over the marks. The band is still narrow: the largest cluster's name is under twice the
- * smallest's, so size reads as a rank and never as a second scale.
+ * The counts on one screen of the 2.4M map ran 176–598 — under one order of magnitude — so the
+ * square-root band over the count that stood here (`12 + 10·√(count/max)`) spent its whole range
+ * making every name within a pixel of every other, while the distinction that does separate them,
+ * how coarse a region is, was not drawn at all (the owner's review, 2026-08-26).
+ *
+ * The levels present in one drawn frontier are few, so each gets a step of its own rather than a
+ * place on a ramp: {@link LEVEL_SIZES} from the coarsest, about a quarter larger at each step,
+ * floored at the last. The count then adds at most {@link WITHIN_LEVEL_PX}, which is small enough
+ * that a level's largest name stays under the next level up's smallest — the step is never
+ * crossed, so size reads as level and the count only orders what shares one.
  */
-export function labelSize(count: number, largest: number): number {
-  return 12 + 10 * Math.sqrt(Math.max(0, count) / Math.max(1, largest));
+export const LEVEL_SIZES = [24, 19, 15, 12.5] as const;
+/** How much the masked count may add inside a level — a tie-break, never a second scale. */
+export const WITHIN_LEVEL_PX = 1.5;
+
+export function labelSize(rank: number, count: number, largestInLevel: number): number {
+  const step = LEVEL_SIZES[Math.min(Math.max(0, Math.trunc(rank)), LEVEL_SIZES.length - 1)]!;
+  return step + WITHIN_LEVEL_PX * Math.sqrt(Math.max(0, count) / Math.max(1, largestInLevel));
 }
 
 /**
