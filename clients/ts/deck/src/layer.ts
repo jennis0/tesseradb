@@ -45,13 +45,14 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  * `marks` object. The stand-in pieces are materialised once per `standIn` array, memoised on
  * its identity, since the pieces survive most frames by reference.
  *
- * The drawing, in order (§5.10): the served `hull` or `box` as faded hairline outlines, the
- * opened one strong with a faint fill; the single-hue density wash from the exact tiles' counts,
+ * The drawing, in order (§5.10): the hovered and the opened artifact's served `hull` or `box`,
+ * every other served shape in the data at zero alpha so it still answers a pick; the single-hue
+ * density wash from the exact tiles' counts,
  * filtered so the tile grid never shows (decision 0097); the marks — one `MarksLayer` per
  * retained slab partition, addressed by slot, plus the stand-ins — in their membership colour
  * through the lookup texture when colouring by cluster, else the column's colour; names and
- * counts at each artifact's `centroid`, placed by priority into a spatial hash with leader
- * lines; the picked mark; and the selected region as the shape drawn — a box or a lasso, never
+ * counts at the frontier's centroids — sized by level — placed by priority into a spatial hash
+ * with leader lines; the picked mark; and the selected region as the shape drawn — a box or a lasso, never
  * its cells.
  *
  * **Colour by cluster is exact only** (decision 0099): a point wears an artifact's colour only
@@ -279,13 +280,8 @@ export type OutlineDatum = {
   colour: Rgba;
   opened: boolean;
   hovered: boolean;
-  /** The artifact's depth in the served tree, and how far it stands above the deepest drawn descendant. */
+  /** The artifact's depth in the served tree. */
   depth: number;
-  height: number;
-  /** Whether the artifact's layer is flat — its outline is drawn only while hovered or opened. */
-  flat: boolean;
-  /** Whether the outline is under `MIN_OUTLINE_PX` on both axes at this zoom — drawn only while hovered or opened. */
-  tiny: boolean;
   /** The fill and line alphas (0–255) and the line width in pixels this outline draws with. */
   fill: number;
   line: number;
@@ -304,14 +300,6 @@ type LabelDatum = {
 };
 type LeaderDatum = {from: [number, number]; to: [number, number]};
 
-/** The hairline's alpha per ground: the boards' 0.16 on light, 0.22 on dark (`datamap_layers2`). */
-const HAIRLINE_ALPHA: Record<'light' | 'dark', number> = {light: 41, dark: 56};
-/**
- * The fill of a contour at the cut's leaves per ground — the boards' 6–10%: the points carry
- * the colour and the contour frames it. An ancestor draws its hairline and no fill, so a deep
- * chain of near-identical hulls (HDBSCAN's condensed tree) never stacks into a wash.
- */
-const FILL_ALPHA: Record<'light' | 'dark', number> = {light: 18, dark: 23};
 /** The hovered outline: a fuller fill and a firmer line than the hairline, less than the opened one's. */
 const HOVER_FILL: Record<'light' | 'dark', number> = {light: 26, dark: 33};
 const HOVER_LINE = 150;
@@ -324,80 +312,40 @@ export type OutlineOptions = {
   hovered: bigint | null;
   level: number | undefined;
   scheme: 'light' | 'dark';
-  /** deck's zoom, for the outline's size on screen. */
-  zoom: number;
 };
 
 /**
- * An outline whose screen-space box is under this many pixels on both axes is not drawn: a
- * shape a few pixels across reads as a dark shard, not a contour. It stays in the data at zero
- * alpha so the artifact still answers a pick, and its label rule is unchanged.
+ * The served outlines and how each draws (§5.10). **A hull is drawn only for the hovered and the
+ * opened artifact** — on every layer, nested included (the owner's review, 2026-08-26). At rest
+ * the map is colour and names.
+ *
+ * The rule already held for a flat layer, whose hulls overlap into a mesh, and the argument is the
+ * same one level up: a response carries a frontier **and its ancestors**, so drawing every served
+ * hull gave each region its own shape plus its parent's plus its grandparent's, translucent fills
+ * stacking into a murky wash with no cue that the big shape contained the small ones. Exact colour
+ * already says where a cluster is and how far it reaches, per principal, so the contours were
+ * paying for a thing already drawn.
+ *
+ * Every other artifact stays in the data at zero alpha, which is what answers a pick — the flat
+ * path's own arrangement, reused rather than forked. Parents are ordered first so an opened child
+ * sits over an opened parent.
  */
-export const MIN_OUTLINE_PX = 12;
-
-/** The pixel extent of an artifact's outline at `zoom`, from its served `box` (else its hull's extent). */
-export function outlinePixels(a: Artifact, zoom: number): [number, number] | null {
-  const scale = 2 ** zoom; // pixels per world unit
-  if (a.box) return [gridToWorld(a.box[2] - a.box[0]) * scale, gridToWorld(a.box[3] - a.box[1]) * scale];
-  if (a.hull && a.hull.length >= 3) {
-    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-    for (const [x, y] of a.hull) {
-      x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y);
-    }
-    return [gridToWorld(x1 - x0) * scale, gridToWorld(y1 - y0) * scale];
-  }
-  return null;
-}
-
-/** Whether a layer's artifacts stand beside one another with no lineage (`hierarchy.kind: 'flat'`). */
-export function isFlatLayer(meta: Meta | null, layer: string): boolean {
-  return meta?.layers.find((l) => l.name === layer)?.hierarchy.kind === 'flat';
-}
-
-/**
- * The served outlines and how each draws (§5.10, the boards' `datamap_layers2`). A nested
- * layer's artifacts draw as contours: a hairline each, a faint fill at the cut's leaves, parents
- * first so a child reads as a level inside its parent. A **flat** layer's artifacts — k-means
- * clusters, say — overlap into a mesh when every hull is drawn, so its outlines draw only for
- * the hovered and the opened artifact and colour does the rest; the others are in the data at
- * zero alpha so they still answer a pick. The opened one is strong with the boards' 0.16 fill.
- * An outline under `MIN_OUTLINE_PX` on both axes at `o.zoom` is likewise kept at zero alpha,
- * unless it is the hovered or the opened one.
- */
-export function outlineData(a: ArtifactsProjection, meta: Meta | null, o: OutlineOptions): OutlineDatum[] {
+export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineDatum[] {
   const data: OutlineDatum[] = [];
   const depths = servedDepths(a);
   const ordered = [...a.served].sort((x, y) => (depths.get(x.tesseraId) ?? 0) - (depths.get(y.tesseraId) ?? 0));
-  const heights = heightsBelow(a, depths, o.level);
-  const flatOf = new Map<string, boolean>();
   for (const artifact of ordered) {
     const depth = depths.get(artifact.tesseraId) ?? 0;
     if (o.level !== undefined && depth > o.level) continue;
     const polygon = outlineOf(artifact);
     if (!polygon) continue;
     const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
-    const flat = flatOf.get(artifact.layer) ?? flatOf.set(artifact.layer, isFlatLayer(meta, artifact.layer)).get(artifact.layer)!;
     const opened = artifact.tesseraId === o.opened;
     const hovered = !opened && artifact.tesseraId === o.hovered;
-    const height = heights.get(artifact.tesseraId) ?? 0;
-    const px = outlinePixels(artifact, o.zoom);
-    const tiny = px !== null && px[0] < MIN_OUTLINE_PX && px[1] < MIN_OUTLINE_PX;
-    let fill = 0;
-    let line = 0;
-    let width = 0.8;
-    if (opened) {
-      fill = OPENED_FILL;
-      line = OPENED_LINE;
-      width = 1.2;
-    } else if (hovered) {
-      fill = HOVER_FILL[o.scheme];
-      line = HOVER_LINE;
-      width = 1;
-    } else if (!flat && !tiny) {
-      fill = height === 0 ? FILL_ALPHA[o.scheme] : 0;
-      line = HAIRLINE_ALPHA[o.scheme];
-    }
-    data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened, hovered, depth, height, flat, tiny, fill, line, width});
+    const fill = opened ? OPENED_FILL : hovered ? HOVER_FILL[o.scheme] : 0;
+    const line = opened ? OPENED_LINE : hovered ? HOVER_LINE : 0;
+    const width = opened ? 1.2 : hovered ? 1 : 0.8;
+    data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened, hovered, depth, fill, line, width});
   }
   return data;
 }
@@ -430,10 +378,37 @@ const COUNT_GAP_EM = 0.35;
 const TOPIC_SIZE = 12;
 
 /**
- * The label candidates for a served set at `zoom`: the cut's leaves (or the chosen level's
- * artifacts) **that have a text to draw** — an artifact with no supplied text and no attached
- * topic draws no label, never its key, which is an id — the top `budget` of them by masked
- * count, each with its name, count and topic and the pixel box the placement needs.
+ * The **frontier** of the served set at `level`: every drawn artifact with no drawn child.
+ *
+ * A served artifact that has a served child in the same response is an ancestor of something on
+ * the map. It names nothing its children do not name more precisely, so it draws no label (the
+ * owner's review, 2026-08-26) — computed here from `parentId` over the served set, which is what
+ * `lineage` already holds, so nothing new is asked of the wire.
+ *
+ * With no chosen level this is the cut's leaves. With one it is that level's artifacts **and**
+ * every shallower artifact whose own children the level cut away, which the plain `depth === level`
+ * test that stood here dropped — a branch that stops above the chosen level went unnamed.
+ */
+export function frontier(a: ArtifactsProjection, level: number | undefined, depths: Map<bigint, number> = servedDepths(a)): Set<bigint> {
+  const drawn = (id: bigint) => level === undefined || (depths.get(id) ?? 0) <= level;
+  const out = new Set<bigint>();
+  for (const artifact of a.served) {
+    if (!drawn(artifact.tesseraId)) continue;
+    const children = a.lineage.childrenOf.get(artifact.tesseraId) ?? [];
+    if (!children.some((c) => drawn(c.tesseraId))) out.add(artifact.tesseraId);
+  }
+  return out;
+}
+
+/**
+ * The label candidates for a served set at `zoom`: the frontier's artifacts **that have a text to
+ * draw** — an artifact with no supplied text and no attached topic draws no label, never its key,
+ * which is an id — the top `budget` of them by masked count, each with its name, count and topic
+ * and the pixel box the placement needs.
+ *
+ * **A name's size is its level's**, over the levels the drawn set actually holds: the frontier is
+ * ordered coarsest first and each level takes a step of {@link labelSize}'s ladder, the masked
+ * count adding only enough to order what shares a level.
  */
 export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, zoom: number, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
   const placed = a.served.filter((x) => x.centroid !== null);
@@ -443,25 +418,29 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
   const dependent = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
   const topicOf = attachedTopics(a, meta);
   const depths = servedDepths(a);
-  // At a chosen level, the names are that level's; else the deepest served (the cut's leaves).
-  const leaves = new Set(a.served.filter((x) => !a.lineage.childrenOf.has(x.tesseraId)).map((x) => x.tesseraId));
+  const front = frontier(a, level, depths);
   const named = placed
-    .filter((x) => !dependent.has(x.layer) && (level !== undefined ? (depths.get(x.tesseraId) ?? 0) === level : leaves.has(x.tesseraId)))
+    .filter((x) => !dependent.has(x.layer) && front.has(x.tesseraId))
     .filter((x) => hasText(x) || topicOf.has(x.tesseraId))
     .sort((x, y) => Number(y.maskedCount - x.maskedCount))
     .slice(0, Math.max(0, budget));
-  const largest = named.reduce((m, x) => Math.max(m, Number(x.maskedCount)), 1);
+  // The levels the labels drawn actually stand at, coarsest first — a rank each, and the largest
+  // count within each, which is all the count is allowed to say.
+  const depthOf = (x: Artifact) => depths.get(x.tesseraId) ?? 0;
+  const rankOf = new Map([...new Set(named.map(depthOf))].sort((p, q) => p - q).map((d, i) => [d, i]));
+  const largestIn = new Map<number, number>();
+  for (const x of named) largestIn.set(depthOf(x), Math.max(largestIn.get(depthOf(x)) ?? 1, Number(x.maskedCount)));
   const scale = 2 ** zoom; // pixels per world unit
   const candidates: LabelCandidate[] = [];
   const byId = new Map<bigint, LabelText>();
   for (const artifact of named) {
     const count = Number(artifact.maskedCount);
-    const size = labelSize(count, largest);
+    const size = labelSize(rankOf.get(depthOf(artifact)) ?? 0, count, largestIn.get(depthOf(artifact)) ?? 1);
     const attached = topicOf.get(artifact.tesseraId) ?? null;
     // A cluster with no name of its own takes its topic as the name (a labelled clustering);
     // one with both draws the topic beneath in italic (the boards).
-    const name = hasText(artifact) ? artifactName(artifact) : attached!;
-    const topic = hasText(artifact) ? attached : null;
+    const name = artifactName(artifact) ?? attached!;
+    const topic = artifactName(artifact) === null ? null : attached;
     const countText = count.toLocaleString('en-GB');
     // **The wrapped box is what is placed.** A name is drawn as up to three short lines, so the
     // spatial hash packs against the block the viewer sees and the 40 px displacement rule is
@@ -487,11 +466,17 @@ export function hasText(a: Artifact): boolean {
   return (a.content[0] ?? '').length > 0;
 }
 
-/** What to call an artifact: its supplied text where the layer publishes any, else its key. */
-export function artifactName(a: Artifact): string {
+/**
+ * What to call an artifact: its supplied text where the layer publishes any, else **nothing**.
+ *
+ * A key is an identifier its layer's author chose — `hdb-2422486`, `tp2-000002` — and drawn as a
+ * name it reads as a cluster called that (the owner's review, 2026-08-26). The map draws no label
+ * for an artifact with no text; a panel with a row to fill draws a neutral placeholder beside the
+ * count, and shows the key under the field that says *key*.
+ */
+export function artifactName(a: Artifact): string | null {
   const text = a.content[0];
-  if (text !== undefined && text.length > 0) return text;
-  return a.key ?? `#${a.tesseraId}`;
+  return text !== undefined && text.length > 0 ? text : null;
 }
 
 /**
@@ -553,29 +538,12 @@ export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<b
   return topicOf;
 }
 
-/** What to call a served artifact where a topic is attached and it has no name of its own. */
-export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string {
-  if (artifact.content.length > 0) return artifactName(artifact);
-  return topics.get(artifact.tesseraId) ?? artifactName(artifact);
-}
-
 /**
- * How far each served artifact stands above the deepest served descendant beneath it (a leaf is
- * 0), within the levels drawn — the fill fades with this, not with depth from the root.
+ * What to call a served artifact: its own text, else a topic attached to it, else **nothing** —
+ * a caller with a row to fill draws a neutral placeholder rather than the key ({@link artifactName}).
  */
-export function heightsBelow(a: ArtifactsProjection, depths: Map<bigint, number>, level: number | undefined): Map<bigint, number> {
-  const height = new Map<bigint, number>();
-  const drawn = (id: bigint) => level === undefined || (depths.get(id) ?? 0) <= level;
-  const of = (id: bigint, guard = 0): number => {
-    const known = height.get(id);
-    if (known !== undefined) return known;
-    let h = 0;
-    if (guard < 1024) for (const c of a.lineage.childrenOf.get(id) ?? []) if (drawn(c.tesseraId)) h = Math.max(h, of(c.tesseraId, guard + 1) + 1);
-    height.set(id, h);
-    return h;
-  };
-  for (const artifact of a.served) if (drawn(artifact.tesseraId)) of(artifact.tesseraId);
-  return height;
+export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string | null {
+  return artifactName(artifact) ?? topics.get(artifact.tesseraId) ?? null;
 }
 
 /** The depth of each served artifact in the served tree: a root is 0, a child one deeper. */
@@ -822,6 +790,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
             radiusUnits: 'pixels' as const,
             getRadius: style.radius,
             radiusMinPixels: 1,
+            antialiasing: style.antialiasing,
             opacity,
             pickable: this.props.pickable && held.active,
             parameters: {depthCompare: 'always' as const}
@@ -864,6 +833,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           radiusUnits: 'pixels' as const,
           getRadius: style.radius,
           radiusMinPixels: 1,
+          antialiasing: style.antialiasing,
           opacity,
           pickable: this.props.pickable,
           parameters: {depthCompare: 'always' as const}
@@ -872,7 +842,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     );
 
     this.props.onDrawn?.(slab.drawn, standIn.count);
-    // The outlines go under everything: hairlines the wash and the marks show through.
+    // The outlines go under everything: the marks show through the hovered one's faint fill.
     layers.unshift(...this.outlineLayers(r, timings));
     layers.push(...this.labelLayers(r, timings), ...this.selectionLayers());
     return layers;
@@ -1012,10 +982,12 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * The served `hull` or `box` as hairline outlines, faded, in each artifact's own colour; the
-   * opened artifact strong, with a faint fill that is the only coloured area fill on the map.
-   * Derived per principal (contracts §3.2), so a shape is exact for this viewer; nothing is
-   * contoured from held marks (decision 0099).
+   * The served `hull` or `box` for the hovered and the opened artifact, in its own colour, the
+   * opened one strong with a faint fill; every other served shape in the data at zero alpha so it
+   * still answers a pick ({@link outlineData}). Derived per principal (contracts §3.2), so a shape
+   * is exact for this viewer; nothing is contoured from held marks (decision 0099).
+   *
+   * The shapes do not depend on the zoom, so the memo survives a zoom that re-places the labels.
    */
   private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number}): Layer[] {
     const a = r.artifacts;
@@ -1023,12 +995,10 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const opened = this.props.openedArtifact ?? null;
     const hovered = this.props.hoveredArtifact ?? null;
     const scheme = this.props.scheme ?? 'dark';
-    const zoom = this.context.viewport?.zoom ?? 0;
-    const bucket = Math.round(zoom * LABEL_ZOOM_STEP);
-    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${hovered ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}|${bucket}` : '';
+    const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${hovered ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldOutlines.get(a.served) : undefined;
     if (a && (!held || held.key !== key)) {
-      held = {key, data: outlineData(a, r.meta, {opened, hovered, level: this.props.clusterLevel, scheme, zoom})};
+      held = {key, data: outlineData(a, {opened, hovered, level: this.props.clusterLevel, scheme})};
       heldOutlines.set(a.served, held);
     }
     const data = held?.data ?? NO_OUTLINES;
