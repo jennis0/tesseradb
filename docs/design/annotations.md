@@ -358,7 +358,8 @@ client's obligations rather than the server's.
 A layer declares which derived properties its artifacts expose, from a closed vocabulary the engine
 implements — **`centroid`, `box` and `hull` as built** (Stage 3), each computed from the visible
 rows and served in the grid units the point path already uses, so a client needs no quantisation
-extent to draw one. A name outside the vocabulary is **refused at registration** rather than
+extent to draw one. **`hull` is a concave (alpha) shape over the visible members, not their convex
+wrap** — see below. A name outside the vocabulary is **refused at registration** rather than
 accepted and quietly omitted: an artifact served without content its layer declared cannot be told
 apart, by a client, from one whose content was withheld — and nothing is withheld from a served
 artifact. ⊘ **`extractive_terms` is specified and not implemented**, and is therefore refused with
@@ -367,6 +368,36 @@ silence. **Count is intrinsic** — every artifact has a masked count, and the e
 requires it computed regardless. Everything else is opt-in, because a hull over masked members costs O(visible
 members) per artifact per request where a count is one bitmap operation, and a client drawing only
 centroids should not pay hull cost for every artifact on screen.
+
+**The hull follows the members rather than wrapping them.** A cluster found by density is an
+irregular region — crescent, branching, often both — and its convex wrap swallows the empty space
+between the arms, overlaps every sibling, and draws single straight edges across the whole viewport.
+The shape served is instead a concave one over the same visible members: start at the convex wrap,
+which contains every member, and repeatedly replace the longest edge `(a, b)` above α with
+`(a, c)` and `(c, b)`, where `c` is the visible member closest to the line through `a` and `b` among
+those on the interior side of it that project inside the segment. Being the *closest* is what makes
+the carved triangle empty of members, so the shape contains every visible member at every step; the
+whole construction is exact integer arithmetic, so it is a function of the member positions and of
+nothing else.
+
+Two parameters, and **neither is a caller's to set**. **α is derived from the shape's own edges** —
+three times the median edge of that principal's convex wrap — so two principals' shapes differ only
+because their memberships do, and a request cannot dial one; a densely sampled convex cloud keeps
+its wrap unchanged, and a point set in convex position keeps it exactly, whatever α is. And digging
+spends a **bounded vertex budget**, longest edge first, so a shape carries at most 64 vertices beyond
+what its wrap carried. The budget rather than an absolute cap is forced: every vertex is a visible
+member's position and every member is inside, so the wrap's own vertex count is a floor — going below
+it means either leaving a member outside the shape or inventing a vertex no member occupies.
+
+**No leak-register row follows, and the argument is short.** The inputs are the same
+`membership ∩ M_auth`, the derivation is the same per-request one, every vertex is a visible member's
+position either way, and the result is a *subset* of the convex hull — it says less about where the
+members a principal cannot see are sitting, not more. Nothing here lets a viewer end up knowing
+something about data they were not served, which is the register's inclusion test
+(design Appendix C's head note). Measured on the 2.4M-document corpus in
+[`2026-08-26-concave-hulls.md`](../evidence/memos/2026-08-26-concave-hulls.md): shapes 14% tighter in
+area on average, 1.4× the convex path's time over a whole 197-artifact layer, and the hull columns
+four times the bytes they were.
 
 **The declaration is therefore a cost control, not a security control**, and carries the same status
 as the pruning policy (spec §6.1): it may be changed without review, because every value it can take
@@ -1017,6 +1048,15 @@ followed through — the first finding that C4's structural closure does not sur
 population, which is the sharpest finding in the document and did not come from drafting it.
 
 ## Appendix R
+
+**r7 — 2026-08-26. The served hull is a concave shape.** §4.2 records what `hull` now means — an
+alpha shape over the visible members in place of their convex wrap — with the construction, the two
+parameters that are derived rather than declared (α from the wrap's own median edge; a bounded vertex
+budget), and the argument that no leak-register row follows: same inputs, same per-request
+derivation, every vertex a visible member's position either way, and a strictly *tighter* shape says
+less about the members a principal cannot see. No rule moves and no gate changes — the vocabulary,
+the closure rule and the cost control are as they were. Measured in
+[`2026-08-26-concave-hulls.md`](../evidence/memos/2026-08-26-concave-hulls.md).
 
 **r6 — 2026-08-19. Two config spellings, corrected.** §6 named the proportional criterion
 `min_fraction` and §8.3 declared computed content as `derived = [count]`; neither parses. The
