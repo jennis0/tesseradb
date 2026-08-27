@@ -385,6 +385,17 @@ the honest degradation. Revisit if a layer arrives whose clustering is not densi
 k-means is already twice as modal, and the 51-ring artifact on that layer is what this looks like
 when it goes wrong.*
 
+> **RULED 2026-08-27: several rings.** The owner overrides the recommendation, and the reason is
+> that the measurement above answers the wrong question: it says multi-modality is rare *on this
+> corpus*, and the wire is not shaped by one corpus's statistics. Multi-modal memberships exist
+> generally — the k-means control on this very bundle is already twice as modal, a correlated mask
+> is unmeasured, and a clustering that is not density-based has no reason to be unimodal at all. A
+> single ring around two separated components is a claim about where the members are that no α
+> corrects, and a shape family whose failure mode is *lying about the ground* is the wrong default
+> whatever its frequency here. **A and C are re-opened in this light**: the χ-shape is defined to
+> keep one simple polygon, while an α-complex yields components naturally, so the family question
+> and the multi-ring question are one question and are answered together.
+
 **E — Who chooses (§5)?** The options are: the layer author at declaration; the service
 automatically with a declared override (decision 0094's shape); the viewer per request. *Recommended:
 the author declares, the build reports what it measured, nothing flips at a fold, and no request
