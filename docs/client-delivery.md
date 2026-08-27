@@ -243,7 +243,7 @@ the multiple overlapping layers make it hard to read*. Answered on the `look` tr
 |---|---|---|
 | 11 | the group polygons are ugly, and the stacked layers make the map hard to read | **done**: a hull is drawn only for the **hovered and the opened** artifact, on every layer, nested included. A response carries a frontier *and its ancestors*, so drawing every served hull gave a region its own contour plus its parent's plus its grandparent's — translucent fills stacking into a wash with no cue that the big shape contained the small ones, and the long straight chords crossing the screenshot were single edges of the large ancestors. The rule already held for a flat layer and the argument one level up is the same: exact colour already says where a cluster is and how far it reaches, per principal (decision 0099). At rest the map is colour and names. Every other artifact stays in the data at zero alpha, which is what answers a pick — the flat path's own arrangement, reused rather than forked. The fill that faded with height below, the flat/nested split and the twelve-pixel floor went with the hairlines |
 | 12 | hierarchy gets lost — an ancestor of something drawn is labelled beside it | **done**: **only the frontier is labelled**. A served artifact with a served child in the same response draws no label; `frontier` computes it from `parentId` over the served set, which `lineage` already holds, so nothing new is asked of the wire. With no chosen level this is the cut's leaves, as before; with one it is that level's artifacts **and** every shallower branch the level cut away, which the plain `depth === level` test dropped. Checked against the running corpus below |
-| 13 | label size spends its whole range on the wrong distinction | **done**: **size encodes level first**. `12 + 10·√(count/max)` over counts that ran 176–598 on one screen made every name within a pixel of every other. Each level of the drawn frontier now takes a step: **24, 19, 15, 12.5 px** from the coarsest, floored at the last, plus at most **1.5 px** for the largest count within a level — small enough that a level's largest name stays under the next level up's smallest, so the step is never crossed and the count only orders what shares a level. The key is never drawn as a name anywhere: `artifactName` and `displayName` answer nothing where there is no supplied text and no attached topic, and the *IN VIEW* list, the cluster card's headline and its children draw a neutral em dash beside the count instead of `hdb-2422486` and `tp2-000002`. The key keeps the card's field that says *key* |
+| 13 | label size spends its whole range on the wrong distinction | **done**: **a name's size is its masked count**, on a logarithmic band over the range the drawn frontier holds — `12.5 + 11.5·log(c/lo)/log(hi/lo)` px, `lo` and `hi` the smallest and largest counts among the names that survive the label budget. The ends are the level ladder's ends, so nothing else about the map's weight moved. The band is logarithmic because these counts run three or four orders of magnitude — 380,069 against 176 on one screen — and a linear map, like the square-root one before it, spends the range on the top few. **Level is not encoded at all**, having been for a day: stepping the size by depth assumed depth tracks scale, which holds in a balanced tree and not in HDBSCAN's condensed tree, so *image object video* at 29,369 members drew a step larger than *algebras equations spaces* at 380,069 (`before-clusters-hdbscan-overview.png`). The hierarchy is carried by row 12's rule instead: a frontier partitions the drawn view, so its counts are directly comparable. A frontier of one name, and one whose counts are all equal, have no range to divide by and take the top of the band — the largest count on screen is the largest name on screen in every case. `LEVEL_SIZES`, `WITHIN_LEVEL_PX` and the rank argument are gone. The key is never drawn as a name anywhere: `artifactName` and `displayName` answer nothing where there is no supplied text and no attached topic, and the *IN VIEW* list, the cluster card's headline and its children draw a neutral em dash beside the count instead of `hdb-2422486` and `tp2-000002`. The key keeps the card's field that says *key* |
 | 14 | the dot glow is way too strong, at every zoom | **done**: two things made it, and both come down — `markStyle`'s band, and deck's own half-pixel feather. Measured below |
 | 15 | the density wash confounds the pass | **done**: `<tessera-map>`'s `wash` defaults **false** (owner direction: how density should be rendered is a separate conversation). Only the default moved — `<tessera-map wash>` turns it on and the layer still builds the image from the exact tiles' counts, filtered so the grid never shows (decision 0097) |
 
@@ -270,11 +270,25 @@ overriding it on the page, as at the previous review.
 **The frontier, checked against the response** rather than assumed: `clusters/hdbscan` at the
 overview on the full principal serves 71 artifacts of the layer at depths 0–3, and the frontier is
 the **58 leaves at depths 1, 2 and 3** — the real splits. The root and the twelve internal nodes of
-the near-root chain draw no label. Three levels are present, so three sizes are drawn. A tiered
-layer at a chosen level (`clusters/toponymy`, 574 topics three notches in) has one level in its
-frontier and draws one size, which is the same rule saying there is no step to make. Labels placed,
-overview then three notches in: `clusters/hdbscan` 10 → 7 and 23 → 27; `clusters/toponymy` 7 → 5 and
-13 → 16. Fewer at the overview is what a larger coarsest step costs; the placement is unchanged.
+the near-root chain draw no label. A tiered layer at a chosen level (`clusters/toponymy`, 574 topics
+three notches in) has one level in its frontier, which the same rule reaches by the same route.
+Labels placed, overview then three notches in: `clusters/hdbscan` 10 → 7 and 23 → 27;
+`clusters/toponymy` 7 → 5 and 13 → 16. Fewer at the overview is what larger names cost; the
+placement is unchanged.
+
+**The size encoding, corrected the day after** (2026-08-27, headed Chromium 1208 on notebook-2m4's
+full principal at 1440 × 900; shots in `/home/joe/tessera-shots/2026-08-27-labelsize/`, before and
+after on each view). Level-first sizing lasted one review. On `clusters/hdbscan` at the overview the
+largest name on screen was *image object video* at **29,369** members, over *algebras equations
+spaces* at **380,069**, because the first sits a level shallower — the encoding was telling the eye
+the opposite of what the counts say. With the band over the count the largest name is *neural
+network deep* at **507,264**, and the order down the screen is the order of the counts.
+`clusters/toponymy` at the overview shows the other half: one level in the frontier meant one size,
+so *Higgs Physics* at 42,979 drew exactly as large as *Condensed Matter* at 194,276; they are now
+three sizes apart on a band whose ends the smallest and largest names hold. Labels placed, before →
+after: `clusters/hdbscan` 7 → 7 at the overview and 27 → 25 three notches in; `clusters/toponymy`
+5 → 6 and 16 → 19. Smaller names pack, which is why the tiered layer draws more of them. The
+harness holds **9 of 9** and `modes.mjs` **15 of 15** on the same corpus.
 
 **A hull that could not be smoothed any more.** `outlineOf` ran three rounds of Chaikin's corner
 cutting over the served hull, on a comment claiming every vertex stayed inside the hull's convex

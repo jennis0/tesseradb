@@ -1,11 +1,12 @@
 import {describe, expect, it} from 'vitest';
 import {SessionArtifactTable, servedLineage, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
 import {artifactName, displayName, frontier, labelBudget, labelCandidates} from '../src/layer.js';
-import {LEVEL_SIZES, placeLabels} from '../src/labels.js';
+import {LABEL_SIZE_MAX, LABEL_SIZE_MIN, placeLabels} from '../src/labels.js';
 
 /**
  * Which artifacts get a label (§5.10, the owner's review 2026-08-26): the frontier of the served
- * set, a text to draw, the top N by masked count — and a size that says which level it is.
+ * set, a text to draw, the top N by masked count — and a size that is that count, on a
+ * logarithmic band over the range the frontier drawn holds.
  */
 
 const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'clusters', parentId: bigint | null = null): Artifact => ({
@@ -97,33 +98,48 @@ describe('labelCandidates', () => {
     expect(byId.get(1n)!.topic).toBeNull();
   });
 
-  it('size encodes level first: a step per level drawn, the count only ordering within one', () => {
-    // Two branches: 2 stops at depth 1, 3 and 4 are at depth 2. The frontier holds two levels,
-    // so it draws two sizes — the coarser one larger, whatever the counts say.
+  it('size is the masked count, and level says nothing: the deeper, larger name draws larger', () => {
+    // The owner's case, in miniature. 2 stops at depth 1 with 400 members; 5 and 6 are a level
+    // deeper and 5 is the biggest thing drawn. Size follows the counts, not the depths.
     const p = projection([
-      artifact(1n, 900n, ['root']),
+      artifact(1n, 9000n, ['root']),
       artifact(2n, 400n, ['stops here'], 'clusters', 1n),
-      artifact(3n, 500n, ['deeper and bigger'], 'clusters', 1n),
-      artifact(5n, 300n, ['deeper still'], 'clusters', 3n),
-      artifact(6n, 100n, ['deeper too'], 'clusters', 3n)
+      artifact(3n, 5000n, ['an ancestor'], 'clusters', 1n),
+      artifact(5n, 4000n, ['deeper and bigger'], 'clusters', 3n),
+      artifact(6n, 100n, ['deeper and smaller'], 'clusters', 3n)
     ]);
     const {byId} = labelCandidates(p, META, undefined, 0, 10);
     expect([...byId.keys()].map(String).sort()).toEqual(['2', '5', '6']);
-    const coarse = byId.get(2n)!.size;
-    const fine = [byId.get(5n)!.size, byId.get(6n)!.size];
-    // The shallower name is a step larger than either deeper one, though 5 outweighs it 300:400
-    // only within its own level.
-    expect(coarse).toBeCloseTo(LEVEL_SIZES[0]! + 1.5, 6);
-    for (const f of fine) expect(f).toBeLessThan(coarse);
-    expect(fine[0]).toBeGreaterThan(fine[1]!);
+    // The largest count on screen is the largest name on screen, whatever level it sits at.
+    expect(byId.get(5n)!.size).toBeCloseTo(LABEL_SIZE_MAX, 6);
+    expect(byId.get(6n)!.size).toBeCloseTo(LABEL_SIZE_MIN, 6);
+    expect(byId.get(2n)!.size).toBeGreaterThan(byId.get(6n)!.size);
+    expect(byId.get(2n)!.size).toBeLessThan(byId.get(5n)!.size);
   });
 
-  it('one level drawn is one size — a flat layer reads as a flat layer', () => {
-    const served = Array.from({length: 5}, (_, i) => artifact(BigInt(i + 1), BigInt(1000 - i * 100), [`cluster ${i}`]));
+  it('spans the band over the counts drawn — the smallest at the floor, the largest at the top', () => {
+    const served = Array.from({length: 5}, (_, i) => artifact(BigInt(i + 1), BigInt(10 ** (5 - i)), [`cluster ${i}`]));
     const {byId} = labelCandidates(projection(served), META, undefined, 0, 10);
     const sizes = [...byId.values()].map((t) => t.size);
-    expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThan(1.6);
-    expect(Math.max(...sizes)).toBeCloseTo(LEVEL_SIZES[0]! + 1.5, 6);
+    expect(Math.max(...sizes)).toBeCloseTo(LABEL_SIZE_MAX, 6);
+    expect(Math.min(...sizes)).toBeCloseTo(LABEL_SIZE_MIN, 6);
+    // Four decades over the band, so the decades are even steps.
+    const ordered = [...byId.entries()].sort((a, b) => Number(a[0] - b[0])).map(([, t]) => t.size);
+    for (let i = 1; i < ordered.length - 1; i++) {
+      expect(ordered[i]! - ordered[i + 1]!).toBeCloseTo(ordered[i - 1]! - ordered[i]!, 6);
+    }
+  });
+
+  it('a frontier with no range lands on the band rather than dividing by zero', () => {
+    // One name on screen, and every count equal: both take the top of the band, and neither is NaN.
+    const one = labelCandidates(projection([artifact(1n, 4812n, ['the only cluster'])]), META, undefined, 0, 10);
+    expect(one.byId.get(1n)!.size).toBe(LABEL_SIZE_MAX);
+    const flat = Array.from({length: 4}, (_, i) => artifact(BigInt(i + 1), 500n, [`cluster ${i}`]));
+    const {byId} = labelCandidates(projection(flat), META, undefined, 0, 10);
+    const sizes = [...byId.values()].map((t) => t.size);
+    expect(sizes).toEqual([LABEL_SIZE_MAX, LABEL_SIZE_MAX, LABEL_SIZE_MAX, LABEL_SIZE_MAX]);
+    // And an empty frontier asks nothing of the band at all.
+    expect(labelCandidates(projection([]), META, undefined, 0, 10).candidates).toEqual([]);
   });
 
   it('takes the top N by masked count, and the placement then drops what overlaps', () => {
