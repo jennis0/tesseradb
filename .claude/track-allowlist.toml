@@ -228,3 +228,22 @@ paths = [
   "probes/2026-08-27-artifact-shapes/*",
   "docs/design/README.md",
 ]
+
+# Wave 9 — several rings (controller, 2026-08-27, on the owner's ruling of D). Settles the family
+# under the multi-ring ruling, takes the triangulation measurement C was blocked on, and builds it:
+# the engine's derived shape, the wire's artifacts frame, the contracts amendment, the design.
+[track.rings]
+paths = [
+  "crates/tessera-engine/src/derived.rs",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-wire/*",
+  "crates/tessera-types/src/layer.rs",
+  "crates/tessera-server/src/viewer.rs",
+  "crates/tessera-server/tests/*",
+  "docs/design/artifact-shapes.md",
+  "docs/design/contracts.md",
+  "docs/design/annotations.md",
+  "probes/2026-08-27-artifact-shapes/*",
+  "Cargo.toml",
+  "crates/tessera-engine/Cargo.toml",
+]
