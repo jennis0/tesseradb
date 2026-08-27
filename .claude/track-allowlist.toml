@@ -196,3 +196,24 @@ paths = [
   "notebooks/*",
   "docs/evidence/memos/2026-08-26-tiered-levels.md",
 ]
+
+# Wave 7 — the owner's look review (controller, 2026-08-26). `look`: hulls only on hover and
+# selection on every layer, labels on the frontier sized by level, the mark glow down, the density
+# wash off by default. `hull`: the served hull becomes a concave (alpha) shape rather than a convex
+# wrap. Disjoint — the first is the client packages, the second is the engine's derived content.
+[track.look]
+paths = [
+  "clients/ts/core/*",
+  "clients/ts/deck/*",
+  "clients/ts/components/*",
+  "clients/ts/harness/*",
+  "clients/ts/viewer/*",
+]
+
+[track.hull]
+paths = [
+  "crates/tessera-engine/src/derived.rs",
+  "crates/tessera-engine/tests/*",
+  "docs/design/annotations.md",
+  "docs/evidence/memos/2026-08-26-concave-hulls.md",
+]
