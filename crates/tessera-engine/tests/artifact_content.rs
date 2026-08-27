@@ -10,6 +10,9 @@
 
 mod common;
 
+#[path = "common/ring.rs"]
+mod ring;
+
 use common::*;
 use tessera_engine::derived::DerivedContent;
 use tessera_engine::{ArtifactOut, Engine, ViewportRequest};
@@ -249,6 +252,46 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
         "the broad box {broad_box:?} must contain the narrow one {want:?}"
     );
     assert_ne!(broad_box, want, "and must not be the same box");
+}
+
+/// **The served hull is a concave shape and not the convex wrap it replaced.** It is tighter than
+/// the wrap over the very same visible members, and it still holds every one of them — the two
+/// halves of what a hull is for. Both are checked against a wrap computed here, from the fixture's
+/// own generator arithmetic, so neither rests on the engine agreeing with itself.
+#[test]
+fn the_served_hull_is_tighter_than_its_wrap_and_holds_every_visible_member() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(declaration("clusters/a", &["hull"]))
+        .unwrap();
+    let sources: Vec<u64> = (0..300).collect();
+    publish(&engine, "clusters/a", &fx, sources.iter().copied());
+
+    for credential in [subset_credential(), full_coverage_credential()] {
+        let served = artifacts_of(&engine, &credential);
+        let hull = served[0].derived.hull.clone().expect("declared");
+        let visible: Vec<[u32; 2]> = if credential == subset_credential() {
+            visible_to_subset(sources.iter().copied())
+                .into_iter()
+                .map(grid_position)
+                .collect()
+        } else {
+            sources.iter().copied().map(grid_position).collect()
+        };
+
+        for member in &visible {
+            assert!(
+                ring::contains(&hull, *member),
+                "{member:?} is a member this principal sees and it fell outside its hull"
+            );
+        }
+        let wrap = ring::convex_hull(&visible);
+        assert!(
+            ring::double_area(&hull) < ring::double_area(&wrap),
+            "the served hull is the convex wrap, not a shape that follows the members"
+        );
+    }
 }
 
 /// A layer that declares nothing gets nothing — and pays nothing. The count is intrinsic and is
