@@ -424,7 +424,7 @@ pub enum ComputedProperty {
     Centroid,
     /// The axis-aligned bounds of the visible members.
     Box,
-    /// The convex hull of the visible members.
+    /// The hull of the visible members — a concave (alpha) shape, tightened from the convex wrap.
     Hull,
 }
 
