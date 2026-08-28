@@ -82,7 +82,10 @@ it keeps one.
    ([decision 0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)): its
    key, count, geometry, content, parent and level are a function of the artifact, `M_auth` and
    the generation, so a filter change leaves them true and moves only `matched`. A client may
-   hold them across one and take the bit from the new response; it may not hold the bit.
+   hold them across one and take the bit from the new response; it may not hold the bit. **Built**
+   2026-08-28 in `ArtifactChannel`: the served identifier list is replaced wholesale (rule 6's
+   reason is unchanged) and the payloads accumulate beside it, dropped whole when either key
+   rotates.
    *Broken:* marks or clusters a previous principal was served stay on screen under a new token,
    or a filtered view keeps drawing items the filter excluded.
 

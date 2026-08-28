@@ -160,6 +160,12 @@ export type ArtifactsProjection = {
   status: ArtifactChannelState['status'];
   refusal: {code: string; detail: string} | null;
   version: number;
+  /**
+   * How many artifact payloads the session holds — the served set plus everything served earlier
+   * under the same identity and content keys, which the channel keeps rather than refetching
+   * (`artifact-cache-handover.md`). Instrumentation: what is drawn is `served`.
+   */
+  held: number;
   /** The session artifact table, for a consumer resolving ordinals (§5.10). */
   table: SessionArtifactTable;
   /** The served set's ordinals — what an opened artifact resolves through. */
@@ -338,7 +344,7 @@ export function createStore(options: StoreOptions): Store {
     view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table, servedOrdinals: new Set(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
@@ -614,9 +620,14 @@ export function createStore(options: StoreOptions): Store {
       status: state.status,
       refusal: state.refusal,
       version: state.version,
+      held: state.held,
       table,
       servedOrdinals,
-      colours: colourTable(),
+      // **Rebuilt only when the table moved.** A response that names artifacts already held names
+      // no new ordinal, so the colours and the lookup texture built from them are the same ones —
+      // which is what the channel's payload store buys, and it buys nothing if this rebuilds a map
+      // of the same size every settle (`artifact-cache-handover.md` §6 step 2).
+      colours: table.version === colouredAt ? projections.artifacts.colours : colourTable(),
       palette
     });
     checkColourCoverage();

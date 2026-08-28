@@ -1,10 +1,11 @@
 # Handover — the client's artifact cache, and the filter bit it needs
 
-**Date:** 2026-08-28 · **Status:** **Step 1 is done; the cache itself is unbuilt.** The filter bit
-is ruled, written down and on the wire ([decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md),
-contracts r42, `client-delivery.md` S13). What remains is §6's steps 2–4 — the channel that holds,
-the wire affordance, and a corpus to measure on. This is a work list and the record of what was
-established on the way to it, not a design.
+**Date:** 2026-08-28 · **Status:** **Steps 1 and 2 are done; the wire affordance is not.** The
+filter bit is ruled, written down and on the wire
+([decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md), contracts r42,
+`client-delivery.md` S13), and the channel now holds payloads across a served-set change (step
+`cache 2`). What remains is §6's steps 3 and 4 — the wire affordance, and a corpus to measure on.
+This is a work list and the record of what was established on the way to it, not a design.
 
 **Read [`client-delivery.md`](client-delivery.md) first** — it is the status record for client work,
 on the convention [`artifact-delivery.md`](artifact-delivery.md) set, and it wins over this document
@@ -190,17 +191,22 @@ level in the *absent* case only.
    `ArtifactRows::matched`, which asks candidacy's own three routes of a narrower set;
    `artifact_filter_bit.rs` proves the bit against the generator's closed forms and proves the
    served set and the masked counts unmoved.
-2. **Teach the channel to hold.** Separate the served identifier list from the payload store, ask
-   only for payloads not already held, and drop the store on an identity-key or content-key change
-   exactly as rule 7 says. No wire change yet — the saving is in what the client re-parses and
-   re-uploads to the GPU, and it is measurable on its own.
+2. ~~**Teach the channel to hold.**~~ **Done 2026-08-28** (`cache 2`): the served identifier list is
+   still replaced wholesale and the payloads accumulate beside it in `ArtifactChannel`, keyed
+   `(layer, tessera_id)`, dropped whole when the identity key or the content key the store was
+   filled under rotates and on reset — rule 7 exactly. The ordinal reference is taken once when a
+   payload enters and released when it leaves, so an artifact panned away from and back is not
+   renamed; the store then reuses the colour map rather than rebuilding it, which is where the
+   saving actually lands. The bit is read from the response every time and never from the store.
+   **Without step 3 the response still carries every payload**, so nothing is saved on the wire or
+   in parsing yet — what is saved is naming, colouring and the lookup texture.
 3. **Design the wire affordance** for *what I hold*, once (1) and (2) have shown what the client
    actually needs. This is the step that needs a contracts change and a leak-register pass.
 4. **Measure on a scattered layer**, not on GeoNames. The corpus for it does not exist yet: an
    attribute layer over `admin4`'s 231 645 values on the GeoNames rung would produce one, and that
    is a corpus change rather than a code change.
 
-**Step 1 is done and steps 2–4 are not.** ⊘ **Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
+**Steps 1 and 2 are done; steps 3 and 4 are not.** ⊘ **Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
 scale, so the case this work is for is currently unmeasured — say so rather than quoting the
 regional figures.
 

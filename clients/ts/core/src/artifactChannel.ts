@@ -28,10 +28,18 @@ import {artifactBudgetFor} from './artifactBudget.js';
  *
  * ## What it does not do
  *
- * **No accumulation.** Held artifacts are replaced wholesale by each response, never merged. A
- * cluster is served because a member visible to this principal falls inside the requested tiles,
- * so a merged set would show clusters for ground the user has panned away from — presented,
- * inevitably, as though they were in view.
+ * **The served set is replaced wholesale and the payloads are not, and the two must not be
+ * confused.** A cluster is served because a member visible to this principal falls inside the
+ * requested tiles, so a *served set* that merged responses would show clusters for ground the user
+ * has panned away from — presented, inevitably, as though they were in view. What accumulates is
+ * the **payload store** beside it: an artifact's key, count, geometry, content, parent and level
+ * are a function of `(artifact, M_auth, generation)` and of nothing in the request
+ * (`artifact-cache-handover.md` §2), so an artifact panned away from and back is the same answer
+ * and is not renamed, recoloured or re-uploaded. Only `matched` moves, and it is taken from the
+ * response every time (decision 0104).
+ *
+ * The store goes when the identity key or the content key it was filled under rotates — rule 7 of
+ * `client-obligations.md`, which is exactly *is what you hold still true*.
  *
  * **No retry, and no reason for an absence.** A cluster below its layer's existence criterion, one
  * whose layer this principal cannot reach, one suppressed and one that never existed are the same
@@ -52,6 +60,11 @@ export type ArtifactChannelState = {
   refusal: {code: string; detail: string} | null;
   /** Bumped whenever `artifacts` is replaced — a paint key that a count of held would miss. */
   version: number;
+  /**
+   * How many payloads the session holds — the served set plus everything served earlier under the
+   * same keys. Instrumentation and nothing else: what is drawn is `artifacts`.
+   */
+  held: number;
 };
 
 export type ArtifactChannelClock = {
@@ -69,6 +82,41 @@ function defaultClock(): ArtifactChannelClock {
 /** How long the view must be still before the artifact request goes out. */
 const SETTLE_MS = 200;
 
+/**
+ * How many payloads the session holds before the least recently served are dropped.
+ *
+ * **Sized so the case the store exists for fits.** A layer whose artifacts are scattered through
+ * row space is served *in full on every request whatever the viewport* — the tile index cannot
+ * bound it — and the whole point of holding is that such a layer is fetched once and never again;
+ * the measured case is GeoNames' 464,655 artifacts at 49 MB
+ * (`evidence/memos/2026-08-28-artifact-response-volume.md`). A cap below that would evict exactly
+ * what it exists to keep. What the cap is for is the layer an order of magnitude larger again,
+ * where holding everything a session ever panned over is a leak in the ordinary sense.
+ *
+ * **It counts artifacts, not bytes**, which is the honest bound and not the tight one: a
+ * count-only artifact is tens of bytes and one carrying a hull is unbounded. Stated rather than
+ * hidden — a hull-carrying layer reaches a given number of megabytes long before it reaches this.
+ */
+const HELD_MAX = 500_000;
+
+/** One held payload: the artifact as served, the ordinal naming it, and when it was last served. */
+type HeldArtifact = {artifact: Artifact; ordinal: number; seen: number};
+
+/** The store's key. Identity is `(layer, tessera_id)`: ids are unique per layer, not across. */
+function keyOf(a: {layer: string; tesseraId: bigint}): string {
+  return `${a.layer}\u0000${a.tesseraId}`;
+}
+
+/**
+ * The payload without the filter bit — what is held.
+ *
+ * A held artifact must never carry a `matched` from the request that fetched it: that is the one
+ * field a filter moves, and holding it would answer this filter's question with the last one's.
+ */
+function withoutBit(a: Artifact): Artifact {
+  return a.matched === null ? a : {...a, matched: null};
+}
+
 export type ArtifactChannelOptions = {
   view: string;
   quantisation: Quantisation;
@@ -85,6 +133,8 @@ export type ArtifactChannelOptions = {
   onChange(state: ArtifactChannelState): void;
   clock?: ArtifactChannelClock;
   settleMs?: number;
+  /** How many payloads to hold before evicting the least recently served — see {@link HELD_MAX}. */
+  heldMax?: number;
   /** The table this channel feeds — its served set is the only holder until D12 (§5.10). */
   table?: SessionArtifactTable;
 };
@@ -96,15 +146,26 @@ export class ArtifactChannel {
   private readonly clock: ArtifactChannelClock;
   private readonly settleMs: number;
   private readonly table: SessionArtifactTable | null;
-  /** The ordinals the current served set holds a reference on, released when it rotates. */
-  private heldOrdinals: Uint32Array | null = null;
+  private readonly heldMax: number;
+  /**
+   * The payload store: one entry per artifact this session has been served under the current keys,
+   * with the ordinal it was named under and the response version it was last served in.
+   *
+   * The ordinal reference is taken **once, when the payload enters**, and released when it leaves —
+   * so an artifact panned away from and back keeps its ordinal, and the session table's colours and
+   * the lookup texture built from it do not move (§5.10).
+   */
+  private held = new Map<string, HeldArtifact>();
+  /** The keys the store was filled under. Rule 7: it goes when either rotates. */
+  private heldUnder: {identityKey: string; contentKey: string} | null = null;
   private state: ArtifactChannelState = {
     layer: null,
     layers: [],
     artifacts: [],
     status: 'idle',
     refusal: null,
-    version: 0
+    version: 0,
+    held: 0
   };
 
   constructor(
@@ -114,6 +175,7 @@ export class ArtifactChannel {
     this.clock = opts.clock ?? defaultClock();
     this.settleMs = opts.settleMs ?? SETTLE_MS;
     this.table = opts.table ?? null;
+    this.heldMax = opts.heldMax ?? HELD_MAX;
   }
 
   get current(): ArtifactChannelState {
@@ -202,8 +264,8 @@ export class ArtifactChannel {
   /** Drop what is held and abandon anything in flight: a new principal, or a dataset switch. */
   reset(): void {
     this.cancel();
-    this.releaseHeld();
-    this.state = {...this.state, artifacts: [], status: 'idle', refusal: null, version: this.state.version + 1};
+    this.dropHeld();
+    this.state = {...this.state, artifacts: [], status: 'idle', refusal: null, version: this.state.version + 1, held: 0};
     this.emit();
   }
 
@@ -214,24 +276,88 @@ export class ArtifactChannel {
     this.inFlight = null;
   }
 
-  private releaseHeld(): void {
-    if (this.table && this.heldOrdinals) this.table.release(this.heldOrdinals);
-    this.heldOrdinals = null;
+  /** Drop the whole store, releasing every ordinal it held. */
+  private dropHeld(): void {
+    if (this.table && this.held.size > 0) {
+      const ordinals = new Uint32Array(this.held.size);
+      let i = 0;
+      for (const entry of this.held.values()) ordinals[i++] = entry.ordinal;
+      this.table.release(ordinals);
+    }
+    this.held.clear();
+    this.heldUnder = null;
   }
 
-  /** Take the served set into the session table, releasing the reference the previous set held. */
-  private hold(artifacts: readonly Artifact[]): void {
-    if (!this.table) return;
-    const refs: ArtifactRef[] = artifacts.map((a) => ({
-      tesseraId: a.tesseraId,
-      layer: a.layer,
-      parentId: a.parentId,
-      centroid: a.centroid,
-      level: a.level
-    }));
-    const taken = this.table.take(refs);
-    this.releaseHeld();
-    this.heldOrdinals = taken;
+  /**
+   * Take this response's served set into the store and the session table, and return the artifacts
+   * to draw — the **held payload** for each, wearing this response's `matched`.
+   *
+   * **The payload is held and the bit is not.** Key, count, geometry, content, parent and level are
+   * a function of `(artifact, M_auth, generation)`, which the two keys below pin exactly; `matched`
+   * is a function of the request's filter as well, so it is read from the response every time
+   * (decision 0104). Returning the held object where the bit agrees is what keeps a re-served
+   * artifact referentially identical, so a consumer memoising on it does no work.
+   */
+  private hold(artifacts: readonly Artifact[], identityKey: string, contentKey: string): Artifact[] {
+    // **Rule 7, at the one place that can enforce it.** A rotated content key is exactly *what you
+    // hold may no longer be true*, and a changed identity key is a different principal's answer —
+    // which must never be shown, and is a disclosure rather than a staleness bug (decision 0029).
+    if (this.heldUnder && (this.heldUnder.identityKey !== identityKey || this.heldUnder.contentKey !== contentKey)) {
+      this.dropHeld();
+    }
+    this.heldUnder = {identityKey, contentKey};
+    const version = this.state.version + 1;
+
+    // Named in one batch, so a parent link between two artifacts of this response resolves — the
+    // table sets links only within the batch it is given.
+    const novel = artifacts.filter((a) => !this.held.has(keyOf(a)));
+    const ordinals = this.table
+      ? this.table.take(
+          novel.map((a) => ({
+            tesseraId: a.tesseraId,
+            layer: a.layer,
+            parentId: a.parentId,
+            centroid: a.centroid,
+            level: a.level
+          }))
+        )
+      : new Uint32Array(novel.length);
+    for (let i = 0; i < novel.length; i++) {
+      const a = novel[i]!;
+      this.held.set(keyOf(a), {artifact: withoutBit(a), ordinal: ordinals[i]!, seen: version});
+    }
+
+    const drawn: Artifact[] = [];
+    for (const a of artifacts) {
+      const entry = this.held.get(keyOf(a))!;
+      entry.seen = version;
+      drawn.push(a.matched === null ? entry.artifact : {...entry.artifact, matched: a.matched});
+    }
+    this.evict(version);
+    return drawn;
+  }
+
+  /**
+   * Drop the least recently served payloads down to the cap, never the set just served.
+   *
+   * **Least recently *served*, not least recently in view** — the two differ on a layer whose
+   * artifacts are all served on every request (`artifact-cache-handover.md` §1), where nothing is
+   * ever the eviction candidate and the cap simply never bites, which is the intended behaviour
+   * there rather than an accident of it.
+   */
+  private evict(version: number): void {
+    if (this.held.size <= this.heldMax) return;
+    const candidates = [...this.held.entries()].filter(([, e]) => e.seen !== version);
+    candidates.sort((a, b) => a[1].seen - b[1].seen);
+    const over = this.held.size - this.heldMax;
+    const going = candidates.slice(0, over);
+    if (going.length === 0) return;
+    if (this.table) {
+      const ordinals = new Uint32Array(going.length);
+      for (let i = 0; i < going.length; i++) ordinals[i] = going[i]![1].ordinal;
+      this.table.release(ordinals);
+    }
+    for (const [key] of going) this.held.delete(key);
   }
 
   private async request(): Promise<void> {
@@ -244,7 +370,9 @@ export class ArtifactChannel {
     // question that was asked — so the held set is simply cleared.
     if (layers.length === 0) {
       this.inFlight = null;
-      this.releaseHeld();
+      // **The served set goes and the store stays.** Switching a layer off is a question not asked,
+      // not an answer gone stale: what is held is still true, and switching it back on draws it
+      // without a refetch. The store goes on a key rotation and on reset, and there only.
       this.state = {...this.state, artifacts: [], status: 'idle', refusal: null, version: this.state.version + 1};
       this.emit();
       return;
@@ -273,23 +401,24 @@ export class ArtifactChannel {
       );
       if (this.inFlight !== signal) return;
       this.inFlight = null;
-      this.hold(response.result.artifacts);
+      const drawn = this.hold(response.result.artifacts, response.identityKey, response.contentKey);
       this.state = {
         ...this.state,
-        artifacts: response.result.artifacts,
+        artifacts: drawn,
         status: 'shown',
         refusal: null,
-        version: this.state.version + 1
+        version: this.state.version + 1,
+        held: this.held.size
       };
       this.emit();
     } catch (error) {
       if (signal.signal.aborted || this.inFlight !== signal) return;
       this.inFlight = null;
       const e = error as {code?: string; detail?: string; message?: string};
-      // A refusal is not an empty view. Held artifacts are dropped: they answered a request that
-      // has been superseded, and drawing them beside a failure would present the last view's
-      // clusters as this one's.
-      this.releaseHeld();
+      // A refusal is not an empty view. The **served set** is dropped: it answered a request that
+      // has been superseded, and drawing it beside a failure would present the last view's clusters
+      // as this one's. The store is untouched — a request that failed said nothing about whether
+      // what is held is still true, and the next successful response carries the keys that do.
       this.state = {
         ...this.state,
         artifacts: [],

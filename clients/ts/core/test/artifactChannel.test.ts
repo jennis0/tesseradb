@@ -6,7 +6,7 @@ import type {Artifact, Quantisation, ViewportResponse, ViewportResult} from '../
 
 const Q: Quantisation = {xMin: 0, xMax: 100, yMin: 0, yMax: 100};
 
-const artifact = (id: bigint, parentId: bigint | null = null): Artifact => ({
+const artifact = (id: bigint, parentId: bigint | null = null, matched: boolean | null = null): Artifact => ({
   layer: 'clusters/x',
   tesseraId: id,
   key: `c-${id}`,
@@ -16,10 +16,11 @@ const artifact = (id: bigint, parentId: bigint | null = null): Artifact => ({
   hull: null,
   content: [],
   parentId,
-  level: 0
+  level: 0,
+  matched
 });
 
-function responseWith(artifacts: Artifact[]): ViewportResponse {
+function responseWith(artifacts: Artifact[], keys?: {identityKey?: string; contentKey?: string}): ViewportResponse {
   const result: ViewportResult = {
     tiles: [],
     ids: new BigUint64Array(0),
@@ -34,8 +35,8 @@ function responseWith(artifacts: Artifact[]): ViewportResponse {
   return {
     result,
     timings: {serverUs: 0, admissionUs: 0, stageNs: null},
-    identityKey: 'ik',
-    contentKey: 'ck',
+    identityKey: keys?.identityKey ?? 'ik',
+    contentKey: keys?.contentKey ?? 'ck',
     pin: 'ck',
     stale: false,
     bytes: 0
@@ -137,7 +138,7 @@ describe('the artifact channel', () => {
     expect(states.at(-1)!.refusal?.code).toBe('refused');
   });
 
-  it('feeds the session table its served set and releases the previous reference on rotation', async () => {
+  it('replaces the served set wholesale and holds the payloads beside it', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();
     let served = [artifact(1n), artifact(2n)];
@@ -148,14 +149,163 @@ describe('the artifact channel', () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(table.live).toBe(2);
+    const ordinalOfOne = table.ordinalOf('clusters/x', 1n);
 
-    // The set rotates to a disjoint one: the previous reference is released, the new one taken.
+    // Panned onto disjoint ground. **The served set is only what is in view** — merging it would
+    // draw clusters for ground the user has left — and the payloads of what was left are held.
     served = [artifact(3n)];
     ch.refresh(view, 400, 300);
     await Promise.resolve();
     await Promise.resolve();
-    expect(table.live).toBe(1);
+    expect(ch.current.artifacts.map((a) => a.tesseraId)).toEqual([3n]);
+    expect(ch.current.held).toBe(3);
+    expect(table.live).toBe(3);
+    // And the ordinal an artifact was named under survives the pan, which is what stops the
+    // colours and the lookup texture being rebuilt for ground already seen.
+    expect(table.ordinalOf('clusters/x', 1n)).toBe(ordinalOfOne);
+  });
+
+  it('names a held artifact once — a pan back to it moves nothing in the session table', async () => {
+    const clock = manualClock();
+    const table = new SessionArtifactTable();
+    let served = [artifact(1n), artifact(2n)];
+    const {client} = fakeClient(() => responseWith(served));
+    const {ch} = channel(client, clock, table);
+    ch.setLayer('clusters/x');
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    const first = ch.current.artifacts[0]!;
+
+    served = [artifact(3n)];
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    const settled = table.version;
+
+    // Back over the original ground: the table does not move, so nothing downstream of its version
+    // — the colour map, the lookup texture — is rebuilt.
+    served = [artifact(1n), artifact(2n)];
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(table.version).toBe(settled);
+    // The payload is the *same object*, so a consumer memoising on identity does no work either.
+    expect(ch.current.artifacts[0]).toBe(first);
+  });
+
+  it('drops the store when the content key rotates, and when the identity key does', async () => {
+    for (const rotate of [{contentKey: 'ck2'}, {identityKey: 'ik2'}]) {
+      const clock = manualClock();
+      const table = new SessionArtifactTable();
+      let served = [artifact(1n), artifact(2n)];
+      let keys: {identityKey?: string; contentKey?: string} | undefined;
+      const {client} = fakeClient(() => responseWith(served, keys));
+      const {ch} = channel(client, clock, table);
+      ch.setLayer('clusters/x');
+      ch.refresh(view, 400, 300);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(ch.current.held).toBe(2);
+
+      // What is held answered a question about a generation, or a principal, that has moved.
+      keys = rotate;
+      served = [artifact(3n)];
+      ch.refresh(view, 400, 300);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(ch.current.held).toBe(1);
+      expect(table.live).toBe(1);
+      expect(table.ordinalOf('clusters/x', 1n)).toBe(0);
+    }
+  });
+
+  it('takes the filter bit from the response and never from what it holds', async () => {
+    const clock = manualClock();
+    const table = new SessionArtifactTable();
+    let served = [artifact(1n, null, true), artifact(2n, null, false)];
+    const {client} = fakeClient(() => responseWith(served));
+    const {ch} = channel(client, clock, table);
+    ch.setLayer('clusters/x');
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ch.current.artifacts.map((a) => a.matched)).toEqual([true, false]);
+
+    // The filter changed; the payloads did not (decision 0104), and the bit is the one thing that
+    // must not be answered from the store.
+    served = [artifact(1n, null, false), artifact(2n, null, true)];
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ch.current.artifacts.map((a) => a.matched)).toEqual([false, true]);
+    expect(ch.current.held).toBe(2);
+    expect(table.version).toBeGreaterThan(0);
+    // Nothing was renamed: a filter change costs no ordinal and no colour.
+    expect(table.live).toBe(2);
+  });
+
+  it('evicts the least recently served first, and never what is on screen', async () => {
+    const clock = manualClock();
+    const table = new SessionArtifactTable();
+    let served = [artifact(1n), artifact(2n)];
+    const {client} = fakeClient(() => responseWith(served));
+    const states: ArtifactChannelState[] = [];
+    const ch = new ArtifactChannel(client, {
+      view: 's0',
+      quantisation: Q,
+      token: () => 'tok',
+      depth: () => 5,
+      clock,
+      table,
+      heldMax: 3,
+      onChange: (s) => states.push(s)
+    });
+    ch.setLayer('clusters/x');
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    served = [artifact(3n)];
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ch.current.held).toBe(3);
+
+    // A fourth: the cap bites, and what goes is the pair served longest ago — never `4`, which is
+    // what the viewer is looking at.
+    served = [artifact(4n)];
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ch.current.held).toBe(3);
+    expect(table.live).toBe(3);
+    expect(table.ordinalOf('clusters/x', 1n)).toBe(0);
     expect(table.ordinalOf('clusters/x', 3n)).toBeGreaterThan(0);
+    expect(table.ordinalOf('clusters/x', 4n)).toBeGreaterThan(0);
+  });
+
+  it('keeps the store when a layer is switched off — a question not asked is not an answer gone stale', async () => {
+    const clock = manualClock();
+    const table = new SessionArtifactTable();
+    const {client} = fakeClient(() => responseWith([artifact(1n), artifact(2n)]));
+    const {ch} = channel(client, clock, table);
+    ch.setLayer('clusters/x');
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    ch.setLayer(null);
+    ch.refresh(view, 400, 300);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ch.current.artifacts).toHaveLength(0);
+    expect(ch.current.held).toBe(2);
+
+    // A reset is the other half of rule 7: a new principal, and nothing held may be named again.
+    ch.reset();
+    expect(ch.current.held).toBe(0);
+    expect(table.live).toBe(0);
   });
 
   it('does not ask, and clears, when no layer is selected', async () => {

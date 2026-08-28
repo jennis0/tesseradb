@@ -61,6 +61,7 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
     status: 'shown',
     refusal: null,
     version: 1,
+    held: served.length,
     table,
     servedOrdinals: new Set(ordinals),
     colours: new Map([...ordinals].map((o) => [o, [10, 20, 30, 255] as const])),
