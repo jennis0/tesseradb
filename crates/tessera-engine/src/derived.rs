@@ -37,7 +37,7 @@
 //! The hull is the expensive one: it is a **concave** shape over the visible members rather than
 //! their convex wrap, and **one ring per separated group of them** rather than one ring per
 //! artifact ([`concave_rings`]) — a sort, a grouping pass, a bucketing pass and a bounded number of
-//! digs, 1.6× the convex path over a whole 197-artifact layer (`docs/design/artifact-shapes.md`
+//! digs, 3.3× the convex path over a whole 197-artifact layer (`docs/design/artifact-shapes.md`
 //! §7). It discloses nothing the wrap did not, and the argument is in [`concave_rings`]'s own
 //! documentation rather than restated here.
 
@@ -181,16 +181,31 @@ pub fn compute(
 /// a visible member's position and each ring contains every member of its own group, so the groups'
 /// wrap vertex counts are a floor: reducing them means either dropping a member outside every ring
 /// or inventing a vertex no member occupies, and both are worse than a wide polygon. What digging
-/// adds is what a cap can bound, and this bounds it at 64 vertices — 512 bytes of `hull_x`/`hull_y`
-/// per artifact at the worst case, against the wraps' own count, which is what already rode on
-/// every response. **64 is where the knee was measured**
-/// (`docs/evidence/memos/2026-08-26-concave-hulls.md`): over one 197-artifact layer it gives shapes
-/// 14% tighter in area for four times the hull bytes, and doubling it again buys 5 more points of
-/// area for another 43 KB. The fidelity cost of running out is that a shape stops refining its
-/// *shortest* remaining bridges, because digging spends the budget longest edge first — a coarser
-/// shape, never a wrong one, since it still holds every member and every ring is still inside its
-/// group's wrap.
-const DIG_BUDGET: usize = 64;
+/// adds is what a cap can bound, and this bounds it at 2,048 vertices — 16 KB of `hull_x`/`hull_y`
+/// per artifact at the worst case, on top of the wraps' own count, which is what already rode on
+/// every response.
+///
+/// **2,048 is a wire-size guard and not a fidelity control, which is the whole point of the
+/// number** (`artifact-shapes.md` §8 B). It was 64, and at 64 the cap *was* the fidelity control:
+/// 108 of 197 artifacts on `clusters/hdbscan` ran out of budget with a bridging edge still live,
+/// 34 of 64 on `clusters/kmeans` and 100 of 574 on `clusters/toponymy` level 3, so what the served
+/// shape followed was the cap rather than the members. Swept over those three layers at the
+/// grouping as it is now built (`tests/hull_geometry.rs`, `the_budget_sweep`), the dig **runs out
+/// of work on its own** at 732, 833 and 197 digs respectively: past those every column — vertices,
+/// bytes, area, time — is identical to the unbounded dig, and no artifact on any of the three is
+/// capped at 1,024 or beyond. 2,048 sits 2.5× clear of the largest of them, so a corpus rougher
+/// than these three still gets the shape its members ask for rather than the shape the cap allows.
+///
+/// **What it costs**, over `clusters/hdbscan` at full membership: 12,497 → 28,459 hull vertices,
+/// 100,836 → 228,532 bytes of `hull_x`/`hull_y` for the whole layer, and 0.89 → 1.89 s of
+/// derivation for all 197 artifacts. The shapes come in from 0.870 to 0.803 of the area of the
+/// rings the grouping alone would have drawn, and the tightest from 0.290 to 0.255.
+///
+/// The fidelity cost of running out — for the pathological membership this still bounds — is that
+/// a shape stops refining its *shortest* remaining bridges, because digging spends the budget
+/// longest edge first: a coarser shape, never a wrong one, since it still holds every member and
+/// every ring is still inside its group's wrap.
+const DIG_BUDGET: usize = 2_048;
 
 /// How many times the median edge an edge must exceed before it is treated as bridging a void.
 ///
@@ -271,6 +286,19 @@ const BRIDGE_FACTOR: i128 = 3;
 /// dominates. Measured over 197 artifacts of 6,146 … 2,422,484 members in
 /// `docs/design/artifact-shapes.md` §7.
 fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
+    dig_rings(points, DIG_BUDGET).0
+}
+
+/// The dig at a budget the caller names, and whether that budget ran out with a bridging edge
+/// still live — **a measurement seam, and the only reason it is public**.
+///
+/// The serving path calls [`concave_rings`], which supplies [`DIG_BUDGET`] and drops the flag; a
+/// request cannot reach this and no configuration key sets a budget. It exists because the sweep
+/// that fixes the constant (`artifact-shapes.md` §8 B) has to run the *same* dig at several
+/// budgets in one process, and a second copy of the construction in a test binary would measure a
+/// second construction. The construction itself is documented at [`concave_rings`].
+#[doc(hidden)]
+pub fn dig_rings(points: &[[u32; 2]], budget: usize) -> (Vec<Vec<[u32; 2]>>, bool) {
     let mut p: Vec<[u32; 2]> = points.to_vec();
     p.sort_unstable();
     p.dedup();
@@ -278,7 +306,7 @@ fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
     // One member is that point and two are that segment, exactly as before: an area no member
     // occupies asserts more than the data does, and there is nothing to dig into or to group.
     if convex.len() < 3 {
-        return vec![convex];
+        return (vec![convex], false);
     }
 
     let alpha_sq = bridge_threshold(&convex);
@@ -302,7 +330,7 @@ fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
     // vertex count is the sum of its groups' wraps plus at most [`DIG_BUDGET`] — the same bound the
     // wire carried when there was one ring, and not a budget that multiplies with the group count.
     let mut inserted = 0usize;
-    while inserted < DIG_BUDGET {
+    while inserted < budget {
         let Some((r, i)) = longest_bridge(&rings, alpha_sq) else {
             break;
         };
@@ -326,6 +354,11 @@ fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
         }
     }
 
+    // Exhaustion is *the budget ran out while a bridge was still live*, which is what a cap acting
+    // as a fidelity control looks like — distinct from a dig that stopped because every remaining
+    // edge is shorter than α or has no candidate.
+    let exhausted = inserted == budget && longest_bridge(&rings, alpha_sq).is_some();
+
     let mut out: Vec<Vec<[u32; 2]>> = rings
         .into_iter()
         .map(|r| r.poly.into_iter().map(|v| v.pos).collect())
@@ -333,7 +366,7 @@ fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
     // Ordered by first vertex. Groups partition the members, so no two rings start at the same
     // position and the order is total — a shape is a ring list, not a ring list up to permutation.
     out.sort_unstable();
-    out
+    (out, exhausted)
 }
 
 /// One group's ring under construction, with the buckets over that group's own members.
@@ -1023,6 +1056,13 @@ mod tests {
     /// plus at most [`DIG_BUDGET`]. The wrap's own count is a floor rather than a target — see
     /// [`DIG_BUDGET`] for why it cannot be capped without either losing a member or inventing a
     /// vertex.
+    ///
+    /// **The served budget is deliberately not exhausted here.** This test asserted that the
+    /// flower ran out of budget while [`DIG_BUDGET`] was 64, which made a cap that was acting as a
+    /// fidelity control look like a property worth pinning. What the budget must do is bound the
+    /// wire, so the bound is asserted at the served value and the *binding* is asserted through
+    /// [`dig_rings`] at a budget small enough to bind — where the shape is still simple and still
+    /// holds every member, which is the claim a truncated dig actually makes.
     #[test]
     fn the_vertex_budget_holds() {
         let members = flower();
@@ -1034,15 +1074,21 @@ mod tests {
             concave.len(),
             convex.len()
         );
-        assert!(
-            concave.len() >= convex.len() + DIG_BUDGET,
-            "the flower's seven valleys did not exhaust the budget: {} over {}",
-            concave.len(),
-            convex.len()
-        );
         assert!(is_simple(&concave));
         for m in &members {
             assert!(contains(&concave, *m));
+        }
+
+        // The cap binding, on the same members: 16 digs is far short of what the flower's seven
+        // valleys want, so the shape stops exactly there — coarser, never wrong.
+        let (truncated, exhausted) = dig_rings(&members, 16);
+        assert!(exhausted, "16 digs did not bind on the flower");
+        let truncated = &truncated[0];
+        assert_eq!(truncated.len(), convex.len() + 16);
+        assert!(truncated.len() < concave.len(), "the cap bought nothing");
+        assert!(is_simple(truncated));
+        for m in &members {
+            assert!(contains(truncated, *m));
         }
     }
 
