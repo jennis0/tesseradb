@@ -723,3 +723,135 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     // Same artifact throughout: only what is said about it moved.
     assert_eq!(b.tessera_id, n.tessera_id);
 }
+
+// ---------------------------------------------------------------------------------------------
+// `levels` on the wire (2026-08-28).
+// ---------------------------------------------------------------------------------------------
+
+/// A tiered layer with three levels carrying GeoNames' own overlapping zoom ranges.
+fn tiered_zoomed(name: &str) -> serde_json::Value {
+    let mut d = declaration(name, None);
+    d["require_member_visibility"] = serde_json::Value::Null;
+    d["hierarchy"] = json!({ "kind": "tiered", "prune_children": true });
+    d["content"] = json!({ "computed": ["centroid"], "supplied": [], "withdraw_on_member_deletion": true });
+    d["levels"] = json!([
+        { "level": 0, "title": "Country", "zoom": [0, 4] },
+        { "level": 1, "title": "Admin 1", "zoom": [3, 7] },
+        { "level": 2, "title": "Admin 2", "zoom": [6, 10] },
+    ]);
+    d
+}
+
+/// Plant one artifact at each of three levels of `admin/boundaries`.
+async fn plant_three_levels(server: &TestServer) {
+    assert_eq!(register(server, tiered_zoomed("admin/boundaries")).await.0, 201);
+    for (level, key) in [(0u32, "country"), (1, "state"), (2, "county")] {
+        let members: Vec<String> = (0..300u64).map(member).collect();
+        let (status, body) = publish(
+            server,
+            "admin/boundaries",
+            json!({
+                "level": level,
+                "addressing": "external",
+                "artifacts": [{ "key": key, "members": members }]
+            }),
+        )
+        .await;
+        assert_eq!(status, 201, "{body}");
+    }
+}
+
+/// Ask at one depth with one `levels` spelling, and report which levels came back.
+async fn levels_at(server: &TestServer, zoom: u32, extra: serde_json::Value) -> Vec<u32> {
+    let rows = viewport_artifacts(server, &["0"], {
+        let mut e = json!({ "zoom": zoom });
+        for (k, v) in extra.as_object().unwrap() {
+            e[k] = v.clone();
+        }
+        e
+    })
+    .await
+    .expect("a served layer carries the frame");
+    let mut levels: Vec<u32> = rows.iter().map(|r| r.level).collect();
+    levels.sort_unstable();
+    levels.dedup();
+    levels
+}
+
+/// **Omitting `levels` follows the declaration's own zoom→level map** — the wire half of the
+/// change. Until now every level was served on every request and a client that read the published
+/// map paid for all of them and drew one.
+#[tokio::test]
+async fn omitting_levels_follows_the_declared_zoom_map() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    plant_three_levels(&server).await;
+
+    assert_eq!(levels_at(&server, 0, json!({})).await, vec![0]);
+    assert_eq!(
+        levels_at(&server, 3, json!({})).await,
+        vec![0, 1],
+        "the ranges overlap at their seam, so a depth inside two of them is answered at both"
+    );
+    assert_eq!(levels_at(&server, 8, json!({})).await, vec![2]);
+}
+
+/// **`"all"` and a list both override it**, and a level the layer does not hold is absent rather
+/// than a refusal — the route an unreachable layer name takes.
+#[tokio::test]
+async fn naming_levels_on_the_wire_overrides_the_map() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    plant_three_levels(&server).await;
+
+    assert_eq!(
+        levels_at(&server, 0, json!({ "levels": "all" })).await,
+        vec![0, 1, 2]
+    );
+    assert_eq!(levels_at(&server, 0, json!({ "levels": [2] })).await, vec![2]);
+    assert_eq!(
+        levels_at(&server, 0, json!({ "levels": [0, 9] })).await,
+        vec![0],
+        "a level the layer does not hold is simply absent"
+    );
+}
+
+/// **An empty list is *none***, as `layers: []` is — and the symmetry is worth a test because the
+/// two fields' *absent* cases are deliberately opposite, so a reader who has just learnt that
+/// omitting `levels` means *the declared map* may reasonably guess `[]` means the same.
+#[tokio::test]
+async fn an_empty_levels_list_is_none() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    plant_three_levels(&server).await;
+
+    let rows = viewport_artifacts(&server, &["0"], json!({ "zoom": 0, "levels": [] })).await;
+    assert!(
+        rows.is_none(),
+        "no level selected serves no artifact, so the frame is absent entirely"
+    );
+}
+
+/// **Any other spelling is a 422**, the same shape `layers` takes: a stray string must not become
+/// a selection that silently matches nothing.
+#[tokio::test]
+async fn a_levels_field_that_is_neither_a_list_nor_all_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    plant_three_levels(&server).await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 10,
+            "layers": "all", "levels": "every"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+}

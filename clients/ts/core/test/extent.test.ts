@@ -37,7 +37,8 @@ const FAR: Artifact = {
   box: [GRID32 * 0.75, GRID32 * 0.75, GRID32 - 1, GRID32 - 1],
   hull: null,
   content: [],
-  parentId: null
+  parentId: null,
+  level: 0
 };
 
 function response(): ViewportResponse {

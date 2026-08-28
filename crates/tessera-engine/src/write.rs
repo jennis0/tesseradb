@@ -9882,6 +9882,10 @@ impl Executor {
                 .collect()
         });
         let mut out = Vec::with_capacity(levels.len());
+        // Level counts gathered per layer for the roll-up below, the per-level lines being one
+        // level's own shape and the sum being what a response pays.
+        let mut per_layer: std::collections::BTreeMap<String, Vec<(u32, u64)>> =
+            std::collections::BTreeMap::new();
         for (layer, level) in levels {
             let Some(registered) = self.live.registered_layer(&layer) else {
                 continue;
@@ -9912,7 +9916,42 @@ impl Executor {
                 now = ?chosen,
                 "the fold re-evaluated a level's serving layout"
             );
+            per_layer
+                .entry(layer.clone())
+                .or_default()
+                .push((level, shape.artifacts));
             out.push((layer, level, chosen));
+        }
+        // **What a whole-layer response costs, reported and never refused** (owner ruling
+        // 2026-08-28). The per-level lines above each carry their own count; this is the sum, and
+        // the sum is the figure that predicts response volume, because a response carries one row
+        // per served artifact and the levels a request does not exclude are all of them.
+        //
+        // **Reported rather than bounded, and the distinction is the ruling's.** A large response
+        // is slow, not wrong: it discloses nothing the mask did not already allow and a rerun costs
+        // nothing, so it is the operator's call and not the service's. The bound that does exist is
+        // the request's — `levels`, whose absent case follows this layer's own declared zoom ranges
+        // — and an operator who sees a number here they do not like has a declaration to change.
+        //
+        // **No byte estimate.** Bytes per artifact depend on what the layer declares: a count-only
+        // level is tens of bytes and one declaring a hull is unbounded, the rings being a function
+        // of the membership. A constant here would be a guess wearing a measurement's clothes; the
+        // artifact count is what is actually known.
+        for (layer, mut levels) in per_layer {
+            levels.sort_unstable();
+            let total: u64 = levels.iter().map(|(_, n)| *n).sum();
+            // **The levels this fold evaluated, which is not always the layer's whole set**: a
+            // level being retired is filtered out above, and so is one whose layer is no longer
+            // registered. The build's report (`tessera_build::artifact_pass::report`) is the one
+            // that sees every level, and is where an operator reads a layer's response cost;
+            // this is the fold's own view of what it just re-evaluated.
+            tracing::info!(
+                layer = %layer,
+                evaluated_artifacts = total,
+                per_level = ?levels,
+                "the fold re-evaluated these levels of a layer; the sum is what a response naming \
+                 them carries, one row per served artifact"
+            );
         }
         out
     }

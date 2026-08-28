@@ -27,7 +27,7 @@ use tessera_wire::{
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{
-    CancelToken, LayerSelection, SinkClosed, SinkResult, ViewportHead, ViewportSink,
+    CancelToken, LayerSelection, LevelSelection, SinkClosed, SinkResult, ViewportHead, ViewportSink,
 };
 
 use crate::error::{map_engine_error, map_join_error, ApiError};
@@ -523,6 +523,27 @@ struct ViewportReq {
     /// frame later is the change this ordering exists to avoid.
     #[serde(default)]
     artifact_budget: Option<u32>,
+    /// Which of each named layer's declared levels to answer for.
+    ///
+    /// **Absent follows the layer's own declaration** — the levels whose declared zoom range
+    /// contains this request's `zoom`, which is what a client reading `/v1/meta`'s zoom→level map
+    /// would have asked for and until now had no way to say. The string `"all"` answers for every
+    /// level; a list answers for exactly those, and **an empty list is *none*, as `layers: []` is**.
+    ///
+    /// **A layer that declares no levels at all is inert to this in every form** — a treed or flat
+    /// layer sits entirely at level 0, so a request naming levels for the tiered layer beside it
+    /// does not blank its clusterings. **A layer that declares levels but no zoom range on any of
+    /// them serves every level in the absent case**, there being no map to follow.
+    ///
+    /// **It applies to every layer named.** A level number is a rung of one layer and means nothing
+    /// across two, so there is no per-layer map here; under decision 0096 a request names one layer
+    /// anyway, and the absent case needs no map at all because each layer's own ranges decide for
+    /// it.
+    ///
+    /// **A level a layer does not hold is absent, not a refusal** — the same route an unreachable
+    /// layer name takes, and the same reason: asking is not a way to learn what exists.
+    #[serde(default)]
+    levels: Option<LevelsReq>,
 }
 
 /// The `layers` field's two spellings: a list of names, or the one reserved word.
@@ -535,6 +556,35 @@ struct ViewportReq {
 enum LayersReq {
     All(AllLayers),
     Named(Vec<String>),
+}
+
+/// The `levels` field's two spellings: a list of level numbers, or the one reserved word.
+///
+/// Untagged on the same argument as [`LayersReq`]: `[0, 1]` or `"all"`, and any other string is a
+/// `422` rather than a selection that silently matches nothing.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LevelsReq {
+    All(AllLevels),
+    Named(Vec<u32>),
+}
+
+/// The literal `"all"` and only that, for `levels`.
+#[derive(Debug)]
+struct AllLevels;
+
+impl<'de> Deserialize<'de> for AllLevels {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        if word == tessera_types::layer::RESERVED_LAYER_SELECTION {
+            Ok(AllLevels)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "`levels` is a list of level numbers or the string \"{}\"; got \"{word}\"",
+                tessera_types::layer::RESERVED_LAYER_SELECTION
+            )))
+        }
+    }
 }
 
 /// The literal `"all"` and only that — `tessera_types::layer::RESERVED_LAYER_SELECTION`.
@@ -743,6 +793,7 @@ impl ViewportSink for WireSink {
                 hull: a.derived.hull.as_deref(),
                 content: &a.content,
                 parent_id: a.parent_id.map(|id| id.raw()),
+                level: a.level,
             })
             .collect();
         let frame = artifacts_frame(&rows);
@@ -890,12 +941,26 @@ fn run_viewport_stream(
         Some(LayersReq::All(_)) => LayerSelection::All,
         Some(LayersReq::Named(_)) | None => LayerSelection::Named(&layer_names),
     };
+    // **Omitted is the declaration's own map**, which is the opposite default from `layers` beside
+    // it and deliberately so: naming a layer has already opted into the artifact pass, and what is
+    // left is which of its rungs to answer at. The expensive answer is *every level*, so that is
+    // the one a caller asks for by name.
+    let level_numbers: Vec<u32> = match &req.levels {
+        Some(LevelsReq::Named(levels)) => levels.clone(),
+        Some(LevelsReq::All(_)) | None => Vec::new(),
+    };
+    let levels = match &req.levels {
+        Some(LevelsReq::All(_)) => LevelSelection::All,
+        Some(LevelsReq::Named(_)) => LevelSelection::Named(&level_numbers),
+        None => LevelSelection::Declared,
+    };
     let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
         .underlay_offset(req.underlay_offset)
         .layers(layers)
         .artifact_budget(req.artifact_budget)
+        .levels(levels)
         .cancel(Some(cancel));
     if let Some(filter) = filter {
         request = request.filter(filter);
@@ -1471,6 +1536,11 @@ struct ArtifactResp {
     /// two clouds is two rings, not one polygon over the gap between them.
     #[serde(skip_serializing_if = "Option::is_none")]
     hull: Option<Vec<Vec<[u32; 2]>>>,
+    /// **The declared resolution this artifact sits at**, the same value the viewport's *artifacts*
+    /// frame carries. Always present — every artifact has a level, a treed or flat layer's being 0
+    /// — and, unlike everything else here, a fact about the artifact rather than about the asking
+    /// principal: two principals served it agree on it.
+    level: u32,
     /// The publisher's supplied content — one entry of the ranked `contents`, entire, positional to the layer's declared
     /// kinds. Empty where the layer declares none; never partial, because an artifact whose content
     /// this principal may not read is a `404`.
@@ -1526,6 +1596,7 @@ async fn artifact(
         r#box: served.derived.bbox,
         hull: served.derived.hull,
         content: served.content,
+        level: served.level,
     }))
 }
 

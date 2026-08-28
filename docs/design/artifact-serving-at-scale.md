@@ -349,10 +349,15 @@ one worth ruling on:
   the satisfied groups per request. ⊘ Not measured, and the storage is real: an artifact spanning
   thirty-two groups is ~200 bytes, so ~2 GB at 10⁷ — and thirty-two is the fixture's number, not a
   corpus's (§4.2).
-- **Evaluate only the levels the request can serve from.** A whole-map request runs every level of a
-  treed layer when the client can draw the coarse one; bounded to what it can serve, the wide case is
-  ~10³ artifacts and the question does not arise. This changes what is *evaluated* and not what is
-  served, but it reaches the request contract. ⊘ Not measured.
+- **Evaluate only the levels the request can serve from — built 2026-08-28**
+  ([decision 0103](../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md)),
+  and it changes what is **served** as well as what is evaluated, which this bullet had the wrong way
+  round. A whole-map request ran every level of a levelled layer when the client could draw the coarse
+  one; `/v1/viewport` now takes `levels`, whose absent case is the layer's own declared zoom ranges
+  against the request's depth, and the check sits above the projection build so a skipped level pays
+  no candidate walk, no masked probe and no derived geometry. Measured on the GeoNames rung: an
+  overview falls from 464,655 artifacts and 49 MB to 5,096
+  ([the memo](../evidence/memos/2026-08-28-artifact-response-volume.md)).
 
 ### 4.4 Three things the construction needs to work at all
 

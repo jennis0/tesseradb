@@ -787,7 +787,7 @@ components:
               title:
                 type: [string, "null"]
               zoom:
-                description: Advisory `[min, max]` zoom; bounds no work.
+                description: "`[min, max]` tile depth — **the default bound on this layer's response**: a `/v1/viewport` naming no `levels` is answered at the levels whose range covers the depth it asked at, and naming `levels` overrides that. Absent means served at every depth; a range containing no depth is refused at registration. It was advisory and bounded no work while nothing on the wire could name a level (contracts §3.2 r41, decision 0103)."
                 oneOf:
                   - type: "null"
                   - type: array
@@ -907,6 +907,35 @@ components:
           type: integer
           minimum: 0
           description: How many artifacts the client wants back at most. Honoured structurally — ancestors in place of their descendants — never by sampling (decision 0083); accepted and inert on a flat layer. Unbounded when absent.
+        levels:
+          description: |
+            Which of each named layer's declared resolutions to answer for (contracts §3.2 r41,
+            decision 0103).
+
+            **Absent follows the layer's own declaration** — the levels whose declared zoom range
+            covers this request's `zoom`, the two being the same 0–16 depth coordinate. The string
+            `"all"` answers for every level; an array answers for exactly those, intersected with
+            what the layer holds. A level a layer does not hold is absent from the answer rather
+            than a refusal, the same way an unreachable layer name is; any other value is `422`.
+
+            **A layer that declares no levels at all is inert to this in every form** — a treed
+            or flat layer sits entirely at level 0, so naming levels for the tiered layer beside it
+            does not blank its clusterings. **A layer that declares levels but no zoom range on any
+            of them serves every level in the absent case**, there being no map to follow.
+
+            **An empty array is *none***, as `layers: []` is.
+
+            **The default is the reverse of `layers`' and deliberately so**: naming a layer has
+            already opted into the artifact pass, so what is left is which of its rungs to pay for,
+            and there the expensive answer is *every level* — the one a caller asks for by name.
+
+            **It applies to every layer named**, against each layer's own declaration: a level
+            number is a rung of one layer and means nothing across two.
+          oneOf:
+            - type: array
+              items: { type: integer, minimum: 0 }
+            - type: string
+              const: all
 
     FilterExpr:
       description: |
@@ -1017,7 +1046,7 @@ components:
     ArtifactResponse:
       type: object
       additionalProperties: false
-      required: [layer, masked_count]
+      required: [layer, masked_count, level]
       properties:
         layer:
           type: string
@@ -1055,3 +1084,7 @@ components:
           type: array
           items: { type: string }
           description: The publisher's supplied content, positional to the layer's declared `supplied_content` types. Absent where the layer declares none; never partial.
+        level:
+          type: integer
+          minimum: 0
+          description: "The declared resolution this artifact sits at — the same value the viewport's *artifacts* frame carries, and the one field here that is a fact about the artifact rather than about the asking principal: two principals served it agree on it. `0` on a treed or flat layer, which declares no levels."

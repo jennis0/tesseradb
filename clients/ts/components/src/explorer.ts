@@ -421,12 +421,13 @@ export class TesseraExplorer extends TesseraElement {
     const layer = clusterLayerOf(s.get('legend').colourBy) ?? a.layers[0] ?? null;
     const declared = layer ? meta.layers.find((l) => l.name === layer) : null;
     if (!declared || declared.levels.length === 0) return null;
+    // **The served artifact's own declared level**, straight off the wire — not the table's entry,
+    // which is the same number today and one indirection away from it, and not a count of parent
+    // links, which is what this used to be and answered a different question.
     const counts: number[] = [];
     for (const x of a.served) {
       if (x.layer !== layer) continue;
-      const e = a.table.entry(a.table.ordinalOf(x.layer, x.tesseraId));
-      if (!e) continue;
-      counts[e.level] = (counts[e.level] ?? 0) + 1;
+      counts[x.level] = (counts[x.level] ?? 0) + 1;
     }
     for (let i = 0; i < counts.length; i++) counts[i] ??= 0;
     if (counts.length <= 1) return null;

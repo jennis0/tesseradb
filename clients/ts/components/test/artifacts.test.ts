@@ -45,7 +45,8 @@ const artifact = (id: bigint, count: bigint, parentId: bigint | null = null, con
   box: null,
   hull: null,
   content,
-  parentId
+  parentId,
+  level: 0
 });
 
 function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']): ArtifactsProjection {

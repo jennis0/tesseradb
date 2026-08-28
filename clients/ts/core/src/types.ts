@@ -254,6 +254,28 @@ export type ViewportRequest = {
    */
   layers?: string[] | 'all';
   /**
+   * Which of each named layer's declared levels to answer for.
+   *
+   * **Omitted follows the layer's own declaration** — the levels whose declared zoom range covers
+   * this request's `zoom`, which is what `/v1/meta`'s zoom→level map has always described and which
+   * nothing on the wire could previously ask for. `'all'` answers for every level; an array answers
+   * for exactly those.
+   *
+   * **The default is the useful one and the expensive answer is the one you ask for by name** —
+   * the opposite arrangement from `layers`, and deliberately: naming a layer has already opted into
+   * the artifact pass, so what is left is which of its rungs to pay for. A five-level administrative
+   * hierarchy answered whole at the overview is a response two orders of magnitude larger than the
+   * one a client draws.
+   *
+   * **Inert on a layer that declares no zoom ranges**, which is every treed layer (they declare no
+   * levels at all) and any levelled layer whose author declared none — those serve every level in
+   * all three cases.
+   *
+   * A level a layer does not hold is absent from the answer rather than a refusal, the same way an
+   * unreachable layer name is.
+   */
+  levels?: number[] | 'all';
+  /**
    * How many artifacts the client wants back at most, in the same shape as `k` beside it.
    *
    * **Inert on a flat layer, and never a sample.** Artifacts are not dropped to meet a budget: the
@@ -356,6 +378,20 @@ export type Artifact = {
    * because there is nothing to fill it from.
    */
   parentId: bigint | null;
+  /**
+   * **Which declared resolution this artifact sits at**, from the layer's `levels` in `/v1/meta`.
+   *
+   * A fact about the artifact and not about the viewer: every principal served it receives the same
+   * number. `0` on a treed or flat layer, which declares no levels and sits entirely at level 0.
+   *
+   * **Read this rather than counting `parentId` links.** That count is the depth of the chain that
+   * reached the artifact *in this response*, which answers a different question: a tiered layer's
+   * edges may skip a level, and its roots may have no parent to be given, so on real data the two
+   * disagree — measured at 490 of 797 artifacts on one layer. Walking parents stays the right
+   * reading of a **treed** layer, where the lineage is the structure; this field is what stops that
+   * reading being carried where it does not hold.
+   */
+  level: number;
 };
 
 export type ViewportResult = {

@@ -54,8 +54,16 @@ millisecond above that is artifacts.
 across the zoom range. The serving structure is doing its job.
 
 **The failure is the opening view, where there is nothing to prune** — and there, every level is
-returned regardless of zoom. The shipped viewer opens at whole-extent zoom 0 and sends
-`layers: "all"` on every viewport request, which is exactly the worst cell of both tables.
+returned regardless of zoom. The shipped viewer opens at whole-extent zoom 0, which is the worst
+cell of both tables.
+
+⊘ **Corrected 2026-08-28: the viewer does not send `layers: "all"`, and not on every request.** An
+earlier revision of this memo said so here and in §4.4. `clients/ts/viewer/src/main.ts` names **one**
+layer — `meta.layers[0]`, or whichever the picker selects — and the point path sends `layers: []`;
+the artifact request is a separate `k = 0` call issued once per *settled* view on a 200 ms debounce
+(`clients/ts/core/src/artifactChannel.ts`). The volume result is unchanged, because on this corpus
+one layer **is** the 464,655 artifacts; what is wrong is the framing *per pan*, which should read
+*per settled view, for one layer*.
 
 **This is not a leak.** The response scales with the visible set and with the viewport and with
 nothing else, which is §4's **I2** behaving as specified. It is a volume problem.
@@ -164,10 +172,28 @@ only `max_artifacts` in the tree is a flag on `crates/tessera-bench/src/bin/memb
 [Decision 0092](../../decisions/0092-the-build-reports-a-layers-shape-and-no-layer-carries-a-declared-bound.md)
 declined a *declared* bound on a layer, which is a different object from a *per-request* ceiling —
 but its own §2 records that `artifact-delivery.md` had carried an owed item, *"the per-request bound
-must refuse on the layer's declared artifact count before any evaluation"*, and that item does not
-appear to have been re-homed when 0092 declined the declared form.
+must refuse on the layer's declared artifact count before any evaluation"*.
 
-So the regime the design assumed would be refused is instead served, at 49 MB.
+⊘ **Corrected 2026-08-28.** An earlier revision said that item did *"not appear to have been
+re-homed"*. It was **withdrawn**, explicitly and in writing:
+[`artifact-delivery.md`](../../artifact-delivery.md) §2 reads *"The second item on this list is
+withdrawn… No bound machinery is owed by any stage"*, and §8's row gives the reason — *"what costs
+is row-space locality rather than the count, so a threshold on the count refuses the cheap layer and
+admits the dear one"*.
+
+**That reason is about evaluation and does not carry to volume.** A response carries one row per
+served artifact, so the served *count* is what predicts its size where it is the wrong predictor of
+time. The 110 B a row costs here is **this layer's**, not a constant — it follows what the layer
+declares, and a level declaring a hull has no bound at all, the rings being a function of the
+membership. That is why [decision 0103](../../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md)
+has the build report the artifact count and no byte estimate. A response-volume ceiling would therefore have been a different object from both
+0092's declared bound and the withdrawn evaluation bound — and the owner has now declined it too
+([decision 0103](../../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md)):
+a large response is slow rather than wrong, so it is reported at the build and served. §5's question
+3 is answered *nowhere, and deliberately*.
+
+So the regime the design assumed would be refused is instead served, at 49 MB — and is now bounded
+by the level instead.
 
 ### 4.4 The cost model and the shipped client disagree about how often artifacts are fetched
 
@@ -176,13 +202,31 @@ So the regime the design assumed would be refused is instead served, at 49 MB.
 > **The client caches, so a level is replica sync rather than request cost** … Sizing a level as
 > though every viewport re-fetched it is the wrong model.
 
-**The shipped viewer re-fetches on every viewport request.** `clients/ts/core/src/client.ts` puts
-`layers` in each `/v1/viewport` body and `clients/ts/viewer/src/main.ts` passes `'all'`; nothing
-caches artifacts across requests or reconciles them against a version coordinate.
+**The shipped viewer re-fetches the artifacts for every settled view**, one layer at a time, and
+nothing reconciles a held artifact against a version coordinate.
 
-⊘ Whether the intended replica behaviour is specified anywhere as a client obligation is **not
-established here**. [`client-obligations.md`](../../design/client-obligations.md) is the document to
-check and this memo has not checked it.
+⊘ **Corrected 2026-08-28** — see §1. The claim that `main.ts` passes `'all'` was wrong; it names one
+layer, and the re-fetch is per settled view rather than per request. The rest holds: there is no
+artifact replica.
+
+**Checked since**, which this memo had not done.
+[`client-obligations.md`](../../design/client-obligations.md) rule 6 states the artifact channel
+asks for itself, and rule 7 that *"a held whole-layer artifact set goes when the content key it was
+fetched under rotates"* — so a held set **is** a written client obligation. And the machinery is
+half-built: `SessionArtifactTable` already keeps artifact payloads across responses, refcounted and
+surviving a pan, which is the store a replica needs. What is missing is that the channel replaces
+its served set wholesale and re-fetches every payload with it.
+
+**Two facts make that fixable rather than merely desirable**, and both were verified in the tree
+rather than assumed. An artifact's payload — key, count, centroid, box, hull, content, parent — is a
+function of `(artifact, M_auth, generation)` and of nothing in the request:
+`crates/tessera-engine/src/derived.rs` computes it from `mask.visible_rows(members)`, the artifact's
+**whole** membership intersected with the mask, never clipped to the viewport. And the **content key
+hashes exactly those three things** and nothing from the request
+(`viewport.rs::view_coordinates`), so it rotates precisely when a held payload goes stale and never
+because a client panned or crossed a zoom band. A client-side artifact dictionary therefore needs no
+new coordinate — and the level must never be put into the content key, or every zoom band crossing
+would discard a cache that was still valid.
 
 ## 5. What a design pass has to answer
 
@@ -221,6 +265,51 @@ Posed, not answered. Each is genuinely open.
    polygons rather than as an enumerated hierarchy. If a design answers response volume for one and
    not the other, the second will re-raise it.
 
+## 5a. What was decided and built, 2026-08-28
+
+**Answered by the owner the same day, and built** — [decision 0103](../../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md),
+contracts r41, `annotation-representation.md` r8, and S10's row in
+[`client-delivery.md`](../../client-delivery.md).
+
+- **Q1 — is the level a request parameter?** Yes. `/v1/viewport` takes `levels`, and its **absent
+  case is the layer's own declared zoom→level map** against the request's depth. The declaration and
+  `/v1/meta` already carried the ranges and the request already carried the same 0–16 coordinate;
+  nothing joined them. The disclosure question was confirmed rather than assumed and 0083's argument
+  does transfer: every artifact passed its own criterion against `M_auth` before the selection runs,
+  so fewer levels serve strictly less and more serve only artifacts that had already cleared their
+  own test.
+- **Q2 — or is the defect in the client?** Both, and this is the half that was on the wire. The
+  client half stands (§4.4).
+- **Q3 — where does the ceiling live?** **Nowhere.** Degraded service beats none: the response
+  discloses nothing and a rerun costs nothing, so the build reports the whole-layer artifact count
+  per level and the response is served.
+- **Q4 — does the zoom→level map stay advisory?** No: it becomes the **default**, overridable by
+  naming `levels`. The client still chooses; following the published map stopped being an intention
+  with no expression.
+- **Q5 and Q6 — is 464,655 a corpus to serve, and what about polygon membership?** Not decided here.
+
+**A second defect fell out and is fixed with it.** The response said nothing about which level an
+artifact was at, so the client counted `parent_id` links — the depth of the chain that reached it
+*in that response*, which is a different question. On `clusters/toponymy` the two disagreed on 490
+of 797 artifacts, 186 drawn at level 0 where 16 are declared. The *artifacts* frame now carries a
+non-nullable `level`.
+
+**Measured on this bundle after the change**, same machine, one run each, `k = 0`, `layers: "all"`,
+whole extent:
+
+| Request | Time | Bytes |
+|---|---:|---:|
+| zoom 0, `levels` omitted (the declared map) | 579 ms | **0.03 MiB** |
+| zoom 0, `levels: "all"` | 6,087 ms | 50.82 MiB |
+| zoom 3, `levels` omitted | 415 ms | **0.50 MiB** |
+| zoom 3, `levels: "all"` | 1,716 ms | 50.82 MiB |
+
+⊘ **These are single runs on a machine serving three other bundles**, so the absolute times are not
+comparable with §1's and none should be quoted as a performance result. The *ratio within one run*
+is what the conclusion rests on, and it is three orders of magnitude on bytes at the overview. The
+saving is not only bytes: the level check sits above the projection build, so a skipped level pays
+no candidate walk, no masked probe and no derived geometry over its members.
+
 ## 6. Reproducing
 
 ```bash
@@ -232,9 +321,10 @@ cd "$TESSERA_LADDER/geonames" && tessera check && tessera build
   --label 'GeoNames' --no-viewer
 ```
 
-Then POST `/v1/viewport` with and without `layers`, at each preset in
-`clients/ts/viewer/public/datasets.json` (the presets are measured per bundle and carry the term
-lists), and at a square window of side 2⁻ᶻ for the zoom sweep.
+Then POST `/v1/viewport` with and without `layers`, at each preset in the `datasets.json` that
+`run_demo.sh` writes under the viewer's `public/` directory — generated per machine and not
+committed, which is why it is described rather than cited; the presets are measured per bundle and
+carry the term lists — and at a square window of side 2⁻ᶻ for the zoom sweep.
 
 ⊘ **These are single-run figures on a machine also running three other `tessera serve` processes.**
 They are an order of magnitude apart from each other, which is what the conclusion rests on; none of

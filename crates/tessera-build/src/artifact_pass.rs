@@ -66,6 +66,10 @@ pub struct LevelLayoutReport {
     pub view: String,
     pub layer: String,
     pub level: u32,
+    /// The level's declared zoom range, which since 2026-08-28 decides whether a request that names
+    /// no `levels` is answered at it. Reported so a gap or an inverted range is visible at the build
+    /// rather than as a blank map at one zoom band.
+    pub zoom: Option<(u32, u32)>,
     pub shape: LevelShape,
     pub pinned: bool,
     pub chosen: ServingLayout,
@@ -156,6 +160,12 @@ pub fn run(
             view: view.to_string(),
             layer: layer.clone(),
             level: *level,
+            zoom: registered
+                .declaration
+                .levels
+                .iter()
+                .find(|l| l.level == *level)
+                .and_then(|l| l.zoom),
             shape,
             pinned: registered.declaration.layout.is_some(),
             chosen: layout,
@@ -395,4 +405,69 @@ pub fn report(pass: &ArtifactPass) {
         pass.row_column_extents.len(),
         pass.containment_extents.len(),
     );
+
+    // **What a whole-layer response costs, reported and never refused**
+    // ([decision 0103](../../../docs/decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md),
+    // owner ruling 2026-08-28). The lines above give each level its own count; this is the sum per
+    // layer, and the sum is what predicts response volume, a response carrying one row per served
+    // artifact.
+    //
+    // **This is the whole of what replaces an artifact ceiling.** A large response is slow, not
+    // wrong: it discloses nothing the mask did not already allow and a rerun costs nothing, so it
+    // is the operator's call. What bounds it is the request's `levels`, whose absent case follows
+    // the zoom ranges printed here — so an operator who does not like a number has a declaration to
+    // change, and this is where they see it.
+    //
+    // **No byte estimate.** Bytes per artifact follow what the layer declares — a count-only level
+    // is tens of bytes and one declaring a hull is unbounded, the rings being a function of the
+    // membership — so a constant would be a guess wearing a measurement's clothes.
+    let mut by_layer: std::collections::BTreeMap<&str, Vec<&LevelLayoutReport>> =
+        std::collections::BTreeMap::new();
+    for level in &pass.levels {
+        by_layer.entry(level.layer.as_str()).or_default().push(level);
+    }
+    for (layer, mut levels) in by_layer {
+        // **Only where there is more than one level**, because for a single-level layer the sum is
+        // the line already printed above and repeating it is noise — and noise here costs the same
+        // as anywhere else: a report that says something about every layer stops being read.
+        if levels.len() < 2 {
+            continue;
+        }
+        levels.sort_by_key(|l| l.level);
+        let total: u64 = levels.iter().map(|l| l.shape.artifacts).sum();
+        let ranges = levels.iter().any(|l| l.zoom.is_some());
+        if ranges {
+            eprintln!(
+                "  {layer}: {total} artifact(s) across {} levels — what a response naming it \
+                 carries at `levels: \"all\"`. Omitting `levels` serves the levels whose declared \
+                 zoom range covers the request's depth:",
+                levels.len()
+            );
+        } else {
+            // No range on any level, so there is no map for the *absent* case to follow and it
+            // serves all of them — the total is what an ordinary request pays. An explicit
+            // `levels` still selects here, the layer having levels to select; what it has no
+            // default for is the omitted case.
+            eprintln!(
+                "  {layer}: {total} artifact(s) across {} levels, none declaring a zoom range — so \
+                 a response omitting `levels` carries all of them. Declare a range per level to \
+                 bound it:",
+                levels.len()
+            );
+        }
+        for l in levels {
+            match l.zoom {
+                Some((lo, hi)) => eprintln!(
+                    "    level {} [{}]: {} artifact(s), zoom {lo}–{hi}",
+                    l.level, l.view, l.shape.artifacts
+                ),
+                // A level with no range of its own beside levels that have one is served at every
+                // depth: it has no scale to be outside of.
+                None => eprintln!(
+                    "    level {} [{}]: {} artifact(s), no zoom range — served at every depth",
+                    l.level, l.view, l.shape.artifacts
+                ),
+            }
+        }
+    }
 }

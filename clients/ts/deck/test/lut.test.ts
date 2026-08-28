@@ -13,7 +13,8 @@ const artifact = (id: bigint, x: number, parentId: bigint | null = null): Artifa
   box: null,
   hull: null,
   content: [],
-  parentId
+  parentId,
+  level: 0
 });
 
 function band(tag: number, ordinals: number[], layer = 'l'): Band {
@@ -44,10 +45,12 @@ function band(tag: number, ordinals: number[], layer = 'l'): Band {
 /** A table naming a root and two children, with every ordinal served. */
 function served() {
   const table = new SessionArtifactTable();
+  // Levels are the wire's, so a reference states one: the two children are declared at level 1,
+  // which is what the level walk below resolves against.
   const [root, a, b] = table.take([
-    {tesseraId: 1n, layer: 'l', parentId: null},
-    {tesseraId: 2n, layer: 'l', parentId: 1n},
-    {tesseraId: 3n, layer: 'l', parentId: 1n}
+    {tesseraId: 1n, layer: 'l', parentId: null, level: 0},
+    {tesseraId: 2n, layer: 'l', parentId: 1n, level: 1},
+    {tesseraId: 3n, layer: 'l', parentId: 1n, level: 1}
   ]);
   const arts = [artifact(1n, 2 ** 31 + 100), artifact(2n, 2 ** 31 + 1e9, 1n), artifact(3n, 2 ** 31 - 1e9, 1n)];
   const named = [root!, a!, b!].map((ordinal, i) => ({ordinal, centroid: arts[i]!.centroid}));

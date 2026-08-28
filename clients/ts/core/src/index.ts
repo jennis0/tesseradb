@@ -77,6 +77,7 @@ export {
 export {
   SessionArtifactTable,
   NO_ORDINAL,
+  rungOf,
   type ArtifactEntry,
   type ArtifactRef
 } from './artifactTable.js';

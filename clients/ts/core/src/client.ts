@@ -206,6 +206,11 @@ export class TesseraClient {
     // what the caller passed and never substitutes one for the other.
     if (req.layers !== undefined) body.layers = req.layers;
     if (req.artifactBudget !== undefined) body.artifact_budget = req.artifactBudget;
+    // **Absent is a real selection here, not a missing one.** Omitting `levels` asks the server to
+    // follow each layer's own declared zoom ranges against this request's depth, so a client that
+    // never thinks about levels gets the one a map would draw. Sent only when the caller named
+    // something, so "follow the declaration" and "give me these" stay distinct request shapes.
+    if (req.levels !== undefined) body.levels = req.levels;
     // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
     // an opaque string on this side so a client never has to know its shape.
     if (req.stamp) body.pin = JSON.parse(req.stamp);

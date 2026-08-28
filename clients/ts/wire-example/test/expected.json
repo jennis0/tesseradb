@@ -33,12 +33,12 @@
       5,
       4
     ],
-    "tiles": 16,
+    "tiles": 14,
     "sub_cells": null,
-    "artifacts": 95,
+    "artifacts": 178,
     "points": 0,
     "first_point_tessera_id": null,
-    "first_artifact_tessera_id": "6960580043625169451"
+    "first_artifact_tessera_id": "1604015221313399392"
   },
   "viewport-membership.bin": {
     "frames": [
@@ -47,11 +47,11 @@
       3,
       4
     ],
-    "tiles": 16,
+    "tiles": 14,
     "sub_cells": null,
-    "artifacts": 95,
-    "points": 256,
-    "first_point_tessera_id": "93260485833490393",
-    "first_artifact_tessera_id": "6960580043625169451"
+    "artifacts": 178,
+    "points": 251,
+    "first_point_tessera_id": "1199908523065398912",
+    "first_artifact_tessera_id": "1604015221313399392"
   }
 }

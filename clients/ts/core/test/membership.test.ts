@@ -112,7 +112,7 @@ describe('the membership column in the decoder', () => {
   });
 });
 
-const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l'): Artifact => ({
+const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l', level = 0): Artifact => ({
   layer,
   tesseraId: id,
   key: `c-${id}`,
@@ -121,7 +121,8 @@ const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l'): Arti
   box: null,
   hull: null,
   content: [],
-  parentId
+  parentId,
+  level
 });
 
 /** A response of `tiles.length` tiles, each of its own served count, with a membership column. */
@@ -248,8 +249,8 @@ describe('the membership golden (captured against the demo layer, the layer name
 
 describe('a band is coloured by the response that carried it (§5.10)', () => {
   /** The same artifact, with a centroid — what a positional colour is a function of. */
-  const placed = (id: bigint, dx: number, parentId: bigint | null = null): Artifact => ({
-    ...artifact(id, parentId),
+  const placed = (id: bigint, dx: number, parentId: bigint | null = null, level = 0): Artifact => ({
+    ...artifact(id, parentId, 'l', level),
     centroid: [GRID32_CENTRE + dx, GRID32_CENTRE]
   });
 
@@ -274,7 +275,7 @@ describe('a band is coloured by the response that carried it (§5.10)', () => {
     // A zoom in. The point response's own artifacts frame carries the children — the debounced
     // `k = 0` channel is still two hundred milliseconds behind on the coarse cut.
     const fine = bandsOfResult(
-      result([2], [1, 2], [20n, 21n], [placed(20n, 9e8, 10n), placed(21n, 11e8, 10n)]),
+      result([2], [1, 2], [20n, 21n], [placed(20n, 9e8, 10n, 1), placed(21n, 11e8, 10n, 1)]),
       3,
       meta(table)
     );

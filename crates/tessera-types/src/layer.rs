@@ -510,9 +510,19 @@ pub struct LevelDeclaration {
     /// buys nothing. Absent is served as absent rather than as the name — choosing to display an
     /// identity like `clusters/hdbscan` is a client's call, not something the service manufactures.
     pub title: Option<String>,
-    /// Advisory min/max zoom, as every tile schema carries. **It bounds no work** — what bounds a
-    /// treed layer's response is the request's artifact budget, and what bounds a levelled layer's
-    /// is the level asked for.
+    /// Min/max zoom, as every tile schema carries — **and, since 2026-08-28, the default bound on a
+    /// levelled layer's response**.
+    ///
+    /// A `/v1/viewport` request that names no `levels` is answered at the levels whose range covers
+    /// the depth it asked at; one that names them overrides this entirely. A layer where no level
+    /// declares a range is unaffected and serves every level, which is what keeps this inert on a
+    /// treed layer (which declares no levels at all) and on any layer whose author declared none.
+    ///
+    /// **It was advisory and bounded nothing**, published in `/v1/meta` for a client to follow with
+    /// no way to act on it: the request carried the same 0–16 depth coordinate and nothing joined
+    /// the two, so a five-level administrative hierarchy was served whole at every zoom and a client
+    /// following the published map paid for five levels and drew one. What bounds a **treed**
+    /// layer's response is still the request's artifact budget; it has no levels for this to reach.
     pub zoom: Option<(u32, u32)>,
 }
 
@@ -662,6 +672,11 @@ pub fn attribute_value_key(code: u32, vocabulary_key: Option<&str>) -> String {
 /// deeper one names a subdivision the geometry cannot express — every tile below it would resolve
 /// to the same range as its parent, which is a membership silently wider than the declaration.
 pub const MAX_SHAPE_DEPTH: u8 = 16;
+
+/// The deepest tile a viewport request may ask at, and so the deepest a level's `zoom` range can
+/// usefully name — the same 0–16 grid `MAX_SHAPE_DEPTH` covers, expressed as the `u32` a
+/// [`LevelDeclaration::zoom`] end carries.
+pub const MAX_TILE_DEPTH: u32 = MAX_SHAPE_DEPTH as u32;
 
 /// The width a reserved run is aligned and sized to: one Roaring container.
 ///
@@ -889,6 +904,11 @@ pub enum DeclarationError {
     ProportionalOnPredicate,
     /// A spatial layer's declared Morton depth is outside `1..=`[`MAX_SHAPE_DEPTH`].
     ShapeDepthOutOfRange(u8),
+    /// A level's `zoom` range has no depth in it — its ends are inverted, or it starts past the
+    /// grid's own depth of 16. Refused rather than warned because it has no reading at all: since
+    /// the range became the default bound on a response (decision 0103) such a level is served at
+    /// no depth, and the operator's only symptom would be a layer that is silently absent.
+    ZoomRangeEmpty { level: u32, lo: u32, hi: u32 },
     /// A layer declares a `shape` and its membership is not `spatial`, so nothing would read it.
     ShapeWithoutSpatialMembership,
     /// A predicate layer declares something its derived artifacts cannot carry — content, a
@@ -949,6 +969,13 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::FractionOutOfRange(p) => {
                 write!(f, "require_member_visibility fraction must be in (0, 1]; got {p}")
             }
+            DeclarationError::ZoomRangeEmpty { level, lo, hi } => write!(
+                f,
+                "level {level} declares zoom [{lo}, {hi}], which contains no depth: the ends are \
+                 inverted or the range starts past the grid's own depth of {MAX_TILE_DEPTH}. A \
+                 request naming no `levels` is answered at the levels whose range covers its depth, \
+                 so this level would be served at none. Omit `zoom` to serve it at every depth"
+            ),
             DeclarationError::ShapeDepthOutOfRange(d) => write!(
                 f,
                 "a spatial layer's `depth` is {d}; it must be between 1 and {MAX_SHAPE_DEPTH}. \
@@ -1044,6 +1071,28 @@ impl LayerDeclaration {
         }
         if !self.levels.is_empty() && seen.iter().copied().ne(0..self.levels.len() as u32) {
             return Err(DeclarationError::LevelsNotDense);
+        }
+
+        // **A zoom range must contain a depth**, because since 2026-08-28 it decides what a request
+        // naming no `levels` is answered at (decision 0103). While the range was advisory an
+        // inverted or out-of-grid one was harmless; now it means the level is served at no depth,
+        // and a layer that quietly vanishes at every zoom is the least diagnosable failure this
+        // surface can produce. `zoom` being absent is a different thing and stays legal: it means
+        // *served at every depth*.
+        //
+        // A **gap** between two levels' ranges is not refused — a declaration may legitimately have
+        // no level for some band — but the build prints every range beside its level so a gap is
+        // visible rather than inferred (`tessera_build::artifact_pass::report`).
+        for level in &self.levels {
+            if let Some((lo, hi)) = level.zoom {
+                if lo > hi || lo > MAX_TILE_DEPTH {
+                    return Err(DeclarationError::ZoomRangeEmpty {
+                        level: level.level,
+                        lo,
+                        hi,
+                    });
+                }
+            }
         }
 
         if let Some(ExistenceCriterion::Fraction(p)) = self.require_member_visibility {

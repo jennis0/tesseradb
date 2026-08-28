@@ -53,6 +53,10 @@ class Artifact(NamedTuple):
     #: One content, entire, positional to the layer's declared kinds. Empty means the layer
     #: declares no supplied content — never that content was withheld.
     content: list[str]
+    #: The declared resolution this artifact sits at — the one field here that is a fact about the
+    #: artifact rather than about this principal, so two principals served it *do* agree on it.
+    #: `0` on a treed or flat layer, which declares no levels and sits entirely at level 0.
+    level: int
 
 
 FRAME_TILES = 1
@@ -192,6 +196,7 @@ def decode_frames(data: bytes):
                         "hull_x",
                         "hull_y",
                         "content",
+                        "level",
                     )
                 }
                 for row in range(batch.num_rows):
@@ -223,6 +228,7 @@ def decode_frames(data: bytes):
                             if hx is None
                             else [list(zip(rx, ry)) for rx, ry in zip(hx, hy)],
                             content=list(columns["content"][row] or []),
+                            level=columns["level"][row],
                         )
                     )
             if not artifacts:

@@ -1,6 +1,6 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, NEUTRAL, layerEntries, type Rgba} from '@tesseradb/client';
+import {CLUSTER_PREFIX, NEUTRAL, layerEntries, rungOf, type Rgba} from '@tesseradb/client';
 import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck';
 import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -119,8 +119,14 @@ export class TesseraLegend extends TesseraElement {
             </select></div>
         </div>`
       : nothing;
-    // The level select follows what the cut served: the depths present in the served tree of the
+    // The level select follows what the cut served: the rungs present in the served tree of the
     // colouring layer, titled from `meta.levels` where the layer is tiered, else *level N*.
+    //
+    // **`rungOf` and not the entry's `level`.** A treed layer declares no levels, so every artifact
+    // arrives at level 0 and reading that field alone would collapse the set to `{0}` and take the
+    // select off the screen entirely — which is what the demo's own `clusters/hdbscan` would do.
+    // `rungOf` is the declared level where the layer has levels and the chain depth where it does
+    // not, so both kinds of layer offer the rungs they actually have.
     const cluster = clusterLayerOf(colourBy);
     const clusterMeta = cluster ? meta.layers.find((l) => l.name === cluster) : null;
     const depths = new Set<number>();
@@ -128,7 +134,7 @@ export class TesseraLegend extends TesseraElement {
       for (const x of artifacts.served) {
         if (x.layer !== cluster) continue;
         const e = artifacts.table.entry(artifacts.table.ordinalOf(x.layer, x.tesseraId));
-        if (e) depths.add(e.level);
+        if (e) depths.add(rungOf(e));
       }
     }
     const levelsServed = [...depths].sort((x, y) => x - y);
