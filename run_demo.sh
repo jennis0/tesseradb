@@ -12,6 +12,8 @@
 #   ./run_demo.sh --scale notebook # the notebook corpus: the HDBSCAN tree, its topics, the taxonomy
 #   ./run_demo.sh --scale notebook-2m4  # the same pipeline over the whole corpus, plus toponymy
 #   ./run_demo.sh --bundle PATH   # serve a bundle you already have, on its own
+#   ./run_demo.sh --bundle PATH --terms GB,FR,DE [--ranks R.json] [--label 'Name']
+#                                 # …whose dictionary is its own, not the fixtures' 0..200
 #   ./run_demo.sh --no-viewer     # servers only (for curl, the golden capture, the smoke script)
 #   ./run_demo.sh --rebuild       # discard and rebuild the demo bundles
 #
@@ -161,10 +163,28 @@ run_viewer=1
 rebuild=0
 build_only=0
 scales=()
+# **`--bundle` alone cannot serve a corpus with its own dictionary**, and these are why. The
+# candidate terms below default to `0..200`, which is the *demo* fixtures' synthetic dictionary —
+# against any other corpus every principal measures empty and the viewer opens on a blank map with
+# nothing to say why. A term id names a different set in every dictionary, so there is no list that
+# could be right for all of them; the bundle's own terms have to be named.
+#
+#   --terms  a comma-separated candidate list, or `lo..hi`
+#   --ranks  `[{term, pairs}]`, most-covering first — what composes the sparse/medium/heavy
+#            coverage principals, which is the whole of what "switch principal" demonstrates once
+#            a dictionary is large enough that any single term is a sliver
+terms_override=''
+ranks_override=''
+# What the picker calls this bundle. Without it the entry is the bundle's absolute path, which is
+# what the operator typed rather than what the corpus is.
+label_override=''
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --scale)      scales+=("$2"); shift 2 ;;
     --bundle)     bundle_override="$2"; shift 2 ;;
+    --terms)      terms_override="$2"; shift 2 ;;
+    --ranks)      ranks_override="$2"; shift 2 ;;
+    --label)      label_override="$2"; shift 2 ;;
     --no-viewer)  run_viewer=0; shift ;;
     --build-only) build_only=1; shift ;;
     --rebuild)    rebuild=1; shift ;;
@@ -234,12 +254,20 @@ schema_of()  { case "$1" in notebook*) echo "$(notebook_dir_of "$1")/schema.toml
 if [[ -n "$bundle_override" ]]; then
   [[ -d "$bundle_override" ]] || { echo "no such bundle: $bundle_override" >&2; exit 1; }
   scales=(custom)
-  items_of()   { echo 0; }
+  items_of()   { python3 -c "
+import json,sys,pathlib
+b = pathlib.Path('$bundle_override')
+m = sorted(b.glob('v*/MANIFEST.json'))
+print(json.load(open(m[-1]))['entity_id_high_water'] if m else 0)
+" 2>/dev/null || echo 0; }
   prose_of()   { echo ''; }
   schema_of()  { echo ''; }
-  viewer_of()  { echo 37585; }
-  session_of() { echo 49303; }
-  control_of() { echo 45721; }
+  # **Its own ports, not 2m4's.** Sharing them meant a `--bundle` run beside an already-running
+  # 2m4 bound nothing, found that port ready anyway, and measured its principals against the other
+  # corpus — which is exactly the confusion `--bundle` exists to avoid.
+  viewer_of()  { echo 37599; }
+  session_of() { echo 49399; }
+  control_of() { echo 45799; }
 fi
 
 bundle_of() {
@@ -434,6 +462,22 @@ start_scale() {
   # yet, and rewriting it is idempotent either way.
   write_deployment "$scale"
 
+  # **A port already in use is a refusal, not a race.** The readiness poll below asks the *port*
+  # whether it is ready, not the process this function started — so a server left over from another
+  # run answers immediately, `start_scale` reports success, and everything downstream talks to a
+  # different bundle. That has happened: a stale 2m4 server made a `--bundle` run measure its
+  # principals against arXiv and fail with "no candidate term is visible to anyone", which names
+  # neither the port nor the cause.
+  for port in "$viewer_port" "$(session_of "$scale")" "$(control_of "$scale")"; do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      exec 3<&- 3>&-
+      echo "port $port is already in use, so $scale cannot be served on it." >&2
+      echo "Something is already listening — most likely a tessera serve from an earlier run." >&2
+      echo "Stop it, or serve this bundle on other ports." >&2
+      exit 1
+    fi
+  done
+
   say "starting tessera serve for $scale on :$viewer_port"
   "$BIN" serve --deployment "$DEV/tessera-$scale.toml" &
   SERVE_PIDS+=($!)
@@ -479,8 +523,10 @@ say "measuring principals per dataset"
 mkdir -p "$(dirname "$DATASETS")" "$DEV/presets"
 RANKS="$DATA/scaled/pairs/categories-subclass.pairs.parquet.term-ranks.json"
 for scale in "${scales[@]}"; do
-  terms="0..200"
-  ranks="$RANKS"
+  terms="${terms_override:-0..200}"
+  # An overridden term list means an overridden dictionary, so the demo fixtures' ranking is not
+  # merely unhelpful for it — it names terms this bundle does not have.
+  ranks="${ranks_override:-$([[ -n "$terms_override" ]] && echo '' || echo "$RANKS")}"
   if [[ -n "$(notebook_dir_of "$scale")" ]]; then
     ranks="$DEV/presets/$scale.term-ranks.json"
     terms="$(python3 - "$(notebook_dir_of "$scale")/points.parquet" "$ranks" <<'CANDIDATES'
@@ -518,7 +564,7 @@ fresh="$DEV/presets/datasets-this-run.json"
       25m) label="arXiv 25M · titles" ;;
       250m) label="arXiv 250M · no prose" ;;
       1b) label="arXiv 1B · no prose" ;;
-      custom) label="$bundle_override" ;;
+      custom) label="${label_override:-$bundle_override}" ;;
     esac
     printf '{"id":"%s","label":"%s","items":%s,"prose":[%s],' \
       "$scale" "$label" "$(items_of "$scale")" "$(prose_of "$scale")"
