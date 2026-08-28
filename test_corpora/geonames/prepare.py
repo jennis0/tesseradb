@@ -325,10 +325,28 @@ def main() -> None:
                 WHERE p.admin2 IS NOT NULL
                 GROUP BY p.admin2
             )""",
-        "admin3": "SELECT admin3 AS key, row_number() OVER (ORDER BY admin3) AS code, "
-        "admin3 AS title FROM (SELECT DISTINCT admin3 FROM points WHERE admin3 IS NOT NULL)",
-        "admin4": "SELECT admin4 AS key, row_number() OVER (ORDER BY admin4) AS code, "
-        "admin4 AS title FROM (SELECT DISTINCT admin4 FROM points WHERE admin4 IS NOT NULL)",
+        # GeoNames publishes no code table for admin3 or admin4, but every division is itself a
+        # feature row — `A.ADM3` / `A.ADM4`, carrying its name and its own admin codes — so the
+        # name is a self-join on the code. Measured 2026-08-28: 170,130 of 175,963 admin3 codes
+        # and 224,708 of 231,645 admin4 codes have exactly one such row (96.7% / 97.0%, no
+        # duplicates); the rest keep their code, as admin1/admin2 do for a code the tables miss.
+        # The historical kinds (`A.ADM3H`, `A.ADM4H`) are a different thing and are not used.
+        "admin3": """
+            SELECT key, row_number() OVER (ORDER BY key) AS code, title FROM (
+                SELECT p.admin3 AS key, coalesce(any_value(f.name), p.admin3) AS title
+                FROM points p
+                LEFT JOIN points f ON f.admin3 = p.admin3 AND f.feature_code = 'A.ADM3'
+                WHERE p.admin3 IS NOT NULL
+                GROUP BY p.admin3
+            )""",
+        "admin4": """
+            SELECT key, row_number() OVER (ORDER BY key) AS code, title FROM (
+                SELECT p.admin4 AS key, coalesce(any_value(f.name), p.admin4) AS title
+                FROM points p
+                LEFT JOIN points f ON f.admin4 = p.admin4 AND f.feature_code = 'A.ADM4'
+                WHERE p.admin4 IS NOT NULL
+                GROUP BY p.admin4
+            )""",
         "timezone": "SELECT timezone AS key, row_number() OVER (ORDER BY timezone) AS code, "
         "timezone AS title FROM (SELECT DISTINCT timezone FROM points WHERE timezone IS NOT NULL)",
     }
@@ -340,9 +358,10 @@ def main() -> None:
 
     # --- the admin layer's names ------------------------------------------------------------
     # One row per artifact, carrying its name as the layer's supplied `name` content: countries
-    # from `countryInfo.txt`, admin1 and admin2 from GeoNames' own code tables, and the code itself
-    # everywhere else — admin3 and admin4, which GeoNames publishes no names for, and the
-    # placeholder `-` levels. **Every artifact, not only the named ones**: a layer declaring a
+    # from `countryInfo.txt`, admin1 and admin2 from GeoNames' own code tables, admin3 and admin4
+    # from their own `A.ADM3` / `A.ADM4` feature rows (the vocabulary join above), and the code
+    # itself everywhere else — the 3% of divisions with no such row, and the placeholder `-`
+    # levels. **Every artifact, not only the named ones**: a layer declaring a
     # supplied kind is one whose every artifact carries it, and the build refuses an artifact that
     # does not ("carries no supplied content, and this layer declares 1 kind(s)"). Enrichment
     # beside an open value set: the artifacts are still exactly what the member file names.
@@ -355,8 +374,10 @@ def main() -> None:
                     LEFT JOIN '{out / "vocab-admin1.parquet"}' v USING (key)
                 UNION ALL SELECT 2, k.key, v.title FROM (SELECT DISTINCT admin2 AS key FROM points) k
                     LEFT JOIN '{out / "vocab-admin2.parquet"}' v USING (key)
-                UNION ALL SELECT 3, key, NULL FROM (SELECT DISTINCT admin3 AS key FROM points)
-                UNION ALL SELECT 4, key, NULL FROM (SELECT DISTINCT admin4 AS key FROM points)
+                UNION ALL SELECT 3, k.key, v.title FROM (SELECT DISTINCT admin3 AS key FROM points) k
+                    LEFT JOIN '{out / "vocab-admin3.parquet"}' v USING (key)
+                UNION ALL SELECT 4, k.key, v.title FROM (SELECT DISTINCT admin4 AS key FROM points) k
+                    LEFT JOIN '{out / "vocab-admin4.parquet"}' v USING (key)
             ) WHERE key IS NOT NULL
             ORDER BY level, key
         ) TO '{out / "artifacts-admin.parquet"}' (FORMAT parquet, COMPRESSION zstd)"""
