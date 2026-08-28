@@ -212,6 +212,33 @@ describe('status.stale keys on the content key, never on x-tessera-stale', () =>
 });
 
 describe('the drops', () => {
+  it('enumerates a column’s values once, however many controls ask while the walk is in flight', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {client, viewport} = fakeClient(() => response('ck'));
+    // A slow enumeration — the shape of a large `derived` vocabulary paged from the server — that
+    // resolves only when told to.
+    let release: (() => void) | null = null;
+    const categories = vi.fn(
+      () => new Promise<{code: number; key: string; title: string | null}[]>((resolve) => {
+        release = () => resolve([{code: 1, key: 'FR.84', title: null}]);
+      })
+    );
+    (client as unknown as {categories: typeof categories}).categories = categories;
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    await clock.advance(1);
+    void viewport;
+    // Every store change re-asks, as `<tessera-filter>` does until the values land.
+    for (let i = 0; i < 25; i++) void store.loadFilterValues('admin4');
+    expect(categories).toHaveBeenCalledTimes(1);
+    release!();
+    await clock.advance(1);
+    expect(store.get('filters').values['admin4']?.map((v) => v.key)).toEqual(['FR.84']);
+    // Landed: a further ask is answered from the projection, not the wire.
+    void store.loadFilterValues('admin4');
+    expect(categories).toHaveBeenCalledTimes(1);
+  });
+
   it('drops the replica and marks a refetch on setFilters — the identity key excludes filters', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();

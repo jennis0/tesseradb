@@ -2271,6 +2271,7 @@ impl Engine {
             zoom,
             mask_identity,
             artifact_rows,
+            &cancel,
         )?;
         if !artifacts.is_empty() {
             sink.artifacts(&artifacts)
@@ -3966,6 +3967,12 @@ impl Engine {
         zoom: u8,
         mask_identity: crate::histogram::MaskIdentity,
         artifact_rows: ArtifactRows,
+        // D-C: checked once per artifact served. The derived sweep is the response's dominant
+        // CPU and it runs between two flushes, so without a checkpoint here a client that has
+        // gone — or a stream the server has shed — is discovered only when the whole frame is
+        // ready to send: three abandoned GeoNames requests each held a worker for minutes
+        // (2026-08-28), deriving geometry nobody would read.
+        cancel: &Option<CancelToken>,
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
@@ -4298,6 +4305,7 @@ impl Engine {
                     if served.binary_search(&ordinal).is_err() {
                         continue;
                     }
+                    check_cancelled(cancel)?;
                     // The one content this viewer contains, entire. ⊘ A content restored from a
                     // packed extent carries no values yet (its content belongs in the record blob,
                     // decision 0077, and that write is unbuilt), and is **withheld** rather than

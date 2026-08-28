@@ -333,7 +333,11 @@ function openSession(preset: Dataset['presets'][number]): void {
  * each, and a held band carries geometry quantised under one bundle's extent — so a switch is a
  * clean rebuild, never a reuse.
  */
+/** Which `activate` is current: an earlier one that is still awaiting its meta stands down. */
+let activation = 0;
+
 async function activate(dataset: Dataset): Promise<void> {
+  const mine = ++activation;
   unsubscribe?.();
   unsubscribe = null;
   dataStore?.dispose();
@@ -384,8 +388,26 @@ async function activate(dataset: Dataset): Promise<void> {
   // Choose the colour and layer defaults once meta is known, before opening the session's store, so
   // the store opens already pointed at them. A throwaway meta fetch through the client.
   if (first) {
-    const session = await client.authorise(first.terms);
-    const meta = await client.meta(session.token);
+    let session: Awaited<ReturnType<TesseraClient['authorise']>>;
+    let meta: Awaited<ReturnType<TesseraClient['meta']>>;
+    try {
+      session = await client.authorise(first.terms);
+      meta = await client.meta(session.token);
+    } catch (error) {
+      // The picker's `change` handler cannot await this, so a refusal here used to vanish and
+      // leave `switching` set for good — the panel said "establishing a session…" over an empty
+      // map with nothing to say why. It is reported where every other refusal is.
+      if (mine !== activation) return;
+      const e = error as {code?: string; detail?: string; message?: string};
+      store.update((s) => {
+        s.switching = false;
+        s.status = 'refused';
+        s.lastError = {code: e.code ?? 'switch-failed', detail: e.detail ?? e.message ?? String(error)};
+        s.failures = [...s.failures.slice(-19), {...s.lastError, at: Date.now()}];
+      });
+      return;
+    }
+    if (mine !== activation) return;
     const rendered = meta.declaredScalars.filter((c) => c.render);
     store.update((s) => {
       s.session = session;

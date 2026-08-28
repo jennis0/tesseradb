@@ -512,7 +512,11 @@ answer to another's request; a hit answers the request that would have computed 
 The attribute filter is deliberately *not* a term, because derived content is filter-blind exactly
 as the masked count beside it is (**I12**).
 
-The cache is bounded at 64 MiB resident and evicts least recently used. There is no configuration
+The cache is bounded at 64 MiB resident and evicts least recently used — **a batch at a time, to
+an eighth below the bound**, because an eviction pass sorts every key held and a pass per insert
+was measured quadratic on GeoNames (2026-08-28): `admin/hierarchy` has 464,000 artifacts against
+the ~262,000 entries the bound holds at the entry floor, and once one principal had been served
+its deeper levels every later insert paid the whole pass. There is no configuration
 key, and that is a deliberate difference from the two caches that have one: their entry size scales
 with the *corpus* — a row projection is a measured 125 MB at 10⁹ items — where an entry here is one
 artifact's outline, bounded by the vertex budget whatever the corpus does. A miss costs the

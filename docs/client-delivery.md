@@ -483,6 +483,27 @@ against a bundle rebuilt from `data/notebook-2m4-live/` into a scratch directory
 scratch port (38701). It reproduces the design's published triangulation figures to within a few
 per cent, and the demo servers on 37585/37589/37590 were neither restarted nor stopped.
 
+## The demo on GeoNames, and what hung it (`demo/debug`, 2026-08-28)
+
+The owner's report: the initial load hangs most of the time, zooming in drops every mark's colour,
+and switching dataset hangs. Four causes, two of them in the client and two in the server, and one
+non-cause. Every figure below was taken against the demo servers on this machine.
+
+| | what it was | what changed |
+|---|---|---|
+| **a request storm on `/v1/categories`** | `<tessera-filter>` asks the store for its column's values on every store change until they land, and `loadFilterValues` had no in-flight guard, so each store change started another enumeration. GeoNames' `derived` vocabularies are paged ~1,000 values a time — `admin4` is 231,645 values, 232 pages — so one walk is 20–35 s and every page landing is itself a store change. **21,500 requests in the first minute**, the main thread saturated, the map never past "Starting session…" | one enumeration per column at a time, none after `dispose`; the same load now issues **469** (one walk per column). A store test |
+| **the derived-geometry cache going quadratic** | `artifact-shapes.md` §10's per-principal cache is bounded at 64 MiB, which at the 256-byte entry floor is ~262,000 entries; `admin/hierarchy` has 464,000 artifacts and every token is a fresh key space. Once full, every insert ran a whole eviction pass — clone and sort every key — to free its own 256 bytes, so the next insert ran it again, and three abandoned requests spent minutes at 100% inside that lock. **Fresh process**, US principal, `admin/hierarchy`: zoom 0 21 ms, zoom 4 168 ms; every-country zoom 0 167 ms. **Same requests once the cache had filled**: 3.4–6.3 s, >70 s (shed by the 60 s stream deadline), and not finished in 170 s. Seventy fresh principals each served the whole-map zoom-4 request: the old binary fails to finish in 60 s once past the bound, two of two | eviction runs to a low-water mark an eighth below the bound, so a pass is paid once per ~32,000 inserts. The same seventy principals on the fixed binary: **max 344 ms (the one pass, at principal 52), every other ≤ 206 ms**. A test; the design's §10 sentence amended |
+| **abandoned requests deriving on** | no cancellation checkpoint inside the per-artifact derivation loop: a client that had gone was discovered at the next frame send | `check_cancelled` once per artifact *served* — after the cut, a relaxed atomic load beside the loop's store lookup and derivation. Disconnect only: a stream the deadline sheds is still discovered at the artifacts frame, since the deadline lives in the sink's `send` |
+| **a swallowed switch failure** | the picker's handler is `void activate(…)`, so a refusal from authorise or meta vanished and `switching` stayed set; overlapping switches were unguarded | reported like every other refusal, and a superseded activation stands down |
+| **colour dropping on zoom, arXiv `2m4`** | **not a defect**: the k-means layer's membership is the notebook's sample — its 24 clusters sum to ~180,000 of 2,422,486 — so at depth 6 the marks drawn are members and at depth 10 most are not, and are drawn neutral. S8 (membership by predicate) is the deferral that would change it | nothing; screenshots at both depths are the evidence |
+
+On GeoNames the colour drop was the second row: the channel's request for the deeper level never
+landed, so bands went neutral and stayed. Two things are reported rather than fixed: the filter
+panel enumerating a 231,645-value `derived` vocabulary as a tick list at all, and a 64 MiB bound
+that one GeoNames principal exceeds on its own at deep zoom — batching amortises the cost, the hit
+rate for that layer stays poor. `x-tessera-server-us` stops at the first flush and so never saw
+any of it; the artifact pass runs after.
+
 ## What each step owes a measurement
 
 The design's §5.10 figures are modelled. Step 2's harness measures, and this file records:

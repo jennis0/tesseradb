@@ -887,19 +887,35 @@ export function createStore(options: StoreOptions): Store {
     if (selection) select(selection);
   }
 
+  /**
+   * Columns whose values are being enumerated. **One enumeration per column, however many times
+   * it is asked for**: a control asks on every store change until the values land, and a large
+   * `derived` vocabulary lands only after every page has been walked — on GeoNames' 231,645-value
+   * `admin4`, 232 pages. Without this guard each store change in that window started another
+   * walk, every completed page was a store change, and the demo issued 21,500 category requests
+   * in its first minute (2026-08-28) — the load never settled.
+   */
+  const enumerating = new Set<string>();
+
   async function loadFilterValues(column: string): Promise<void> {
-    if (!token) return;
+    if (!token || disposed) return;
     if (projections.filters.values[column] || projections.filters.valueErrors[column]) return;
+    if (enumerating.has(column)) return;
+    enumerating.add(column);
     try {
       const values = await client.categories(token, column);
+      if (disposed) return;
       values.sort((a, b) => a.key.localeCompare(b.key));
       replaceProjection('filters', {...projections.filters, values: {...projections.filters.values, [column]: values}});
     } catch (error) {
+      if (disposed) return;
       const e = error as {code?: string; detail?: string; message?: string};
       replaceProjection('filters', {
         ...projections.filters,
         valueErrors: {...projections.filters.valueErrors, [column]: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)}}
       });
+    } finally {
+      enumerating.delete(column);
     }
   }
 
@@ -1220,7 +1236,11 @@ export function createStore(options: StoreOptions): Store {
     if (selection) select(selection);
   }
 
+  /** Set by `dispose`: a fetch that lands afterwards writes nothing into a store nobody reads. */
+  let disposed = false;
+
   function dispose(): void {
+    disposed = true;
     presenter?.cancel();
     channel?.cancel();
     if (regionTimer) clock.cancel(regionTimer);

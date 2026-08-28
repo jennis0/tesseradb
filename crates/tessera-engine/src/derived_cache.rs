@@ -131,6 +131,11 @@ fn weight_bytes(content: &DerivedContent) -> u64 {
 /// 14.4 ms and 84 ms on the 2.42M-member corpus root, gather included.
 const DEFAULT_BOUND_BYTES: u64 = 64 * 1024 * 1024;
 
+/// An eviction pass frees this fraction of the bound — `1/8`, 8 MiB at the default — so that a
+/// cache running full pays one pass per 32,000 or so inserts rather than one per insert. See
+/// [`DerivedCache::evict_to_bound`].
+const LOW_WATER_DIVISOR: u64 = 8;
+
 /// The operator gauges. A count of structures, naming no artifact and no principal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DerivedCacheStats {
@@ -287,18 +292,29 @@ impl DerivedCache {
         }
     }
 
-    /// Least recently used first, until the bound is met.
+    /// Least recently used first, once the bound is crossed, down to [`LOW_WATER`] of it.
     ///
     /// **Victims are chosen in one pass rather than one at a time**, which is the difference
     /// between this and `crate::histogram`'s otherwise identical eviction. That cache holds one
     /// entry per `(session, layer, level)` and a scan per victim is nothing; this one holds an
     /// entry per *artifact*, so a scan per victim is quadratic in a residency that a whole-layer
     /// response fills a few hundred entries at a time.
+    ///
+    /// **And the pass evicts a batch, not one entry.** The pass is a clone and a sort of every key
+    /// held — a quarter of a million at the default bound — and an insert that lands on a full
+    /// cache used to run it to free exactly its own weight, so the *next* insert ran it again.
+    /// GeoNames' `admin/hierarchy` has 464,000 artifacts, more than the bound holds at the entry
+    /// floor; once one principal had been served its deeper levels, every further insert paid a
+    /// full pass, three abandoned requests spent minutes of CPU inside this lock, and a request
+    /// that took 21 ms on a fresh process took 4–6 s behind them and 60 s at the next level down
+    /// (2026-08-28). Evicting to a low-water mark makes the pass amortised: one per batch of
+    /// inserts, not one per insert.
     fn evict_to_bound(&self, inner: &mut Inner) {
         let bound = self.bound_bytes.load(Ordering::Relaxed);
         if inner.resident <= bound {
             return;
         }
+        let target = bound - bound / LOW_WATER_DIVISOR;
         let mut by_age: Vec<(u64, DerivedKey)> = inner
             .entries
             .iter()
@@ -306,7 +322,7 @@ impl DerivedCache {
             .collect();
         by_age.sort_unstable_by_key(|(touched, _)| *touched);
         for (_, key) in by_age {
-            if inner.resident <= bound {
+            if inner.resident <= target {
                 break;
             }
             if let Some(entry) = inner.entries.remove(&key) {
@@ -335,6 +351,28 @@ mod tests {
             fragment_watermark: 0,
             properties: properties_bits(&[ComputedProperty::Hull]),
         }
+    }
+
+    /// A full cache evicts a batch per pass, not one entry per insert: the insert that crosses the
+    /// bound lands the residency at the low-water mark, and the inserts that follow land nothing
+    /// on the floor until the bound is crossed again.
+    #[test]
+    fn a_full_cache_evicts_a_batch_per_pass() {
+        let floor = weight_bytes(&DerivedContent::default());
+        let bound = 256 * floor;
+        let cache = DerivedCache::new(bound);
+        for i in 0..257u32 {
+            cache.get_or_derive(key(1, i, 0), DerivedContent::default);
+        }
+        let after_first_pass = cache.stats();
+        assert!(after_first_pass.evictions > 1, "one pass evicted {}", after_first_pass.evictions);
+        assert!(after_first_pass.resident_bytes <= bound - bound / LOW_WATER_DIVISOR);
+        // The next inserts ride the room the pass made: no pass, no eviction.
+        for i in 257..(257 + 16) {
+            cache.get_or_derive(key(1, i, 0), DerivedContent::default);
+        }
+        assert_eq!(cache.stats().evictions, after_first_pass.evictions);
+        assert!(cache.stats().resident_bytes <= bound);
     }
 
     fn shape(x: u32) -> DerivedContent {
@@ -428,8 +466,10 @@ mod tests {
     /// The bound evicts, least recently used first, and the gauge says so.
     #[test]
     fn the_bound_evicts_the_least_recently_used() {
-        // Three entries' worth, at the 256-byte floor plus one ring of three vertices.
-        let cache = DerivedCache::new(3 * (256 + 28));
+        // Three entries' worth, at the 256-byte floor plus one ring of three vertices — with enough
+        // over the third that the low-water mark (an eighth below the bound) still holds three, so
+        // the fourth's arrival evicts exactly the oldest and not a batch.
+        let cache = DerivedCache::new(3 * (256 + 28) + 148);
         for ordinal in 0..3 {
             cache.get_or_derive(key(1, ordinal, 0), || shape(ordinal));
         }
