@@ -307,7 +307,7 @@ zoom  = [12, 16]
 # construction and take no visibility declaration. Without them a boundary layer cannot answer
 # "zoom to this region" for the region the viewer can actually see.
 [layer.content]
-computed = ["centroid", "box"]
+computed = ["centroid", "box", "hull"]
 
 # A region's name is true whether or not any document exists, so it inherits the artifact's own
 # visibility rather than requiring a generating set (configuration.md, `[[layer.content.supplied]]`).
