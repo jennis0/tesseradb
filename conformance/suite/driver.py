@@ -599,7 +599,7 @@ class SuiteHarness:
         env = os.environ.copy()
         env["TESSERA_REFERENCE_SESSION_CRED"] = SESSION_CREDENTIAL
         env["TESSERA_REFERENCE_OPERATOR_CRED"] = OPERATOR_CREDENTIAL
-        argv = [str(binary), "serve", "-c", str(config_path)]
+        argv = [str(binary), "serve", "--deployment", str(config_path)]
         if self.profile.memory_max is not None:
             self._reap_scope()  # a scope cannot be reused; a stale keeper must not outlive it
             self._scope_unit = f"tessera-suite-{os.getpid()}-{next(_SCOPE_SEQ)}"

@@ -466,6 +466,30 @@ impl ComputedSelection<'_> {
     }
 }
 
+/// Which columns of the artifacts frame a viewport answers with — `artifact-fetch-protocol.md`
+/// §5.2's projection, the one wire affordance of that design.
+///
+/// **The row set, the `matched` bits and the `rung` values are identical under either value;
+/// only the columns change.** Candidacy, the verdict, the cut and the filter probe run
+/// identically — what [`ArtifactRows::Identity`] skips is payload *production* only: derived
+/// geometry ([`crate::derived::compute`]), the key lookup, and the materialisation of supplied
+/// content (its *servability* is still tested, because an artifact whose content cannot be
+/// served is withheld, and a projection must not resurrect it). The skip is a CPU saving and
+/// nothing else; a projection that altered selection would break §5.2's contract sentence and
+/// with it every cross-reference in the response.
+///
+/// It discloses nothing: an identity response is a column subset of what the same caller's
+/// identical request would have been served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArtifactRows {
+    /// Every column — the default, and the answer a caller who has read nothing receives.
+    #[default]
+    Full,
+    /// `layer`, `tessera_id`, `rung`, `matched` — for the caller that already holds the payload
+    /// columns and wants this filter's bits over the same rows.
+    Identity,
+}
+
 /// Whether one level of one layer is answered for.
 ///
 /// Split out of the serving loop so the rule is readable on its own and a test can state it
@@ -634,6 +658,9 @@ pub struct ViewportRequest<'a> {
     /// [`ViewportRequest::new`] starts at [`ComputedSelection::Declared`], which is what the wire's
     /// absent field means and what every response carried before the field existed.
     pub computed: ComputedSelection<'a>,
+    /// Which columns each served artifact answers with — see [`ArtifactRows`]. The row set is
+    /// identical under either value; [`ArtifactRows::Identity`] skips payload production only.
+    pub artifact_rows: ArtifactRows,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -653,6 +680,7 @@ impl<'a> ViewportRequest<'a> {
             artifact_budget: None,
             levels: LevelSelection::Declared,
             computed: ComputedSelection::Declared,
+            artifact_rows: ArtifactRows::Full,
         }
     }
 
@@ -678,6 +706,12 @@ impl<'a> ViewportRequest<'a> {
     /// Answer for these levels of every named layer. See [`LevelSelection`].
     pub fn levels(mut self, levels: LevelSelection<'a>) -> Self {
         self.levels = levels;
+        self
+    }
+
+    /// Answer each artifact with these columns. See [`ArtifactRows`].
+    pub fn artifact_rows(mut self, rows: ArtifactRows) -> Self {
+        self.artifact_rows = rows;
         self
     }
 
@@ -774,20 +808,47 @@ pub struct ArtifactOut {
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
     /// no supplied content, and nothing else.
     pub content: Vec<String>,
-    /// **Which declared resolution this artifact sits at**, and a fact about the artifact rather
-    /// than about this viewer — every principal served it receives the same number.
+    /// **The resolution a client draws this artifact at**, computed the right way for its
+    /// layer's kind (`artifact-fetch-protocol.md` §5.3 — the rung ruling, which renamed and
+    /// re-meant the `level` field this carried until then).
     ///
-    /// A client needs it because the alternative it was reduced to is wrong: counting `parent_id`
-    /// links puts an artifact at the depth of the chain that reached it, and a tiered layer's edges
-    /// skip levels and leave roots parentless, so the two disagree on every layer whose data is not
-    /// a perfect ladder. It says nothing a `/v1/meta` reader did not already know, the level set
-    /// being published there.
+    /// On a **levelled** layer it is the declared level — a fact about the artifact, the same for
+    /// every principal served it, indexing the level set `/v1/meta` publishes. A client needs
+    /// that number because the alternative it was reduced to is wrong: a tiered layer's edges
+    /// skip levels and leave roots parentless, so counting `parent_id` links disagrees with the
+    /// declaration on every layer whose data is not a perfect ladder.
     ///
-    /// **Zero for a treed or flat layer**, which declares no levels and sits entirely at level 0
-    /// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)).
-    /// There the structure is in the edges and walking parents is the *correct* reading; this
-    /// column is what stops that reading being applied where it does not hold.
-    pub level: u32,
+    /// On a **treed** layer — which declares no levels and sits entirely at level 0, its
+    /// structure in its edges ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md))
+    /// — it is the **response-local parent-chain depth**: the depth of this row in the forest the
+    /// response's own `parent_id` links form, *after* the budget cut and every other narrowing,
+    /// so the root of a re-rooted subtree reads 0. That is the number walking the served parents
+    /// yields, computed server-side so no client has to know which layer kind wants which
+    /// derivation (the shipped client picked wrongly once).
+    ///
+    /// On a **flat** layer it is 0.
+    pub rung: u32,
+    /// **Whether any member of this artifact that the principal may see, and that lies inside the
+    /// request's tiles, matches the request's filter** — `None` where the request carried no
+    /// filter, which is *there was no question* rather than *no matches*
+    /// ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    ///
+    /// **A boolean and never a count.** A filtered count beside [`Self::masked_count`] would put
+    /// two numbers on one artifact and make a client choose which it is showing.
+    ///
+    /// **It is the only filter-dependent field here.** Existence and the count stay anchored on
+    /// `M_auth`, so a filter cannot make an artifact appear or vanish and cannot move the number
+    /// beside it (**I3**, **I12**) — and a client holding this artifact's payload across a filter
+    /// change holds nothing stale but this.
+    ///
+    /// **It is clipped to the viewport where the count is not.** The count and the geometry are
+    /// over the whole visible membership; this is over the part of it in view, because that is the
+    /// extent every filter-crossing route can answer over rather than the extent one of them can.
+    /// So an artifact whose only matches sit just off screen reads `false` until the viewer pans.
+    ///
+    /// **A dependent artifact carries its target's**, as its [`Self::masked_count`] does (D13): a
+    /// label describes its cluster, and its own membership is a slice of that cluster at best.
+    pub matched: Option<bool>,
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -1645,6 +1706,7 @@ impl Engine {
             artifact_budget,
             levels: req_levels,
             computed: req_computed,
+            artifact_rows,
         } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
@@ -2208,6 +2270,7 @@ impl Engine {
             req_computed,
             zoom,
             mask_identity,
+            artifact_rows,
         )?;
         if !artifacts.is_empty() {
             sink.artifacts(&artifacts)
@@ -3567,6 +3630,7 @@ impl Engine {
             entity,
             layer.declaration.content.supplied.len(),
             rank,
+            true,
         ) else {
             return Ok(None);
         };
@@ -3627,12 +3691,18 @@ impl Engine {
             }),
             masked_count,
             derived,
-            level,
+            // The declared level — which is the rung on every layer kind *for this route*: a
+            // treed layer's stored level is 0, and its response-local chain depth is also 0 here,
+            // this response being one artifact with no parent links to be deep in.
+            rung: level,
             // **Always null on this route, and not by omission.** A parent is named only where it
             // is also in the response, and this response is one artifact — so there is nothing for
             // it to name. Resolving the parent here anyway would hand a caller who holds one
             // identifier the existence of a coarser artifact they were never served.
             parent_id: None,
+            // The identifier route carries no filter to answer about (decision 0104), and there is
+            // no viewport for the answer to be scoped to either.
+            matched: None,
         }))
     }
 
@@ -3661,6 +3731,13 @@ impl Engine {
     /// `Some(vec![])` and `None` are different answers and the difference is the whole point:
     /// the first is *this layer declares no supplied content*, which is most layers; the second is
     /// *this artifact should carry content and it is not here*, which withholds the artifact.
+    ///
+    /// **`materialise = false` runs the same servability test and copies nothing** — the identity
+    /// projection's setting (`artifact-fetch-protocol.md` §5.2). `Some`/`None` is decided by
+    /// identical checks on either setting, because that answer withholds the artifact and a
+    /// projection must not move the row set; all `false` skips is the string copies, and its
+    /// `Some` always carries the empty vector. One function with a flag rather than a probing
+    /// sibling, so the two readings of "servable" cannot drift apart.
     #[allow(clippy::too_many_arguments)]
     fn supplied_content(
         &self,
@@ -3671,6 +3748,7 @@ impl Engine {
         entity: EntityId,
         kinds: usize,
         rank: Option<u32>,
+        materialise: bool,
     ) -> Option<Vec<String>> {
         let Some(rank) = rank else {
             return Some(Vec::new());
@@ -3681,7 +3759,11 @@ impl Engine {
             store
                 .get(layer, level, ordinal)
                 .and_then(|record| record.contents.get(rank as usize))
-                .and_then(|set| set.values.clone())
+                .and_then(|set| match (&set.values, materialise) {
+                    (Some(values), true) => Some(values.clone()),
+                    (Some(_), false) => Some(Vec::new()),
+                    (None, _) => None,
+                })
         });
         if let Some(values) = held {
             return Some(values);
@@ -3699,7 +3781,7 @@ impl Engine {
             .records()
             .fields_of(u32::try_from(entity.raw()).ok()?)
             .ok()??;
-        let mut values = Vec::with_capacity(kinds);
+        let mut values = Vec::with_capacity(if materialise { kinds } else { 0 });
         for k in 0..kinds {
             let tag = u16::try_from(base + k).ok()?;
             // **Every declared kind or none.** A row missing one is content that did not survive
@@ -3708,7 +3790,11 @@ impl Engine {
             // content withheld.
             let field = fields.iter().find(|f| f.tag == tag)?;
             match &field.value {
-                tessera_filter::RecordValue::Utf8(text) => values.push(text.clone()),
+                tessera_filter::RecordValue::Utf8(text) => {
+                    if materialise {
+                        values.push(text.clone());
+                    }
+                }
                 _ => return None,
             }
         }
@@ -3856,10 +3942,10 @@ impl Engine {
         move |attachment| self.dependency_served(ctx, attachment, DEPENDENCY_CHAIN_MAX)
     }
 
-    // Nine, and every one is a thing the artifact pass genuinely needs from the request it is part
+    // Ten, and every one is a thing the artifact pass genuinely needs from the request it is part
     // of: the session, the generation, the view and its data, the resolved tile ranges, the
-    // composed mask, and the request's own two artifact parameters. Bundling them into a struct
-    // would name the same nine things one call earlier.
+    // composed mask, and the request's own three artifact parameters. Bundling them into a struct
+    // would name the same ten things one call earlier.
     #[allow(clippy::too_many_arguments)]
     fn serve_artifacts(
         &self,
@@ -3879,6 +3965,7 @@ impl Engine {
         // declared per-level zoom ranges. The two are the same 0–16 coordinate.
         zoom: u8,
         mask_identity: crate::histogram::MaskIdentity,
+        artifact_rows: ArtifactRows,
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
         // never-registered one alike (`LayerRegistry::resolve_for`).
@@ -3951,6 +4038,10 @@ impl Engine {
         // Built once per request: it is the same set for every layer in the response, and its cost
         // is the viewport's containers rather than the population's.
         let viewport = crate::tile_index::Viewport::compose(&tile_rows, mask);
+        // **The filter's half of the same hoisting, and it is composed once for the request too**:
+        // `viewport ∩ M_auth ∩ M_sel`, the one set decision 0104's bit is asked against. `None` is
+        // an unfiltered request — no question, and no column on the wire to answer it.
+        let matched_here = mask.matched_rows(viewport.here());
 
         let shard = generation.bundle.manifest.identity.shard_id;
         // Built once for the whole response: the postings and the manifest's plugin are the
@@ -3963,6 +4054,10 @@ impl Engine {
         let in_request: std::collections::BTreeSet<String> = names.iter().cloned().collect();
 
         let mut out = Vec::new();
+        // The layers whose rung is the response-local chain depth rather than the declared level —
+        // the treed (nested) ones, decision 0082's edges-not-levels shape. Collected during the
+        // walk, applied after the response's row set is final (below).
+        let mut treed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         // Where each served artifact ended up, and what each points at — collected during the walk
         // and reconciled after it.
         let mut served_at: std::collections::BTreeMap<(String, u32, u32), TesseraId> =
@@ -3990,6 +4085,9 @@ impl Engine {
                 || generation.overlay.is_suppressed(layer.entity)
             {
                 continue;
+            }
+            if layer.declaration.hierarchy.kind == tessera_types::layer::HierarchyKind::Nested {
+                treed.insert(name.clone());
             }
 
             // Parsed once per layer. A name outside the vocabulary cannot reach here — the
@@ -4072,6 +4170,11 @@ impl Engine {
                 // Captured before the shadow below: `view` becomes the artifact predicate's value,
                 // and the derived-geometry key needs the view's *name*.
                 let view_name = view;
+                // **Built after the candidacy route and never as part of it**: the filter decides
+                // nothing about which artifacts are served (decision 0104), so this is computed
+                // beside the verdict rather than inside it, and is skipped whole on an unfiltered
+                // request.
+                let matched = matched_here.as_ref().map(|here| rows.matched(here));
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
@@ -4199,6 +4302,12 @@ impl Engine {
                     // packed extent carries no values yet (its content belongs in the record blob,
                     // decision 0077, and that write is unbuilt), and is **withheld** rather than
                     // served with its description missing.
+                    //
+                    // **Asked under the identity projection too, and deliberately** — with
+                    // `materialise = false`, so the values are not copied but the *servability*
+                    // test is identical. Content-cannot-be-served withholds the artifact, so
+                    // skipping the probe here would let an identity response carry a row the full
+                    // response withholds, breaking §5.2's row-set contract sentence.
                     let Some(content) = self.supplied_content(
                         generation,
                         &name,
@@ -4207,6 +4316,7 @@ impl Engine {
                         entity,
                         layer.declaration.content.supplied.len(),
                         rank,
+                        artifact_rows == ArtifactRows::Full,
                     ) else {
                         continue;
                     };
@@ -4221,13 +4331,18 @@ impl Engine {
                     // artifact's membership intersected with what this principal may see, so every
                     // property below is a function of `membership ∩ M_auth` and nothing else
                     // (`annotations.md` §4.2). Skipped entirely where the layer declares nothing,
-                    // which is what keeps a count-only layer at count-only cost.
+                    // which is what keeps a count-only layer at count-only cost — and skipped
+                    // whole under the identity projection, which is that projection's point: the
+                    // derived sweep is the response's dominant CPU and decides nothing about
+                    // which rows are served (`artifact-fetch-protocol.md` §5.2).
                     //
                     // **Held per principal between requests** (`crate::derived_cache`): a pan
                     // re-serves mostly the same artifacts to the same viewer, and a shape is the
                     // most expensive thing this loop does. The key names the principal, so a hit
                     // answers the request that would have derived the same value.
-                    let derived = if declared_derived.is_empty() {
+                    let derived = if artifact_rows == ArtifactRows::Identity
+                        || declared_derived.is_empty()
+                    {
                         crate::derived::DerivedContent::default()
                     } else {
                         let key = crate::derived_cache::DerivedKey {
@@ -4256,11 +4371,15 @@ impl Engine {
                     // Both are per-ordinal facts of one generation, but only one of them is held
                     // in the row form: a key is a caller's string, one per artifact, and copying
                     // ten million of them into a cached structure buys nothing the store's own
-                    // lookup does not already answer.
+                    // lookup does not already answer. The key is payload, so the identity
+                    // projection skips the lookup.
                     let parent = rows.parent(ordinal);
-                    let key = self
-                        .write
-                        .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone());
+                    let key = match artifact_rows {
+                        ArtifactRows::Identity => None,
+                        ArtifactRows::Full => self
+                            .write
+                            .with_artifacts(|store| store.get(&name, level, ordinal)?.key.clone()),
+                    };
                     // Recorded, not resolved: which artifacts this response holds is not known
                     // until every layer and level has been walked, and a parent — or the artifact
                     // a dependent hangs from — may sit in a level this loop has not reached.
@@ -4279,9 +4398,15 @@ impl Engine {
                         key,
                         masked_count,
                         derived,
-                        level,
+                        // The declared level. On a treed layer — where every artifact sits at
+                        // level 0 and the rung is the response-local chain depth — this is
+                        // recomputed below, once the response's row set is final.
+                        rung: level,
                         // Filled in below, once the response's own membership is settled.
                         parent_id: None,
+                        // Asked only of the artifacts that survived the cut: the bit describes what
+                        // is served, and an artifact the response drops has no row to carry one.
+                        matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
                     });
                 }
             }
@@ -4318,6 +4443,27 @@ impl Engine {
                     .and_then(|target| count_at.get(target).copied())
             })
             .collect();
+        // **And its target's filter bit, on D13's own argument** (decision 0104). A label describes
+        // its cluster, so *does anything here match* is a question about the cluster; the label's
+        // own membership is often empty, and a bit over it would read `false` for every label under
+        // every filter — the same defect the count rule exists to prevent, in the field beside it.
+        // Derivable from the target's own row in this response, which the drop above guarantees is
+        // present, so it discloses nothing new (decision 0023).
+        let matched_at: std::collections::BTreeMap<&(String, u32, u32), Option<bool>> = placed
+            .iter()
+            .zip(&out)
+            .map(|(place, artifact)| (&place.at, artifact.matched))
+            .collect();
+        let target_matched: Vec<Option<Option<bool>>> = placed
+            .iter()
+            .map(|place| {
+                place
+                    .attached_to
+                    .as_ref()
+                    .filter(|target| in_request.contains(&target.0))
+                    .and_then(|target| matched_at.get(target).copied())
+            })
+            .collect();
 
         // **A parent is named only where it is also in this response**, which is the whole of the
         // disclosure rule for this field. An artifact whose parent exists but was withheld — below
@@ -4326,8 +4472,12 @@ impl Engine {
         // grouping exists which they are not cleared to see, which is a disclosure the rest of this
         // pass takes care to avoid making.
         let mut served = Vec::with_capacity(out.len());
-        for (((mut artifact, place), dropped), target_count) in
-            out.into_iter().zip(&placed).zip(dropped).zip(target_counts)
+        for ((((mut artifact, place), dropped), target_count), target_bit) in out
+            .into_iter()
+            .zip(&placed)
+            .zip(dropped)
+            .zip(target_counts)
+            .zip(target_matched)
         {
             if dropped {
                 continue;
@@ -4335,12 +4485,35 @@ impl Engine {
             if let Some(count) = target_count {
                 artifact.masked_count = count;
             }
+            if let Some(bit) = target_bit {
+                artifact.matched = bit;
+            }
             artifact.parent_id = place
                 .parent
                 .as_ref()
                 .and_then(|key| served_at.get(key))
                 .copied();
             served.push(artifact);
+        }
+        // **A treed layer's rung is the response-local parent-chain depth** — the depth of each
+        // row in the forest this response's own `parent_id` links form
+        // (`artifact-fetch-protocol.md` §5.3). Computed here, after the cut, the content
+        // withholds and the dependent drop, because those are what make the forest
+        // response-local: a row whose ancestors were pruned, withheld or cut away is a root of
+        // its subtree and reads 0, whatever its depth in the stored tree.
+        if !treed.is_empty() {
+            let parent_of: std::collections::HashMap<u64, Option<u64>> = served
+                .iter()
+                .filter(|a| treed.contains(&a.layer))
+                .map(|a| (a.tessera_id.raw(), a.parent_id.map(|p| p.raw())))
+                .collect();
+            let edges = parent_of.values().filter(|p| p.is_some()).count();
+            let mut depths: std::collections::HashMap<u64, u32> =
+                std::collections::HashMap::with_capacity(parent_of.len());
+            for artifact in served.iter_mut().filter(|a| treed.contains(&a.layer)) {
+                artifact.rung =
+                    response_depth(artifact.tessera_id.raw(), &parent_of, &mut depths, edges);
+            }
         }
         // **The membership column's served set is `served_at` after the drop** — exactly the
         // artifacts in `served`, and the only identifiers the column can name.
@@ -4355,6 +4528,53 @@ impl Engine {
         }
         Ok((served, served_layers))
     }
+}
+
+/// The response-local parent-chain depth of one served treed artifact — its `rung`
+/// (`artifact-fetch-protocol.md` §5.3).
+///
+/// `parent_of` holds every served row of the treed layers, keyed by `tessera_id`, valued with the
+/// response's own `parent_id` — which, by that field's contract, only ever names an identifier in
+/// the same response, and within the artifact's own layer. `None`, and an identifier `parent_of`
+/// does not hold, are both roots: *no parent in this response* is rung 0, whatever the stored
+/// tree says.
+///
+/// Memoised through `depths` because ancestors are shared, exactly as [`crate::cut::Lineage`]'s
+/// depth table is; the cycle guard is the edge count, as there — the publish refuses a cycle, so
+/// exceeding it means a malformed store, and the fail-safe answer is a root.
+fn response_depth(
+    id: u64,
+    parent_of: &std::collections::HashMap<u64, Option<u64>>,
+    depths: &mut std::collections::HashMap<u64, u32>,
+    edges: usize,
+) -> u32 {
+    let mut chain: Vec<u64> = Vec::new();
+    let mut at = id;
+    let base = loop {
+        if let Some(&known) = depths.get(&at) {
+            break known;
+        }
+        match parent_of.get(&at).copied().flatten() {
+            None => {
+                depths.insert(at, 0);
+                break 0;
+            }
+            Some(up) => {
+                if chain.len() > edges {
+                    depths.insert(at, 0);
+                    break 0;
+                }
+                chain.push(at);
+                at = up;
+            }
+        }
+    };
+    let mut depth = base;
+    for &node in chain.iter().rev() {
+        depth += 1;
+        depths.insert(node, depth);
+    }
+    depths[&id]
 }
 
 /// Where one served artifact sits, and what it points at.

@@ -97,8 +97,10 @@ if ((meta.layers ?? []).length > 0) {
   await writeFile(join(dir, 'viewport-membership.bin'), membership);
   // And the annotation channel's own shape: `k = 0`, the tiles, the artifacts frame and the
   // trailer, no points frame at all — the body a decoder is most likely to misread as truncated.
-  // Pinned byte for byte by the worked decodes' answer sheet, so it is captured as the same
-  // principal (`--terms 0`) every time.
+  // Pinned by the worked decodes' answer sheet (`wire-example/test/expected.json`, re-derived on
+  // every capture), so capture it as the same principal every time: on the notebook corpus the
+  // terms are arXiv categories and `--terms 0` sees nothing, so the r43 goldens were taken as its
+  // *medium* preset (`.dev/presets/notebook.json`, two terms).
   const channel = await viewport({...base, k: 0, layers: [layer]});
   await writeFile(join(dir, 'viewport-artifacts.bin'), channel);
   console.log(`captured viewport-membership.bin (${membership.length} B) and viewport-artifacts.bin (${channel.length} B) for layer ${layer}`);

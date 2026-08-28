@@ -278,6 +278,18 @@ paths:
         and no points frame at all. **A client must not decrease `k` as it zooms in**; the server
         cannot enforce this.
 
+        The *artifacts* frame's `matched` column answers the request's `filters` per
+        artifact, and is null where the request carried none — see `filters`. Its `layer` column
+        is **dictionary-encoded** (u16 keys over utf8 values); its `rung` column is the number a
+        client draws by — the declared level on a levelled layer, the response-local parent-chain
+        depth on a treed one (the depth in the forest this response's own `parent_id` links form,
+        after the budget cut), `0` on a flat one; and its two hull columns **trail the fixed
+        columns and are absent from the schema entirely when no served layer declares a hull** —
+        an absent column is distinguishable from a null one, so a per-row null keeps its one
+        meaning: *this layer declares no such property*, never *withheld* (decision 0076).
+        `artifact_rows: "identity"` answers with the **same rows** in a fixed four-column schema —
+        see its property.
+
         `layers` decides whether an artifacts frame can appear — see its schema; the semantics
         there are the owner's ruling of 2026-08-25 and the server change is landing on the s3
         track, so until that merges an *omitted* `layers` is read as `"all"` and the string form is
@@ -881,7 +893,18 @@ components:
           minimum: 0
           description: The cap clause. Defaults to `k_max_marks`; capped by `max_k`. `0` is the counts-only request. Never decrease it on zoom.
         filters:
-          $ref: "#/components/schemas/FilterExpr"
+          description: |
+            The filter. It narrows which marks are drawn and **answers one boolean beside each
+            served artifact**: the *artifacts* frame's `matched` is `true` where a member this
+            principal may see, inside the requested tiles, matches (contracts §3.2, decision 0104).
+            The column is **null** on every response whose request carried no filter — there was no
+            question, and `false` would answer one.
+
+            **A filter moves nothing else about an artifact.** The same artifacts are served with
+            the same `masked_count`, filtered or not: a filter may move the frontier up and never
+            down (**I12**).
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
         pin:
           $ref: "#/components/schemas/Pin"
         underlay_offset:
@@ -960,6 +983,20 @@ components:
           items:
             type: string
             enum: [centroid, box, hull]
+        artifact_rows:
+          description: |
+            Which columns each served artifact row answers with. **Absent or `"full"`: every
+            column** — the default, and the answer a caller who has read nothing receives.
+            **`"identity"`: the same rows in a fixed four-column schema** — `layer`
+            (dictionary-encoded), `tessera_id`, `rung`, `matched`, the payload columns absent from
+            the schema rather than null. **The row set, the `matched` bits and the `rung` values
+            are identical under either value; only the columns change** — which keeps `parent_id`
+            and the points frames' membership columns resolvable, and is why the projection
+            discloses nothing: a column subset of what the same caller's identical request would
+            have been served. For a filter change over rows the caller already holds. Any other
+            value is `422`.
+          type: string
+          enum: [full, identity]
 
     FilterExpr:
       description: |
@@ -1070,7 +1107,7 @@ components:
     ArtifactResponse:
       type: object
       additionalProperties: false
-      required: [layer, masked_count, level]
+      required: [layer, masked_count, rung]
       properties:
         layer:
           type: string
@@ -1108,7 +1145,7 @@ components:
           type: array
           items: { type: string }
           description: The publisher's supplied content, positional to the layer's declared `supplied_content` types. Absent where the layer declares none; never partial.
-        level:
+        rung:
           type: integer
           minimum: 0
-          description: "The declared resolution this artifact sits at — the same value the viewport's *artifacts* frame carries, and the one field here that is a fact about the artifact rather than about the asking principal: two principals served it agree on it. `0` on a treed or flat layer, which declares no levels."
+          description: "The rung this artifact sits at — the declared level on a levelled layer, `0` on a treed or flat one (which, this response being one artifact with no parent links, is also its response-local chain depth; the viewport frame's `rung` column carries the same number). The one field here that is a fact about the artifact rather than about the asking principal: two principals served it agree on it."

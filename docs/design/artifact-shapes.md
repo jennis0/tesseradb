@@ -400,10 +400,13 @@ taken from that row.
 
 *Hull bytes* is 8 per vertex plus 4 per ring, and excludes the Arrow list offsets and validity, which
 do not move with the shape. Position gathering — one read per member, which a declared `box` already
-pays — is **101 ms** over `clusters/hdbscan` and 26 ms on its largest artifact, and sits under both
-columns. It was 163 ms and 42 ms: rows are Morton rank, so a segment's visible rows are a
-contiguous stretch of the mask and the segment is resolved once for the stretch rather than
-re-resolved per row (§7.3).
+pays — is **57 ms** over `clusters/hdbscan` and 18 ms on its largest artifact, and sits under both
+columns. It was 163 ms and 42 ms, then 109 and 28: rows are Morton rank, so a segment's visible rows
+are a contiguous stretch of the mask, the segment is resolved once for the stretch rather than
+re-resolved per row, and the mask is read a block of rows at a time and the block as its runs
+(§7.3). The `wrap` and `shape` columns above include the gather and are each about 50 ms lower than
+they were tabled at; they were not re-measured, the machine being loaded, and the dig that dominates
+them is unchanged.
 
 ### 7.1 Reducing the input before computing the shape
 
@@ -535,32 +538,90 @@ independently, each timed on its own:
 
 | stage | before §7.4 | | after §7.4 | |
 |---|---|---|---|---|
-| gather one position per visible member | 119 ms | 11% | 120 ms | 19% |
-| `box` and `centroid` over those positions | 16 ms | 2% | 17 ms | 3% |
-| reduce the input to one member per occupied cell (§7.1) | 102 ms | 10% | 103 ms | 16% |
-| the shape — sort, wrap, group, dig | **796 ms** | 77% | **391 ms** | 62% |
-| the whole derivation | 1,040 ms | | **631 ms** | |
+| gather one position per visible member | 57 ms | 6% | 58 ms | 11% |
+| `box` and `centroid` over those positions | 16 ms | 2% | 16 ms | 3% |
+| reduce the input to one member per occupied cell (§7.1) | 79 ms | 9% | 79 ms | 15% |
+| the shape — sort, wrap, group, dig | **760 ms** | 83% | **373 ms** | 71% |
+| the whole derivation | 912 ms | | **525 ms** | |
 
-Both columns are the median of six runs alternated binary against binary, so the three stages the
-change does not touch read the same in each — which is the check that the fourth column is the
-change and not the machine.
+**This is the merged measurement and neither of the two changes' own figures describes it.** §7.4's
+indexing and this section's gather and fold landed on separate branches and were each measured
+against a tree without the other in it, so the published pair — 57/16/79/767 for one and
+119/16/102/391 for the other — are of two trees that no longer exist. Both columns above are taken
+on the tree that carries both, as the median of six runs alternated binary against binary, so the
+three stages §7.4 does not touch read the same in each — which is the check that the fourth column
+is the change and not the machine.
 
 **The per-member passes are not where the cost is, and that is the finding that re-scoped this
 work.** Reading a position for each of the layer's 12,808,679 members, finding the occupied cells
-and the hull candidates come to a fifth of the derivation between them; the dig over the reduced
-input is three quarters of it on its own. What a declared `box` or `centroid` already pays — the
-gather — is 11%, so an artifacts request that declares a hull is not paying mostly to *find* its
+and the hull candidates come to a sixth of the derivation between them; the dig over the reduced
+input is four fifths of it on its own. What a declared `box` or `centroid` already pays — the
+gather — is 6%, so an artifacts request that declares a hull is not paying mostly to *find* its
 members.
+
+**The four stages are timed apart, which is not what a request pays**, so `compute` is timed whole
+beside them: with `centroid`, `box` and `hull` declared it is **913 ms** over the layer, and with
+`centroid` and `box` and no hull — `taxonomy/arxiv`'s declaration — it is **67 ms**. Those two were
+991 ms and 120 ms, the second moving further than the gather alone because `compute` traversed the
+gathered positions three times, once for the mean, once for the extremes and once more inside the
+reduction for the box its grid is scaled from; it now traverses them once and passes the box down.
+Over `taxonomy/arxiv`'s own two levels — 199 artifacts, 4,039,284 members — the whole derivation is
+**38 ms → 26 ms**.
 
 **What did move, and how.** Rows are Morton rank, so a segment holds a contiguous range of them and
 the visible rows of one segment are a contiguous stretch of the mask. Gathering resolves the segment
 once for the stretch instead of re-resolving it per row, and reads the two columns in ascending
-index order rather than through a reverse scan that restarts each time: **170 ms → 106 ms**. The
-reduction folds runs instead of binning into a grid (§7.1), and finds the octagon over cells instead
-of over members: 142 ms → 89 ms, while reaching artifacts from 75,000 members where the array it
-replaced reached none under about 260,000. End to end, the `k = 0` artifacts request for
-`clusters/hdbscan`'s 197 shapes goes **1,053 ms → 964 ms** cold; warm it is 3 ms either way, the
-answer being held per principal (§7.2).
+index order rather than through a reverse scan that restarts each time: **170 ms → 106 ms**. It then
+stopped asking the mask for one row at a time. The bitmap's iterator crosses an FFI boundary on
+every step, which the compiler cannot inline through, against an inner body of two indexed loads and
+a bit permutation; the gather now fills a 1,024-row block through `next_many` and walks the block as
+its **runs of consecutive rows**, so the permutation runs over a contiguous pair of column slices
+with no index arithmetic between elements. A membership is a cluster of a Morton-ordered corpus and
+the largest artifact here is 2,422,486 of 2,422,486 rows, so the runs are long; a sparse mask
+degrades to runs of one and costs what the row-at-a-time loop cost. **109 ms → 57 ms**, and 28 → 18
+on the corpus root.
+
+The reduction folds runs instead of binning into a grid (§7.1), and finds the octagon over cells
+instead of over members: 142 ms → 89 ms, while reaching artifacts from 75,000 members where the
+array it replaced reached none under about 260,000. It then stopped computing what it throws away.
+A cell at the binning resolution is the top bits of a member's position on both axes — the top bits
+of its Morton code, the grid being anchored at the corpus origin — so the boundary between one cell
+and the next is two shifts and a comparison, and the interleaved key, the cell centre and the
+squared distance are no longer read for every member. The representative is chosen **per cell**,
+with the centre computed once for the cell rather than once for each of its members, and not at all
+for a cell holding one member or for an artifact the occupancy test declines: a run count is the
+occupied-cell count exactly where the runs ascend, which is every serving route, so the test is
+answered before a single distance is computed. What the fold carries dropped with it — a run was 32
+bytes, 163 MB of them over the layer, and is now one `u32` — the representatives became the vector
+the hull candidates are appended to rather than a second one copied into it, and a cell is tested
+against the octagon at **one** corner rather than four, which is the same answer because an edge's
+form is linear and separable and IEEE addition and multiplication are monotone. **95 ms → 79 ms.**
+
+**None of that moves a shape, and it is asserted rather than argued.** `tests/hull_geometry.rs`'s
+`the_reduction_is_the_definition` derives every artifact of the layer twice — once through the
+engine, once through an oracle written from §7.1 that bins every member into a hash map and tests
+every member against the octagon on its own, sharing no code with the reduction — and requires the
+representative **sets** to be equal and the **rings** to be byte-identical. 24 artifacts reduced,
+173 exact, 12,808,679 members, 1,750,795 representatives, every ring identical, and the same
+assertion holds against the implementation this replaced. `derived.rs`'s own
+`the_fold_returns_what_a_dense_binning_would_have` is the same comparison on three synthetic clouds
+— one in Morton order, one rotated so a cell is met twice, one too thin to reduce — and runs in the
+gate. Over the layer, `measure_against_the_corpus` reports the same 26,740 vertices, 215 rings,
+1,809 members outside their own shape and the same area ratios to three decimals.
+
+End to end, the `k = 0` artifacts request for `clusters/hdbscan`'s 197 shapes goes
+**1,053 ms → 964 ms** cold; warm it is 3 ms either way, the answer being held per principal
+(§7.2).
+
+**At the request level the last change is inside the noise, and that is stated rather than
+rounded up.** Two servers over the same bundle on a scratch port, as the demo's 176-term principal,
+alternated over three rounds each with the cache cleared between: the whole-layer hull request is
+1,044 ms at its best before and 1,029 ms after, and `taxonomy/arxiv`'s 65 ms and 71 ms. The
+engine-level figures say to expect about 78 ms and 12 ms; the run-to-run spread on the machine
+these were taken on is wider than either, so the request-level measurement confirms the answers and
+the response sizes are unchanged and settles nothing about the time. The response bytes themselves
+are **not** a usable identity check — two runs of one binary differ, the frame carrying something
+per-request — which is why the identity assertions above are made over the geometry.
 
 **A jump per cell — the route the row-range property most obviously suggests — was refused on
 measurement, and this is where the crossover is.** If a cell is a row range then the occupied cells
@@ -581,10 +642,13 @@ indexing the dense array in Morton order so its writes are local is **260 ms**, 
 back by a grid four times the size. The fold is 89 ms.
 
 **What this does not reach.** The owner's target was for a declared hull to cost what a layer
-declaring none costs, which on this bundle is **65 ms** for `taxonomy/arxiv`. It is **635 ms**
-(§7.4). Three quarters of the derivation was the dig itself, which §7.4 halved; what is left is
-still ten times the target, and the remainder is no longer concentrated anywhere a further index
-would reach — the largest single term is now sorting and wrapping the reduced input.
+declaring none costs — on this bundle **66 ms** for `taxonomy/arxiv`'s 199 artifacts over its two
+levels, 4,039,284 members. The hull is **523 ms**, which was 913 ms before §7.4 indexed the dig.
+**Seven tenths of what remains is still the dig**, which this section did not touch: §8 B's budget
+and §4's family are where that number lives, not the route to the members. What the route to the
+members can still give is bounded and small: the three per-member stages are 153 ms of the 523
+between them, so a gather and a fold that cost nothing at all would leave 373 ms — still five and a
+half times the target.
 
 ### 7.4 Indexing the dig
 
@@ -630,17 +694,18 @@ membership packs, checked by digest rather than by spot check.
 
 | | before | after |
 |---|---|---|
-| the layer's shape construction | 796 ms | **391 ms** |
+| the layer's shape construction | 760 ms | **373 ms** |
 | — the candidate search | 455 ms | **87 ms** |
 | — the admissibility check | 57 ms | **7 ms** |
-| the whole derivation over the layer | 1,040 ms | **631 ms** |
-| a `k = 0` request for all 197 shapes, cold | 1,046 ms | **635 ms** |
-| the same request on a layer declaring no hull | 65 ms | 65 ms |
+| the whole derivation over the layer | 912 ms | **525 ms** |
+| `compute(centroid, box, hull)` over the layer, in process | 914 ms | **523 ms** |
+| the same for a layer declaring no hull | 66 ms | 66 ms |
 
-The request rows are the median of six, taken against **two servers running side by side** on
-different ports, one built from each side of the change, with the requests alternated between them —
-which is why the control row is identical rather than merely close. Each request is a fresh
-principal, so nothing is served from §7.2's cache.
+Every row is the median of six runs alternated binary against binary on one machine. The two
+per-dig rows are from a build carrying per-stage counters, whose totals read a few percent low; the
+rest are clean runs. **The whole table is the merged tree** — the two rows measuring the dig itself
+were taken before this section's own branch met the gather and fold of §7.3, and only the ratio
+between them transfers.
 
 **A hover barely moves, and that is the expected shape of the result.** One artifact's
 `/v1/artifacts/{id}` is dominated by gathering and reducing its members, not by digging them: the
@@ -1022,6 +1087,32 @@ check which found nothing sit beside the mechanism it checked rather than in the
   until the shape arrives**, so at rest the map's hover index is rectangles. Depth, the smaller
   box and the mark's own membership column separate them, and the index is rebuilt on the true
   shape when it lands — 2–5 ms for an ordinary cluster, 188 ms for the corpus root.
+- **r7 — 2026-08-28. The per-member passes, at the cost of one traversal each, and the shapes
+  proved unchanged rather than argued to be.** r6 profiled the derivation and found the per-member
+  work a fifth of it; this took that fifth apart without touching the dig, the family, α, the
+  budget, the binning resolution or the 75,000-member floor.
+  **The gather reads the mask a block of rows at a time and the block as its runs** (§7.3): the
+  bitmap's iterator crosses an FFI boundary the compiler cannot inline through, against a body of
+  two indexed loads and a bit permutation, so the call was a third of the pass. 109 → 57 ms over the
+  layer, 28 → 18 on the corpus root.
+  **The fold reads a cell index and nothing else**, the cell being the top bits of a member's
+  position on both axes; the interleaved key, the cell centre and the squared distance are computed
+  per *cell* and only where a cell has a choice to make — not for a cell of one member, and not at
+  all for an artifact the occupancy test declines, which a run count answers exactly wherever the
+  runs ascend. A run went from 32 bytes to one `u32`, the representatives became the vector the
+  candidates are appended to, and a cell is tested against the octagon at one corner rather than
+  four. 95 → 79 ms.
+  **`compute` traverses the gathered positions once**, not three times: the mean and the extremes
+  come off one pass and the box that pass produces is the box the binning grid is scaled from. The
+  whole derivation is 991 → 913 ms, and a layer declaring no hull 120 → 67 ms — the case this helps
+  most, and the one the owner's target is measured against.
+  **The purity is the deliverable and it is tested both ways.** `the_reduction_is_the_definition`
+  derives all 197 artifacts through the engine and through an oracle written from §7.1 that shares
+  no code with it, and requires the representative sets to be equal and the rings byte-identical;
+  it passes against this implementation and against the one it replaced. Every served figure —
+  26,740 vertices, 215 rings, 1,809 members outside their own shape, the area ratios — is unmoved.
+  No `rayon`, per the standing ruling.
+
 - **r6 — 2026-08-28. What the derivation's time is actually made of, and the reduction reaches the
   artifacts it is for.** The brief this answered assumed the per-member scan dominated. Profiled
   stage by stage (§7.3) it is a fifth of the derivation and the dig is three quarters, so the work

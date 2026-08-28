@@ -13,9 +13,15 @@ Every Arrow payload is a complete IPC stream, decodable alone; the trailer is JS
 
     1  tiles       exactly one, first          (tile, visible, matched, served)
     2  sub-cells   exactly one iff requested   (cell, count)
-    5  artifacts   at most one, before points  (layer, tessera_id, key, masked_count, ...)
+    5  artifacts   at most one, before points  (layer, tessera_id, key, masked_count, ...,
+                                                rung, matched)
     3  points      zero or more                (tessera_id, code, ...render columns)
     4  trailer     exactly one, last           JSON — its presence marks the response complete
+
+The artifacts frame's `layer` is dictionary-encoded (u16 keys over utf8 values), which `pyarrow`
+resolves on read, and its two hull columns trail the fixed set — in the schema only when a served
+layer declares a hull (contracts §3.2 r43). Under `artifact_rows: "identity"` the same rows arrive
+as just (layer, tessera_id, rung, matched); this decoder is generic over either shape.
 
 Strict on purpose: a truncated body, a missing trailer or an unknown kind raises. Every prefix of
 a stream is sound to draw — the counts are exact from the first frame — but it must not be

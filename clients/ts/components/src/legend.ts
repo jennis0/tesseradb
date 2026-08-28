@@ -1,6 +1,6 @@
 import {css, html, nothing} from 'lit';
 import {property} from 'lit/decorators.js';
-import {CLUSTER_PREFIX, NEUTRAL, layerEntries, rungOf, type Rgba} from '@tesseradb/client';
+import {CLUSTER_PREFIX, NEUTRAL, layerEntries, type Rgba} from '@tesseradb/client';
 import {UNMAPPED, artifactName, clusterLayerOf, colourOfFraction, colourOfRank, css as rgb, paletteValues} from '@tesseradb/deck';
 import {TesseraElement, UNNAMED, emit} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -119,25 +119,20 @@ export class TesseraLegend extends TesseraElement {
             </select></div>
         </div>`
       : nothing;
-    // The level select follows what the cut served: the rungs present in the served tree of the
+    // The level select follows what the cut served: the rungs present in the served set of the
     // colouring layer, titled from `meta.levels` where the layer is tiered, else *level N*.
     //
-    // **`rungOf` and not the entry's `level`.** A treed layer declares no levels, so every artifact
-    // arrives at level 0 and reading that field alone would collapse the set to `{0}` and take the
-    // select off the screen entirely — which is what the demo's own `clusters/hdbscan` would do.
-    // `rungOf` is the declared level where the layer has levels and the chain depth where it does
-    // not, so both kinds of layer offer the rungs they actually have.
+    // **The wire's `rung`, read off the served artifact** (contracts §3.2 r44): the declared level
+    // on a levelled layer, the response-local chain depth on a treed one — so a treed layer, whose
+    // every artifact is declared at level 0, still offers the rungs it actually has (the demo's own
+    // `clusters/hdbscan`), and nothing here has to pick a derivation per layer kind.
     const cluster = clusterLayerOf(colourBy);
     const clusterMeta = cluster ? meta.layers.find((l) => l.name === cluster) : null;
-    const depths = new Set<number>();
+    const rungs = new Set<number>();
     if (cluster) {
-      for (const x of artifacts.served) {
-        if (x.layer !== cluster) continue;
-        const e = artifacts.table.entry(artifacts.table.ordinalOf(x.layer, x.tesseraId));
-        if (e) depths.add(rungOf(e));
-      }
+      for (const x of artifacts.served) if (x.layer === cluster) rungs.add(x.rung);
     }
-    const levelsServed = [...depths].sort((x, y) => x - y);
+    const levelsServed = [...rungs].sort((x, y) => x - y);
     const levelSelect =
       this.selectable && cluster && levelsServed.length > 1
         ? html`<div class="col" style="margin-top:8px"><span class="xs muted">Level</span>

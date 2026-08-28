@@ -1217,7 +1217,8 @@ fn at_zoom(
 }
 
 fn levels_of(served: &[ArtifactOut]) -> Vec<u32> {
-    let mut out: Vec<u32> = served.iter().map(|a| a.level).collect();
+    // `rung` is the declared level on these layers, every one of them levelled.
+    let mut out: Vec<u32> = served.iter().map(|a| a.rung).collect();
     out.sort_unstable();
     out.dedup();
     out
@@ -1328,12 +1329,15 @@ fn a_layer_declaring_no_zoom_range_serves_every_level() {
     }
 }
 
-/// **A treed layer's artifacts are all at level 0**, so the column is constant there and the
-/// selection is inert. Walking `parent_id` is the *correct* reading of a treed layer, where the
-/// lineage is the structure; the column exists to stop that reading being carried to a tiered
-/// layer, where it is wrong.
+/// **A treed layer's rungs are its response-local chain depths, and the `levels` selection stays
+/// inert on it.** A treed layer declares no levels, so a level number names nothing about it and
+/// naming one must not blank its clusterings; what its `rung` column carries is the number
+/// walking the response's own `parent_id` links yields — root 0, child 1 — computed server-side
+/// (contracts §3.2 r43; until then the column was the constant stored level, 0). Walking parents
+/// was always the correct reading of a treed layer, whose lineage is its structure; the column
+/// now does the walk so no client picks the wrong derivation.
 #[test]
-fn a_treed_layers_artifacts_all_sit_at_level_zero() {
+fn a_treed_layers_rungs_are_chain_depths_and_the_levels_selection_is_inert() {
     let fx = fixture();
     let engine = fx.open();
     engine
@@ -1357,8 +1361,19 @@ fn a_treed_layers_artifacts_all_sit_at_level_zero() {
         "clusters/hdbscan",
         LevelSelection::Declared,
     );
-    assert_eq!(levels_of(&served), vec![0]);
+    assert_eq!(levels_of(&served), vec![0, 1], "root at rung 0, its child at 1");
     assert!(served.len() >= 2, "the whole visible tree, unpruned");
+
+    // Naming levels for the tiered layer beside it must not blank a clustering: the layer
+    // declares none, so the selection is inert in every form and the same tree comes back.
+    let named = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "clusters/hdbscan",
+        LevelSelection::Named(&[1]),
+    );
+    assert_eq!(keys(&named), keys(&served));
 }
 
 /// **The level is the declaration's, not the depth of the chain that reached it.**
@@ -1408,7 +1423,7 @@ fn the_level_is_declared_not_counted_from_parent_links() {
         .find(|a| a.key.as_deref() == Some("country"))
         .expect("the country is served");
 
-    assert_eq!(county.level, 2, "the declared level");
+    assert_eq!(county.rung, 2, "the declared level — a levelled layer's rung");
     assert_eq!(
         county.parent_id,
         Some(country.tessera_id),

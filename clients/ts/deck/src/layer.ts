@@ -294,8 +294,8 @@ export type OutlineDatum = {
   colour: Rgba;
   opened: boolean;
   hovered: boolean;
-  /** The artifact's depth in the served tree. */
-  depth: number;
+  /** The wire's `rung` — the resolution the artifact is drawn at (contracts §3.2 r44). */
+  rung: number;
   /** The fill and line alphas (0–255) and the line width in pixels this outline draws with. */
   fill: number;
   line: number;
@@ -367,13 +367,14 @@ export type OutlineOptions = {
  */
 export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineDatum[] {
   const data: OutlineDatum[] = [];
-  const depths = servedDepths(a);
-  const front = frontier(a, o.level, depths);
+  const front = frontier(a, o.level);
   const dependent = new Set(o.meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-  const ordered = [...a.served].sort((x, y) => (depths.get(x.tesseraId) ?? 0) - (depths.get(y.tesseraId) ?? 0));
+  // The wire's `rung` orders parents first (contracts §3.2 r44): the declared level on a levelled
+  // layer, the response-local chain depth on a treed one — drawn by, never derived.
+  const ordered = [...a.served].sort((x, y) => x.rung - y.rung);
   for (const artifact of ordered) {
-    const depth = depths.get(artifact.tesseraId) ?? 0;
-    if (o.level !== undefined && depth > o.level) continue;
+    const rung = artifact.rung;
+    if (o.level !== undefined && rung > o.level) continue;
     if (!front.has(artifact.tesseraId)) continue;
     if (dependent.has(artifact.layer)) continue;
     const rings = outlineOf(artifact, a.hulls?.get(artifact.tesseraId));
@@ -390,7 +391,7 @@ export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineD
     // artifact, which is the whole of what the several-ring wire changes here: two rings of one
     // artifact may overlap, and a pick answers the same artifact whichever it lands on.
     for (const ring of rings) {
-      data.push({id: artifact.tesseraId, polygon: draws ? smoothRing(ring) : ring, colour, opened, hovered, depth, fill, line, width});
+      data.push({id: artifact.tesseraId, polygon: draws ? smoothRing(ring) : ring, colour, opened, hovered, rung, fill, line, width});
     }
   }
   return data;
@@ -405,12 +406,12 @@ export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineD
  */
 export function hoverShapes(data: readonly OutlineDatum[]): ContourShape[] {
   const byId = new Map<bigint, [number, number][][]>();
-  const depth = new Map<bigint, number>();
+  const rungs = new Map<bigint, number>();
   for (const row of data) {
     (byId.get(row.id) ?? byId.set(row.id, []).get(row.id)!).push(row.polygon);
-    depth.set(row.id, row.depth);
+    rungs.set(row.id, row.rung);
   }
-  return [...byId].map(([id, rings]) => ({id, depth: depth.get(id) ?? 0, rings, bbox: shapeBbox(rings)}));
+  return [...byId].map(([id, rings]) => ({id, rung: rungs.get(id) ?? 0, rings, bbox: shapeBbox(rings)}));
 }
 
 /**
@@ -449,16 +450,21 @@ const TOPIC_SIZE = 12;
  * `lineage` already holds, so nothing new is asked of the wire.
  *
  * With no chosen level this is the cut's leaves. With one it is that level's artifacts **and**
- * every shallower artifact whose own children the level cut away, which the plain `depth === level`
+ * every shallower artifact whose own children the level cut away, which the plain `rung === level`
  * test that stood here dropped — a branch that stops above the chosen level went unnamed.
+ *
+ * The number compared is the wire's `rung` (contracts §3.2 r44): the declared level on a levelled
+ * layer, the response-local chain depth on a treed one, computed server-side after the cut. It is
+ * never derived here — the client-side chain count this once used answered the wrong question on
+ * a levelled layer, whose edges may skip a level (trap 5.4, retired with the column).
  */
-export function frontier(a: ArtifactsProjection, level: number | undefined, depths: Map<bigint, number> = servedDepths(a)): Set<bigint> {
-  const drawn = (id: bigint) => level === undefined || (depths.get(id) ?? 0) <= level;
+export function frontier(a: ArtifactsProjection, level: number | undefined): Set<bigint> {
+  const drawn = (x: {rung: number}) => level === undefined || x.rung <= level;
   const out = new Set<bigint>();
   for (const artifact of a.served) {
-    if (!drawn(artifact.tesseraId)) continue;
+    if (!drawn(artifact)) continue;
     const children = a.lineage.childrenOf.get(artifact.tesseraId) ?? [];
-    if (!children.some((c) => drawn(c.tesseraId))) out.add(artifact.tesseraId);
+    if (!children.some((c) => drawn(c))) out.add(artifact.tesseraId);
   }
   return out;
 }
@@ -481,8 +487,7 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
   // candidates of their own (§5.10, D13).
   const dependent = new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
   const topicOf = attachedTopics(a, meta);
-  const depths = servedDepths(a);
-  const front = frontier(a, level, depths);
+  const front = frontier(a, level);
   const named = placed
     .filter((x) => !dependent.has(x.layer) && front.has(x.tesseraId))
     .filter((x) => hasText(x) || topicOf.has(x.tesseraId))
@@ -615,21 +620,6 @@ export function attachedTopics(a: ArtifactsProjection, meta: Meta | null): Map<b
  */
 export function displayName(artifact: Artifact, topics: ReadonlyMap<bigint, string>): string | null {
   return artifactName(artifact) ?? topics.get(artifact.tesseraId) ?? null;
-}
-
-/** The depth of each served artifact in the served tree: a root is 0, a child one deeper. */
-export function servedDepths(a: ArtifactsProjection): Map<bigint, number> {
-  const depth = new Map<bigint, number>();
-  const of = (id: bigint, guard = 0): number => {
-    const known = depth.get(id);
-    if (known !== undefined) return known;
-    const artifact = a.lineage.byId.get(id);
-    const parent = artifact && artifact.parentId !== null && a.lineage.byId.has(artifact.parentId) && guard < 1024 ? of(artifact.parentId, guard + 1) + 1 : 0;
-    depth.set(id, parent);
-    return parent;
-  };
-  for (const artifact of a.served) of(artifact.tesseraId);
-  return depth;
 }
 
 export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {

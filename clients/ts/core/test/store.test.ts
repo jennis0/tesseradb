@@ -302,6 +302,49 @@ describe('setLayers before meta', () => {
   });
 });
 
+describe('the colours are rebuilt when the table moves and not per response', () => {
+  it('reuses the same colour map when a settle names no artifact the session had not held', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    // Two artifacts, served identically on every request — the shape of a layer whose artifacts
+    // are scattered through row space and so are served in full whatever the viewport.
+    const served = [
+      {layer: 'clusters/a', tesseraId: 1n, key: 'c1', maskedCount: 5n, centroid: [1, 2] as [number, number], box: null, hull: null, content: [], parentId: null, rung: 0, matched: null},
+      {layer: 'clusters/a', tesseraId: 2n, key: 'c2', maskedCount: 7n, centroid: [3, 4] as [number, number], box: null, hull: null, content: [], parentId: null, rung: 0, matched: null}
+    ];
+    const {client} = fakeClient(() => {
+      const r = response('ck');
+      return {...r, result: {...r.result, artifacts: served}};
+    });
+    const store = createStore({
+      viewerUrl: 'http://viewer',
+      token: 'tok',
+      client,
+      clock,
+      scheduler,
+      prefetch: false,
+      replica: {revalidateAfterMs: Infinity}
+    });
+    store.setLayers(['clusters/a']);
+    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    const first = store.get('artifacts');
+    expect(first.held).toBe(2);
+    expect(first.colours.size).toBe(2);
+
+    // A second settle over other ground, answered with the same artifacts: nothing is named, so
+    // the colour map is the same object and the lookup texture built from it is not rewritten.
+    store.setView({bbox: [50, 100, 100, 200], width: 800, height: 800});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    expect(store.get('artifacts').colours).toBe(first.colours);
+    expect(store.get('artifacts').held).toBe(2);
+  });
+});
+
 describe('select(box) — one counting request in the tiles form (§5.11)', () => {
   it('asks once at a bounded depth with k = 0, sums the tiles, and types exactness by the cell', async () => {
     const clock = fakeClock();

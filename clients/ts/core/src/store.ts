@@ -160,6 +160,12 @@ export type ArtifactsProjection = {
   status: ArtifactChannelState['status'];
   refusal: {code: string; detail: string} | null;
   version: number;
+  /**
+   * How many artifact payloads the session holds — the served set plus everything served earlier
+   * under the same identity and content keys, which the channel keeps rather than refetching
+   * (`artifact-cache-handover.md`). Instrumentation: what is drawn is `served`.
+   */
+  held: number;
   /** The session artifact table, for a consumer resolving ordinals (§5.10). */
   table: SessionArtifactTable;
   /** The served set's ordinals — what an opened artifact resolves through. */
@@ -362,7 +368,7 @@ export function createStore(options: StoreOptions): Store {
     view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table, servedOrdinals: new Set(), hulls: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), hulls: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
@@ -492,6 +498,12 @@ export function createStore(options: StoreOptions): Store {
       depth: () => projections.view.depth ?? presenter?.frame?.depth,
       maxTiles: meta.maxTilesPerRequest,
       table,
+      // The same composition the point path sends: a filtered view asks the server (the bit is per
+      // request, decision 0104), an unfiltered one over scopes held whole is served locally.
+      filters: () => composeFilters(projections.filters.draft),
+      // What classifies each layer for the fetch model — levelled and flat scopes may be held
+      // whole; treed ones ask per view always.
+      declarations: meta.layers,
       onChange: onArtifacts
     });
     // A `setLayers` that arrived before meta is honoured now: the channel is what asks, and it
@@ -545,8 +557,22 @@ export function createStore(options: StoreOptions): Store {
 
   function onTrace(kind: string, fields: Record<string, number>): void {
     // A revalidation observed a (possibly new) content key without redrawing the marks.
-    if (kind === 'revalidate') recomputeStale();
+    if (kind === 'revalidate') {
+      recomputeStale();
+      observeArtifactRotation();
+    }
     options.instruments?.onTrace?.(kind, fields);
+  }
+
+  /**
+   * Hand the point path's content-key observation to the artifact channel. While its held scopes
+   * answer views locally the channel issues no request of its own, so this is the only route by
+   * which a rotation can reach its rule-7 drop (`artifact-cache-handover.md` §4a.3: the point path
+   * carries the key on every response, so the client learns without asking).
+   */
+  function observeArtifactRotation(): void {
+    const observed = replica?.currentContentKey;
+    if (observed) channel?.observeContentKey(observed);
   }
 
   function onPresented(p: Presented): void {
@@ -609,6 +635,9 @@ export function createStore(options: StoreOptions): Store {
     if (stale !== projections.status.stale) {
       replaceProjection('status', {...projections.status, stale, sessionWarm: true});
     }
+    // After the frame's projections are settled: a rotation the points observed reaches the
+    // artifact channel's rule-7 drop, which matters exactly when held scopes answer views locally.
+    if (p.fetched) observeArtifactRotation();
     if (options.instruments?.onFrame && replica && p.fetched) {
       options.instruments.onFrame({
         plan: {choice: p.plan.choice},
@@ -641,10 +670,15 @@ export function createStore(options: StoreOptions): Store {
       status: state.status,
       refusal: state.refusal,
       version: state.version,
+      held: state.held,
       table,
       servedOrdinals,
       hulls: heldHulls,
-      colours: colourTable(),
+      // **Rebuilt only when the table moved.** A response that names artifacts already held names
+      // no new ordinal, so the colours and the lookup texture built from them are the same ones —
+      // which is what the channel's payload store buys, and it buys nothing if this rebuilds a map
+      // of the same size every settle (`artifact-cache-handover.md` §6 step 2).
+      colours: table.version === colouredAt ? projections.artifacts.colours : colourTable(),
       palette
     });
     checkColourCoverage();

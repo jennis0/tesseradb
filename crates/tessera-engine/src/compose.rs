@@ -547,6 +547,30 @@ impl EffectiveMask {
         }
     }
 
+    /// The rows of `here` this request's filter admits — `here ∩ M_sel` — or `None` where the
+    /// request carried no filter and there is no question to answer
+    /// ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    ///
+    /// **The one filter-aware question an artifact may ask**, and it is on this type rather than on
+    /// [`MaskedSet`] because that trait is deliberately filter-blind: the masked count and the
+    /// existence criterion read it, and a filter reaching either would make an artifact appear and
+    /// vanish as a viewer typed (**I12**). The bit this feeds is a boolean beside the count and
+    /// never a second count.
+    ///
+    /// **`here` must be `viewport ∩ M_auth`** — a set obtained from
+    /// [`MaskedSet::visible_rows`] and from nothing else, exactly as derived content's input is.
+    /// The intersection then narrows an already-composed set and cannot widen it, and the answer
+    /// stays inside `M_auth` whatever the filter matched.
+    ///
+    /// **Scoped to the viewport because that is the extent every crossing route can answer over.**
+    /// The per-tile crossing and the render-column route are *silent* outside the request's tiles
+    /// rather than negative there ([`FilterRows`]), so a whole-membership bit would be exact on one
+    /// route and quietly narrow on the other two. `here` is inside the domain by construction, its
+    /// rows being the request's own tiles.
+    pub fn matched_rows(&self, here: &Bitmap) -> Option<Bitmap> {
+        self.filter.as_ref().map(|filter| here.and(filter.rows()))
+    }
+
     /// Every range this mask is asked about must be one the filter was evaluated over — see
     /// [`FilterRows`]. Called from the two methods that read `filter`; compiled out in release.
     #[inline]
