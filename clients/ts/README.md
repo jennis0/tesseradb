@@ -209,7 +209,11 @@ passing while quietly dropping two thirds of the types it covers. The other two 
 against any corpus that carries a layer** — `--artifacts-only` recaptures the pair alone, leaving
 the wide goldens as they are. The first is the annotation channel's own shape, `k = 0` and no
 points frame; the worked decodes in `reference/examples` and `wire-example` pin its bytes, so it
-is captured as `--terms 0` every time. The second names the layer with points, so the body carries
+is captured as `--terms 0` every time. **Both are r40 captures** — `hull_x` and `hull_y` are a
+nested list of rings — and `viewport-artifacts-pre-r40.bin` beside them is a real body from before
+that change, kept deliberately and never recaptured: it is what the decoder's refusal is tested
+against, because read one level shallow those bytes yield one ring of one vertex per artifact,
+which draws as nothing, picks as nothing and errors nowhere. The second names the layer with points, so the body carries
 the artifacts frame **and** a points frame with the per-point membership column (D12); the wide
 fixture's breadth, a property of the declared columns, has nothing to contribute to either. What
 it must carry is several artifacts with genuinely different geometry — a layer declaring

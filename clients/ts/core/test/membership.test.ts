@@ -225,7 +225,7 @@ describe('the membership golden (captured against the demo layer, the layer name
   // `node scripts/capture-golden.mjs --artifacts-only` against it. Everything above covers the
   // column against bodies this test file builds; what is lost meanwhile is the one check that the
   // column and the artifacts frame agree in a body the server actually sent.
-  it.skip('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
+  it('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
     const {readFileSync} = require('node:fs') as typeof import('node:fs');
     const {join} = require('node:path') as typeof import('node:path');
     const r = decodeViewport(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin'))));
