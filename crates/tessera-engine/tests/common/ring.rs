@@ -131,6 +131,32 @@ fn point_to_segment(a: [u32; 2], b: [u32; 2], p: [u32; 2]) -> f64 {
     ((px - qx).powi(2) + (py - qy).powi(2)).sqrt()
 }
 
+/// **How far outside its own shape a member sits**, in grid units — `0.0` when it is inside any
+/// ring of that shape.
+///
+/// §1's claim is not that a member is inside its own outline: the shape is computed over one real
+/// member per occupied cell of a grid across the artifact's own extent (§7.1), so a member can sit
+/// up to a cell beyond it, and §4's ruling of 2026-08-28 is what permits that. This is the quantity
+/// that claim is about, and it is what a containment assertion over a reduced input has to be
+/// written in terms of.
+pub fn escape(rings: &[Vec<[u32; 2]>], p: [u32; 2]) -> f64 {
+    if rings.iter().any(|r| contains(r, p)) {
+        return 0.0;
+    }
+    let mut nearest = f64::INFINITY;
+    for ring in rings {
+        let n = ring.len();
+        if n == 1 {
+            nearest = nearest.min(point_to_segment(ring[0], ring[0], p));
+            continue;
+        }
+        for i in 0..n {
+            nearest = nearest.min(point_to_segment(ring[i], ring[(i + 1) % n], p));
+        }
+    }
+    nearest
+}
+
 /// The **two-way worst excursion** between two shapes, each a list of rings: the largest distance
 /// from a vertex of either to the nearest boundary point of the other, in grid units.
 ///
