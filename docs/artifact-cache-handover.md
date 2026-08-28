@@ -150,6 +150,81 @@ membership, never the part in view, so an artifact drawn with its edge off scree
 otherwise, and the server's intersection test is a fetch bound rather than an assertion. What is
 undecided is whether the *fetch model* is written down as an obligation.
 
+## 4a. Step 3, costed — and why it should probably not be built yet
+
+**Written 2026-08-28, after steps 1 and 2. Nothing here is decided; §4a.4 is the ruling to make.**
+
+### 4a.1 The floor: the served identifier list, which no cache removes
+
+A response's artifacts frame is two things — *which artifacts are in view* and *what each one is* —
+and only the second is what the store now holds. So the affordance can elide payloads and cannot
+elide identity, and the floor is what identity costs.
+
+**Modelled, not measured**, from the frame as contracts §3.2 defines it: `tessera_id` 8 B,
+`parent_id` 8 B, `level` 4 B, `matched` a bit, and `layer` as a **repeated string**, which is the
+column that dominates — `clusters/toponymy` is 18 bytes on every row, there being no dictionary
+encoding on this frame. Call it 40 B an artifact against the ~110 B the whole frame measures
+(`evidence/memos/2026-08-28-artifact-response-volume.md` §1: 49.0 MB over 464,655 artifacts). **So
+payload elision alone saves about 60% of the frame and not 95%**, and the scattered flat layer §1 is
+about — 231,645 artifacts, served in full on every request — still pays ~9 MB a settled view with a
+perfect cache. Two thirds of a bad number is a bad number.
+
+Dictionary-encoding `layer` is worth doing on its own and belongs to neither step: one column, no
+semantics, and it takes the floor to ~20 B.
+
+### 4a.2 Three shapes, and what each actually buys
+
+**(i) A held-set claim by level** — *I hold layer L level k whole at content key X* — is the
+handover's own proposal (§4). It is a few bytes, and the server elides the payload columns for that
+level. **But it only elides the payload**, so it lands on §4a.1's floor; and a client can claim it
+honestly only where it holds the level *whole*, which it knows only by having asked over the whole
+extent. The claim's failure mode is benign — a false claim draws artifacts with no geometry, a
+client bug that withholds nothing — but the win is bounded by the floor.
+
+**(ii) A held-set claim by tile**, mirroring `delta-serving.md`'s declared-tiles form for points:
+the client names the tiles it has already been answered for, and the server subtracts their
+candidate set. Exact at any granularity and compact. **It is also the one that does not compose with
+the rest of the request**: what a client was served for a tile depends on the `levels` it named and
+on `artifact_budget`'s cut, so *served for tiles T* is not determined by T, and a claim that assumed
+it would elide a payload the client never received. Making it sound means carrying the level set and
+the budget in the claim and having the server reject any mismatch — a second request shape to keep
+true against the first.
+
+**(iii) No affordance at all: fetch the level whole, once, and pick from it locally.** 0103 already
+expresses it — `levels: [k]` over the full extent — and the owner has already settled the objection
+that local picking over-draws (§4: geometry and count are over the whole visible membership, so an
+artifact drawn with its edge off screen never claimed otherwise, and the server's intersection test
+is a fetch bound rather than an assertion). A client that holds a level whole then pans and zooms
+within it with **no artifact traffic at all** — not a smaller frame, none — which is the only one of
+the three that goes below §4a.1's floor.
+
+### 4a.3 What (iii) costs, stated rather than implied
+
+- **One large response up front** — the level whole for this principal, which for GeoNames' admin 4
+  is 231,645 artifacts. 49 MB once is a different problem from 49 MB per settled view, and it is not
+  obviously an acceptable one (the response-volume memo §5 Q2 says exactly this).
+- **A filter still needs the server.** `matched` is per request (decision 0104), so a filtered view
+  costs a round trip whatever is held — one that can ask for the bits alone.
+- **Freshness is already answered**: the point path carries the content key on every response, so a
+  client learns of a rotation without asking the artifact channel anything.
+- **It is a client policy, not a wire feature**, so it needs no contracts change and no
+  leak-register pass — the two things step 3 was expected to need.
+
+### 4a.4 The recommendation
+
+**Do not build a wire affordance yet.** Build (iii) as the channel's fetch model where the client
+can hold a level whole, keep asking per viewport where it cannot, dictionary-encode `layer` to lower
+the floor for the case that keeps asking, and leave (i) and (ii) unbuilt until something measures
+them. The reason is §6 step 4's, unchanged: **the corpus that would show the difference does not
+exist**, so any affordance built now is sized against a modelled number, and (i) is bounded by a
+floor that (iii) does not have.
+
+⊘ **The owner's ruling is owed on one thing before (iii) can be built**: whether *the client may
+hold a level whole and pick from it locally* becomes a written obligation, and on what basis it
+decides to — the fetch model §4's third ⊘ names. There is no cardinality hint to decide it by (S5,
+declined), so the client must decide by observation, and what it observes is the size of the answer
+it just got.
+
 ## 5. Traps — things that look right and are not
 
 **5.1 The level must never enter the content key.** It is a request parameter; the content key
