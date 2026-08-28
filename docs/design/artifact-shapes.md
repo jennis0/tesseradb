@@ -273,27 +273,29 @@ its own timing (`hull_triangulation.rs`).
 
 | | on the whole membership (r4) | on the reduced input (r6) | with the dig indexed (r7) |
 |---|---|---|---|
-| whole layer — the dig | 1,882 ms | 900 ms | **496 ms** |
-| whole layer — sort + Delaunay + components + χ-peel | 6,835 ms | 1,852 ms | 1,917 ms |
-| the ratio over the layer | 3.44× | 1.94× | **3.42×** |
-| the largest artifact's Delaunay alone | 1,533 ms | 64 ms | 69 ms |
-| the largest artifact — the dig | — | 66 ms | **29 ms** |
-| one shape, gather included — the dig | p50 1.7 ms, p90 19.9 ms, worst 263 ms | p50 1.7 ms, p90 14.4 ms, worst 73 ms | **p50 1.2 ms, p90 7.4 ms, worst 55 ms** |
-| one shape, gather included — triangulated | p50 4.8 ms, p90 35.6 ms, worst 2,017 ms | p50 5.0 ms, p90 23.7 ms, worst 104 ms | p50 5.0 ms, p90 22.4 ms, worst 110 ms |
-| the ratio per artifact | 3.7× / 6.2× / 11.8× | 3.7× / 6.1× | **4.6× / 6.1×** |
+| whole layer — the dig | 1,882 ms | 869 ms | **467 ms** |
+| whole layer — sort + Delaunay + components + χ-peel | 6,835 ms | 1,856 ms | 1,848 ms |
+| the ratio over the layer | 3.44× | 1.90× | **3.53×** |
+| the largest artifact's Delaunay alone | 1,533 ms | 68 ms | 68 ms |
+| the largest artifact — the dig | — | 62 ms | **24 ms** |
+| one shape, gather included — the dig | p50 1.7 ms, p90 19.9 ms, worst 263 ms | p50 1.6 ms, p90 13.6 ms, worst 66 ms | **p50 1.2 ms, p90 6.6 ms, worst 40 ms** |
+| one shape, gather included — triangulated | p50 4.8 ms, p90 35.6 ms, worst 2,017 ms | p50 5.0 ms, p90 21.7 ms, worst 103 ms | p50 4.9 ms, p90 21.7 ms, worst 102 ms |
+| the ratio per artifact | 3.7× / 6.2× / 11.8× | 3.6× / 6.0× | **4.6× / 6.0×** |
 | one shape on the wire — the dig | p50 748 B, worst 6,060 B | p50 748 B, worst 5,004 B | p50 748 B, worst 5,004 B |
 | one shape on the wire — the χ-peel | p50 300 B, worst 1,668 B | p50 300 B, worst 1,636 B | p50 300 B, worst 1,636 B |
 
-**The third column is the same run as the second**, alternated binary against binary on one machine
-so that a build server on the same box could not favour either; the triangulated rows move by a few
-percent between them and nothing else does, which is the check that only the dig changed. The
-per-artifact *worst* ratio is dropped from the last two columns: its denominator is a shape that
-takes tens of microseconds, so the figure swings between 7× and 25× run to run and says nothing.
+**The last two columns are one run**, alternated binary against binary on one machine so that a
+build on the same box could not favour either; the triangulated rows move by under a percent between
+them and nothing else does, which is the check that only the dig changed. Both are the tree that
+carries the gather and fold of §7.3 as well as §7.4's index — the second column is `main` and the
+third is `main` plus the index, so neither is the r6 figure this column replaced. The per-artifact
+*worst* ratio is dropped from the last two columns: its denominator is a shape that takes tens of
+microseconds, so the figure swings between 7× and 25× run to run and says nothing.
 
 **What has changed is the argument ruling A rests on, not its direction.** The dig is still cheaper
 everywhere — 4.6× at the median now, where r6 measured 3.6× — and the χ-shape still sends about 60%
 fewer hull bytes. What has gone is *"two seconds is not a hover"*: the largest artifact, which holds
-the whole corpus and is hovered like any other, costs **69 ms** through a triangulation now rather
+the whole corpus and is hovered like any other, costs **68 ms** through a triangulation now rather
 than 2,017 ms. Seventy milliseconds is a hover. The Delaunay is also no longer the overwhelming
 term — 69% of the triangulated route's own time, against 76% — because what it was overwhelming was
 the cost of triangulating millions of points that the drawing could not resolve.
@@ -376,10 +378,10 @@ run to run.
 
 | layer | artifacts | members | rings | > 1 ring | wrap vertices | shape vertices | hull bytes | wrap | shape | area / wrap |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `clusters/hdbscan` | 197 | 6,146 … 2,422,486 | 215 | 4 | 3,278 | 26,740 | 214,780 | 590 ms | 486 ms | 0.771 mean, 0.072 min |
-| `clusters/kmeans` | 64 | 13,658 … 73,360 | 190 | 7 | 1,587 | 8,424 | 68,152 | 94 ms | 165 ms | 0.835 mean, 0.010 min |
-| `clusters/toponymy` L3 | 574 | 1,211 … 11,682 | 618 | 18 | 7,846 | 28,400 | 229,672 | 58 ms | 152 ms | 0.785 mean, 0.012 min |
-| `topics/hdbscan` | 195 | 200 | 197 | 2 | 2,098 | 3,833 | 31,452 | 1 ms | 3 ms | 0.874 mean, 0.113 min |
+| `clusters/hdbscan` | 197 | 6,146 … 2,422,486 | 215 | 4 | 3,278 | 26,740 | 214,780 | 578 ms | 464 ms | 0.771 mean, 0.072 min |
+| `clusters/kmeans` | 64 | 13,658 … 73,360 | 190 | 7 | 1,587 | 8,424 | 68,152 | 96 ms | 169 ms | 0.835 mean, 0.010 min |
+| `clusters/toponymy` L3 | 574 | 1,211 … 11,682 | 618 | 18 | 7,846 | 28,400 | 229,672 | 61 ms | 152 ms | 0.785 mean, 0.012 min |
+| `topics/hdbscan` | 195 | 200 | 197 | 2 | 2,098 | 3,833 | 31,452 | 1 ms | 2 ms | 0.874 mean, 0.113 min |
 
 **Only the first row moves when the input reduction changes** (§7.1), and the other three do not
 move at all: the reduction engages only above a member floor no artifact of `clusters/kmeans`
@@ -391,12 +393,12 @@ shape.
 **No artifact on any of those four layers exhausts the budget**, which is the property §8 B is
 about: the shape each row describes is the one the dig stops at on its own.
 
-**Only the two time columns moved at r7 and every shape column is byte-identical** — the indexing of
+**Only the *shape* column moved at r7 and every shape column is byte-identical** — the indexing of
 §7.4 is a filter over an exhaustive answer, so the vertices, rings, bytes and areas above are the
-ones r6 measured, checked pack by pack rather than assumed. The `topics/hdbscan` row's two
-milliseconds are at the limit of what this measurement resolves: 195 artifacts of 200 members read
-anywhere between 1 and 17 ms run to run, on either side of the change, and no figure should be
-taken from that row.
+ones r6 measured, checked layer by layer rather than assumed; the same four rows before the index
+read 847, 246, 182 and 2.5 ms of shape. The `topics/hdbscan` row is at the limit of what this
+measurement resolves: 195 artifacts of 200 members read anywhere between 1 and 17 ms run to run, on
+either side of the change, and no figure should be taken from that row.
 
 *Hull bytes* is 8 per vertex plus 4 per ring, and excludes the Arrow list offsets and validity, which
 do not move with the shape. Position gathering — one read per member, which a declared `box` already
@@ -699,13 +701,18 @@ membership packs, checked by digest rather than by spot check.
 | — the admissibility check | 57 ms | **7 ms** |
 | the whole derivation over the layer | 912 ms | **525 ms** |
 | `compute(centroid, box, hull)` over the layer, in process | 914 ms | **523 ms** |
-| the same for a layer declaring no hull | 66 ms | 66 ms |
+| a `k = 0` request for all 197 shapes, cold | 905 ms | **519 ms** |
+| the same request on a layer declaring no hull | 58 ms | 58 ms |
 
-Every row is the median of six runs alternated binary against binary on one machine. The two
-per-dig rows are from a build carrying per-stage counters, whose totals read a few percent low; the
-rest are clean runs. **The whole table is the merged tree** — the two rows measuring the dig itself
-were taken before this section's own branch met the gather and fold of §7.3, and only the ratio
-between them transfers.
+Every row is the median of six runs alternated binary against binary on one machine, and the two
+request rows are taken against **two servers running side by side** on different ports, one from each
+side of the change, with the requests alternated between them — which is why the control row is
+identical rather than merely close. Each request is a fresh principal, so nothing is served from
+§7.2's cache. The two per-dig rows are the exception twice over: they come from a build carrying
+per-stage counters, whose totals read a few percent low, and they were taken before this section's
+branch met the gather and fold of §7.3, so only the ratio between them transfers. The breakdown
+below is from that same counter build re-run on the merged tree, where the six stages sum to the
+shape stage's 373 ms.
 
 **A hover barely moves, and that is the expected shape of the result.** One artifact's
 `/v1/artifacts/{id}` is dominated by gathering and reducing its members, not by digging them: the
@@ -713,11 +720,13 @@ largest artifact is 45 ms cold either way, the second largest 57 → 39 ms, and 
 14,477 members is unchanged at 1–2 ms. The dig is the majority term over a *layer* because the many
 mid-sized artifacts each pay it, not because any one of them pays much.
 
-**What is left, and why no further index is proposed.** Of the 391 ms the shape now costs, sorting
-and de-duplicating the reduced input is about 125 ms and the convex wrap about 79 ms — both linear
-passes over 5.13M representatives, and neither is a search that an index could prune. The dig loop
-itself is about 100 ms. Making the shape substantially cheaper again means reducing the input
-further, which is §7.1's resolution and not this section's, or changing the family, which is §4's.
+**What is left, and why no further index is proposed.** Of the 373 ms the shape now costs, sorting
+and de-duplicating the reduced input is **124 ms** and its convex wrap **75 ms** — both linear passes
+over the representatives, and neither is a search an index could prune. Grouping at α is 37 ms and
+building the buckets 41 ms. What the dig loop itself still costs is **95 ms**, of which the indexed
+candidate search is 90 and the admissibility check 5. Making the shape substantially cheaper again
+means reducing the input further, which is §7.1's resolution and not this section's, or changing the
+family, which is §4's.
 
 ### 7.5 Digging no finer than the input, and why neither form is served
 
@@ -787,13 +796,13 @@ layers at the grouping as it is now built:
 
 | budget | vertices | hull bytes | exhausted, of 197 / 64 / 574 | area vs the group wraps, median | area, worst | dig, whole layer |
 |---|---|---|---|---|---|---|
-| 64 | 12,491 / 5,494 / 25,237 | 100,788 / 44,712 / 204,368 | **108 / 34 / 100** | 0.866 / 0.942 / 0.835 | 0.290 / 0.699 / 0.177 | 0.57 / 0.14 / 0.14 s |
-| 128 | 17,849 / 6,925 / 28,146 | 143,652 / 56,160 / 227,640 | 58 / 11 / 10 | 0.818 / 0.928 / 0.833 | 0.290 / 0.540 / 0.177 | 0.48 / 0.15 / 0.15 s |
-| 256 | 22,861 / 7,778 / 28,400 | 183,748 / 62,984 / 229,672 | 25 / 2 / 0 | 0.803 / 0.928 / 0.833 | 0.276 / 0.435 / 0.177 | 0.46 / 0.15 / 0.15 s |
-| 512 | 26,443 / 8,103 / 28,400 | 212,404 / 65,584 / 229,672 | 6 / 1 / 0 | 0.803 / 0.928 / 0.833 | 0.255 / 0.366 / 0.177 | 0.52 / 0.15 / 0.15 s |
-| 1,024 | 26,740 / 8,424 / 28,400 | 214,780 / 68,152 / 229,672 | **0 / 0 / 0** | 0.803 / 0.928 / 0.833 | 0.255 / 0.366 / 0.177 | 0.56 / 0.16 / 0.15 s |
-| **2,048** | **26,740 / 8,424 / 28,400** | **214,780 / 68,152 / 229,672** | **0 / 0 / 0** | **0.803 / 0.928 / 0.833** | **0.255 / 0.366 / 0.177** | 0.52 / 0.15 / 0.15 s |
-| unbounded | 26,740 / 8,424 / 28,400 | 214,780 / 68,152 / 229,672 | 0 / 0 / 0 | 0.803 / 0.928 / 0.833 | 0.255 / 0.366 / 0.177 | 0.52 / 0.16 / 0.15 s |
+| 64 | 12,491 / 5,494 / 25,237 | 100,788 / 44,712 / 204,368 | **108 / 34 / 100** | 0.866 / 0.942 / 0.835 | 0.290 / 0.699 / 0.177 | 0.41 / 0.15 / 0.14 s |
+| 128 | 17,849 / 6,925 / 28,146 | 143,652 / 56,160 / 227,640 | 58 / 11 / 10 | 0.818 / 0.928 / 0.833 | 0.290 / 0.540 / 0.177 | 0.43 / 0.15 / 0.15 s |
+| 256 | 22,861 / 7,778 / 28,400 | 183,748 / 62,984 / 229,672 | 25 / 2 / 0 | 0.803 / 0.928 / 0.833 | 0.276 / 0.435 / 0.177 | 0.45 / 0.16 / 0.15 s |
+| 512 | 26,443 / 8,103 / 28,400 | 212,404 / 65,584 / 229,672 | 6 / 1 / 0 | 0.803 / 0.928 / 0.833 | 0.255 / 0.366 / 0.177 | 0.47 / 0.16 / 0.15 s |
+| 1,024 | 26,740 / 8,424 / 28,400 | 214,780 / 68,152 / 229,672 | **0 / 0 / 0** | 0.803 / 0.928 / 0.833 | 0.255 / 0.366 / 0.177 | 0.48 / 0.16 / 0.15 s |
+| **2,048** | **26,740 / 8,424 / 28,400** | **214,780 / 68,152 / 229,672** | **0 / 0 / 0** | **0.803 / 0.928 / 0.833** | **0.255 / 0.366 / 0.177** | 0.47 / 0.16 / 0.15 s |
+| unbounded | 26,740 / 8,424 / 28,400 | 214,780 / 68,152 / 229,672 | 0 / 0 / 0 | 0.803 / 0.928 / 0.833 | 0.255 / 0.366 / 0.177 | 0.47 / 0.16 / 0.15 s |
 
 The three figures in each cell are `clusters/hdbscan` / `clusters/kmeans` / `clusters/toponymy`
 level 3, at full membership, from `hull_geometry.rs`'s `the_budget_sweep`. **Re-measured at r7**,
@@ -822,17 +831,17 @@ server on one machine — the median of four runs, nothing cached anywhere:
 |---|---|---|---|
 | `clusters/hdbscan`, 197 artifacts | **2,032 ms**, 263,079 B | **167 ms**, 26,402 B | **1.2 ms** |
 | `clusters/toponymy`, `levels: "all"`, 797 artifacts | **803 ms**, 534,630 B | **84 ms**, 91,236 B | **2.3 ms** |
-| `taxonomy/arxiv`, 209 artifacts — declares no hull | 78 ms, 26,915 B | 78 ms, 26,915 B | **2.3 ms** |
-| `clusters/hdbscan` asking for **every** hull | **2,032 ms**, 263,079 B | **635 ms**, 248,998 B | **1.3 ms** |
+| `taxonomy/arxiv`, 209 artifacts — declares no hull | 78 ms, 26,915 B | 58 ms, 26,917 B | **2.3 ms** |
+| `clusters/hdbscan` asking for **every** hull | **2,032 ms**, 263,079 B | **519 ms**, 248,998 B | **1.3 ms** |
 
 The taxonomy row is the control and it does not move under `computed`, which is the point: it was
 already the cost of an artifacts request without a hull, and the two clustering rows now sit beside
 it. **The hull was 92% of the first request's time and 90% of its bytes.**
 
-The fourth row is the request that still asks for all 197 shapes, and it is where §7.1, §7.2 and
-§7.4 show up on the wire: **2,032 → 1,046 ms** for reducing the input, **1,046 → 635 ms** for
-indexing the dig, and 1.3 ms for the same principal asking again. The control row was re-measured
-alongside it at 65 ms. The last column is that second ask on every row — the geometry a request derives is
+The fourth row is the request that still asks for all 197 shapes, and it is where §7.1, §7.2, §7.3
+and §7.4 show up on the wire: **2,032 → 1,046 ms** for reducing the input, 1,046 → 905 ms for the
+gather and the fold, **905 → 519 ms** for indexing the dig, and 1.3 ms for the same principal asking
+again. The control row was re-measured alongside it at 58 ms and is the same on both servers. The last column is that second ask on every row — the geometry a request derives is
 held for the principal that derived it (§7.2), so the first two columns are what a *new* principal
 pays and the last is what panning costs.
 
@@ -840,12 +849,12 @@ pays and the last is what panning costs.
 makes when the pointer lands on a shape (§9), with the session already warm so that only the shape
 is cold. JSON bodies of 0.7–14 KB throughout.
 
-| members | before §7.1 | after §7.1 | after §7.4 | the same shape again (§7.2) |
+| members | before §7.1 | after §7.3 | after §7.4 | the same shape again (§7.2) |
 |---|---|---|---|---|
-| 2,422,486 — the corpus root | 188 ms | 70 ms | 45 ms | 0.57 ms |
-| 1,844,620 | 265 ms | 73 ms | **39 ms** | 0.55 ms |
-| 14,477 | — | 1.4 ms | 1.4 ms | 0.38 ms |
-| 6,146 | 2–5 ms | 0.9 ms | 0.9 ms | 0.40 ms |
+| 2,422,486 — the corpus root | 188 ms | 32 ms | 30 ms | 0.58 ms |
+| 1,844,620 | 265 ms | 46 ms | **28 ms** | 0.60 ms |
+| 14,477 | — | 1.4 ms | 1.4 ms | 0.39 ms |
+| 6,146 | 2–5 ms | 0.8 ms | 0.8 ms | 0.38 ms |
 
 **Indexing the dig is worth little on a single hover and that is expected** (§7.4): one artifact's
 call is mostly gathering and reducing its members, so only the second row moves much. The dig is the
@@ -1149,10 +1158,11 @@ check which found nothing sit beside the mechanism it checked rather than in the
   **Both are filters over an exhaustive answer and both are held to an oracle** written from the
   definition, because the dug triangle is empty only if the candidate is the true minimiser: an index
   returning a nearly-nearest member would break §1 silently and pass every timing test. The ring sets
-  are **byte-identical over 2,321 artifacts**. The layer's shape construction is 796 → 391 ms, the
-  derivation 1,040 → 631 ms, and the 197-shape request **1,046 → 635 ms** cold against a control of
-  65 ms — measured with a server from each side of the change running side by side and the requests
-  alternated, so the control reads identically on both.
+  are **byte-identical over 2,321 artifacts**, and so are they against `main` after the merge below.
+  The layer's shape construction is 760 → 373 ms, the derivation 912 → 525 ms, and the 197-shape
+  request **905 → 519 ms** cold against a control of 58 ms — measured with a server from each side
+  of the change running side by side and the requests alternated, so the control reads identically
+  on both.
   **The stopping rule is measured and neither form is served** (§7.5), and the first is a negative
   result worth keeping: refusing a bridge shorter than a binning cell **cannot fire**, because the
   dig already stops at α and α is 34–270 cells on every artifact the reduction engages on. Refusing
@@ -1163,11 +1173,17 @@ check which found nothing sit beside the mechanism it checked rather than in the
   down: a cell is a property of the artifact and a pixel is a property of the request, and only the
   first can key a shape derived once and served to everyone entitled to it.
   **§4.2 is re-derived and ruling A is still not reopened.** The dig moved and the triangulated route
-  did not, so the margin over the layer is 3.42× where r6 measured 1.94×. That is a stronger cost
+  did not, so the margin over the layer is 3.53× where r6 measured 1.94×. That is a stronger cost
   argument than r6's and a weaker one than r4's, and neither is what would settle A.
-  **The owner's target is still not reached**: 635 ms against 65 ms. What is left is not
+  **The owner's target is still not reached**: 519 ms against 58 ms. What is left is not
   concentrated anywhere an index would reach — the largest single term is now sorting and wrapping
-  5.13M representatives — so the next move is §7.1's resolution or §4's family, not another index.
+  the reduced input — so the next move is §7.1's resolution or §4's family, not another index.
+  **Every figure in this entry and in §4.2, §7, §7.3, §7.4 and §8 B is the merged tree**, because
+  this work and the gather and fold of §7.3 were done on separate branches and each was measured
+  against a tree without the other in it. The two published profiles — 57/16/79/767 and
+  119/16/102/391 — describe trees that no longer exist; merged it is 58/16/79/373. Both tracks'
+  oracles were run against the merge: gather's `the_reduction_is_the_definition`, and this one's
+  ring digest over all 2,321 artifacts of the eleven membership packs.
   One defect fixed on the way: `the_budget_sweep` asserted plain containment, which the reduction
   gave up at r5, and had been failing on `clusters/hdbscan` ever since; it now asserts what §1
   claims, that a member sits at most a cell outside its own shape.
