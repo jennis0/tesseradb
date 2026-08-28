@@ -335,3 +335,16 @@ paths = [
   "crates/tessera-spatial/src/*",
   "docs/design/artifact-shapes.md",
 ]
+
+# Wave 16 — the dig (controller, 2026-08-28). The three changes explored together because they
+# interact: index the ring's edges, stop digging at the input's own resolution, then re-derive the
+# family comparison. Shares `derived.rs` with [track.gather]; conflicts are expected and reviewed
+# at integration.
+[track.dig]
+paths = [
+  "crates/tessera-engine/src/derived.rs",
+  "crates/tessera-engine/tests/hull_geometry.rs",
+  "crates/tessera-engine/tests/hull_triangulation.rs",
+  "crates/tessera-engine/tests/common/*",
+  "docs/design/artifact-shapes.md",
+]
