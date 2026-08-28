@@ -38,6 +38,10 @@ Read this section for the state; the tables below for what each step owes and wh
   only the drawn frontier answers, deepest first, held until the pointer leaves the shape.
 - **Three demo corpora** are served by `run_demo.sh`: `notebook-2m4` (2.42M, seven layers — the one
   to judge on), `notebook` (50,000, the same shape), and `2m4` (k-means only, the original).
+- **The client's artifact cache is designed-but-unstarted and has its own map**:
+  [`artifact-cache-handover.md`](artifact-cache-handover.md) — why it is the only bound a scattered
+  layer has, the facts it turns on, the filter bit it needs, and the traps. It has no row below
+  because no work has started; add one when it does.
 - **What is not built** is in the server-tracks table: the selection operand and its verbs (S6,
   designed and reviewed, not built), the fetch-model hint (S5, declined), predicate membership for
   k-means (S8, deferred), a per-branch cut (S9, closed as not a defect), and — until 2026-08-28 — the tiered layer's
