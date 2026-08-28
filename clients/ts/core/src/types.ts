@@ -592,6 +592,26 @@ export type Timings = {
   stageNs: number[] | null;
 };
 
+/**
+ * One points frame of a streamed response, with the counts its points satisfy.
+ *
+ * **A part is a set of whole bands, never a fragment of one.** The server flushes at whole tiles
+ * (`streamed-serving.md` §2), so the tiles here are exactly the run this part's points cover, in
+ * the response's own order, and a consumer stores them exactly as it stores a whole response.
+ *
+ * It carries its own identity and content coordinates rather than reading them from the response,
+ * because the response has not resolved yet — a part landed under one principal must never be
+ * stored under another, and a part from a request a pan has superseded must be recognisable as
+ * belonging to the answer it came from.
+ */
+export type ViewportPart = {
+  result: ViewportResult;
+  /** See {@link ViewportResponse.identityKey}. */
+  identityKey: string;
+  /** See {@link ViewportResponse.contentKey}. */
+  contentKey: string;
+};
+
 export type ViewportResponse = {
   result: ViewportResult;
   timings: Timings;
