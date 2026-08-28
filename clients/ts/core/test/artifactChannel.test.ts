@@ -3,6 +3,7 @@ import {
   ArtifactChannel,
   artifactInView,
   declaredLevelsAt,
+  requestLevels,
   type ArtifactChannelClock,
   type ArtifactChannelState
 } from '../src/artifactChannel.js';
@@ -771,6 +772,15 @@ describe('the identity projection over a held scope (protocol §5.2)', () => {
 });
 
 describe('the declared-map mirror and the in-view test', () => {
+  it('requestLevels names the union of the levelled layers’ maps at the camera zoom, floored, and nothing for flat ones', () => {
+    const admin = {name: 'admin', hierarchy: {kind: 'tiered', pruneChildren: true}, levels: [{level: 0, title: '', zoom: [0, 4] as [number, number]}, {level: 1, title: '', zoom: [3, 7] as [number, number]}, {level: 2, title: '', zoom: [6, 10] as [number, number]}]} as never;
+    const flat = {name: 'k', hierarchy: {kind: 'flat', pruneChildren: false}, levels: []} as never;
+    // A zoom-6.9 view the budget sent to depth 11 still asks for what zoom 6 declares.
+    expect(requestLevels([admin, flat], ['admin', 'k'], 6.9)).toEqual([1, 2]);
+    expect(requestLevels([admin, flat], ['k'], 6.9)).toBeUndefined();
+    expect(requestLevels(new Map([['admin', admin]]), ['admin'], 3)).toEqual([0, 1]);
+  });
+
   it('declaredLevelsAt mirrors the server: no ranges anywhere means every level', () => {
     const layer = decl({
       levels: [

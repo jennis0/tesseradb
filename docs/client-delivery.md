@@ -575,6 +575,23 @@ counts arrive with the response it chose the size of — so the opening view is 
 everything after it is count-driven. ⊘ **Not measured on GeoNames itself**: the figures above are
 the defect's measurement and a synthetic of its shape, not a re-run.
 
+## The request names its levels from the camera zoom (`demo/perf`, 2026-08-28)
+
+**The server's absent-`levels` default keys on the request's `zoom`, and that is the tile depth
+the mark budget chose — not what the viewer is looking at.** On a sparse-per-tile corpus the two
+part company: the owner's trace shows a zoom-6 view of GeoNames sent to depth 11, where the
+declared map answers with admin3 alone. Measured on the same box: asked at depth 11 with the
+default, **85% of points carried no membership** (most places have no admin3) and drew grey, in
+strips beside depth-9 bands whose cut carried admin2; asked with `levels: [2, 3]`, 0%. The coverage
+check saw nothing stale throughout, correctly — a point with no artifact at the served levels is
+coloured neutral by right; it was the served levels that were wrong.
+
+Both requests now name `levels` from the camera zoom (`requestLevels` in `artifactChannel.ts`):
+the union of each levelled layer's declared map at `floor(zoom)`, omitted where no named layer
+declares levels. The channel's local pick, its held-whole marks and its promotion candidates key on
+the same zoom, so what is picked locally is what the wire would have answered. The server default
+is unchanged — decision 0103 stands; the client is following the declaration's own word.
+
 ## The response lands as it arrives (`demo/perf-stream`, 2026-08-28)
 
 **The wire streamed and the client waited.** `POST /v1/viewport` has been a frame sequence since

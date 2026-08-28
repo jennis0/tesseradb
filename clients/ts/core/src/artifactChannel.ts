@@ -150,10 +150,39 @@ export function scopeKindOf(layer: Pick<Layer, 'hierarchy' | 'levels'>): 'levell
  * answers at every depth.
  */
 export function declaredLevelsAt(layer: Pick<Layer, 'levels'>, zoom: number): number[] {
+  zoom = Math.floor(zoom);
   const declared = layer.levels;
   if (declared.length === 0) return [];
   if (!declared.some((d) => d.zoom !== null)) return declared.map((d) => d.level);
   return declared.filter((d) => d.zoom === null || (d.zoom[0] <= zoom && zoom <= d.zoom[1])).map((d) => d.level);
+}
+
+/**
+ * The `levels` a request over `layers` names, from the **camera zoom** — the union of each
+ * levelled layer's declared map at that zoom, or `undefined` where no named layer declares
+ * levels (the field is then omitted and the server's default is right for the layers that remain).
+ *
+ * **Named, and from the camera, because the server's default keys on the request's `zoom` —
+ * which is the tile depth the mark budget chose, not what the viewer is looking at.** On a
+ * sparse-per-tile corpus the budget sends a zoom-6 view to depth 11, and the declared map at
+ * depth 11 answers with the deepest level alone: measured on GeoNames (2026-08-28), the same box
+ * asked at depth 11 with the default came back with **85% of points carrying no membership** —
+ * most places have no admin3 — and drew grey in strips beside depth-9 bands that carried admin2;
+ * asked with `levels: [2, 3]` it came back with 0%. The declaration's "zoom" is what a corpus
+ * author means by it; the depth is the wire's business. The server applies one list to every
+ * named layer and ignores a level a layer does not declare, so the union is safe.
+ */
+export function requestLevels(declarations: ReadonlyMap<string, Pick<Layer, 'hierarchy' | 'levels'>> | readonly Pick<Layer, 'name' | 'hierarchy' | 'levels'>[], layers: readonly string[], zoom: number): number[] | undefined {
+  const lookup = (name: string) => (declarations instanceof Map ? declarations.get(name) : (declarations as readonly Pick<Layer, 'name' | 'hierarchy' | 'levels'>[]).find((l) => l.name === name));
+  const out = new Set<number>();
+  let any = false;
+  for (const name of layers) {
+    const decl = lookup(name);
+    if (!decl || scopeKindOf(decl) !== 'levelled') continue;
+    any = true;
+    for (const level of declaredLevelsAt(decl, zoom)) out.add(level);
+  }
+  return any ? [...out].sort((a, b) => a - b) : undefined;
 }
 
 /**
@@ -520,7 +549,7 @@ export class ArtifactChannel {
   }
 
   /** Whether the request this view produces covers the whole extent — every tile at its depth. */
-  private static isWholeExtent(view: {bbox: [number, number, number, number]; depth: number}): boolean {
+  private static isWholeExtent(view: {bbox: [number, number, number, number]; depth: number; zoom: number}): boolean {
     const r = tileRectOfBbox(view.bbox, view.depth);
     const edge = 2 ** view.depth - 1;
     return r.x0 === 0 && r.y0 === 0 && r.x1 === edge && r.y1 === edge;
@@ -530,24 +559,25 @@ export class ArtifactChannel {
    * The levels the view's request would be answered at for one layer, or null where the layer can
    * never be held whole — a treed layer, and any layer this channel holds no declaration for.
    * A flat layer is its single level-0 scope; a levelled one follows the declared map at the
-   * request's own depth, exactly as the server's absent-`levels` default does.
+   * **camera zoom** — the levels the request names (`requestLevels`), which is what the local
+   * pick and the held-whole marks must agree with.
    */
-  private scopeLevels(layer: string, depth: number): number[] | null {
+  private scopeLevels(layer: string, zoom: number): number[] | null {
     const decl = this.declarations.get(layer);
     if (!decl) return null;
     const kind = scopeKindOf(decl);
     if (kind === 'treed') return null;
-    return kind === 'flat' ? [0] : declaredLevelsAt(decl, depth);
+    return kind === 'flat' ? [0] : declaredLevelsAt(decl, zoom);
   }
 
   /**
    * Whether every scope this view touches is held whole — the condition under which the local pick
    * is sanctioned (protocol §4: rows come from a response, or from a scope held whole).
    */
-  private servesWhole(layers: readonly string[], view: {bbox: [number, number, number, number]; depth: number}): boolean {
+  private servesWhole(layers: readonly string[], view: {bbox: [number, number, number, number]; depth: number; zoom: number}): boolean {
     if (!this.heldUnder) return false;
     for (const layer of layers) {
-      const levels = this.scopeLevels(layer, view.depth);
+      const levels = this.scopeLevels(layer, view.zoom);
       if (!levels) return false;
       for (const level of levels) if (!this.isHeldWhole(layer, level)) return false;
     }
@@ -561,13 +591,13 @@ export class ArtifactChannel {
    * the edge of a shape whose visible members lie off screen, which is a boundary that ought to be
    * drawn (the geometry describes the whole visible membership, never the part in view).
    */
-  private pickLocal(layers: readonly string[], view: {bbox: [number, number, number, number]; depth: number}): Artifact[] {
+  private pickLocal(layers: readonly string[], view: {bbox: [number, number, number, number]; depth: number; zoom: number}): Artifact[] {
     const r = tileRectOfBbox(view.bbox, view.depth);
     const span = GRID32 / 2 ** view.depth;
     const box = {x0: r.x0 * span, y0: r.y0 * span, x1: (r.x1 + 1) * span, y1: (r.y1 + 1) * span};
     const wanted = new Map<string, Set<number>>();
     for (const layer of layers) {
-      const levels = this.scopeLevels(layer, view.depth);
+      const levels = this.scopeLevels(layer, view.zoom);
       if (levels) wanted.set(layer, new Set(levels));
     }
     const out: Artifact[] = [];
@@ -584,10 +614,10 @@ export class ArtifactChannel {
    * nothing either: there is no cardinality hint on this surface (S5, declined), and the ratchet
    * no longer asks for one — its bound is the drop rules, not a size.
    */
-  private markWholeExtent(layers: readonly string[], view: {bbox: [number, number, number, number]; depth: number}): void {
+  private markWholeExtent(layers: readonly string[], view: {bbox: [number, number, number, number]; depth: number; zoom: number}): void {
     if (!ArtifactChannel.isWholeExtent(view)) return;
     for (const layer of layers) {
-      const levels = this.scopeLevels(layer, view.depth);
+      const levels = this.scopeLevels(layer, view.zoom);
       if (!levels) continue;
       for (const level of levels) this.markWhole(layer, level);
     }
@@ -617,7 +647,7 @@ export class ArtifactChannel {
       if (!decl) continue;
       const kind = scopeKindOf(decl);
       if (kind === 'treed') continue;
-      const levels = kind === 'flat' ? [0] : declaredLevelsAt(decl, this.view.depth);
+      const levels = kind === 'flat' ? [0] : declaredLevelsAt(decl, this.view.zoom);
       for (const level of levels) {
         if (this.isHeldWhole(layer, level)) continue;
         out.push({layer, level, flat: kind === 'flat'});
@@ -751,6 +781,8 @@ export class ArtifactChannel {
           // the points on screen are the point path's business.
           k: 0,
           layers,
+          // The levels from the camera zoom, not the depth (`requestLevels`).
+          ...(requestLevels(this.declarations, layers, view.zoom) !== undefined ? {levels: requestLevels(this.declarations, layers, view.zoom)} : {}),
           // **The centroid and the box, and not the hull.** A hull is derived per artifact per
           // request over the members this principal can see, and the map draws one — the hovered
           // or the opened artifact's — while a settled view carries a couple of hundred. Measured

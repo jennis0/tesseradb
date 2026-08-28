@@ -12,6 +12,7 @@ import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
 import {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, type WorldPolygon} from './region.js';
 import {layerClosure} from './layers.js';
+import {requestLevels} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
 import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
 import type {Band, BandKey} from './bands.js';
@@ -452,7 +453,17 @@ export function createStore(options: StoreOptions): Store {
         const zoom = presenter?.view?.view.zoom ?? 0;
         return client.viewport(
           tok,
-          {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn, ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)})},
+          {
+            ...req,
+            view: viewId,
+            filters: composeFilters(projections.filters.draft),
+            layers: req.k === 0 ? [] : layersOn,
+            ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
+            // The levels from the camera zoom, so the membership column names the same cut the
+            // channel asks for — and not the deepest level alone, which is what the server's
+            // depth-keyed default answers a budget-deepened request with (`requestLevels`).
+            ...(req.k === 0 || layersOn.length === 0 || !meta || requestLevels(meta.layers, layersOn, zoom) === undefined ? {} : {levels: requestLevels(meta.layers, layersOn, zoom)})
+          },
           signal,
           background,
           onPart

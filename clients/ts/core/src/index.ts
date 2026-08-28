@@ -67,7 +67,7 @@ export {
   type FilterDraft,
   type TextMode
 } from './filters.js';
-export {
+export {requestLevels, 
   ArtifactChannel,
   artifactInView,
   declaredLevelsAt,
