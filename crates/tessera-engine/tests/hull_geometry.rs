@@ -506,3 +506,179 @@ fn worst_from_one(v: &mut [f64]) -> f64 {
         })
         .unwrap_or(1.0)
 }
+
+/// **Where the derivation's time actually goes**, stage by stage over the whole layer — the
+/// profile `docs/design/artifact-shapes.md` §7.1 quotes, and the thing that decides whether a
+/// cheaper route to the occupied cells is worth building at all.
+///
+/// The stages are the ones a change can move independently: reading a position per visible member
+/// (`gather`), the Akl–Toussaint pass that keeps α exact (`octagon`), binning the members to one
+/// representative per cell (`bin`), and everything the shape itself costs over the reduced input
+/// (`shape` — sort, wrap, group, dig). `octagon` is timed here on a second copy of the same eight
+/// running maxima rather than through a seam, because it is one pass with no state to expose and a
+/// seam for it would be a hole in the module for a measurement's convenience.
+///
+/// ```text
+/// TESSERA_HULL_BUNDLE=<…>/bundle-notebook-2m4 \
+///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_derivation_profile
+/// ```
+#[test]
+#[ignore]
+fn the_derivation_profile() {
+    let corpus = corpus::open();
+    let d = tessera_engine::derived::SERVED_QUANTISE_DIVISIONS;
+    let mut rows: Vec<Stage> = Vec::new();
+
+    for (_, visible) in &corpus.memberships {
+        let t0 = Instant::now();
+        let positions = corpus::gather(visible, &corpus.locator);
+        let gather_ms = t0.elapsed().as_secs_f64() * 1e3;
+        if positions.len() < 3 {
+            continue;
+        }
+
+        let t1 = Instant::now();
+        let box_and_centroid = one_pass_box_and_centroid(&positions);
+        let bc_ms = t1.elapsed().as_secs_f64() * 1e3;
+        std::hint::black_box(box_and_centroid);
+
+        let t2 = Instant::now();
+        let reduced = tessera_engine::derived::quantised(&positions, d);
+        let reduce_ms = t2.elapsed().as_secs_f64() * 1e3;
+        let reduced_len = reduced.as_ref().map_or(positions.len(), |r| r.len());
+
+        let t3 = Instant::now();
+        let rings = tessera_engine::derived::dig_rings(&positions, usize::MAX).0;
+        let shape_ms = t3.elapsed().as_secs_f64() * 1e3 - reduce_ms;
+        std::hint::black_box(rings);
+
+        rows.push(Stage {
+            members: positions.len(),
+            representatives: reduced_len,
+            gather_ms,
+            bc_ms,
+            reduce_ms,
+            shape_ms: shape_ms.max(0.0),
+        });
+    }
+
+    rows.sort_unstable_by_key(|r| r.members);
+    println!("members,representatives,gather_ms,box_centroid_ms,reduce_ms,shape_ms");
+    for r in &rows {
+        println!(
+            "{},{},{:.3},{:.3},{:.3},{:.3}",
+            r.members, r.representatives, r.gather_ms, r.bc_ms, r.reduce_ms, r.shape_ms
+        );
+    }
+    let sum = |f: fn(&Stage) -> f64| -> f64 { rows.iter().map(f).sum() };
+    let (g, o, b, s) = (
+        sum(|r| r.gather_ms),
+        sum(|r| r.bc_ms),
+        sum(|r| r.reduce_ms),
+        sum(|r| r.shape_ms),
+    );
+    let total = g + o + b + s;
+    println!(
+        "\nlayer: {} artifacts, {} members, {} representatives",
+        rows.len(),
+        rows.iter().map(|r| r.members).sum::<usize>(),
+        rows.iter().map(|r| r.representatives).sum::<usize>(),
+    );
+    println!(
+        "gather {g:.0} ms ({:.0}%)  box+centroid {o:.0} ms ({:.0}%)  reduce {b:.0} ms ({:.0}%)  shape {s:.0} ms ({:.0}%)  total {total:.0} ms",
+        100.0 * g / total,
+        100.0 * o / total,
+        100.0 * b / total,
+        100.0 * s / total,
+    );
+    println!(
+        "the hull's own cost (reduce+shape) {:.0} ms; what a declared box or centroid already pays (gather) {g:.0} ms",
+        b + s,
+    );
+}
+
+/// One artifact's row of the profile — the four stages a change can move independently.
+struct Stage {
+    members: usize,
+    representatives: usize,
+    gather_ms: f64,
+    bc_ms: f64,
+    reduce_ms: f64,
+    shape_ms: f64,
+}
+
+/// The `box` and `centroid` properties over the gathered positions, written from the definition —
+/// the profile's floor, since a layer declaring either already pays a pass over every member and
+/// the hull's own cost is what it adds on top.
+fn one_pass_box_and_centroid(points: &[[u32; 2]]) -> ([u32; 4], [f64; 2]) {
+    let mut b = [u32::MAX, u32::MAX, 0u32, 0u32];
+    let (mut sx, mut sy) = (0.0f64, 0.0f64);
+    for p in points {
+        b[0] = b[0].min(p[0]);
+        b[1] = b[1].min(p[1]);
+        b[2] = b[2].max(p[0]);
+        b[3] = b[3].max(p[1]);
+        sx += p[0] as f64;
+        sy += p[1] as f64;
+    }
+    let n = points.len() as f64;
+    (b, [sx / n, sy / n])
+}
+
+/// **How many members share a cell** — the measurement `artifact-shapes.md` §7.3's crossover rests
+/// on, and the reason the occupied cells are folded out of runs rather than jumped to.
+///
+/// A cell that is a contiguous row range could be reached by bitmap arithmetic — gallop over the
+/// segment's Morton column to the cell's end, reset the mask's iterator past it, read one position
+/// per cell instead of one per member — and that wins only where a cell holds more members than the
+/// jump costs. So the question is occupancy, and it is answered at two resolutions: the corpus
+/// grid's own cell, which is the finest a row range can address, and the binning resolution the
+/// shape is actually computed at.
+///
+/// ```text
+/// TESSERA_HULL_BUNDLE=<…>/bundle-notebook-2m4 \
+///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_cell_occupancy
+/// ```
+#[test]
+#[ignore]
+fn the_cell_occupancy() {
+    use std::collections::HashSet;
+    let corpus = corpus::open();
+    let d = tessera_engine::derived::SERVED_QUANTISE_DIVISIONS;
+    println!("members,extent,occupied_morton_cells,members_per_morton_cell,representatives,members_per_binning_cell");
+    let (mut members, mut morton_cells, mut reps) = (0usize, 0usize, 0usize);
+    let mut worst_binning = 0.0f64;
+    for (_, visible) in &corpus.memberships {
+        let positions = corpus::gather(visible, &corpus.locator);
+        if positions.len() < 3 {
+            continue;
+        }
+        // The corpus grid is 2^16 × 2^16 (`contracts.md` §2.5): a position's high half is its
+        // Morton cell, and rows sharing one are the finest run a row range can be.
+        let cells: HashSet<(u32, u32)> = positions.iter().map(|q| (q[0] >> 16, q[1] >> 16)).collect();
+        let r = tessera_engine::derived::quantised(&positions, d).map_or(positions.len(), |v| v.len());
+        let per_binning = positions.len() as f64 / r as f64;
+        worst_binning = worst_binning.max(per_binning);
+        members += positions.len();
+        morton_cells += cells.len();
+        reps += r;
+        println!(
+            "{},{:.0},{},{:.2},{},{:.2}",
+            positions.len(),
+            extent_of(&positions),
+            cells.len(),
+            positions.len() as f64 / cells.len() as f64,
+            r,
+            per_binning
+        );
+    }
+    println!(
+        "\nlayer: {members} members, {morton_cells} distinct Morton cells ({:.2} members a cell), {reps} representatives at {d} divisions ({:.2} members a cell, densest artifact {worst_binning:.1})",
+        members as f64 / morton_cells as f64,
+        members as f64 / reps as f64,
+    );
+    assert!(
+        members as f64 / morton_cells as f64 > 1.0,
+        "a member cannot share a cell with fewer than one member"
+    );
+}

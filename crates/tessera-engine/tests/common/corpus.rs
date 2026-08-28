@@ -86,10 +86,9 @@ pub fn open() -> Corpus {
     }
 }
 
-/// The positions `compute` reads, gathered through the same locator.
+/// The positions `compute` reads, gathered the way `compute` gathers them — one segment walk, not
+/// a row-by-row resolve. A measurement that gathered differently would be timing its own copy of
+/// the one pass every declared property pays for.
 pub fn gather(visible: &Bitmap, locator: &RowLocator<'_>) -> Vec<[u32; 2]> {
-    visible
-        .iter()
-        .filter_map(|row| locator.position(row).map(|(x, y)| [x, y]))
-        .collect()
+    locator.positions(visible)
 }

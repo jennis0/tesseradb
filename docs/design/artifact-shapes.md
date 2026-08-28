@@ -1,6 +1,6 @@
 # The shape of a served artifact
 
-**Status:** Normative — 2026-08-28 (r5). It governs what the `hull` vocabulary word means, and
+**Status:** Normative — 2026-08-28 (r6). It governs what the `hull` vocabulary word means, and
 `annotations.md` §4.2 and `contracts.md` §3.2 defer to it on the shape's geometry. The rulings that
 closed it are in Appendix R.
 
@@ -22,8 +22,9 @@ the single-ring shape cost, before this).
 reimplementation that reproduces the engine's published figures exactly before comparing anything
 against them. The two figures a *ruling* rests on are Rust against Rust in one process —
 `crates/tessera-engine/tests/hull_triangulation.rs` for what a triangulation costs, and
-`hull_geometry.rs` for what the served shape costs and what reducing its input does to it
-(`the_quantisation_sweep`) — because a Qhull-in-C against numpy-in-Python
+`hull_geometry.rs` for what the served shape costs, what reducing its input does to it
+(`the_quantisation_sweep`), where the derivation's time goes (`the_derivation_profile`) and how many
+members share a cell (`the_cell_occupancy`) — because a Qhull-in-C against numpy-in-Python
 column compares implementations rather than algorithms. Both read `notebook-2m4`: `clusters/hdbscan`
 (197 artifacts, 6,146 … 2,422,486 members), with `clusters/kmeans` (64), `clusters/toponymy` level 3
 (574) and `topics/hdbscan` (195) as controls.
@@ -51,11 +52,13 @@ What the shape guarantees:
 
 - **Every vertex is a visible member's position.** No invented point, no cell corner, no smoothing.
 - **Every member is within one cell of the ring of its own group**, and all but a handful are
-  inside it. The shape is computed over one real member per occupied cell of a grid across the
-  artifact's own extent (§7.1) rather than over every member, so a member can sit up to a cell
-  beyond its own outline. Measured over `clusters/hdbscan` at full membership: **1,965 positions of
-  12,808,679**, on 22 of 197 artifacts and at most 0.09% of any one artifact's members. Under §4's
-  ruling that is an imprecise summary of where the cluster is, not a false claim about a member.
+  inside it. Above a member floor the shape is computed over one real member per occupied cell of a
+  grid across the artifact's own extent (§7.1) rather than over every member, so a member can sit up
+  to a cell beyond its own outline. Measured over `clusters/hdbscan` at full membership: **1,809
+  positions of 12,808,679**, on 24 of 197 artifacts and at most 0.083% of any one artifact's
+  members; on `clusters/kmeans`, `clusters/toponymy` and `topics/hdbscan`, none at all, no artifact
+  of theirs reaching the floor. Under §4's ruling that is an imprecise summary of where the cluster
+  is, not a false claim about a member.
 - **Each ring is simple** — it does not cross or touch itself.
 - **Each ring is inside its group's convex wrap**, so the whole shape is inside the wrap of the
   visible members.
@@ -358,38 +361,59 @@ run to run.
 
 | layer | artifacts | members | rings | > 1 ring | wrap vertices | shape vertices | hull bytes | wrap | shape | area / wrap |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `clusters/hdbscan` | 197 | 6,146 … 2,422,486 | 215 | 4 | 3,278 | 26,815 | 215,380 | 556 ms | 903 ms | 0.771 mean, 0.072 min |
+| `clusters/hdbscan` | 197 | 6,146 … 2,422,486 | 215 | 4 | 3,278 | 26,740 | 214,780 | 548 ms | 824 ms | 0.771 mean, 0.072 min |
 | `clusters/kmeans` | 64 | 13,658 … 73,360 | 190 | 7 | 1,587 | 8,424 | 68,152 | 93 ms | 240 ms | 0.835 mean, 0.010 min |
 | `clusters/toponymy` L3 | 574 | 1,211 … 11,682 | 618 | 18 | 7,846 | 28,400 | 229,672 | 57 ms | 174 ms | 0.785 mean, 0.012 min |
 | `topics/hdbscan` | 195 | 200 | 197 | 2 | 2,098 | 3,833 | 31,452 | 1 ms | 3 ms | 0.874 mean, 0.113 min |
 
-**Only the first row moved when the input reduction landed** (§7.1), and the other three did not
-move at all: reduction engages on an artifact whose members outnumber the cells of its own grid, and
-no artifact of `clusters/kmeans` (13,658 … 73,360 members), `clusters/toponymy` level 3 (1,211 …
-11,682) or `topics/hdbscan` (200) is dense enough to reach it. That was checked rather than assumed
-— re-running the sweep over `clusters/kmeans` returns the identical 8,424 vertices and 239 ms.
+**Only the first row moves when the input reduction changes** (§7.1), and the other three do not
+move at all: the reduction engages only above a member floor no artifact of `clusters/kmeans`
+(13,658 … 73,360 members), `clusters/toponymy` level 3 (1,211 … 11,682) or `topics/hdbscan` (200)
+reaches. That is checked rather than assumed at each change — re-running the sweep over
+`clusters/kmeans` returns the identical 8,424 vertices, 190 rings and no member outside its own
+shape.
 
 **No artifact on any of those four layers exhausts the budget**, which is the property §8 B is
 about: the shape each row describes is the one the dig stops at on its own.
 
 *Hull bytes* is 8 per vertex plus 4 per ring, and excludes the Arrow list offsets and validity, which
 do not move with the shape. Position gathering — one read per member, which a declared `box` already
-pays — is 163 ms over `clusters/hdbscan` and 42 ms on its largest artifact, and sits under both
-columns. **It is now the floor**: on the corpus root the gather is 42 ms and the shape 39 ms, where
-before the reduction the shape was 167 ms.
+pays — is **101 ms** over `clusters/hdbscan` and 26 ms on its largest artifact, and sits under both
+columns. It was 163 ms and 42 ms: rows are Morton rank, so a segment's visible rows are a
+contiguous stretch of the mask and the segment is resolved once for the stretch rather than
+re-resolved per row (§7.3).
 
 ### 7.1 Reducing the input before computing the shape
 
 Every construction in §4 consumes one position per visible member to produce something whose
 resolution is bounded by the drawing: the largest shape here is 757 vertices over 2,422,486 members,
-drawn about a thousand pixels wide. So the members are binned to a square grid over their own
-bounding box and **the shape is computed over one real member per occupied cell** — the member
-nearest that cell's centre, ties broken on the position itself.
+drawn about a thousand pixels wide. So the members are binned to a square grid and **the shape is
+computed over one real member per occupied cell** — the member nearest that cell's centre, ties
+broken on the position itself.
+
+**The grid is anchored at the corpus's own origin, which is what makes finding the occupied cells
+cheap.** A cell whose side is at least one Morton cell is then a Morton block, rows are Morton rank,
+and the members of a cell are therefore **consecutive** in the input: the occupied cells are folded
+out of a run of comparisons, with nothing allocated for a cell that is not occupied. What that
+replaces — a dense `nx × ny` array, anchored at the artifact's own bounding box — made a grid with
+more cells than members a losing trade, and the guard expressing that trade is gone. §7.3 has the
+routes that lost, the jump-per-cell one included.
 
 **It is a quantisation and not a sample.** Every member falls in some cell, every occupied cell
 contributes, and every vertex is still a visible member's own position, so §1's vertex property is
 untouched. What it gives up is §1's old containment: a member can sit up to a cell beyond its own
 outline, which §4's ruling permits and §1 quantifies.
+
+**It engages only above 75,000 visible members, and the floor is set by ring structure rather than
+by cost.** Below it the exact shape is affordable, and it is what a viewer who has zoomed into a
+small cluster is looking at. Run without a floor over the four layers of `notebook-2m4`, the
+reduction reached artifacts it had nothing to offer: `clusters/kmeans` lost **45 of its 190 rings**
+— α-groups merged, which is the claim about where the members are that §3 exists to refuse — and
+put 6.7% of one artifact's members outside its own shape, `clusters/toponymy` level 3 6.5% of one
+and `topics/hdbscan` 5.0% of one, for 49 ms, −12 ms and nothing across the three. **75,000 is the
+size above which no artifact measured loses a ring, and that is a fact about this corpus rather
+than a law** — a corpus with a 200,000-member cluster shaped like `clusters/kmeans`'s would want it
+higher. It is a cost control and safe at any value, like the vocabulary declaration itself (§10).
 
 **The resolution is 1,024 cells along the artifact's longer axis, and it is relative to the artifact
 rather than to the request's zoom.** A shape drawn at all is drawn at most a viewport wide, so a
@@ -411,21 +435,33 @@ beside the representatives, by Akl–Toussaint's filter against the polygon of t
 wrap of the whole membership, and α is not approximated at all — measured as an exact match on every
 artifact of the layer.
 
-What it costs and what it buys, over the 22 of 197 artifacts dense enough to reduce, whose
-9,287,043 members become 1,717,984 representatives:
+**Both halves of that are answered per cell, and the answer is the same set rather than an
+approximation of it.** A cell bounds its members, so a cell whose furthest corner in a direction
+falls short of the best representative's score cannot hold that direction's extreme; only the band
+that does not fall short is opened, and the eight extremes are exact. `strictly_inside` is a
+conjunction of half-planes and so convex, so a cell whose four corners are all strictly inside holds
+nothing that is not, and only the octagon's own boundary band is opened. Testing each of the layer's
+12.8M members against eight edges was *measured* at 68 ms, on top of the 49 ms the eight extremes
+cost in a pass of their own; the band is what those become.
 
-| | median | p90 | worst |
-|---|---|---|---|
-| the boundary's departure from the unreduced shape, as a fraction of the artifact's own extent | 0.005 | 0.025 | 0.044 |
-| the area, against the unreduced shape | 1.000 | — | 0.988 … 1.007 |
+What it costs and what it buys, over the 24 of 197 artifacts the reduction engages on, whose
+9,461,746 members become 1,786,598 representatives:
 
-**Where it is not invisible, stated rather than averaged away.** At the median the departure is half
-a percent of the artifact's extent — a pixel or two on a thousand-pixel drawing. On one artifact of
-the 197 it is 4.4%: a single concavity that the unreduced dig opens and the reduced one does not,
-because the members it would have dug to are no longer candidates. The area is within 1.2% there, so
-it is one notch rather than a shape that has moved. Below 1,024 divisions that case gets common
-enough to matter — at 512 the worst departure is 17% of an artifact's extent — which is what fixes
-the resolution here rather than lower, where the time would be better.
+| | median | worst |
+|---|---|---|
+| the boundary's departure from the unreduced shape, as a fraction of the artifact's own extent | 0.000 | 0.035 |
+| the area, against the unreduced shape | 1.000 | 0.996 |
+| members outside their own shape | 1,809 of 12,808,679 over the layer | 0.083% of one artifact's |
+
+Digging the whole layer is 1,895 ms unreduced and **818 ms** reduced.
+
+**Where it is not invisible, stated rather than averaged away.** At the median the departure is
+nothing measurable. At the worst it is 3.5% of one artifact's extent: a single concavity that the
+unreduced dig opens and the reduced one does not, because the members it would have dug to are no
+longer candidates. The area is within 0.4% there, so it is one notch rather than a shape that has
+moved. Below 1,024 divisions that case gets common enough to matter — at 512 the worst departure is
+16% of an artifact's extent — which is what fixes the resolution here rather than lower, where the
+time would be better.
 
 **The derivation is single-threaded and stays so** (owner ruling, 2026-08-28). Parallelism in this
 engine lives at the *request* level, so concurrent requests use the cores; a `par_iter` over an
@@ -469,6 +505,58 @@ are the additional groups' own wraps; the extra time is the grouping pass. The s
 0.858 → 0.852 of the wrap on average and 0.290 → 0.093 at its tightest — the whole gain was on the
 multi-modal artifacts, which is what that ruling was about. The budget then went 64 → 2,048 (§8 B),
 which is the larger of the two moves and is the one the table above measures.
+
+### 7.3 Where the time goes, and the route that did not pay
+
+**The profile, over `clusters/hdbscan` at full membership** — the four stages a change can move
+independently, each timed on its own:
+
+| stage | | |
+|---|---|---|
+| gather one position per visible member | 106 ms | 11% |
+| `box` and `centroid` over those positions | 15 ms | 2% |
+| reduce the input to one member per occupied cell (§7.1) | 89 ms | 9% |
+| the shape — sort, wrap, group, dig | 724 ms | 77% |
+
+**The per-member passes are not where the cost is, and that is the finding that re-scoped this
+work.** Reading a position for each of the layer's 12,808,679 members, finding the occupied cells
+and the hull candidates come to a fifth of the derivation between them; the dig over the reduced
+input is three quarters of it on its own. What a declared `box` or `centroid` already pays — the
+gather — is 11%, so an artifacts request that declares a hull is not paying mostly to *find* its
+members.
+
+**What did move, and how.** Rows are Morton rank, so a segment holds a contiguous range of them and
+the visible rows of one segment are a contiguous stretch of the mask. Gathering resolves the segment
+once for the stretch instead of re-resolving it per row, and reads the two columns in ascending
+index order rather than through a reverse scan that restarts each time: **170 ms → 106 ms**. The
+reduction folds runs instead of binning into a grid (§7.1), and finds the octagon over cells instead
+of over members: 142 ms → 89 ms, while reaching artifacts from 75,000 members where the array it
+replaced reached none under about 260,000. End to end, the `k = 0` artifacts request for
+`clusters/hdbscan`'s 197 shapes goes **1,053 ms → 964 ms** cold; warm it is 3 ms either way, the
+answer being held per principal (§7.2).
+
+**A jump per cell — the route the row-range property most obviously suggests — was refused on
+measurement, and this is where the crossover is.** If a cell is a row range then the occupied cells
+could be found by bitmap arithmetic: gallop over the segment's Morton column to the end of the
+current cell, reset the mask's iterator past it, and read one position per cell rather than one per
+member. That costs on the order of ten probes and a container walk per cell, against one sequential
+comparison per member for the fold, so it can only win where a cell holds more members than that.
+**On `notebook-2m4` it is not close.** The corpus grid is 2^16 × 2^16 against 2.4M items, so
+12,808,679 member positions occupy 12,560,851 distinct Morton cells — a **ratio of 1.02**, one member
+to a cell. At the binning resolution the layer averages 2.5 members to a cell and its densest
+artifact 17.4. The jump becomes the cheaper route somewhere around a few tens of members a cell,
+which is a corpus two orders of magnitude denser than this one; below that the sequential comparison
+wins, and the row-range property pays here as *locality* rather than as skipping.
+
+Two other routes to the occupied cells were measured and lost, and are recorded so they are not
+tried again: a hash map keyed on the cell index is **289 ms** of binning, a hash a member; and
+indexing the dense array in Morton order so its writes are local is **260 ms**, the locality bought
+back by a grid four times the size. The fold is 89 ms.
+
+**What this does not reach.** The owner's target was for a declared hull to cost what a layer
+declaring none costs, which on this bundle is 59 ms for `taxonomy/arxiv`'s 186 artifacts. It is
+964 ms. Three quarters of that is the dig itself, which this section did not touch: §8 B's budget
+and §4's family are where that number lives, not the route to the members.
 
 ## 8. Who chooses
 
@@ -783,3 +871,23 @@ check which found nothing sit beside the mechanism it checked rather than in the
   until the shape arrives**, so at rest the map's hover index is rectangles. Depth, the smaller
   box and the mark's own membership column separate them, and the index is rebuilt on the true
   shape when it lands — 2–5 ms for an ordinary cluster, 188 ms for the corpus root.
+- **r6 — 2026-08-28. What the derivation's time is actually made of, and the reduction reaches the
+  artifacts it is for.** The brief this answered assumed the per-member scan dominated. Profiled
+  stage by stage (§7.3) it is a fifth of the derivation and the dig is three quarters, so the work
+  was re-scoped to the two things that could move without touching the family.
+  **The gather resolves a segment once per stretch of visible rows rather than once per row**
+  (170 → 106 ms), which is the row-space property — rows are Morton rank — paying as locality.
+  **The occupied cells are folded out of runs rather than binned into a dense grid** (§7.1): the
+  grid is anchored at the corpus origin, so a cell is a Morton block and its members arrive
+  consecutively, and the octagon that keeps α exact is found over cells rather than over members.
+  Three alternative routes to the same cells were measured and lost, the jump-per-cell one that the
+  brief proposed included, and §7.3 records the crossover: it needs a few tens of members to a cell
+  and this corpus has 2.5, one member to a Morton cell.
+  **The reduction gained a 75,000-member floor**, because without one it reached small artifacts and
+  merged α-groups — 45 of `clusters/kmeans`'s 190 rings — which §3 exists to refuse. Above the floor
+  every fidelity column improved against r5: 1,965 → 1,809 members outside their own shape, worst
+  artifact 0.09% → 0.083%, worst area 0.988 → 0.996, worst departure 4.4% → 3.5% of an artifact's
+  extent, α exact as before. The 197-shape request is 1,053 → 964 ms cold, 3 ms warm.
+  **The owner's target is not reached and §7.3 says so at the claim**: a layer declaring no hull
+  costs 59 ms on this bundle. Three quarters of the 964 ms is the dig, which is §8 B's and §4's
+  ground rather than this section's.
