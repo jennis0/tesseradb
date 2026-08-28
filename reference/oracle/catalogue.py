@@ -1250,6 +1250,11 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "geometry_seed": _GEOMETRY_SEED,
         "extent": list(EXTENT),
         "view": VIEW_ID,
+        # The two corpus file names moved off the argv and into the declaration (the `[sources]`
+        # table), whose text is baked into `SCHEMA_TOML` at import — so they are stamped directly,
+        # exactly as `view` and `extent` are, rather than relied on through the schema text.
+        "points_name": POINTS_NAME,
+        "pairs_name": PAIRS_NAME,
         "one_tile": [ONE_TILE_DEPTH, ONE_TILE_TX, ONE_TILE_TY],
         "id_key": CATALOGUE_ID_KEY_HEX,
         # The filter columns' planting rules — everything `department_of`/`title_of` are a

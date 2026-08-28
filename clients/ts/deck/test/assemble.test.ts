@@ -222,7 +222,8 @@ describe('assemble', () => {
       scalars: {w: {arrowType: 'u32', values: Uint32Array.from([10, 11, 12, 13, 14])}},
       subCells: null,
       membership: {},
-      artifacts: []
+      artifacts: [],
+      artifactsIdentity: null
     };
     const bands = bandsOfResult(result, 2, {identityKey: 'ik', contentKey: 'ck', capUsed: 500, now: 0});
 

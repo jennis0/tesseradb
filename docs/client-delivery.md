@@ -49,11 +49,17 @@ Read this section for the state; the tables below for what each step owes and wh
   rows returns. A client holding a level whole and picking from it locally costs no artifact
   traffic at all, and that fetch model is ruled **policy, not obligation** — the obligations are
   three rules (the bit from the response; drop on content-key rotation; rows never assembled from
-  partial history), kept small so the provided client never becomes required. The one wire
-  affordance is an opt-in column projection — identity rows at 13.6 B/row measured — ⊘ unbuilt,
-  alongside two encoding changes (dictionary-encoded `layer`, the hull columns) that cheapen every
-  response for every caller and precede it in value. The scattered corpus that would measure any of
-  it still does not exist.
+  partial history), kept small so the provided client never becomes required. **Built the same
+  day** (contracts r43): the opt-in column projection — identity rows at 14.6 B/row in the gate's
+  regression test against 13.6 measured for the design — the `rung` column that moved the
+  level-versus-depth trap into the wire, and the two encodings (dictionary-encoded `layer`, hull
+  columns trailing and absent when undeclared) that cheapen every response for every caller; the
+  channel holds scopes whole, serves unfiltered views from the hold with no request, asks for
+  identity rows under a filter, and promotes in idle time with **no gate** (owner: a count is not
+  a bound in bytes; the drop rules are the bound). Two gaps closed on the way: the channel had
+  never sent `filters`, so 0104's bit had never reached it; and a locally serving channel now
+  receives the point path's content key so rule 7 can fire. The scattered corpus that would
+  measure any of it still does not exist.
 - **What is not built** is in the server-tracks table: the selection operand and its verbs (S6,
   designed and reviewed, not built), the fetch-model hint (S5, declined), predicate membership for
   k-means (S8, deferred), a per-branch cut (S9, closed as not a defect), and — until 2026-08-28 — the tiered layer's

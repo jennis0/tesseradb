@@ -6,9 +6,12 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 2  sub-cells  (cell, count)                          exactly one, iff underlay requested
     kind 3  points     (tessera_id, code, ...scalars)         zero or more; concatenate in order
     kind 4  trailer    JSON                                   exactly one, last
-    kind 5  artifacts  (layer, tessera_id, key,        at most one, after tiles and before
-                        masked_count, and the derived            any points; absent when none served
-                        geometry columns)
+    kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
+                        key, masked_count, the derived           any points; absent when none served
+                        geometry, content, parent_id,
+                        rung, matched — then hull_x/hull_y,
+                        in the schema only when a served
+                        layer declares a hull; §3.2 r43)
 
 Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
 independently implemented in Python (this is the client-side decode any real SDK would need, not
@@ -53,10 +56,11 @@ class Artifact(NamedTuple):
     #: One content, entire, positional to the layer's declared kinds. Empty means the layer
     #: declares no supplied content — never that content was withheld.
     content: list[str]
-    #: The declared resolution this artifact sits at — the one field here that is a fact about the
-    #: artifact rather than about this principal, so two principals served it *do* agree on it.
-    #: `0` on a treed or flat layer, which declares no levels and sits entirely at level 0.
-    level: int
+    #: The rung this artifact is drawn at (contracts §3.2 r43): the declared level on a levelled
+    #: layer — a fact about the artifact, so two principals served it *do* agree on it — and the
+    #: response-local parent-chain depth on a treed one, the depth of this row in the forest the
+    #: response's own `parent_id` links form after the budget cut. `0` on a flat layer.
+    rung: int
 
 
 FRAME_TILES = 1
@@ -180,6 +184,14 @@ def decode_frames(data: bytes):
                 # legitimately disagree about the same `tessera_id` here too, and neither shape is
                 # the artifact's. A `None` is *this layer declares no such property* — never
                 # *withheld*, since an artifact whose content could not be served is absent whole.
+                # `layer` is dictionary-encoded (contracts §3.2 r43); `to_pylist` resolves the
+                # keys to their utf8 values, so the encoding is invisible from here on. The two
+                # hull columns TRAIL the fixed columns and are absent from the schema entirely
+                # when no served layer declares a hull — an absent column is distinguishable from
+                # a null one, so 0076's null rule gains no third reading.
+                names = set(batch.schema.names)
+                if ("hull_x" in names) != ("hull_y" in names):
+                    raise ValueError("a hull with one axis column and not the other")
                 columns = {
                     name: batch.column(name).to_pylist()
                     for name in (
@@ -193,16 +205,18 @@ def decode_frames(data: bytes):
                         "box_min_y",
                         "box_max_x",
                         "box_max_y",
-                        "hull_x",
-                        "hull_y",
                         "content",
-                        "level",
+                        "rung",
                     )
                 }
+                hulls = "hull_x" in names
+                hull_x = batch.column("hull_x").to_pylist() if hulls else None
+                hull_y = batch.column("hull_y").to_pylist() if hulls else None
                 for row in range(batch.num_rows):
                     cx = columns["centroid_x"][row]
                     bx = columns["box_min_x"][row]
-                    hx, hy = columns["hull_x"][row], columns["hull_y"][row]
+                    hx = hull_x[row] if hulls else None
+                    hy = hull_y[row] if hulls else None
                     if (hx is None) != (hy is None):
                         raise ValueError("a hull with one axis and not the other")
                     artifacts.append(
@@ -228,7 +242,7 @@ def decode_frames(data: bytes):
                             if hx is None
                             else [list(zip(rx, ry)) for rx, ry in zip(hx, hy)],
                             content=list(columns["content"][row] or []),
-                            level=columns["level"][row],
+                            rung=columns["rung"][row],
                         )
                     )
             if not artifacts:

@@ -1,9 +1,9 @@
 # Artifact fetch: the questions, the fetch model, and what each side owes
 
-**Status:** **Proposal r2 — the shape is the owner's, ruled 2026-08-28; §5.2, §5.3 and §8's
-encodings are ⊘ unbuilt**, each marked at its site. §3 describes the surface as it stands today,
-which *is* built, and §6's policy is buildable against it without any of the unbuilt pieces. A
-conflict with [`contracts.md`](contracts.md) is resolved in its favour until this is promoted.
+**Status:** **Proposal r3 — the shape is the owner's, ruled and built 2026-08-28.** §5.2, §5.3
+and §8's encodings are on the wire (contracts r43) and §6's fetch model is the shipped channel's
+policy; the one ⊘ left is §7.3's server memo. Promotion is the owner's. A conflict with
+[`contracts.md`](contracts.md) is resolved in its favour until then.
 
 **Owns:** how a client asks for artifacts and what comes back — the scope of the question, the
 default answer, the one opt-in projection, and the fetch model — together with what the client must
@@ -13,8 +13,8 @@ this document is still guaranteed.
 **Does not own:** what an artifact *is* ([`annotations.md`](annotations.md)), how it is stored and
 evaluated ([`annotation-representation.md`](annotation-representation.md),
 [`artifact-serving-at-scale.md`](artifact-serving-at-scale.md)), or the byte schema of the frames
-([`contracts.md`](contracts.md) §3.2, which stays the contract — §5.2 and §5.3 propose changes *to*
-it, they do not restate it).
+([`contracts.md`](contracts.md) §3.2, which stays the contract — §5.2 and §5.3 argue changes it
+took at r43; it states them).
 
 **Reads with:** [`client-obligations.md`](client-obligations.md) rules 6 and 7,
 [`delta-serving.md`](delta-serving.md) (as the shape the *future* replica-sync question would take,
@@ -81,8 +81,8 @@ Built, and the baseline everything below is measured against.
 - **`artifact_budget`** cuts a nested layer's response structurally — ancestors in place of their
   descendants, never by sampling (decision 0083).
 - **The *artifacts* frame** carries one row per served artifact: layer, id, key, masked count,
-  geometry, content, parent, level, and `matched` — the filter bit, null where the request carried
-  no filter (decision 0104).
+  geometry, content, parent, rung (§5.3 — `level` until r3), and `matched` — the filter bit, null
+  where the request carried no filter (decision 0104).
 - **`matched` is an Arrow boolean column**, bit-packed on the wire, positional to the rows in the
   frame it sits in. There is no addressing problem because the bits and the rows travel together.
 
@@ -151,13 +151,13 @@ holds — is §5.2, with the caller asking rather than claiming.
 complete row each.** Built, the default, and it stays the default; this is the answer §6.1
 guarantees to a caller who has read nothing.
 
-### 5.2 ⊘ The projection — proposed, unbuilt
+### 5.2 The projection — built 2026-08-28
 
-`artifact_rows: "full" | "identity"` on `/v1/viewport`, defaulting to `"full"`.
+`artifact_rows: "full" | "identity"` on `/v1/viewport`, defaulting to `"full"` (contracts r43).
 
 **`"identity"` answers with the same rows and fewer columns**: `layer` (dictionary-encoded),
-`tessera_id`, `level` (§5.3's `rung` once it lands), `matched` — its own fixed four-column schema,
-measured at 13.6 B/row against 125 for a full row (§8). The sentence that is the contract:
+`tessera_id`, `rung` (§5.3), `matched` — its own fixed four-column schema, measured at 13.6 B/row
+against 125 for a full row (§8). The sentence that is the contract:
 
 > **The row set is identical under either value of `artifact_rows`; only the columns change.**
 
@@ -177,19 +177,28 @@ one round trip, no wrong map, which is §1's admission test passed rather than a
 neither knows nor cares what the caller holds; there is nothing to recompute, nothing to trust, and
 no honesty rule to write.
 
-### 5.3 ⊘ The rung column — proposed, contracts' to take
+**What the building settled** (Appendix R, r3): an identity response still runs the
+content-servability probe, because an artifact whose content cannot be served is *absent* (0076)
+— that is selection, not payload, and skipping it would have broken the contract sentence; what
+it skips is materialisation only. The shipped channel takes this path for a filter over a scope it
+holds whole, and re-asks in full, once, on the first identifier it cannot resolve.
 
-The frame's `level` column becomes `rung`: **the declared level on a levelled layer, the
-response-local parent-chain depth on a treed one** — the number a client draws by. Today every
-client must know that a levelled layer's resolution is its declared level while a treed layer's is
-its chain depth, and pick per layer (`rungOf`; `artifact-cache-handover.md` trap 5.4). The shipped
-client got that pick wrong once and was caught in review; every future client gets to rediscover
-it. The server has both numbers at serve time. One column, computed the right way per layer kind,
-and the trap stops existing for every client — the pattern §7.2 names: a trap documented for one
-client is a debt every client pays, a trap folded into the wire is paid once. Levelled layers lose
-nothing (`rung` equals the declared level there); treed layers stop encoding their resolution as
-something to be counted client-side. Pre-release, so the column is renamed and re-meant rather than
-appended beside its predecessor.
+### 5.3 The rung column — built 2026-08-28 (contracts r43)
+
+The frame's `level` column became `rung`: **the declared level on a levelled layer, the
+response-local parent-chain depth on a treed one, 0 on a flat one** — the number a client draws
+by. Until then every client had to know that a levelled layer's resolution is its declared level
+while a treed layer's is its chain depth, and pick per layer (`rungOf`; `artifact-cache-handover.md`
+trap 5.4). The shipped client got that pick wrong once and was caught in review; every future
+client would have rediscovered it. The server has both numbers at serve time. One column, computed
+the right way per layer kind, and the trap stops existing for every client — the pattern §7.2
+names: a trap documented for one client is a debt every client pays, a trap folded into the wire is
+paid once. Levelled layers lose nothing (`rung` equals the declared level there); treed layers stop
+encoding their resolution as something to be counted client-side, and `rungOf` is deleted. The
+depth is computed **after every narrowing** — the budget cut, content withholds, the orphaned
+dependent drop — over the forest the response's own `parent_id` links form, so a re-rooted
+subtree's root reads 0; *response-local* is read strictly. Pre-release, so the column was renamed
+and re-meant rather than appended beside its predecessor (0048).
 
 ### 5.4 ⊘ Deferred shapes — recorded with their triggers, deliberately unbuilt
 
@@ -232,19 +241,26 @@ and spends bytes.
   enough to cross the viewport while its visible members lie outside it — a boundary that ought to
   be drawn, since the geometry describes the whole visible membership and never claimed to describe
   the part in view (settled by the owner; `artifact-cache-handover.md` §4).
-- **Coarse rungs are held whole because they are tiny** (GeoNames: 254 artifacts at the country
-  rung, 4,842 at admin 1); **fine rungs are asked per view because the tile index prunes them**
-  (0.06 MiB at zoom 10, measured). The crossover is observed from response sizes — there is no
-  cardinality hint and none is coming (S5, declined 2026-08-25, because a layer's artifact count is
-  a corpus-wide count over objects the principal may not individually see), so every client decides
-  from the same self-describing responses, which is what keeps §7.2's equality structural.
+- **The first paint is per view; the hold follows in idle time, and the hold is ungated** (owner,
+  2026-08-28). A settled view at scopes not yet held whole is answered per view — cheap at every
+  zoom, the level map bounding the coarse rungs (254 artifacts at GeoNames' country rung, 4,842 at
+  admin 1) and the tile index the fine ones (0.06 MiB at zoom 10, measured) — and then the channel
+  fetches those scopes whole, one per idle window, whatever their size. There is no threshold: a
+  count is not a bound in bytes, the two differing by orders of magnitude between a count-only
+  layer and one carrying hulls — the reason the store itself carries no cap
+  (`artifact-cache-handover.md` §6 step 2) — and the drop rules are the whole bound. What limits
+  what a session holds is the declared map: a view names only the rungs declared for its zoom, so a
+  session that never leaves the overview never holds admin 4. There is no cardinality hint and none
+  is coming (S5, declined 2026-08-25, because a layer's artifact count is a corpus-wide count over
+  objects the principal may not individually see), so every client decides from the same
+  self-describing responses, which is what keeps §7.2's equality structural.
 - **A scattered flat layer is held whole after its first response by construction** — every
   response *is* the whole layer, so the first paint costs the same bytes as today and the saving
   starts at the second settled view.
 - **A deep-zoomed open fetches per view first and promotes to whole-rung in idle time**, so the
   hold is never paid at startup.
-- **A filter change over a held scope** re-asks with the filter — under §5.2, for identity rows;
-  until §5.2 lands, for full rows, which is today's cost.
+- **A filter change over a held scope** re-asks with the filter for identity rows (§5.2), taking
+  the bit from the response and everything else from the hold.
 
 **Where the walls are**, so the policy is sized honestly. Measured at GeoNames' scale; ⊘ everything
 past it is modelled, the scattered corpus not existing (§8). On a scattered flat layer: per-view
@@ -346,10 +362,14 @@ every nulled variable-length column still writes a four-byte offset per row, and
 non-nullable. Eliding a payload through it saves 22%. The 13.6 needs a second schema, which is why
 §5.2 proposes one.
 
-⊘ **Two encoding changes, unbuilt, no protocol**: dictionary-encoding `layer` (~14% of **every**
-response, 125.0 → ~107 B/row) and nulling the two hull columns when no served layer declares a
-hull (~7%); together 125.0 → 98.8 B/row, measured. They help every caller identically and precede
-everything else here in value per unit of anything.
+**Two encoding changes, built 2026-08-28, no protocol**: dictionary-encoding `layer` (u16 keys;
+~14% of **every** response, 125.0 → ~107 B/row) and moving the two hull columns to the tail of the
+schema, **absent from it** when no served layer declares a hull (~7%); together 125.0 → 98.8 B/row,
+measured. They help every caller identically and preceded everything else here in value per unit
+of anything. The gate now holds the figures: at 100,000 synthetic rows with a 15-byte layer name,
+identity **14.6 B/row** (bound: under 20), the hull-free full row **97.9 B/row** with the
+dictionary, and the layer column **2.1 against 19.1 B/row** plain — measured on both encodings,
+not modelled (`crates/tessera-wire/tests/wire.rs`).
 
 **Whole-extent measured figures** (`../evidence/memos/2026-08-28-artifact-response-volume.md` §1):
 49.0 MiB and 1,887 ms for 464,655 artifacts under a full principal at zoom 0; 0.06 MiB at zoom 10;
@@ -390,27 +410,48 @@ qualifies.
 **Decided and built** (2026-08-28): the filter bit and its shape (0104); the level selector and the
 declared map as its default (0103); the client's payload store and its drop rules (`cache 2`).
 
-**Decided by the owner, 2026-08-28, in the discussion that reworked this document:**
+**Decided by the owner, 2026-08-28, in the discussion that reworked this document, and built
+the same day:**
 
 - **A held-set claim and server-side row dropping are declined** (§4). Neither returns in another
   costume; the row/column rule is the test a successor must pass.
 - **The projection is the one wire affordance** (§5.2), and the rung column moves the one
-  client-side trap into the wire (§5.3). Both ⊘ unbuilt.
-- **The fetch model is policy, not obligation** (§6); the obligations are §7.2's three rules.
-- **§8's two encodings are wanted** — they precede the rest in value and nothing waits on them.
+  client-side trap into the wire (§5.3). Both built; contracts r43.
+- **The fetch model is policy, not obligation** (§6); the obligations are §7.2's three rules. The
+  shipped channel implements the policy, and **its idle promotion carries no gate** — a threshold
+  counted in artifacts was proposed at 10,000 and refused: not a bound in bytes, and the drop
+  rules are the bound, as for the store.
+- **§8's two encodings** — built; they preceded the rest, and the gate holds their figures.
 
 **Open, and each is the owner's:**
 
-- **When §5.2 and §5.3 are built.** Nothing in the current corpora needs the projection — a filter
-  change over a held country rung re-sends 254 full rows — so it can honestly wait for §8's
-  scattered corpus, or land with the encodings while the frame is open. The encodings themselves
-  need no ruling, only doing.
 - **The ingest-era pair** (§6's rotation condition): whether artifacts get the point path's softer
   stale-marked treatment, and delta sync (§5.4) — both premature until continuous ingest is close.
+- **§7.3's memo** — the one ⊘ left, internal, waiting on a measurement that says the whole-extent
+  time matters to a caller that holds nothing.
 - **Promotion of this document**, which is a normal review-and-promote and not a re-litigation of
   the shape.
 
 ## Appendix R
+
+**r3 — 2026-08-28.** Built, the same day as r2, on the owner's direction, in four seams: the wire
+and server (§5.2, §5.3, §8 — contracts r43, the OpenAPI description, the oracle's reader); the
+channel's fetch model (§6); the TypeScript client's decode and its identity path; the Python
+readers and the conformance run. What the building changed, each recorded at its site: an identity
+response still runs the content-servability probe, that being selection rather than payload
+(§5.2); the rung is computed after every narrowing, not the budget cut alone (§5.3); hull presence
+is decided from the served rows, which is equivalent to *a served layer declares a hull* because a
+served artifact always has a visible member and a declared hull then always computes; dictionary
+keys are `u16`; `api_version` stays at 1 on deviation 10's argument as the r26 framing rework's
+precedent, the schema itself being the loud break. Two things the client work found: the shipped
+channel had **never sent `filters`** on the artifact request, so decision 0104's bit had never
+reached the client it was built for — closed as a consequence of *a filter always asks the
+server*; and a channel answering views locally issues no request of its own, so the point path's
+observed content key is now handed to it, which is the only route by which rule 7 can fire while a
+hold stands. The promotion ratchet was built with a 10,000-artifact gate and **the owner refused
+it** — not a bound in bytes, the drop rules being the bound as they are for the store — so it was
+removed and §6 rewritten (§10). The measured figures in §8 are the gate's, and stand beside the
+review's.
 
 **r2 — 2026-08-28.** Reworked the same day as r1, after its review and an owner discussion that
 settled the shape. r1 posed three filter modes and a held-set cache claim; r2 replaces both with

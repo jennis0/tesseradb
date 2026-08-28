@@ -772,7 +772,8 @@ async fn levels_at(server: &TestServer, zoom: u32, extra: serde_json::Value) -> 
     })
     .await
     .expect("a served layer carries the frame");
-    let mut levels: Vec<u32> = rows.iter().map(|r| r.level).collect();
+    // `rung` is the declared level here — the layer under test is levelled.
+    let mut levels: Vec<u32> = rows.iter().map(|r| r.rung).collect();
     levels.sort_unstable();
     levels.dedup();
     levels
@@ -853,5 +854,166 @@ async fn a_levels_field_that_is_neither_a_list_nor_all_is_refused() {
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+}
+
+// ---------------------------------------------------------------------------------------------
+// `artifact_rows` on the wire, and the artifacts frame's two shapes (2026-08-28,
+// `artifact-fetch-protocol.md` §5.2, §5.3, §8).
+// ---------------------------------------------------------------------------------------------
+
+/// One `/v1/viewport` POST, un-asserted — for the cases that check a refusal, or read the raw
+/// frame bytes.
+async fn viewport_response(
+    server: &TestServer,
+    terms: &[&str],
+    extra: serde_json::Value,
+) -> reqwest::Response {
+    let auth = authorise(server, terms).await;
+    let token = auth["token"].as_str().unwrap();
+    let mut body = json!({ "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200, "layers": "all" });
+    for (key, value) in extra.as_object().unwrap() {
+        body[key] = value.clone();
+    }
+    server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The kind-5 frame's schema column names, read raw — for the assertions about which columns
+/// exist, which the row decoder deliberately papers over.
+fn artifact_schema_names(body: &[u8]) -> Option<Vec<String>> {
+    let frames = tessera_wire::split_frames(body).expect("well-formed frame sequence");
+    let payload = frames
+        .iter()
+        .find(|(kind, _)| *kind == tessera_wire::FRAME_ARTIFACTS)?
+        .1;
+    let reader = arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(payload.to_vec()), None)
+        .expect("a complete Arrow stream");
+    Some(reader.schema().fields().iter().map(|f| f.name().clone()).collect())
+}
+
+/// **§5.2's contract sentence, over the wire**: the same rows, rungs and bits in either
+/// projection; the identity response is its own fixed four-column schema, and the payload columns
+/// are absent from it rather than null.
+#[tokio::test]
+async fn identity_rows_are_the_full_rows_with_the_payload_columns_absent() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    plant_three_levels(&server).await;
+
+    let ask = |extra: serde_json::Value| viewport_response(&server, &["0"], extra);
+    let full = decode_viewport_frames(&ask(json!({ "levels": "all" })).await.bytes().await.unwrap())
+        .artifacts
+        .expect("three levels served in full rows");
+    assert_eq!(full.len(), 3);
+    // The tiered layer's rungs are its declared levels, on the wire under the renamed column.
+    let mut rungs: Vec<u32> = full.iter().map(|r| r.rung).collect();
+    rungs.sort_unstable();
+    assert_eq!(rungs, vec![0, 1, 2]);
+
+    let identity_body = ask(json!({ "levels": "all", "artifact_rows": "identity" }))
+        .await
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(
+        artifact_schema_names(&identity_body).unwrap(),
+        vec!["layer", "tessera_id", "rung", "matched"],
+        "the identity projection is its own four-column schema — absent columns, not null ones"
+    );
+    let decoded = decode_viewport_frames(&identity_body);
+    assert!(decoded.artifacts.is_none());
+    let identity = decoded.artifacts_identity.expect("the same frame kind, projected");
+
+    let key = |layer: &str, id: u64, rung: u32, matched: Option<bool>| (layer.to_string(), id, rung, matched);
+    let full_view: std::collections::BTreeSet<_> = full
+        .iter()
+        .map(|r| key(&r.layer, r.tessera_id, r.rung, r.matched))
+        .collect();
+    let identity_view: std::collections::BTreeSet<_> = identity
+        .iter()
+        .map(|r| key(&r.layer, r.tessera_id, r.rung, r.matched))
+        .collect();
+    assert_eq!(
+        full_view, identity_view,
+        "the row set, the rungs and the bits are identical; only the columns change"
+    );
+    // No filter was sent, so the bit is null in both projections — *no question*, not `false`.
+    assert!(identity.iter().all(|r| r.matched.is_none()));
+    // And the full rows really carry the payload the identity rows omit.
+    assert!(full.iter().all(|r| r.centroid.is_some()));
+
+    // `"full"` spelled out is the default spelled out.
+    let explicit = decode_viewport_frames(
+        &ask(json!({ "levels": "all", "artifact_rows": "full" })).await.bytes().await.unwrap(),
+    )
+    .artifacts
+    .expect("the explicit default");
+    assert_eq!(explicit, full);
+}
+
+/// **The hull columns trail, and only when a served layer declares a hull** — an absent column is
+/// distinguishable from a null one, so decision 0076's null rule gains no third reading.
+#[tokio::test]
+async fn the_hull_columns_trail_and_are_absent_when_no_served_layer_declares_one() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    // `plant_three_levels`' layer declares `centroid` alone: no hull columns at all.
+    plant_three_levels(&server).await;
+    let without = viewport_response(&server, &["0"], json!({ "levels": "all" }))
+        .await
+        .bytes()
+        .await
+        .unwrap();
+    let names = artifact_schema_names(&without).unwrap();
+    assert_eq!(
+        names.last().map(String::as_str),
+        Some("matched"),
+        "no served layer declares a hull, so the schema ends at the fixed prefix: {names:?}"
+    );
+    assert!(!names.iter().any(|n| n.starts_with("hull_")));
+
+    // The default `declaration` computes a hull, so serving it puts the two columns at the tail.
+    let mut d = declaration("clusters/hulled", None);
+    d["require_member_visibility"] = serde_json::Value::Null;
+    assert_eq!(register(&server, d).await.0, 201);
+    let (status, body) = publish(
+        &server,
+        "clusters/hulled",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "c0", "members": [member(0), member(3), member(6)] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    let with = viewport_response(&server, &["0"], json!({ "layers": ["clusters/hulled"] }))
+        .await
+        .bytes()
+        .await
+        .unwrap();
+    let names = artifact_schema_names(&with).unwrap();
+    assert_eq!(
+        &names[names.len() - 2..],
+        ["hull_x".to_string(), "hull_y".to_string()],
+        "a served hull-declaring layer puts the two columns at the tail: {names:?}"
+    );
+    let rows = decode_viewport_frames(&with).artifacts.unwrap();
+    assert!(rows[0].hull.is_some(), "and the row carries its rings");
+}
+
+/// **Any other `artifact_rows` spelling is a 422**, the shape `levels` and `layers` take: a stray
+/// string must not become a projection that silently serves something else.
+#[tokio::test]
+async fn an_artifact_rows_value_that_is_neither_full_nor_identity_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let resp = viewport_response(&server, &["0"], json!({ "artifact_rows": "bits" })).await;
     assert_eq!(resp.status().as_u16(), 422);
 }

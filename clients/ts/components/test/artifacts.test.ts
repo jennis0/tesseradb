@@ -46,7 +46,7 @@ const artifact = (id: bigint, count: bigint, parentId: bigint | null = null, con
   hull: null,
   content,
   parentId,
-  level: 0,
+  rung: 0,
   matched: null
 });
 

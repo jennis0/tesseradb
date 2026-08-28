@@ -16,6 +16,9 @@
 //!                    ...membership:<layer>); zero or more, whole tiles per frame, concatenating
 //!                    to the full points stream
 //! kind 4  trailer    JSON; exactly one, last — its presence is the completeness signal
+//! kind 5  artifacts  Arrow IPC stream, one row per served artifact, in the request's projection
+//!                    (full, or the identity four-column schema); at most one, after tiles and
+//!                    before any points, ABSENT when nothing is served
 //! ```
 //!
 //! This module never touches the underlying entity-ID type: it accepts a caller-supplied
@@ -38,11 +41,11 @@
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array,
-    Int8Array, ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray, UInt16Array,
-    UInt32Array, UInt32Builder, UInt64Array, UInt8Array,
+    ArrayRef, BooleanArray, DictionaryArray, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, Int8Array, ListBuilder, StringArray, StringBuilder, TimestampMicrosecondArray,
+    UInt16Array, UInt32Array, UInt32Builder, UInt64Array, UInt8Array,
 };
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::{DataType, Field, Schema, UInt16Type};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 
@@ -287,18 +290,19 @@ pub struct ArtifactRow<'a> {
     /// cleared to see, so the two are one value here and a client must read null as *no parent in
     /// this response* rather than as *no parent*.
     pub parent_id: Option<u64>,
-    /// **The declared resolution this artifact sits at.** A fact about the artifact, not about the
-    /// viewer: every principal served it receives the same number, and `/v1/meta` already publishes
-    /// the level set it indexes into.
+    /// **The resolution a client draws this artifact at**, computed the right way for its layer's
+    /// kind so no client has to know which way that is (`artifact-fetch-protocol.md` §5.3, the
+    /// rung ruling; it renamed and re-meant the `level` column this field carried until then).
     ///
-    /// It is here because the reconstruction a client is otherwise reduced to — counting
-    /// `parent_id` links — answers a different question. That count is the depth of the chain that
-    /// reached the artifact *in this response*, and a tiered layer's edges may skip a level and its
-    /// roots may have no parent to be given, so on real data the two disagree. Walking parents
-    /// stays correct for a **treed** layer, where the lineage is the structure and every artifact
-    /// sits at level 0; this column is what stops that reading being carried where it does not
-    /// hold.
-    pub level: u32,
+    /// On a **levelled** layer it is the declared level — a fact about the artifact, the same
+    /// number for every principal served it, indexing the level set `/v1/meta` publishes. On a
+    /// **treed** layer it is the response-local parent-chain depth: the depth of this row in the
+    /// forest the response's own `parent_id` links form, after the budget cut, so a re-rooted
+    /// subtree's root reads 0. On a **flat** layer it is 0. The two derivations disagree on real
+    /// data — a tiered layer's edges skip levels and its roots arrive parentless — which is why
+    /// the server computes the right one per layer rather than leaving every client to pick
+    /// (and one shipped client to pick wrongly, which is what happened).
+    pub rung: u32,
     /// **Whether this artifact holds a member the request's filter admits** — one that this
     /// principal may see and that lies inside the request's tiles
     /// ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
@@ -317,23 +321,77 @@ pub struct ArtifactRow<'a> {
     pub matched: Option<bool>,
 }
 
-/// The kind-5 artifacts frame: one row per served artifact.
+/// The `layer` column, dictionary-encoded — one utf8 value per distinct layer, a `u16` key per
+/// row (`artifact-fetch-protocol.md` §8: the name is ~14% of every full row written plain, and a
+/// response's distinct layers are a handful).
+///
+/// Keys are minted in first-appearance order; `u16` bounds a response at 65,536 distinct layers,
+/// which is a caller bug long before it is a limit.
+fn layer_dictionary(rows: &[ArtifactRow<'_>]) -> ArrayRef {
+    let mut index: std::collections::HashMap<&str, u16> = std::collections::HashMap::new();
+    let mut values: Vec<&str> = Vec::new();
+    let keys: UInt16Array = rows
+        .iter()
+        .map(|r| {
+            Some(*index.entry(r.layer).or_insert_with(|| {
+                let next = u16::try_from(values.len())
+                    .expect("more than 65,536 distinct layers in one response");
+                values.push(r.layer);
+                next
+            }))
+        })
+        .collect();
+    let values = Arc::new(StringArray::from_iter_values(values));
+    Arc::new(
+        DictionaryArray::<UInt16Type>::try_new(keys, values)
+            .expect("layer dictionary construction"),
+    )
+}
+
+/// `layer`'s schema field — `Dictionary(UInt16, Utf8)`, shared by both artifact frame shapes so
+/// they cannot disagree about the encoding.
+fn layer_field() -> Field {
+    Field::new(
+        "layer",
+        DataType::Dictionary(Box::new(DataType::UInt16), Box::new(DataType::Utf8)),
+        false,
+    )
+}
+
+/// The kind-5 artifacts frame: one row per served artifact, in the full (default) projection.
 ///
 /// `masked_count` is `UInt64` and `tessera_id` is `UInt64`, matching the points frame's `tessera_id`
 /// column so a client's decoder has one identifier type across the response.
 ///
-/// **The geometry columns are nullable and the schema is fixed**, because one response carries
-/// artifacts from several layers and layers declare different vocabularies. A null is *this layer
-/// declares no centroid*; it is never *withheld*, since an artifact whose content could not be
-/// served is absent entirely (decision 0076).
+/// **Column positions are contract for the fixed prefix; optional columns trail.** Decoders that
+/// index this batch positionally exist, so the fourteen fixed columns — `layer` through `matched`
+/// — sit at fixed positions, and the only columns whose presence varies, `hull_x`/`hull_y`, come
+/// after all of them (`artifact-fetch-protocol.md` §8; this superseded the earlier
+/// appended-last-per-revision rule when the hull columns moved to the tail). The frame kinds are
+/// unchanged and `api_version` stays at 1 (contracts §3.2: no published deployment exists and
+/// every in-repo reader moves in lockstep, decision 0048) — the reordering is the loud break, a
+/// positional decoder finding `content` where `hull_x` sat rather than one column's values under
+/// another's meaning of the same type.
 ///
-/// **The hull travels as two `List<List<UInt32>>` columns** — one per axis so that a client reads an
-/// axis without a stride, and nested so that the ring boundaries are in the type rather than in a
-/// convention. A reader written against the single-ring shape descends one level, finds a list where
-/// it expected a `UInt32`, and fails; a flat encoding with a separate offsets column would let the
-/// same reader concatenate every ring into one polygon and draw a chord between them, silently.
-/// The two axes carry the same ring structure by construction, and a decoder that zips them should
-/// check the lengths agree rather than assume it (`contracts.md` §3.2).
+/// **`layer` is dictionary-encoded** — see [`layer_dictionary`].
+///
+/// **The geometry columns are nullable and per-row**, because one response carries artifacts from
+/// several layers and layers declare different vocabularies. A null is *this layer declares no
+/// centroid*; it is never *withheld*, since an artifact whose content could not be served is
+/// absent entirely (decision 0076).
+///
+/// **The hull columns are present exactly when some row carries a hull** — i.e. when a served
+/// layer declares one — **and absent from the schema otherwise.** An absent column is
+/// distinguishable from a null one, so decision 0076's rule (a null means *this layer declares no
+/// such property*, never *withheld*) gains no third reading: when the columns are present, a
+/// per-row null keeps exactly its 0076 meaning. When present they travel as two
+/// `List<List<UInt32>>` columns — one per axis so that a client reads an axis without a stride,
+/// and nested so that the ring boundaries are in the type rather than in a convention. A reader
+/// written against the single-ring shape descends one level, finds a list where it expected a
+/// `UInt32`, and fails; a flat encoding with a separate offsets column would let the same reader
+/// concatenate every ring into one polygon and draw a chord between them, silently. The two axes
+/// carry the same ring structure by construction, and a decoder that zips them should check the
+/// lengths agree rather than assume it (`contracts.md` §3.2).
 ///
 /// # Panics
 ///
@@ -347,8 +405,14 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
     let vertex = || Arc::new(Field::new("item", DataType::UInt32, false));
     let ring = || Arc::new(Field::new("item", DataType::List(vertex()), false));
 
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("layer", DataType::Utf8, false),
+    // A row carries a hull exactly when its layer declares one (a declared hull over a served
+    // artifact always computes — a served artifact has a visible member), so *any row carries one*
+    // and *a served layer declares one* are the same test, and it is decidable here from the rows
+    // alone.
+    let hulls = rows.iter().any(|r| r.hull.is_some());
+
+    let mut fields = vec![
+        layer_field(),
         Field::new("tessera_id", DataType::UInt64, false),
         // A publisher need not supply a key.
         Field::new("key", DataType::Utf8, true),
@@ -359,8 +423,6 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Field::new("box_min_y", DataType::UInt32, true),
         Field::new("box_max_x", DataType::UInt32, true),
         Field::new("box_max_y", DataType::UInt32, true),
-        Field::new("hull_x", DataType::List(ring()), true),
-        Field::new("hull_y", DataType::List(ring()), true),
         // One list per artifact, positional to its layer's declared kinds. A list rather than a
         // column per kind, because one response carries artifacts from several layers and their
         // declarations differ; the client reads the kinds from `/v1/meta` and zips.
@@ -369,45 +431,22 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
             DataType::List(Arc::new(Field::new("item", DataType::Utf8, false))),
             false,
         ),
-        // **Appended last, and its position is contract**, on the same argument the tiles frame's
-        // `served` carries: decoders that index this batch positionally exist, so inserting it
-        // earlier would silently rebind every column after it.
         Field::new("parent_id", DataType::UInt64, true),
-        // Appended after `parent_id` for that same reason, and non-nullable: every artifact has a
-        // level, a treed layer's being 0 (decision 0082). There is no *withheld* state to express —
-        // an artifact whose content could not be served is absent whole (decision 0076).
-        Field::new("level", DataType::UInt32, false),
-        // Appended after `level`, on the same positional argument, and **nullable because null is
-        // a value here**: an unfiltered request asked no question, and a `false` would answer one.
-        // So the column is all-null on every response that carried no `filter`, rather than absent
-        // — one schema per frame kind, as the geometry columns are (decision 0104).
+        // Non-nullable: every artifact has a rung — a levelled layer's declared level, a treed
+        // layer's response-local chain depth, a flat layer's 0 (see [`ArtifactRow::rung`]). There
+        // is no *withheld* state to express — an artifact whose content could not be served is
+        // absent whole (decision 0076).
+        Field::new("rung", DataType::UInt32, false),
+        // Last of the fixed columns, and **nullable because null is a value here**: an unfiltered
+        // request asked no question, and a `false` would answer one. So the column is all-null on
+        // every response that carried no `filter`, rather than absent (decision 0104).
         Field::new("matched", DataType::Boolean, true),
-    ]));
-
-    let mut hull_x = ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
-        .with_field(ring());
-    let mut hull_y = ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
-        .with_field(ring());
-    for row in rows {
-        match row.hull {
-            Some(rings) => {
-                for r in rings {
-                    for v in r {
-                        hull_x.values().values().append_value(v[0]);
-                        hull_y.values().values().append_value(v[1]);
-                    }
-                    hull_x.values().append(true);
-                    hull_y.values().append(true);
-                }
-                hull_x.append(true);
-                hull_y.append(true);
-            }
-            None => {
-                hull_x.append_null();
-                hull_y.append_null();
-            }
-        }
+    ];
+    if hulls {
+        fields.push(Field::new("hull_x", DataType::List(ring()), true));
+        fields.push(Field::new("hull_y", DataType::List(ring()), true));
     }
+    let schema = Arc::new(Schema::new(fields));
 
     let mut content = ListBuilder::new(StringBuilder::new()).with_field(Arc::new(Field::new(
         "item",
@@ -423,8 +462,8 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         content.append(true);
     }
 
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(rows.iter().map(|r| r.layer))),
+    let mut columns: Vec<ArrayRef> = vec![
+        layer_dictionary(rows),
         Arc::new(UInt64Array::from_iter_values(
             rows.iter().map(|r| r.tessera_id),
         )),
@@ -450,17 +489,87 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(UInt32Array::from_iter(
             rows.iter().map(|r| r.bbox.map(|b| b[3])),
         )),
-        Arc::new(hull_x.finish()),
-        Arc::new(hull_y.finish()),
         Arc::new(content.finish()),
         Arc::new(UInt64Array::from_iter(rows.iter().map(|r| r.parent_id))),
-        Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.level))),
+        Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
     ];
+    if hulls {
+        let mut hull_x =
+            ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
+                .with_field(ring());
+        let mut hull_y =
+            ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
+                .with_field(ring());
+        for row in rows {
+            match row.hull {
+                Some(rings) => {
+                    for r in rings {
+                        for v in r {
+                            hull_x.values().values().append_value(v[0]);
+                            hull_y.values().values().append_value(v[1]);
+                        }
+                        hull_x.values().append(true);
+                        hull_y.values().append(true);
+                    }
+                    hull_x.append(true);
+                    hull_y.append(true);
+                }
+                None => {
+                    hull_x.append_null();
+                    hull_y.append_null();
+                }
+            }
+        }
+        columns.push(Arc::new(hull_x.finish()));
+        columns.push(Arc::new(hull_y.finish()));
+    }
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");
 
     let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + rows.len() * 96 + 1024);
+    let len_at = begin_frame(&mut out, FRAME_ARTIFACTS);
+    write_stream_into(&schema, &batch, &mut out);
+    patch_frame_len(&mut out, len_at);
+    out
+}
+
+/// The kind-5 artifacts frame in the **identity projection** — `artifact_rows: "identity"`,
+/// `artifact-fetch-protocol.md` §5.2: the same rows as [`artifacts_frame`] would carry, in a
+/// fixed four-column schema of `layer` (dictionary-encoded), `tessera_id`, `rung`, `matched`.
+///
+/// **The row set, the `matched` bits and the `rung` values are identical under either
+/// projection; only the columns change.** That sentence is the contract: no parent can dangle
+/// and the points frame's membership columns still name identifiers present here, because no row
+/// was dropped — and the response is a column subset of what the same caller's identical request
+/// would have been served, which is why the projection discloses nothing. The payload columns are
+/// **absent from the schema, not null**, so decision 0076's null rule gains no third reading.
+///
+/// Measured at 13.6 B/row against 125 for the pre-dictionary full row (§8 of the design; the
+/// size-regression test in `tests/wire.rs` holds the bounds).
+///
+/// # Panics
+///
+/// Panics on Arrow construction failure.
+pub fn artifacts_identity_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        layer_field(),
+        Field::new("tessera_id", DataType::UInt64, false),
+        Field::new("rung", DataType::UInt32, false),
+        Field::new("matched", DataType::Boolean, true),
+    ]));
+    let columns: Vec<ArrayRef> = vec![
+        layer_dictionary(rows),
+        Arc::new(UInt64Array::from_iter_values(
+            rows.iter().map(|r| r.tessera_id),
+        )),
+        Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
+    ];
+    let batch = RecordBatch::try_new(schema.clone(), columns)
+        .expect("identity artifacts frame batch construction");
+
+    let mut out = Vec::with_capacity(FRAME_HEADER_BYTES + rows.len() * 16 + 1024);
     let len_at = begin_frame(&mut out, FRAME_ARTIFACTS);
     write_stream_into(&schema, &batch, &mut out);
     patch_frame_len(&mut out, len_at);

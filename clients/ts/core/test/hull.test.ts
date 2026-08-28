@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {Field, Float64, List, Table, Uint32, Uint64, Utf8, makeData, makeVector, tableToIPC, vectorFromArray} from 'apache-arrow';
+import {Bool, Dictionary, Field, Float64, List, Table, Uint16, Uint32, Uint64, Utf8, makeData, makeVector, tableToIPC, vectorFromArray} from 'apache-arrow';
 import {decodeViewport} from '../src/decode.js';
 
 /**
@@ -36,14 +36,16 @@ type Rings = number[][] | null;
 
 /**
  * An artifacts-frame body over one row per pair of hull axes — the annotation channel's own shape,
- * `k = 0` and no points frame. The axes are given separately so a test can make them disagree,
- * which the server never does and which is exactly why the decoder must not assume it.
+ * `k = 0` and no points frame — in the r43 layout: the fourteen fixed columns `layer` (dictionary
+ * u16/utf8) through `matched`, the two hull columns trailing. The axes are given separately so a
+ * test can make them disagree, which the server never does and which is exactly why the decoder
+ * must not assume it.
  */
 function body(rows: {x: Rings; y: Rings}[], type: {x: unknown; y: unknown} = {x: RINGS, y: RINGS}): Uint8Array {
   const tiles = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n])}), 'stream');
   const artifacts = tableToIPC(
     new Table({
-      layer: vectorFromArray(rows.map(() => 'clusters/x'), new Utf8()),
+      layer: vectorFromArray(rows.map(() => 'clusters/x'), new Dictionary(new Utf8(), new Uint16())),
       tessera_id: u64(rows.map((_, i) => BigInt(i + 1))),
       key: vectorFromArray(rows.map((_, i) => `c-${i}`), new Utf8()),
       masked_count: u64(rows.map(() => 7n)),
@@ -53,13 +55,15 @@ function body(rows: {x: Rings; y: Rings}[], type: {x: unknown; y: unknown} = {x:
       box_min_y: vectorFromArray(rows.map(() => 0), new Uint32()),
       box_max_x: vectorFromArray(rows.map(() => 9), new Uint32()),
       box_max_y: vectorFromArray(rows.map(() => 9), new Uint32()),
-      hull_x: vectorFromArray(rows.map((r) => r.x), type.x as never),
-      hull_y: vectorFromArray(rows.map((r) => r.y), type.y as never),
       content: vectorFromArray(rows.map(() => [] as string[]), TEXTS),
+      parent_id: vectorFromArray(rows.map(() => null), new Uint64()),
       // Required, and the decoder refuses a body without it (decision 0048 — there is no older
-      // server to be lenient towards, and reading a missing level as 0 would draw a whole
-      // hierarchy at its coarsest rung and look like data).
-      level: vectorFromArray(rows.map(() => 0), new Uint32())
+      // server to be lenient towards, and reading a missing rung as 0 would draw a whole
+      // hierarchy at its coarsest and look like data).
+      rung: vectorFromArray(rows.map(() => 0), new Uint32()),
+      matched: vectorFromArray(rows.map(() => null), new Bool()),
+      hull_x: vectorFromArray(rows.map((r) => r.x), type.x as never),
+      hull_y: vectorFromArray(rows.map((r) => r.y), type.y as never)
     }),
     'stream'
   );

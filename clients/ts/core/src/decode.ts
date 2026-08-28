@@ -1,7 +1,7 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
-import type {Artifact, MembershipColumn, ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
+import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
@@ -15,18 +15,24 @@ type Ring = {length: number; get(v: number): number | null};
 type Rings = {length: number; get(r: number): Ring | null};
 
 /**
- * A hull axis column, checked to be `list<list<uint32>>` before a row is read.
+ * A hull axis column, checked to be `list<list<uint32>>` before a row is read — or `null` where
+ * the schema carries no such column at all.
  *
- * **The nesting is the contract, and it is verified at the schema rather than discovered at the
- * first row** (contracts §3.2 item 4). A pre-r40 server sends one flat `list<uint32>` per
- * artifact; read two levels deep that column yields a number where a ring is expected, and the
- * ring would come out as a single vertex on a shape with none of the artifact's ground. The
- * mismatch is a version skew between this client and the service it is talking to, so it is a
- * refusal with the two types named and not a shape to accommodate.
+ * **Absence is a schema fact, not a version skew** (contracts §3.2 r43): the two hull columns
+ * trail the fixed prefix and are omitted entirely when no served layer declares a hull, an absent
+ * column being distinguishable from a null one so decision 0076's rule — a null means *this
+ * layer declares no such property*, never *withheld* — gains no third reading.
+ *
+ * **Where the column is present, the nesting is the contract, and it is verified at the schema
+ * rather than discovered at the first row** (contracts §3.2 item 4). A pre-r40 server sends one
+ * flat `list<uint32>` per artifact; read two levels deep that column yields a number where a ring
+ * is expected, and the ring would come out as a single vertex on a shape with none of the
+ * artifact's ground. That mismatch is a version skew between this client and the service it is
+ * talking to, so it is a refusal with the two types named and not a shape to accommodate.
  */
-function ringColumn(table: Table, name: string): {get(i: number): Rings | null} {
+function ringColumn(table: Table, name: string): {get(i: number): Rings | null} | null {
   const col = table.getChild(name);
-  if (!col) throw new Error(`viewport payload has no column "${name}"`);
+  if (!col) return null;
   const inner = (col.type as {children?: {type: DataType}[]}).children?.[0]?.type;
   if (col.type.typeId !== Type.List || inner?.typeId !== Type.List) {
     throw new Error(
@@ -400,9 +406,37 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   // deployment with no layers — and of a principal who reaches none, and of a view holding none.
   // Those are one answer on purpose; see `Artifact`.
   const artifacts: Artifact[] = [];
+  let artifactsIdentity: ArtifactIdentity[] | null = null;
   if (parts.artifacts) {
     const t = tableFromIPC(parts.artifacts);
+    // `layer` is dictionary-encoded (u16 keys over utf8, contracts §3.2 r43) in both projections.
+    // apache-arrow resolves the dictionary on `.get()` — the vector hands back the utf8 value,
+    // never the key — so the column reads exactly as the plain-utf8 encoding did; verified by
+    // test rather than assumed (`artifacts-frame.test.ts`).
     const layer = t.getChild('layer')!;
+    // The projection is read off the frame's own schema, never off the request: the identity
+    // frame is exactly the four columns `(layer, tessera_id, rung, matched)` (contracts §3.2
+    // r43), the full frame's fixed prefix is fourteen with the two hull columns trailing.
+    if (t.schema.fields.length === 4) {
+      const tesseraId = u64Column(t, 'tessera_id');
+      const rung = t.getChild('rung');
+      const matched = t.getChild('matched');
+      if (rung == null || matched == null) {
+        throw new Error(
+          'viewport artifacts frame has four columns but is not the identity projection: expected (layer, tessera_id, rung, matched)'
+        );
+      }
+      artifactsIdentity = [];
+      for (let i = 0; i < tesseraId.length; i++) {
+        artifactsIdentity.push({
+          layer: String(layer.get(i)),
+          tesseraId: tesseraId[i]!,
+          rung: Number(rung.get(i)),
+          matched: matched.get(i) === null ? null : Boolean(matched.get(i))
+        });
+      }
+      return {tiles, ids, codes, positions, world, scalars, membership, subCells, artifacts, artifactsIdentity};
+    }
     const key = t.getChild('key')!;
     const tesseraId = u64Column(t, 'tessera_id');
     const maskedCount = u64Column(t, 'masked_count');
@@ -416,12 +450,19 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     const boxMaxX = t.getChild('box_max_x')!;
     const boxMaxY = t.getChild('box_max_y')!;
     // `hull_x` and `hull_y` are `list<list<uint32>>` — **one entry per ring** (contracts §3.2
-    // item 4, `artifact-shapes.md` §9). The nesting is checked here, at the schema, so a body from
-    // a server that still sends one flat ring per artifact is refused rather than misread: the
-    // downcast is what a single-ring reader fails on, and the same downcast in reverse is what
-    // this decoder must not paper over.
+    // item 4, `artifact-shapes.md` §9) — and **trail the fixed prefix, absent from the schema
+    // entirely when no served layer declares a hull** (r43). Read by name, tolerating absence:
+    // an absent pair reads as no artifact carrying a hull, and a per-row null in a present pair
+    // keeps its one meaning (the layer declares none). Where a column is present, the nesting is
+    // checked at the schema, so a body from a server that still sends one flat ring per artifact
+    // is refused rather than misread: the downcast is what a single-ring reader fails on, and the
+    // same downcast in reverse is what this decoder must not paper over.
     const hullX = ringColumn(t, 'hull_x');
     const hullY = ringColumn(t, 'hull_y');
+    // The two travel together by contract; one without the other has no reading.
+    if ((hullX === null) !== (hullY === null)) {
+      throw new Error('viewport artifacts frame carries one hull column and not the other');
+    }
     // One content, entire, positional to the layer's declared kinds. Empty means the layer
     // declares no supplied content — never that content was withheld, because an artifact whose
     // content this principal may not read does not appear at all.
@@ -431,30 +472,33 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     // would disclose that a coarser artifact exists which they may not see. Read it as "no parent
     // here", never as "no parent".
     const parentId = t.getChild('parent_id');
-    // **The declared level**, non-nullable and a fact about the artifact rather than the viewer.
-    // Read by name like every other column here; the schema's *position* is contract for a decoder
-    // that indexes positionally, which this one deliberately is not.
-    const level = t.getChild('level');
+    // **The rung a client draws this artifact at**, non-nullable, computed the right way for the
+    // layer's kind (contracts §3.2 r43): the declared level on a levelled layer, the
+    // response-local parent-chain depth on a treed one, 0 on a flat one. Read by name like every
+    // other column here; the schema's *position* is contract for a decoder that indexes
+    // positionally, which this one deliberately is not.
+    const rung = t.getChild('rung');
     // **The filter bit, and null is a value**: the column is all-null where the request carried no
     // filter, which is *there was no question* rather than *no matches* (decision 0104). A missing
-    // column reads the same way, and unlike `level` there is nothing to refuse over — a client that
+    // column reads the same way, and unlike `rung` there is nothing to refuse over — a client that
     // asked for no filter has no use for it, and one that did draws every artifact undimmed, which
     // is what it drew before the column existed.
     const matched = t.getChild('matched');
     // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
-    // (decision 0048) and a level is what a client draws a tiered layer's resolution from, so a
-    // body without the column is a server this build does not match — silently reading every
-    // artifact as level 0 would draw the whole hierarchy at its coarsest rung and look like data.
-    if (level == null) {
+    // (decision 0048) and the rung is what a client draws every layer's resolution from, so a
+    // body without the column — an r41-or-earlier server's `level` included — is a server this
+    // build does not match: silently reading every artifact as rung 0 would draw the whole
+    // hierarchy at its coarsest and look like data.
+    if (rung == null) {
       throw new Error(
-        'viewport artifacts frame carries no `level` column: this client requires a server that serves it'
+        'viewport artifacts frame carries no `rung` column: this client requires a server that serves it (contracts §3.2 r43 renamed and re-meant `level`)'
       );
     }
     for (let i = 0; i < tesseraId.length; i++) {
       const cx = centroidX.get(i);
       const bx = boxMinX.get(i);
-      const hx = hullX.get(i);
-      const hy = hullY.get(i);
+      const hx = hullX === null ? null : hullX.get(i);
+      const hy = hullY === null ? null : hullY.get(i);
       // The two axes carry the same ring structure by construction. **Checked, not assumed** — a
       // decoder that assumes it misdraws silently on the day something else does not, and a ring
       // whose axes disagree has no reading at all: a shorter x than y would draw a ring that
@@ -498,11 +542,11 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
         // Absent on a server older than the field, which reads the same as a root — the
         // fail-closed direction, and the only one available without inventing a parent.
         parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i)),
-        level: Number(level.get(i)),
+        rung: Number(rung.get(i)),
         matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i))
       });
     }
   }
 
-  return {tiles, ids, codes, positions, world, scalars, membership, subCells, artifacts};
+  return {tiles, ids, codes, positions, world, scalars, membership, subCells, artifacts, artifactsIdentity};
 }

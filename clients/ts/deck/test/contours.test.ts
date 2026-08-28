@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {SessionArtifactTable, gridToWorldXY, servedLineage, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
-import {hoverShapes, outlineData, outlineOf, servedDepths} from '../src/layer.js';
+import {hoverShapes, outlineData, outlineOf} from '../src/layer.js';
 import {ringWithin, shapeContains} from '../src/contours.js';
 
 /** The served shape as it is drawn, and which of the served shapes the map actually draws. */
@@ -15,13 +15,29 @@ const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact =>
   hull: [[[0, 0], [2 ** 32 - 1, 0], [2 ** 32 - 1, 2 ** 32 - 1], [0, 2 ** 32 - 1]]],
   content: [],
   parentId,
-  level: 0,
+  rung: 0,
   matched: null
 });
 
-function projection(served: Artifact[]): ArtifactsProjection {
+/**
+ * The served set as the wire delivers it (contracts §3.2 r43): on this treed fixture `rung` is the
+ * response-local parent-chain depth, computed here exactly as the server computes it after the cut
+ * — a root, and a child of an unserved parent, at 0. It stands in for the server; nothing under
+ * test derives it again.
+ */
+function withRungs(served: Artifact[]): Artifact[] {
+  const byId = new Map(served.map((a) => [a.tesseraId, a]));
+  const depthOf = (a: Artifact, guard = 0): number => {
+    const parent = a.parentId === null ? undefined : byId.get(a.parentId);
+    return parent && guard < 1024 ? depthOf(parent, guard + 1) + 1 : 0;
+  };
+  return served.map((a) => ({...a, rung: depthOf(a)}));
+}
+
+function projection(input: Artifact[]): ArtifactsProjection {
+  const served = withRungs(input);
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId})));
+  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId, rung: a.rung})));
   return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
@@ -97,14 +113,6 @@ describe('outlineOf', () => {
     // No ring reaches the ground between them, which is the whole reason the wire is nested.
     const middle: [number, number] = [gridToWorldXY([g / 2, g / 2])[0], gridToWorldXY([g / 2, g / 2])[1]];
     for (const ring of rings) expect(inside(middle, ring)).toBe(false);
-  });
-});
-
-describe('servedDepths', () => {
-  it('is the depth in the served tree — a root 0, a child one deeper, a child of an unserved parent a root', () => {
-    const served = [artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n), artifact(4n, 99n)];
-    const depths = servedDepths(projection(served));
-    expect([...depths.entries()].map(([id, d]) => [String(id), d])).toEqual([['1', 0], ['2', 1], ['3', 2], ['4', 0]]);
   });
 });
 
@@ -226,12 +234,12 @@ describe('outlineData', () => {
   });
 
   it('parents are ordered before their children, so an opened child draws over an opened parent', () => {
-    // Two branches, so both a depth-0 and a depth-1 artifact are on the frontier.
+    // Two branches, so both a rung-0 and a rung-2 artifact are on the frontier; the rung is the wire's.
     const p = projection([artifact(3n, 2n), artifact(1n, null), artifact(2n, 1n)]);
     const data = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'dark'});
-    expect(data.map((d) => d.depth)).toEqual([2]);
+    expect(data.map((d) => d.rung)).toEqual([2]);
     const branched = projection([artifact(3n, 2n), artifact(1n, null), artifact(2n, 1n), artifact(4n, null)]);
-    expect(outlineData(branched, {opened: null, hovered: null, level: undefined, scheme: 'dark'}).map((d) => d.depth)).toEqual([0, 2]);
+    expect(outlineData(branched, {opened: null, hovered: null, level: undefined, scheme: 'dark'}).map((d) => d.rung)).toEqual([0, 2]);
   });
 });
 
@@ -246,7 +254,7 @@ describe('hoverShapes', () => {
     expect(shapes.map((s) => String(s.id))).toEqual(['2']);
     const flat = projection([{...artifact(1n, null), hull: [left, right]}, artifact(2n, null)]);
     const both = hoverShapes(outlineData(flat, {opened: null, hovered: null, level: undefined, scheme: 'dark'}));
-    expect(both.map((s) => [String(s.id), s.rings.length, s.depth])).toEqual([['1', 2, 0], ['2', 1, 0]]);
+    expect(both.map((s) => [String(s.id), s.rings.length, s.rung])).toEqual([['1', 2, 0], ['2', 1, 0]]);
     // The box is the rings', so a pointer between two separated groups is in neither.
     const one = both[0]!;
     expect(shapeContains(one, gridToWorldXY([g / 8, g / 8]))).toBe(true);

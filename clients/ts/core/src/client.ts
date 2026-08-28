@@ -206,6 +206,9 @@ export class TesseraClient {
     // what the caller passed and never substitutes one for the other.
     if (req.layers !== undefined) body.layers = req.layers;
     if (req.artifactBudget !== undefined) body.artifact_budget = req.artifactBudget;
+    // Sent only when named, so the default stays the server's own (`"full"`) and a caller who
+    // never mentions it sends the request shape it always sent.
+    if (req.artifactRows !== undefined) body.artifact_rows = req.artifactRows;
     // **Absent is a real selection here, not a missing one.** Omitting `levels` asks the server to
     // follow each layer's own declared zoom ranges against this request's depth, so a client that
     // never thinks about levels gets the one a map would draw. Sent only when the caller named

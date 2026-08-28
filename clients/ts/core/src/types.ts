@@ -140,7 +140,13 @@ export type Layer = {
    * Where the layer's lineage lives, and the **default** cut depth — not its only setting, since a
    * request may ask for more detail (`artifactBudget`).
    */
-  hierarchy: {kind: 'flat' | 'nested' | 'stacked'; pruneChildren: boolean};
+  /**
+   * The four kinds the wire declares (`tessera-types`' `HierarchyKind`): `flat` (no lineage),
+   * `nested` (a tree in the edges, no levels), and the two levelled shapes `stacked` and `tiered`.
+   * `tiered` was missing here until 2026-08-28 — the union is what the fetch model classifies
+   * layers by, so an absent member is a layer silently treated as something it is not.
+   */
+  hierarchy: {kind: 'flat' | 'nested' | 'stacked' | 'tiered'; pruneChildren: boolean};
   /**
    * The resolutions the layer declares. **Empty for a treed layer**, which declares none: its
    * lineage is in its edges, and a level number would say nothing about position in it.
@@ -284,6 +290,14 @@ export type ViewportRequest = {
    * would be a wrong map rather than half a map.
    */
   artifactBudget?: number;
+  /**
+   * Which columns each served artifact row answers with (contracts §3.2 r43). Omitted or `'full'`
+   * is every column; `'identity'` is the same rows in the fixed four-column schema
+   * ({@link ArtifactIdentity}). **The row set, the `matched` bits and the `rung` values are
+   * identical under either value; only the columns change** — which is what it is for: a filter
+   * change over rows the caller already holds, the bit being the one field a filter moves.
+   */
+  artifactRows?: 'full' | 'identity';
 };
 
 /**
@@ -379,19 +393,18 @@ export type Artifact = {
    */
   parentId: bigint | null;
   /**
-   * **Which declared resolution this artifact sits at**, from the layer's `levels` in `/v1/meta`.
+   * **The resolution a client draws this artifact at**, computed the right way for its layer's
+   * kind (contracts §3.2 r43): the declared level on a **levelled** layer — a fact about the
+   * artifact, agreeing across principals, indexing the level set `/v1/meta` publishes — the
+   * **response-local parent-chain depth** on a **treed** one, computed after the cut so the root
+   * of a re-rooted subtree reads 0, and `0` on a flat one.
    *
-   * A fact about the artifact and not about the viewer: every principal served it receives the same
-   * number. `0` on a treed or flat layer, which declares no levels and sits entirely at level 0.
-   *
-   * **Read this rather than counting `parentId` links.** That count is the depth of the chain that
-   * reached the artifact *in this response*, which answers a different question: a tiered layer's
-   * edges may skip a level, and its roots may have no parent to be given, so on real data the two
-   * disagree — measured at 490 of 797 artifacts on one layer. Walking parents stays the right
-   * reading of a **treed** layer, where the lineage is the structure; this field is what stops that
-   * reading being carried where it does not hold.
+   * **A client draws by this column and never derives it.** Which derivation a layer kind wants
+   * — declared level or chain count — was a documented per-client trap, fallen into once; the
+   * server now serves the right number for every kind, so counting `parentId` links here answers
+   * no question this field does not.
    */
-  level: number;
+  rung: number;
   /**
    * **Whether this artifact holds a member the current filter admits** — one this principal may
    * see, inside the requested tiles.
@@ -412,6 +425,26 @@ export type Artifact = {
    * the whole visible membership. An artifact whose only matches sit off screen reads `false`
    * until the view moves over them.
    */
+  matched: boolean | null;
+};
+
+/**
+ * One row of the identity projection (`artifact_rows: "identity"`, contracts §3.2 r43): the same
+ * row set a full answer to the identical request would carry, in a fixed four-column schema.
+ *
+ * The row set, the `matched` bits and the `rung` values are identical under either value of
+ * `artifact_rows`; only the columns change. The payload columns are absent from the schema rather
+ * than null, so a caller resolves each row against payloads it already holds by
+ * `(layer, tesseraId)` — and one meeting an identifier its store cannot resolve knows it, and
+ * re-asks with `"full"`: one round trip, never a wrong map.
+ */
+export type ArtifactIdentity = {
+  layer: string;
+  /** Wire identity, u64 — never narrowed to a number. */
+  tesseraId: bigint;
+  /** See {@link Artifact.rung} — identical to the full row's value. */
+  rung: number;
+  /** See {@link Artifact.matched} — identical to the full row's value, null with no filter. */
   matched: boolean | null;
 };
 
@@ -473,6 +506,13 @@ export type ViewportResult = {
    * a principal reaches at all comes from `GET /v1/meta`.
    */
   artifacts: Artifact[];
+  /**
+   * The identity projection's rows, where the response answered `artifact_rows: "identity"` —
+   * `null` where the frame was full or absent. Exactly one of this and a non-empty
+   * {@link ViewportResult.artifacts} is populated: the projection is read off the frame's own
+   * schema (four columns against the full frame's fourteen-or-more), never off the request.
+   */
+  artifactsIdentity: ArtifactIdentity[] | null;
 };
 
 /** One layer's membership column as the decoder hands it over — see {@link ViewportResult.membership}. */

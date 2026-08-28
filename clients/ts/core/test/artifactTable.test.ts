@@ -1,16 +1,16 @@
 import {describe, expect, it} from 'vitest';
-import {NO_ORDINAL, SessionArtifactTable, rungOf, type ArtifactRef} from '../src/artifactTable.js';
+import {NO_ORDINAL, SessionArtifactTable, type ArtifactRef} from '../src/artifactTable.js';
 
 const ref = (
   id: bigint,
   parentId: bigint | null = null,
   layer = 'clusters/x',
-  level = 0
+  rung = 0
 ): ArtifactRef => ({
   tesseraId: id,
   layer,
   parentId,
-  level
+  rung
 });
 
 describe('the session artifact table', () => {
@@ -26,28 +26,28 @@ describe('the session artifact table', () => {
     expect(table.entry(a)?.tesseraId).toBe(10n);
   });
 
-  it('links a child to a parent served in the same batch, and takes each level from the wire', () => {
+  it('links a child to a parent served in the same batch, and takes each rung from the wire', () => {
     const table = new SessionArtifactTable();
     const [parent, child] = table.take([ref(1n), ref(2n, 1n, 'clusters/x', 1)]);
     expect(table.entry(child)?.parentOrdinal).toBe(parent);
-    expect(table.entry(child)?.level).toBe(1);
-    expect(table.entry(parent)?.level).toBe(0);
+    expect(table.entry(child)?.rung).toBe(1);
+    expect(table.entry(parent)?.rung).toBe(0);
   });
 
   /**
-   * **The level is the wire's and never the chain's.** A tiered layer's edge may skip a level — a
-   * city directly under a country because that country has no states — so a child one link below a
-   * root can be declared at level 2. Counting links said 1 and drew it with the wrong siblings;
-   * this is the case that separates the two rules.
+   * **The rung is the wire's and never the chain's** (contracts §3.2 r43). A tiered layer's edge
+   * may skip a level — a city directly under a country because that country has no states — so a
+   * child one link below a root is served at rung 2. Counting links said 1 and drew it with the
+   * wrong siblings; the count no longer exists here to disagree.
    */
-  it('keeps a declared level that the parent chain would have disagreed with', () => {
+  it('keeps a rung that the parent chain would have disagreed with', () => {
     const table = new SessionArtifactTable();
     const [country, county] = table.take([
       ref(1n, null, 'clusters/x', 0),
       ref(2n, 1n, 'clusters/x', 2)
     ]);
     expect(table.entry(county)?.parentOrdinal).toBe(country);
-    expect(table.entry(county)?.level).toBe(2);
+    expect(table.entry(county)?.rung).toBe(2);
   });
 
   it('leaves a child a root when its parent is not in the batch — a link that does not resolve is no link', () => {
@@ -121,43 +121,38 @@ describe('the level walk and retained references', () => {
   });
 
   /**
-   * **A treed layer, as the wire actually gives it**: every artifact declared at level 0, the
-   * lineage entirely in the edges (decision 0082). Reading the declared level alone here collapses
-   * the layer to one rung — no level picker to offer and a coarsening walk that never coarsens —
-   * which is what the demo's own `clusters/hdbscan` would have done.
+   * **A treed layer, as the wire now gives it** (contracts §3.2 r43): every artifact declared at
+   * level 0, and `rung` the response-local chain depth the server computed after the cut. The
+   * table used to count that depth from the links itself and pick between the count and the
+   * declared level per layer kind (trap 5.4); it now records the wire's number, and the walk
+   * coarsens by it — so a treed layer still offers the rungs it has and the walk still coarsens.
    */
-  it('keeps a treed layer’s rungs from its edges, every declared level being 0', () => {
+  it('coarsens a treed layer by the wire’s rungs, which are its chain depths', () => {
     const table = new SessionArtifactTable();
     const [root, mid, leaf] = table.take([
       ref(1n, null, 'clusters/tree', 0),
-      ref(2n, 1n, 'clusters/tree', 0),
-      ref(3n, 2n, 'clusters/tree', 0)
+      ref(2n, 1n, 'clusters/tree', 1),
+      ref(3n, 2n, 'clusters/tree', 2)
     ]);
-    // The declaration says nothing — the edges say everything.
-    expect([root, mid, leaf].map((o) => table.entry(o!)!.level)).toEqual([0, 0, 0]);
-    expect([root, mid, leaf].map((o) => table.entry(o!)!.depth)).toEqual([0, 1, 2]);
-    expect([root, mid, leaf].map((o) => rungOf(table.entry(o!)!))).toEqual([0, 1, 2]);
-
-    // And the coarsening walk still coarsens, which is what the picker drives.
+    expect([root, mid, leaf].map((o) => table.entry(o!)!.rung)).toEqual([0, 1, 2]);
     const served = new Set([root!, mid!, leaf!]);
     expect(table.resolve(leaf!, served, 1)).toBe(mid);
     expect(table.resolve(leaf!, served, 0)).toBe(root);
   });
 
   /**
-   * **A levelled layer whose edge skips a rung** — the other half, and the case where the chain
-   * count is the wrong answer. `rungOf` takes the declared level here because it is never below the
-   * chain depth: levels are dense and an edge may not run finer-to-coarser.
+   * **A levelled layer whose edge skips a rung** — the case where a chain count is the wrong
+   * answer, and the reason the count no longer exists here: the wire's `rung` is the declared
+   * level, and a child one link below a root is at 2 because that is what was declared.
    */
-  it('takes the declared level where it and the chain disagree', () => {
+  it('coarsens a levelled layer by the declared level, never by a link count', () => {
     const table = new SessionArtifactTable();
     const [country, county] = table.take([
       ref(1n, null, 'admin/boundaries', 0),
       ref(2n, 1n, 'admin/boundaries', 2)
     ]);
-    expect(table.entry(county!)!.depth).toBe(1);
-    expect(table.entry(county!)!.level).toBe(2);
-    expect(rungOf(table.entry(county!)!)).toBe(2);
+    expect(table.entry(county!)!.parentOrdinal).toBe(country);
+    expect(table.entry(county!)!.rung).toBe(2);
     // Coarsening to rung 1 passes the county and stops at the country, which is at 0.
     expect(table.resolve(county!, new Set([country!, county!]), 1)).toBe(country);
   });

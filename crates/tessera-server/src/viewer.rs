@@ -21,7 +21,8 @@ use tokio::sync::{mpsc, oneshot};
 
 use tessera_types::{GenerationStamp, TesseraId};
 use tessera_wire::{
-    artifacts_frame, points_frame, sub_cells_frame, tiles_frame, trailer_frame, ArtifactRow,
+    artifacts_frame, artifacts_identity_frame, points_frame, sub_cells_frame, tiles_frame,
+    trailer_frame, ArtifactRow,
     ScalarColumn,
 };
 
@@ -544,6 +545,30 @@ struct ViewportReq {
     /// layer name takes, and the same reason: asking is not a way to learn what exists.
     #[serde(default)]
     levels: Option<LevelsReq>,
+    /// Which columns each served artifact row answers with (`artifact-fetch-protocol.md` §5.2).
+    ///
+    /// **Absent is `"full"`** — every column, the answer a caller who has read nothing receives.
+    /// **`"identity"` answers with the SAME rows in a fixed four-column schema** — `layer`
+    /// (dictionary-encoded), `tessera_id`, `rung`, `matched`: the row set, the `matched` bits and
+    /// the `rung` values are identical under either value, and only the columns change, which is
+    /// what keeps every cross-reference (`parent_id`, the points frames' membership columns) true
+    /// and is why the projection discloses nothing — a column subset of what the same caller's
+    /// identical request would have been served. For the caller that already holds the payload
+    /// columns and wants this filter's bits over the same rows.
+    ///
+    /// Any other value is a `422`, from serde naming the two accepted spellings.
+    #[serde(default)]
+    artifact_rows: Option<ArtifactRowsReq>,
+}
+
+/// The `artifact_rows` field's two values. A derived enum rather than [`LayersReq`]'s untagged
+/// shape — there is no list form here — so an unknown value is a `422` whose message names the
+/// two accepted spellings.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ArtifactRowsReq {
+    Full,
+    Identity,
 }
 
 /// The `layers` field's two spellings: a list of names, or the one reserved word.
@@ -664,6 +689,10 @@ struct WireSink {
     /// request truncated at 111 s with **neither** `viewport stream aborted` line firing, because
     /// the server's own deadline had fired and had no way to say so. This is that way.
     shed: Option<Shed>,
+    /// The request's `artifact_rows` projection — which kind-5 frame shape [`Self::artifacts`]
+    /// writes. Set by the producer from the parsed request before the engine call; the engine
+    /// computes the same rows either way (`artifact-fetch-protocol.md` §5.2).
+    artifact_rows: tessera_engine::ArtifactRows,
     arrow_serialise_ns: u64,
     points_total: u64,
     flushes: u64,
@@ -793,11 +822,16 @@ impl ViewportSink for WireSink {
                 hull: a.derived.hull.as_deref(),
                 content: &a.content,
                 parent_id: a.parent_id.map(|id| id.raw()),
-                level: a.level,
+                rung: a.rung,
                 matched: a.matched,
             })
             .collect();
-        let frame = artifacts_frame(&rows);
+        // The same rows either way — the projection changes which columns are written, never
+        // which artifacts the engine served (`artifact-fetch-protocol.md` §5.2).
+        let frame = match self.artifact_rows {
+            tessera_engine::ArtifactRows::Full => artifacts_frame(&rows),
+            tessera_engine::ArtifactRows::Identity => artifacts_identity_frame(&rows),
+        };
         self.arrow_serialise_ns += serialise_start.elapsed().as_nanos() as u64;
         self.send(frame)
     }
@@ -955,6 +989,15 @@ fn run_viewport_stream(
         Some(LevelsReq::Named(_)) => LevelSelection::Named(&level_numbers),
         None => LevelSelection::Declared,
     };
+    // **Omitted is `"full"`** — the complete answer is the default and the projection is the
+    // opt-in (`artifact-fetch-protocol.md` §5.2). Told to the engine (which skips payload
+    // production) and to the sink (which writes the four-column frame); the row set is identical
+    // either way.
+    let artifact_rows = match req.artifact_rows {
+        Some(ArtifactRowsReq::Identity) => tessera_engine::ArtifactRows::Identity,
+        Some(ArtifactRowsReq::Full) | None => tessera_engine::ArtifactRows::Full,
+    };
+    sink.artifact_rows = artifact_rows;
     let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
@@ -962,6 +1005,7 @@ fn run_viewport_stream(
         .layers(layers)
         .artifact_budget(req.artifact_budget)
         .levels(levels)
+        .artifact_rows(artifact_rows)
         .cancel(Some(cancel));
     if let Some(filter) = filter {
         request = request.filter(filter);
@@ -1204,6 +1248,9 @@ async fn viewport(
         deadline: Duration::from_millis(state.stream_deadline_ms),
         first_flush_at: None,
         shed: None,
+        // Re-derived from the request inside the producer; the default only carries this value
+        // to there.
+        artifact_rows: tessera_engine::ArtifactRows::Full,
         arrow_serialise_ns: 0,
         points_total: 0,
         flushes: 0,
@@ -1537,11 +1584,13 @@ struct ArtifactResp {
     /// two clouds is two rings, not one polygon over the gap between them.
     #[serde(skip_serializing_if = "Option::is_none")]
     hull: Option<Vec<Vec<[u32; 2]>>>,
-    /// **The declared resolution this artifact sits at**, the same value the viewport's *artifacts*
-    /// frame carries. Always present — every artifact has a level, a treed or flat layer's being 0
-    /// — and, unlike everything else here, a fact about the artifact rather than about the asking
-    /// principal: two principals served it agree on it.
-    level: u32,
+    /// **The rung this artifact sits at** — the declared level on a levelled layer, `0` on a
+    /// treed or flat one, which on this one-artifact response is also its response-local chain
+    /// depth, there being no parent links to be deep in (the viewport frame's `rung`,
+    /// `artifact-fetch-protocol.md` §5.3). Always present, and — unlike everything else here — a
+    /// fact about the artifact rather than about the asking principal: two principals served it
+    /// agree on it.
+    rung: u32,
     /// The publisher's supplied content — one entry of the ranked `contents`, entire, positional to the layer's declared
     /// kinds. Empty where the layer declares none; never partial, because an artifact whose content
     /// this principal may not read is a `404`.
@@ -1597,7 +1646,7 @@ async fn artifact(
         r#box: served.derived.bbox,
         hull: served.derived.hull,
         content: served.content,
-        level: served.level,
+        rung: served.rung,
     }))
 }
 

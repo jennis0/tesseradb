@@ -13,9 +13,11 @@
  *       kind 3  points     Arrow IPC stream: tessera_id uint64, code uint64, ...scalars —
  *                          zero or more frames, concatenating to the full points stream
  *       kind 4  trailer    JSON; exactly one, last — its presence marks the response complete
- *       kind 5  artifacts  Arrow IPC stream: layer utf8, tessera_id uint64, key utf8
- *                          (nullable), masked_count uint64 — at most one, after tiles and before
- *                          any points frame; ABSENT when the response served none
+ *       kind 5  artifacts  Arrow IPC stream: the fourteen fixed columns `layer` (dictionary
+ *                          u16/utf8) through `matched`, hull columns trailing when a served
+ *                          layer declares one — or the identity projection's four (contracts
+ *                          §3.2 r43) — at most one, after tiles and before any points frame;
+ *                          ABSENT when the response served none
  *
  * Every failure here throws, and strictly: a truncated body, an unknown kind, a missing trailer
  * or a misplaced tiles frame must never decode to a plausible shorter response — a sample

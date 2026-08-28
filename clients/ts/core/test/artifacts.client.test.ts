@@ -23,7 +23,8 @@ const empty: ViewportResult = {
   scalars: {},
   subCells: null,
   membership: {},
-  artifacts: []
+  artifacts: [],
+  artifactsIdentity: null
 };
 
 /** Capture every request the client makes, and answer each with the body given. */
@@ -84,6 +85,17 @@ describe('the viewport request', () => {
       layers: ['clusters/hdbscan-2026-08'],
       artifact_budget: 500
     });
+  });
+
+  it('carries the row projection under its wire name, and only when named', async () => {
+    const seen = stubFetch(() => new Response(new ArrayBuffer(0), {status: 200}));
+    const c = client();
+    await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x'], artifactRows: 'identity'});
+    await c.viewport('tok', {view: 's0', zoom: 4, layers: ['clusters/x']});
+    // `"identity"` is the same rows in four columns (contracts §3.2 r43); absent leaves the
+    // server's own default, `"full"`, and the request shape a caller who never asks always sent.
+    expect(seen[0]!.body.artifact_rows).toBe('identity');
+    expect('artifact_rows' in seen[1]!.body).toBe(false);
   });
 });
 
@@ -148,9 +160,12 @@ describe('/v1/meta', () => {
 });
 
 /**
- * **The two artifact goldens are r40 captures** — taken against a `tessera serve` built from this
- * tree, over the notebook corpus's `clusters/hdbscan`, so `hull_x`/`hull_y` are the nested list of
- * rings contracts §3.2 item 4 specifies.
+ * **The two artifact goldens are r43 captures** (2026-08-28) — taken against a `tessera serve`
+ * built from this tree over the notebook corpus's `clusters/hdbscan` (`./run_demo.sh --scale
+ * notebook --no-viewer`, then `scripts/capture-golden.mjs --artifacts-only` as the corpus's
+ * *medium* preset principal, whose terms are arXiv categories; `--terms 0` sees nothing there), so
+ * `layer` is dictionary-encoded, `rung` stands where `level` did, and `hull_x`/`hull_y` trail the
+ * fixed prefix as the nested list of rings contracts §3.2 item 4 specifies.
  *
  * **`viewport-artifacts-pre-r40.bin` is kept deliberately and is never recaptured.** It is a real
  * body from before a hull was a list of rings, and the refusal below is the only test that can use

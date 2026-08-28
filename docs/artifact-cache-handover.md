@@ -4,10 +4,11 @@
 exist.** The filter bit is ruled, written down and on the wire
 ([decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md), contracts r42,
 `client-delivery.md` S13), and the channel now holds payloads across a served-set change (step
-`cache 2`). Step 3 is designed and ruled
-([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2): no held-set claim —
-an opt-in column projection, ⊘ unbuilt, and a fetch model that is policy rather than obligation.
-What remains is step 4 — a corpus to measure on. This is a work list and the record of what was
+`cache 2`). Step 3 is designed, ruled and built
+([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r3, contracts r43): no
+held-set claim — an opt-in column projection, the rung column, the two encodings, and a fetch model
+that is policy rather than obligation, shipped in the channel. What remains is step 4 — a corpus to
+measure on. This is a work list and the record of what was
 established on the way to it, not a design.
 
 **Read [`client-delivery.md`](client-delivery.md) first** — it is the status record for client work,
@@ -98,9 +99,10 @@ but do not re-derive them from scratch.
 
 ## 3. What is already built and can be relied on
 
-- **`levels` on the request and `level` on the *artifacts* frame** (0103, contracts r41).
-- **`SessionArtifactTable`**, with `level` (the wire's declared level), `depth` (the parent-chain
-  count) and `rungOf` picking between them — see §5.4.
+- **`levels` on the request and `rung` on the *artifacts* frame** (0103, contracts r41; `level`
+  renamed and re-meant at r43 — the drawing rung, computed server-side per layer kind).
+- **`SessionArtifactTable`**, holding each artifact's `rung` straight off the wire — `rungOf` and
+  the client-side `depth` are deleted, see §5.4.
 - **Client-obligations rules 6 and 7**, which already say what a held artifact set is and when it
   goes.
 - **The masked-count histogram cache** on the server side, keyed per level version with the overlay
@@ -145,7 +147,7 @@ scoped, which the wire says at the field. 0104's *What is in view* has the argum
 **The wire affordance is designed and ruled** (2026-08-28): the client never says what it holds.
 [`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) §4 declines every shape in
 which the client supplies rows — the held-set claim included — and its §5.2 specifies the one
-affordance that survived, an opt-in column projection (⊘ unbuilt).
+affordance that survived, an opt-in column projection (built 2026-08-28, contracts r43).
 
 **Whether a client may hold a level whole and pick from it locally.** The owner settled the
 objection that this over-draws: an artifact's geometry and count are over its whole visible
@@ -251,8 +253,11 @@ tiles it already holds, and an elided tile contributes no artifacts, so a cluste
 depend on whether its ground happened to be novel — **the map would lose clusters as the cache
 warmed**. The channel asks for itself with `k = 0`.
 
-**5.4 `level` and `depth` are different numbers and only one is right per layer.** The wire's
-`level` is the declared rung; `depth` is the parent-chain count. A **levelled** layer's resolution
+**5.4 `level` and `depth` are different numbers and only one is right per layer** — **moved
+into the wire 2026-08-28** (the `rung` column, contracts r43; protocol §5.3): the server now serves
+the drawing rung computed the right way per layer kind and `rungOf` is deleted, so no client picks.
+The trap is kept as the record of why. The wire's `level` was the declared rung; `depth` the
+parent-chain count. A **levelled** layer's resolution
 is its declared level, because an edge may skip a rung — counting links put 490 of
 `clusters/toponymy`'s 797 artifacts at the wrong level. A **treed** layer declares no levels, so
 every artifact arrives at level 0 and the chain depth *is* its resolution; reading the declared
@@ -292,7 +297,8 @@ level in the *absent* case only.
    ([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2): there is no *what
    I hold* — every shape in which the client supplies rows is declined, and the affordance is an
    opt-in column projection (`artifact_rows`), specified with its schema and its disclosure
-   reasoning, ⊘ unbuilt. Build timing is the owner's, with step 4's corpus the honest trigger.
+   reasoning — **built the same day** with the rung column and the two encodings (contracts r43),
+   and the fetch model shipped in the channel, its idle promotion ungated by owner ruling.
 4. **Measure on a scattered layer**, not on GeoNames. The corpus for it does not exist yet: an
    attribute layer over `admin4`'s 231 645 values on the GeoNames rung would produce one, and that
    is a corpus change rather than a code change.
