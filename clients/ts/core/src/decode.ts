@@ -265,64 +265,40 @@ function compact(v: number): number {
 }
 
 /**
- * Decode a framed `/v1/viewport` body.
+ * The point half of a response, decoded from one or more kind-3 frames.
  *
- * Two rules this function exists to hold:
- *
- * 1. `ids` stays a `BigUint64Array`. A `tessera_id` is a u64 and does not survive a double.
- * 2. Positions are deinterleaved here, once, into the layout deck.gl's `getPosition` wants. The
- *    server ships one `code: uint64` per point — the Morton interleave of two 32-bit fixed-point
- *    axes — so this is where the axes come apart.
- *
- * The output is **cell space**, `[0, 65536)` per axis with a fraction below the cell, which is the
- * grid's own units and needs no quantisation extent to interpret. That is why `coords.ts` no
- * longer takes one: the extent is what maps *data* coordinates onto the grid, and nothing on this
- * path is in data coordinates any more. The raw `codes` are returned alongside, because a client
- * that wants the containing tile at any depth gets it by shifting rather than by re-quantising.
+ * Separated from {@link ViewportResult} because the points are the part that arrives in pieces:
+ * a wide response is dozens of frames, each a complete Arrow stream over whole tiles, and the
+ * streaming client decodes them one at a time as the wire delivers them. A batch decode is the
+ * same function over every frame at once.
  */
-export function decodeViewport(body: Uint8Array): ViewportResult {
-  const parts = splitFramedStreams(body);
+export type PointsPart = {
+  ids: BigUint64Array;
+  codes: BigUint64Array;
+  positions: Float64Array;
+  world: Float32Array;
+  scalars: Record<string, ScalarColumn>;
+  membership: Record<string, MembershipColumn>;
+};
 
-  // The trailer's key set is closed (contracts §3.2 r26) and validated at every decode: the one
-  // server-authored JSON region of the body must not quietly acquire a field no reader checks.
-  const trailer = JSON.parse(new TextDecoder().decode(parts.trailer)) as Record<string, unknown>;
-  const trailerKeys = Object.keys(trailer)
-    .filter((k) => k !== 'stage_ns')
-    .sort();
-  const expected = ['arrow_serialise_ns', 'flushes', 'points', 'stream_us'];
-  if (trailerKeys.length !== expected.length || trailerKeys.some((k, i) => k !== expected[i])) {
-    throw new Error(`trailer keys outside the closed set: ${trailerKeys.join(',')}`);
-  }
-  if (trailer['flushes'] !== parts.points.length) {
-    throw new Error(
-      `trailer claims ${trailer['flushes']} point frames, body carries ${parts.points.length}`
-    );
-  }
-
-  const tileTable = tableFromIPC(parts.tiles);
-  const tile = u64Column(tileTable, 'tile');
-  const visible = u64Column(tileTable, 'visible');
-  const matched = u64Column(tileTable, 'matched');
-  const served = u64Column(tileTable, 'served');
-  const tiles: TileCounts[] = [];
-  for (let i = 0; i < tile.length; i++) {
-    tiles.push({
-      tile: tile[i]!,
-      visible: visible[i]!,
-      matched: matched[i]!,
-      served: served[i]!
-    });
-  }
-
-  // Each kind-3 frame is a complete Arrow stream; Arrow JS reads the batches of one stream into
-  // one Table, and concatenating the frames' streams byte-wise would decode only the first — so
-  // frames decode separately and their tables concatenate as row groups. Zero frames (an empty
-  // response carries no points schema at all — contracts §3.2) decodes to zero points.
-  const pointTables = parts.points.map((frame) => tableFromIPC(frame));
+/**
+ * Decode kind-3 frames into one point block.
+ *
+ * Each frame is a complete Arrow stream; Arrow JS reads the batches of one stream into one Table,
+ * and concatenating the frames' streams byte-wise would decode only the first — so frames decode
+ * separately and their tables concatenate as row groups. Zero frames (an empty response carries no
+ * points schema at all — contracts §3.2) decodes to zero points.
+ *
+ * **Positions are deinterleaved here, once**, into the layout deck.gl's `getPosition` wants. The
+ * server ships one `code: uint64` per point — the Morton interleave of two 32-bit fixed-point
+ * axes — so this is where the axes come apart. The output is **cell space**, `[0, 65536)` per axis
+ * with a fraction below the cell, which is the grid's own units and needs no quantisation extent to
+ * interpret; the raw `codes` are returned alongside, because a client that wants the containing
+ * tile at any depth gets it by shifting rather than by re-quantising.
+ */
+export function decodePoints(payloads: readonly Uint8Array[]): PointsPart {
+  const pointTables = payloads.map((frame) => tableFromIPC(frame));
   const totalPoints = pointTables.reduce((n, t) => n + t.numRows, 0);
-  if (trailer['points'] !== totalPoints) {
-    throw new Error(`trailer claims ${trailer['points']} points, body carries ${totalPoints}`);
-  }
   const ids = new BigUint64Array(totalPoints);
   const codes = new BigUint64Array(totalPoints);
   {
@@ -366,6 +342,7 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
   // declared schema (each is a complete stream over the same manifest), so the first table's
   // field list is the response's.
   const scalars: Record<string, ScalarColumn> = {};
+  const membership: Record<string, MembershipColumn> = {};
   if (pointTables.length > 0) {
     for (const field of pointTables[0]!.schema.fields) {
       if (field.name === 'tessera_id' || field.name === 'code') continue;
@@ -378,10 +355,6 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
       const perFrame = pointTables.map((t) => scalarColumn(field.name, t.getChild(field.name)!));
       scalars[field.name] = concatScalarColumns(perFrame, totalPoints);
     }
-  }
-
-  const membership: Record<string, MembershipColumn> = {};
-  if (pointTables.length > 0) {
     for (const field of pointTables[0]!.schema.fields) {
       if (!field.name.startsWith(MEMBERSHIP_PREFIX)) continue;
       membership[field.name.slice(MEMBERSHIP_PREFIX.length)] = hashMembership(
@@ -390,163 +363,286 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
       );
     }
   }
+  return {ids, codes, positions, world, scalars, membership};
+}
 
-  let subCells: SubCell[] | null = null;
-  if (parts.subCells) {
-    const t = tableFromIPC(parts.subCells);
-    const cell = u64Column(t, 'cell');
-    const count = u64Column(t, 'count');
-    subCells = [];
-    for (let i = 0; i < cell.length; i++) {
-      subCells.push({cell: cell[i]!, count: count[i]!});
-    }
+/** Decode the kind-1 frame: every tile's counts, in the response's own tile order. */
+export function decodeTiles(payload: Uint8Array): TileCounts[] {
+  const tileTable = tableFromIPC(payload);
+  const tile = u64Column(tileTable, 'tile');
+  const visible = u64Column(tileTable, 'visible');
+  const matched = u64Column(tileTable, 'matched');
+  const served = u64Column(tileTable, 'served');
+  const tiles: TileCounts[] = [];
+  for (let i = 0; i < tile.length; i++) {
+    tiles.push({
+      tile: tile[i]!,
+      visible: visible[i]!,
+      matched: matched[i]!,
+      served: served[i]!
+    });
   }
+  return tiles;
+}
 
+/** Decode the kind-2 frame: the underlay's per-cell counts. */
+export function decodeSubCells(payload: Uint8Array): SubCell[] {
+  const t = tableFromIPC(payload);
+  const cell = u64Column(t, 'cell');
+  const count = u64Column(t, 'count');
+  const subCells: SubCell[] = [];
+  for (let i = 0; i < cell.length; i++) {
+    subCells.push({cell: cell[i]!, count: count[i]!});
+  }
+  return subCells;
+}
+
+/**
+ * Decode the kind-5 frame, in whichever projection the server sent.
+ *
+ * The projection is read off the frame's own schema, never off the request: the identity frame is
+ * exactly the four columns `(layer, tessera_id, rung, matched)` (contracts §3.2 r44), the full
+ * frame's fixed prefix is fourteen with the two hull columns trailing.
+ */
+export function decodeArtifactsFrame(payload: Uint8Array): {
+  artifacts: Artifact[];
+  artifactsIdentity: ArtifactIdentity[] | null;
+} {
+  const artifacts: Artifact[] = [];
+  const t = tableFromIPC(payload);
+  // `layer` is dictionary-encoded (u16 keys over utf8, contracts §3.2 r44) in both projections.
+  // apache-arrow resolves the dictionary on `.get()` — the vector hands back the utf8 value,
+  // never the key — so the column reads exactly as the plain-utf8 encoding did; verified by
+  // test rather than assumed (`artifacts-frame.test.ts`).
+  const layer = t.getChild('layer')!;
+  if (t.schema.fields.length === 4) {
+    const tesseraId = u64Column(t, 'tessera_id');
+    const rung = t.getChild('rung');
+    const matched = t.getChild('matched');
+    if (rung == null || matched == null) {
+      throw new Error(
+        'viewport artifacts frame has four columns but is not the identity projection: expected (layer, tessera_id, rung, matched)'
+      );
+    }
+    const artifactsIdentity: ArtifactIdentity[] = [];
+    for (let i = 0; i < tesseraId.length; i++) {
+      artifactsIdentity.push({
+        layer: String(layer.get(i)),
+        tesseraId: tesseraId[i]!,
+        rung: Number(rung.get(i)),
+        matched: matched.get(i) === null ? null : Boolean(matched.get(i))
+      });
+    }
+    return {artifacts, artifactsIdentity};
+  }
+  const key = t.getChild('key')!;
+  const tesseraId = u64Column(t, 'tessera_id');
+  const maskedCount = u64Column(t, 'masked_count');
+  // Derived geometry, in the same grid units as `codes` — no extent needed to draw it. A null is
+  // *this layer declares none*, never *withheld*: an artifact whose content could not be served
+  // does not appear at all.
+  const centroidX = t.getChild('centroid_x')!;
+  const centroidY = t.getChild('centroid_y')!;
+  const boxMinX = t.getChild('box_min_x')!;
+  const boxMinY = t.getChild('box_min_y')!;
+  const boxMaxX = t.getChild('box_max_x')!;
+  const boxMaxY = t.getChild('box_max_y')!;
+  // `hull_x` and `hull_y` are `list<list<uint32>>` — **one entry per ring** (contracts §3.2
+  // item 4, `artifact-shapes.md` §9) — and **trail the fixed prefix, absent from the schema
+  // entirely when no served layer declares a hull** (r44). Read by name, tolerating absence:
+  // an absent pair reads as no artifact carrying a hull, and a per-row null in a present pair
+  // keeps its one meaning (the layer declares none). Where a column is present, the nesting is
+  // checked at the schema, so a body from a server that still sends one flat ring per artifact
+  // is refused rather than misread: the downcast is what a single-ring reader fails on, and the
+  // same downcast in reverse is what this decoder must not paper over.
+  const hullX = ringColumn(t, 'hull_x');
+  const hullY = ringColumn(t, 'hull_y');
+  // The two travel together by contract; one without the other has no reading.
+  if ((hullX === null) !== (hullY === null)) {
+    throw new Error('viewport artifacts frame carries one hull column and not the other');
+  }
+  // One content, entire, positional to the layer's declared kinds. Empty means the layer
+  // declares no supplied content — never that content was withheld, because an artifact whose
+  // content this principal may not read does not appear at all.
+  const content = t.getChild('content')!;
+  // **Present only where the parent is also in this response.** A null is a root *or* a parent
+  // this principal was not served, and the two are deliberately one value: naming the second
+  // would disclose that a coarser artifact exists which they may not see. Read it as "no parent
+  // here", never as "no parent".
+  const parentId = t.getChild('parent_id');
+  // **The rung a client draws this artifact at**, non-nullable, computed the right way for the
+  // layer's kind (contracts §3.2 r44): the declared level on a levelled layer, the
+  // response-local parent-chain depth on a treed one, 0 on a flat one. Read by name like every
+  // other column here; the schema's *position* is contract for a decoder that indexes
+  // positionally, which this one deliberately is not.
+  const rung = t.getChild('rung');
+  // **The filter bit, and null is a value**: the column is all-null where the request carried no
+  // filter, which is *there was no question* rather than *no matches* (decision 0104). A missing
+  // column reads the same way, and unlike `rung` there is nothing to refuse over — a client that
+  // asked for no filter has no use for it, and one that did draws every artifact undimmed, which
+  // is what it drew before the column existed.
+  const matched = t.getChild('matched');
+  // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
+  // (decision 0048) and the rung is what a client draws every layer's resolution from, so a
+  // body without the column — an r41-or-earlier server's `level` included — is a server this
+  // build does not match: silently reading every artifact as rung 0 would draw the whole
+  // hierarchy at its coarsest and look like data.
+  if (rung == null) {
+    throw new Error(
+      'viewport artifacts frame carries no `rung` column: this client requires a server that serves it (contracts §3.2 r44 renamed and re-meant `level`)'
+    );
+  }
+  for (let i = 0; i < tesseraId.length; i++) {
+    const cx = centroidX.get(i);
+    const bx = boxMinX.get(i);
+    const hx = hullX === null ? null : hullX.get(i);
+    const hy = hullY === null ? null : hullY.get(i);
+    // The two axes carry the same ring structure by construction. **Checked, not assumed** — a
+    // decoder that assumes it misdraws silently on the day something else does not, and a ring
+    // whose axes disagree has no reading at all: a shorter x than y would draw a ring that
+    // closes early, in the shape of a real boundary.
+    if ((hx === null) !== (hy === null)) {
+      throw new Error(`viewport artifact row ${i}: one hull axis is null and the other is not`);
+    }
+    let hull: [number, number][][] | null = null;
+    if (hx !== null && hy !== null) {
+      if (hx.length !== hy.length) {
+        throw new Error(`viewport artifact row ${i}: hull axes disagree on ring count (${hx.length} and ${hy.length})`);
+      }
+      hull = [];
+      for (let r = 0; r < hx.length; r++) {
+        const rx = hx.get(r);
+        const ry = hy.get(r);
+        if (rx === null || ry === null) {
+          throw new Error(`viewport artifact row ${i}: hull ring ${r} is null on one axis`);
+        }
+        if (rx.length !== ry.length) {
+          throw new Error(`viewport artifact row ${i}: hull axes disagree on the length of ring ${r} (${rx.length} and ${ry.length})`);
+        }
+        const ring: [number, number][] = [];
+        for (let v = 0; v < rx.length; v++) ring.push([Number(rx.get(v)), Number(ry.get(v))]);
+        hull.push(ring);
+      }
+    }
+    artifacts.push({
+      layer: String(layer.get(i)),
+      tesseraId: tesseraId[i]!,
+      // A publisher need not supply a key.
+      key: key.get(i) === null ? null : String(key.get(i)),
+      maskedCount: maskedCount[i]!,
+      centroid: cx === null ? null : [Number(cx), Number(centroidY.get(i))],
+      box:
+        bx === null
+          ? null
+          : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
+      hull,
+      content: Array.from(content.get(i) ?? [], (v) => String(v)),
+      // Absent on a server older than the field, which reads the same as a root — the
+      // fail-closed direction, and the only one available without inventing a parent.
+      parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i)),
+      rung: Number(rung.get(i)),
+      matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i))
+    });
+  }
+  return {artifacts, artifactsIdentity: null};
+}
+
+/**
+ * A response's head: the frames the server sends before any points frame.
+ *
+ * The counts channel, the underlay and the artifacts all land in the first flush
+ * (`streamed-serving.md` §3), so this is everything a client can draw before a single point has
+ * arrived — and, for a client naming layers, everything a point's membership column is named
+ * through.
+ */
+export type ViewportHead = {
+  tiles: TileCounts[];
+  subCells: SubCell[] | null;
+  artifacts: Artifact[];
+  artifactsIdentity: ArtifactIdentity[] | null;
+};
+
+/** Decode the head frames together — the one unit the streaming client asks its decoder for. */
+export function decodeHead(frames: {
+  tiles: Uint8Array;
+  subCells: Uint8Array | null;
+  artifacts: Uint8Array | null;
+}): ViewportHead {
+  const {artifacts, artifactsIdentity} = frames.artifacts
+    ? decodeArtifactsFrame(frames.artifacts)
+    : {artifacts: [] as Artifact[], artifactsIdentity: null};
+  return {
+    tiles: decodeTiles(frames.tiles),
+    subCells: frames.subCells ? decodeSubCells(frames.subCells) : null,
+    artifacts,
+    artifactsIdentity
+  };
+}
+
+/**
+ * Parse the kind-4 trailer, refusing any key outside the closed set.
+ *
+ * The trailer's key set is closed (contracts §3.2 r26) and validated at every decode: the one
+ * server-authored JSON region of the body must not quietly acquire a field no reader checks.
+ */
+export function parseTrailer(payload: Uint8Array): Record<string, unknown> {
+  const trailer = JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>;
+  const trailerKeys = Object.keys(trailer)
+    .filter((k) => k !== 'stage_ns')
+    .sort();
+  const expected = ['arrow_serialise_ns', 'flushes', 'points', 'stream_us'];
+  if (trailerKeys.length !== expected.length || trailerKeys.some((k, i) => k !== expected[i])) {
+    throw new Error(`trailer keys outside the closed set: ${trailerKeys.join(',')}`);
+  }
+  return trailer;
+}
+
+/**
+ * The trailer's two counts against what the body actually carried.
+ *
+ * The server states how many point frames it flushed and how many points it served; a body that
+ * disagrees is a body a reader has mis-framed or a transport has edited, and either way the points
+ * in hand are not the answer to the question asked.
+ */
+export function checkTrailerCounts(
+  trailer: Record<string, unknown>,
+  flushes: number,
+  points: number
+): void {
+  if (trailer['flushes'] !== flushes) {
+    throw new Error(`trailer claims ${trailer['flushes']} point frames, body carries ${flushes}`);
+  }
+  if (trailer['points'] !== points) {
+    throw new Error(`trailer claims ${trailer['points']} points, body carries ${points}`);
+  }
+}
+
+/**
+ * Decode a framed `/v1/viewport` body, whole.
+ *
+ * Two rules this path exists to hold:
+ *
+ * 1. `ids` stays a `BigUint64Array`. A `tessera_id` is a u64 and does not survive a double.
+ * 2. Positions are deinterleaved once, in {@link decodePoints}, into the renderer's layout.
+ *
+ * **The streaming client does not come through here** — it takes the same frames one at a time as
+ * the wire delivers them (`client.ts`) so that a tile can be drawn before the last byte lands.
+ * This is the batch surface: a test, a script, a counts-only ask, and anything holding a whole
+ * body already.
+ */
+export function decodeViewport(body: Uint8Array): ViewportResult {
+  const parts = splitFramedStreams(body);
+  const trailer = parseTrailer(parts.trailer);
+  const tiles = decodeTiles(parts.tiles);
+  const {ids, codes, positions, world, scalars, membership} = decodePoints(parts.points);
+  checkTrailerCounts(trailer, parts.points.length, ids.length);
+  const subCells = parts.subCells ? decodeSubCells(parts.subCells) : null;
   // Empty when the response carried no artifacts frame, which is the ordinary state of a
   // deployment with no layers — and of a principal who reaches none, and of a view holding none.
   // Those are one answer on purpose; see `Artifact`.
-  const artifacts: Artifact[] = [];
-  let artifactsIdentity: ArtifactIdentity[] | null = null;
-  if (parts.artifacts) {
-    const t = tableFromIPC(parts.artifacts);
-    // `layer` is dictionary-encoded (u16 keys over utf8, contracts §3.2 r44) in both projections.
-    // apache-arrow resolves the dictionary on `.get()` — the vector hands back the utf8 value,
-    // never the key — so the column reads exactly as the plain-utf8 encoding did; verified by
-    // test rather than assumed (`artifacts-frame.test.ts`).
-    const layer = t.getChild('layer')!;
-    // The projection is read off the frame's own schema, never off the request: the identity
-    // frame is exactly the four columns `(layer, tessera_id, rung, matched)` (contracts §3.2
-    // r44), the full frame's fixed prefix is fourteen with the two hull columns trailing.
-    if (t.schema.fields.length === 4) {
-      const tesseraId = u64Column(t, 'tessera_id');
-      const rung = t.getChild('rung');
-      const matched = t.getChild('matched');
-      if (rung == null || matched == null) {
-        throw new Error(
-          'viewport artifacts frame has four columns but is not the identity projection: expected (layer, tessera_id, rung, matched)'
-        );
-      }
-      artifactsIdentity = [];
-      for (let i = 0; i < tesseraId.length; i++) {
-        artifactsIdentity.push({
-          layer: String(layer.get(i)),
-          tesseraId: tesseraId[i]!,
-          rung: Number(rung.get(i)),
-          matched: matched.get(i) === null ? null : Boolean(matched.get(i))
-        });
-      }
-      return {tiles, ids, codes, positions, world, scalars, membership, subCells, artifacts, artifactsIdentity};
-    }
-    const key = t.getChild('key')!;
-    const tesseraId = u64Column(t, 'tessera_id');
-    const maskedCount = u64Column(t, 'masked_count');
-    // Derived geometry, in the same grid units as `codes` — no extent needed to draw it. A null is
-    // *this layer declares none*, never *withheld*: an artifact whose content could not be served
-    // does not appear at all.
-    const centroidX = t.getChild('centroid_x')!;
-    const centroidY = t.getChild('centroid_y')!;
-    const boxMinX = t.getChild('box_min_x')!;
-    const boxMinY = t.getChild('box_min_y')!;
-    const boxMaxX = t.getChild('box_max_x')!;
-    const boxMaxY = t.getChild('box_max_y')!;
-    // `hull_x` and `hull_y` are `list<list<uint32>>` — **one entry per ring** (contracts §3.2
-    // item 4, `artifact-shapes.md` §9) — and **trail the fixed prefix, absent from the schema
-    // entirely when no served layer declares a hull** (r44). Read by name, tolerating absence:
-    // an absent pair reads as no artifact carrying a hull, and a per-row null in a present pair
-    // keeps its one meaning (the layer declares none). Where a column is present, the nesting is
-    // checked at the schema, so a body from a server that still sends one flat ring per artifact
-    // is refused rather than misread: the downcast is what a single-ring reader fails on, and the
-    // same downcast in reverse is what this decoder must not paper over.
-    const hullX = ringColumn(t, 'hull_x');
-    const hullY = ringColumn(t, 'hull_y');
-    // The two travel together by contract; one without the other has no reading.
-    if ((hullX === null) !== (hullY === null)) {
-      throw new Error('viewport artifacts frame carries one hull column and not the other');
-    }
-    // One content, entire, positional to the layer's declared kinds. Empty means the layer
-    // declares no supplied content — never that content was withheld, because an artifact whose
-    // content this principal may not read does not appear at all.
-    const content = t.getChild('content')!;
-    // **Present only where the parent is also in this response.** A null is a root *or* a parent
-    // this principal was not served, and the two are deliberately one value: naming the second
-    // would disclose that a coarser artifact exists which they may not see. Read it as "no parent
-    // here", never as "no parent".
-    const parentId = t.getChild('parent_id');
-    // **The rung a client draws this artifact at**, non-nullable, computed the right way for the
-    // layer's kind (contracts §3.2 r44): the declared level on a levelled layer, the
-    // response-local parent-chain depth on a treed one, 0 on a flat one. Read by name like every
-    // other column here; the schema's *position* is contract for a decoder that indexes
-    // positionally, which this one deliberately is not.
-    const rung = t.getChild('rung');
-    // **The filter bit, and null is a value**: the column is all-null where the request carried no
-    // filter, which is *there was no question* rather than *no matches* (decision 0104). A missing
-    // column reads the same way, and unlike `rung` there is nothing to refuse over — a client that
-    // asked for no filter has no use for it, and one that did draws every artifact undimmed, which
-    // is what it drew before the column existed.
-    const matched = t.getChild('matched');
-    // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
-    // (decision 0048) and the rung is what a client draws every layer's resolution from, so a
-    // body without the column — an r41-or-earlier server's `level` included — is a server this
-    // build does not match: silently reading every artifact as rung 0 would draw the whole
-    // hierarchy at its coarsest and look like data.
-    if (rung == null) {
-      throw new Error(
-        'viewport artifacts frame carries no `rung` column: this client requires a server that serves it (contracts §3.2 r44 renamed and re-meant `level`)'
-      );
-    }
-    for (let i = 0; i < tesseraId.length; i++) {
-      const cx = centroidX.get(i);
-      const bx = boxMinX.get(i);
-      const hx = hullX === null ? null : hullX.get(i);
-      const hy = hullY === null ? null : hullY.get(i);
-      // The two axes carry the same ring structure by construction. **Checked, not assumed** — a
-      // decoder that assumes it misdraws silently on the day something else does not, and a ring
-      // whose axes disagree has no reading at all: a shorter x than y would draw a ring that
-      // closes early, in the shape of a real boundary.
-      if ((hx === null) !== (hy === null)) {
-        throw new Error(`viewport artifact row ${i}: one hull axis is null and the other is not`);
-      }
-      let hull: [number, number][][] | null = null;
-      if (hx !== null && hy !== null) {
-        if (hx.length !== hy.length) {
-          throw new Error(`viewport artifact row ${i}: hull axes disagree on ring count (${hx.length} and ${hy.length})`);
-        }
-        hull = [];
-        for (let r = 0; r < hx.length; r++) {
-          const rx = hx.get(r);
-          const ry = hy.get(r);
-          if (rx === null || ry === null) {
-            throw new Error(`viewport artifact row ${i}: hull ring ${r} is null on one axis`);
-          }
-          if (rx.length !== ry.length) {
-            throw new Error(`viewport artifact row ${i}: hull axes disagree on the length of ring ${r} (${rx.length} and ${ry.length})`);
-          }
-          const ring: [number, number][] = [];
-          for (let v = 0; v < rx.length; v++) ring.push([Number(rx.get(v)), Number(ry.get(v))]);
-          hull.push(ring);
-        }
-      }
-      artifacts.push({
-        layer: String(layer.get(i)),
-        tesseraId: tesseraId[i]!,
-        // A publisher need not supply a key.
-        key: key.get(i) === null ? null : String(key.get(i)),
-        maskedCount: maskedCount[i]!,
-        centroid: cx === null ? null : [Number(cx), Number(centroidY.get(i))],
-        box:
-          bx === null
-            ? null
-            : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
-        hull,
-        content: Array.from(content.get(i) ?? [], (v) => String(v)),
-        // Absent on a server older than the field, which reads the same as a root — the
-        // fail-closed direction, and the only one available without inventing a parent.
-        parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i)),
-        rung: Number(rung.get(i)),
-        matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i))
-      });
-    }
-  }
+  const {artifacts, artifactsIdentity} = parts.artifacts
+    ? decodeArtifactsFrame(parts.artifacts)
+    : {artifacts: [] as Artifact[], artifactsIdentity: null};
 
   return {tiles, ids, codes, positions, world, scalars, membership, subCells, artifacts, artifactsIdentity};
 }

@@ -236,6 +236,19 @@ frames; the SDK grows a collect helper; `Engine::viewport` remains the in-proces
 surface. The tile-addressed adapter (`tile-addressed-integration.md`) consumes the engine API
 and is unaffected. No `?stream=0` mode: two framings is two conformance surfaces forever.
 
+**The TypeScript client reads the body as it arrives** (built 2026-08-28): it frames the byte
+stream incrementally, decodes each points frame the moment it is whole, and lands its tiles as
+bands before the next frame has been received — so a wide answer draws progressively instead of
+after its last byte. The two properties this rests on are §2's and §3's: a frame is an
+independently decodable Arrow stream, and it holds whole tiles in the tiles batch's order, so the
+run of counts a frame satisfies is found by adding up the `served` the server already sent. §6's
+rules are unchanged by it — the trailer's presence is still what marks the response complete, and
+a body that ends without one is still refused after every whole frame it did deliver has been
+handed over. Its batch path is unchanged and is what a reader holding a whole body still uses.
+Measured on GeoNames at depth 10 over 24,960 tiles (65.4 MB, 60 point frames, 14,343 bands, Node,
+inline decoder, loopback): first band **435–549 ms → 31–39 ms**, whole response 438–553 →
+280–317 ms.
+
 ## 9. Edits this lands (the implementation's checklist)
 
 - `tessera-wire`: frame writer (`kind` + length + payload), per-frame encoders, **in
@@ -264,7 +277,7 @@ and is unaffected. No `?stream=0` mode: two framings is two conformance surfaces
   (first-flush header, frame pacing) where today it is double-gated behind `bench-timing`; the
   register entry records the granularity change (review findings 3–4).
 - Consumers, in lockstep: `reference/oracle/wire.py`, `clients/ts/core` (`frame.ts`,
-  `decode.ts` — batch-wise; incremental decode is the client track's work),
+  `decode.ts`; the TypeScript client decodes **incrementally** — built 2026-08-28, §8),
   `tessera-server/tests/http.rs`'s decoder, conformance tests that touch framing, bench
   scripts reading `x-tessera-server-us` (meaning narrows to first-flush; the gate keeps it)
   and `x-tessera-stage-ns` (moves to the trailer).

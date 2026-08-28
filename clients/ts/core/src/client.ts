@@ -1,5 +1,12 @@
-import {decodeViewport} from './decode.js';
-import {createDecoder, type Decoder} from './decoder.js';
+import {
+  checkTrailerCounts,
+  decodeViewport,
+  parseTrailer,
+  type PointsPart,
+  type ViewportHead
+} from './decode.js';
+import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
+import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
 import type {
   ArrowType,
   ArtifactDetail,
@@ -9,9 +16,67 @@ import type {
   Layer,
   Meta,
   Session,
+  TileCounts,
+  ViewportPart,
   ViewportRequest,
-  ViewportResponse
+  ViewportResponse,
+  ViewportResult
 } from './types.js';
+
+/** Where a streamed response's points go, one frame's worth at a time. */
+export type PartSink = (part: ViewportPart) => void | Promise<void>;
+
+/** What either decode path hands back, before the headers are folded in around it. */
+type Decoded = {
+  result: ViewportResult;
+  bytes: number;
+  points: number;
+  ms: number;
+  workerMs: number | null;
+};
+
+/**
+ * The point columns of a response that carried none — every streamed response's own result.
+ *
+ * Fresh buffers each time rather than one shared empty set: a caller that holds a result holds
+ * these, and two results sharing a `scalars` object is an aliasing fault waiting for the day
+ * something writes to one.
+ */
+function emptyPoints() {
+  return {
+    ids: new BigUint64Array(0),
+    codes: new BigUint64Array(0),
+    positions: new Float64Array(0),
+    world: new Float32Array(0),
+    scalars: {} as Record<string, never>,
+    membership: {} as Record<string, never>
+  };
+}
+
+/** The same result with its points removed — they were delivered to the sink instead. */
+function headOnly(result: ViewportResult): ViewportResult {
+  return {...result, ...emptyPoints()};
+}
+
+/**
+ * The run of tiles whose served counts add up to one points frame's rows.
+ *
+ * **A chunk boundary never splits a tile** (`streamed-serving.md` §2), so the frame's rows are
+ * exactly some run of the tiles batch and the run is found by adding up the counts the server
+ * already sent. A frame whose rows land inside a tile is a wire the client cannot attribute, and
+ * it refuses rather than assigning the points to a tile they may not belong to.
+ */
+function tilesFor(tiles: readonly TileCounts[], from: number, rows: number): {tiles: TileCounts[]; next: number} {
+  let at = from;
+  let sum = 0;
+  while (at < tiles.length && sum < rows) sum += Number(tiles[at++]!.served);
+  if (sum !== rows) {
+    throw new Error(
+      `a points frame of ${rows} rows does not end on a tile boundary (tiles ${from}..${at} serve ${sum})`
+    );
+  }
+  return {tiles: tiles.slice(from, at), next: at};
+}
 
 /**
  * A Tessera error body, `{"error": code, "detail": string}`, with its HTTP status.
@@ -59,6 +124,10 @@ export type TesseraClientOptions = {
    * response's size and point count, and `workerMs` — the worker's own decode time, so the
    * difference is what the response spent queued behind another in its lane (`null` where it
    * decoded inline).
+   *
+   * **On a streamed response `ms` is head-to-last-part and so includes the wire**, there being no
+   * moment at which the bytes are all in hand and none of them decoded; `workerMs` is then the sum
+   * of the frames' own decode times, and is the decode figure.
    */
   onDecode?: (ms: number, bytes: number, points: number, workerMs: number | null) => void;
   /**
@@ -186,7 +255,15 @@ export class TesseraClient {
     req: ViewportRequest,
     signal?: AbortSignal,
     /** Route decode to the speculative lane — see {@link Decoder.decode}. */
-    background = false
+    background = false,
+    /**
+     * Take each points frame as it lands, rather than the whole response at the end.
+     *
+     * **With a sink the returned response carries no points**: every one of them went to the sink,
+     * and handing them over twice would double both the memory and the work. Without one the
+     * response is what it always was. `k = 0` has no points frames and ignores this.
+     */
+    onPart?: PartSink
   ): Promise<ViewportResponse> {
     const body: Record<string, unknown> = {view: req.view, zoom: req.zoom};
     if (req.bbox) body.bbox = req.bbox;
@@ -228,12 +305,15 @@ export class TesseraClient {
       signal
     });
     if (!response.ok) await fail(response);
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    // Read BEFORE decode: the worker path transfers the buffer zero-copy, which detaches it —
-    // `byteLength` afterwards is 0, and every byte ledger downstream (the anticipation budget,
-    // the traces, the ring-spend measurement) silently read that zero.
-    const size = bytes.byteLength;
     const stage = response.headers.get('x-tessera-stage-ns');
+    const coordinates = {
+      identityKey: response.headers.get('x-tessera-identity-key') ?? '',
+      // Unquoted here: the quotes are HTTP's entity-tag syntax, not part of the value, and every
+      // comparison this client makes is against another value it took from this same header.
+      contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
+      pin: response.headers.get('x-tessera-pin'),
+      stale: response.headers.get('x-tessera-stale') === '1'
+    };
     this.decoder ??= this.opts.decoder ?? createDecoder();
     const decodeStarted = performance.now();
     // **A counts-only response decodes on this thread.** `k = 0` carries tiles and artifacts and
@@ -241,23 +321,221 @@ export class TesseraClient {
     // milliseconds to decode — and the worker lanes are serial: measured on the demo, a region's
     // count queued 7.9 s behind a million-point decode in the lane it was dealt, for a response
     // the server answered in 5 ms. The channel's and the region's asks are exactly the requests
-    // whose latency the user is waiting on, so they never queue behind a point sweep.
-    const result = req.k === 0 ? decodeViewport(bytes) : await this.decoder.decode(bytes, background);
-    this.opts.onDecode?.(performance.now() - decodeStarted, size, result.ids.length, req.k === 0 ? null : this.decoder.lastWorkerMs);
+    // whose latency the user is waiting on, so they never queue behind a point sweep. It has no
+    // points frames either, so there is nothing for a part sink to be handed.
+    const counts = req.k === 0;
+    const decoded =
+      onPart && !counts
+        ? await this.streamed(
+            response,
+            {identityKey: coordinates.identityKey, contentKey: coordinates.contentKey},
+            onPart,
+            background
+          )
+        : await this.whole(response, counts, background);
+    this.opts.onDecode?.(decoded.ms, decoded.bytes, decoded.points, decoded.workerMs);
     return {
-      result,
+      result: decoded.result,
       timings: {
+        // Time-to-**first-flush**, not the whole response (`streamed-serving.md` §6): the server's
+        // own cost is the sweep, and the trailer's `stream_us` — which includes every wait on this
+        // client's own reading — is deliberately not this number.
         serverUs: Number(response.headers.get('x-tessera-server-us') ?? 0),
         admissionUs: Number(response.headers.get('x-tessera-admission-us') ?? 0),
         stageNs: stage ? stage.split(',').map(Number) : null
       },
-      identityKey: response.headers.get('x-tessera-identity-key') ?? '',
-      // Unquoted here: the quotes are HTTP's entity-tag syntax, not part of the value, and every
-      // comparison this client makes is against another value it took from this same header.
-      contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
-      pin: response.headers.get('x-tessera-pin'),
-      stale: response.headers.get('x-tessera-stale') === '1',
-      bytes: size
+      ...coordinates,
+      bytes: decoded.bytes
+    };
+  }
+
+  /** The whole body, then the decoder — what a caller holding no part sink gets. */
+  private async whole(
+    response: Response,
+    counts: boolean,
+    background: boolean
+  ): Promise<Decoded> {
+    const started = performance.now();
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    // Read BEFORE decode: the worker path transfers the buffer zero-copy, which detaches it —
+    // `byteLength` afterwards is 0, and every byte ledger downstream (the anticipation budget,
+    // the traces, the ring-spend measurement) silently read that zero.
+    const size = bytes.byteLength;
+    const result = counts ? decodeViewport(bytes) : await this.decoder!.decode(bytes, background);
+    return {
+      result,
+      bytes: size,
+      points: result.ids.length,
+      ms: performance.now() - started,
+      workerMs: counts ? null : this.decoder!.lastWorkerMs
+    };
+  }
+
+  /**
+   * Consume the body as it arrives, landing each points frame the moment it is whole.
+   *
+   * **Slow data should cause pop-in, not lag.** A wide view is around a hundred point frames and a
+   * hundred megabytes; reading the body to its end before decoding the first frame means nothing
+   * is drawn until the last byte has landed, and then every tile arrives at once — the wire
+   * streams and the client waits. The server already emits whole tiles per frame, in tile order,
+   * each frame an independently decodable Arrow stream (`streamed-serving.md` §2, §3), which is
+   * precisely the licence to decode and draw one as it completes.
+   *
+   * The tiles frame comes first, so each part carries the run of tile counts its own points
+   * satisfy — walked off the counts the server already sent, since a chunk boundary never splits a
+   * tile. A part is therefore a set of *whole* bands, not a fragment of one, and the replica
+   * stores it exactly as it stores a whole response.
+   *
+   * **What ends the response is the trailer, not the socket.** A body that stops without one is
+   * incomplete by contract and throws here as it always did (`streamed-serving.md` §6); what the
+   * caller has already landed stays landed and stays sound — every part came from the one
+   * generation snapshot and each tile's points are an id-order prefix of `served(T)` — but the
+   * request never resolves, so nothing downstream marks the region covered.
+   */
+  private async streamed(
+    response: Response,
+    coordinates: {identityKey: string; contentKey: string},
+    onPart: PartSink,
+    background: boolean
+  ): Promise<Decoded> {
+    const started = performance.now();
+    if (!response.body) {
+      // A runtime whose `fetch` gives no stream — a polyfill, a mocked transport. The sink is
+      // still handed everything, in one piece; the difference is when, never what.
+      const whole = await this.whole(response, false, background);
+      await onPart({result: whole.result, ...coordinates});
+      return {...whole, result: headOnly(whole.result)};
+    }
+    const reader = response.body.getReader();
+    const frames = new FrameReader();
+    const head: HeadFrames = {tiles: new Uint8Array(0), subCells: null, artifacts: null};
+    let decodingHead: Promise<ViewportHead> | null = null;
+    let trailerBytes: Uint8Array | null = null;
+    let bytes = 0;
+    let flushes = 0;
+    let points = 0;
+    // Accumulated across the frames, and left null where the decoder measures nothing (the inline
+    // one, whose calls *are* the work) so a zero is never reported as a measurement.
+    let workerMs: number | null = null;
+    // The tiles frame's rows, consumed in step with the point frames that satisfy them.
+    let tileAt = 0;
+    // Parts are delivered in wire order however the decode lanes deal the frames, by awaiting
+    // each frame's decode in turn. The chain also carries the sink's own backpressure: reading
+    // continues while a part is absorbed, so the socket is never held for the absorb lane, but a
+    // second part is never handed over before the first has been taken.
+    let delivering: Promise<void> = Promise.resolve();
+    // Nobody awaits this chain until the body has been read, and a rejection with no handler in
+    // between is an unhandled rejection rather than this call's failure.
+    delivering.catch(() => {});
+
+    // Set the moment the read fails — an abort, a transport fault, a frame the grammar refuses.
+    // Nothing lands after it: a request the caller has abandoned must not keep filling a store
+    // behind the view that superseded it, which is the discard a whole-body abort got for free.
+    let abandoned = false;
+
+    const startHead = () => {
+      decodingHead ??= this.decoder!.decodeHead(head, background);
+    };
+    const deliver = (decoding: Promise<PointsPart>) => {
+      delivering = delivering.then(async () => {
+        const part = await decoding;
+        // Read here, next to the reply it belongs to: the decoder reports the *last* reply's
+        // time, and the head's own reply lands on the same counter.
+        const frameMs = this.decoder!.lastWorkerMs;
+        if (abandoned) return;
+        const decodedHead = await decodingHead!;
+        if (frameMs !== null) workerMs = (workerMs ?? 0) + frameMs;
+        const rows = part.ids.length;
+        points += rows;
+        const run = tilesFor(decodedHead.tiles, tileAt, rows);
+        tileAt = run.next;
+        await onPart({
+          result: {
+            tiles: run.tiles,
+            ...part,
+            subCells: null,
+            // Every part carries the response's artifacts, because that is what a point's
+            // membership column is named through (`bands.ts`) and the frame precedes them all.
+            artifacts: decodedHead.artifacts,
+            artifactsIdentity: decodedHead.artifactsIdentity
+          },
+          ...coordinates
+        });
+      });
+      delivering.catch(() => {});
+    };
+
+    try {
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        for (const frame of frames.push(value)) {
+          switch (frame.kind) {
+            case FRAME_TILES:
+              head.tiles = frame.payload;
+              break;
+            case FRAME_SUB_CELLS:
+              head.subCells = frame.payload;
+              break;
+            case FRAME_ARTIFACTS:
+              head.artifacts = frame.payload;
+              break;
+            case FRAME_POINTS:
+              // The head is complete at the first points frame — the grammar puts every other
+              // frame before it — so this is the earliest the counts and the artifacts can be
+              // decoded, and they are decoded before the points they name.
+              startHead();
+              flushes += 1;
+              deliver(this.decoder!.decodePoints(frame.payload, background));
+              break;
+            case FRAME_TRAILER:
+              // A counts-only or empty response has no points frame to have started it.
+              startHead();
+              trailerBytes = frame.payload;
+              break;
+          }
+        }
+      }
+    } catch (error) {
+      abandoned = true;
+      // Releases the body for a fault the transport did not itself raise; an aborted stream is
+      // already errored and this is a no-op on it.
+      void reader.cancel().catch(() => {});
+      throw error;
+    }
+    // **Every whole frame is handed over before the response is judged.** A body that stopped
+    // without its trailer is refused below, and what it did deliver is sound — whole tiles from
+    // the one generation snapshot — so the refusal denies the caller a *complete* response, not
+    // the points it already has.
+    await delivering;
+    // Throws on a body that stopped mid-frame or without its trailer, which is what makes a
+    // truncated response loud rather than short.
+    frames.end();
+    const decodedHead = await decodingHead!;
+    checkTrailerCounts(parseTrailer(trailerBytes!), flushes, points);
+    // Every tile the server said it served points for has had them. The batch decoder gets this
+    // for free by walking one array; here the walk is spread over the parts, so its end is
+    // checked rather than assumed.
+    for (let i = tileAt; i < decodedHead.tiles.length; i++) {
+      if (decodedHead.tiles[i]!.served !== 0n) {
+        throw new Error(
+          `tile ${decodedHead.tiles[i]!.tile} was served ${decodedHead.tiles[i]!.served} points that no frame carried`
+        );
+      }
+    }
+    return {
+      result: {
+        tiles: decodedHead.tiles,
+        ...emptyPoints(),
+        subCells: decodedHead.subCells,
+        artifacts: decodedHead.artifacts,
+        artifactsIdentity: decodedHead.artifactsIdentity
+      },
+      bytes,
+      points,
+      ms: performance.now() - started,
+      workerMs
     };
   }
 

@@ -575,6 +575,57 @@ counts arrive with the response it chose the size of — so the opening view is 
 everything after it is count-driven. ⊘ **Not measured on GeoNames itself**: the figures above are
 the defect's measurement and a synthetic of its shape, not a re-run.
 
+## The response lands as it arrives (`demo/perf-stream`, 2026-08-28)
+
+**The wire streamed and the client waited.** `POST /v1/viewport` has been a frame sequence since
+`streamed-serving.md` shipped — tiles first, then one points frame per flush of whole tiles, then a
+JSON trailer — but `TesseraClient.viewport` read `response.arrayBuffer()` and only then handed the
+bytes to its decoder, so nothing was drawn until the last byte had landed and the absorb lane then
+had every tile at once. A wide GeoNames view at depth 10 is 60 point frames and 65 MB.
+
+The client now frames the byte stream as it arrives and lands each frame's tiles the moment the
+frame is whole. What made it a small change is a property the server already guarantees: a points
+frame is an independently decodable Arrow stream holding **whole tiles** in the tiles batch's
+order (`streamed-serving.md` §2, §3), so the run of counts a frame satisfies is found by adding up
+the `served` the server sent in the first flush, and a frame is therefore a set of *whole bands* —
+the replica stores one exactly as it stores a whole response, and the band splitter did not change.
+
+| | |
+|---|---|
+| `frame.ts` | one `FrameReader` state machine for the grammar, fed a whole body or a network chunk at a time; `splitFramedStreams` is now that reader pushed once. Chunk boundaries carry no meaning — a header split across three chunks and a payload across a hundred both frame — and no frame is copied more than once. It also refuses a points frame **before** the tiles frame, which the batch reader had only discovered at the trailer |
+| `decode.ts` | the per-frame decoders factored out (`decodeTiles`, `decodeSubCells`, `decodeArtifactsFrame`, `decodePoints`, `decodeHead`, `parseTrailer`, `checkTrailerCounts`); `decodeViewport` is those in sequence and is byte-for-byte what it was |
+| the worker | three request shapes instead of one — a whole body, a *head* (tiles + sub-cells + artifacts), and one points frame — each frame transferred rather than copied. A response's frames are dealt round-robin across the two foreground lanes, so its own frames decode two at a time; the caller keeps them in order by awaiting them in order |
+| `client.ts` | `viewport` takes an optional part sink. With one it reads the body incrementally and **the returned response carries no points** — they all went to the sink, and handing them over twice would double the memory and the absorbing. Without one it is what it was, which is what the counts asks, the artifact channel and every direct caller still use |
+| `replica.ts` | the sink absorbs each part as it lands; the response that follows is only *observed*. The byte ledger, `markCovered` and the eviction pass stay **per response** — a pass over the budget sorts every held band, and running it per part would be that sort sixty times for one answer |
+
+**Measured**, GeoNames at depth 10 over 24,960 tiles (65.4 MB, 60 point frames, 14,343 bands),
+against a scratch server over the same bundle on this machine, Node with the inline decoder over
+loopback, alternated whole-body/streamed twice:
+
+| | whole body | streamed |
+|---|---|---|
+| first band stored | 435–549 ms | **31–39 ms** |
+| last band stored | 435–549 ms | 278–314 ms |
+| whole request | 438–553 ms | 280–317 ms |
+
+The first figure is the point: the map draws its first tiles about fourteen times sooner. The
+third moved too, because decode now overlaps the wire rather than following it. ⊘ **Measured in
+Node, not in a browser**: the inline decoder is what Node gets, so this is main-thread decode with
+no worker hop and no drawing competing for the thread; the browser's shape should be at least as
+good, and it is not measured.
+
+The three failure modes stay loud, and each has a test. A body that ends without its trailer is
+still incomplete by contract — every whole frame it delivered is handed over first, then the
+refusal, so a caller keeps drawable points and never gets a response to mark a region covered on.
+An abort discards everything after it: nothing lands once the read has failed, and the reader is
+cancelled. A body cut inside a frame is refused rather than served short.
+
+**The `slice` instrument still means something and now means it per part**: the absorb lane sees a
+trickle rather than a wall, so the budget typically binds on the first slice of a part and not at
+all on the rest, and the maximum over a response is what it always was. `onDecode`'s `ms` is
+head-to-last-part on the streaming path, which includes the wire; its `workerMs` is the sum of the
+frames' own decode times and is the decode figure.
+
 ## What each step owes a measurement
 
 The design's §5.10 figures are modelled. Step 2's harness measures, and this file records:

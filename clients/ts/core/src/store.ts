@@ -440,7 +440,7 @@ export function createStore(options: StoreOptions): Store {
 
     layersOn = layerClosure(meta.layers, layersOn);
     replica = new Replica(
-      async (req, signal, background) => {
+      async (req, signal, background, onPart) => {
         const tok = await ensureToken();
         tokenEverUsed = true;
         // The point path names the layers that are on, with their closure, and pays their pass
@@ -454,7 +454,8 @@ export function createStore(options: StoreOptions): Store {
           tok,
           {...req, view: viewId, filters: composeFilters(projections.filters.draft), layers: req.k === 0 ? [] : layersOn, ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)})},
           signal,
-          background
+          background,
+          onPart
         );
       },
       meta.quantisation,
