@@ -27,7 +27,8 @@ use tessera_wire::{
 
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{
-    CancelToken, LayerSelection, LevelSelection, SinkClosed, SinkResult, ViewportHead, ViewportSink,
+    CancelToken, ComputedSelection, LayerSelection, LevelSelection, SinkClosed, SinkResult,
+    ViewportHead, ViewportSink,
 };
 
 use crate::error::{map_engine_error, map_join_error, ApiError};
@@ -544,6 +545,27 @@ struct ViewportReq {
     /// layer name takes, and the same reason: asking is not a way to learn what exists.
     #[serde(default)]
     levels: Option<LevelsReq>,
+    /// Which of each layer's **declared** computed properties — `centroid`, `box`, `hull` — the
+    /// response should carry.
+    ///
+    /// **Absent is the declaration's own set**, which is what every response carried before this
+    /// field existed. A list answers for exactly those, intersected with what each layer declared,
+    /// and **the empty list is none**: counts and no geometry.
+    ///
+    /// **It narrows and can never widen.** A property a layer did not declare is not served for
+    /// naming it, by the same route an unreachable layer name takes; the intersection is the whole
+    /// rule. Nothing here reaches the closure rule — whatever is computed is still a function of
+    /// `membership ∩ M_auth` and nothing else — so this is a cost control of exactly the kind the
+    /// declaration is, moved to the request that pays for it. The client draws a hull for the one
+    /// artifact under the pointer and asks the drill-down route for that one, where before it was
+    /// served 197 to draw one (`artifact-shapes.md` §7).
+    ///
+    /// **A name outside the vocabulary is a `422`, unlike an unreachable layer name**, and the
+    /// split is the one contracts §3.2 already draws for filters: the vocabulary is deployment
+    /// schema, fixed, the same for every principal and published in `/v1/meta`, so refusing
+    /// discloses nothing. A *layer* name is viewer data, which is why that one is absent instead.
+    #[serde(default)]
+    computed: Option<Vec<String>>,
 }
 
 /// The `layers` field's two spellings: a list of names, or the one reserved word.
@@ -954,6 +976,19 @@ fn run_viewport_stream(
         Some(LevelsReq::Named(_)) => LevelSelection::Named(&level_numbers),
         None => LevelSelection::Declared,
     };
+    // **Absent is the declaration's own set**, as `levels` beside it is: a client that never
+    // thought about geometry is answered exactly as it was before the field existed. Parsed rather
+    // than validated here — the handler already refused an unknown name, so this cannot drop one.
+    let computed_named: Vec<tessera_engine::ComputedProperty> = req
+        .computed
+        .iter()
+        .flatten()
+        .filter_map(|name| tessera_engine::ComputedProperty::parse(name))
+        .collect();
+    let computed = match &req.computed {
+        Some(_) => ComputedSelection::Named(&computed_named),
+        None => ComputedSelection::Declared,
+    };
     let mut request = ViewportRequest::new(&req.view, req.zoom, bbox, k)
         .tiles(tiles.as_deref())
         .stamp(stamp)
@@ -961,6 +996,7 @@ fn run_viewport_stream(
         .layers(layers)
         .artifact_budget(req.artifact_budget)
         .levels(levels)
+        .computed(computed)
         .cancel(Some(cancel));
     if let Some(filter) = filter {
         request = request.filter(filter);
@@ -1145,6 +1181,21 @@ async fn viewport(
             return Err(ApiError::Contract(
                 "send exactly one of bbox and tiles".to_string(),
             ));
+        }
+    }
+
+    // **The computed vocabulary is refused here, before admission**, and it is the one part of
+    // this field that is not an intersection: the three names are deployment schema, so an unknown
+    // one is a client bug and saying so costs no disclosure (see [`ViewportReq::computed`]).
+    if let Some(names) = &req.computed {
+        if let Some(bad) = names
+            .iter()
+            .find(|name| tessera_engine::ComputedProperty::parse(name).is_none())
+        {
+            return Err(ApiError::Contract(format!(
+                "`computed` names {bad:?}; the computed properties are {}",
+                tessera_engine::ComputedProperty::VOCABULARY.join(", ")
+            )));
         }
     }
 

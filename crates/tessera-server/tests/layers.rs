@@ -733,7 +733,8 @@ fn tiered_zoomed(name: &str) -> serde_json::Value {
     let mut d = declaration(name, None);
     d["require_member_visibility"] = serde_json::Value::Null;
     d["hierarchy"] = json!({ "kind": "tiered", "prune_children": true });
-    d["content"] = json!({ "computed": ["centroid"], "supplied": [], "withdraw_on_member_deletion": true });
+    d["content"] =
+        json!({ "computed": ["centroid"], "supplied": [], "withdraw_on_member_deletion": true });
     d["levels"] = json!([
         { "level": 0, "title": "Country", "zoom": [0, 4] },
         { "level": 1, "title": "Admin 1", "zoom": [3, 7] },
@@ -744,7 +745,10 @@ fn tiered_zoomed(name: &str) -> serde_json::Value {
 
 /// Plant one artifact at each of three levels of `admin/boundaries`.
 async fn plant_three_levels(server: &TestServer) {
-    assert_eq!(register(server, tiered_zoomed("admin/boundaries")).await.0, 201);
+    assert_eq!(
+        register(server, tiered_zoomed("admin/boundaries")).await.0,
+        201
+    );
     for (level, key) in [(0u32, "country"), (1, "state"), (2, "county")] {
         let members: Vec<String> = (0..300u64).map(member).collect();
         let (status, body) = publish(
@@ -808,7 +812,10 @@ async fn naming_levels_on_the_wire_overrides_the_map() {
         levels_at(&server, 0, json!({ "levels": "all" })).await,
         vec![0, 1, 2]
     );
-    assert_eq!(levels_at(&server, 0, json!({ "levels": [2] })).await, vec![2]);
+    assert_eq!(
+        levels_at(&server, 0, json!({ "levels": [2] })).await,
+        vec![2]
+    );
     assert_eq!(
         levels_at(&server, 0, json!({ "levels": [0, 9] })).await,
         vec![0],
@@ -854,4 +861,146 @@ async fn a_levels_field_that_is_neither_a_list_nor_all_is_refused() {
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 422);
+}
+
+// ---------------------------------------------------------------------------------------------
+// `computed` on the wire (2026-08-28).
+// ---------------------------------------------------------------------------------------------
+
+/// One cluster on a layer declaring `centroid` and `hull`, asked for with one `computed` spelling.
+async fn computed_row(server: &TestServer, extra: serde_json::Value) -> ArtifactRow {
+    let rows = viewport_artifacts(server, &["0"], extra)
+        .await
+        .expect("a served layer carries the frame");
+    rows.into_iter().next().expect("one cluster")
+}
+
+async fn one_cluster(server: &TestServer) {
+    let mut d = declaration("clusters/a", None);
+    d["require_member_visibility"] = serde_json::Value::Null;
+    assert_eq!(register(server, d).await.0, 201);
+    let members: Vec<String> = (0..300u64).map(member).collect();
+    let (status, body) = publish(
+        server,
+        "clusters/a",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "c0", "members": members }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+}
+
+/// **A request narrows the declaration, and the narrowing reaches the wire.** The layer declares
+/// `centroid` and `hull`; a request naming only `centroid` is served the centroid and a null hull.
+///
+/// This is the field's whole purpose: the client draws one hull and was being served every
+/// artifact's, which measured at 94% of a `k = 0` artifacts request on the 2.42M corpus
+/// (`artifact-shapes.md` §7).
+#[tokio::test]
+async fn a_named_computed_set_narrows_what_the_frame_carries() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    one_cluster(&server).await;
+
+    let all = computed_row(&server, json!({})).await;
+    assert!(
+        all.centroid.is_some() && all.hull.is_some(),
+        "absent is the declaration's own set"
+    );
+
+    let narrowed = computed_row(&server, json!({ "computed": ["centroid"] })).await;
+    assert!(narrowed.centroid.is_some(), "asked for");
+    assert!(narrowed.hull.is_none(), "not asked for");
+    assert_eq!(
+        narrowed.tessera_id, all.tessera_id,
+        "the same artifact is served either way — only what is said about it moved"
+    );
+    assert_eq!(
+        narrowed.masked_count, all.masked_count,
+        "a geometry selection is not a disclosure control: the count is untouched"
+    );
+}
+
+/// **Asking for less is never a way to see more.** `box` is not declared by this layer, so naming
+/// it serves nothing — the request intersects the declaration and can never union with it.
+#[tokio::test]
+async fn naming_an_undeclared_property_serves_it_no_more_than_omitting_it() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    one_cluster(&server).await;
+
+    let row = computed_row(&server, json!({ "computed": ["box", "centroid"] })).await;
+    assert!(
+        row.bbox.is_none(),
+        "the layer declares no box; naming it adds none"
+    );
+    assert!(row.centroid.is_some());
+    assert!(row.hull.is_none());
+}
+
+/// **The empty list is none** — counts and no geometry, and the frame is still served, because a
+/// geometry selection says nothing about which artifacts exist.
+#[tokio::test]
+async fn an_empty_computed_list_is_counts_and_no_geometry() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    one_cluster(&server).await;
+
+    let row = computed_row(&server, json!({ "computed": [] })).await;
+    assert!(row.centroid.is_none() && row.bbox.is_none() && row.hull.is_none());
+    assert!(
+        row.masked_count > 0,
+        "the artifact is still served, and counted"
+    );
+}
+
+/// **A name outside the vocabulary is a `422`**, unlike an unreachable layer name, which is
+/// absent. The vocabulary is deployment schema — fixed, identical for every principal, published
+/// in `/v1/meta` — so refusing discloses nothing; a layer name is viewer data and does.
+#[tokio::test]
+async fn an_unknown_computed_name_is_refused_and_says_the_vocabulary() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    one_cluster(&server).await;
+
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 10,
+            "layers": "all", "computed": ["outline"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["detail"].as_str().unwrap().contains("centroid"),
+        "the refusal names the vocabulary: {body}"
+    );
+}
+
+/// **The drill-down route is unaffected**, and that is what makes the narrowing usable: the client
+/// asks the viewport for centroids and boxes and this route for the one hull it draws.
+#[tokio::test]
+async fn the_drill_down_still_carries_the_hull_the_viewport_was_not_asked_for() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    one_cluster(&server).await;
+
+    let row = computed_row(&server, json!({ "computed": ["centroid"] })).await;
+    assert!(row.hull.is_none());
+
+    let (status, body) = drill(&server, &["0"], &row.tessera_id.to_string()).await;
+    assert_eq!(status, 200, "{body}");
+    let rings = body["hull"]
+        .as_array()
+        .expect("the drill-down serves the hull");
+    assert!(!rings.is_empty());
 }

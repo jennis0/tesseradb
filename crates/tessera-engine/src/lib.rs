@@ -70,14 +70,14 @@ pub use single_flight::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLI
 // `deny tessera-server tessera-authz`), and `tessera_authz::CacheStats` is not a public path even
 // for a crate that could — its module is private there. Whoever wires `/control/status`
 // writes `use tessera_engine::FragmentCacheStats;` and nothing else.
-pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
+pub use derived::ComputedProperty;
 pub use membership_column::MembershipColumn;
+pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
-    ArtifactOut, ColumnBuf, EngineMeta, ItemOut, LayerSelection, LevelSelection, PointColumns,
-    ScalarOut, SinkClosed, SinkResult,
-    SubCellCount, TileCount, ViewCoordinates, ViewportHead, ViewportOut, ViewportRequest,
-    ViewportSink,
+    ArtifactOut, ColumnBuf, ComputedSelection, EngineMeta, ItemOut, LayerSelection, LevelSelection,
+    PointColumns, ScalarOut, SinkClosed, SinkResult, SubCellCount, TileCount, ViewCoordinates,
+    ViewportHead, ViewportOut, ViewportRequest, ViewportSink,
 };
 // `EngineMeta::declared_scalars`' element type, re-exported for the same layering reason
 // `FragmentCacheStats` is: `check-layers.sh` denies a `tessera-server → tessera-store` edge
