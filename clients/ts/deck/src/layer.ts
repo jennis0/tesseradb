@@ -286,6 +286,12 @@ const ownLut = new WeakMap<MarkSlab, LookupTexture>();
 const heldOutlines = new WeakMap<object, {key: string; hulls: object; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]; placed: number}>();
+/**
+ * The label candidates, once per served set — **not** per zoom bucket, which is what the
+ * placement is per. Anchors are held in world units and scaled per bucket; see
+ * {@link labelCandidates}.
+ */
+const heldCandidates = new WeakMap<object, {key: string; candidates: LabelCandidate[]; byId: Map<bigint, LabelText>}>();
 
 /**
  * One drawn ring. **A datum is a ring, not an artifact** — a hull is a list of rings
@@ -549,8 +555,30 @@ export function frontier(a: ArtifactsProjection, level: number | undefined): Set
  * the drawn frontier holds. The range is taken over the candidates that survive the budget, which
  * is what is on screen: the largest name is the largest count drawn, and the smallest the
  * smallest.
+ *
+ * **Held per served set, not per zoom bucket.** Every part of a candidate but its anchor — the
+ * frontier, the sort by masked count, the budget's cut, the wrapped lines and the box they make —
+ * is a function of the served set, the level and the budget alone; only the anchor is pixels, and
+ * a zoom scales it. The placement is what a bucket re-runs, and it takes the top `budget`
+ * candidates rather than the served set (0.2 ms against 38 for a filter and sort of 34k, measured
+ * on GeoNames at zoom 9–10). So the list is built once and each bucket scales anchors into a copy.
  */
 export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, zoom: number, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
+  const key = `${a.version}|${level ?? ''}|${budget}`;
+  let held = heldCandidates.get(a.served);
+  if (!held || held.key !== key) {
+    held = {key, ...namedCandidates(a, meta, level, budget)};
+    heldCandidates.set(a.served, held);
+  }
+  const scale = 2 ** zoom; // pixels per world unit
+  return {candidates: held.candidates.map((c) => ({...c, x: c.x * scale, y: c.y * scale})), byId: held.byId};
+}
+
+/**
+ * The zoom-independent half of {@link labelCandidates}: the candidates with their anchors in
+ * **world units**, which the caller scales.
+ */
+function namedCandidates(a: ArtifactsProjection, meta: Meta | null, level: number | undefined, budget: number): {candidates: LabelCandidate[]; byId: Map<bigint, LabelText>} {
   const placed = a.served.filter((x) => x.centroid !== null);
   // A dependent layer's artifacts — a clustering's topic labels — draw their text beneath the
   // name of whatever they sit on, italic and small, and are placed with it: they are not
@@ -571,7 +599,6 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
     if (count < smallest) smallest = count;
     if (count > largest) largest = count;
   }
-  const scale = 2 ** zoom; // pixels per world unit
   const candidates: LabelCandidate[] = [];
   const byId = new Map<bigint, LabelText>();
   for (const artifact of named) {
@@ -592,8 +619,8 @@ export function labelCandidates(a: ArtifactsProjection, meta: Meta | null, level
     const lastLine = lines[lines.length - 1]!.length * NAME_EM * size + countText.length * COUNT_EM * size * COUNT_SCALE + COUNT_GAP_EM * size;
     candidates.push({
       id: artifact.tesseraId,
-      x: gridToWorld(artifact.centroid![0]) * scale,
-      y: gridToWorld(artifact.centroid![1]) * scale,
+      x: gridToWorld(artifact.centroid![0]),
+      y: gridToWorld(artifact.centroid![1]),
       width: Math.max(widest, lastLine, topic ? topic.length * TOPIC_SIZE * 0.5 : 0) + 8,
       height: lines.length * size * LABEL_LINE_HEIGHT + (topic ? TOPIC_SIZE + 3 : 0),
       priority: count
@@ -831,11 +858,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const {slab} = this.props;
     const layers: (Layer | null)[] = [];
 
-    // The lookup texture is rewritten whenever the table, the served set, the palette, the level
-    // or the highlight moved — O(table range), never O(points) — and the device it lives on is
-    // deck's. **The table's own version is in the key**: a point response names artifacts the
-    // debounced channel has not served yet, and without it those ordinals kept the texture's
-    // neutral until the channel's next answer bumped `version`.
+    // The lookup texture is rewritten whenever the table, the colours, the palette, the level or
+    // the highlight moved — never O(points), and by the rows that moved rather than whole where
+    // the table only gained ordinals (`lut.ts`) — and the device it lives on is deck's. **The
+    // table and the colour map are compared inside**, by version and by identity: a point response
+    // names artifacts the debounced channel has not served yet, and those ordinals would otherwise
+    // keep the texture's neutral until the channel's next answer. The served set's version is
+    // deliberately not in the key — no texel is a function of it, and having it there rebuilt the
+    // whole texture on every settle.
     const lut = this.lut();
     const lutStarted = performance.now();
     if (this.context.device && !lut.gpu) lut.attach(this.context.device);
@@ -845,7 +875,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     if (r.artifacts) {
       lut.update(
         {artifacts: r.artifacts, level: this.props.clusterLevel, highlight: highlightOrdinal},
-        `${r.artifacts.version}|${r.artifacts.table.version}|${r.artifacts.palette}|${r.artifacts.table.range}|${this.props.clusterLevel ?? ''}|${highlightOrdinal}`
+        `${r.artifacts.palette}|${this.props.clusterLevel ?? ''}|${highlightOrdinal}`
       );
     }
     timings.lutMs = performance.now() - lutStarted;

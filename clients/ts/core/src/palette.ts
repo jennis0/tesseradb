@@ -69,6 +69,16 @@ export function positionalColour(centroid: readonly [number, number], scheme: Pa
 /** The neutral: *not known here yet*, which is what a point wears until the wire names it. */
 export const NEUTRAL: Rgba = [118, 126, 140, 200];
 
+/**
+ * The colour of one artifact under the **positional** palette, centroid or not: the whole of what
+ * that palette does per entry, since it ignores the set. Stated once here because a caller that
+ * extends a colour map for a newly named ordinal — rather than rebuilding it over the whole
+ * session table (`store.ts`) — must compute exactly what {@link artifactColours} would have.
+ */
+export function positionalEntry(centroid: readonly [number, number] | null, scheme: PaletteScheme = 'dark'): Rgba {
+  return centroid ? positionalColour(centroid, scheme) : NEUTRAL;
+}
+
 /** An artifact a colour is wanted for: its ordinal in the session table, and where it sits. */
 export type Placed = {ordinal: number; centroid: readonly [number, number] | null};
 
@@ -91,9 +101,7 @@ export function artifactColours(
 ): Map<number, Rgba> {
   const out = new Map<number, Rgba>();
   if (kind === 'positional') {
-    for (const {ordinal, centroid} of placedIn) {
-      out.set(ordinal, centroid ? positionalColour(centroid, scheme) : NEUTRAL);
-    }
+    for (const {ordinal, centroid} of placedIn) out.set(ordinal, positionalEntry(centroid, scheme));
     return out;
   }
   const placed = placedIn.filter((s) => s.centroid !== null).map((s) => ({...s, ...polarOf(s.centroid!)}));

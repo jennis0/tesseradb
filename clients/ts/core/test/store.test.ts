@@ -370,6 +370,62 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     expect(store.get('artifacts').colours).toBe(first.colours);
     expect(store.get('artifacts').held).toBe(2);
   });
+
+  it('extends the map for what a settle named and recomputes nothing already in it', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const artifact = (id: bigint, centroid: [number, number]) => ({
+      layer: 'clusters/a',
+      tesseraId: id,
+      key: `c${id}`,
+      maskedCount: 5n,
+      centroid,
+      box: null,
+      hull: null,
+      content: [],
+      parentId: null,
+      rung: 0,
+      matched: null
+    });
+    let served = [artifact(1n, [1, 2]), artifact(2n, [3, 4])];
+    const {client} = fakeClient(() => {
+      const r = response('ck');
+      return {...r, result: {...r.result, artifacts: served, artifactsIdentity: null}};
+    });
+    const store = createStore({viewerUrl: 'http://viewer', token: 'tok', client, clock, scheduler, prefetch: false, replica: {revalidateAfterMs: Infinity}});
+    store.setLayers(['clusters/a']);
+    store.setView({bbox: [0, 0, 100, 200], width: 800, height: 800});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    const table = store.get('artifacts').table;
+    const first = store.get('artifacts').colours;
+    const one = table.ordinalOf('clusters/a', 1n);
+    const held = first.get(one);
+    expect(first.size).toBe(2);
+
+    // A settle that names a third artifact. Under the positional palette a colour is a pure
+    // function of one centroid, so the map is extended where the table moved: the same object,
+    // and the colours already in it are the same objects — not recomputed to the same values.
+    served = [...served, artifact(3n, [5, 6])];
+    store.setView({bbox: [50, 100, 100, 200], width: 800, height: 800});
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    scheduler.flush();
+    await clock.advance(600);
+    const next = store.get('artifacts').colours;
+    expect(next.size).toBe(3);
+    expect(next).toBe(first);
+    expect(next.get(one)).toBe(held);
+    expect(next.get(table.ordinalOf('clusters/a', 3n))).toBeDefined();
+
+    // A palette change is not an extension: every colour moves, so the map is rebuilt and its
+    // identity says so.
+    store.setPalette('spread');
+    expect(store.get('artifacts').colours).not.toBe(first);
+    expect(store.get('artifacts').colours.size).toBe(3);
+  });
 });
 
 describe('select(box) — one counting request in the tiles form (§5.11)', () => {
