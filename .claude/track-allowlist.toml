@@ -269,3 +269,13 @@ paths = [
   "clients/ts/harness/*",
   "clients/ts/viewer/*",
 ]
+
+# Wave 11 — the dig's vertex budget (controller, 2026-08-28). Settles artifact-shapes.md §8 B on
+# fresh measurement: the cap is acting as a fidelity control, which B says it must not.
+[track.budget]
+paths = [
+  "crates/tessera-engine/src/derived.rs",
+  "crates/tessera-engine/tests/*",
+  "docs/design/artifact-shapes.md",
+  "probes/2026-08-27-artifact-shapes/*",
+]
