@@ -151,13 +151,48 @@ impl<'a> RowLocator<'a> {
             }
             let mut it = visible.iter();
             it.reset_at_or_after(row_base);
-            for row in it {
-                if row as u64 >= hi {
+            // **Read the mask a block of rows at a time, not a row at a time.** The bitmap's
+            // iterator crosses an FFI boundary on every `next`, which the compiler cannot inline
+            // through, and this loop's whole body is two indexed loads and a bit permutation — so
+            // the call was a *measured* third of the gather. `next_many` fills the block inside the
+            // library and hands back a slice; the rows, and so the positions, are the same ones in
+            // the same order.
+            //
+            // **A block is then read as its runs of consecutive rows**, which is what the mask
+            // mostly holds: a membership is a cluster of a Morton-ordered corpus, and the largest
+            // artifact of the measurement layer is 2,422,486 of 2,422,486 rows. A run is two
+            // slices of the columns walked together, so the bit permutation runs over a contiguous
+            // pair of arrays with no index arithmetic between elements and nothing to stop it
+            // vectorising. Sparse masks fall out as runs of one and cost what the row-at-a-time
+            // loop cost.
+            let mut block = [0u32; 1_024];
+            'segment: loop {
+                let n = it.next_many(&mut block);
+                if n == 0 {
                     break;
                 }
-                let idx = (row - row_base) as usize;
-                let (qx, qy) = unsplit32(MortonCode::new(morton[idx]), residual[idx]);
-                out.push([qx, qy]);
+                let mut i = 0usize;
+                while i < n {
+                    if block[i] as u64 >= hi {
+                        break 'segment;
+                    }
+                    let mut j = i + 1;
+                    while j < n && block[j] == block[j - 1] + 1 && (block[j] as u64) < hi {
+                        j += 1;
+                    }
+                    let lo = (block[i] - row_base) as usize;
+                    let run = lo..lo + (j - i);
+                    out.extend(
+                        morton[run.clone()]
+                            .iter()
+                            .zip(&residual[run])
+                            .map(|(&cell, &sub)| {
+                                let (qx, qy) = unsplit32(MortonCode::new(cell), sub);
+                                [qx, qy]
+                            }),
+                    );
+                    i = j;
+                }
             }
         }
         out
