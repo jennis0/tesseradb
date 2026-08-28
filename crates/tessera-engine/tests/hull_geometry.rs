@@ -85,7 +85,13 @@ fn measure_against_the_corpus() {
             dump("members".into(), &thinned);
         }
 
+        // What the served budget cost this artifact: the same dig with no cap, so "at the budget"
+        // below is a fact about this shape rather than an arithmetic guess from a constant.
+        let uncapped = tessera_engine::derived::dig_rings(&positions, usize::MAX).0;
+
         rows.push(Row {
+            capped: shape.iter().map(|r| r.len()).sum::<usize>()
+                < uncapped.iter().map(|r| r.len()).sum::<usize>(),
             members: positions.len(),
             wrap: wrap.len(),
             shape: shape.iter().map(|r| r.len()).sum(),
@@ -111,7 +117,10 @@ fn measure_against_the_corpus() {
     let total_wrap: usize = rows.iter().map(|r| r.wrap).sum();
     let total_shape: usize = rows.iter().map(|r| r.shape).sum();
     let total_rings: usize = rows.iter().map(|r| r.rings).sum();
-    let at_budget = rows.iter().filter(|r| r.shape >= r.wrap + 64).count();
+    // **Exhaustion against the unbounded dig, not against a copy of the constant.** A test that
+    // hard-codes the budget it is measuring reports the wrong number the day the budget moves,
+    // which is exactly what happened to this line when it said 64.
+    let at_budget = rows.iter().filter(|r| r.capped).count();
     let undug = rows.iter().filter(|r| r.shape == r.wrap).count();
     println!(
         "\n{} artifacts, {} … {} members",
@@ -158,6 +167,7 @@ fn measure_against_the_corpus() {
 }
 
 struct Row {
+    capped: bool,
     members: usize,
     wrap: usize,
     shape: usize,
@@ -167,4 +177,123 @@ struct Row {
     wrap_ms: f64,
     shape_ms: f64,
     ratio: f64,
+}
+
+/// **Ruling B's sweep: what each vertex budget buys, on the shape as it is now built.**
+///
+/// The memo's sweep (`docs/evidence/memos/2026-08-26-concave-hulls.md`) predates the multi-ring
+/// grouping, and a budget shared across an artifact's rings does not buy what a single ring's did,
+/// so the numbers `artifact-shapes.md` §8 B rests on are these rather than those.
+///
+/// Three things separate it from `measure_against_the_corpus` above. The area denominator is the
+/// **groups' own wraps** — the dig at budget 0, which is the same construction with the digging
+/// switched off — and not the whole membership's convex wrap, because the question is what the
+/// digging buys and grouping has already been paid for. Exhaustion is reported by the construction
+/// itself (`dig_rings`'s second return) rather than inferred from a vertex count, so a dig that
+/// happened to stop at the cap with nothing left to dig is not counted as capped. And containment
+/// is checked at the **largest** budget in the sweep, which is where the ring is most folded and a
+/// broken induction would show first.
+///
+/// ```text
+/// TESSERA_HULL_BUNDLE=<…>/bundle-notebook-2m4 \
+///   TESSERA_HULL_PACK=partitions/default/members/members-000000-001.tsmb \
+///   TESSERA_HULL_BUDGETS=64,128,256,512,1024,0 \
+///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_budget_sweep
+/// ```
+///
+/// `0` in the budget list means **unbounded** — the dig runs until no bridging edge is left.
+#[test]
+#[ignore]
+fn the_budget_sweep() {
+    let corpus = corpus::open();
+    let budgets: Vec<usize> = std::env::var("TESSERA_HULL_BUDGETS")
+        .unwrap_or_else(|_| "64,128,256,512,1024".into())
+        .split(',')
+        .map(|s| match s.trim().parse::<usize>().expect("a budget") {
+            0 => usize::MAX,
+            n => n,
+        })
+        .collect();
+    let largest = *budgets.iter().max().expect("a budget");
+
+    let mut clouds: Vec<Vec<[u32; 2]>> = Vec::new();
+    for (_, visible) in &corpus.memberships {
+        let positions = corpus::gather(visible, &corpus.locator);
+        if positions.len() >= 3 {
+            clouds.push(positions);
+        }
+    }
+
+    // The denominator, once: the same construction with the digging switched off, so every ratio
+    // below is what the digging bought over the rings the grouping alone drew.
+    let wraps: Vec<(usize, usize, f64)> = clouds
+        .iter()
+        .map(|c| {
+            let (rings, _) = tessera_engine::derived::dig_rings(c, 0);
+            (
+                rings.iter().map(|r| r.len()).sum::<usize>(),
+                rings.len(),
+                rings.iter().map(|r| double_area(r)).sum::<i128>() as f64,
+            )
+        })
+        .collect();
+    let wrap_vertices: usize = wraps.iter().map(|w| w.0).sum();
+    let wrap_rings: usize = wraps.iter().map(|w| w.1).sum();
+    println!(
+        "{} artifacts, {} … {} members; group wraps: {wrap_vertices} vertices in {wrap_rings} rings, {} bytes",
+        clouds.len(),
+        clouds.iter().map(|c| c.len()).min().unwrap(),
+        clouds.iter().map(|c| c.len()).max().unwrap(),
+        wrap_vertices * 8 + wrap_rings * 4,
+    );
+    println!(
+        "\nbudget,vertices,hull_bytes,vs_wrap_bytes,exhausted,digs_p50,digs_p99,digs_max,area_median,area_worst,dig_ms"
+    );
+
+    for &budget in &budgets {
+        let mut vertices = 0usize;
+        let mut rings_total = 0usize;
+        let mut exhausted = 0usize;
+        let mut ratios: Vec<f64> = Vec::with_capacity(clouds.len());
+        // Digs spent per artifact: at the unbounded run this is what a cap has to clear to stop
+        // being a fidelity control, which is the number ruling B is actually about.
+        let mut digs: Vec<usize> = Vec::with_capacity(clouds.len());
+        let mut dig_ms = 0.0f64;
+        for (cloud, wrap) in clouds.iter().zip(&wraps) {
+            let t = Instant::now();
+            let (rings, capped) = tessera_engine::derived::dig_rings(cloud, budget);
+            dig_ms += t.elapsed().as_secs_f64() * 1e3;
+            vertices += rings.iter().map(|r| r.len()).sum::<usize>();
+            rings_total += rings.len();
+            exhausted += usize::from(capped);
+            ratios.push(rings.iter().map(|r| double_area(r)).sum::<i128>() as f64 / wrap.2.max(1.0));
+            digs.push(rings.iter().map(|r| r.len()).sum::<usize>() - wrap.0);
+            if budget == largest {
+                // Containment is the induction the construction rests on, and it must survive the
+                // deepest digging the sweep asks for, not only the served budget.
+                assert!(
+                    cloud.iter().all(|m| rings.iter().any(|r| contains(r, *m))),
+                    "a member fell outside every ring at budget {budget}"
+                );
+            }
+        }
+        ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        digs.sort_unstable();
+        let bytes = vertices * 8 + rings_total * 4;
+        println!(
+            "{},{vertices},{bytes},{:.2}×,{exhausted},{},{},{},{:.4},{:.4},{:.0}",
+            if budget == usize::MAX {
+                "unbounded".to_string()
+            } else {
+                budget.to_string()
+            },
+            bytes as f64 / (wrap_vertices * 8 + wrap_rings * 4) as f64,
+            digs[digs.len() / 2],
+            digs[digs.len() * 99 / 100],
+            digs[digs.len() - 1],
+            ratios[ratios.len() / 2],
+            ratios[0],
+            dig_ms,
+        );
+    }
 }
