@@ -2,6 +2,7 @@
 // Drive the annotation layer in a headless browser: the same clustering under several principals.
 //
 //   node clients/ts/viewer/smoke-artifacts.mjs [--url http://localhost:5173] [--shots DIR]
+//     [--headed] [--executable /path/to/chrome]
 //
 // **This is the instrument for the artifacts claim**, which is not "clusters draw" but: one
 // clustering, several viewers, and a count beside each cluster that is *that viewer's own* — with
@@ -18,20 +19,16 @@
 // published layer (`scripts/publish-clusters.mjs`) and a running `vite dev`.
 import {mkdir} from 'node:fs/promises';
 import {join} from 'node:path';
-import {chromium} from 'playwright';
+import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
 
-const args = Object.fromEntries(
-  process.argv
-    .slice(2)
-    .reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc), [])
-);
+const args = flags();
 const url = args.url ?? 'http://localhost:5173';
 const shots = args.shots ?? '/tmp/tessera-artifacts';
 await mkdir(shots, {recursive: true});
 
-const browser = await chromium.launch({
-  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox']
-});
+// A layer × principal grid is one settle per cell — twenty-five of them on a corpus with five
+// layers — so this is the script the headed browser matters most to (`smoke-browser.mjs`).
+const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 const consoleErrors = [];
 page.on('console', (m) => {
@@ -41,7 +38,7 @@ page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
 // Look-ahead off: it issues requests while the view is still, which is every moment this script
 // measures in, and none of them are this instrument's business.
-await page.goto(`${url}${url.includes('?') ? '&' : '?'}prefetch=0`, {waitUntil: 'load'});
+await page.goto(withParams(url, {prefetch: 0}), {waitUntil: 'load'});
 
 /** Wait until the mark count stops moving — every figure below is only meaningful once it has. */
 const settled = async (limitMs = 45_000) => {
@@ -260,16 +257,6 @@ if (!results.some((r) => r.served !== null)) {
   console.error('ARTIFACT SMOKE FAILED: no principal was served a cluster count from any layer — the list never showed one');
   process.exit(1);
 }
-/**
- * The one console error a healthy run still produces: Chromium logs
- * `ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the client abandoned mid-flight,
- * which is what a superseded request *is* — the driver aborts the one in flight when the view
- * moves. The harness has exempted it since step 3; these scripts had not, so a run against a
- * corpus large enough for a response to still be streaming when the next gesture lands failed on
- * the client working as designed. Nothing else is excused.
- */
-const isSupersededAbort = (text) => /ERR_INCOMPLETE_CHUNKED_ENCODING/.test(text);
-
 console.log('--- console errors (a superseded request’s abort excepted) ---');
 console.log(consoleErrors.length ? consoleErrors.map((e) => `  ${e}`).join('\n') : '  none');
 const unexplained = consoleErrors.filter((e) => !isSupersededAbort(e));

@@ -6,22 +6,18 @@
 // in the loop, and so a screenshot lands somewhere reviewable.
 //
 //   node clients/ts/viewer/smoke.mjs [--url http://localhost:5173] [--shot /tmp/viewer.png]
+//     [--headed] [--executable /path/to/chrome]
 //
-// Requires a running `tessera serve` and a running `vite dev`.
-import {chromium} from 'playwright';
+// Requires a running `tessera serve` and a running `vite dev`. `--headed` is what a corpus of a
+// few million points needs: see `smoke-browser.mjs`.
+import {flags, isSupersededAbort, launchBrowser, withParams} from './smoke-browser.mjs';
 
-const args = Object.fromEntries(
-  process.argv
-    .slice(2)
-    .reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc), [])
-);
+const args = flags();
 const url = args.url ?? 'http://localhost:5173';
 const shot = args.shot ?? '/tmp/tessera-viewer.png';
 const settleMs = Number(args.settle ?? 6000);
 
-const browser = await chromium.launch({
-  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox']
-});
+const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 
 const consoleErrors = [];
@@ -153,7 +149,7 @@ if (options > 0) {
 // view is *still*, which is exactly when a colour switch is measured — so with it on, a request
 // nobody made lands inside the window and reads as the encoding refetching. The knob is the same
 // A/B the cache measurements use; the principal and zoom sections above ran with it on.
-await page.goto(`${url}${url.includes('?') ? '&' : '?'}prefetch=0`, {waitUntil: 'load'});
+await page.goto(withParams(url, {prefetch: 0}), {waitUntil: 'load'});
 await page.waitForTimeout(settleMs);
 await settled();
 
@@ -280,16 +276,6 @@ console.log(' ', JSON.stringify(canvasPixels));
 //
 // So there is nothing left to excuse, and every console error counts. The 500s are still listed
 // separately, because a run that fails wants to say *which* of the two it was.
-/**
- * The one console error a healthy run still produces: Chromium logs
- * `ERR_INCOMPLETE_CHUNKED_ENCODING` against a streamed response the client abandoned mid-flight,
- * which is what a superseded request *is* — the driver aborts the one in flight when the view
- * moves. The harness has exempted it since step 3; these scripts had not, so a run against a
- * corpus large enough for a response to still be streaming when the next gesture lands failed on
- * the client working as designed. Nothing else is excused.
- */
-const isSupersededAbort = (text) => /ERR_INCOMPLETE_CHUNKED_ENCODING/.test(text);
-
 const categoryFaults = requests.filter(
   (r) => r.path.startsWith('/v1/categories/') && r.status === 500
 );

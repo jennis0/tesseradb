@@ -5,20 +5,17 @@
 // This is the acceptance test for the whole Phase 1 workstream. The tile-addressed MVP's figures
 // against the same fixtures are 17 / 50 / 242 / 456 marks at depths 0-3, with 12 of 23 requests
 // shed at 1e9. Both numbers should move decisively.
-import {chromium} from 'playwright';
+//
+//   node clients/ts/viewer/smoke-budget.mjs [--url http://localhost:5173] [--principal N]
+//     [--headed] [--executable /path/to/chrome]
+import {flags, isSupersededAbort, launchBrowser} from './smoke-browser.mjs';
 
-const args = Object.fromEntries(
-  process.argv
-    .slice(2)
-    .reduce((acc, a, i, all) => (a.startsWith('--') ? [...acc, [a.slice(2), all[i + 1]]] : acc), [])
-);
+const args = flags();
 const url = args.url ?? 'http://localhost:5173';
 const settle = Number(args.settle ?? 9000);
 const principal = args.principal ?? '3';
 
-const browser = await chromium.launch({
-  args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader']
-});
+const browser = await launchBrowser(args);
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 
 const statuses = [];
@@ -30,10 +27,9 @@ page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => {
   // A 429 the client retried and recovered still prints a browser resource-load error. That is
   // the transport narrating, not the client failing; judge on whether the view survived instead.
-  // A 429 is shed-and-retried, and `ERR_INCOMPLETE_CHUNKED_ENCODING` is Chromium logging a
-  // streamed response the driver abandoned when the view moved — a superseded request's abort,
-  // which is the client working as designed (the harness has exempted it since step 3).
-  if (m.type() === 'error' && !/429|Too Many Requests|ERR_INCOMPLETE_CHUNKED_ENCODING/.test(m.text())) errors.push(m.text());
+  // A 429 is shed-and-retried, and a superseded request's abort is the client working as
+  // designed (`smoke-browser.mjs`).
+  if (m.type() === 'error' && !/429|Too Many Requests/.test(m.text()) && !isSupersededAbort(m.text())) errors.push(m.text());
 });
 
 await page.goto(url, {waitUntil: 'load'});
@@ -50,14 +46,14 @@ const readPanels = () =>
   page.evaluate(() => {
     const p = window.__tesseraProbe;
     if (!p) return {served: null, visible: null, depth: null, tiles: null, actual: null, limitedBy: null, status: 'absent'};
-    const i = p.instruments ?? {};
+    const i = p.instruments ?? null;
     return {
       served: p.view.served,
       visible: p.view.visible,
       depth: String(p.view.depth),
-      tiles: i.tiles ?? null,
+      tiles: i?.tiles ?? null,
       actual: String(p.marks - p.view.provisional),
-      limitedBy: i.limitedBy ?? null,
+      limitedBy: i?.limitedBy ?? null,
       status: p.view.status
     };
   });
