@@ -393,7 +393,7 @@ three times the median edge of that principal's convex wrap — so two principal
 because their memberships do, and a request cannot dial one; a densely sampled convex cloud keeps
 its wrap unchanged, and a point set in convex position keeps it exactly, whatever α is. And digging
 spends a **bounded vertex budget**, longest edge first and **per artifact rather than per ring**, so
-a shape carries at most 64 vertices beyond what its groups' wraps carried and several groups do not
+a shape carries at most 2,048 vertices beyond what its groups' wraps carried — a guard against a pathological membership, not a fidelity control: on every layer measured the digging terminates on its own well below it and several groups do not
 multiply the wire. The budget rather than an absolute cap is forced: every vertex is a visible
 member's position and every member is inside a ring, so the wraps' own vertex count is a floor —
 going below it means either leaving a member outside every ring or inventing a vertex no member

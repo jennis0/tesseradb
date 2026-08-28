@@ -130,7 +130,7 @@ describe('smoothRing', () => {
   });
 
   it('costs what it is said to cost, on the largest hull the demo corpus serves', () => {
-    // 144 vertices across 10 rings is the largest shape on `clusters/hdbscan` at the overview
+    // 757 vertices across 10 rings is the largest shape on `clusters/hdbscan` at the overview
     // (artifact-shapes §9). One shape's worth of smoothing, timed.
     const rings = Array.from({length: 10}, (_, i) => circle(14, 1 + i / 10));
     const started = performance.now();
