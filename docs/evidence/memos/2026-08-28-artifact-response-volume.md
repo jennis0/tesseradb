@@ -310,6 +310,12 @@ is what the conclusion rests on, and it is three orders of magnitude on bytes at
 saving is not only bytes: the level check sits above the projection build, so a skipped level pays
 no candidate walk, no masked probe and no derived geometry over its members.
 
+**What remained after that, in the levels a request does serve, was the artifacts' own names**: the
+supplied content of every served artifact was read one zstd block at a time, ≈163 µs each, which is
+why a level of 23,821 artifacts cost 3.75 s here whatever the response carried. A level's contents
+are now read once per level and held — S18 in [`client-delivery.md`](../../client-delivery.md)
+carries the before-and-after.
+
 ## 6. Reproducing
 
 ```bash

@@ -693,3 +693,140 @@ fn content_that_disagrees_with_the_declaration_is_refused() {
     // Every batch was refused whole, so nothing landed under any of those keys.
     assert!(artifacts_of(&engine, &full_coverage_credential()).is_empty());
 }
+
+/// Publish `labels.len()` artifacts, each with its own key and its own text, wait for the content
+/// to reach a record extent, and then take the log away — so every later read of these labels comes
+/// from the blob rather than from the publication's own copy in the write store.
+///
+/// The keys are `t0…`, and the *n*th artifact's members are the *n*th hundred of source ids, which
+/// keeps each generating set inside what the full-coverage principal can see.
+fn published_and_log_free(fx: &Fixture, labels: &[&str]) {
+    {
+        let engine = fx.open();
+        engine
+            .register_layer(label_layer("topics/a", true))
+            .unwrap();
+        let batch: Vec<IncomingArtifact> = labels
+            .iter()
+            .enumerate()
+            .map(|(n, label)| {
+                let members = (n as u64) * 20..(n as u64 + 1) * 20;
+                IncomingArtifact::with_content(
+                    Some(format!("t{n}")),
+                    fx.members(members.clone()),
+                    vec![content(label, fx, members)],
+                )
+            })
+            .collect();
+        engine
+            .publish_artifacts("topics/a".into(), 0, batch)
+            .unwrap();
+        content_extents(fx, 1);
+    }
+    remove_the_whole_log(fx);
+}
+
+/// **Every artifact keeps its own text when the level is read a level at a time.**
+///
+/// The viewport reads a level's supplied content in one pass over the record blob and answers each
+/// served artifact from it (`crate::artifact_content`), where it once read a zstd block per
+/// artifact. The failure that pass makes possible is an addressing one — a table keyed a row out
+/// would serve every artifact its neighbour's name, which is a wrong answer that looks entirely
+/// well-formed — so what is asserted is the *pairing* of key to text, artifact by artifact, and not
+/// merely that text arrived.
+#[test]
+fn every_artifact_keeps_its_own_content_when_the_level_is_read_from_the_blob() {
+    let fx = fixture();
+    let labels = [
+        "the first label",
+        "the second label",
+        "the third label",
+        "the fourth label",
+        "the fifth label",
+        "the sixth label",
+    ];
+    published_and_log_free(&fx, &labels);
+
+    let engine = fx.open();
+    let served = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(served.len(), labels.len(), "{served:?}");
+    for artifact in &served {
+        let key = artifact.key.as_deref().expect("each artifact kept its key");
+        let n: usize = key.trim_start_matches('t').parse().expect("a t<n> key");
+        assert_eq!(
+            artifact.content,
+            vec![labels[n].to_string()],
+            "{key} was served its own text"
+        );
+    }
+
+    // The drill-down reads the one entity's row directly rather than the level's table, and the
+    // two routes must serve one string: a table that disagreed with the row it was built from
+    // would show up here and nowhere else.
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let idset = engine.generation().bundle.manifest.identity.idset;
+    for artifact in &served {
+        let drilled = engine
+            .artifact(&session, artifact.tessera_id, Some(idset), "s0")
+            .unwrap()
+            .expect("the identifier the viewport just issued");
+        assert_eq!(drilled.content, artifact.content);
+    }
+}
+
+/// **A publication after the table is built is reflected in the next response**, because the level's
+/// version is half the key it is held under.
+///
+/// The counter is what is asserted, not just the content: a table rebuilt on every request would
+/// serve the right names and lose the whole point of holding one, and a table that outlived its
+/// level would serve the level as it was — names that are all still names, which no assertion on
+/// the text alone would catch.
+#[test]
+fn a_publication_after_the_table_is_built_rebuilds_it() {
+    let fx = fixture();
+    published_and_log_free(&fx, &["the first label", "the second label"]);
+
+    let engine = fx.open();
+    assert_eq!(engine.artifact_content_cache_stats().builds, 0);
+
+    let first = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(first.len(), 2);
+    let stats = engine.artifact_content_cache_stats();
+    assert_eq!(stats.builds, 1, "the level's contents were read once");
+    assert_eq!(stats.held, 1, "one table, for the one level served");
+    assert_eq!(stats.artifacts, 2);
+
+    // A second request at the same level version reads nothing.
+    assert_eq!(artifacts_of(&engine, &full_coverage_credential()).len(), 2);
+    assert_eq!(engine.artifact_content_cache_stats().builds, 1);
+
+    engine
+        .publish_artifacts(
+            "topics/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("t2".into()),
+                fx.members(200..220),
+                vec![content("the third label", &fx, 200..220)],
+            )],
+        )
+        .unwrap();
+
+    let after = artifacts_of(&engine, &full_coverage_credential());
+    assert_eq!(after.len(), 3);
+    let mut labels: Vec<&str> = after
+        .iter()
+        .map(|a| a.content.first().expect("content survived").as_str())
+        .collect();
+    labels.sort_unstable();
+    assert_eq!(
+        labels,
+        vec!["the first label", "the second label", "the third label"],
+        "the two blob-resident labels came back beside the one still held in the write store"
+    );
+    assert_eq!(
+        engine.artifact_content_cache_stats().builds,
+        2,
+        "the publication moved the level's version, so the table was read again"
+    );
+}

@@ -3632,6 +3632,10 @@ impl Engine {
             layer.declaration.content.supplied.len(),
             rank,
             true,
+            // One artifact, so the direct read: the level's table would answer this in O(1) and
+            // cost a pass over the level to build, which is the wrong trade for a route that
+            // resolves one identifier.
+            None,
         ) else {
             return Ok(None);
         };
@@ -3739,6 +3743,12 @@ impl Engine {
     /// projection must not move the row set; all `false` skips is the string copies, and its
     /// `Some` always carries the empty vector. One function with a flag rather than a probing
     /// sibling, so the two readings of "servable" cannot drift apart.
+    ///
+    /// **`table` is the level's contents, read once for the level** — the viewport pass supplies
+    /// it, and it is what keeps a response of thousands of artifacts off a zstd block read per
+    /// artifact (`crate::artifact_content`, which carries the measurement). `None` reads the one
+    /// entity's row directly: the drill-down route asks about one artifact, and building a whole
+    /// level's table to answer that would trade a block read for a pass over the level.
     #[allow(clippy::too_many_arguments)]
     fn supplied_content(
         &self,
@@ -3750,6 +3760,7 @@ impl Engine {
         kinds: usize,
         rank: Option<u32>,
         materialise: bool,
+        table: Option<&crate::artifact_content::LevelContent>,
     ) -> Option<Vec<String>> {
         let Some(rank) = rank else {
             return Some(Vec::new());
@@ -3770,36 +3781,58 @@ impl Engine {
             return Some(values);
         }
 
-        // Otherwise the record blob, at this artifact's own entity: one block read, the same one a
-        // point's blob-resident fields cost. Tags are `rank × kinds + kind` against the
-        // layer's declaration — see `ArtifactStore::unpublished_content`.
+        // Otherwise the record blob, at this artifact's own entity. Tags are `rank × kinds + kind`
+        // against the layer's declaration — see `ArtifactStore::unpublished_content`.
         if kinds == 0 {
             return Some(Vec::new());
         }
         let base = (rank as usize).checked_mul(kinds)?;
-        let fields = generation
-            .filter_columns
-            .records()
-            .fields_of(u32::try_from(entity.raw()).ok()?)
-            .ok()??;
-        let mut values = Vec::with_capacity(if materialise { kinds } else { 0 });
-        for k in 0..kinds {
-            let tag = u16::try_from(base + k).ok()?;
-            // **Every declared kind or none.** A row missing one is content that did not survive
-            // its write, and serving the rest would hand a client an artifact short of what its
-            // layer says it carries — which is indistinguishable, from the client's side, from
-            // content withheld.
-            let field = fields.iter().find(|f| f.tag == tag)?;
-            match &field.value {
-                tessera_filter::RecordValue::Utf8(text) => {
-                    if materialise {
-                        values.push(text.clone());
-                    }
+        let entity = u32::try_from(entity.raw()).ok()?;
+        /// **Every declared kind or none.** A row missing one is content that did not survive its
+        /// write, and serving the rest would hand a client an artifact short of what its layer
+        /// says it carries — which is indistinguishable, from the client's side, from content
+        /// withheld. Stated once, for both routes below.
+        fn values_for<'a>(
+            base: usize,
+            kinds: usize,
+            materialise: bool,
+            text_at: impl Fn(u16) -> Option<&'a str>,
+        ) -> Option<Vec<String>> {
+            let mut values = Vec::with_capacity(if materialise { kinds } else { 0 });
+            for k in 0..kinds {
+                let text = text_at(u16::try_from(base + k).ok()?)?;
+                if materialise {
+                    values.push(text.to_string());
                 }
-                _ => return None,
+            }
+            Some(values)
+        }
+        // **The two routes decide identically**, which is the whole reason the tag walk above is
+        // one loop over a lookup rather than two loops: the table holds the row's utf8 fields, and
+        // a tag it does not hold is a tag the row did not carry *or* one whose value was not text
+        // — both of which withhold on the direct route too.
+        match table {
+            Some(table) => {
+                let tagged = table.tagged(entity)?;
+                values_for(base, kinds, materialise, |tag| {
+                    tagged
+                        .binary_search_by_key(&tag, |(t, _)| *t)
+                        .ok()
+                        .map(|at| tagged[at].1.as_str())
+                })
+            }
+            None => {
+                let fields = generation.filter_columns.records().fields_of(entity).ok()??;
+                values_for(base, kinds, materialise, |tag| {
+                    fields.iter().find(|f| f.tag == tag).and_then(|f| {
+                        match &f.value {
+                            tessera_filter::RecordValue::Utf8(text) => Some(text.as_str()),
+                            _ => None,
+                        }
+                    })
+                })
             }
         }
-        Some(values)
     }
 
     /// The dependency prerequisite, shared by both serving routes: **is the artifact this one
@@ -4293,6 +4326,30 @@ impl Engine {
                     artifact_budget,
                     layer.declaration.hierarchy.prune_children,
                 );
+                // **The level's supplied content, read once for the level rather than once per
+                // served artifact** (`crate::artifact_content`, which carries the measurement that
+                // put it here: 408 ms of a response whose points half is 1.3 ms, all of it one
+                // zstd block decompressed per artifact served — 6.7 ms once the level's contents
+                // are read together). Built after the cut, so a level whose artifacts all failed
+                // their verdict reads nothing at all, and skipped whole where the layer declares no
+                // supplied content — which is most layers.
+                let contents = if layer.declaration.content.supplied.is_empty() || served.is_empty()
+                {
+                    None
+                } else {
+                    Some(self.level_contents.get_or_build(
+                        &name,
+                        level,
+                        level_version,
+                        generation.segments_version,
+                        || {
+                            crate::artifact_content::LevelContent::build(
+                                generation.filter_columns.records(),
+                                runs,
+                            )
+                        },
+                    ))
+                };
                 served_levels.push(ServedLevel {
                     level,
                     rows: Arc::clone(&rows),
@@ -4325,6 +4382,7 @@ impl Engine {
                         layer.declaration.content.supplied.len(),
                         rank,
                         artifact_rows == ArtifactRows::Full,
+                        contents.as_deref(),
                     ) else {
                         continue;
                     };

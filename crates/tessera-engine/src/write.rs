@@ -2507,6 +2507,7 @@ impl WritePath {
                     row_projection_cache,
                     artifact_projections: flush.artifact_projections,
                     lineages: flush.lineages,
+                    level_contents: flush.level_contents,
                     queues: LifecycleQueues {
                         work: work_rx,
                         deny: deny_rx,
@@ -3419,6 +3420,9 @@ pub(crate) struct MaintenanceDeps {
     /// The lineages, shared for the half of the same warm that is theirs — see
     /// [`Executor::warm_artifact_caches`].
     pub(crate) lineages: Arc<crate::cut::Lineages>,
+    /// The supplied-content tables, shared for the one thing this thread does with them: dropping
+    /// a layer's when the layer is dropped, beside the two caches above.
+    pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
     /// Whether the coalesce and the merge run at all — see `Engine::merge_enabled`.
     pub(crate) coalesce_enabled: Arc<AtomicBool>,
     pub(crate) merge_enabled: Arc<AtomicBool>,
@@ -4360,6 +4364,12 @@ struct Executor {
     artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
     /// The lineages, rebuilt beside them and for the same reason.
     lineages: Arc<crate::cut::Lineages>,
+    /// The supplied-content tables, held for the layer drop below. Not warmed at the fold: a
+    /// table is read from the blob the fold has just rewritten, and reading every level's is a
+    /// pass over the whole of it — where a row form is rebuilt there because row space renumbered
+    /// under it, this one is merely stale and the first request that wants a level pays for that
+    /// level alone.
+    level_contents: Arc<crate::artifact_content::LevelContents>,
     queues: LifecycleQueues,
     health: Arc<ExecutorHealth>,
     /// The last window's sequence number. [`BatchState::Held`] is what it is for; all it has to be
@@ -9024,6 +9034,7 @@ impl Executor {
         if let WalRecord::LayerDrop { name } = &record {
             self.artifact_projections.forget(name);
             self.lineages.forget(name);
+            self.level_contents.forget(name);
         }
         let published = Published::registry_applied(&record);
         // The registry is durable in the log but not yet in a manifest, and a rotation reclaims the

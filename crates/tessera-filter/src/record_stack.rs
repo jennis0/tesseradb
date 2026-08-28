@@ -102,6 +102,26 @@ impl RecordStack {
         Ok(None)
     }
 
+    /// The rows of the entities in `wanted`, from whichever layers hold them — the read a caller
+    /// that wants many rows takes instead of looping [`Self::fields_of`], and whose cost is the
+    /// blocks touched rather than the entities asked for
+    /// ([`RecordBlob::for_each_row_in`] carries the argument).
+    ///
+    /// Ascending within a layer and layer by layer across the stack, so a caller wanting one
+    /// global order must impose it. Disjointness (I9) is why that is a presentation question and
+    /// not a correctness one: no two layers hold the same entity, so no entity is visited twice
+    /// whatever the order.
+    pub fn for_each_row_in(
+        &self,
+        wanted: &croaring::Bitmap,
+        f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
+    ) -> Result<(), RecordError> {
+        for layer in &self.layers {
+            layer.for_each_row_in(wanted, f)?;
+        }
+        Ok(())
+    }
+
     /// Whether any layer holds a row for `entity`.
     pub fn has_row(&self, entity: u32) -> bool {
         self.layers.iter().any(|layer| layer.has_row(entity))
