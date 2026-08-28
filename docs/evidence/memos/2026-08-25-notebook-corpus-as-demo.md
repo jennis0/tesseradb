@@ -177,8 +177,9 @@ tree emits a node for every paper that detaches near the top, so the tree's firs
 chain — 2.42M → 1.84M members, one small sibling shed per step, every label the `(no distinctive
 terms)` placeholder — and a single-depth cut at budget 20 spent its whole budget walking it.
 
-Two changes to the notebook's writer, and `notebooks/collapse-hdbscan.py` applying the same rule
-to a directory written before it: a node whose largest child holds more than 90% of its members is
+Two changes to the notebook's writer, and a retrofit script beside it applying the same rule to a
+directory written before it (both deleted on 2026-08-28 when the pipeline became
+[the ladder's arXiv rung](../../../test_corpora/arxiv/README.md), which collapses inline): a node whose largest child holds more than 90% of its members is
 dropped and its children re-parented to the nearest kept ancestor (the root kept whatever its
 shape; leaves never dropped); and a cluster with no distinctive terms gets no topic row rather
 than a placeholder. On `notebook-2m4-live`: **257 nodes, depth 58 → 197 nodes, depth 11**; 60
