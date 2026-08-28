@@ -392,6 +392,27 @@ export type Artifact = {
    * reading being carried where it does not hold.
    */
   level: number;
+  /**
+   * **Whether this artifact holds a member the current filter admits** — one this principal may
+   * see, inside the requested tiles.
+   *
+   * `null` where the request carried no filter: there was no question, and `false` would answer
+   * one that was never asked. Draw on the distinction — a `false` is a cluster with nothing in it
+   * for this search, a `null` is every cluster as it always looked.
+   *
+   * **The only field here a filter moves.** Existence, `maskedCount` and the geometry are what
+   * this principal may see, filter or no filter, so a filter never makes an artifact appear or
+   * vanish and never changes its count.
+   *
+   * **Do not derive this from the points you hold**: they are a *sample* of the matches, so a
+   * cluster whose few matching members were not sampled looks empty — false for exactly the small
+   * clusters a filter is used to find.
+   *
+   * **It answers about the members in view**, where `maskedCount` and the geometry answer about
+   * the whole visible membership. An artifact whose only matches sit off screen reads `false`
+   * until the view moves over them.
+   */
+  matched: boolean | null;
 };
 
 export type ViewportResult = {

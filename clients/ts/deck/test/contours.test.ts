@@ -15,7 +15,8 @@ const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact =>
   hull: [[[0, 0], [2 ** 32 - 1, 0], [2 ** 32 - 1, 2 ** 32 - 1], [0, 2 ** 32 - 1]]],
   content: [],
   parentId,
-  level: 0
+  level: 0,
+  matched: null
 });
 
 function projection(served: Artifact[]): ArtifactsProjection {

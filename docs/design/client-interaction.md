@@ -62,7 +62,7 @@ verbs into panels, legends and DOM. It is low-volume, exact, and **never** deriv
 from the mark channel, because the marks are a sample and the numbers are not.
 
 **"Number" is too narrow, and the artifact work corrects it** *(2026-08-01; see
-[`annotations.md`](annotations.md) §9)*. A cluster hull is an aggregate over the
+[`annotations.md`](annotations.md) §4.2, the closure rule a derived property obeys)*. A cluster hull is an aggregate over the
 visible set, so a client that draws a hull around the *k* points it holds has committed the
 sample-as-set error **in geometry** — the same failure in a shape nobody thinks to check.
 So this is the **exact masked-aggregate channel**, and geometry travels on it: hulls,

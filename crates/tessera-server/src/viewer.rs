@@ -794,6 +794,7 @@ impl ViewportSink for WireSink {
                 content: &a.content,
                 parent_id: a.parent_id.map(|id| id.raw()),
                 level: a.level,
+                matched: a.matched,
             })
             .collect();
         let frame = artifacts_frame(&rows);

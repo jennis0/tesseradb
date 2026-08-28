@@ -1,12 +1,14 @@
 # Handover — the client's artifact cache, and the filter bit it needs
 
-**Date:** 2026-08-28 · **Status:** **Nothing is built.** This is a work list and the record of what
-was established on the way to it, not a design. Two of the questions below are the owner's and one
-of them was answered in conversation and never written down, which is the first thing to fix.
+**Date:** 2026-08-28 · **Status:** **Step 1 is done; the cache itself is unbuilt.** The filter bit
+is ruled, written down and on the wire ([decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md),
+contracts r42, `client-delivery.md` S13). What remains is §6's steps 2–4 — the channel that holds,
+the wire affordance, and a corpus to measure on. This is a work list and the record of what was
+established on the way to it, not a design.
 
 **Read [`client-delivery.md`](client-delivery.md) first** — it is the status record for client work,
 on the convention [`artifact-delivery.md`](artifact-delivery.md) set, and it wins over this document
-wherever they differ. **There is no row for this work yet**; §7 says where it goes.
+wherever they differ. **The row is S13**, which carries step 1; §7 says how the rest lands there.
 
 ## 0. Where authority lives
 
@@ -105,9 +107,9 @@ but do not re-derive them from scratch.
 
 ## 4. What is open
 
-**⊘ The filter bit — ruled in conversation on 2026-08-28 and written down nowhere.** The owner's
-words were that filters should *"return boolean membership mask for filtered artifacts"*. The
-agreed shape:
+**The filter bit is ruled, written down and built** — [decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md),
+2026-08-28, from the owner's words that filters should *"return boolean membership mask for filtered
+artifacts"*. The shape, as it now stands on the wire:
 
 - **A boolean per served artifact under a filter**: `membership ∩ M_sel ≠ ∅`, an early-exiting
   intersection, and **not a filtered count**. A count would put a second number beside the artifact
@@ -121,18 +123,20 @@ agreed shape:
 - **The client cannot compute it.** The points it holds are a sample of `matched`, so deriving
   *which clusters still have members* from them gives false negatives for exactly the small clusters
   a filter is used to find — the **sample-as-set error in geometry**, stated at
-  [`design/client-interaction.md`](design/client-interaction.md) §2. (Two documents point at
-  `annotations.md` §9 for that rule and it is not there — that section is *What it costs*. Cite
-  client-interaction §2 until the pointers are corrected.)
+  [`design/client-interaction.md`](design/client-interaction.md) §2. (`client-interaction.md` §2 pointed at
+  `annotations.md` §9 for that rule, which is *What it costs*; it now points at §4.2, the closure
+  rule a derived property obeys.)
 - **No leak-register row.** Appendix C's preamble gives the inclusion test: *a row exists only where
   a viewer, reading responses they are entitled to, can end up knowing something about data they
   were not served*, and *data the service serves never qualifies*. The bit is over a subset of the
   principal's own visible members.
 
-**This ruling exists only in a chat, and a ruling that exists only in a chat does not exist.** Write
-it to `docs/decisions/` before building — the same first step `client-handover.md` §1 required of
-its own rulings. Decision files are frozen to everyone but the owner, so **ask** rather than
-transcribing unasked.
+**One thing the ruling did not say, and the decision settles**: the bit is scoped to the request's
+tiles rather than to the whole visible membership — `membership ∩ viewport ∩ M_auth ∩ M_sel`. Two of
+the three routes a filter takes into row space are *silent* outside the request's own domain rather
+than negative there, so a whole-membership bit would be exact on the projecting crossing and quietly
+narrow on the per-tile and render-column ones. The cost is that the count beside the bit is not so
+scoped, which the wire says at the field. 0104's *What is in view* has the argument.
 
 **⊘ The wire affordance is undesigned.** How does a client say what it holds? A list of held
 identifiers is worse than the payload it saves (464 655 ids is 3.7 MB). With 0103 landed, a level is
@@ -181,10 +185,11 @@ level in the *absent* case only.
 
 ## 6. A suggested order
 
-1. **Write the filter-bit decision** (owner), then build it: the boolean on the *artifacts* frame,
-   present only when the request carries filters. `ArtifactRecords::intersects_visible` is already
-   the shape of the probe. Prove it with a test that a filter moves the bit and moves neither the
-   masked count nor the served set.
+1. ~~**Write the filter-bit decision** (owner), then build it.~~ **Done 2026-08-28** (0104, S13):
+   `matched` on the *artifacts* frame, null where the request carried no filter; the probe is
+   `ArtifactRows::matched`, which asks candidacy's own three routes of a narrower set;
+   `artifact_filter_bit.rs` proves the bit against the generator's closed forms and proves the
+   served set and the masked counts unmoved.
 2. **Teach the channel to hold.** Separate the served identifier list from the payload store, ask
    only for payloads not already held, and drop the store on an identity-key or content-key change
    exactly as rule 7 says. No wire change yet — the saving is in what the client re-parses and
@@ -195,12 +200,13 @@ level in the *absent* case only.
    attribute layer over `admin4`'s 231 645 values on the GeoNames rung would produce one, and that
    is a corpus change rather than a code change.
 
-**⊘ Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
+**Step 1 is done and steps 2–4 are not.** ⊘ **Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
 scale, so the case this work is for is currently unmeasured — say so rather than quoting the
 regional figures.
 
 ## 7. Where status goes
 
-Add an **S-row** to [`client-delivery.md`](client-delivery.md)'s server-tracks table when the work
-starts — the convention that file already carries, and the same one S10 used for the level. This
-document is the map; that table is the record, and it moves in the change that moves the work.
+**S13** is the row, added when step 1 landed — the convention that file already carries, and the
+same one S10 used for the level. This document is the map; that table is the record, and it moves in
+the change that moves the work. Steps 2 and 3 are client steps rather than server tracks, so they
+join the steps table above it.

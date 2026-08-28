@@ -738,6 +738,27 @@ pub struct ArtifactOut {
     /// There the structure is in the edges and walking parents is the *correct* reading; this
     /// column is what stops that reading being applied where it does not hold.
     pub level: u32,
+    /// **Whether any member of this artifact that the principal may see, and that lies inside the
+    /// request's tiles, matches the request's filter** — `None` where the request carried no
+    /// filter, which is *there was no question* rather than *no matches*
+    /// ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    ///
+    /// **A boolean and never a count.** A filtered count beside [`Self::masked_count`] would put
+    /// two numbers on one artifact and make a client choose which it is showing.
+    ///
+    /// **It is the only filter-dependent field here.** Existence and the count stay anchored on
+    /// `M_auth`, so a filter cannot make an artifact appear or vanish and cannot move the number
+    /// beside it (**I3**, **I12**) — and a client holding this artifact's payload across a filter
+    /// change holds nothing stale but this.
+    ///
+    /// **It is clipped to the viewport where the count is not.** The count and the geometry are
+    /// over the whole visible membership; this is over the part of it in view, because that is the
+    /// extent every filter-crossing route can answer over rather than the extent one of them can.
+    /// So an artifact whose only matches sit just off screen reads `false` until the viewer pans.
+    ///
+    /// **A dependent artifact carries its target's**, as its [`Self::masked_count`] does (D13): a
+    /// label describes its cluster, and its own membership is a slice of that cluster at best.
+    pub matched: Option<bool>,
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -3551,6 +3572,9 @@ impl Engine {
             // it to name. Resolving the parent here anyway would hand a caller who holds one
             // identifier the existence of a coarser artifact they were never served.
             parent_id: None,
+            // The identifier route carries no filter to answer about (decision 0104), and there is
+            // no viewport for the answer to be scoped to either.
+            matched: None,
         }))
     }
 
@@ -3866,6 +3890,10 @@ impl Engine {
         // Built once per request: it is the same set for every layer in the response, and its cost
         // is the viewport's containers rather than the population's.
         let viewport = crate::tile_index::Viewport::compose(&tile_rows, mask);
+        // **The filter's half of the same hoisting, and it is composed once for the request too**:
+        // `viewport ∩ M_auth ∩ M_sel`, the one set decision 0104's bit is asked against. `None` is
+        // an unfiltered request — no question, and no column on the wire to answer it.
+        let matched_here = mask.matched_rows(viewport.here());
 
         let shard = generation.bundle.manifest.identity.shard_id;
         // Built once for the whole response: the postings and the manifest's plugin are the
@@ -3978,6 +4006,11 @@ impl Engine {
                     mask,
                 );
                 let containment = rows.partition().map(|p| p.answers(&session.satisfied));
+                // **Built after the candidacy route and never as part of it**: the filter decides
+                // nothing about which artifacts are served (decision 0104), so this is computed
+                // beside the verdict rather than inside it, and is skipped whole on an unfiltered
+                // request.
+                let matched = matched_here.as_ref().map(|here| rows.matched(here));
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
@@ -4167,6 +4200,9 @@ impl Engine {
                         level,
                         // Filled in below, once the response's own membership is settled.
                         parent_id: None,
+                        // Asked only of the artifacts that survived the cut: the bit describes what
+                        // is served, and an artifact the response drops has no row to carry one.
+                        matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
                     });
                 }
             }
@@ -4203,6 +4239,27 @@ impl Engine {
                     .and_then(|target| count_at.get(target).copied())
             })
             .collect();
+        // **And its target's filter bit, on D13's own argument** (decision 0104). A label describes
+        // its cluster, so *does anything here match* is a question about the cluster; the label's
+        // own membership is often empty, and a bit over it would read `false` for every label under
+        // every filter — the same defect the count rule exists to prevent, in the field beside it.
+        // Derivable from the target's own row in this response, which the drop above guarantees is
+        // present, so it discloses nothing new (decision 0023).
+        let matched_at: std::collections::BTreeMap<&(String, u32, u32), Option<bool>> = placed
+            .iter()
+            .zip(&out)
+            .map(|(place, artifact)| (&place.at, artifact.matched))
+            .collect();
+        let target_matched: Vec<Option<Option<bool>>> = placed
+            .iter()
+            .map(|place| {
+                place
+                    .attached_to
+                    .as_ref()
+                    .filter(|target| in_request.contains(&target.0))
+                    .and_then(|target| matched_at.get(target).copied())
+            })
+            .collect();
 
         // **A parent is named only where it is also in this response**, which is the whole of the
         // disclosure rule for this field. An artifact whose parent exists but was withheld — below
@@ -4211,14 +4268,21 @@ impl Engine {
         // grouping exists which they are not cleared to see, which is a disclosure the rest of this
         // pass takes care to avoid making.
         let mut served = Vec::with_capacity(out.len());
-        for (((mut artifact, place), dropped), target_count) in
-            out.into_iter().zip(&placed).zip(dropped).zip(target_counts)
+        for ((((mut artifact, place), dropped), target_count), target_bit) in out
+            .into_iter()
+            .zip(&placed)
+            .zip(dropped)
+            .zip(target_counts)
+            .zip(target_matched)
         {
             if dropped {
                 continue;
             }
             if let Some(count) = target_count {
                 artifact.masked_count = count;
+            }
+            if let Some(bit) = target_bit {
+                artifact.matched = bit;
             }
             artifact.parent_id = place
                 .parent

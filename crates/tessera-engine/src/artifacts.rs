@@ -212,6 +212,21 @@ pub enum Candidacy {
     Scanned(Bitmap),
 }
 
+/// What a filtered request's hoisted `viewport ∩ M_auth ∩ M_sel` produced, on whichever route the
+/// level's layout takes — see [`ArtifactRows::matched`].
+///
+/// **Neither variant admits or withholds an artifact.** The bit rides beside a served artifact and
+/// moves nothing else: existence and the masked count are anchored on `M_auth`, filter or no filter
+/// (**I3**, **I12**).
+pub enum Matched<'a> {
+    /// The answer for the whole level, one pass over the matched set — the row-major route and a
+    /// spatial level's ranges, exactly as [`Candidacy::Scanned`] is reached.
+    Scanned(Bitmap),
+    /// The matched set itself, borrowed, for the artifact-major route: one early-exiting probe per
+    /// served artifact against it, and nothing materialised per level.
+    PerArtifact(&'a Bitmap),
+}
+
 impl Candidacy {
     /// Every candidate ordinal, **ascending** — the order the cut downstream is entitled to, and
     /// which both routes produce because both are backed by a bitmap.
@@ -553,6 +568,42 @@ impl ArtifactRows {
         match &self.column {
             Some(column) => Candidacy::Scanned(column.candidates(viewport.here())),
             None => Candidacy::Indexed(self.index.candidates(viewport.rows())),
+        }
+    }
+
+    /// **Which of this level's artifacts hold a member the request's filter admits**, given the
+    /// hoisted `viewport ∩ M_auth ∩ M_sel` — [decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)'s
+    /// bit, in whichever shape the level's layout makes cheapest.
+    ///
+    /// **The same three routes as [`Self::candidacy`], asked of a narrower set**, and deliberately
+    /// so: the question is candidacy's own — *has this artifact a visible member in view* — with
+    /// the filter's rows removed from the input first. So the row-major and spatial arms answer for
+    /// the whole level in one pass, as they do there, and the artifact-major arm defers to a probe
+    /// per artifact, which the caller pays only for the artifacts it actually serves.
+    ///
+    /// The set handed in must come from [`crate::compose::EffectiveMask::matched_rows`] and from
+    /// nothing else, which is what keeps the answer inside `M_auth`.
+    pub fn matched<'a>(&self, here_matched: &'a Bitmap) -> Matched<'a> {
+        if let Some(ranges) = &self.ranges {
+            return Matched::Scanned(ranges.candidates(here_matched));
+        }
+        match &self.column {
+            Some(column) => Matched::Scanned(column.candidates(here_matched)),
+            None => Matched::PerArtifact(here_matched),
+        }
+    }
+
+    /// Whether one artifact holds such a member — see [`Self::matched`].
+    ///
+    /// **The probe is early-exiting** (`Bitmap::intersect` stops at the first container that
+    /// meets), so it is cheap where there is a hit and a pass over the artifact's containers where
+    /// there is not. Under a selective filter the second is the common case, and a scattered
+    /// artifact's membership spans hundreds of blocks — unmeasured, and stated rather than claimed
+    /// (`artifact-serving-at-scale.md` §7).
+    pub fn matches(&self, matched: &Matched<'_>, ordinal: u32) -> bool {
+        match matched {
+            Matched::Scanned(ordinals) => ordinals.contains(ordinal),
+            Matched::PerArtifact(here_matched) => self.intersects_visible(ordinal, here_matched),
         }
     }
 

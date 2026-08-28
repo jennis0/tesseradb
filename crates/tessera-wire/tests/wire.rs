@@ -373,3 +373,63 @@ fn the_artifacts_frame_carries_a_hull_as_a_list_of_rings() {
     assert_eq!(xs[1], None, "an undeclared hull is null, not an empty list");
     assert_eq!(ys[1], None);
 }
+
+/// **`matched` is nullable because null is a value**: an unfiltered request asked no question, and
+/// a `false` would answer one. Its position — last, after `level` — is contract, on the same
+/// argument every other appended column carries: decoders index this batch positionally.
+#[test]
+fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
+    let rows = vec![
+        ArtifactRow {
+            layer: "clusters/a",
+            tessera_id: 7,
+            masked_count: 12,
+            matched: Some(true),
+            ..Default::default()
+        },
+        ArtifactRow {
+            layer: "clusters/a",
+            tessera_id: 8,
+            masked_count: 3,
+            matched: Some(false),
+            ..Default::default()
+        },
+        // The unfiltered request: no question was asked of this artifact.
+        ArtifactRow {
+            layer: "clusters/a",
+            tessera_id: 9,
+            masked_count: 1,
+            matched: None,
+            ..Default::default()
+        },
+    ];
+
+    let bytes = artifacts_frame(&rows);
+    let frames = split_frames(&bytes).expect("one well-formed frame");
+    let batch = StreamReader::try_new(std::io::Cursor::new(frames[0].1), None)
+        .expect("arrow stream")
+        .next()
+        .expect("one batch")
+        .expect("decodes");
+
+    let schema = batch.schema();
+    assert_eq!(
+        schema.fields().len() - 1,
+        schema.index_of("matched").expect("column present"),
+        "`matched` is the last column, and its position is contract"
+    );
+    let field = schema.field_with_name("matched").unwrap();
+    assert_eq!(field.data_type(), &DataType::Boolean);
+    assert!(field.is_nullable(), "null is *the request carried no filter*");
+
+    let column = batch
+        .column_by_name("matched")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .expect("a nullable Boolean");
+    let read: Vec<Option<bool>> = (0..column.len())
+        .map(|i| column.is_valid(i).then(|| column.value(i)))
+        .collect();
+    assert_eq!(read, vec![Some(true), Some(false), None]);
+}

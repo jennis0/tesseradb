@@ -435,6 +435,12 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     // Read by name like every other column here; the schema's *position* is contract for a decoder
     // that indexes positionally, which this one deliberately is not.
     const level = t.getChild('level');
+    // **The filter bit, and null is a value**: the column is all-null where the request carried no
+    // filter, which is *there was no question* rather than *no matches* (decision 0104). A missing
+    // column reads the same way, and unlike `level` there is nothing to refuse over — a client that
+    // asked for no filter has no use for it, and one that did draws every artifact undimmed, which
+    // is what it drew before the column existed.
+    const matched = t.getChild('matched');
     // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
     // (decision 0048) and a level is what a client draws a tiered layer's resolution from, so a
     // body without the column is a server this build does not match — silently reading every
@@ -492,7 +498,8 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
         // Absent on a server older than the field, which reads the same as a root — the
         // fail-closed direction, and the only one available without inventing a parent.
         parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i)),
-        level: Number(level.get(i))
+        level: Number(level.get(i)),
+        matched: matched == null || matched.get(i) === null ? null : Boolean(matched.get(i))
       });
     }
   }

@@ -278,6 +278,9 @@ paths:
         and no points frame at all. **A client must not decrease `k` as it zooms in**; the server
         cannot enforce this.
 
+        The *artifacts* frame's `matched` column answers the request's `filters` per
+        artifact, and is null where the request carried none — see `filters`.
+
         `layers` decides whether an artifacts frame can appear — see its schema; the semantics
         there are the owner's ruling of 2026-08-25 and the server change is landing on the s3
         track, so until that merges an *omitted* `layers` is read as `"all"` and the string form is
@@ -881,7 +884,18 @@ components:
           minimum: 0
           description: The cap clause. Defaults to `k_max_marks`; capped by `max_k`. `0` is the counts-only request. Never decrease it on zoom.
         filters:
-          $ref: "#/components/schemas/FilterExpr"
+          description: |
+            The filter. It narrows which marks are drawn and **answers one boolean beside each
+            served artifact**: the *artifacts* frame's `matched` is `true` where a member this
+            principal may see, inside the requested tiles, matches (contracts §3.2, decision 0104).
+            The column is **null** on every response whose request carried no filter — there was no
+            question, and `false` would answer one.
+
+            **A filter moves nothing else about an artifact.** The same artifacts are served with
+            the same `masked_count`, filtered or not: a filter may move the frontier up and never
+            down (**I12**).
+          allOf:
+            - $ref: "#/components/schemas/FilterExpr"
         pin:
           $ref: "#/components/schemas/Pin"
         underlay_offset:

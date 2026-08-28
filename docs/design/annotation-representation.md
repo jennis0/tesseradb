@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-15 · **Promoted:** 2026-08-16
 **Status:** **Normative for the annotation representation** — what the model is made of: storage, addressing, the visibility predicate's evaluation, the fold's artifact pass, and serving. Reviewed under three lenses (Stage 0, 2026-08-15; the record is [`2026-08-15-artifact-design-review.md`](../evidence/memos/2026-08-15-artifact-design-review.md)) and ruled by decisions [0074](../decisions/0074-row-less-entities-are-allocated-downward.md)–[0083](../decisions/0083-the-frontier-is-a-request-time-budget.md). Companion to [`annotations.md`](annotations.md), which owns the *model*. The measurement campaign is run and reviewed ([`probes/2026-08-15-artifact-representation/`](../../probes/2026-08-15-artifact-representation/)); its three harness bugs are corrected in place and listed as negative results (§11.3). [`annotation-write-cycle.md`](annotation-write-cycle.md) supersedes the point-event halves of §5 and §5.0.3, and this document is corrected toward it. `architecture.md` remains the specification and wins every conflict.
-**⊘ Four things are open inside a normative document**, marked at their sites and each due at the stage that needs it rather than held against promotion: search's containment gate (§8 — Stage 8), the filter axis (§6.3 — Stage 8), membership packaging (§2.4 — Stage 2, the one layout question the rulings did not settle), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). §11.3's unmeasured items are allocated to stages the same way; the fold's artifact pass is the largest of them and is Stage 4's first measurement, not its last.
+**⊘ Three things are open inside a normative document**, marked at their sites and each due at the stage that needs it rather than held against promotion: search's containment gate (§8 — Stage 8), membership packaging (§2.4 — Stage 2, the one layout question the rulings did not settle), and the edit pass ([decision 0077](../decisions/0077-supplied-content-lives-in-the-record-blob.md) defers it — Stage 7). **The filter axis closed on 2026-08-28** ([decision 0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)): a filter answers a boolean beside each served artifact and moves neither existence nor the count (§6.3). §11.3's unmeasured items are allocated to stages the same way; the fold's artifact pass is the largest of them and is Stage 4's first measurement, not its last.
 **Why it is separate:** the model survived review under three lenses; the section that made it concrete did not. Three reviewers (2026-08-15) returned findings that clustered almost entirely on `annotations.md` §7 and §7.1 — a reuse claim asserting that artifacts are items and therefore inherit every entity-keyed structure. That section is withdrawn and replaced by this document. Keeping the model and the representation apart is what stops the next such finding invalidating both.
 **Reads against:** design §4 (I1, I2, I5, I7, I9, I12), §5.1, §6.3, §7.1–§7.9, §10.4, Appendix A, Appendix C; [`filter-index.md`](filter-index.md) §2 (the measured constants this design turns on); [`write-path.md`](write-path.md) §5; [`views-and-multi-table.md`](views-and-multi-table.md) §3; [`compaction.md`](compaction.md); decisions [0028](../decisions/0028-postings-requirement-and-the-pair-relation.md), [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md), [0062](../decisions/0062-filters-compose-as-a-boolean-tree-inside-the-candidate.md), [0064](../decisions/0064-an-absent-number-is-a-presence-bitmap-beside-the-column.md).
 **Citation convention:** unprefixed §n is the architecture design; `model §n` is `annotations.md`; this document's own sections are **spec §n**.
@@ -1023,12 +1023,17 @@ visibly wrong on an unbalanced tree, which is every real clustering. ⊘ **The c
 walk over the edges of the passing set within the viewport, bounded by that set rather than by the
 tree, with an unknown constant.
 
-⊘ **The filter axis is unresolved, and decision 0080 removed the last mechanism that gave it a
-partial answer.** An earlier revision here ran a display threshold against `M_sel` — the filtered
-mask, `M_auth ∧ filters` — inside the walk; the walk is gone. Under a filter, nothing now says
-which number sits beside an artifact — the masked count, or the filtered one — or what prunes a
-cluster the filter has emptied. Until the owner states it, the per-artifact test runs against
-`M_auth` alone and filters do not touch artifact existence.
+**The filter axis is settled: a filter answers one boolean beside each served artifact and touches
+nothing else** ([decision 0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md),
+owner ruling 2026-08-28; built the same day). The number beside an artifact is the masked count,
+filter or no filter, and a filter prunes nothing — the per-artifact test runs against `M_auth`
+alone, so an artifact neither appears nor vanishes as a viewer types (**I12**). What a filter adds
+is `matched`: whether any member this principal may see, inside the request's tiles, satisfies it.
+**Not a second count**, which would put two numbers on one artifact and make the client choose; and
+**not something a client can derive**, its points being a sample of the matches
+(`client-interaction.md` §2). An earlier revision here ran a display threshold against `M_sel` —
+the filtered mask — inside the walk that decision 0080 removed; nothing of that survives, and the
+question it left open is this bit's.
 
 ***Client-chosen.*** **Which layers render is the client's decision, and which level within one.**
 Every competent map tool lets a user toggle annotation layers, and nothing here should obstruct
@@ -1466,6 +1471,8 @@ document had one cause — reasoning about entity space while designing a row-sp
 error was invisible from inside the argument that made it.
 
 ## Appendix R
+
+**r9 — 2026-08-28. The filter axis is settled: a boolean, and nothing else moves.** §6.3's ⊘ asked which number sits beside an artifact under a filter and what prunes one the filter has emptied. The answer is neither: the count stays the masked count, nothing is pruned, and the frame gains a nullable `matched` — whether a member this principal may see, inside the request's tiles, satisfies the filter ([decision 0104](../decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md), owner ruling; built and on the wire the same day, contracts r42). A boolean rather than a filtered count, because two numbers on one artifact make the client choose which it is showing; and the server's to compute, because a client's points are a *sample* of the matches and the sample is empty for exactly the small artifacts a filter is used to find. Scoped to the request's tiles, that being the extent every filter-crossing route can answer over — stated in §6.3 and in contracts §3.2 rather than left to be discovered, since the count beside it is not so scoped.
 
 **r8 — 2026-08-28. The level is on the wire both ways, and there is no ceiling.** §6's two halves
 were each describing something that did not exist. The zoom→level map was *advisory* because nothing

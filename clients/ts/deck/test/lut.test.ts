@@ -14,7 +14,8 @@ const artifact = (id: bigint, x: number, parentId: bigint | null = null): Artifa
   hull: null,
   content: [],
   parentId,
-  level: 0
+  level: 0,
+  matched: null
 });
 
 function band(tag: number, ordinals: number[], layer = 'l'): Band {

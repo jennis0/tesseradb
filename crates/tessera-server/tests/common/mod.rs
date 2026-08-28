@@ -630,6 +630,9 @@ pub struct ArtifactRow {
     pub hull: Option<Vec<Vec<[u32; 2]>>>,
     /// The declared resolution this artifact sits at — 0 on a treed or flat layer.
     pub level: u32,
+    /// Whether a member this principal may see, inside the requested tiles, matched the request's
+    /// filter. `None` where the request carried none.
+    pub matched: Option<bool>,
 }
 
 fn str_col(
@@ -816,6 +819,16 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                 .downcast_ref::<arrow::array::UInt32Array>()
                                 .expect("`level` is a non-nullable UInt32 at column 14")
                                 .value(i),
+                            // Column 15, after `level` — positionally for the same reason, and
+                            // nullable: null is *the request carried no filter*.
+                            matched: {
+                                let column = batch
+                                    .column(15)
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::BooleanArray>()
+                                    .expect("`matched` is a nullable Boolean at column 15");
+                                column.is_valid(i).then(|| column.value(i))
+                            },
                         });
                     }
                 }

@@ -299,6 +299,22 @@ pub struct ArtifactRow<'a> {
     /// sits at level 0; this column is what stops that reading being carried where it does not
     /// hold.
     pub level: u32,
+    /// **Whether this artifact holds a member the request's filter admits** — one that this
+    /// principal may see and that lies inside the request's tiles
+    /// ([decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)).
+    ///
+    /// `None` where the request carried no filter: there was no question, and a `false` would
+    /// answer one that was never asked. A whole frame of nulls is what an unfiltered response
+    /// carries.
+    ///
+    /// **A boolean rather than a filtered count**, so that nothing here competes with
+    /// `masked_count` for what the client is showing. Existence and the count are anchored on
+    /// `M_auth` whatever the filter did, so this is the only field of the row a filter moves.
+    ///
+    /// **It is clipped to the request's tiles where the count is not**: the count and the geometry
+    /// describe the whole visible membership, this the part of it in view, that being the extent
+    /// every filter-crossing route can answer over.
+    pub matched: Option<bool>,
 }
 
 /// The kind-5 artifacts frame: one row per served artifact.
@@ -361,6 +377,11 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         // level, a treed layer's being 0 (decision 0082). There is no *withheld* state to express —
         // an artifact whose content could not be served is absent whole (decision 0076).
         Field::new("level", DataType::UInt32, false),
+        // Appended after `level`, on the same positional argument, and **nullable because null is
+        // a value here**: an unfiltered request asked no question, and a `false` would answer one.
+        // So the column is all-null on every response that carried no `filter`, rather than absent
+        // — one schema per frame kind, as the geometry columns are (decision 0104).
+        Field::new("matched", DataType::Boolean, true),
     ]));
 
     let mut hull_x = ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
@@ -434,6 +455,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(content.finish()),
         Arc::new(UInt64Array::from_iter(rows.iter().map(|r| r.parent_id))),
         Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.level))),
+        Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
     ];
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");

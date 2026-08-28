@@ -4,7 +4,7 @@ import {artifactOfMark} from '../src/pick.js';
 
 /** A hovered mark names the artifact it is a member of, through its ordinal and the table. */
 
-const artifact = (id: bigint, parentId: bigint | null, level = 0): Artifact => ({layer: 'clusters', tesseraId: id, key: `c-${id}`, maskedCount: 1n, centroid: null, box: null, hull: null, content: [], parentId, level});
+const artifact = (id: bigint, parentId: bigint | null, level = 0): Artifact => ({layer: 'clusters', tesseraId: id, key: `c-${id}`, maskedCount: 1n, centroid: null, box: null, hull: null, content: [], parentId, level, matched: null});
 
 function projection(served: Artifact[]): ArtifactsProjection {
   const table = new SessionArtifactTable();
