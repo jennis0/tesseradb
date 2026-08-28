@@ -245,46 +245,6 @@ describe('the artifact channel', () => {
     expect(table.live).toBe(2);
   });
 
-  it('evicts the least recently served first, and never what is on screen', async () => {
-    const clock = manualClock();
-    const table = new SessionArtifactTable();
-    let served = [artifact(1n), artifact(2n)];
-    const {client} = fakeClient(() => responseWith(served));
-    const states: ArtifactChannelState[] = [];
-    const ch = new ArtifactChannel(client, {
-      view: 's0',
-      quantisation: Q,
-      token: () => 'tok',
-      depth: () => 5,
-      clock,
-      table,
-      heldMax: 3,
-      onChange: (s) => states.push(s)
-    });
-    ch.setLayer('clusters/x');
-    ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
-
-    served = [artifact(3n)];
-    ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(ch.current.held).toBe(3);
-
-    // A fourth: the cap bites, and what goes is the pair served longest ago — never `4`, which is
-    // what the viewer is looking at.
-    served = [artifact(4n)];
-    ch.refresh(view, 400, 300);
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(ch.current.held).toBe(3);
-    expect(table.live).toBe(3);
-    expect(table.ordinalOf('clusters/x', 1n)).toBe(0);
-    expect(table.ordinalOf('clusters/x', 3n)).toBeGreaterThan(0);
-    expect(table.ordinalOf('clusters/x', 4n)).toBeGreaterThan(0);
-  });
-
   it('keeps the store when a layer is switched off — a question not asked is not an answer gone stale', async () => {
     const clock = manualClock();
     const table = new SessionArtifactTable();

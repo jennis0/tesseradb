@@ -199,7 +199,10 @@ level in the *absent* case only.
    renamed; the store then reuses the colour map rather than rebuilding it, which is where the
    saving actually lands. The bit is read from the response every time and never from the store.
    **Without step 3 the response still carries every payload**, so nothing is saved on the wire or
-   in parsing yet — what is saved is naming, colouring and the lookup texture.
+   in parsing yet — what is saved is naming, colouring and the lookup texture. **No cap** (owner,
+   2026-08-28): a cap counted in artifacts is not a bound in bytes, the two differing by orders of
+   magnitude between a count-only layer and one carrying hulls, so the drop rules are the whole
+   bound and a byte cap is left to be built if it is ever wanted.
 3. **Design the wire affordance** for *what I hold*, once (1) and (2) have shown what the client
    actually needs. This is the step that needs a contracts change and a leak-register pass.
 4. **Measure on a scattered layer**, not on GeoNames. The corpus for it does not exist yet: an

@@ -83,24 +83,28 @@ function defaultClock(): ArtifactChannelClock {
 const SETTLE_MS = 200;
 
 /**
- * How many payloads the session holds before the least recently served are dropped.
+ * **There is no cap on what the store holds, and the drop rules are the whole bound.**
  *
- * **Sized so the case the store exists for fits.** A layer whose artifacts are scattered through
- * row space is served *in full on every request whatever the viewport* — the tile index cannot
- * bound it — and the whole point of holding is that such a layer is fetched once and never again;
- * the measured case is GeoNames' 464,655 artifacts at 49 MB
- * (`evidence/memos/2026-08-28-artifact-response-volume.md`). A cap below that would evict exactly
- * what it exists to keep. What the cap is for is the layer an order of magnitude larger again,
- * where holding everything a session ever panned over is a leak in the ordinary sense.
+ * A cap in *artifacts* cannot mean anything: bytes per artifact span orders of magnitude — a
+ * count-only artifact is tens of bytes and one carrying a hull is a ring per separated group of its
+ * visible members, unbounded — so a number of artifacts is not a number of megabytes and choosing
+ * one is choosing a figure that looks like a budget without being one. A cap in bytes would mean
+ * something and is not built; if one is ever wanted, the client has already parsed the rings and
+ * can total them at insert.
  *
- * **It counts artifacts, not bytes**, which is the honest bound and not the tight one: a
- * count-only artifact is tens of bytes and one carrying a hull is unbounded. Stated rather than
- * hidden — a hull-carrying layer reaches a given number of megabytes long before it reaches this.
+ * What bounds this instead is that the payloads are what the response already carried, parsed into
+ * the objects this holds — nothing is materialised that a response did not — and that the store
+ * goes whole when the identity key or the content key rotates, on a reset, and on a refresh. So it
+ * is bounded by one layer's population under one content key.
+ *
+ * **The growth case, stated rather than hidden**: a layer whose artifacts the tile index *can*
+ * bound is served a viewport at a time, so a session panning across a very large one accumulates
+ * towards that layer's whole population. That is the same total a single request over the whole
+ * extent would have returned, reached slowly.
  */
-const HELD_MAX = 500_000;
 
-/** One held payload: the artifact as served, the ordinal naming it, and when it was last served. */
-type HeldArtifact = {artifact: Artifact; ordinal: number; seen: number};
+/** One held payload: the artifact as served, and the ordinal it was named under. */
+type HeldArtifact = {artifact: Artifact; ordinal: number};
 
 /** The store's key. Identity is `(layer, tessera_id)`: ids are unique per layer, not across. */
 function keyOf(a: {layer: string; tesseraId: bigint}): string {
@@ -133,8 +137,6 @@ export type ArtifactChannelOptions = {
   onChange(state: ArtifactChannelState): void;
   clock?: ArtifactChannelClock;
   settleMs?: number;
-  /** How many payloads to hold before evicting the least recently served — see {@link HELD_MAX}. */
-  heldMax?: number;
   /** The table this channel feeds — its served set is the only holder until D12 (§5.10). */
   table?: SessionArtifactTable;
 };
@@ -146,7 +148,6 @@ export class ArtifactChannel {
   private readonly clock: ArtifactChannelClock;
   private readonly settleMs: number;
   private readonly table: SessionArtifactTable | null;
-  private readonly heldMax: number;
   /**
    * The payload store: one entry per artifact this session has been served under the current keys,
    * with the ordinal it was named under and the response version it was last served in.
@@ -175,7 +176,6 @@ export class ArtifactChannel {
     this.clock = opts.clock ?? defaultClock();
     this.settleMs = opts.settleMs ?? SETTLE_MS;
     this.table = opts.table ?? null;
-    this.heldMax = opts.heldMax ?? HELD_MAX;
   }
 
   get current(): ArtifactChannelState {
@@ -306,7 +306,6 @@ export class ArtifactChannel {
       this.dropHeld();
     }
     this.heldUnder = {identityKey, contentKey};
-    const version = this.state.version + 1;
 
     // Named in one batch, so a parent link between two artifacts of this response resolves — the
     // table sets links only within the batch it is given.
@@ -324,40 +323,13 @@ export class ArtifactChannel {
       : new Uint32Array(novel.length);
     for (let i = 0; i < novel.length; i++) {
       const a = novel[i]!;
-      this.held.set(keyOf(a), {artifact: withoutBit(a), ordinal: ordinals[i]!, seen: version});
+      this.held.set(keyOf(a), {artifact: withoutBit(a), ordinal: ordinals[i]!});
     }
 
-    const drawn: Artifact[] = [];
-    for (const a of artifacts) {
-      const entry = this.held.get(keyOf(a))!;
-      entry.seen = version;
-      drawn.push(a.matched === null ? entry.artifact : {...entry.artifact, matched: a.matched});
-    }
-    this.evict(version);
-    return drawn;
-  }
-
-  /**
-   * Drop the least recently served payloads down to the cap, never the set just served.
-   *
-   * **Least recently *served*, not least recently in view** — the two differ on a layer whose
-   * artifacts are all served on every request (`artifact-cache-handover.md` §1), where nothing is
-   * ever the eviction candidate and the cap simply never bites, which is the intended behaviour
-   * there rather than an accident of it.
-   */
-  private evict(version: number): void {
-    if (this.held.size <= this.heldMax) return;
-    const candidates = [...this.held.entries()].filter(([, e]) => e.seen !== version);
-    candidates.sort((a, b) => a[1].seen - b[1].seen);
-    const over = this.held.size - this.heldMax;
-    const going = candidates.slice(0, over);
-    if (going.length === 0) return;
-    if (this.table) {
-      const ordinals = new Uint32Array(going.length);
-      for (let i = 0; i < going.length; i++) ordinals[i] = going[i]![1].ordinal;
-      this.table.release(ordinals);
-    }
-    for (const [key] of going) this.held.delete(key);
+    return artifacts.map((a) => {
+      const {artifact} = this.held.get(keyOf(a))!;
+      return a.matched === null ? artifact : {...artifact, matched: a.matched};
+    });
   }
 
   private async request(): Promise<void> {
