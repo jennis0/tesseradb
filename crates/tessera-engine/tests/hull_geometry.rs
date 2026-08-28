@@ -552,6 +552,23 @@ fn the_derivation_profile() {
         let shape_ms = t3.elapsed().as_secs_f64() * 1e3 - reduce_ms;
         std::hint::black_box(rings);
 
+        // The four stages above are timed apart, so they double-count nothing and miss nothing a
+        // stage boundary falls between. This is the whole derivation as a request pays for it —
+        // gather, mean, extremes and shape in the order `compute` runs them, and the number the
+        // stage rows have to add up to.
+        let t4 = Instant::now();
+        let derived = compute(
+            &[
+                ComputedProperty::Centroid,
+                ComputedProperty::Box,
+                ComputedProperty::Hull,
+            ],
+            visible,
+            &corpus.locator,
+        );
+        let derive_ms = t4.elapsed().as_secs_f64() * 1e3;
+        std::hint::black_box(derived);
+
         rows.push(Stage {
             members: positions.len(),
             representatives: reduced_len,
@@ -559,15 +576,22 @@ fn the_derivation_profile() {
             bc_ms,
             reduce_ms,
             shape_ms: shape_ms.max(0.0),
+            derive_ms,
         });
     }
 
     rows.sort_unstable_by_key(|r| r.members);
-    println!("members,representatives,gather_ms,box_centroid_ms,reduce_ms,shape_ms");
+    println!("members,representatives,gather_ms,box_centroid_ms,reduce_ms,shape_ms,derive_ms");
     for r in &rows {
         println!(
-            "{},{},{:.3},{:.3},{:.3},{:.3}",
-            r.members, r.representatives, r.gather_ms, r.bc_ms, r.reduce_ms, r.shape_ms
+            "{},{},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            r.members,
+            r.representatives,
+            r.gather_ms,
+            r.bc_ms,
+            r.reduce_ms,
+            r.shape_ms,
+            r.derive_ms
         );
     }
     let sum = |f: fn(&Stage) -> f64| -> f64 { rows.iter().map(f).sum() };
@@ -595,6 +619,10 @@ fn the_derivation_profile() {
         "the hull's own cost (reduce+shape) {:.0} ms; what a declared box or centroid already pays (gather) {g:.0} ms",
         b + s,
     );
+    println!(
+        "compute(centroid, box, hull) end to end: {:.0} ms over the layer",
+        sum(|r| r.derive_ms)
+    );
 }
 
 /// One artifact's row of the profile — the four stages a change can move independently.
@@ -605,6 +633,8 @@ struct Stage {
     bc_ms: f64,
     reduce_ms: f64,
     shape_ms: f64,
+    /// The whole of `compute` over the same membership, with all three properties declared.
+    derive_ms: f64,
 }
 
 /// The `box` and `centroid` properties over the gathered positions, written from the definition —
@@ -681,4 +711,179 @@ fn the_cell_occupancy() {
         members as f64 / morton_cells as f64 > 1.0,
         "a member cannot share a cell with fewer than one member"
     );
+}
+
+/// **The reduction the engine computes is the reduction the definition asks for, member for
+/// member, over every artifact of the layer** — the assertion that makes the route to the occupied
+/// cells a speed change and not a shape change.
+///
+/// The engine finds the occupied cells by folding runs of consecutive members and answers both
+/// hull-candidate questions per *cell*, over a band. This oracle does neither: it bins every member
+/// into a hash map keyed on the cell, and tests every member against the octagon on its own. It
+/// shares no code with the engine's reduction — only the resolution constant and the convex hull
+/// in `common/ring.rs`, which is itself a second implementation.
+///
+/// Two things are asserted, and the second is the one that matters: the representative **sets** are
+/// equal, and the **rings** the dig produces from each are byte-identical. A set difference that
+/// happened not to move a vertex would still be caught by the first; a ring difference could not
+/// hide behind either.
+///
+/// ```text
+/// TESSERA_HULL_BUNDLE=<…>/bundle-notebook-2m4 \
+///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_reduction_is_the_definition
+/// ```
+#[test]
+#[ignore]
+fn the_reduction_is_the_definition() {
+    let corpus = corpus::open();
+    let d = tessera_engine::derived::SERVED_QUANTISE_DIVISIONS;
+    let (mut reduced, mut exact, mut members, mut reps) = (0usize, 0usize, 0usize, 0usize);
+    for (ordinal, visible) in &corpus.memberships {
+        let positions = corpus::gather(visible, &corpus.locator);
+        if positions.len() < 3 {
+            continue;
+        }
+        members += positions.len();
+
+        let engine = tessera_engine::derived::quantised(&positions, d);
+        let oracle = dense_reduction(&positions, d);
+        assert_eq!(
+            engine.is_some(),
+            oracle.is_some(),
+            "artifact {ordinal}: the two routes disagree about whether the reduction engages"
+        );
+
+        let Some(oracle) = oracle else {
+            exact += 1;
+            continue;
+        };
+        let mut engine = engine.expect("both routes reduce");
+        reduced += 1;
+
+        let mut oracle = oracle;
+        engine.sort_unstable();
+        engine.dedup();
+        oracle.sort_unstable();
+        oracle.dedup();
+        assert_eq!(
+            engine, oracle,
+            "artifact {ordinal}: the representatives and hull candidates are not the same set"
+        );
+        reps += engine.len();
+
+        // The rings, from the engine's own route and from the oracle's set fed to a dig that
+        // reduces nothing further. Unbounded, so the budget cannot mask a difference by stopping
+        // both digs at the same vertex count.
+        let by_engine = tessera_engine::derived::dig_rings_at(&positions, usize::MAX, d).0;
+        let by_oracle = tessera_engine::derived::dig_rings_at(&oracle, usize::MAX, 0).0;
+        assert_eq!(
+            by_engine, by_oracle,
+            "artifact {ordinal}: the rings are not byte-identical"
+        );
+    }
+    println!(
+        "{} artifacts reduced and {} exact, {members} members, {reps} representatives — every ring identical",
+        reduced, exact
+    );
+    assert!(reduced > 0, "the layer must exercise the reduced path");
+}
+
+/// One member per occupied cell and every hull candidate beside them, **written from
+/// `artifact-shapes.md` §7.1 rather than from the engine**: a hash map over every member for the
+/// cells, an exact octagon over every member for the candidates, and no run, band or merge
+/// anywhere. It is the oracle `the_reduction_is_the_definition` compares against, and it is
+/// deliberately the slow, obvious construction.
+fn dense_reduction(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
+    use std::collections::HashMap;
+    const FLOOR: usize = 75_000;
+    const MARGIN: f64 = 65_536.0;
+    if divisions < 16 || points.len() < FLOOR {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for q in points {
+        x0 = x0.min(q[0]);
+        y0 = y0.min(q[1]);
+        x1 = x1.max(q[0]);
+        y1 = y1.max(q[1]);
+    }
+    let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
+    let shift = wx
+        .max(wy)
+        .div_ceil(divisions as u64)
+        .next_power_of_two()
+        .trailing_zeros();
+    let side = 1u64 << shift;
+    if side <= 1 {
+        return None;
+    }
+    let half = side / 2;
+
+    // Every member into its cell, keeping the one nearest that cell's centre and breaking ties on
+    // the position.
+    let mut cells: HashMap<(u64, u64), ([u32; 2], u64)> = HashMap::new();
+    for q in points {
+        let (cx, cy) = ((q[0] as u64) >> shift, (q[1] as u64) >> shift);
+        let (mx, my) = ((cx << shift) + half, (cy << shift) + half);
+        let (dx, dy) = ((q[0] as u64).abs_diff(mx), (q[1] as u64).abs_diff(my));
+        let d = dx * dx + dy * dy;
+        cells
+            .entry((cx, cy))
+            .and_modify(|best| {
+                if d < best.1 || (d == best.1 && *q < best.0) {
+                    *best = (*q, d);
+                }
+            })
+            .or_insert((*q, d));
+    }
+    if cells.len() * 4 > points.len() * 3 {
+        return None;
+    }
+
+    // Akl–Toussaint over every member, one at a time.
+    const DIRECTIONS: [(i64, i64); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    let mut best: [Option<(i64, [u32; 2])>; 8] = [None; 8];
+    for q in points {
+        let (x, y) = (q[0] as i64, q[1] as i64);
+        for (slot, (wx, wy)) in best.iter_mut().zip(DIRECTIONS) {
+            let score = wx * x + wy * y;
+            if slot.is_none_or(|(s, b)| score > s || (score == s && *q < b)) {
+                *slot = Some((score, *q));
+            }
+        }
+    }
+    let extremes: Vec<[u32; 2]> = best.into_iter().flatten().map(|(_, q)| q).collect();
+    let ring = convex_hull(&extremes);
+    let edges: Vec<[f64; 3]> = (0..ring.len())
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let (ax, ay) = (a[0] as f64, a[1] as f64);
+            let (bx, by) = (b[0] as f64, b[1] as f64);
+            [-(by - ay), bx - ax, (by - ay) * ax - (bx - ax) * ay]
+        })
+        .collect();
+    let inside = |q: [u32; 2]| -> bool {
+        if ring.len() < 3 {
+            return false;
+        }
+        let (x, y) = (q[0] as f64, q[1] as f64);
+        edges.iter().all(|[a, b, c]| a * x + b * y + c > MARGIN)
+    };
+
+    let mut out: Vec<[u32; 2]> = cells.values().map(|(rep, _)| *rep).collect();
+    for q in points {
+        if !inside(*q) {
+            out.push(*q);
+        }
+    }
+    Some(out)
 }
