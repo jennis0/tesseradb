@@ -312,3 +312,15 @@ paths = [
   "docs/design/artifact-shapes.md",
   "probes/2026-08-27-artifact-shapes/*",
 ]
+
+# Wave 14 — occupied cells without a scan (controller, 2026-08-28, owner direction: make serving
+# every hull cheap enough that the client's narrowing is an optimisation, not a requirement).
+[track.cells]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-store/src/derived.rs",
+  "crates/tessera-spatial/src/*",
+  "docs/design/artifact-shapes.md",
+  "probes/2026-08-27-artifact-shapes/*",
+]
