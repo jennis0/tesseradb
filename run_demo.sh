@@ -28,8 +28,8 @@
 #     1b         1,000,000,000  none                 ~20 GB
 #
 # `notebook` is the odd one out, and it is in the picker for what the other four lack. They
-# publish one flat k-means layer; `notebook` is `data/notebook/`, which `notebooks/arxiv-corpus.ipynb`
-# writes — a uniform sample of the same corpus carrying **five declared layers**: k-means flat
+# publish one flat k-means layer; `notebook` is `data/notebook/`, which the ladder's arXiv rung
+# (`test_corpora/arxiv/`) writes — a uniform sample of the same corpus carrying **five declared layers**: k-means flat
 # under a `{ count = 50 }` floor, HDBSCAN's condensed tree nested under `{ fraction = 0.05 }`, a
 # TF-IDF topic label attached to every cluster of each, and arXiv's own classification as a tiered
 # layer whose two levels are joined by containment edges. It builds in seconds. Its principals are
@@ -343,8 +343,10 @@ build_scale() {
     [[ -f "$f" ]] || {
       echo "missing fixture: $f" >&2
       if [[ -n "$(notebook_dir_of "$scale")" ]]; then
-        echo "the notebook corpus is written by notebooks/arxiv-corpus.ipynb:" >&2
-        echo "  notebooks/run-corpus.sh --notebook --build-only --out $(notebook_dir_of "$scale")" >&2
+        echo "the notebook corpus is written by the ladder's arXiv rung:" >&2
+        echo "  ~/venvs/arxiv/bin/python -m test_corpora.arxiv.prepare \\" >&2
+        echo "      --sample 50000 --out $(notebook_dir_of "$scale")" >&2
+        echo "  (add 'python -m test_corpora.arxiv.toponymy' for the named-topic layer)" >&2
         exit 1
       fi
       echo "build the demo inputs first:" >&2

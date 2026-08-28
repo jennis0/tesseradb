@@ -19,6 +19,7 @@ is the owner's to settle.
 
 | # | Rung | Points | State |
 |---|---|---|---|
+| — | arXiv | 2,422,486 | **Have, and now on the campaign's convention.** The pipeline that produces it was a notebook outside `test_corpora/`; ported to [`../test_corpora/arxiv/`](../test_corpora/arxiv/README.md) on 2026-08-28 as `prepare.py` plus an optional `toponymy.py`, and the notebook deleted. It is the ladder's only embedding corpus and the only one whose source is derived rather than staged |
 | 0 | Re-run the 5×10⁷ artifact tier | — | **Deferred, deliberately.** It confirms W1 and W2, which bite at rung 2 and not at rung 1, and it costs a ~45 GB build. Take it before rung 2, not before rung 1 |
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served.** Not done against §7.1's bar — see §2 |
 | 2 | Overture places + divisions | 7.4×10⁷ | Not started. Staged |

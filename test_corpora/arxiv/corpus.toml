@@ -1,0 +1,226 @@
+# arXiv — 2,422,486 preprints, the ladder's bottom rung and its only embedding corpus.
+#
+# Produced by `prepare.py`, which copies this file next to the parquets it writes; `[sources]` is
+# relative to the declaring document (configuration.md §3), so the copy beside the data is what
+# `tessera build` reads and this one is what gets reviewed.
+#
+# **The optional second stage edits the copy, never this file.** `toponymy.py` injects its four
+# sources at the marker in `[sources]` and appends the layer block from `toponymy.toml`. Both files
+# are valid TOML on their own so that both are reviewable; the markers are comments for the same
+# reason. A missing marker is a refusal rather than a silent no-op.
+#
+# **Every path is named once.** A `source` anywhere below names one of these keys rather than
+# repeating a path, so staging one of them elsewhere is a single `--file` override that moves
+# everything reading it. `[defaults].source` is what a view or a column takes when it names none —
+# here the points file, which carries identity, geometry and every attribute column.
+
+[sources]
+points                = "points.parquet"
+archive               = "archive.parquet"
+primary_category      = "primary_category.parquet"
+kmeans                = "clusters-kmeans.parquet"
+kmeans_members        = "clusters-kmeans-members.parquet"
+kmeans_topics         = "topics-kmeans.parquet"
+kmeans_topic_members  = "topics-kmeans-members.parquet"
+hdbscan               = "clusters-hdbscan.parquet"
+hdbscan_members       = "clusters-hdbscan-members.parquet"
+hdbscan_topics        = "topics-hdbscan.parquet"
+hdbscan_topic_members = "topics-hdbscan-members.parquet"
+taxonomy              = "taxonomy-arxiv.parquet"
+taxonomy_members      = "taxonomy-arxiv-members.parquet"
+# <toponymy-sources>
+
+[defaults]
+source = "points"
+
+# **The frame is the view's, and it is fitted to the data.** `auto` squares a box around the
+# coordinates `prepare.py` wrote, with a small margin, so a circle stays a circle and nothing
+# clamps onto the edge. Quantisation *clamps* rather than filters, so a frame that does not fit
+# the data produces a well-formed bundle with the geometry wrong — which is why the build's frame
+# report is the thing to read before believing a map (`README.md`).
+[[view]]
+name             = "s0"
+title            = "arXiv preprints"
+extent           = "auto"
+point_visibility = { field = "categories", default = "public" }
+
+# arXiv's archive names and subject classes are published taxonomy, so the value sets disclose
+# nothing about this corpus's contents. Closed: a paper filed under something neither set names is
+# a refusal rather than a quietly minted category.
+[[vocabulary]]
+name       = "archive"
+title      = "arXiv archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "archive"
+
+[[vocabulary]]
+name       = "primary_category"
+title      = "arXiv subject class"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "primary_category"
+
+[[attribute]]
+name       = "archive"
+title      = "Archive"
+type       = "category"
+vocabulary = "archive"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "primary_category"
+title      = "Primary category"
+type       = "category"
+vocabulary = "primary_category"
+render     = true
+index      = true
+
+# `timestamp_us` rather than `i64`, so the unit is a fact the client reads off `/v1/meta` rather
+# than a convention it has to be told.
+[[attribute]]
+name   = "submitted_at"
+title  = "Submitted"
+type   = "timestamp_us"
+render = true
+
+# Prose lives in the record blob and reaches a client at drill-down: `render` on a text column is
+# refused, the hot column being a fixed-width slot per row. `index` builds the token index behind
+# `match` and `phrase`.
+[[attribute]]
+name  = "title"
+type  = "text"
+index = true
+
+[[attribute]]
+name  = "abstract"
+type  = "text"
+index = true
+
+[[attribute]]
+name  = "arxiv_id"
+title = "arXiv ID"
+type  = "keyword"
+index = true
+
+# Three clusterings here and a fourth in `toponymy.toml`, with a label set over each that has one.
+# Every layer states its two disclosure controls, because neither has a default: `visibility` is
+# the label a viewer must hold to know the layer exists at all, and `require_member_visibility` is
+# how much of a cluster a viewer must already see before that cluster is served to them.
+
+[[layer]]
+name       = "clusters/kmeans"
+title      = "k-means clusters"
+source     = "kmeans"
+views      = ["s0"]
+membership = "enumerated"
+hierarchy  = { kind = "flat", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+# The absolute form: a fixed floor, whatever the cluster's size.
+require_member_visibility = { count = 50 }
+# `hull` beside the box: the explorer draws a cluster as its served hull, and every computed
+# property is recomputed per viewer from `membership ∩ M_auth`, so a hull discloses no more than
+# the box did.
+content = { computed = ["centroid", "box", "hull"] }
+
+  # Membership in its own source: one row per (artifact, entity).
+  [layer.members]
+  source = "kmeans_members"
+
+  # The label set, written where it is used. `[layer.labels]` is sugar: it expands to a `[[layer]]`
+  # of its own — flat, on the same view, depending on this one, carrying one supplied `text`
+  # content — and builds a byte-identical bundle to writing that block out. What it never fills in
+  # is a disclosure control, so the two member requirements below are written here.
+  [layer.labels]
+  name                = "topics/kmeans"
+  title               = "k-means topics"
+  source              = "kmeans_topics"
+  type                = "text"
+  membership          = "enumerated"
+  artifact_visibility = { default = "inherited" }
+  # The layer grain: nothing beyond the cluster's own gate decides whether a label exists.
+  require_member_visibility = "none"
+
+    # The content grain, and a different question: the text is a synthesis of the titles it was
+    # drawn from, so it is read only by a viewer who can already read every one of them.
+    [layer.labels.content]
+    require_member_visibility = "all"
+
+    # A label's members are the documents it was generated from, and a ranked content's are the
+    # documents that rank was generated from — one row per (artifact, rank, entity).
+    [layer.labels.members]
+    source = "kmeans_topic_members"
+
+[[layer]]
+name       = "clusters/hdbscan"
+title      = "HDBSCAN clusters"
+source     = "hdbscan"
+views      = ["s0"]
+membership = "enumerated"
+hierarchy  = { kind = "nested", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+# The proportional form: a share of the cluster's own size, so the bar scales. Expect holes in the
+# lineage — a share does not shrink downward, so a small child can clear what its parent cannot,
+# each cluster having passed its own test. A layer declaring this form must expect them.
+require_member_visibility = { fraction = 0.05 }
+content = { computed = ["centroid", "box", "hull"] }
+
+  [layer.members]
+  source = "hdbscan_members"
+
+  [layer.labels]
+  name                = "topics/hdbscan"
+  title               = "HDBSCAN topics"
+  source              = "hdbscan_topics"
+  type                = "text"
+  membership          = "enumerated"
+  artifact_visibility = { default = "inherited" }
+  require_member_visibility = "none"
+
+    [layer.labels.content]
+    require_member_visibility = "all"
+
+    [layer.labels.members]
+    source = "hdbscan_topic_members"
+
+# The taxonomy: arXiv's own classification, as levels with containment edges between them.
+#
+# **Its edges are information, not roll-up.** A budget does not climb them — substituting an
+# archive for its subject classes would draw one shape across a region whose neighbours are still
+# drawn as classes. The resolution is the client choosing a level, and the edges are what let it
+# nest what it draws or filter to one archive's subtree while still drawing the rest.
+#
+# It is also the covering counterpart to HDBSCAN: every paper's primary category sits in exactly
+# one archive, so an archive *is* the union of its classes, and the two layers put a covering and a
+# non-covering hierarchy side by side over the same points.
+
+[[layer]]
+name       = "taxonomy/arxiv"
+title      = "arXiv classification"
+source     = "taxonomy"
+views      = ["s0"]
+membership = "enumerated"
+hierarchy  = { kind = "tiered", prune_children = false }
+
+visibility          = "public"
+artifact_visibility = { default = "inherited" }
+require_member_visibility = { count = 1 }
+content = { computed = ["centroid", "box", "hull"] }
+
+  [[layer.levels]]
+  level = 0
+  title = "archive"
+
+  [[layer.levels]]
+  level = 1
+  title = "subject class"
+
+  [layer.members]
+  source = "taxonomy_members"
