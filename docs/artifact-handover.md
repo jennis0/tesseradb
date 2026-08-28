@@ -350,12 +350,12 @@ single-depth form, so do not add it casually.
 ## 4. Things that will bite
 
 **The demo corpus is the fixture, and it is re-derivable.**
-[`notebooks/arxiv-corpus.ipynb`](../notebooks/arxiv-corpus.ipynb) writes the whole corpus and its
-one declaration; [`notebooks/run-corpus.sh`](../notebooks/run-corpus.sh) builds it, serves it and
-opens the viewer. Use it before reasoning about behaviour from the types — three of Stage 5's
+[`test_corpora/arxiv/`](../test_corpora/arxiv/README.md) writes the whole corpus and its one
+declaration; `run_demo.sh --scale notebook` builds it, serves it and opens the viewer. Use it
+before reasoning about behaviour from the types — three of Stage 5's
 findings came from running it and none from reading.
 
-**The view's extent is `auto`, and that is load-bearing.** The notebook writes raw UMAP coordinates
+**The view's extent is `auto`, and that is load-bearing.** The rung writes raw UMAP coordinates
 and the frame fits a box around exactly those numbers. Hand-scaling them against a stated extent is
 what this notebook used to do, and it put the entire corpus in a forty-cell speck in one corner of a
 65 536-cell world — silently, with no clamp and no error, and it survived a full review because

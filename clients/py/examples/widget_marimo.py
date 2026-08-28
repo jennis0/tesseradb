@@ -1,4 +1,4 @@
-# The same example as widget.ipynb, as a Marimo notebook: `marimo edit --port 5173 notebooks/widget_marimo.py`.
+# The same example as widget.ipynb, as a Marimo notebook: `marimo edit --port 5173 clients/py/examples/widget_marimo.py`.
 # Marimo folds every synced trait into one `.value`, so the reading cell re-runs at every settle.
 import marimo
 
@@ -15,7 +15,7 @@ def _():
     import tesseradb
 
     # What the demo is serving right now: `run_demo.sh` writes it (gitignored), presets included.
-    demo = json.loads(pathlib.Path("../clients/ts/viewer/public/datasets.json").read_text())["datasets"][0]
+    demo = json.loads(pathlib.Path("../../ts/viewer/public/datasets.json").read_text())["datasets"][0]
     preset = next(p for p in demo["presets"] if p["label"].startswith("medium"))
     VIEWER = demo["viewerUrl"]
     # Operator-only: the credential mints any principal; the widget gets the token, never the credential.

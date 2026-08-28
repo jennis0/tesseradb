@@ -12,7 +12,7 @@ cut that requires a child before it will draw an ancestor — gets this wrong, a
 invisibly, because every number it reports is individually plausible.
 
 **The tree is real; the grant is the instrument.** The hierarchy comes from
-`notebooks/arxiv-corpus.ipynb`, which is HDBSCAN's own condensed tree over the arXiv UMAP geometry.
+`test_corpora/arxiv/prepare.py`, which is HDBSCAN's own condensed tree over the arXiv UMAP geometry.
 The term is minted here, over exactly one parent's stray members, because no arXiv category happens
 to coincide with a split's noise — and the point of the check is the tree's shape, not the term's
 provenance.
