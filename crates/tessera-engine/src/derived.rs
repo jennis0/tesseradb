@@ -1695,7 +1695,7 @@ mod tests {
     /// The single ring of a membership that is one α-group, with that being asserted rather than
     /// assumed — a test that silently accepted a second ring would stop testing what it says.
     fn one_ring(members: &[[u32; 2]]) -> Vec<[u32; 2]> {
-        let rings = concave_rings(members);
+        let rings = concave_rings(members, None);
         assert_eq!(rings.len(), 1, "expected one group, got {}", rings.len());
         rings.into_iter().next().unwrap()
     }
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn two_separated_clouds_get_a_ring_each() {
         let members = two_clouds();
-        let rings = concave_rings(&members);
+        let rings = concave_rings(&members, None);
         assert_eq!(rings.len(), 2, "two clouds gave {} rings", rings.len());
 
         for m in &members {
@@ -1904,9 +1904,9 @@ mod tests {
     #[test]
     fn the_rings_do_not_depend_on_the_order_the_members_arrive_in() {
         let members = two_clouds();
-        let forwards = concave_rings(&members);
+        let forwards = concave_rings(&members, None);
         let backwards: Vec<[u32; 2]> = members.iter().copied().rev().collect();
-        assert_eq!(forwards, concave_rings(&backwards));
+        assert_eq!(forwards, concave_rings(&backwards, None));
 
         let mut starts: Vec<[u32; 2]> = forwards.iter().map(|r| r[0]).collect();
         let sorted = {
@@ -1937,7 +1937,7 @@ mod tests {
             let r = x * x + y * y;
             (600 * 600..=1000 * 1000).contains(&r)
         });
-        let rings = concave_rings(&members);
+        let rings = concave_rings(&members, None);
         assert_eq!(rings.len(), 1, "an annulus is one group");
         assert!(
             contains(&rings[0], [2_000_000, 2_000_000]),
@@ -1961,7 +1961,7 @@ mod tests {
                 members.push([m[0] + offset, m[1] + (k as u32) * 3]);
             }
         }
-        let rings = concave_rings(&members);
+        let rings = concave_rings(&members, None);
         assert_eq!(rings.len(), 3, "three flowers gave {} rings", rings.len());
 
         let mut floor = 0usize;
@@ -2034,6 +2034,106 @@ mod tests {
         3.0 * extent / divisions as f64
     }
 
+    /// **The set the fold returns is the set a dense binning would have returned**, cell for cell
+    /// and candidate for candidate — the assertion that makes the route to the occupied cells a
+    /// speed change rather than a shape change.
+    ///
+    /// The oracle here is written from `artifact-shapes.md` §7.1 and shares nothing with
+    /// [`quantise`] but the cell arithmetic the resolution defines: it puts every member into a map
+    /// keyed on its cell rather than folding runs, and tests every member against the octagon on
+    /// its own rather than opening a band of cells. Three clouds, because the routes differ in what
+    /// they do with *order*: one in Morton order, one rotated so the fold meets a cell twice, and
+    /// one whose members are spread thinly enough that the reduction declines.
+    ///
+    /// `tests/hull_geometry.rs`'s `the_reduction_is_the_definition` is the same assertion over the
+    /// 197 real memberships of the measurement layer, and it requires the *rings* to match as well.
+    #[test]
+    fn the_fold_returns_what_a_dense_binning_would_have() {
+        /// One member per occupied cell and every hull candidate, the obvious way.
+        fn dense(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
+            use std::collections::HashMap;
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+            for q in points {
+                x0 = x0.min(q[0]);
+                y0 = y0.min(q[1]);
+                x1 = x1.max(q[0]);
+                y1 = y1.max(q[1]);
+            }
+            let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
+            let shift = wx
+                .max(wy)
+                .div_ceil(divisions as u64)
+                .next_power_of_two()
+                .trailing_zeros();
+            let side = 1u64 << shift;
+            if side <= 1 {
+                return None;
+            }
+            let half = side / 2;
+            let mut cells: HashMap<(u64, u64), ([u32; 2], u64)> = HashMap::new();
+            for q in points {
+                let (cx, cy) = ((q[0] as u64) >> shift, (q[1] as u64) >> shift);
+                let (mx, my) = ((cx << shift) + half, (cy << shift) + half);
+                let (dx, dy) = ((q[0] as u64).abs_diff(mx), (q[1] as u64).abs_diff(my));
+                let d = dx * dx + dy * dy;
+                cells
+                    .entry((cx, cy))
+                    .and_modify(|best| {
+                        if d < best.1 || (d == best.1 && *q < best.0) {
+                            *best = (*q, d);
+                        }
+                    })
+                    .or_insert((*q, d));
+            }
+            if cells.len() * 4 > points.len() * 3 {
+                return None;
+            }
+            let octagon = extreme_octagon(points);
+            let mut out: Vec<[u32; 2]> = cells.values().map(|(rep, _)| *rep).collect();
+            for q in points {
+                if !octagon.strictly_inside(*q) {
+                    out.push(*q);
+                }
+            }
+            Some(out)
+        }
+
+        let normalise = |v: Option<Vec<[u32; 2]>>| {
+            v.map(|mut v| {
+                v.sort_unstable();
+                v.dedup();
+                v
+            })
+        };
+
+        let dense_cloud = sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
+        // A rotation the fold meets as one descent, which is what a view's second segment looks
+        // like to it: a cell it has already folded arrives again.
+        let mut shuffled = dense_cloud.clone();
+        shuffled.rotate_left(dense_cloud.len() / 3);
+        let thin = sample(400, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
+
+        for (name, cloud, divisions) in [
+            ("morton order", &dense_cloud, 32u32),
+            ("a cell met twice", &shuffled, 32),
+            ("too thin to reduce", &thin, 1_024),
+        ] {
+            assert_eq!(
+                normalise(quantise(cloud, divisions, 0, None)),
+                normalise(dense(cloud, divisions)),
+                "{name}: the fold and a dense binning disagree"
+            );
+        }
+        assert!(
+            quantise(&dense_cloud, 32, 0, None).is_some(),
+            "the dense cloud must exercise the reduced path"
+        );
+        assert!(
+            quantise(&thin, 1_024, 0, None).is_none(),
+            "the thin cloud must exercise the declining path"
+        );
+    }
+
     /// **The reduction is a quantisation and not a sample**, which is the property the vertex
     /// guarantee rests on: every representative is a member's own position, and every member has a
     /// representative within a cell of it.
@@ -2045,7 +2145,7 @@ mod tests {
     #[test]
     fn every_representative_is_a_member_and_every_member_has_one() {
         let members = sample(5_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
-        let reduced = quantise(&members, 32, 0).expect("a cloud this dense reduces");
+        let reduced = quantise(&members, 32, 0, None).expect("a cloud this dense reduces");
         assert!(
             reduced.len() * 3 < members.len(),
             "no reduction: {} of {}",
@@ -2082,7 +2182,7 @@ mod tests {
                 x * x + y * y <= 5_000 * 5_000 && (x < 0 || y.abs() > 2_000)
             }),
         ] {
-            let reduced = quantise(&cloud, 32, 0).expect("a cloud this dense reduces");
+            let reduced = quantise(&cloud, 32, 0, None).expect("a cloud this dense reduces");
             assert_eq!(
                 convex_hull(&reduced),
                 convex_hull(&cloud),
@@ -2102,9 +2202,9 @@ mod tests {
     #[test]
     fn a_small_membership_is_not_reduced_at_all() {
         let members = moon();
-        assert!(quantise(&members, QUANTISE_DIVISIONS, REDUCTION_FLOOR).is_none());
+        assert!(quantise(&members, QUANTISE_DIVISIONS, REDUCTION_FLOOR, None).is_none());
         assert_eq!(
-            concave_rings(&members),
+            concave_rings(&members, None),
             dig_rings_at(&members, DIG_BUDGET, 0).0
         );
     }
@@ -2116,8 +2216,8 @@ mod tests {
         let members = sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
         let mut shuffled = members.clone();
         shuffled.reverse();
-        let mut a = quantise(&members, 32, 0).expect("reduces");
-        let mut b = quantise(&shuffled, 32, 0).expect("reduces");
+        let mut a = quantise(&members, 32, 0, None).expect("reduces");
+        let mut b = quantise(&shuffled, 32, 0, None).expect("reduces");
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b);
@@ -2157,7 +2257,7 @@ mod tests {
             for divisions in [16u32, 64, 256, 1_024] {
                 cloud.push([9_000, 9_000]);
                 let (Some(mine), reference) = (
-                    quantise(&cloud, divisions, 0),
+                    quantise(&cloud, divisions, 0, None),
                     extreme_octagon(&cloud),
                 ) else {
                     continue;
@@ -2200,8 +2300,8 @@ mod tests {
             .copied()
             .collect();
 
-        let mut once = quantise(&sorted, 64, 0).expect("reduces");
-        let mut twice = quantise(&twice_over, 64, 0).expect("reduces");
+        let mut once = quantise(&sorted, 64, 0, None).expect("reduces");
+        let mut twice = quantise(&twice_over, 64, 0, None).expect("reduces");
         once.sort_unstable();
         once.dedup();
         twice.sort_unstable();
@@ -2212,11 +2312,11 @@ mod tests {
     /// The degenerate cases keep the behaviour the convex wrap had, on the shape that replaced it.
     #[test]
     fn a_degenerate_shape_is_the_members_themselves() {
-        assert_eq!(concave_rings(&[[3, 4]]), vec![vec![[3, 4]]]);
-        assert_eq!(concave_rings(&[[3, 4], [3, 4]]), vec![vec![[3, 4]]]);
-        assert_eq!(concave_rings(&[[0, 0], [1, 1]]), vec![vec![[0, 0], [1, 1]]]);
+        assert_eq!(concave_rings(&[[3, 4]], None), vec![vec![[3, 4]]]);
+        assert_eq!(concave_rings(&[[3, 4], [3, 4]], None), vec![vec![[3, 4]]]);
+        assert_eq!(concave_rings(&[[0, 0], [1, 1]], None), vec![vec![[0, 0], [1, 1]]]);
         assert_eq!(
-            concave_rings(&[[0, 0], [1, 1], [2, 2]]),
+            concave_rings(&[[0, 0], [1, 1], [2, 2]], None),
             vec![vec![[0, 0], [2, 2]]],
             "collinear members leave two endpoints"
         );
