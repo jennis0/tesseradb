@@ -936,6 +936,30 @@ components:
               items: { type: integer, minimum: 0 }
             - type: string
               const: all
+        computed:
+          description: |
+            Which of each layer's **declared** derived properties the response should carry
+            (contracts §3.2 r42, `artifact-shapes.md` §8 C).
+
+            **Absent is the layer's own declaration**, which is what every response carried before
+            this field existed. An array is that array **intersected** with each layer's
+            declaration, and the empty array is *none* — counts and no geometry, the artifacts
+            frame still served.
+
+            **It narrows and can never widen.** A property a layer did not declare is not served
+            for naming it. A name outside the vocabulary is `422`, unlike an unreachable layer
+            name, which is absent: the three words are deployment schema and each layer's own set
+            is published in `/v1/meta`, so refusing discloses nothing.
+
+            **A cost control, not a disclosure one.** A hull is derived per artifact per request
+            from `membership ∩ M_auth`, and a client draws one while a settled view carries
+            hundreds; measured at 2,032 ms and 263 KB against 164 ms and 26 KB on a 2.42M-member
+            corpus. Fetch the one shape that draws from `POST /v1/artifacts/{tessera_id}`, which
+            serves the same geometry and is unaffected by this field.
+          type: array
+          items:
+            type: string
+            enum: [centroid, box, hull]
 
     FilterExpr:
       description: |
