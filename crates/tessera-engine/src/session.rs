@@ -620,6 +620,11 @@ pub struct Engine {
     /// when the principal's mask does — which includes every accepted deny. Empty for a deployment
     /// with no row-major level, which is most of them.
     pub(crate) masked_counts: Arc<crate::histogram::MaskedCountCache>,
+    /// One artifact's derived centroid, box and hull, per principal — see
+    /// [`crate::derived_cache::DerivedCache`]. Per *session* like the histograms beside it and for
+    /// the same reason: the values are functions of the principal's own visible members, so an
+    /// entry is never shared across principals.
+    pub(crate) derived_geometry: Arc<crate::derived_cache::DerivedCache>,
     /// One lineage per `(layer, level)` — see [`crate::cut::Lineages`]. Keyed per *deployment* like
     /// the projections beside it, and on the store's version alone, because a level's parent
     /// pointers are the same whichever view is served.
@@ -1241,6 +1246,7 @@ impl Engine {
             row_projection_cache: Arc::clone(&row_projection_cache),
             artifact_projections: Arc::clone(&artifact_projections),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
+            derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
@@ -1722,6 +1728,7 @@ impl Engine {
         // target: a masked-count histogram is ~4 B per artifact, 40 MB at 10⁷, and a revoked
         // session's is pinned by nothing else.
         self.masked_counts.prune_token(token_id);
+        self.derived_geometry.prune_token(token_id);
         self.row_projection_cache.prune_token(token_id)
     }
 
@@ -1729,6 +1736,24 @@ impl Engine {
     /// only; a count of structures, naming no artifact and no principal.
     pub fn masked_count_cache_stats(&self) -> crate::histogram::MaskedCountStats {
         self.masked_counts.stats()
+    }
+
+    /// The derived-geometry cache's gauges — see [`crate::derived_cache::DerivedCacheStats`].
+    /// Operator plane only; a count of structures, naming no artifact and no principal.
+    ///
+    /// `hit_rate` is the figure this cache is judged on, and it is a figure about a *pan*: the same
+    /// principal panning across one layer re-serves mostly the same artifacts, which is what makes
+    /// a held shape worth its bytes.
+    pub fn derived_cache_stats(&self) -> crate::derived_cache::DerivedCacheStats {
+        self.derived_geometry.stats()
+    }
+
+    /// Bound the derived-geometry cache. An embedder that never calls this gets
+    /// `crate::derived_cache`'s own default, which is where the figure is argued — there is no
+    /// configuration key, because an entry's size is bounded by the vertex budget rather than by
+    /// the corpus.
+    pub fn set_derived_cache_bytes(&self, bytes: u64) {
+        self.derived_geometry.set_bound_bytes(bytes);
     }
 
     /// How many levels are recorded row-major and served artifact-major — see

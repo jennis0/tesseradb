@@ -16,6 +16,7 @@ pub mod compose;
 pub mod containment;
 pub mod cut;
 pub mod derived;
+pub mod derived_cache;
 pub mod filter;
 mod flush;
 mod geometry;

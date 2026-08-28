@@ -352,6 +352,12 @@ fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
 /// 0.09% of any one artifact's members.
 const QUANTISE_DIVISIONS: u32 = 1_024;
 
+/// [`QUANTISE_DIVISIONS`], for the measurement seams — the family comparison in
+/// `tests/hull_triangulation.rs` has to give the triangulated route the same reduced input the dig
+/// receives, or it is comparing two constructions over two different clouds.
+#[doc(hidden)]
+pub const SERVED_QUANTISE_DIVISIONS: u32 = QUANTISE_DIVISIONS;
+
 /// One real member per occupied cell of a square grid over the members' own bounding box, or `None`
 /// where the grid cannot reduce the input — see [`QUANTISE_DIVISIONS`] for what this is for.
 ///
