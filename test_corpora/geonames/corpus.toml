@@ -1,0 +1,307 @@
+# GeoNames — 13,463,857 features, the ladder's first geographic rung.
+#
+# Produced by `prepare.py`, which copies this file next to the parquets it writes; `[sources]` is
+# relative to the declaring document (configuration.md §3), so the copy beside the data is what
+# `tessera build` reads and this one is what gets reviewed.
+#
+# **The extent is post-projection, and that is a limitation rather than a choice.** Tessera has no
+# projection layer, so `prepare.py` transforms WGS84 to Web Mercator, normalises the whole domain
+# to the unit square and runs y **south** — the direction `clients/ts/core/src/coords.ts` pins
+# against deck.gl's own tile addressing, and the one a symmetric frame in metres gets backwards. A
+# 16-bit cell is then exactly an XYZ tile at zoom 16. When the extent is declared on the input side
+# of the projection (`projections.md` §2), this becomes `projection = "web_mercator"` with the
+# WGS84 box that `frame.json` records, and the corpus is rebuilt.
+
+[sources]
+points          = "points.parquet"
+feature_class   = "vocab-feature-class.parquet"
+feature_code    = "vocab-feature-code.parquet"
+country         = "vocab-country.parquet"
+admin1          = "vocab-admin1.parquet"
+admin2          = "vocab-admin2.parquet"
+admin3          = "vocab-admin3.parquet"
+admin4          = "vocab-admin4.parquet"
+timezone        = "vocab-timezone.parquet"
+members_feature = "members-feature.parquet"
+members_admin   = "members-admin.parquet"
+
+[defaults]
+source = "points"
+
+# **The access side is synthetic, and every figure this corpus produces says so.** GeoNames carries
+# no rights or audience field, so each point's access term is its own country code — a real column
+# standing in for a compartment. The 6,997 rows whose country is blank carry no term and are filled
+# with `public`, which the build reports; every other point is visible only to a principal holding
+# its country. So a principal here is a set of countries, and `public` alone sees 0.05% of the map.
+[[view]]
+name             = "world"
+title            = "GeoNames"
+extent           = { min = 0.0, max = 1.0 }
+point_visibility = { field = "country", default = "public" }
+
+# ---------------------------------------------------------------------------------------------
+# Vocabularies. Two are `public` and six are `derived`, and the split is structural rather than a
+# preference: a feature class exists everywhere and is published by GeoNames in
+# `featureCodes_en.txt`, so serving its names discloses nothing about this corpus. Every
+# administrative value is **contained in exactly one country**, which is also the compartment — so
+# telling a principal barred from France that `FR.84.69` exists names a compartment they do not
+# hold. `admin3`, `admin4` and `timezone` are additionally minted from the corpus itself, there
+# being no published file for them, so `public` would disclose the corpus's own contents.
+#
+# `derived` means a value is served where the viewer can see at least one item carrying it,
+# evaluated per request from inside the mask (decision 0090). On `admin4` that is a 231,645-value
+# vocabulary listing computed per request — the expensive combination, and the reason this rung is
+# worth building.
+# ---------------------------------------------------------------------------------------------
+
+[[vocabulary]]
+name       = "feature_class"
+title      = "Feature class"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "feature_class"
+
+[[vocabulary]]
+name       = "feature_code"
+title      = "Feature code"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "feature_code"
+
+[[vocabulary]]
+name       = "country"
+title      = "Country"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "country"
+
+[[vocabulary]]
+name       = "admin1"
+title      = "First-level administrative division"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "admin1"
+
+# u32 from here down: admin3 and admin4 exceed a u16 code space outright, and admin2 at 51,199 of
+# 65,535 would ship 78% full on a gazetteer that grows. None of the three is rendered, so the width
+# is the size of the code space and not bytes in every row.
+[[vocabulary]]
+name       = "admin2"
+title      = "Second-level administrative division"
+width      = "u32"
+value_set  = "closed"
+visibility = "derived"
+source     = "admin2"
+
+[[vocabulary]]
+name       = "admin3"
+title      = "Third-level administrative division"
+width      = "u32"
+value_set  = "closed"
+visibility = "derived"
+source     = "admin3"
+
+[[vocabulary]]
+name       = "admin4"
+title      = "Fourth-level administrative division"
+width      = "u32"
+value_set  = "closed"
+visibility = "derived"
+source     = "admin4"
+
+[[vocabulary]]
+name       = "timezone"
+title      = "Time zone"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "timezone"
+
+# ---------------------------------------------------------------------------------------------
+# Attributes. `index` is uniform across the whole administrative hierarchy — one rule for the tree,
+# the same at every level. `render` follows cardinality, which is a property of the data rather
+# than a decision: 254 countries is a legend, 231,645 fourth-level divisions is a lookup. Declaring
+# both on the small categories is what lets decision 0068 route on cost.
+# ---------------------------------------------------------------------------------------------
+
+[[attribute]]
+name       = "feature_class"
+type       = "category"
+vocabulary = "feature_class"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "feature_code"
+type       = "category"
+vocabulary = "feature_code"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "country"
+type       = "category"
+vocabulary = "country"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "admin1"
+type       = "category"
+vocabulary = "admin1"
+index      = true
+
+[[attribute]]
+name       = "admin2"
+type       = "category"
+vocabulary = "admin2"
+index      = true
+
+[[attribute]]
+name       = "admin3"
+type       = "category"
+vocabulary = "admin3"
+index      = true
+
+[[attribute]]
+name       = "admin4"
+type       = "category"
+vocabulary = "admin4"
+index      = true
+
+[[attribute]]
+name       = "timezone"
+type       = "category"
+vocabulary = "timezone"
+index      = true
+
+# `i64`, and both halves of that are the data rather than a preference. The maximum is
+# 6,814,400,000 — the Earth itself, carried as a feature — so one row breaks a `u32` and four break
+# an `i32`. The minimum is **-12**: two reefs in Kiribati carry negative populations, which is
+# plainly an error in GeoNames and is nonetheless what the file says. Carrying them means a range
+# filter shows them, which is where a data error belongs; nulling them would be this pipeline
+# deciding the source is wrong. Nonzero on 4.9% of rows.
+[[attribute]]
+name   = "population"
+type   = "i64"
+render = true
+
+# Two numerics with opposite honesty. `elevation` is present on 17.8% of rows and null elsewhere;
+# `dem` is a digital elevation model sampled for nearly every row, whose own -9999 unknown sentinel
+# `prepare.py` converts to null so that a range filter has no false floor.
+[[attribute]]
+name   = "elevation"
+type   = "i16"
+render = true
+
+[[attribute]]
+name   = "dem"
+type   = "i16"
+render = true
+
+# `timestamp_us` rather than an integer, so the unit is a fact the client reads off `/v1/meta`
+# instead of a convention it has to be told. Spans 1993-09-24 to 2026-08-27, and is also the order
+# entity ids were assigned in — so replaying the corpus in id order is a time-ordered ingest.
+[[attribute]]
+name   = "modification_date"
+type   = "timestamp_us"
+render = true
+
+# 13.5M names averaging 13.1 bytes — 0.18 GB, affordable whole, which is what makes prose search at
+# this rung a measurement rather than an aspiration.
+[[attribute]]
+name   = "name"
+type   = "text"
+index  = true
+
+# ---------------------------------------------------------------------------------------------
+# Two independent hierarchies over one point set, which is what this rung is for. Both are
+# `enumerated` with `value_set = "open"`: no artifact roster is supplied, so the artifacts are
+# exactly what the member files name.
+#
+# A member row is one point with a list, whose positions are the declared levels. A null entry
+# means *in no artifact at that level* — which is what an unrecorded feature code is, and what the
+# ragged admin tail is: admin1 is present on 99.7% of rows and admin4 on 6.2%.
+# ---------------------------------------------------------------------------------------------
+
+[[layer]]
+name                      = "features/taxonomy"
+title                     = "Feature taxonomy"
+views                     = ["world"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "tiered", prune_children = true }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+
+[[layer.levels]]
+level = 0
+title = "Class"
+zoom  = [0, 6]
+
+[[layer.levels]]
+level = 1
+title = "Code"
+zoom  = [5, 16]
+
+[layer.members]
+source = "members_feature"
+
+# 463,283 artifacts across five levels, against 698 for the taxonomy above — and average members
+# per artifact of 52,979 · 2,784 · 189 · 22.8 · 3.6. The fourth level sits almost entirely under a
+# `min_visible_members` floor of 10, so it is suppressed for nearly every principal. That is
+# correct and it is worth knowing: the level is declared because a boundary ladder that stops at
+# admin3 is not the ladder GeoNames publishes, not because it is expected to serve.
+#
+# `require_member_visibility = { count = 1 }` with `artifact_visibility = "inherited"` is what makes
+# containment structural rather than declared: a French region is served only to a principal who
+# can already see a French point.
+[[layer]]
+name                      = "admin/hierarchy"
+title                     = "Administrative hierarchy"
+views                     = ["world"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "tiered", prune_children = true }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+
+[[layer.levels]]
+level = 0
+title = "Country"
+zoom  = [0, 4]
+
+[[layer.levels]]
+level = 1
+title = "Admin 1"
+zoom  = [3, 7]
+
+[[layer.levels]]
+level = 2
+title = "Admin 2"
+zoom  = [6, 10]
+
+[[layer.levels]]
+level = 3
+title = "Admin 3"
+zoom  = [9, 13]
+
+[[layer.levels]]
+level = 4
+title = "Admin 4"
+zoom  = [12, 16]
+
+# Recomputed per viewer from `membership ∩ M_auth` and nothing else, so they are contained by
+# construction and take no visibility declaration. Without them a boundary layer cannot answer
+# "zoom to this region" for the region the viewer can actually see.
+[layer.content]
+computed = ["centroid", "box"]
+
+[layer.members]
+source = "members_admin"
