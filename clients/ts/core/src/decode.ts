@@ -9,6 +9,35 @@ function u64Column(table: Table, name: string): BigUint64Array {
   return col.toArray() as BigUint64Array;
 }
 
+/** One ring of a hull on one axis: `uint32` vertex coordinates in grid units. */
+type Ring = {length: number; get(v: number): number | null};
+/** One artifact's rings on one axis — the outer list of `list<list<uint32>>`. */
+type Rings = {length: number; get(r: number): Ring | null};
+
+/**
+ * A hull axis column, checked to be `list<list<uint32>>` before a row is read.
+ *
+ * **The nesting is the contract, and it is verified at the schema rather than discovered at the
+ * first row** (contracts §3.2 item 4). A pre-r40 server sends one flat `list<uint32>` per
+ * artifact; read two levels deep that column yields a number where a ring is expected, and the
+ * ring would come out as a single vertex on a shape with none of the artifact's ground. The
+ * mismatch is a version skew between this client and the service it is talking to, so it is a
+ * refusal with the two types named and not a shape to accommodate.
+ */
+function ringColumn(table: Table, name: string): {get(i: number): Rings | null} {
+  const col = table.getChild(name);
+  if (!col) throw new Error(`viewport payload has no column "${name}"`);
+  const inner = (col.type as {children?: {type: DataType}[]}).children?.[0]?.type;
+  if (col.type.typeId !== Type.List || inner?.typeId !== Type.List) {
+    throw new Error(
+      `viewport payload column "${name}" is ${col.type} — a served hull is a list of rings, ` +
+        'so the column is list<list<uint32>> (contracts §3.2 item 4). A flat list is a server ' +
+        'older than the rings change.'
+    );
+  }
+  return col as unknown as {get(i: number): Rings | null};
+}
+
 /**
  * One declared-scalar column, as the type the manifest declared plus the buffer Arrow already
  * holds.
@@ -386,8 +415,13 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     const boxMinY = t.getChild('box_min_y')!;
     const boxMaxX = t.getChild('box_max_x')!;
     const boxMaxY = t.getChild('box_max_y')!;
-    const hullX = t.getChild('hull_x')!;
-    const hullY = t.getChild('hull_y')!;
+    // `hull_x` and `hull_y` are `list<list<uint32>>` — **one entry per ring** (contracts §3.2
+    // item 4, `artifact-shapes.md` §9). The nesting is checked here, at the schema, so a body from
+    // a server that still sends one flat ring per artifact is refused rather than misread: the
+    // downcast is what a single-ring reader fails on, and the same downcast in reverse is what
+    // this decoder must not paper over.
+    const hullX = ringColumn(t, 'hull_x');
+    const hullY = ringColumn(t, 'hull_y');
     // One content, entire, positional to the layer's declared kinds. Empty means the layer
     // declares no supplied content — never that content was withheld, because an artifact whose
     // content this principal may not read does not appear at all.
@@ -402,10 +436,32 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
       const bx = boxMinX.get(i);
       const hx = hullX.get(i);
       const hy = hullY.get(i);
-      let hull: [number, number][] | null = null;
+      // The two axes carry the same ring structure by construction. **Checked, not assumed** — a
+      // decoder that assumes it misdraws silently on the day something else does not, and a ring
+      // whose axes disagree has no reading at all: a shorter x than y would draw a ring that
+      // closes early, in the shape of a real boundary.
+      if ((hx === null) !== (hy === null)) {
+        throw new Error(`viewport artifact row ${i}: one hull axis is null and the other is not`);
+      }
+      let hull: [number, number][][] | null = null;
       if (hx !== null && hy !== null) {
+        if (hx.length !== hy.length) {
+          throw new Error(`viewport artifact row ${i}: hull axes disagree on ring count (${hx.length} and ${hy.length})`);
+        }
         hull = [];
-        for (let v = 0; v < hx.length; v++) hull.push([Number(hx.get(v)), Number(hy.get(v))]);
+        for (let r = 0; r < hx.length; r++) {
+          const rx = hx.get(r);
+          const ry = hy.get(r);
+          if (rx === null || ry === null) {
+            throw new Error(`viewport artifact row ${i}: hull ring ${r} is null on one axis`);
+          }
+          if (rx.length !== ry.length) {
+            throw new Error(`viewport artifact row ${i}: hull axes disagree on the length of ring ${r} (${rx.length} and ${ry.length})`);
+          }
+          const ring: [number, number][] = [];
+          for (let v = 0; v < rx.length; v++) ring.push([Number(rx.get(v)), Number(ry.get(v))]);
+          hull.push(ring);
+        }
       }
       artifacts.push({
         layer: String(layer.get(i)),

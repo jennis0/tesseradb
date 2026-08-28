@@ -70,9 +70,11 @@ export type MapProbe = {
     /** Lookup-texture writes since the map was made — what a colouring interaction costs. */
     lutWrites: number;
     /**
-     * What the last paint held and drew of the artifacts: the served shapes the outline layer
-     * carries, how many of those actually draw — the hovered and the opened one, the rest at zero
-     * alpha so they still answer a pick — and the labels placed.
+     * What the last paint held and drew of the artifacts: the **rings** the outline layer carries,
+     * how many **artifacts** actually draw one — the hovered and the opened one, the rest at zero
+     * alpha so they still answer a pick — and the labels placed. The two counts are in different
+     * units because a hull is a list of rings (`artifact-shapes.md` §1): opening a cluster whose
+     * members are two separated clouds hands deck two rings and draws one hull.
      */
     outlines: number;
     outlinesDrawn: number;

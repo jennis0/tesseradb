@@ -147,11 +147,30 @@ describe('/v1/meta', () => {
   });
 });
 
+/**
+ * **The two artifact goldens are pre-r40 captures and have not been recaptured.** They carry
+ * `hull_x`/`hull_y` as a flat `list<uint32>`, the shape a server sent before a hull became a list
+ * of rings (contracts §3.2 item 4, r40), so the decoder refuses them — which is the guard working,
+ * and is asserted below. Every test here that needs a *post*-r40 body is skipped and says so at
+ * the claim rather than being quietly weakened to something the stale bytes still satisfy.
+ *
+ * What restores them: a `tessera serve` built from this branch, and
+ * `node scripts/capture-golden.mjs --artifacts-only` against it. The demo servers run a binary
+ * that predates the change, so capturing against those would have written the old shape back.
+ */
 describe('the artifacts frame, decoded from a captured response', () => {
   const fixture = (name: string) =>
     new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', name)));
 
-  it('carries one row per served artifact, and no points beside them', () => {
+  it('refuses a body captured before a hull was a list of rings, rather than reading it one level shallow', () => {
+    // A real pre-r40 body, not a hand-assembled one — the only reading of these bytes a decoder
+    // written for the nested wire could otherwise reach is one ring of one vertex per artifact,
+    // drawn as nothing and picked as nothing, with no error anywhere.
+    expect(() => decodeViewport(fixture('viewport-artifacts.bin'))).toThrow(/hull_x.*list of rings/s);
+    expect(() => decodeViewport(fixture('viewport-membership.bin'))).toThrow(/hull_x.*list of rings/s);
+  });
+
+  it.skip('carries one row per served artifact, and no points beside them', () => {
     const result = decodeViewport(fixture('viewport-artifacts.bin'));
     expect(result.artifacts.length).toBeGreaterThan(0);
     // Captured at `k = 0` — the annotation channel's own request shape. A body with an artifacts
@@ -178,7 +197,7 @@ describe('the artifacts frame, decoded from a captured response', () => {
     expect(decodeViewport(fixture('viewport-plain.bin')).artifacts).toEqual([]);
   });
 
-  it('carries the derived geometry in the same grid units as the points', () => {
+  it.skip('carries the derived geometry in the same grid units as the points', () => {
     const result = decodeViewport(fixture('viewport-artifacts.bin'));
     // The captured layer declares all three, so every row carries all three. A null here would be
     // *the layer declares none* and never *withheld* — content is never withheld from a served
@@ -197,13 +216,17 @@ describe('the artifacts frame, decoded from a captured response', () => {
       expect(cy).toBeGreaterThanOrEqual(minY);
       expect(cy).toBeLessThanOrEqual(maxY);
 
-      // Hull vertices are positions of real members, so they sit on the box's bounds or inside.
+      // One ring per separated group of the visible members, and every vertex a real member's
+      // position — so every vertex of every ring sits on the box's bounds or inside them.
       expect(a.hull!.length).toBeGreaterThan(0);
-      for (const [x, y] of a.hull!) {
-        expect(x).toBeGreaterThanOrEqual(minX);
-        expect(x).toBeLessThanOrEqual(maxX);
-        expect(y).toBeGreaterThanOrEqual(minY);
-        expect(y).toBeLessThanOrEqual(maxY);
+      for (const ring of a.hull!) {
+        expect(ring.length).toBeGreaterThan(0);
+        for (const [x, y] of ring) {
+          expect(x).toBeGreaterThanOrEqual(minX);
+          expect(x).toBeLessThanOrEqual(maxX);
+          expect(y).toBeGreaterThanOrEqual(minY);
+          expect(y).toBeLessThanOrEqual(maxY);
+        }
       }
       // Grid units, not data coordinates: the axes span 2^32, exactly as `codes` does.
       expect(maxX).toBeLessThanOrEqual(2 ** 32);

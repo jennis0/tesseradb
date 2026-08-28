@@ -313,8 +313,22 @@ export type Artifact = {
   centroid: [number, number] | null;
   /** `[minX, minY, maxX, maxY]`, grid units. */
   box: [number, number, number, number] | null;
-  /** Convex hull vertices, counter-clockwise, grid units. */
-  hull: [number, number][] | null;
+  /**
+   * The hull's **rings** — one per separated group of the visible members, each closed,
+   * counter-clockwise from its lowest vertex, in grid units (`artifact-shapes.md` §1, contracts
+   * §3.2 item 4).
+   *
+   * A membership that is two separated clouds is two rings, never one polygon over the gap
+   * between them. No ring encloses another and there are no holes, so an annulus of members is
+   * drawn as a disk. A ring of one or two vertices is a degenerate group drawn as its own
+   * members: rounding one up to a triangle would claim an area no member occupies.
+   *
+   * Two rings of one artifact may overlap, and a member may lie inside a second ring of its own
+   * artifact — measured on one of four layers, so it is not a state to code against either way.
+   * It costs nothing: both rings are this artifact, so anything keyed by `tesseraId` answers the
+   * same whichever one it came from.
+   */
+  hull: [number, number][][] | null;
   /**
    * The publisher's supplied content — label text, an authored name, a polygon — as **one
    * entry of the artifact's ranked contents, entire**, positional to the layer's `suppliedContent`

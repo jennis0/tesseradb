@@ -148,8 +148,12 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     expect(extent[3]).toBeCloseTo(200, 3);
     for (const v of extent) expect(v).toBeLessThanOrEqual(200);
 
-    // The same box, as the outline draws it: world units, one conversion for both readers.
-    const outline = outlineOf(FAR, false)!;
+    // The same box, as the outline draws it: world units, one conversion for both readers. With no
+    // hull the outline is the box, which is one ring — `extentOf` reads the served `box` whatever
+    // the hull is, so nothing here moved when the hull became a list of rings.
+    const rings = outlineOf(FAR)!;
+    expect(rings.length).toBe(1);
+    const outline = rings[0]!;
     expect(outline[0]).toEqual([gridToWorld(FAR.box![0]), gridToWorld(FAR.box![1])]);
     expect(outline[0]![0]).toBeCloseTo(WORLD_SIZE * 0.75, 6);
     const [wx0, wy0] = outline[0]!;

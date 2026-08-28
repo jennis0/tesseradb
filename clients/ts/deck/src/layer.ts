@@ -45,7 +45,7 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  * `marks` object. The stand-in pieces are materialised once per `standIn` array, memoised on
  * its identity, since the pieces survive most frames by reference.
  *
- * The drawing, in order (§5.10): the hovered and the opened artifact's served `hull` or `box`,
+ * The drawing, in order (§5.10): the hovered and the opened artifact's served `hull` rings or `box`,
  * every other served shape in the data at zero alpha so it still answers a pick; the single-hue
  * density wash from the exact tiles' counts,
  * filtered so the tile grid never shows (decision 0097); the marks — one `MarksLayer` per
@@ -112,7 +112,12 @@ export type LayerTimings = {
   labelsMs: number;
   layersMs: number;
   lutWrites: number;
-  /** The served shapes the outline layer holds, and how many of them actually draw. */
+  /**
+   * The **rings** the outline layer holds, and how many **artifacts** actually draw one — two
+   * units on purpose. A hull is a list of rings, so the held count is what the layer hands deck;
+   * the drawn count is what a reader means by "one hull is showing", which stays one when the
+   * opened artifact's shape is two separated clouds.
+   */
   outlines: number;
   outlinesDrawn: number;
   labels: number;
@@ -276,6 +281,12 @@ const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]; placed: number}>();
 
+/**
+ * One drawn ring. **A datum is a ring, not an artifact** — a hull is a list of rings
+ * (`artifact-shapes.md` §1), and every ring of one artifact carries that artifact's `id`, so the
+ * row-to-artifact map the pick reads is this array in order and never an index into the served
+ * set.
+ */
 export type OutlineDatum = {
   id: bigint;
   polygon: [number, number][];
@@ -331,6 +342,11 @@ export type OutlineOptions = {
  * Every other artifact stays in the data at zero alpha, which is what answers a pick — the flat
  * path's own arrangement, reused rather than forked. Parents are ordered first so an opened child
  * sits over an opened parent.
+ *
+ * **A served artifact contributes one row per ring of its hull**, so the length of the result is
+ * the ring count and not the served count. Every row of one artifact draws alike, because the
+ * rings are one shape in several pieces and highlighting half of a cluster would be a lie about
+ * where its members are.
  */
 export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineDatum[] {
   const data: OutlineDatum[] = [];
@@ -339,15 +355,21 @@ export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineD
   for (const artifact of ordered) {
     const depth = depths.get(artifact.tesseraId) ?? 0;
     if (o.level !== undefined && depth > o.level) continue;
-    const polygon = outlineOf(artifact);
-    if (!polygon) continue;
+    const rings = outlineOf(artifact);
+    if (!rings) continue;
     const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
     const opened = artifact.tesseraId === o.opened;
     const hovered = !opened && artifact.tesseraId === o.hovered;
     const fill = opened ? OPENED_FILL : hovered ? HOVER_FILL[o.scheme] : 0;
     const line = opened ? OPENED_LINE : hovered ? HOVER_LINE : 0;
     const width = opened ? 1.2 : hovered ? 1 : 0.8;
-    data.push({id: artifact.tesseraId, polygon, colour: a.colours.get(ordinal) ?? NEUTRAL, opened, hovered, depth, fill, line, width});
+    const colour = a.colours.get(ordinal) ?? NEUTRAL;
+    // **One datum per ring, every one carrying the artifact's own id.** A row is a ring and not an
+    // artifact, which is the whole of what the several-ring wire changes here: two rings of one
+    // artifact may overlap, and a pick answers the same artifact whichever it lands on.
+    for (const polygon of rings) {
+      data.push({id: artifact.tesseraId, polygon, colour, opened, hovered, depth, fill, line, width});
+    }
   }
   return data;
 }
@@ -485,8 +507,14 @@ export function artifactName(a: Artifact): string | null {
 }
 
 /**
- * A served artifact's outline in world space: its hull, else its box, else nothing — **the wire's
- * own vertices, in the wire's own order, and nothing else**.
+ * A served artifact's outline in world space: **its hull's rings**, else its box, else nothing —
+ * the wire's own vertices, in the wire's own order, and nothing else.
+ *
+ * A hull is a list of rings, one per separated group of the visible members (`artifact-shapes.md`
+ * §1), so this returns a list of rings and each one is drawn as its own polygon carrying the
+ * artifact's identifier. A ring of one or two vertices is a degenerate group — its own members,
+ * with no area to draw or to pick — and is left out; where that leaves no ring at all the box
+ * answers instead, which is the rule a degenerate single hull already met.
  *
  * The hull was smoothed here by three rounds of Chaikin's corner cutting, on the reading that
  * every vertex it produced stayed inside the hull's convex extent. That held only while the served
@@ -504,10 +532,11 @@ export function artifactName(a: Artifact): string | null {
  * about 130 to 700 on one shape — and an outline is materialised for every served artifact,
  * drawn or not, because the polygon is what answers a pick.
  */
-export function outlineOf(a: Artifact): [number, number][] | null {
+export function outlineOf(a: Artifact): [number, number][][] | null {
   const w = gridToWorld;
-  if (a.hull && a.hull.length >= 3) return a.hull.map(gridToWorldXY);
-  if (a.box) return [[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]];
+  const rings = (a.hull ?? []).filter((ring) => ring.length >= 3).map((ring) => ring.map(gridToWorldXY));
+  if (rings.length > 0) return rings;
+  if (a.box) return [[[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]]];
   return null;
 }
 
@@ -1006,7 +1035,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const data = held?.data ?? NO_OUTLINES;
     timings.outlinesMs = performance.now() - started;
     timings.outlines = data.length;
-    timings.outlinesDrawn = data.reduce((n, d) => n + (d.fill > 0 || d.line > 0 ? 1 : 0), 0);
+    timings.outlinesDrawn = new Set(data.filter((d) => d.fill > 0 || d.line > 0).map((d) => d.id)).size;
     // The layer exists from the first paint, empty, so its program is linked before it is needed.
     return [
       new PolygonLayer(
@@ -1026,6 +1055,9 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           getLineWidth: (d: OutlineDatum) => d.width,
           lineWidthMinPixels: 0.8,
           pickable: this.props.pickable,
+          // The row-to-artifact map the pick reads (`pick.ts`). A row is a **ring**, so this is
+          // not an index into the served set and must not be rebuilt from one: an artifact whose
+          // hull is two rings holds two rows here, both naming it.
           artifactIds: data.map((d) => d.id),
           parameters: {depthCompare: 'always' as const},
           updateTriggers: {getFillColor: key, getLineColor: key, getLineWidth: key}

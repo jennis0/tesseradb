@@ -11,7 +11,7 @@ const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact =>
   maskedCount: count,
   centroid: [2 ** 31, 2 ** 31],
   box: [0, 0, 2 ** 32 - 1, 2 ** 32 - 1],
-  hull: [[0, 0], [2 ** 32 - 1, 0], [2 ** 32 - 1, 2 ** 32 - 1], [0, 2 ** 32 - 1]],
+  hull: [[[0, 0], [2 ** 32 - 1, 0], [2 ** 32 - 1, 2 ** 32 - 1], [0, 2 ** 32 - 1]]],
   content: [],
   parentId
 });
@@ -54,7 +54,9 @@ describe('outlineOf', () => {
     // than the reflex one puts on — so an area comparison alone would have missed it.)
     const g = 2 ** 32 - 1;
     const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
-    const drawn = outlineOf({...artifact(1n, null), hull: notched})!;
+    const rings = outlineOf({...artifact(1n, null), hull: [notched]})!;
+    expect(rings.length).toBe(1);
+    const drawn = rings[0]!;
     // The wire's vertices, in the wire's order, through the one grid-to-world conversion.
     expect(drawn).toEqual(notched.map(gridToWorldXY));
     const side = drawn[1]![0];
@@ -73,11 +75,25 @@ describe('outlineOf', () => {
 
   it('falls back to the box, and to nothing where the wire carries neither', () => {
     const a = artifact(1n, null);
-    expect(outlineOf(a)!.length).toBe(4);
-    expect(outlineOf({...a, hull: null})!.length).toBe(4);
+    expect(outlineOf(a)!.map((r) => r.length)).toEqual([4]);
+    expect(outlineOf({...a, hull: null})!.map((r) => r.length)).toEqual([4]);
     expect(outlineOf({...a, hull: null, box: null})).toBeNull();
-    // A degenerate hull is not a polygon, and the box answers instead.
-    expect(outlineOf({...a, hull: [[0, 0], [1, 1]]})!.length).toBe(4);
+    // A degenerate group is its own members (`artifact-shapes.md` §1) — a ring of one or two
+    // vertices has no area to draw or to pick, so the box answers for the artifact instead.
+    expect(outlineOf({...a, hull: [[[0, 0], [1, 1]]]})!.map((r) => r.length)).toEqual([4]);
+    expect(outlineOf({...a, hull: []})!.map((r) => r.length)).toEqual([4]);
+  });
+
+  it('draws every ring of a hull, and drops only the degenerate ones', () => {
+    const g = 2 ** 32 - 1;
+    const left: [number, number][] = [[0, 0], [g / 4, 0], [g / 4, g / 4], [0, g / 4]];
+    const right: [number, number][] = [[(3 * g) / 4, (3 * g) / 4], [g, (3 * g) / 4], [g, g], [(3 * g) / 4, g]];
+    // Two separated clouds and a one-member group: the wire's three rings, of which two draw.
+    const rings = outlineOf({...artifact(1n, null), hull: [left, right, [[g / 2, g / 2]]]})!;
+    expect(rings).toEqual([left.map(gridToWorldXY), right.map(gridToWorldXY)]);
+    // No ring reaches the ground between them, which is the whole reason the wire is nested.
+    const middle: [number, number] = [gridToWorldXY([g / 2, g / 2])[0], gridToWorldXY([g / 2, g / 2])[1]];
+    for (const ring of rings) expect(inside(middle, ring)).toBe(false);
   });
 });
 
@@ -98,6 +114,8 @@ describe('outlineData', () => {
     for (const scheme of ['light', 'dark'] as const) {
       const rest = outlineData(p, {opened: null, hovered: null, level: undefined, scheme});
       expect(rest.map((d) => String(d.id))).toEqual(['1', '2', '3']);
+      // One ring apiece here, so one row apiece — the several-ring case is its own test below.
+      expect(rest.length).toBe(3);
       expect(rest.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
       // Every one still carries its polygon, which is what answers a pick.
       expect(rest.every((d) => d.polygon.length >= 3)).toBe(true);
@@ -137,6 +155,38 @@ describe('outlineData', () => {
     expect(data.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
     const hovered = outlineData(p, {opened: null, hovered: 2n, level: 1, scheme: 'light'});
     expect(hovered.find((d) => d.id === 2n)!.line).toBe(150);
+  });
+
+  it('gives one row per ring, every row carrying the artifact — the pick’s row-to-artifact map', () => {
+    const g = 2 ** 32 - 1;
+    const left: [number, number][] = [[0, 0], [g / 4, 0], [g / 4, g / 4], [0, g / 4]];
+    const right: [number, number][] = [[(3 * g) / 4, (3 * g) / 4], [g, (3 * g) / 4], [g, g], [(3 * g) / 4, g]];
+    const two = {...artifact(1n, null), hull: [left, right]};
+    const p = projection([two, artifact(2n, null)]);
+    const data = outlineData(p, {opened: 1n, hovered: null, level: undefined, scheme: 'dark'});
+    // Three rows for two artifacts. An `artifactIds` array built from the served set would be one
+    // short here, and every pick past the first artifact would answer the wrong cluster.
+    expect(data.length).toBe(3);
+    expect(data.map((d) => String(d.id))).toEqual(['1', '1', '2']);
+    // Both of the opened artifact's rings draw alike: the rings are one shape in pieces, and
+    // highlighting half of a cluster would say something false about where its members are.
+    const opened = data.filter((d) => d.id === 1n);
+    expect(opened.map((d) => [d.fill, d.line])).toEqual([[41, 200], [41, 200]]);
+    expect(opened.map((d) => d.polygon)).toEqual([left.map(gridToWorldXY), right.map(gridToWorldXY)]);
+    // And the rows are distinct polygons, not one polygon repeated.
+    expect(opened[0]!.polygon).not.toEqual(opened[1]!.polygon);
+  });
+
+  it('a ring of one artifact overlapping a ring of another is answered by its own row', () => {
+    // Two rings of one artifact may overlap (`artifact-shapes.md` §1), and so may rings of two
+    // artifacts. Nothing here dedupes by id: the pick reads a row, and the row names the artifact.
+    const g = 2 ** 32 - 1;
+    const square: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [0, g / 2]];
+    const overlapping: [number, number][] = [[g / 4, g / 4], [(3 * g) / 4, g / 4], [(3 * g) / 4, (3 * g) / 4], [g / 4, (3 * g) / 4]];
+    const p = projection([{...artifact(1n, null), hull: [square, overlapping]}]);
+    const data = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
+    expect(data.length).toBe(2);
+    expect(new Set(data.map((d) => d.id))).toEqual(new Set([1n]));
   });
 
   it('parents are ordered before their children, so an opened child draws over an opened parent', () => {
