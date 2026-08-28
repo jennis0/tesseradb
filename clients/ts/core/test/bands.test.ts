@@ -264,6 +264,19 @@ describe('BandCache eviction', () => {
     }
   });
 
+  it('never truncates a band on screen at the current depth, however old its touch', () => {
+    // Two 128-byte depth-9 bands against a 250-byte budget. The older one is on screen (inside
+    // the protected rectangle) and is left whole; the newer, off-screen one is halved instead.
+    const cache = new BandCache(250);
+    const shown = band({depth: 9, prefix: 2n, n: 4, touchedAt: 0});
+    const off = band({depth: 9, prefix: 3n, n: 4, touchedAt: 5});
+    cache.put(shown);
+    cache.put(off);
+    cache.evict({depth: 9, prefix: 0n, protect: {depth: 9, rect: {x0: shown.x, y0: shown.y, x1: shown.x, y1: shown.y}}});
+    expect(cache.get(9, 2n)!.ids.length).toBe(4);
+    expect(cache.get(9, 3n)!.ids.length).toBe(2);
+  });
+
   it('lowers a truncated band bound to exactly what remains', () => {
     const cache = new BandCache(24); // forces truncation on the first pass
     cache.put(band({depth: 6, prefix: 1n, n: 8}));

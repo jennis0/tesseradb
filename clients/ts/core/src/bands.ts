@@ -389,7 +389,19 @@ export type PlannedRequest = {
   novel: number;
 };
 
-export type EvictionFocus = {depth: number; prefix: bigint};
+export type EvictionFocus = {
+  depth: number;
+  prefix: bigint;
+  /**
+   * The bands that are on screen at this depth, which eviction never truncates. Before the
+   * response landed part by part every band of one answer shared a touch time and the tie broke
+   * on distance from the focus, so the periphery went first; streamed, the first rows to land are
+   * the least recently touched and were halved while the rest of the same view kept every point —
+   * strips at half density across the map, their coverage retracted, refetched and halved again
+   * (GeoNames, 2026-08-28). What is being looked at is not a candidate.
+   */
+  protect?: {depth: number; rect: TileRect};
+};
 
 /**
  * The held bands for one principal, under one byte budget.
@@ -790,8 +802,10 @@ export class BandCache {
       return Number(distance(b, focus) - distance(a, focus));
     });
 
+    const protect = focus.protect;
     for (const band of order) {
       if (this.held <= target) return;
+      if (protect && band.depth === protect.depth && rectContainsTile(protect.rect, band.x, band.y)) continue;
       const keep = Math.max(1, Math.floor(band.ids.length / 2));
       if (keep >= band.ids.length) continue;
       this.truncate(band, keep);

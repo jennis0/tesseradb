@@ -436,14 +436,18 @@ export class Replica {
     // never its points.
     const request = (rect: TileRect) => {
       const bbox = rectToRequestBbox(rect, depth, this.quantisation);
-      const piece = {landed: [] as Band[], parts: 0, fetching: null as unknown as Promise<ViewportResponse>};
+      const piece = {landed: [] as Band[], parts: 0, startedAt: 0, fetching: null as unknown as Promise<ViewportResponse>};
+      // One touch time for the whole piece, so eviction sees its bands as one arrival and not as
+      // a sequence in which the first rows to land are the oldest (`EvictionFocus.protect`).
+      const startedAt = this.now();
+      piece.startedAt = startedAt;
       piece.fetching = this.fetchViewport(
         {view: this.opts.view, zoom: depth, bbox, k},
         signal,
         background,
         async (part) => {
           piece.parts += 1;
-          for (const band of await this.absorb(part, depth, k)) piece.landed.push(band);
+          for (const band of await this.absorb(part, depth, k, startedAt)) piece.landed.push(band);
         }
       );
       // The loop below may throw out of an earlier piece (an abort, a shed request) while this one
@@ -466,7 +470,7 @@ export class Replica {
       // transport that answered whole never called the sink, and its response is absorbed here as
       // it always was.
       if (piece.parts === 0) {
-        for (const band of await this.absorb(response, depth, k)) piece.landed.push(band);
+        for (const band of await this.absorb(response, depth, k, piece.startedAt)) piece.landed.push(band);
       } else {
         this.observe(response);
       }
@@ -474,7 +478,7 @@ export class Replica {
       // **Once per response, never once per part.** A pass over the budget sorts every held band,
       // which at 10^5 of them is not something to do a hundred times for one answer.
       if (this.opts.cache !== false && piece.landed.length > 0) {
-        this.cache.evict({depth, prefix: piece.landed[0]!.prefix});
+        this.cache.evict({depth, prefix: piece.landed[0]!.prefix, protect: {depth, rect: render}});
       }
       // Marked only after the bands are in. A region marked covered before its points are held
       // would let the next plan subtract ground whose data never arrived. An aborted or truncated
@@ -577,7 +581,9 @@ export class Replica {
   private async absorb(
     arrival: {result: ViewportResponse['result']; identityKey: string; contentKey: string},
     depth: number,
-    k: number
+    k: number,
+    /** The touch time every band of one piece shares — the piece's start, whichever part it landed in. */
+    at: number = this.now()
   ): Promise<Band[]> {
     this.observe(arrival);
     const contentKey = this.contentKey;
@@ -586,7 +592,7 @@ export class Replica {
       identityKey: this.identityKey,
       contentKey,
       capUsed: k,
-      now: this.now(),
+      now: at,
       table: this.opts.table,
       onRemap: (ms) => this.opts.onPhase?.('remap', ms, arrival.result.ids.length)
     });
