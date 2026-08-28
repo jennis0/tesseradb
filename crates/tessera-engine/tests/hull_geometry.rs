@@ -49,16 +49,16 @@ fn measure_against_the_corpus() {
             .expect("declared");
         let shape_ms = t2.elapsed().as_secs_f64() * 1e3 - gather_ms;
 
-        // Containment against the whole membership, on real positions — the property the
-        // construction rests on, checked where the memberships are not of our own making. With
-        // several rings the claim is *some* ring, and the foreign-ring count below says whether it
-        // was ever more than one.
-        assert!(
-            positions
-                .iter()
-                .all(|m| shape.iter().any(|r| contains(r, *m))),
-            "ordinal {ordinal}: a member fell outside every ring of its shape"
-        );
+        // **Containment is counted, not asserted** (`artifact-shapes.md` §4's head, ruled
+        // 2026-08-28: a shape is a summary of where a cluster is, not a per-point assertion). The
+        // dig itself still holds every member it is given; what can put one outside is that the dig
+        // is given one representative member per grid cell rather than all of them, so a member can
+        // sit up to a cell beyond its own shape. The figure is what `the_quantisation_sweep`
+        // chooses the resolution against, and it is reported here on the served construction.
+        let escaped = positions
+            .iter()
+            .filter(|m| !shape.iter().any(|r| contains(r, **m)))
+            .count();
         let mut foreign = 0usize;
         if shape.len() > 1 {
             for m in &positions {
@@ -90,6 +90,7 @@ fn measure_against_the_corpus() {
         let uncapped = tessera_engine::derived::dig_rings(&positions, usize::MAX).0;
 
         rows.push(Row {
+            escaped,
             capped: shape.iter().map(|r| r.len()).sum::<usize>()
                 < uncapped.iter().map(|r| r.len()).sum::<usize>(),
             members: positions.len(),
@@ -137,6 +138,12 @@ fn measure_against_the_corpus() {
         100.0 * ((total_shape * 8 + total_rings * 4) as f64 / (total_wrap * 8) as f64 - 1.0)
     );
     println!(
+        "members outside every ring of their own shape: {} over the layer, on {} artifacts; worst artifact {:.4}% of its members",
+        rows.iter().map(|r| r.escaped).sum::<usize>(),
+        rows.iter().filter(|r| r.escaped > 0).count(),
+        100.0 * rows.iter().map(|r| r.escaped as f64 / r.members as f64).fold(0.0, f64::max),
+    );
+    println!(
         "rings: {total_rings} over the layer; {} artifacts carry more than one; {} members inside more than one ring of their own artifact",
         rows.iter().filter(|r| r.rings > 1).count(),
         rows.iter().map(|r| r.foreign).sum::<usize>(),
@@ -167,6 +174,7 @@ fn measure_against_the_corpus() {
 }
 
 struct Row {
+    escaped: usize,
     capped: bool,
     members: usize,
     wrap: usize,
@@ -266,7 +274,8 @@ fn the_budget_sweep() {
             vertices += rings.iter().map(|r| r.len()).sum::<usize>();
             rings_total += rings.len();
             exhausted += usize::from(capped);
-            ratios.push(rings.iter().map(|r| double_area(r)).sum::<i128>() as f64 / wrap.2.max(1.0));
+            ratios
+                .push(rings.iter().map(|r| double_area(r)).sum::<i128>() as f64 / wrap.2.max(1.0));
             digs.push(rings.iter().map(|r| r.len()).sum::<usize>() - wrap.0);
             if budget == largest {
                 // Containment is the induction the construction rests on, and it must survive the
@@ -296,4 +305,204 @@ fn the_budget_sweep() {
             dig_ms,
         );
     }
+}
+
+/// **What binning the members before the shape costs, and what it buys** — the sweep behind
+/// `tessera_engine::derived`'s `QUANTISE_DIVISIONS` and `artifact-shapes.md` §7.1.
+///
+/// Every construction in this family consumes one position per visible member to produce something
+/// whose resolution is bounded by the drawing: the largest shape on this layer is 757 vertices over
+/// 2.42M members, drawn about a thousand pixels wide. The engine therefore bins the members to a
+/// square grid over their own bounding box and digs over one real member per occupied cell. This
+/// measures what that does, against the same construction with the binning switched off.
+///
+/// Five columns decide it, and the fifth is the one the owner's containment ruling
+/// (`artifact-shapes.md` §4's head) made admissible at all:
+///
+/// - **the input**, since that is what the whole change is;
+/// - **α**, which is derived from the members and must not move — three times the median edge of
+///   their own convex wrap, so a wrap whose vertices have been displaced by a cell would move it;
+/// - **the area**, against the unquantised shape rather than against the wrap;
+/// - **the excursion**, the two-way worst departure of either ring from the other
+///   (`ring::excursion`), reported as a fraction of the artifact's own longer axis — which is what
+///   makes it comparable to a pixel, a shape being drawn at most a viewport wide;
+/// - **members outside their own shape**, which quantisation can now produce and which the
+///   unquantised dig could not.
+///
+/// The dig is **unbounded** here rather than at the served budget of 2,048, because no artifact on
+/// this layer reaches that budget (`measure_against_the_corpus` reports 0 at the budget) and an
+/// unbounded dig removes the cap from the comparison entirely.
+///
+/// ```text
+/// TESSERA_HULL_BUNDLE=<…>/bundle-notebook-2m4 \
+///   TESSERA_HULL_DIVISIONS=256,512,1024,2048,4096 \
+///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_quantisation_sweep
+/// ```
+#[test]
+#[ignore]
+fn the_quantisation_sweep() {
+    let corpus = corpus::open();
+    let divisions: Vec<u32> = std::env::var("TESSERA_HULL_DIVISIONS")
+        .unwrap_or_else(|_| "256,512,1024,2048,4096".into())
+        .split(',')
+        .map(|s| s.trim().parse::<u32>().expect("a division count"))
+        .collect();
+
+    let mut clouds: Vec<Vec<[u32; 2]>> = Vec::new();
+    let mut gather_ms: Vec<f64> = Vec::new();
+    for (_, visible) in &corpus.memberships {
+        let t = Instant::now();
+        let positions = corpus::gather(visible, &corpus.locator);
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        if positions.len() >= 3 {
+            clouds.push(positions);
+            gather_ms.push(ms);
+        }
+    }
+
+    // The baseline, once: the same construction with the binning switched off. Every ratio below is
+    // against this shape and not against the convex wrap, because the question is what the binning
+    // changed and not what the digging bought.
+    let mut base: Vec<Base> = Vec::new();
+    for cloud in &clouds {
+        let t = Instant::now();
+        let rings = tessera_engine::derived::dig_rings_at(cloud, usize::MAX, 0).0;
+        base.push(Base {
+            ms: t.elapsed().as_secs_f64() * 1e3,
+            area: rings.iter().map(|r| double_area(r)).sum::<i128>() as f64,
+            vertices: rings.iter().map(|r| r.len()).sum(),
+            alpha_sq: ring::alpha_sq(cloud) as f64,
+            extent: extent_of(cloud),
+            rings,
+        });
+    }
+    let total_members: usize = clouds.iter().map(|c| c.len()).sum();
+    println!(
+        "{} artifacts, {} … {} members ({total_members} in total); unquantised: {} vertices, {:.0} ms of digging, {:.0} ms of gathering",
+        clouds.len(),
+        clouds.iter().map(|c| c.len()).min().unwrap(),
+        clouds.iter().map(|c| c.len()).max().unwrap(),
+        base.iter().map(|b| b.vertices).sum::<usize>(),
+        base.iter().map(|b| b.ms).sum::<f64>(),
+        gather_ms.iter().sum::<f64>(),
+    );
+    println!(
+        "\ndivisions,input,vertices,dig_ms,p50_ms,p90_ms,worst_ms,alpha_worst,area_median,area_worst,excursion_median,excursion_worst,excursion_alpha_worst,outside,outside_worst"
+    );
+
+    // Per-artifact rows, for the diagnosis a summary cannot carry: `TESSERA_HULL_ROWS=1` prints one
+    // line per artifact per resolution, which is how the worst-case columns below are traced back to
+    // the artifact that produced them.
+    let rows = std::env::var("TESSERA_HULL_ROWS").is_ok();
+    if rows {
+        println!("row,divisions,members,input,vertices,dig_ms,alpha,area,excursion,outside");
+    }
+    for &d in &divisions {
+        let mut reduced = 0usize;
+        let mut vertices = 0usize;
+        let mut dig_ms = 0.0f64;
+        let mut per_artifact: Vec<f64> = Vec::new();
+        let mut alpha_drift: Vec<f64> = Vec::new();
+        let mut areas: Vec<f64> = Vec::new();
+        let mut excursions: Vec<f64> = Vec::new();
+        let mut excursion_alpha: Vec<f64> = Vec::new();
+        let mut outside_total = 0usize;
+        let mut outside_worst = 0.0f64;
+        for ((cloud, b), gather) in clouds.iter().zip(&base).zip(&gather_ms) {
+            let t = Instant::now();
+            let rings = tessera_engine::derived::dig_rings_at(cloud, usize::MAX, d).0;
+            let ms = t.elapsed().as_secs_f64() * 1e3;
+            dig_ms += ms;
+            per_artifact.push(ms + gather);
+            vertices += rings.iter().map(|r| r.len()).sum::<usize>();
+
+            // The input the shape was actually computed over, taken from the same helper the
+            // engine digs over rather than recomputed here from the cell arithmetic.
+            let members = representatives(cloud, d);
+            reduced += members.len();
+
+            let alpha = ring::alpha_sq(&members) as f64;
+            alpha_drift.push((alpha / b.alpha_sq.max(1.0)).sqrt());
+            areas.push(rings.iter().map(|r| double_area(r)).sum::<i128>() as f64 / b.area.max(1.0));
+            let e = ring::excursion(&rings, &b.rings);
+            excursions.push(e / b.extent);
+            excursion_alpha.push(e / b.alpha_sq.max(1.0).sqrt());
+
+            let outside = cloud
+                .iter()
+                .filter(|m| !rings.iter().any(|r| contains(r, **m)))
+                .count();
+            outside_total += outside;
+            outside_worst = outside_worst.max(outside as f64 / cloud.len() as f64);
+            if rows {
+                println!(
+                    "row,{d},{},{},{},{ms:.2},{:.4},{:.4},{:.5},{outside}",
+                    cloud.len(),
+                    members.len(),
+                    rings.iter().map(|r| r.len()).sum::<usize>(),
+                    alpha_drift[alpha_drift.len() - 1],
+                    areas[areas.len() - 1],
+                    excursions[excursions.len() - 1],
+                );
+            }
+        }
+        println!(
+            "{d},{reduced},{vertices},{dig_ms:.0},{:.1},{:.1},{:.0},{:.4},{:.4},{:.4},{:.5},{:.5},{:.3},{outside_total},{:.5}",
+            pct(&mut per_artifact.clone(), 0.5),
+            pct(&mut per_artifact.clone(), 0.9),
+            pct(&mut per_artifact.clone(), 1.0),
+            worst_from_one(&mut alpha_drift.clone()),
+            pct(&mut areas.clone(), 0.5),
+            pct(&mut areas.clone(), 0.0),
+            pct(&mut excursions.clone(), 0.5),
+            pct(&mut excursions.clone(), 1.0),
+            pct(&mut excursion_alpha.clone(), 1.0),
+            outside_worst,
+        );
+    }
+}
+
+struct Base {
+    ms: f64,
+    area: f64,
+    vertices: usize,
+    alpha_sq: f64,
+    extent: f64,
+    rings: Vec<Vec<[u32; 2]>>,
+}
+
+/// The longer axis of a cloud's bounding box — the denominator that makes an excursion comparable
+/// to a pixel, since a shape is drawn at most a viewport wide.
+fn extent_of(cloud: &[[u32; 2]]) -> f64 {
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for q in cloud {
+        x0 = x0.min(q[0]);
+        y0 = y0.min(q[1]);
+        x1 = x1.max(q[0]);
+        y1 = y1.max(q[1]);
+    }
+    (((x1 - x0) as f64).max((y1 - y0) as f64)).max(1.0)
+}
+
+/// The representatives the engine would dig over, for the α comparison.
+fn representatives(cloud: &[[u32; 2]], divisions: u32) -> Vec<[u32; 2]> {
+    tessera_engine::derived::quantised(cloud, divisions).unwrap_or_else(|| cloud.to_vec())
+}
+
+fn pct(v: &mut [f64], p: f64) -> f64 {
+    v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+    v[((v.len() as f64 * p) as usize).min(v.len() - 1)]
+}
+
+/// The value furthest from 1 — how far a ratio that should not move has moved, in either direction.
+fn worst_from_one(v: &mut [f64]) -> f64 {
+    v.iter()
+        .copied()
+        .max_by(|a, b| {
+            (a - 1.0)
+                .abs()
+                .partial_cmp(&(b - 1.0).abs())
+                .expect("no NaN")
+        })
+        .unwrap_or(1.0)
 }

@@ -90,3 +90,78 @@ pub fn double_area(poly: &[[u32; 2]]) -> i128 {
         })
         .sum()
 }
+
+/// α², as the squared length an edge must exceed to be treated as bridging a void: three times the
+/// median edge of the convex wrap, squared.
+///
+/// **A second implementation of `tessera_engine::derived`'s rule, and here for the same reason the
+/// wrap above is.** It is what a measurement compares the engine's α against — the quantisation
+/// sweep asks whether binning the members moves it — and a comparison that called the engine's own
+/// arithmetic would agree by construction.
+pub fn alpha_sq(points: &[[u32; 2]]) -> i128 {
+    let wrap = convex_hull(points);
+    if wrap.len() < 2 {
+        return 0;
+    }
+    let mut lengths: Vec<i128> = (0..wrap.len())
+        .map(|i| sq_len(wrap[i], wrap[(i + 1) % wrap.len()]))
+        .collect();
+    lengths.sort_unstable();
+    9 * lengths[lengths.len() / 2]
+}
+
+pub fn sq_len(a: [u32; 2], b: [u32; 2]) -> i128 {
+    let (dx, dy) = (b[0] as i128 - a[0] as i128, b[1] as i128 - a[1] as i128);
+    dx * dx + dy * dy
+}
+
+/// The distance from `p` to the closed segment `a b`, in grid units.
+fn point_to_segment(a: [u32; 2], b: [u32; 2], p: [u32; 2]) -> f64 {
+    let (ax, ay) = (a[0] as f64, a[1] as f64);
+    let (bx, by) = (b[0] as f64, b[1] as f64);
+    let (px, py) = (p[0] as f64, p[1] as f64);
+    let (vx, vy) = (bx - ax, by - ay);
+    let len_sq = vx * vx + vy * vy;
+    let t = if len_sq == 0.0 {
+        0.0
+    } else {
+        (((px - ax) * vx + (py - ay) * vy) / len_sq).clamp(0.0, 1.0)
+    };
+    let (qx, qy) = (ax + t * vx, ay + t * vy);
+    ((px - qx).powi(2) + (py - qy).powi(2)).sqrt()
+}
+
+/// The **two-way worst excursion** between two shapes, each a list of rings: the largest distance
+/// from a vertex of either to the nearest boundary point of the other, in grid units.
+///
+/// This is the Hausdorff distance restricted to vertices on the sampling side and to whole segments
+/// on the measured side, which is exact for the question it is asked — whether one shape's boundary
+/// ever departs the other's — because a polygon's furthest point from another polygon's boundary is
+/// attained at a vertex.
+///
+/// `f64` rather than `i128`, and the only place in this file that is: a distance to a segment is a
+/// square root of a rational, and the figure it feeds is a fraction of an artifact's extent rather
+/// than a decision.
+pub fn excursion(a: &[Vec<[u32; 2]>], b: &[Vec<[u32; 2]>]) -> f64 {
+    let one_way = |from: &[Vec<[u32; 2]>], to: &[Vec<[u32; 2]>]| -> f64 {
+        let mut worst = 0.0f64;
+        for ring in from {
+            for &v in ring {
+                let mut nearest = f64::INFINITY;
+                for other in to {
+                    let n = other.len();
+                    if n == 1 {
+                        nearest = nearest.min(point_to_segment(other[0], other[0], v));
+                        continue;
+                    }
+                    for i in 0..n {
+                        nearest = nearest.min(point_to_segment(other[i], other[(i + 1) % n], v));
+                    }
+                }
+                worst = worst.max(nearest);
+            }
+        }
+        worst
+    };
+    one_way(a, b).max(one_way(b, a))
+}
