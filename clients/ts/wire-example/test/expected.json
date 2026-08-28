@@ -38,7 +38,7 @@
     "artifacts": 178,
     "points": 0,
     "first_point_tessera_id": null,
-    "first_artifact_tessera_id": "1604015221313399392"
+    "first_artifact_tessera_id": "1181461666753581072"
   },
   "viewport-membership.bin": {
     "frames": [
@@ -50,8 +50,8 @@
     "tiles": 14,
     "sub_cells": null,
     "artifacts": 178,
-    "points": 251,
-    "first_point_tessera_id": "1199908523065398912",
-    "first_artifact_tessera_id": "1604015221313399392"
+    "points": 257,
+    "first_point_tessera_id": "627005022019853929",
+    "first_artifact_tessera_id": "1181461666753581072"
   }
 }
