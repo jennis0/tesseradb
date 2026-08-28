@@ -569,6 +569,17 @@ fn the_derivation_profile() {
         let derive_ms = t4.elapsed().as_secs_f64() * 1e3;
         std::hint::black_box(derived);
 
+        // The same derivation for a layer that declares no hull — `taxonomy/arxiv` is the one on
+        // this bundle — which is the whole of what the per-member passes cost when nothing is dug.
+        let t5 = Instant::now();
+        let flat = compute(
+            &[ComputedProperty::Centroid, ComputedProperty::Box],
+            visible,
+            &corpus.locator,
+        );
+        let no_hull_ms = t5.elapsed().as_secs_f64() * 1e3;
+        std::hint::black_box(flat);
+
         rows.push(Stage {
             members: positions.len(),
             representatives: reduced_len,
@@ -577,21 +588,25 @@ fn the_derivation_profile() {
             reduce_ms,
             shape_ms: shape_ms.max(0.0),
             derive_ms,
+            no_hull_ms,
         });
     }
 
     rows.sort_unstable_by_key(|r| r.members);
-    println!("members,representatives,gather_ms,box_centroid_ms,reduce_ms,shape_ms,derive_ms");
+    println!(
+        "members,representatives,gather_ms,box_centroid_ms,reduce_ms,shape_ms,derive_ms,no_hull_ms"
+    );
     for r in &rows {
         println!(
-            "{},{},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            "{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
             r.members,
             r.representatives,
             r.gather_ms,
             r.bc_ms,
             r.reduce_ms,
             r.shape_ms,
-            r.derive_ms
+            r.derive_ms,
+            r.no_hull_ms
         );
     }
     let sum = |f: fn(&Stage) -> f64| -> f64 { rows.iter().map(f).sum() };
@@ -620,8 +635,9 @@ fn the_derivation_profile() {
         b + s,
     );
     println!(
-        "compute(centroid, box, hull) end to end: {:.0} ms over the layer",
-        sum(|r| r.derive_ms)
+        "compute(centroid, box, hull) end to end: {:.0} ms over the layer; compute(centroid, box) — a layer declaring no hull — {:.0} ms",
+        sum(|r| r.derive_ms),
+        sum(|r| r.no_hull_ms)
     );
 }
 
@@ -635,6 +651,8 @@ struct Stage {
     shape_ms: f64,
     /// The whole of `compute` over the same membership, with all three properties declared.
     derive_ms: f64,
+    /// The same, declaring `centroid` and `box` and no hull.
+    no_hull_ms: f64,
 }
 
 /// The `box` and `centroid` properties over the gathered positions, written from the definition —
