@@ -52,10 +52,17 @@ const headed = 'headed' in args;
 /** A Chromium other than the one this Playwright bundles — `--executable /path/to/chrome`. */
 const executablePath = args.executable;
 
+// **A page served from another port.** The demo enumerates one browser origin in
+// `serve.dev_cors_origins` — `http://localhost:5173` — so a viewer run on another port cannot
+// reach the server at all, and every claim below reads as a detached store rather than as a
+// configuration. Where the URL is not that origin the *browser's* origin check is switched off
+// rather than the server's: this is a measuring browser, and a running demo is not touched.
+const sameOrigin = new URL(url).port === '5173';
+const originFlags = sameOrigin ? [] : ['--disable-web-security'];
 const browser = await chromium.launch(
   headed
-    ? {headless: false, args: ['--disable-gpu-sandbox'], ...(executablePath ? {executablePath} : {})}
-    : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox'], ...(executablePath ? {executablePath} : {})}
+    ? {headless: false, args: ['--disable-gpu-sandbox', ...originFlags], ...(executablePath ? {executablePath} : {})}
+    : {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox', ...originFlags], ...(executablePath ? {executablePath} : {})}
 );
 const page = await browser.newPage({viewport: {width: 1280, height: 800}});
 // The probe: the demo publishes its first map's on `window` (with the lanes it keeps itself);
