@@ -582,6 +582,16 @@ End to end, the `k = 0` artifacts request for `clusters/hdbscan`'s 197 shapes go
 **1,053 ms → 964 ms** cold; warm it is 3 ms either way, the answer being held per principal
 (§7.2).
 
+**At the request level the last change is inside the noise, and that is stated rather than
+rounded up.** Two servers over the same bundle on a scratch port, as the demo's 176-term principal,
+alternated over three rounds each with the cache cleared between: the whole-layer hull request is
+1,044 ms at its best before and 1,029 ms after, and `taxonomy/arxiv`'s 65 ms and 71 ms. The
+engine-level figures say to expect about 78 ms and 12 ms; the run-to-run spread on the machine
+these were taken on is wider than either, so the request-level measurement confirms the answers and
+the response sizes are unchanged and settles nothing about the time. The response bytes themselves
+are **not** a usable identity check — two runs of one binary differ, the frame carrying something
+per-request — which is why the identity assertions above are made over the geometry.
+
 **A jump per cell — the route the row-range property most obviously suggests — was refused on
 measurement, and this is where the crossover is.** If a cell is a row range then the occupied cells
 could be found by bitmap arithmetic: gallop over the segment's Morton column to the end of the
