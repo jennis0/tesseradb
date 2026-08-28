@@ -1,6 +1,6 @@
 # The shape of a served artifact
 
-**Status:** Normative — 2026-08-28 (r4). It governs what the `hull` vocabulary word means, and
+**Status:** Normative — 2026-08-28 (r5). It governs what the `hull` vocabulary word means, and
 `annotations.md` §4.2 and `contracts.md` §3.2 defer to it on the shape's geometry. The rulings that
 closed it are in Appendix R.
 
@@ -22,7 +22,8 @@ the single-ring shape cost, before this).
 reimplementation that reproduces the engine's published figures exactly before comparing anything
 against them. The two figures a *ruling* rests on are Rust against Rust in one process —
 `crates/tessera-engine/tests/hull_triangulation.rs` for what a triangulation costs, and
-`hull_geometry.rs` for what the served shape costs — because a Qhull-in-C against numpy-in-Python
+`hull_geometry.rs` for what the served shape costs and what reducing its input does to it
+(`the_quantisation_sweep`) — because a Qhull-in-C against numpy-in-Python
 column compares implementations rather than algorithms. Both read `notebook-2m4`: `clusters/hdbscan`
 (197 artifacts, 6,146 … 2,422,486 members), with `clusters/kmeans` (64), `clusters/toponymy` level 3
 (574) and `topics/hdbscan` (195) as controls.
@@ -49,16 +50,22 @@ on the shape: on every layer measured the dig runs out of work of its own accord
 What the shape guarantees:
 
 - **Every vertex is a visible member's position.** No invented point, no cell corner, no smoothing.
-- **Every member is inside the ring of its own group**, boundary included.
+- **Every member is within one cell of the ring of its own group**, and all but a handful are
+  inside it. The shape is computed over one real member per occupied cell of a grid across the
+  artifact's own extent (§7.1) rather than over every member, so a member can sit up to a cell
+  beyond its own outline. Measured over `clusters/hdbscan` at full membership: **1,965 positions of
+  12,808,679**, on 22 of 197 artifacts and at most 0.09% of any one artifact's members. Under §4's
+  ruling that is an imprecise summary of where the cluster is, not a false claim about a member.
 - **Each ring is simple** — it does not cross or touch itself.
 - **Each ring is inside its group's convex wrap**, so the whole shape is inside the wrap of the
   visible members.
 - **A degenerate group is its members.** One member is a ring of one vertex, two are a ring of two:
   rounding either up to a triangle would draw an area no member occupies.
-- **It is a function of the member positions alone** — exact `i128` arithmetic throughout, apart
-  from one square root that turns α² into the grouping grid's cell side. That square root is
-  IEEE-754 correctly rounded and so is identical on every platform, its result is rounded up to a
-  whole grid unit, and every join it then decides is an integer comparison of cell indices. Two
+- **It is a function of the member positions alone.** The construction is exact `i128` arithmetic
+  apart from two floating-point steps, and both are identical on every platform because every IEEE-754
+  operation they use is correctly rounded: the square root that turns α² into the grouping grid's
+  cell side, whose result is rounded up to a whole grid unit before any join is decided, and the
+  cross products of the eight-extreme filter that keeps α exact under the reduction (§7.1). Two
   principals' shapes differ only because their memberships do.
 
 What it does **not** guarantee, stated because it is the property a reader will assume: a member may
@@ -219,7 +226,8 @@ bytes** than the dig does, and its area is no longer the tighter of the two: 0.7
 against the dig's 0.771.
 
 **Re-ruled 2026-08-28 at the scale that now matters, and the answer is the same one for a different
-reason.** A response derives a hull for the artifact the client draws and for no other (§8 C), so a
+reason.** *(The per-artifact table below was measured on the whole membership; §4.2 re-measures it
+on the reduced input the derivation now takes, where the margin narrows sharply.)* A response derives a hull for the artifact the client draws and for no other (§8 C), so a
 layer sum is the wrong denominator: what a viewer waits for is *one* artifact's shape, and what
 rides the wire is one artifact's vertices. Measured per artifact over the same 197, gather included,
 in `hull_triangulation.rs`:
@@ -246,6 +254,45 @@ triangulated route's own time** over the layer. Choosing between them moves noth
 above, so nothing about the re-admission changes the comparison with the dig. **Ruling A stands: the
 dig keeps the job**, now on interaction latency rather than on layer-wide cost. Revisit it if the
 workspace acquires a triangulation for another reason, or if a way is found to bound the root's.
+
+### 4.2 The same comparison on the input the derivation now takes
+
+**Ruling A is not reopened here and this section rules nothing.** It reports a number, because the
+figure ruling A turned on has moved by an order of magnitude and a design that left the old one
+standing would be quoting a measurement of a construction that no longer runs.
+
+Both routes are now given the reduced input of §7.1 — one real member per occupied cell, plus every
+member that could be a convex-hull vertex — because handing the triangulation the whole membership
+while the dig is given a reduction of it compares two constructions over two different clouds. The
+reduction and the sort are charged to the triangulated route explicitly and the dig pays them inside
+its own timing (`hull_triangulation.rs`).
+
+| | on the whole membership (r4) | on the reduced input |
+|---|---|---|
+| whole layer — the dig | 1,882 ms | **900 ms** |
+| whole layer — sort + Delaunay + components + χ-peel | 6,835 ms | **1,852 ms** |
+| the ratio over the layer | 3.44× | **1.77×** |
+| the corpus root's Delaunay alone | 1,533 ms | **53 ms** |
+| one shape, gather included — the dig | p50 1.7 ms, p90 19.9 ms, worst 263 ms | **p50 1.7 ms, p90 14.6 ms, worst 82 ms** |
+| one shape, gather included — triangulated | p50 4.8 ms, p90 35.6 ms, worst 2,017 ms | **p50 4.9 ms, p90 23.9 ms, worst 121 ms** |
+| the ratio per artifact | 3.7× / 6.2× / 11.8× | **3.6× / 6.1× / 7.4×** |
+| one shape on the wire — the dig | p50 748 B, worst 6,060 B | p50 748 B, worst 4,980 B |
+| one shape on the wire — the χ-peel | p50 300 B, worst 1,668 B | p50 300 B, worst 1,668 B |
+
+**What has changed is the argument ruling A rests on, not its direction.** The dig is still cheaper
+everywhere — 3.6× at the median, 7.4× at the worst — and the χ-shape still sends about 60% fewer
+hull bytes. What has gone is *"two seconds is not a hover"*: the corpus root, which holds the whole
+corpus and is hovered like any other artifact, costs **121 ms** through a triangulation now rather
+than 2,017 ms. A hundred milliseconds is a hover. The Delaunay is also no longer the overwhelming
+term — 67% of the triangulated route's own time, against 76% — because what it was overwhelming was
+the cost of triangulating millions of points that the drawing could not resolve.
+
+So the sentence in §4.1 that reads *"revisit it if the workspace acquires a triangulation for
+another reason, or if a way is found to bound the root's"* has had its second clause met. **Whether
+that is enough to move ruling A is the owner's**, and three things would go with it: the α-complex's
+fill of 1.000 and its free components and holes (§6), a `delaunator` dependency the workspace does
+not carry, and a shape whose vertices are still members but whose containment is the one §4's table
+records as **no**.
 
 ## 5. Grouping the members
 
@@ -311,18 +358,110 @@ run to run.
 
 | layer | artifacts | members | rings | > 1 ring | wrap vertices | shape vertices | hull bytes | wrap | shape | area / wrap |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `clusters/hdbscan` | 197 | 6,146 … 2,422,486 | 215 | 4 | 3,278 | 28,459 | 228,532 | 578 ms | 1,906 ms | 0.771 mean, 0.072 min |
+| `clusters/hdbscan` | 197 | 6,146 … 2,422,486 | 215 | 4 | 3,278 | 26,815 | 215,380 | 556 ms | 903 ms | 0.771 mean, 0.072 min |
 | `clusters/kmeans` | 64 | 13,658 … 73,360 | 190 | 7 | 1,587 | 8,424 | 68,152 | 93 ms | 240 ms | 0.835 mean, 0.010 min |
 | `clusters/toponymy` L3 | 574 | 1,211 … 11,682 | 618 | 18 | 7,846 | 28,400 | 229,672 | 57 ms | 174 ms | 0.785 mean, 0.012 min |
 | `topics/hdbscan` | 195 | 200 | 197 | 2 | 2,098 | 3,833 | 31,452 | 1 ms | 3 ms | 0.874 mean, 0.113 min |
+
+**Only the first row moved when the input reduction landed** (§7.1), and the other three did not
+move at all: reduction engages on an artifact whose members outnumber the cells of its own grid, and
+no artifact of `clusters/kmeans` (13,658 … 73,360 members), `clusters/toponymy` level 3 (1,211 …
+11,682) or `topics/hdbscan` (200) is dense enough to reach it. That was checked rather than assumed
+— re-running the sweep over `clusters/kmeans` returns the identical 8,424 vertices and 239 ms.
 
 **No artifact on any of those four layers exhausts the budget**, which is the property §8 B is
 about: the shape each row describes is the one the dig stops at on its own.
 
 *Hull bytes* is 8 per vertex plus 4 per ring, and excludes the Arrow list offsets and validity, which
 do not move with the shape. Position gathering — one read per member, which a declared `box` already
-pays — is 181 ms over `clusters/hdbscan` and 46 ms on its largest artifact, and sits under both
-columns.
+pays — is 163 ms over `clusters/hdbscan` and 42 ms on its largest artifact, and sits under both
+columns. **It is now the floor**: on the corpus root the gather is 42 ms and the shape 39 ms, where
+before the reduction the shape was 167 ms.
+
+### 7.1 Reducing the input before computing the shape
+
+Every construction in §4 consumes one position per visible member to produce something whose
+resolution is bounded by the drawing: the largest shape here is 757 vertices over 2,422,486 members,
+drawn about a thousand pixels wide. So the members are binned to a square grid over their own
+bounding box and **the shape is computed over one real member per occupied cell** — the member
+nearest that cell's centre, ties broken on the position itself.
+
+**It is a quantisation and not a sample.** Every member falls in some cell, every occupied cell
+contributes, and every vertex is still a visible member's own position, so §1's vertex property is
+untouched. What it gives up is §1's old containment: a member can sit up to a cell beyond its own
+outline, which §4's ruling permits and §1 quantifies.
+
+**The resolution is 1,024 cells along the artifact's longer axis, and it is relative to the artifact
+rather than to the request's zoom.** A shape drawn at all is drawn at most a viewport wide, so a
+cell is a pixel or two of displacement in the case that matters. Making it depend on the zoom would
+put the zoom in the cache key (§7.2), give a viewer a shape that flickers as they zoom, and hand the
+identifier route — which carries no zoom — no answer at all. The stability is worth more than the
+extra fidelity at a deep zoom, where the client's own drawn curve is already the coarser of the two:
+the spline through the served ring leaves it by up to a third of the longest adjacent edge (§9), and
+those edges are α-scale.
+
+**α is the part that does not survive a naive reduction, and it is stated here because it was
+nearly missed.** α is three times the median edge of the members' own convex wrap, and that
+statistic follows the *sampling density* — the wrap of a sparser sample of the same region has fewer
+vertices and longer edges. Taken over the representatives alone it moved by up to **3.6×** on one
+artifact and took its shape from 0.29 to 1.29 of the unreduced one's area, which is a different shape
+rather than a blurred one. So every member that could be a convex-hull vertex is carried through
+beside the representatives, by Akl–Toussaint's filter against the polygon of the eight extremes of
+`x`, `y`, `x + y` and `x − y`. The wrap of what the construction receives is then **exactly** the
+wrap of the whole membership, and α is not approximated at all — measured as an exact match on every
+artifact of the layer.
+
+What it costs and what it buys, over the 22 of 197 artifacts dense enough to reduce, whose
+9,287,043 members become 1,717,984 representatives:
+
+| | median | p90 | worst |
+|---|---|---|---|
+| the boundary's departure from the unreduced shape, as a fraction of the artifact's own extent | 0.005 | 0.025 | 0.044 |
+| the area, against the unreduced shape | 1.000 | — | 0.988 … 1.007 |
+
+**Where it is not invisible, stated rather than averaged away.** At the median the departure is half
+a percent of the artifact's extent — a pixel or two on a thousand-pixel drawing. On one artifact of
+the 197 it is 4.4%: a single concavity that the unreduced dig opens and the reduced one does not,
+because the members it would have dug to are no longer candidates. The area is within 1.2% there, so
+it is one notch rather than a shape that has moved. Below 1,024 divisions that case gets common
+enough to matter — at 512 the worst departure is 17% of an artifact's extent — which is what fixes
+the resolution here rather than lower, where the time would be better.
+
+**The derivation is single-threaded and stays so** (owner ruling, 2026-08-28). Parallelism in this
+engine lives at the *request* level, so concurrent requests use the cores; a `par_iter` over an
+artifact's members would let one request oversubscribe the pool the others are queued behind, which
+trades a served viewer's latency for a hovering one's. The two things that made the derivation cheap
+are the ones a second thread would have hidden: the input is reduced, and the answer is not computed
+twice.
+
+### 7.2 Holding the answer
+
+Nothing held a derived centroid, box or hull, so the identical artifacts request three times running
+cost 2.4 s, 2.9 s and 2.8 s. It is now held per principal, under a key whose first term is the
+principal and whose other terms are each a reason that principal's visible set or the artifact's
+membership moved: the view, the layer, the level and its write counter, the ordinal, the geometry
+version, the overlay's counter, the fragment's identity and watermark, and the property set the
+request asked for (§8 C).
+
+**A shape is never shared across principals, and that term is the whole of the disclosure argument**
+(§10). Two viewers of one artifact have two different clouds, so one viewer's outline is not an
+answer to another's request; a hit answers the request that would have computed the same value.
+The attribute filter is deliberately *not* a term, because derived content is filter-blind exactly
+as the masked count beside it is (**I12**).
+
+The cache is bounded at 64 MiB resident and evicts least recently used. There is no configuration
+key, and that is a deliberate difference from the two caches that have one: their entry size scales
+with the *corpus* — a row projection is a measured 125 MB at 10⁹ items — where an entry here is one
+artifact's outline, bounded by the vertex budget whatever the corpus does. A miss costs the
+derivation: a measured p50 of 1.6 ms, p90 of 14.4 ms and 82 ms on the corpus root.
+
+**What a pan gets, measured rather than modelled.** Twelve overlapping viewports walking across the
+map, each followed by three of the hovers a client makes when a pointer lands on a shape, against a
+server over `notebook-2m4` as the principal holding its 176 terms: **220 ms out, 27 ms back over the
+same twelve, 26 ms out again**. At the level below, a pan of eight viewports over a fixture whose
+eight artifacts are all in every one derives each shape exactly once — 56 hits against 8 misses,
+which is the shape of the property rather than of the corpus
+(`tests/artifact_cache_cadence.rs`).
 
 Against the single ring it replaces, measured at the budget of 64 both were built at:
 **12,388 → 12,497 vertices, 99,104 → 100,836 bytes (+1.7%), 841 → 906 ms (+8%)**. The extra vertices
@@ -380,21 +519,36 @@ bought on any measured layer, and the worst case a pathological membership can p
 request over the whole extent, as the principal holding this bundle's 176 terms, against the same
 server on one machine — the median of four runs, nothing cached anywhere:
 
-| request | before | after (`computed: ["centroid", "box"]`) |
-|---|---|---|
-| `clusters/hdbscan`, 197 artifacts | **2,032 ms**, 263,079 B | **164 ms**, 26,406 B |
-| `clusters/toponymy`, `levels: "all"`, 797 artifacts | **803 ms**, 534,630 B | **81 ms**, 91,237 B |
-| `taxonomy/arxiv`, 209 artifacts — declares no hull | 74 ms, 26,916 B | 74 ms, 26,916 B |
+| request | before `computed` | with `computed: ["centroid", "box"]` | the same, this principal's second time |
+|---|---|---|---|
+| `clusters/hdbscan`, 197 artifacts | **2,032 ms**, 263,079 B | **167 ms**, 26,402 B | **1.2 ms** |
+| `clusters/toponymy`, `levels: "all"`, 797 artifacts | **803 ms**, 534,630 B | **84 ms**, 91,236 B | **2.3 ms** |
+| `taxonomy/arxiv`, 209 artifacts — declares no hull | 78 ms, 26,915 B | 78 ms, 26,915 B | **2.3 ms** |
+| `clusters/hdbscan` asking for **every** hull | **2,032 ms**, 263,079 B | **1,046 ms**, 249,508 B | **1.3 ms** |
 
-The taxonomy row is the control and it does not move, which is the point: it was already the cost
-of an artifacts request without a hull, and the two clustering rows now sit beside it. **The hull
-was 92% of the first request's time and 90% of its bytes.**
+The taxonomy row is the control and it does not move under `computed`, which is the point: it was
+already the cost of an artifacts request without a hull, and the two clustering rows now sit beside
+it. **The hull was 92% of the first request's time and 90% of its bytes.**
+
+The fourth row is the request that still asks for all 197 shapes, and it is where §7.1 and §7.2 show
+up on the wire: **2,032 → 1,046 ms** for reducing the input, and 1.3 ms for the same principal
+asking again. The last column is that second ask on every row — the geometry a request derives is
+held for the principal that derived it (§7.2), so the first two columns are what a *new* principal
+pays and the last is what panning costs.
 
 **What a hover costs, end to end**, on the same server: the one `/v1/artifacts/{id}` call the client
-makes when the pointer lands on a shape (§9). **2–5 ms** for artifacts of 6,000 to 34,000 members,
-**188 ms** for the 2.42M-member root and **265 ms** for the 1.84M-member artifact below it, JSON
-bodies of 0.7–15 KB. So the whole layer's shapes cost less than one of them did, and the two that
-are slow are slow only when they are pointed at.
+makes when the pointer lands on a shape (§9), with the session already warm so that only the shape
+is cold. JSON bodies of 0.7–14 KB throughout.
+
+| members | before §7.1 | after §7.1 | the same shape again (§7.2) |
+|---|---|---|---|
+| 2,422,486 — the corpus root | 188 ms | **70 ms** | 0.48 ms |
+| 1,844,620 | 265 ms | **73 ms** | 0.45 ms |
+| 507,264 | — | 48 ms | 0.41 ms |
+| 6,146 … 34,091 | 2–5 ms | **0.9 … 4.8 ms** | 0.35 … 0.43 ms |
+
+So the whole layer's shapes cost less than one of them did, the two that are slow are slow only when
+they are pointed at, and pointing at one twice costs nothing the second time.
 
 **What it cost on the wire before any of this**, kept because §8 B's ruling rests on it. The same
 `clusters/hdbscan` request went from **130,471 to 262,055 bytes** when the budget moved 64 → 2,048,
@@ -526,10 +680,41 @@ to, can end up knowing something about data they were not served.*
   a caller can learn by asking twice with different selections that one of the two answers did not
   already carry.
 
+- **A held shape is one principal's own** (§7.2). The cache's key names the session, the geometry,
+  the overlay's counter and the fragment the request composed against, so a hit answers the request
+  that would have derived the same value from the same visible members. Sharing one entry across
+  principals would be exactly the disclosure the closure rule forbids, and it is the key's first
+  term that makes it unexpressible rather than merely avoided. Nothing in the cache is ever
+  mutated: a deny rotates the key rather than editing an entry, so the corrected outline is served
+  on the next request rather than at the next refresh.
+
 **No register row, and this note is where that is recorded** — Appendix C's head note asks that a
 check which found nothing sit beside the mechanism it checked rather than in the register.
 
 ## Appendix R — Review trail
+
+- **r5 — 2026-08-28. The derivation is made cheap, twice over, and the family question is
+  re-measured on what it now costs.** Deriving one shape was ~10 ms and linear in the visible
+  membership, when what it produces is bounded by the drawing.
+  **The input is reduced before the shape is computed** (§7.1): one real member per occupied cell
+  of a 1,024-across grid over the artifact's own extent, which is a quantisation and not a sample.
+  The whole layer's digging goes 1,906 → 903 ms and the corpus root 167 → 39 ms. Two things are
+  recorded rather than smoothed over. **α does not survive a naive reduction** — it follows the
+  sampling density, and over the representatives alone it moved by up to 3.6× and changed a shape
+  rather than blurring it; carrying every possible convex-hull vertex through the reduction makes it
+  exact instead. And **§1's containment is given up**: 1,965 member positions of 12.8M now sit
+  outside their own shape, by at most a cell, which is admissible only because of §4's ruling and
+  which §1 now quantifies rather than promising the opposite.
+  **Derived geometry is held per principal** (§7.2), keyed so that no entry is ever shared across
+  principals — a hover on the corpus root is 70 ms cold and 0.48 ms warm, and a pan of twelve
+  viewports with three hovers each is 220 ms out and 27 ms back.
+  **Ruling A is not reopened, and §4.2 is the number that would reopen it.** On the reduced input
+  the triangulated route is 1.77× the dig over the layer rather than 3.44×, and the corpus root's
+  triangulated shape is **121 ms** rather than 2,017 ms — so *"two seconds is not a hover"*, which
+  is what r4's re-ruling rested on, is no longer the argument. The dig is still 3.6× cheaper at the
+  median and 7.4× at the worst, and whether that is enough is the owner's to rule.
+  The derivation acquires no `rayon` and must not: parallelism stays at the request level so that
+  concurrent requests use the cores rather than one request oversubscribing them (owner ruling).
 
 - **r1** — Drafted 2026-08-27 as an investigation from
   [`probes/2026-08-27-artifact-shapes/`](../../probes/2026-08-27-artifact-shapes/), with five open

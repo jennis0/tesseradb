@@ -498,6 +498,12 @@ fn quantise(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
 /// member near an edge is therefore *kept*, and a kept member costs a slot in a vector that is
 /// about to be sorted. There is no rounding under which a hull vertex is discarded, so the wrap —
 /// and α, and the shape — stay exactly what the exact monotone chain makes of the whole membership.
+///
+/// **The set it keeps is also identical on every platform**, which is what the shape being a
+/// function of the member positions alone requires (§1): every operation here is an IEEE-754
+/// multiply, add or compare on values a `f64` represents exactly, all correctly rounded and none
+/// contracted, so a member kept on one machine is kept on every machine. Soundness would hold
+/// without that; determinism would not, because a kept member is a candidate the dig can dig to.
 fn extreme_octagon(points: &[[u32; 2]]) -> Octagon {
     // The eight supporting directions, as `(wx, wy)` in `wx·x + wy·y`.
     const DIRECTIONS: [(i64, i64); 8] = [
