@@ -130,7 +130,14 @@ export class Driver {
    * the marks it just paid for would be redrawn as stand-ins and immediately re-requested. The
    * counts a response brings decide the *next* plan, and the depth hold governs when that lands.
    */
-  private counts: CountField | null = null;
+  /**
+   * One count field per depth, the latest adopted at each. **Per depth, not the last one only**:
+   * a zoom-in adopts a small field at the finer depth, and if that replaced the coarser one, the
+   * next zoom-out had no field covering the view and fell back to the average model — the owner's
+   * trace of 2026-08-28 shows exactly that hand-off, `bound` at depth 13 then `average` at 12,
+   * where the depth-11 field from a second earlier still bounded every one of those views.
+   */
+  private counts = new Map<number, CountField>();
   /** The presented-frame handle — all the driver knows of what is on screen. */
   private presented: {want: TileRect; depth: number; version: number; standInStale: boolean} | null =
     null;
@@ -255,9 +262,14 @@ export class Driver {
    * model until the next response re-anchors the field — the same self-repair the calibration has.
    */
   private countsFor(bbox: [number, number, number, number]): CountField | undefined {
-    const field = this.counts;
-    if (!field) return undefined;
-    return rectContains(field.covers, tileRectOfBbox(bbox, field.depth)) ? field : undefined;
+    // The finest field that covers the view: exact where the view is at its depth, the tightest
+    // bound otherwise.
+    let best: CountField | undefined;
+    for (const field of this.counts.values()) {
+      if (!rectContains(field.covers, tileRectOfBbox(bbox, field.depth))) continue;
+      if (!best || field.depth > best.depth) best = field;
+    }
+    return best;
   }
 
   /**
@@ -278,7 +290,7 @@ export class Driver {
    */
   private adopt(depth: number, cells: CountCell[], fetched: TileRect, spans: TileRect): void {
     const whole = this.replica.novelIn(spans, depth, this.meta.kMaxMarks) === 0;
-    this.counts = {depth, cells, covers: whole ? spans : fetched};
+    this.counts.set(depth, {depth, cells, covers: whole ? spans : fetched});
   }
 
   /** Every view-state change enters here. */
@@ -500,7 +512,7 @@ export class Driver {
     this.velocity = undefined;
     this.lastTarget = null;
     this.anticipationEligible = false;
-    this.counts = null;
+    this.counts.clear();
   }
 
   private async anticipate(): Promise<void> {

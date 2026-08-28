@@ -273,6 +273,8 @@ export function chooseDepth(inputs: BudgetInputs): DepthChoice {
 
   let depth = MIN_DEPTH;
   let limitedBy: DepthChoice['limitedBy'] = 'maxDepth';
+  /** With counts: every depth that fits, and its marks — the walk is finished before it is chosen from. */
+  const fitting: {depth: number; marks: number}[] = [];
 
   for (let d = MIN_DEPTH; d <= MAX_DEPTH; d++) {
     const tiles = tilesInBbox(worldBbox, d);
@@ -287,6 +289,7 @@ export function chooseDepth(inputs: BudgetInputs): DepthChoice {
         break;
       }
       depth = d;
+      fitting.push({depth: d, marks: counted.marks});
       if (!counted.capped) {
         // Every member in view is served here. Deeper is four times the tiles for the same marks.
         limitedBy = 'saturated';
@@ -306,6 +309,25 @@ export function chooseDepth(inputs: BudgetInputs): DepthChoice {
     }
   }
 
+  // **A depth must buy marks, not only tiles.** The deepest depth that fits was the rule, and it
+  // paid four times the tiles per step for whatever a few dense cells still had capped: the
+  // owner's trace of 2026-08-28 shows depth 13 chosen with 199,977 tiles for 395k predicted
+  // marks, and depth 12 with 20,000 tiles for 150k — six points a band, and a frame time that
+  // follows the band count rather than the marks (150 ms at 25k bands against 50 ms at 12k for
+  // twice the points). So the deepest fitting depth's marks are what is available, and the
+  // **shallowest** depth within `MIN_GAIN_PER_STEP` of it is taken; the members a coarser depth
+  // still holds capped wait for a zoom. Decided over the finished walk rather than step by step,
+  // because a view that is one cell at coarse depths is flat at `k` and then jumps when the cell
+  // splits — a per-step rule stopped on the flat part.
+  // Only depths at or below the field's own: a folded cell's `min(k, count)` counts marks the
+  // ancestor tile serves *outside* the view as well — a capped world tile is 500 marks, of which
+  // a small view shows a handful — so a fold is not a figure for what is on screen, and a step
+  // coarser than the field is never taken on its account.
+  if (fitting.length > 1) {
+    const best = fitting[fitting.length - 1]!.marks;
+    const enough = fitting.find((f) => f.depth >= counts!.depth && f.marks >= best * (1 - MIN_GAIN_PER_STEP));
+    if (enough && enough.depth < depth) return answer(enough.depth, 'saturated');
+  }
   return answer(depth, limitedBy);
 }
 
@@ -318,6 +340,12 @@ export type Observation = {
 };
 
 /** Bounds on the correction, so one pathological response cannot move `mTarget` far. */
+/**
+ * How far below the deepest fitting depth's marks the chosen depth may sit — 15% — against the four
+ * times the tiles every step deeper costs. Above it a step is buying bands, not points.
+ */
+export const MIN_GAIN_PER_STEP = 0.15;
+
 const M_TARGET_MIN_FACTOR = 0.25;
 const M_TARGET_MAX_FACTOR = 4;
 const DAMPING = 0.5;

@@ -128,6 +128,23 @@ describe('chooseDepth on a bimodal field', () => {
     expect(counted.limitedBy).toBe('budget');
   });
 
+  it('stops where a step deeper buys tiles and not marks — a few capped cells do not pull the depth down', () => {
+    // A field at depth 8 whose 64 x 64 cells hold 6 members each — nothing capped — except one
+    // city cell of 3,000. The deepest fitting depth is 12, the first where nothing is capped;
+    // its marks are the whole field's, and depth 8 is already within 15% of them at 4^4 fewer
+    // tiles. The old rule walked to 12.
+    const cells = [];
+    for (let x = 0; x < 64; x++) for (let y = 0; y < 64; y++) cells.push({x, y, count: x === 10 && y === 10 ? 3_000 : 6});
+    const counts: CountField = {depth: 8, cells, covers: {x0: 0, y0: 0, x1: 63, y1: 63}};
+    const choice = chooseDepth({budget: 500_000, mTarget: 40, maxTiles: 262_144, worldBbox: view, k: 500, counts});
+    // Depth 8 — the field's own — already serves all but the city's members, so it is taken and
+    // not the first uncapped depth. (Depth 5 would show the same marks by the fold, but a fold
+    // counts an ancestor's marks outside the view too, so the rule never goes above the field.)
+    expect(choice.source).toBe('counts');
+    expect(choice.depth).toBe(8);
+    expect(choice.limitedBy).toBe('saturated');
+  });
+
   it('falls back to the average where the counts do not cover the view', () => {
     // The same field shifted off the view: present, and silent about the ground being asked about.
     const elsewhere = {...field(), covers: {x0: 1_000, y0: 1_000, x1: 1_064, y1: 1_064}};
