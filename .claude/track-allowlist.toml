@@ -300,3 +300,15 @@ paths = [
   "docs/openapi/tessera.yaml",
   "probes/2026-08-27-artifact-shapes/*",
 ]
+
+# Wave 13 — the shape's own cost (controller, 2026-08-28, owner direction: fix the computation, do
+# not parallelise it — request-level parallelism is the boundary). Quantise the input, cache the
+# result, then re-measure the family.
+[track.shapeperf]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-store/src/derived.rs",
+  "docs/design/artifact-shapes.md",
+  "probes/2026-08-27-artifact-shapes/*",
+]
