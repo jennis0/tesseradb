@@ -10,7 +10,7 @@ import {
   type Store,
   type SelectionShape
 } from '@tesseradb/client';
-import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, encodingOf, encodingSignature, resolvePick, type Picked} from '@tesseradb/deck';
+import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, encodingOf, encodingSignature, hoverAt, hoverShapes, outlineData, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -71,8 +71,9 @@ export type MapProbe = {
     lutWrites: number;
     /**
      * What the last paint held and drew of the artifacts: the **rings** the outline layer carries,
-     * how many **artifacts** actually draw one — the hovered and the opened one, the rest at zero
-     * alpha so they still answer a pick — and the labels placed. The two counts are in different
+     * how many **artifacts** actually draw one — the hovered and the opened one, the rest of the
+     * frontier at zero alpha so they still answer a pick — and the labels placed. The two counts
+     * are in different
      * units because a hull is a list of rings (`artifact-shapes.md` §1): opening a cluster whose
      * members are two separated clouds hands deck two rings and draws one hull.
      */
@@ -626,29 +627,63 @@ export class TesseraMap extends TesseraElement {
 
   // ---- hover and pick -----------------------------------------------------------------------
 
+  /**
+   * The drawn shapes a hover is resolved against, held until the served set, the level or the
+   * roster moves. Built with nothing hovered and nothing opened, so it is the served geometry and
+   * not the smoothed line: a smoothed contour is inside the served ring, and an index that shrank
+   * under the pointer would drop the hover it had just taken.
+   */
+  private contoursHeld: {served: object; level: number | null; meta: object | null; shapes: ContourShape[]} | null = null;
+
+  private contours(): ContourShape[] {
+    const s = this.resolvedStore;
+    const a = s?.get('artifacts') ?? null;
+    if (!a) return [];
+    const meta = s?.get('meta') ?? null;
+    const level = this.clusterLevel ?? null;
+    const held = this.contoursHeld;
+    if (held && held.served === a.served && held.level === level && held.meta === meta) return held.shapes;
+    const shapes = hoverShapes(outlineData(a, {opened: null, hovered: null, level: level ?? undefined, scheme: this.scheme(), meta}));
+    this.contoursHeld = {served: a.served, level, meta, shapes};
+    return shapes;
+  }
+
+  /** How far past a hovered shape's edge the pointer goes before the hover lets go, in pixels. */
+  private static readonly HOVER_MARGIN_PX = 4;
+
+  /**
+   * What the pointer is over: the tooltip from the mark beneath it, and the hovered artifact from
+   * the **drawn** contours ({@link hoverAt}), not from deck's pick.
+   *
+   * Deck answers a pick with whatever polygon its picking pass finds, which was every served
+   * artifact — ancestors included, at zero alpha — so crossing a cluster meant crossing its
+   * parent's invisible ring too and the highlight flipped between the two on a pixel of movement
+   * (the owner's review, 2026-08-27). The shapes are now the frontier's alone, the deepest one
+   * containing the pointer wins, and the one already hovered holds until the pointer is clear of
+   * it. The mark beneath the pointer is passed as the preference, so the highlighted contour is
+   * the cluster whose point the tooltip is describing.
+   */
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
-    if (picked.kind === 'artifact') {
-      if (this.hover) this.hover = null;
-      this.hoveredArtifact = picked.id;
-      return;
-    }
+    const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
+    const slot = picked.kind === 'mark' ? /marks-p(\d+)$/.exec(layerId) : null;
+    const at = slot ? this.slab.markAt(Number(slot[1]), info.index) : null;
+    const artifacts = this.resolvedStore?.get('artifacts') ?? null;
+    // The mark's own artifact, where there is one — a fact the wire carries, and the tie-break
+    // where two hulls interleave over the same ground.
+    const own = at && artifacts ? artifactOfMark(at.band, at.i, artifacts, this.clusterLevel ?? undefined) : null;
+    const world = this.worldAt(info.x, info.y);
+    this.hoveredArtifact = world
+      ? hoverAt(this.contours(), world, this.hoveredArtifact, TesseraMap.HOVER_MARGIN_PX / 2 ** this.viewState.zoom, own)
+      : null;
     if (picked.kind !== 'mark') {
       if (this.hover) this.hover = null;
-      this.hoveredArtifact = null;
       return;
     }
     // The hint: the first tooltip field as the title (a `title` column, typically), the rest as
     // one muted line beneath — the boards' `tooltip`. With no fields, the id.
     const values: string[] = [];
     const fields = this.tooltipFields.split(/[\s,]+/).filter(Boolean);
-    const layerId = (info.sourceLayer ?? info.layer)?.id ?? '';
-    const slot = /marks-p(\d+)$/.exec(layerId);
-    const at = slot ? this.slab.markAt(Number(slot[1]), info.index) : null;
-    // A mark under the pointer names the artifact it is a member of, through the ordinal it
-    // carries and the table — so a flat layer's hull shows while its points are hovered.
-    const artifacts = this.resolvedStore?.get('artifacts') ?? null;
-    this.hoveredArtifact = at && artifacts ? artifactOfMark(at.band, at.i, artifacts, this.clusterLevel ?? undefined) : null;
     if (fields.length > 0 && slot) {
       if (at) {
         for (const f of fields) {
@@ -693,10 +728,15 @@ export class TesseraMap extends TesseraElement {
   // ---- selection: the box and the lasso -------------------------------------------------------
 
   private unproject(e: PointerEvent): [number, number] | null {
-    const viewport = this.deck?.getViewports()[0];
-    if (!viewport) return null;
     const rect = this.getBoundingClientRect();
-    const xy = viewport.unproject([e.clientX - rect.left, e.clientY - rect.top]);
+    return this.worldAt(e.clientX - rect.left, e.clientY - rect.top);
+  }
+
+  /** A point in canvas pixels to world space, through the live viewport. */
+  private worldAt(x: number, y: number): [number, number] | null {
+    const viewport = this.deck?.getViewports()[0];
+    if (!viewport || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const xy = viewport.unproject([x, y]);
     return [xy[0]!, xy[1]!];
   }
 
