@@ -4,6 +4,14 @@
 (2026-08-28). §3 describes the surface as it stands today, which *is* built. A conflict with
 [`contracts.md`](contracts.md) is resolved in its favour until this is promoted.
 
+**⊘ Reviewed 2026-08-28, and nothing below is dispositioned** —
+[`../evidence/memos/2026-08-28-artifact-fetch-protocol-review.md`](../evidence/memos/2026-08-28-artifact-fetch-protocol-review.md).
+Read it before acting on §4, §5 or §8. Its headline is that **this document's byte model is wrong by
+about 2.4×**: an identity-and-bit row costs 97 B through the frame as built, not the 40 B §5 and §8
+claim, so payload elision saves 22% rather than 60% — measured, and re-derived independently. Mode 1
+is found not to be the projection §4 calls it, and five further findings stand against §5. The text
+below is **unchanged** from r1.
+
 **Owns:** how a client asks for artifacts and what comes back — the scope of the question, the three
 filter modes, and the cache claim — together with what the client must do to ask honestly, what the
 server must do to answer safely, and what a caller who has never read this document is still
@@ -263,6 +271,12 @@ shipped — the surface as it stands is complete and correct, and every item abo
 buys bytes.
 
 ## Appendix R
+
+**Reviewed r1 — 2026-08-28**, one independent reviewer on performance, the API user's and the client
+author's experience, and simplicity. Fourteen findings, none dispositioned and none applied; the
+record is [`../evidence/memos/2026-08-28-artifact-fetch-protocol-review.md`](../evidence/memos/2026-08-28-artifact-fetch-protocol-review.md).
+Its verdict: §§1–3, 6.1 and 7 promotable close to as written, mode 3's deferral right, **§5 to be
+reworked and mode 1 to be deleted rather than edited**.
 
 **r1 — 2026-08-28.** Written after the owner asked for the whole artifact-fetch space in one place,
 following the two steps that landed that day (the filter bit; the client's payload store). Its shape
