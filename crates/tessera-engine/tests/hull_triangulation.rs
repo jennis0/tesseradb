@@ -47,10 +47,21 @@ fn what_a_triangulation_costs_against_the_dig() {
             .expect("declared");
         let dig_ms = ms(t1) - gather_ms;
 
-        // Both alternatives start from a sorted, deduplicated position list, exactly as the dig
-        // does internally, so the sort is timed once and charged to neither.
+        // **Both alternatives start from the reduced input the dig now receives** — one real
+        // member per occupied cell of the artifact's own grid, plus every member that could be a
+        // convex-hull vertex (`tessera_engine::derived`'s `QUANTISE_DIVISIONS`). Handing the
+        // triangulation the whole membership while the dig is given a reduction of it would
+        // compare two constructions over two different clouds, and the question ruling A is asked
+        // now is what each costs *on the input the service actually has*.
+        //
+        // The reduction and the sort are charged here, so the triangulated route pays them
+        // explicitly and the dig pays them inside its own timing.
         let t2 = Instant::now();
-        let mut p = positions.clone();
+        let mut p = tessera_engine::derived::quantised(
+            &positions,
+            tessera_engine::derived::SERVED_QUANTISE_DIVISIONS,
+        )
+        .unwrap_or_else(|| positions.clone());
         p.sort_unstable();
         p.dedup();
         let sort_ms = ms(t2);

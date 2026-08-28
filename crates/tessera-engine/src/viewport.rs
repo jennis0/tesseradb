@@ -3580,16 +3580,43 @@ impl Engine {
             .iter()
             .filter_map(|name| crate::derived::ComputedProperty::parse(name))
             .collect();
+        //
+        // **The same per-principal cache the viewport reads** (`crate::derived_cache`), and this is
+        // the route that most needs it: the client asks the viewport for centroids and this for the
+        // one shape it draws (`artifact-shapes.md` §9), so a viewer moving the pointer back over a
+        // cluster they have already hovered pays nothing.
         let derived = if declared_derived.is_empty() {
             crate::derived::DerivedContent::default()
         } else {
-            let locator =
-                crate::derived::RowLocator::new(segments_with_row_bases(view, view_data)?);
-            let visible = rows
-                .get(ordinal)
-                .map(|members| mask.visible_rows(members))
-                .unwrap_or_default();
-            crate::derived::compute(&declared_derived, &visible, &locator)
+            let key = crate::derived_cache::DerivedKey {
+                token_id: mask_identity.token_id,
+                view: view.to_string(),
+                layer: name.clone(),
+                level,
+                ordinal,
+                level_version: self
+                    .write
+                    .with_artifacts(|store| store.level_version(&name, level)),
+                segments_version: mask_identity.segments_version,
+                overlay_version: mask_identity.overlay_version,
+                fragment_identity: mask_identity.fragment_identity,
+                fragment_watermark: mask_identity.fragment_watermark,
+                properties: crate::derived_cache::properties_bits(&declared_derived),
+            };
+            let content = self.derived_geometry.get_or_derive(key, || {
+                let Ok(segments) = segments_with_row_bases(view, view_data) else {
+                    // Unreachable in practice — the view resolved above — and an empty content is
+                    // the fail-closed reading of a row space that cannot be assembled.
+                    return crate::derived::DerivedContent::default();
+                };
+                let locator = crate::derived::RowLocator::new(segments);
+                let visible = rows
+                    .get(ordinal)
+                    .map(|members| mask.visible_rows(members))
+                    .unwrap_or_default();
+                crate::derived::compute(&declared_derived, &visible, &locator)
+            });
+            (*content).clone()
         };
         Ok(Some(ArtifactOut {
             content,
@@ -4042,6 +4069,9 @@ impl Engine {
                     mask,
                 );
                 let containment = rows.partition().map(|p| p.answers(&session.satisfied));
+                // Captured before the shadow below: `view` becomes the artifact predicate's value,
+                // and the derived-geometry key needs the view's *name*.
+                let view_name = view;
                 let view = crate::artifacts::ArtifactView {
                     declaration: &layer.declaration,
                     overlay: &generation.overlay,
@@ -4192,14 +4222,35 @@ impl Engine {
                     // property below is a function of `membership ∩ M_auth` and nothing else
                     // (`annotations.md` §4.2). Skipped entirely where the layer declares nothing,
                     // which is what keeps a count-only layer at count-only cost.
+                    //
+                    // **Held per principal between requests** (`crate::derived_cache`): a pan
+                    // re-serves mostly the same artifacts to the same viewer, and a shape is the
+                    // most expensive thing this loop does. The key names the principal, so a hit
+                    // answers the request that would have derived the same value.
                     let derived = if declared_derived.is_empty() {
                         crate::derived::DerivedContent::default()
                     } else {
-                        let visible = rows
-                            .get(ordinal)
-                            .map(|members| mask.visible_rows(members))
-                            .unwrap_or_default();
-                        crate::derived::compute(&declared_derived, &visible, &locator)
+                        let key = crate::derived_cache::DerivedKey {
+                            token_id: mask_identity.token_id,
+                            view: view_name.to_string(),
+                            layer: name.clone(),
+                            level,
+                            ordinal,
+                            level_version,
+                            segments_version: mask_identity.segments_version,
+                            overlay_version: mask_identity.overlay_version,
+                            fragment_identity: mask_identity.fragment_identity,
+                            fragment_watermark: mask_identity.fragment_watermark,
+                            properties: crate::derived_cache::properties_bits(&declared_derived),
+                        };
+                        (*self.derived_geometry.get_or_derive(key, || {
+                            let visible = rows
+                                .get(ordinal)
+                                .map(|members| mask.visible_rows(members))
+                                .unwrap_or_default();
+                            crate::derived::compute(&declared_derived, &visible, &locator)
+                        }))
+                        .clone()
                     };
                     // **The parent comes from the level's own records and the key from the store.**
                     // Both are per-ordinal facts of one generation, but only one of them is held

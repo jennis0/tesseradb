@@ -40,6 +40,17 @@
 //! digs, 3.3× the convex path over a whole 197-artifact layer (`docs/design/artifact-shapes.md`
 //! §7). It discloses nothing the wrap did not, and the argument is in [`concave_rings`]'s own
 //! documentation rather than restated here.
+//!
+//! ## This module is single-threaded, deliberately
+//!
+//! **Nothing here uses `rayon`, and nothing here may acquire one** (owner ruling, 2026-08-28).
+//! Parallelism in this engine lives at the **request** level — `Engine::viewport` installs the one
+//! shared compute pool for a request's tile loop — so that concurrent requests use the cores. A
+//! `par_iter` over an artifact's members, or over a response's artifacts, would let one request
+//! oversubscribe the pool the others are queued behind, which trades a served viewer's latency for
+//! a hovering one's. The two ways this module was made cheap instead are the ones a second thread
+//! would have hidden: the input is reduced before the shape is computed
+//! ([`QUANTISE_DIVISIONS`]), and the answer is not computed twice ([`crate::derived_cache`]).
 
 use croaring::Bitmap;
 use tessera_spatial::morton::unsplit32;
@@ -289,16 +300,307 @@ fn concave_rings(points: &[[u32; 2]]) -> Vec<Vec<[u32; 2]>> {
     dig_rings(points, DIG_BUDGET).0
 }
 
-/// The dig at a budget the caller names, and whether that budget ran out with a bridging edge
-/// still live — **a measurement seam, and the only reason it is public**.
+/// How many cells the quantising grid spans along the artifact's longer axis, before the shape is
+/// computed. **1,024, and the number is chosen against what is drawn.**
 ///
-/// The serving path calls [`concave_rings`], which supplies [`DIG_BUDGET`] and drops the flag; a
-/// request cannot reach this and no configuration key sets a budget. It exists because the sweep
-/// that fixes the constant (`artifact-shapes.md` §8 B) has to run the *same* dig at several
-/// budgets in one process, and a second copy of the construction in a test binary would measure a
-/// second construction. The construction itself is documented at [`concave_rings`].
+/// **What it does.** Every construction here consumed one position per visible member to produce
+/// something whose resolution is bounded by the drawing: the largest shape on the measurement layer
+/// is 757 vertices over 2.42M members, drawn about a thousand pixels wide. So the members are
+/// binned to a square grid over their own bounding box and the shape is computed over **one real
+/// member per occupied cell** ([`quantise`]). It is a *quantisation and not a sample*: every member
+/// falls in some cell, every occupied cell contributes, and every vertex is still a visible
+/// member's own position, so §1's vertex property is untouched.
+///
+/// **Why the resolution is relative to the artifact and not to the request's zoom.** A shape drawn
+/// at all is drawn at most a viewport wide, so a cell of 1/1,024 of the artifact's own longer axis
+/// is at most a viewport pixel or two of displacement in the case that matters, and less than that
+/// in every other. Making it depend on the request's zoom instead would key the cache on zoom, give
+/// a viewer a shape that flickers as they zoom, and hand the identifier route — which carries no
+/// zoom — no answer at all. The stability is worth more than the extra fidelity at a deep zoom,
+/// where the client's own drawn curve is already the coarser of the two: the served ring is
+/// smoothed by a periodic cubic B-spline that leaves it by up to a third of the longest adjacent
+/// edge (`artifact-shapes.md` §9), and those edges are α-scale — thousands of times a cell.
+///
+/// **What it costs and what it buys, measured** (`tests/hull_geometry.rs`,
+/// `the_quantisation_sweep`, over the 197-artifact `clusters/hdbscan` layer of `notebook-2m4` at
+/// full membership, release build, one thread). 22 of the 197 artifacts are dense enough to reduce
+/// at all, and between them 9,287,043 members become 1,717,984 representatives. Over those 22:
+///
+/// | | median | p90 | worst |
+/// |---|---|---|---|
+/// | boundary's departure from the unreduced shape, as a fraction of the artifact's own extent | 0.005 | 0.025 | 0.044 |
+/// | area, against the unreduced shape | 1.000 | — | 0.988 … 1.007 |
+///
+/// α is **exactly** unchanged on every artifact of the layer ([`extreme_octagon`] is what makes
+/// that true rather than nearly true). The whole layer's digging goes **1,759 ms → 862 ms**, one
+/// artifact's shape from p50 1.7 ms / p90 20.9 ms / worst 265 ms to **p50 1.6 ms / p90 14.4 ms /
+/// worst 84 ms**, and the corpus root — 2,422,486 members, which reduce to 139,732 — from 167 ms to
+/// 43 ms with an area ratio of 1.0000 and no measurable departure at all.
+///
+/// **Where it is not invisible, stated rather than averaged away.** At the median the departure is
+/// half a percent of the artifact's extent, which is a pixel or two. On one artifact of the 197 it
+/// is 4.4%: a single concavity that the unreduced dig opens and the reduced one does not, because
+/// the members that would have been dug to are no longer candidates. The area is within 1.2% there,
+/// so it is one notch rather than a shape that has moved. Below 1,024 divisions that case gets
+/// common enough to matter — at 512 the worst departure is 17% of an artifact's extent — which is
+/// what fixes the resolution here rather than lower, where the time would be better.
+///
+/// **The residual, stated rather than smoothed over.** A member may now fall outside its own
+/// artifact's shape, by at most one cell — the owner's ruling of 2026-08-28
+/// (`artifact-shapes.md` §4's head) is what permits it, containment having been a bar the shape no
+/// longer has to clear. Measured over the layer: 1,965 member positions of 12,808,679, and at most
+/// 0.09% of any one artifact's members.
+const QUANTISE_DIVISIONS: u32 = 1_024;
+
+/// [`QUANTISE_DIVISIONS`], for the measurement seams — the family comparison in
+/// `tests/hull_triangulation.rs` has to give the triangulated route the same reduced input the dig
+/// receives, or it is comparing two constructions over two different clouds.
+#[doc(hidden)]
+pub const SERVED_QUANTISE_DIVISIONS: u32 = QUANTISE_DIVISIONS;
+
+/// One real member per occupied cell of a square grid over the members' own bounding box, or `None`
+/// where the grid cannot reduce the input — see [`QUANTISE_DIVISIONS`] for what this is for.
+///
+/// **The representative is the member nearest its cell's centre**, ties broken on the position
+/// itself, which keeps the choice a function of the member positions alone rather than of the order
+/// they were gathered in. The cheaper rule — the lexicographically smallest member of the cell —
+/// was declined because its error is *directional*: the left edge of a cloud would be exact and the
+/// right edge would pull inward by a cell, so the shape would shrink rather than blur.
+///
+/// **`None` where the grid holds at least as many cells as there are members**, which is both the
+/// case where there is nothing to gain and the case where the grid would cost more memory than the
+/// input it is reducing. Small artifacts therefore take the unquantised path, which is the right
+/// answer twice over: they are the cheap ones (a *measured* 0.5 ms at under 10,000 members), and
+/// they are the ones a viewer zooms into.
+///
+/// The cell side is the same on both axes so that a long thin cloud is not stretched, and it is
+/// derived from the longer axis so that the shorter one is never binned more coarsely than
+/// [`QUANTISE_DIVISIONS`] asks for.
+/// The representatives [`dig_rings_at`] would compute a shape over — **the third measurement seam,
+/// and public for [`dig_rings`]'s reason**.
+///
+/// The sweep has to ask what binning did to α, which is a statistic of the representatives' own
+/// convex wrap, and a test binary that rebuilt the cell arithmetic from the constant would be
+/// measuring its own copy of it.
+#[doc(hidden)]
+pub fn quantised(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
+    quantise(points, divisions)
+}
+
+fn quantise(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
+    // The squared distance below is `u64`, and the bound that keeps it from overflowing is that a
+    // cell side is at most `2^32 / divisions` rounded up to a power of two: at 16 divisions a
+    // half-side is under 2^29 and its square under 2^58. Every caller is the constant or the sweep,
+    // both far above that.
+    // `0` is the seam's "no quantisation at all", and every other caller is far above 16.
+    if divisions == 0 || points.len() < 4 {
+        return None;
+    }
+    debug_assert!(
+        divisions >= 16,
+        "the cell-centre distance is bounded by the side"
+    );
+    if divisions < 16 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for q in points {
+        x0 = x0.min(q[0]);
+        y0 = y0.min(q[1]);
+        x1 = x1.max(q[0]);
+        y1 = y1.max(q[1]);
+    }
+    let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
+    // **A power of two, so a cell index is a shift rather than a division.** Two integer divisions
+    // per member is a real cost at these sizes — this pass is the one thing every member is still
+    // read for — and rounding the side up only ever makes the grid coarser than `divisions` asked,
+    // never finer, so the resolution argument is unaffected.
+    let shift = wx
+        .max(wy)
+        .div_ceil(divisions as u64)
+        .next_power_of_two()
+        .trailing_zeros();
+    let side = 1u64 << shift;
+    if side <= 1 {
+        // The grid is already the position lattice, so binning is the identity on a deduplicated
+        // input and buys nothing.
+        return None;
+    }
+    let (nx, ny) = (wx.div_ceil(side), wy.div_ceil(side));
+    // **The grid may hold several times the members and still be worth building**, because a
+    // cluster is a dense blob inside its own bounding box rather than a uniform fill of it: a
+    // *measured* 123,034-member artifact of the `clusters/hdbscan` layer occupies 23,537 of the
+    // 65,536 cells a 256-division grid gives it. Past four cells per member the pass costs more in
+    // zeroing than the reduction returns, and the shape is left exact.
+    if nx.saturating_mul(ny) > 4 * points.len() as u64 {
+        return None;
+    }
+
+    let total = (nx * ny) as usize;
+    // Two arrays rather than one of `Option<(position, distance)>`, which pads to 24 bytes a cell.
+    // `u64::MAX` is the empty sentinel and cannot be a real distance: a half-side is under 2^29.
+    let mut held: Vec<[u32; 2]> = vec![[0, 0]; total];
+    let mut held_d: Vec<u64> = vec![u64::MAX; total];
+    let half = side / 2;
+    let octagon = extreme_octagon(points);
+    // **Every member that could be a convex-hull vertex is carried through beside the
+    // representatives**, which is what keeps α exact — see [`extreme_octagon`].
+    let mut out: Vec<[u32; 2]> = Vec::new();
+    for q in points {
+        if !octagon.strictly_inside(*q) {
+            out.push(*q);
+        }
+        let (cx, cy) = ((q[0] - x0) as u64 >> shift, (q[1] - y0) as u64 >> shift);
+        let (mx, my) = (
+            x0 as u64 + (cx << shift) + half,
+            y0 as u64 + (cy << shift) + half,
+        );
+        let (dx, dy) = ((q[0] as u64).abs_diff(mx), (q[1] as u64).abs_diff(my));
+        let d = dx * dx + dy * dy;
+        let k = (cy * nx + cx) as usize;
+        if d < held_d[k] || (d == held_d[k] && *q < held[k]) {
+            held_d[k] = d;
+            held[k] = *q;
+        }
+    }
+    out.extend(
+        held.into_iter()
+            .zip(held_d)
+            .filter(|(_, d)| *d != u64::MAX)
+            .map(|(q, _)| q),
+    );
+    // Duplicates are left for the caller's sort and dedup, which every route into this already
+    // pays: a member may be both its cell's representative and a hull candidate.
+    Some(out)
+}
+
+/// **α must not move when the input is reduced, so every member that could be a convex-hull vertex
+/// survives [`quantise`] whether or not it is its cell's representative.**
+///
+/// α is three times the median edge of the visible members' *own* convex wrap, and that statistic
+/// is a function of the sampling density rather than only of the cloud: the hull of a sparser
+/// sample of the same region has fewer vertices and longer edges. Measured over the 197-artifact
+/// layer at a resolution of 512, computing the wrap over the representatives alone moved α by up to
+/// **3.6×** on one artifact, which took its shape from 0.29 to 1.29 of the unquantised one's area —
+/// a visibly different shape rather than a blurred one. Carrying the candidates removes the drift
+/// at its source: the wrap of `representatives ∪ candidates` **is** the wrap of every member, so α
+/// is not approximated at all.
+///
+/// The filter is Akl–Toussaint's: a member strictly inside the polygon spanned by the extremes of
+/// `x`, `y`, `x + y` and `x − y` is inside the hull of those eight members and so cannot be a hull
+/// vertex. It costs one pass and discards the interior, which on this corpus is *measured* at 94% …
+/// 99.9% of a large artifact's members.
+///
+/// **`f64` here, and it is the only inexact arithmetic in this module's construction — with a
+/// margin that makes the answer exact anyway.** Grid coordinates are below 2^32 and exact in `f64`,
+/// so each cross product carries an absolute error under 2^13; a member is discarded only when
+/// every edge puts it more than [`OCTAGON_MARGIN`] inside, which is eight times that bound. A
+/// member near an edge is therefore *kept*, and a kept member costs a slot in a vector that is
+/// about to be sorted. There is no rounding under which a hull vertex is discarded, so the wrap —
+/// and α, and the shape — stay exactly what the exact monotone chain makes of the whole membership.
+///
+/// **The set it keeps is also identical on every platform**, which is what the shape being a
+/// function of the member positions alone requires (§1): every operation here is an IEEE-754
+/// multiply, add or compare on values a `f64` represents exactly, all correctly rounded and none
+/// contracted, so a member kept on one machine is kept on every machine. Soundness would hold
+/// without that; determinism would not, because a kept member is a candidate the dig can dig to.
+fn extreme_octagon(points: &[[u32; 2]]) -> Octagon {
+    // The eight supporting directions, as `(wx, wy)` in `wx·x + wy·y`.
+    const DIRECTIONS: [(i64, i64); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    // One pass for all eight, not one pass each: the members are read once here and once again to
+    // bin them, and a third to eighth pass over a 2.4M-member cloud is the cost this whole
+    // construction is about.
+    let mut best: [Option<(i64, [u32; 2])>; 8] = [None; 8];
+    for q in points {
+        let (x, y) = (q[0] as i64, q[1] as i64);
+        for (slot, (wx, wy)) in best.iter_mut().zip(DIRECTIONS) {
+            let score = wx * x + wy * y;
+            // Ties broken on the position, so the octagon is a function of the member positions
+            // rather than of the order they were gathered in.
+            if slot.is_none_or(|(s, b)| score > s || (score == s && *q < b)) {
+                *slot = Some((score, *q));
+            }
+        }
+    }
+    let mut extremes: Vec<[u32; 2]> = best.into_iter().flatten().map(|(_, q)| q).collect();
+    extremes.sort_unstable();
+    extremes.dedup();
+    // `A·x + B·y + C` per edge, which is the same cross product with the vertex subtracted out
+    // once rather than per member — two multiplications instead of four, on the one test every
+    // member takes.
+    let ring = convex_hull_of_sorted(&extremes);
+    let edges = (0..ring.len())
+        .map(|i| {
+            let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+            let (ax, ay) = (a[0] as f64, a[1] as f64);
+            let (bx, by) = (b[0] as f64, b[1] as f64);
+            [-(by - ay), bx - ax, (by - ay) * ax - (bx - ax) * ay]
+        })
+        .collect();
+    Octagon {
+        edges,
+        degenerate: ring.len() < 3,
+    }
+}
+
+/// The polygon spanned by the eight extremes, as one linear form per edge — see
+/// [`extreme_octagon`].
+struct Octagon {
+    edges: Vec<[f64; 3]>,
+    /// A polygon of fewer than three vertices encloses nothing, so every member is a candidate.
+    degenerate: bool,
+}
+
+impl Octagon {
+    /// Whether `q` is inside every edge by more than [`OCTAGON_MARGIN`].
+    fn strictly_inside(&self, q: [u32; 2]) -> bool {
+        if self.degenerate {
+            return false;
+        }
+        let (x, y) = (q[0] as f64, q[1] as f64);
+        self.edges
+            .iter()
+            .all(|[a, b, c]| a * x + b * y + c > OCTAGON_MARGIN)
+    }
+}
+
+/// How far inside every edge a member must be before [`extreme_octagon`]'s filter discards it, in
+/// cross-product units. 2^16, against a *worst-case* `f64` error under 2^13 on a grid of 2^32 —
+/// see [`extreme_octagon`] for why a margin makes an inexact test an exact answer.
+const OCTAGON_MARGIN: f64 = 65_536.0;
+
 #[doc(hidden)]
 pub fn dig_rings(points: &[[u32; 2]], budget: usize) -> (Vec<Vec<[u32; 2]>>, bool) {
+    dig_rings_at(points, budget, QUANTISE_DIVISIONS)
+}
+
+/// [`dig_rings`] at a quantising resolution the caller names, `0` meaning none — the second
+/// measurement seam, and public for [`dig_rings`]'s reason.
+///
+/// The sweep that fixes [`QUANTISE_DIVISIONS`] has to run the same construction at several
+/// resolutions, and against the unquantised shape, in one process.
+#[doc(hidden)]
+pub fn dig_rings_at(
+    points: &[[u32; 2]],
+    budget: usize,
+    divisions: u32,
+) -> (Vec<Vec<[u32; 2]>>, bool) {
+    // **Reduce the input before computing the shape** ([`QUANTISE_DIVISIONS`]). It happens ahead of
+    // the sort, which is where most of a large artifact's cost was: the corpus root's 2.42M
+    // positions cost 121 ms to wrap and 167 ms to dig, and both figures are dominated by ordering
+    // members whose individual positions the drawing cannot resolve.
+    let reduced = quantise(points, divisions);
+    let points: &[[u32; 2]] = reduced.as_deref().unwrap_or(points);
+
     let mut p: Vec<[u32; 2]> = points.to_vec();
     p.sort_unstable();
     p.dedup();
@@ -381,7 +683,10 @@ impl Ring {
         Ring {
             poly: convex
                 .into_iter()
-                .map(|pos| Vertex { pos, retired: false })
+                .map(|pos| Vertex {
+                    pos,
+                    retired: false,
+                })
                 .collect(),
             grid: Buckets::build(members),
         }
@@ -802,7 +1107,10 @@ fn on_segment(p: [u32; 2], q: [u32; 2], r: [u32; 2]) -> bool {
 fn segments_meet(p1: [u32; 2], p2: [u32; 2], p3: [u32; 2], p4: [u32; 2]) -> bool {
     let (d1, d2) = (orient(p3, p4, p1), orient(p3, p4, p2));
     let (d3, d4) = (orient(p1, p2, p3), orient(p1, p2, p4));
-    if ((d1 > 0) != (d2 > 0)) && (d1 != 0 && d2 != 0) && ((d3 > 0) != (d4 > 0)) && (d3 != 0 && d4 != 0)
+    if ((d1 > 0) != (d2 > 0))
+        && (d1 != 0 && d2 != 0)
+        && ((d3 > 0) != (d4 > 0))
+        && (d3 != 0 && d4 != 0)
     {
         return true;
     }
@@ -840,7 +1148,8 @@ fn convex_hull_of_sorted(p: &[[u32; 2]]) -> Vec<[u32; 2]> {
     }
     let lower = hull.len() + 1;
     for &point in p.iter().rev().skip(1) {
-        while hull.len() >= lower && orient(hull[hull.len() - 2], hull[hull.len() - 1], point) <= 0 {
+        while hull.len() >= lower && orient(hull[hull.len() - 2], hull[hull.len() - 1], point) <= 0
+        {
             hull.pop();
         }
         hull.push(point);
@@ -863,7 +1172,6 @@ fn convex_hull(points: &[[u32; 2]]) -> Vec<[u32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     /// A deterministic sample of `count` positions from `region`, drawn over the box
     /// `[-span, span]²` and offset into the unsigned grid.
@@ -1168,7 +1476,10 @@ mod tests {
         p.dedup();
         let alpha_sq = bridge_threshold(&convex_hull_of_sorted(&p));
         let (labels, groups) = alpha_groups(&p, alpha_sq);
-        assert!(groups > 1, "the fixture is supposed to be more than one group");
+        assert!(
+            groups > 1,
+            "the fixture is supposed to be more than one group"
+        );
 
         let mut joined = 0usize;
         for i in 0..p.len() {
@@ -1202,9 +1513,16 @@ mod tests {
             s.sort_unstable();
             s
         };
-        assert_eq!(starts, sorted, "the rings are not ordered by their first vertex");
+        assert_eq!(
+            starts, sorted,
+            "the rings are not ordered by their first vertex"
+        );
         starts.dedup();
-        assert_eq!(starts.len(), forwards.len(), "two rings start at one position");
+        assert_eq!(
+            starts.len(),
+            forwards.len(),
+            "two rings start at one position"
+        );
     }
 
     /// **A void with members all the way around it stays inside the ring, and that is the decision
@@ -1260,9 +1578,148 @@ mod tests {
             vertices <= floor + DIG_BUDGET,
             "{vertices} vertices over three wraps of {floor} — the budget multiplied"
         );
+        let bound = cell_bound(&members, QUANTISE_DIVISIONS);
         for m in &members {
-            assert!(rings.iter().any(|r| contains(r, *m)), "{m:?} fell outside every ring");
+            assert!(
+                escape(&rings, *m) <= bound,
+                "{m:?} is further from its shape than a quantising cell"
+            );
         }
+    }
+
+    /// Twice the area of the triangle `a b p`, over `|ab|` — the distance from `p` to the line
+    /// through `a` and `b`, clamped to the segment.
+    fn point_to_segment(a: [u32; 2], b: [u32; 2], p: [u32; 2]) -> f64 {
+        let (ax, ay) = (a[0] as f64, a[1] as f64);
+        let (bx, by) = (b[0] as f64, b[1] as f64);
+        let (px, py) = (p[0] as f64, p[1] as f64);
+        let (vx, vy) = (bx - ax, by - ay);
+        let len_sq = vx * vx + vy * vy;
+        let t = if len_sq == 0.0 {
+            0.0
+        } else {
+            (((px - ax) * vx + (py - ay) * vy) / len_sq).clamp(0.0, 1.0)
+        };
+        ((px - (ax + t * vx)).powi(2) + (py - (ay + t * vy)).powi(2)).sqrt()
+    }
+
+    /// How far `m` lies outside every ring of `rings`, in grid units; zero when it is inside one.
+    fn escape(rings: &[Vec<[u32; 2]>], m: [u32; 2]) -> f64 {
+        if rings.iter().any(|r| contains(r, m)) {
+            return 0.0;
+        }
+        rings
+            .iter()
+            .flat_map(|r| {
+                (0..r.len()).map(move |i| point_to_segment(r[i], r[(i + 1) % r.len()], m))
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
+    /// The furthest a member can be from its own shape: the diagonal of one quantising cell.
+    ///
+    /// A cell side is `extent / QUANTISE_DIVISIONS` rounded up to a power of two, so at most twice
+    /// that, and its diagonal at most √2 again. Every member shares its cell with a representative,
+    /// which the dig does hold — so this is a bound and not a tolerance.
+    fn cell_bound(members: &[[u32; 2]], divisions: u32) -> f64 {
+        let (mut lo, mut hi) = ([u32::MAX; 2], [0u32; 2]);
+        for m in members {
+            for k in 0..2 {
+                lo[k] = lo[k].min(m[k]);
+                hi[k] = hi[k].max(m[k]);
+            }
+        }
+        let extent = ((hi[0] - lo[0]).max(hi[1] - lo[1])) as f64;
+        3.0 * extent / divisions as f64
+    }
+
+    /// **The reduction is a quantisation and not a sample**, which is the property the vertex
+    /// guarantee rests on: every representative is a member's own position, and every member has a
+    /// representative within a cell of it.
+    ///
+    /// Run at a coarse resolution rather than the served one, because the properties do not depend
+    /// on the resolution and a cloud dense enough to reduce at 1,024 divisions is millions of
+    /// members. The second half is what makes the escape bound in
+    /// `the_budget_is_shared_across_the_rings` a bound rather than an observation.
+    #[test]
+    fn every_representative_is_a_member_and_every_member_has_one() {
+        let members = sample(5_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
+        let reduced = quantise(&members, 32).expect("a cloud this dense reduces");
+        assert!(
+            reduced.len() * 3 < members.len(),
+            "no reduction: {} of {}",
+            reduced.len(),
+            members.len()
+        );
+
+        let held: std::collections::HashSet<[u32; 2]> = members.iter().copied().collect();
+        assert!(
+            reduced.iter().all(|q| held.contains(q)),
+            "a representative is not a member's own position"
+        );
+        let bound = cell_bound(&members, 32);
+        assert!(
+            members.iter().all(|m| reduced
+                .iter()
+                .any(|k| point_to_segment(*k, *k, *m) <= bound)),
+            "a member has no representative within a cell"
+        );
+    }
+
+    /// **α does not move when the input is reduced**, because every member that could be a convex
+    /// hull vertex survives the reduction whatever cell it falls in ([`extreme_octagon`]).
+    ///
+    /// α is three times the median edge of the members' own wrap, and that statistic follows the
+    /// sampling density — measured on the corpus, taking it over the representatives alone moved it
+    /// by up to 3.6× and changed the shape rather than blurring it.
+    #[test]
+    fn the_reduction_leaves_the_convex_wrap_and_so_alpha_exact() {
+        for cloud in [
+            sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000),
+            sample(20_000, 5_000, |x, y| x.abs() + y.abs() <= 5_000),
+            sample(20_000, 5_000, |x, y| {
+                x * x + y * y <= 5_000 * 5_000 && (x < 0 || y.abs() > 2_000)
+            }),
+        ] {
+            let reduced = quantise(&cloud, 32).expect("a cloud this dense reduces");
+            assert_eq!(
+                convex_hull(&reduced),
+                convex_hull(&cloud),
+                "the reduction lost a convex-hull vertex"
+            );
+            assert_eq!(
+                bridge_threshold(&convex_hull(&reduced)),
+                bridge_threshold(&convex_hull(&cloud)),
+                "α moved"
+            );
+        }
+    }
+
+    /// A membership small enough that the grid cannot reduce it is dug over every member, so the
+    /// shape is exactly what it was before the reduction existed — which is what keeps the
+    /// artifacts a viewer zooms into at full fidelity.
+    #[test]
+    fn a_small_membership_is_not_reduced_at_all() {
+        let members = moon();
+        assert!(quantise(&members, QUANTISE_DIVISIONS).is_none());
+        assert_eq!(
+            concave_rings(&members),
+            dig_rings_at(&members, DIG_BUDGET, 0).0
+        );
+    }
+
+    /// The reduction is a function of the member positions, not of the order they arrive in — the
+    /// cell's representative is the member nearest its centre, ties broken on the position itself.
+    #[test]
+    fn the_reduction_does_not_depend_on_the_order_the_members_arrive_in() {
+        let members = sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
+        let mut shuffled = members.clone();
+        shuffled.reverse();
+        let mut a = quantise(&members, 32).expect("reduces");
+        let mut b = quantise(&shuffled, 32).expect("reduces");
+        a.sort_unstable();
+        b.sort_unstable();
+        assert_eq!(a, b);
     }
 
     /// The degenerate cases keep the behaviour the convex wrap had, on the shape that replaced it.
@@ -1322,8 +1779,14 @@ mod tests {
         for corner in [[0, 0], [10, 0], [10, 10], [0, 10]] {
             assert!(hull.contains(&corner), "{corner:?} missing from {hull:?}");
         }
-        assert!(!hull.contains(&[5, 0]), "a collinear member is not a vertex");
-        assert!(!hull.contains(&[5, 5]), "an interior member is not a vertex");
+        assert!(
+            !hull.contains(&[5, 0]),
+            "a collinear member is not a vertex"
+        );
+        assert!(
+            !hull.contains(&[5, 5]),
+            "an interior member is not a vertex"
+        );
     }
 
     /// A degenerate hull is the members themselves. Rounding one up to an area would draw a region
@@ -1350,4 +1813,3 @@ mod tests {
         assert_eq!(hull, vec![[0, 0], [10, 0], [10, 10], [0, 10]]);
     }
 }
-
