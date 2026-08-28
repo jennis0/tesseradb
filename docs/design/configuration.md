@@ -482,7 +482,7 @@ two levels one base and a gap would reserve a run no address reaches.
 |---|---|---|
 | `level` | R | the number. **Explicit, not array position**, because edges reference `(layer, level, ordinal)` and reordering the file would silently renumber them |
 | `title` | O | human-readable; the metadata endpoint publishes the zoom→level map |
-| `zoom` | O | `[min, max]`, **advisory** — it bounds no work; a tiered layer's response is bounded by the level asked for and a treed layer's by the request's artifact budget |
+| `zoom` | O | `[min, max]` — **the default bound on this layer's response** (2026-08-28). A `/v1/viewport` naming no `levels` is answered at the levels whose range covers the depth asked at; naming them overrides it, and a layer where no level declares a range serves every level. A treed layer declares no levels, so its response is bounded by the request's artifact budget as before. *(Was advisory and bounded nothing: this table asserted the bound while nothing on the wire could ask for a level.)* |
 
 **`[layer.content]`** — what this layer's artifacts carry, in three parts.
 

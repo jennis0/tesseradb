@@ -396,6 +396,85 @@ pub enum LayerSelection<'a> {
     Named(&'a [&'a str]),
 }
 
+/// Which of a levelled layer's declared resolutions a viewport answers for.
+///
+/// **Three shapes, and the default is the declaration's own** — unlike [`LayerSelection`], whose
+/// default is *none* because the artifact pass is the expensive one to opt into. Here the pass has
+/// already been paid for by naming the layer, and what is left is which rungs of it to answer at.
+/// The costly answer is *every level*, and it is the one a caller must ask for by name.
+///
+/// **Why the declaration decides rather than the client.** A layer declares a zoom range per level
+/// (`configuration.md`'s `[[layer.levels]]`), `/v1/meta` publishes it, and a request already
+/// carries the depth it is asking at — three facts that until now were never joined, so a client
+/// following the published map paid for every level and drew one. The map stays the client's to
+/// override; what changes is that ignoring it is now the deliberate act rather than the accidental
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelSelection<'a> {
+    /// The levels whose declared zoom range contains the request's depth.
+    ///
+    /// **A layer that declares no range on any level yields every level** — the levelled layer whose
+    /// author stated titles and no scales. A level with no range of its own, in a layer where others
+    /// have one, is served at every depth: it has no scale to be outside of, and inventing one for
+    /// it would drop artifacts on a guess.
+    Declared,
+    /// Every level the layer holds, whatever the depth asked at.
+    All,
+    /// Exactly these, intersected with what the layer holds — never unioned. A level the layer does
+    /// not hold is absent from the answer rather than a refusal, by the same route an unreachable
+    /// layer name is: naming a level is not a way to learn whether it exists.
+    ///
+    /// **Empty is none**, as `layers: []` is: a caller who names no level has asked for no artifacts
+    /// from any layer that declares levels. It is reachable only deliberately — the *absent* request
+    /// field is [`LevelSelection::Declared`] and not this.
+    Named(&'a [u32]),
+}
+
+/// Whether one level of one layer is answered for.
+///
+/// Split out of the serving loop so the rule is readable on its own and a test can state it
+/// directly: the loop's job is to skip, and this is what it skips on.
+pub(crate) fn level_is_selected(
+    selection: LevelSelection<'_>,
+    declared: &[tessera_types::layer::LevelDeclaration],
+    level: u32,
+    zoom: u8,
+) -> bool {
+    // **A layer that declares no levels is not selectable, in any of the three forms.** A treed or
+    // flat layer sits entirely at level 0 (decision 0082) and a level number names nothing about it,
+    // so a request naming levels for the tiered layer beside it must not blank it. Without this the
+    // uniform reading — the selection applies to every layer named — makes `levels: [1]` alongside
+    // `layers: "all"` serve nothing at all from every clustering in the deployment.
+    if declared.is_empty() {
+        return true;
+    }
+    match selection {
+        LevelSelection::All => true,
+        LevelSelection::Named(levels) => levels.contains(&level),
+        LevelSelection::Declared => {
+            // Nothing declared a scale, so there is no map to follow and every level answers. This
+            // is the treed and flat case, and also the levelled layer whose author declared titles
+            // and no ranges.
+            if !declared.iter().any(|d| d.zoom.is_some()) {
+                return true;
+            }
+            match declared.iter().find(|d| d.level == level) {
+                // Declared, so the range decides.
+                Some(d) => match d.zoom {
+                    Some((lo, hi)) => (lo..=hi).contains(&u32::from(zoom)),
+                    // A level with no range of its own in a layer that has them: no scale to be
+                    // outside of.
+                    None => true,
+                },
+                // A run with no declaration behind it — level 0 of a treed layer reached through a
+                // layer that also declares levels cannot happen, but a run beyond the declared
+                // list would otherwise vanish silently.
+                None => true,
+            }
+        }
+    }
+}
+
 /// One `/v1/viewport` request, as the engine sees it.
 ///
 /// A struct rather than a positional argument list: the query is the system's main entry point and
@@ -499,6 +578,20 @@ pub struct ViewportRequest<'a> {
     /// Both directions are safe here — cutting shallower serves strictly less, cutting deeper
     /// serves more artifacts that each passed against `M_auth`.
     pub artifact_budget: Option<u32>,
+    /// Which of each named layer's levels to answer for. See [`LevelSelection`].
+    ///
+    /// **Applies to every layer named**, against that layer's own declaration — a level number is a
+    /// rung of one layer and means nothing across two, so there is no per-layer map here and under
+    /// [decision 0096](../../../docs/decisions/0096-layers-are-usually-one-and-the-picker-offers-the-closure.md)
+    /// a request names one layer anyway. [`LevelSelection::Declared`] needs no such map at all,
+    /// each layer's own ranges deciding for it.
+    ///
+    /// **This is a request bound and never a control.** Every artifact a level holds passed its own
+    /// existence criterion against `M_auth` before any of this ran (decision 0080), so asking for
+    /// fewer levels serves strictly less and asking for more serves only artifacts that had already
+    /// cleared their own test. It sits beside `artifact_budget` for that reason and carries the same
+    /// warning: §8.4's maximum depth was a disclosure control and this is not one.
+    pub levels: LevelSelection<'a>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -516,6 +609,7 @@ impl<'a> ViewportRequest<'a> {
             filter: None,
             layers: LayerSelection::All,
             artifact_budget: None,
+            levels: LevelSelection::Declared,
         }
     }
 
@@ -528,6 +622,12 @@ impl<'a> ViewportRequest<'a> {
     /// See [`ViewportRequest::artifact_budget`].
     pub fn artifact_budget(mut self, budget: Option<u32>) -> Self {
         self.artifact_budget = budget;
+        self
+    }
+
+    /// Answer for these levels of every named layer. See [`LevelSelection`].
+    pub fn levels(mut self, levels: LevelSelection<'a>) -> Self {
+        self.levels = levels;
         self
     }
 
@@ -624,6 +724,20 @@ pub struct ArtifactOut {
     /// none receives no artifact at all rather than this list empty. Empty means the layer declares
     /// no supplied content, and nothing else.
     pub content: Vec<String>,
+    /// **Which declared resolution this artifact sits at**, and a fact about the artifact rather
+    /// than about this viewer — every principal served it receives the same number.
+    ///
+    /// A client needs it because the alternative it was reduced to is wrong: counting `parent_id`
+    /// links puts an artifact at the depth of the chain that reached it, and a tiered layer's edges
+    /// skip levels and leave roots parentless, so the two disagree on every layer whose data is not
+    /// a perfect ladder. It says nothing a `/v1/meta` reader did not already know, the level set
+    /// being published there.
+    ///
+    /// **Zero for a treed or flat layer**, which declares no levels and sits entirely at level 0
+    /// ([decision 0082](../../../docs/decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md)).
+    /// There the structure is in the edges and walking parents is the *correct* reading; this
+    /// column is what stops that reading being applied where it does not hold.
+    pub level: u32,
 }
 
 /// The masked viewport response. No `serde` derive (I10) — see [`PointOut`]'s doc.
@@ -1479,6 +1593,7 @@ impl Engine {
             cancel,
             layers: req_layers,
             artifact_budget,
+            levels: req_levels,
         } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
@@ -2038,6 +2153,8 @@ impl Engine {
             &mask,
             req_layers,
             artifact_budget,
+            req_levels,
+            zoom,
             mask_identity,
         )?;
         if !artifacts.is_empty() {
@@ -3428,6 +3545,7 @@ impl Engine {
             }),
             masked_count,
             derived,
+            level,
             // **Always null on this route, and not by omission.** A parent is named only where it
             // is also in the response, and this response is one artifact — so there is nothing for
             // it to name. Resolving the parent here anyway would hand a caller who holds one
@@ -3671,6 +3789,10 @@ impl Engine {
         mask: &crate::compose::EffectiveMask,
         requested: LayerSelection<'_>,
         artifact_budget: Option<u32>,
+        levels: LevelSelection<'_>,
+        // The request's tile depth, which `LevelSelection::Declared` joins against each layer's
+        // declared per-level zoom ranges. The two are the same 0–16 coordinate.
+        zoom: u8,
         mask_identity: crate::histogram::MaskIdentity,
     ) -> Result<(Vec<ArtifactOut>, Vec<ServedLayer>)> {
         // Which layers this principal may know exist — one set probe for a gate-failed name and a
@@ -3814,6 +3936,15 @@ impl Engine {
             let mut served_levels: Vec<ServedLevel> = Vec::new();
             for (level, runs) in layer.runs.iter().enumerate() {
                 let level = level as u32;
+                // **Skipped before the projection is built, not after it is served.** A level the
+                // request did not ask for costs nothing at all here: no `get_or_build`, no
+                // candidate walk, no masked probe and no derived geometry over its members. That is
+                // the whole point of the field — a whole-layer response over a five-level
+                // administrative hierarchy pays a pass over every member at every level, and the
+                // levels a client was never going to draw dominate it.
+                if !level_is_selected(levels, &layer.declaration.levels, level, zoom) {
+                    continue;
+                }
                 let recorded = layer.layout_of(level);
                 let (rows, level_version) = self.write.with_artifacts(|store| {
                     (
@@ -4033,6 +4164,7 @@ impl Engine {
                         key,
                         masked_count,
                         derived,
+                        level,
                         // Filled in below, once the response's own membership is settled.
                         parent_id: None,
                     });

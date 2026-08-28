@@ -3,9 +3,12 @@
 **Date:** 2026-08-25
 **Status:** Provisional r5 — **built through §9's six steps** (2026-08-25; the record is
 [`client-delivery.md`](../client-delivery.md), which wins over this document wherever they differ).
-Still Provisional because four decisions remain the owner's — D10 (viewer-plane CORS), D4 (the
-notebook's proxy arm), D11 (the selection operand) and the leak-register row for D12 (C30, proposed
-in `evidence/memos/2026-08-25-d12-membership-column.md`) — and because the building changed three
+Still Provisional because three decisions remain the owner's — D10 (viewer-plane CORS), D4 (the
+notebook's proxy arm) and D11 (the selection operand). The fourth is settled: the leak-register row
+for D12 (C30, proposed in `evidence/memos/2026-08-25-d12-membership-column.md`) is **not taken** —
+architecture Appendix C's preamble names this column as the specimen of the register's ratchet and
+gives the inclusion test that excludes it, *data the service serves never qualifying* (owner
+direction 2026-08-26). It is Provisional also because the building changed three
 things this document said, recorded in Appendix R's r5 entry. r4 was reviewed. r3 was reviewed across three lenses (truthfulness and
 corpus fit, embeddability, the four customers; Appendix R) and every finding is dispositioned
 here in one pass. **To become normative:** owner rulings on the open decisions in §11, and the

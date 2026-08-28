@@ -18,7 +18,8 @@ const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'cl
   box: null,
   hull: null,
   content,
-  parentId
+  parentId,
+  level: 0
 });
 
 function projection(served: Artifact[]): ArtifactsProjection {

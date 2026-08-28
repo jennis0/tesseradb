@@ -100,7 +100,7 @@ layers share nothing.
 | identity and name — what a registry lists | its artifact set |
 | the **gate**: whether a viewer may know this analysis exists | its ordinal space and reserved entity run |
 | lifecycle: create, drop, replace, tombstoned name | its representation and membership source |
-| hierarchy kind — flat, nested, stacked or tiered | its advisory zoom range |
+| hierarchy kind — flat, nested, stacked or tiered | its zoom range, which since 2026-08-28 is the default bound on a response ([decision 0103](../decisions/0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md)) rather than advice |
 | the **own-terms flag** and **existence criterion** its artifacts use (§5) | its containment-verification result |
 | which views it appears in | |
 | relations to other layers | |
@@ -141,7 +141,7 @@ administrative level, zoom band, level of detail.
 | **layer** | MVT / QGIS / MapLibre **layer** — one-to-one on the wire |
 | **level** | admin level (`admin_0/1/2`), zoom band, level of detail |
 | **artifact** | **feature** |
-| a level's advisory zoom range | a tile schema's `minzoom` / `maxzoom` |
+| a level's zoom range | a tile schema's `minzoom` / `maxzoom` |
 
 An earlier revision called the layer a *family* and the level a *layer*, which collided with the
 corpus in its own tile-serving section and would have forced a translation on every style sheet

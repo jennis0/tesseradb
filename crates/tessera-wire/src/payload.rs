@@ -287,6 +287,18 @@ pub struct ArtifactRow<'a> {
     /// cleared to see, so the two are one value here and a client must read null as *no parent in
     /// this response* rather than as *no parent*.
     pub parent_id: Option<u64>,
+    /// **The declared resolution this artifact sits at.** A fact about the artifact, not about the
+    /// viewer: every principal served it receives the same number, and `/v1/meta` already publishes
+    /// the level set it indexes into.
+    ///
+    /// It is here because the reconstruction a client is otherwise reduced to — counting
+    /// `parent_id` links — answers a different question. That count is the depth of the chain that
+    /// reached the artifact *in this response*, and a tiered layer's edges may skip a level and its
+    /// roots may have no parent to be given, so on real data the two disagree. Walking parents
+    /// stays correct for a **treed** layer, where the lineage is the structure and every artifact
+    /// sits at level 0; this column is what stops that reading being carried where it does not
+    /// hold.
+    pub level: u32,
 }
 
 /// The kind-5 artifacts frame: one row per served artifact.
@@ -345,6 +357,10 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         // `served` carries: decoders that index this batch positionally exist, so inserting it
         // earlier would silently rebind every column after it.
         Field::new("parent_id", DataType::UInt64, true),
+        // Appended after `parent_id` for that same reason, and non-nullable: every artifact has a
+        // level, a treed layer's being 0 (decision 0082). There is no *withheld* state to express —
+        // an artifact whose content could not be served is absent whole (decision 0076).
+        Field::new("level", DataType::UInt32, false),
     ]));
 
     let mut hull_x = ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
@@ -417,6 +433,7 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(hull_y.finish()),
         Arc::new(content.finish()),
         Arc::new(UInt64Array::from_iter(rows.iter().map(|r| r.parent_id))),
+        Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.level))),
     ];
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");

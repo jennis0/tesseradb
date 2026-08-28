@@ -15,7 +15,8 @@ const artifact = (id: bigint, parentId: bigint | null = null): Artifact => ({
   box: null,
   hull: null,
   content: [],
-  parentId
+  parentId,
+  level: 0
 });
 
 function responseWith(artifacts: Artifact[]): ViewportResponse {

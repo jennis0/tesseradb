@@ -72,7 +72,7 @@ ruling that exists only in a chat does not exist):
 
 **Built 2026-08-25** (see the record): the store, the five packages, the thirteen elements, the
 widget, the C3 documents, and S2–S4 on the server. Still open, and the owner's: D10 and D4 (S1),
-D11 (S6), D14 (S7), and D12's register row (C30, proposed).
+D11 (S6), D14 (S7), and D12's register row (C30, proposed and **not taken** — Appendix C's inclusion test excludes data the service serves; owner direction 2026-08-26).
 
 ## 2. The work list, in order
 

@@ -628,6 +628,8 @@ pub struct ArtifactRow {
     pub bbox: Option<[u32; 4]>,
     /// The hull's **rings**, one per separated group of the visible members.
     pub hull: Option<Vec<Vec<[u32; 2]>>>,
+    /// The declared resolution this artifact sits at — 0 on a treed or flat layer.
+    pub level: u32,
 }
 
 fn str_col(
@@ -805,6 +807,15 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                 ]
                             }),
                             hull,
+                            // Column 14, after `parent_id` at 13 — read positionally here on
+                            // purpose, because that position is contract and a test that read by
+                            // name would not notice a column inserted ahead of it.
+                            level: batch
+                                .column(14)
+                                .as_any()
+                                .downcast_ref::<arrow::array::UInt32Array>()
+                                .expect("`level` is a non-nullable UInt32 at column 14")
+                                .value(i),
                         });
                     }
                 }

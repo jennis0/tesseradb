@@ -226,7 +226,8 @@ export class ArtifactChannel {
       tesseraId: a.tesseraId,
       layer: a.layer,
       parentId: a.parentId,
-      centroid: a.centroid
+      centroid: a.centroid,
+      level: a.level
     }));
     const taken = this.table.take(refs);
     this.releaseHeld();

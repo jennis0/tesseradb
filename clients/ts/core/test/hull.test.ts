@@ -55,7 +55,11 @@ function body(rows: {x: Rings; y: Rings}[], type: {x: unknown; y: unknown} = {x:
       box_max_y: vectorFromArray(rows.map(() => 9), new Uint32()),
       hull_x: vectorFromArray(rows.map((r) => r.x), type.x as never),
       hull_y: vectorFromArray(rows.map((r) => r.y), type.y as never),
-      content: vectorFromArray(rows.map(() => [] as string[]), TEXTS)
+      content: vectorFromArray(rows.map(() => [] as string[]), TEXTS),
+      // Required, and the decoder refuses a body without it (decision 0048 — there is no older
+      // server to be lenient towards, and reading a missing level as 0 would draw a whole
+      // hierarchy at its coarsest rung and look like data).
+      level: vectorFromArray(rows.map(() => 0), new Uint32())
     }),
     'stream'
   );

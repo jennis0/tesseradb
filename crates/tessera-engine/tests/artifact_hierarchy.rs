@@ -14,7 +14,7 @@
 mod common;
 
 use common::*;
-use tessera_engine::{ArtifactOut, Engine, LayerSelection, ViewportRequest};
+use tessera_engine::{ArtifactOut, Engine, LayerSelection, LevelSelection, ViewportRequest};
 use tessera_lifecycle::membership::IncomingAttachment;
 use tessera_lifecycle::IncomingArtifact;
 use tessera_types::layer::{
@@ -632,8 +632,11 @@ fn levelled_artifacts_of(
 /// polygon across a region whose neighbours are still counties. Resolution is the client choosing
 /// a level.
 ///
-/// An over-large response is the artifact ceiling's business, which refuses rather than
-/// truncating. The cut must never start sampling to reach a number.
+/// **What bounds an over-large response is the level, not a ceiling** (owner ruling 2026-08-28;
+/// an earlier revision of this comment said a ceiling refuses, and none exists or will). A request
+/// names the levels it wants, or names none and is answered at the levels the layer's own zoom
+/// ranges declare for the depth asked at — see `a_request_naming_no_levels_follows_the_declared_map`.
+/// The cut must never start sampling to reach a number, which is what this test is for.
 #[test]
 fn a_budget_is_inert_on_a_tiered_layer() {
     let fx = fixture();
@@ -1135,5 +1138,461 @@ fn a_dependent_of_a_dropped_dependent_goes_with_it() {
         keys(&cut),
         vec!["root"],
         "the label goes with its cluster and the note goes with the label"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The level on the wire, and the level as a request bound (2026-08-28).
+//
+// Two things were missing at once and each hid the other. A response said nothing about which
+// level an artifact sat at, so a client counted `parent_id` links — which answers a different
+// question, and disagrees wherever a layer's edges skip a level or its roots have no parent. And a
+// request could not name a level, so every level was served on every request and a client following
+// the published zoom→level map paid for five and drew one.
+// ---------------------------------------------------------------------------------------------
+
+/// A tiered layer whose levels declare zoom ranges, as a real geography does — GeoNames' own
+/// country/admin1/admin2 ladder is `[0,4] [3,7] [6,10]`, overlapping at the seams so a scale change
+/// is a fade rather than a jump.
+fn tiered_zoomed(name: &str, ranges: &[(u32, u32)]) -> LayerDeclaration {
+    let mut d = declaration(name, None, false);
+    d.hierarchy.kind = HierarchyKind::Tiered;
+    d.levels = ranges
+        .iter()
+        .enumerate()
+        .map(|(level, &(lo, hi))| tessera_types::layer::LevelDeclaration {
+            level: level as u32,
+            title: Some(format!("level {level}")),
+            zoom: Some((lo, hi)),
+        })
+        .collect();
+    d
+}
+
+/// Three levels of one tiered layer, planted so each level's membership is disjoint from its
+/// siblings' and every artifact clears any criterion.
+fn plant_three_levels(engine: &Engine, fx: &Fixture, layer: &str) {
+    engine
+        .publish_artifacts(layer.into(), 0, vec![node(fx, "country", None, 0..300)])
+        .unwrap();
+    engine
+        .publish_artifacts(
+            layer.into(),
+            1,
+            vec![
+                node(fx, "state-a", Some("country"), 0..150),
+                node(fx, "state-b", Some("country"), 150..300),
+            ],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            layer.into(),
+            2,
+            vec![
+                node(fx, "county-a", Some("state-a"), 0..75),
+                node(fx, "county-b", Some("state-b"), 150..225),
+            ],
+        )
+        .unwrap();
+}
+
+fn at_zoom(
+    engine: &Engine,
+    credential: &[u8],
+    zoom: u8,
+    layer: &str,
+    levels: LevelSelection<'_>,
+) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", zoom, WHOLE_MAP, N_ITEMS as usize)
+                .layers(LayerSelection::Named(&[layer]))
+                .levels(levels),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+}
+
+fn levels_of(served: &[ArtifactOut]) -> Vec<u32> {
+    let mut out: Vec<u32> = served.iter().map(|a| a.level).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// **A request naming no levels is answered at the levels the layer declares for that depth.**
+///
+/// This is the whole of the change on the serving side. The declaration carries a zoom range per
+/// level and `/v1/meta` publishes it; the request carries the depth it is asking at; until now
+/// nothing joined them, so an overview over a five-level administrative hierarchy was served all
+/// five and the client drew one. The ranges overlap at their seams, so a depth inside two of them
+/// is answered at both — a scale change is a fade, and dropping one of the pair to make the answer
+/// tidy would blank a level mid-transition.
+#[test]
+fn a_request_naming_no_levels_follows_the_declared_map() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7), (6, 10)]))
+        .unwrap();
+    plant_three_levels(&engine, &fx, "admin/boundaries");
+
+    // Depth 0: only the coarsest range contains it.
+    let overview = at_zoom(&engine, &full_coverage_credential(), 0, "admin/boundaries", LevelSelection::Declared);
+    assert_eq!(levels_of(&overview), vec![0], "depth 0 is inside [0,4] alone");
+
+    // Depth 3: the seam of the first two ranges, so both answer.
+    let seam = at_zoom(&engine, &full_coverage_credential(), 3, "admin/boundaries", LevelSelection::Declared);
+    assert_eq!(levels_of(&seam), vec![0, 1], "depth 3 is inside [0,4] and [3,7]");
+
+    // Depth 8: past the first two entirely.
+    let deep = at_zoom(&engine, &full_coverage_credential(), 8, "admin/boundaries", LevelSelection::Declared);
+    assert_eq!(levels_of(&deep), vec![2], "depth 8 is inside [6,10] alone");
+}
+
+/// **Naming levels serves exactly those, and `All` serves every one** — the override that keeps
+/// the zoom map advisory in the sense that matters: a client may always ask for what the map does
+/// not offer it, and pay for it.
+#[test]
+fn naming_levels_overrides_the_declared_map() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7), (6, 10)]))
+        .unwrap();
+    plant_three_levels(&engine, &fx, "admin/boundaries");
+
+    // At depth 0 the map offers level 0 alone; asking for 2 gets 2 and nothing else.
+    let named = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "admin/boundaries",
+        LevelSelection::Named(&[2]),
+    );
+    assert_eq!(levels_of(&named), vec![2]);
+
+    let both = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "admin/boundaries",
+        LevelSelection::Named(&[0, 2]),
+    );
+    assert_eq!(levels_of(&both), vec![0, 2]);
+
+    let all = at_zoom(&engine, &full_coverage_credential(), 0, "admin/boundaries", LevelSelection::All);
+    assert_eq!(levels_of(&all), vec![0, 1, 2], "`All` ignores the map entirely");
+
+    // A level the layer does not hold is absent rather than a refusal — the route an unreachable
+    // layer name takes, and for the same reason: asking is not a way to learn what exists.
+    let beyond = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "admin/boundaries",
+        LevelSelection::Named(&[0, 9]),
+    );
+    assert_eq!(levels_of(&beyond), vec![0]);
+}
+
+/// **A layer that declares no zoom range is unaffected**, in all three selections' absent case.
+/// This is what keeps the default inert on every layer built before the ranges existed and on
+/// every treed layer, which declares no levels at all (decision 0082).
+#[test]
+fn a_layer_declaring_no_zoom_range_serves_every_level() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(tiered("admin/boundaries", 3)).unwrap();
+    plant_three_levels(&engine, &fx, "admin/boundaries");
+
+    // Depth 8 rather than deeper: a whole-map request at depth 9 or below is already refused on
+    // `max_tiles_per_request`, which is worth knowing — the tile cap bounds the widest, deepest
+    // request before any of this runs.
+    for zoom in [0u8, 5, 8] {
+        let served = at_zoom(
+            &engine,
+            &full_coverage_credential(),
+            zoom,
+            "admin/boundaries",
+            LevelSelection::Declared,
+        );
+        assert_eq!(
+            levels_of(&served),
+            vec![0, 1, 2],
+            "no range is declared, so there is no map to follow at depth {zoom}"
+        );
+    }
+}
+
+/// **A treed layer's artifacts are all at level 0**, so the column is constant there and the
+/// selection is inert. Walking `parent_id` is the *correct* reading of a treed layer, where the
+/// lineage is the structure; the column exists to stop that reading being carried to a tiered
+/// layer, where it is wrong.
+#[test]
+fn a_treed_layers_artifacts_all_sit_at_level_zero() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(treed_whole("clusters/hdbscan", None))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/hdbscan".into(),
+            0,
+            vec![
+                node(&fx, "root", None, 0..300),
+                node(&fx, "child", Some("root"), 0..150),
+            ],
+        )
+        .unwrap();
+
+    let served = at_zoom(
+        &engine,
+        &full_coverage_credential(),
+        0,
+        "clusters/hdbscan",
+        LevelSelection::Declared,
+    );
+    assert_eq!(levels_of(&served), vec![0]);
+    assert!(served.len() >= 2, "the whole visible tree, unpruned");
+}
+
+/// **The level is the declaration's, not the depth of the chain that reached it.**
+///
+/// The bug this closes, in the shape it was found in: `clusters/toponymy` put 490 of 797 artifacts
+/// at the wrong level because the client counted parent links, and a tiered layer's edges may skip
+/// a level. Here the county's parent is the **country**, two levels up — a city directly under a
+/// country because that country has no states, which is a fact about the data and not a gap in the
+/// ladder. Counting links puts it at depth 1; it is declared at level 2, and the column says so.
+#[test]
+fn the_level_is_declared_not_counted_from_parent_links() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7), (6, 10)]))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            0,
+            vec![node(&fx, "country", None, 0..300)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![node(&fx, "state", Some("country"), 0..150)],
+        )
+        .unwrap();
+    // The edge skips level 1 entirely: this county's parent is the country.
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            2,
+            vec![node(&fx, "county", Some("country"), 200..300)],
+        )
+        .unwrap();
+
+    let served = at_zoom(&engine, &full_coverage_credential(), 0, "admin/boundaries", LevelSelection::All);
+    let county = served
+        .iter()
+        .find(|a| a.key.as_deref() == Some("county"))
+        .expect("the county is served");
+    let country = served
+        .iter()
+        .find(|a| a.key.as_deref() == Some("country"))
+        .expect("the country is served");
+
+    assert_eq!(county.level, 2, "the declared level");
+    assert_eq!(
+        county.parent_id,
+        Some(country.tessera_id),
+        "and its parent is the country, one link up — which is the count that would say 1"
+    );
+}
+
+/// **A zoom range that contains no depth is refused at the declaration.**
+///
+/// It was harmless while the range was advisory. Now it decides what a request naming no `levels`
+/// is answered at, so an inverted or out-of-grid range means the level is served at no depth at all
+/// — and the operator's only symptom would be a layer silently absent from every zoom.
+#[test]
+fn a_zoom_range_containing_no_depth_is_refused() {
+    let fx = fixture();
+    let engine = fx.open();
+
+    let mut inverted = tiered_zoomed("admin/a", &[(0, 4), (7, 3)]);
+    inverted.name = "admin/inverted".into();
+    assert!(
+        engine.register_layer(inverted).is_err(),
+        "[7, 3] contains no depth"
+    );
+
+    let mut past_grid = tiered_zoomed("admin/b", &[(0, 4), (17, 20)]);
+    past_grid.name = "admin/past-grid".into();
+    assert!(
+        engine.register_layer(past_grid).is_err(),
+        "a range starting past the grid's depth of 16 contains no depth a request can ask at"
+    );
+
+    // **A single-depth range is legal** — `[4, 4]` is one band, not an empty one — and so is an
+    // absent range, which means *served at every depth*.
+    let mut single = tiered_zoomed("admin/c", &[(0, 0), (4, 4)]);
+    single.name = "admin/single".into();
+    assert!(engine.register_layer(single).is_ok());
+    assert!(engine.register_layer(tiered("admin/none", 2)).is_ok());
+}
+
+/// **A level selection is inert on a layer that declares no levels.**
+///
+/// The uniform reading — the selection applies to every layer named — would otherwise let a client
+/// asking for level 1 of its boundaries blank every clustering in the same response, a treed layer
+/// sitting entirely at level 0 (decision 0082). A level number names nothing about such a layer, so
+/// it does not select against it.
+#[test]
+fn naming_a_level_does_not_blank_a_treed_layer_beside_it() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7)]))
+        .unwrap();
+    engine
+        .register_layer(treed_whole("clusters/hdbscan", None))
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            0,
+            vec![node(&fx, "country", None, 0..300)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![node(&fx, "state", Some("country"), 0..150)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "clusters/hdbscan".into(),
+            0,
+            vec![node(&fx, "cluster", None, 0..300)],
+        )
+        .unwrap();
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let served = engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize)
+                .layers(LayerSelection::Named(&["admin/boundaries", "clusters/hdbscan"]))
+                .levels(LevelSelection::Named(&[1])),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts;
+
+    assert_eq!(
+        keys_in(&served, "admin/boundaries"),
+        vec!["state"],
+        "the levelled layer answers at the level asked for"
+    );
+    assert_eq!(
+        keys_in(&served, "clusters/hdbscan"),
+        vec!["cluster"],
+        "and the treed layer beside it is untouched, having no level the number could name"
+    );
+}
+
+/// **A level a request did not ask for takes its dependents with it.**
+///
+/// The trap this closes: the names of a boundary set often live in a dependent layer, so a level
+/// selection that dropped the boundaries and kept their labels would leave a map annotated with
+/// names for regions it is not drawing. The rule already exists — a dependent whose target is
+/// withheld is absent entire — and this is what proves a level filter is not a hole in it.
+///
+/// **The label layer declares its own levels, and that is what makes the test bite.** A flat label
+/// layer sits at level 0, so asking for level 1 alone excludes the *labels* too and the orphan path
+/// is never reached — the test then passes with the whole drop deleted, which is what an earlier
+/// revision of it did. Here the label is at level 1 and its target at level 0, so a request for
+/// level 1 selects the label and not its subject: the only thing that can remove it is the orphan
+/// rule.
+#[test]
+fn a_dependent_goes_when_its_targets_level_is_not_asked_for() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine
+        .register_layer(tiered_zoomed("admin/boundaries", &[(0, 4), (3, 7)]))
+        .unwrap();
+    let mut names = labels_on("admin/names", "admin/boundaries");
+    names.hierarchy.kind = HierarchyKind::Stacked;
+    names.levels = (0..2)
+        .map(|level| tessera_types::layer::LevelDeclaration {
+            level,
+            title: Some(format!("names {level}")),
+            zoom: None,
+        })
+        .collect();
+    engine.register_layer(names).unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            0,
+            vec![node(&fx, "country", None, 0..300)],
+        )
+        .unwrap();
+    engine
+        .publish_artifacts(
+            "admin/boundaries".into(),
+            1,
+            vec![node(&fx, "state", Some("country"), 0..150)],
+        )
+        .unwrap();
+    // The label sits at level **1** and describes the country, which is at level 0.
+    engine
+        .publish_artifacts(
+            "admin/names".into(),
+            1,
+            vec![label(
+                &fx,
+                "country-name",
+                "admin/boundaries",
+                "country",
+                0..300,
+            )],
+        )
+        .unwrap();
+
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+    let both = |zoom: u8, levels: LevelSelection<'_>| -> Vec<ArtifactOut> {
+        engine
+            .viewport(
+                &session,
+                ViewportRequest::new("s0", zoom, WHOLE_MAP, N_ITEMS as usize)
+                    .layers(LayerSelection::Named(&["admin/boundaries", "admin/names"]))
+                    .levels(levels),
+            )
+            .expect("a viewport over the whole map")
+            .artifacts
+    };
+
+    // Both levels asked for: the country is served and so is the name at level 1 above it.
+    let served = both(0, LevelSelection::Named(&[0, 1]));
+    assert_eq!(keys_in(&served, "admin/boundaries"), vec!["country", "state"]);
+    assert_eq!(keys_in(&served, "admin/names"), vec!["country-name"]);
+
+    // **Level 1 alone.** The label's own level *is* selected — so nothing about the selection
+    // removes it — and its subject's is not. It must go with its subject rather than float free
+    // over a boundary the response does not carry.
+    let served = both(0, LevelSelection::Named(&[1]));
+    assert_eq!(keys_in(&served, "admin/boundaries"), vec!["state"]);
+    assert!(
+        keys_in(&served, "admin/names").is_empty(),
+        "a label whose subject was not served is absent, whatever withheld the subject"
     );
 }

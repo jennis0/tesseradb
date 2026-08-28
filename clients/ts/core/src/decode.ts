@@ -431,6 +431,19 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
     // would disclose that a coarser artifact exists which they may not see. Read it as "no parent
     // here", never as "no parent".
     const parentId = t.getChild('parent_id');
+    // **The declared level**, non-nullable and a fact about the artifact rather than the viewer.
+    // Read by name like every other column here; the schema's *position* is contract for a decoder
+    // that indexes positionally, which this one deliberately is not.
+    const level = t.getChild('level');
+    // **A loud refusal rather than a guessed zero.** There is no compatibility to keep here
+    // (decision 0048) and a level is what a client draws a tiered layer's resolution from, so a
+    // body without the column is a server this build does not match — silently reading every
+    // artifact as level 0 would draw the whole hierarchy at its coarsest rung and look like data.
+    if (level == null) {
+      throw new Error(
+        'viewport artifacts frame carries no `level` column: this client requires a server that serves it'
+      );
+    }
     for (let i = 0; i < tesseraId.length; i++) {
       const cx = centroidX.get(i);
       const bx = boxMinX.get(i);
@@ -478,7 +491,8 @@ export function decodeViewport(body: Uint8Array): ViewportResult {
         content: Array.from(content.get(i) ?? [], (v) => String(v)),
         // Absent on a server older than the field, which reads the same as a root — the
         // fail-closed direction, and the only one available without inventing a parent.
-        parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i))
+        parentId: parentId == null || parentId.get(i) === null ? null : BigInt(parentId.get(i)),
+        level: Number(level.get(i))
       });
     }
   }

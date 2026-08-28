@@ -82,11 +82,20 @@ artifacts in range** (*modelled* from the measured per-artifact and per-row cons
 
 **The ruling holds because the column's regime is past the point of rendering anything.** Nineteen
 thousand artifacts in one viewport is already more than a client can draw; the fine-level case where
-the column wins puts **~10⁵** in a 1% window. A request in that regime is one of two things: a client
-asking for a level the zoom-to-level map should have steered away from (§6.3), or a request that will
-be refused on its artifact ceiling regardless of which structure would have answered it faster.
-**Optimising the route for a regime whose output is unservable buys nothing**, and it costs a second
-representation, a second write path and a second set of invariants to keep aligned.
+the column wins puts **~10⁵** in a 1% window. A request in that regime is a client asking for a level
+the zoom-to-level map should have steered it away from (§6.3) — and since 2026-08-28 the map does
+steer it, the levels a request is answered at being the declared ones for the depth it asked at
+unless it names others.
+
+**⊘ There is no artifact ceiling, and this section used to argue from one.** It previously read
+*"or a request that will be refused on its artifact ceiling regardless"* and called such a regime's
+output **unservable**. No such ceiling was ever built, and the owner has ruled against building one
+(2026-08-28): a large response is slow, not wrong — it discloses nothing the mask did not already
+allow and a rerun costs nothing — so degraded service beats no service, and what the build reports
+instead is the whole-layer artifact count per level. So the regime is **servable and served**, and
+the argument for not optimising it stands on its own remaining leg: it costs a second
+representation, a second write path and a second set of invariants to keep aligned, for a shape the
+level map now steers away from.
 
 **What is accepted, named rather than hidden:** a caller who does serve a fine level over a wide
 viewport pays **2–4× more** than a column would. That is a real cost in a real configuration, and the
@@ -871,7 +880,11 @@ A viewport response carries, per visible layer, the artifacts whose rows interse
 and which pass their own existence test. **What bounds that set depends on the layer's structure**
 (§6.2): a treed layer is cut to the request's artifact budget
 ([decision 0083](../decisions/0083-the-frontier-is-a-request-time-budget.md)), and a levelled layer
-serves the level asked for. Either way the bound is a function of the **declaration and the request**
+serves the levels asked for — or, where the request names none, the levels its own declared zoom
+ranges give for the depth it asked at (**built 2026-08-28**; the request field is `levels` and the
+response's *artifacts* frame carries each artifact's own `level`. Until then neither existed: every
+level was served on every request, and a client following the published map paid for all of them and
+drew one). Either way the bound is a function of the **declaration and the request**
 — never the principal, and never a statistic — which is §8.2's standing rule about routes, and what
 keeps service time from becoming a function of how much a principal can see.
 
@@ -888,9 +901,13 @@ client-interaction already models a client as a versioned partial replica that f
 reconciles against a version coordinate. Sizing a level as though every viewport re-fetched it is the
 wrong model.
 
-**The zoom-to-level map is therefore advisory and not a cost bound** — a min/max zoom a sensible
-client follows and a UI exposes, as every tile schema does. It does not exist at all for a treed
-layer, which has no levels to map (§6.2).
+**The zoom-to-level map is the default bound, and the client may override it** (2026-08-28; it was
+*advisory and not a cost bound*, which it could only be while nothing on the wire could name a
+level). A request naming no `levels` is answered at the levels the map gives for its depth; one
+naming them is answered at exactly those. The client still chooses — what changed is that following
+the map is now the default rather than an intention it had no way to express, and ignoring it is the
+deliberate act. It does not exist at all for a treed layer, which has no levels to map (§6.2), and a
+layer whose levels declare no ranges serves all of them.
 
 ### 6.1 Artifacts cannot be sampled, and that is the real constraint
 
@@ -961,7 +978,7 @@ level a scale.
 | A coarser view is | an ancestor | a different analysis | either, interchangeably |
 | The edges are for | **roll-up** — the cut climbs them | — | **information** — what contains what |
 | `artifact_budget` | trades depth for count | inert | inert |
-| The zoom→level map | does not apply | advisory, the client's choice | its purpose |
+| The zoom→level map | does not apply | the default, overridable by `levels` | its purpose, and the default |
 | `reach` | well defined | undefined across levels | well defined |
 
 **A layer declares its structure**, and it is never inferred from whether edges happen to exist.
@@ -1269,9 +1286,11 @@ in-memory by necessity as well as by design, and reports resident sizes alongsid
   choice. The file layout in §2.4 is provisional until this lands.
 - **M3 → a decision record**, and if taken, a change to the build's signature-sort comparator. It
   cannot be retrofitted under **I9**, so it is decided before the first build that writes artifacts.
-- **M4 → §6's zoom-to-level map** is settled by ruling rather than by measurement: it is advisory
-  metadata, it bounds no work, and a treed layer has none
-  ([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md), §6, §6.2).
+- **M4 → §6's zoom-to-level map** is settled by ruling rather than by measurement, and the ruling
+  moved: it was *advisory metadata that bounds no work*, and since 2026-08-28 it is the **default
+  bound** on a levelled layer's response, overridable per request by `levels`. A treed layer still
+  has none ([decision 0082](../decisions/0082-a-hierarchy-lives-in-edges-levels-are-resolutions.md),
+  §6, §6.2, and the decision this section's change records).
 - **M5 → §2.3's width rule** becomes measured or is withdrawn.
 - **M6 → §8's escalation resolves**, either dissolving the register row or confirming it.
 
@@ -1447,6 +1466,19 @@ document had one cause — reasoning about entity space while designing a row-sp
 error was invisible from inside the argument that made it.
 
 ## Appendix R
+
+**r8 — 2026-08-28. The level is on the wire both ways, and there is no ceiling.** §6's two halves
+were each describing something that did not exist. The zoom→level map was *advisory* because nothing
+on the wire could name a level — the request now carries `levels` and the *artifacts* frame carries
+each artifact's own `level`, so the map becomes the **default** (the levels its ranges give for the
+depth asked at) and naming levels overrides it; a layer declaring no ranges is unaffected and serves
+all of them. And §2's argument that a fine-level request *"will be refused on its artifact ceiling
+regardless"* rested on a ceiling that was never built and now never will be: the owner ruled against
+one (2026-08-28) on the grounds that a large response is slow rather than wrong, so degraded service
+beats none, and the build reports the whole-layer artifact count per level instead. Measured on the
+GeoNames rung, where the map cuts an overview response from 464,655 artifacts to 5,096. M4 (§11.2)
+moves with the map. The evidence is
+[`../evidence/memos/2026-08-28-artifact-response-volume.md`](../evidence/memos/2026-08-28-artifact-response-volume.md).
 
 **r7 — 2026-08-19. A dependency edge carries deletion and visibility.** §4's extra term was three
 cheap questions — the target's deny state, its layer's reachability, and whether its slot still

@@ -226,8 +226,8 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
   // for the artifacts this response's points belong to, of a centroid — which is what colours
   // them. Feeding both here is what lets a band be coloured by the response that carried it,
   // rather than waiting on the `k = 0` channel two hundred milliseconds behind the gesture.
-  const frameOf = new Map<string, {parentId: bigint | null; centroid: readonly [number, number] | null}>();
-  for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentId: a.parentId, centroid: a.centroid});
+  const frameOf = new Map<string, {parentId: bigint | null; centroid: readonly [number, number] | null; level: number}>();
+  for (const a of result.artifacts) frameOf.set(`${a.layer} ${a.tesseraId}`, {parentId: a.parentId, centroid: a.centroid, level: a.level});
   const naming: ResponseNaming[] = [];
   const held: Uint32Array[] = [];
   for (const [layer, column] of Object.entries(result.membership)) {
@@ -235,7 +235,11 @@ function nameResponse(result: ViewportResult, table: SessionArtifactTable): {nam
     for (let d = 0; d < column.ids.length; d++) {
       const id = column.ids[d]!;
       const known = frameOf.get(`${layer} ${id}`);
-      refs.push({tesseraId: id, layer, parentId: known?.parentId ?? null, centroid: known?.centroid ?? null});
+      // **`level` only where the artifacts frame named it.** A membership column may name an
+      // artifact this response's artifacts frame also carries, and then the level is the wire's; a
+      // reference built from the column alone has no level to give and takes 0, which is what it
+      // would have been on a treed layer anyway. It is never counted from the links.
+      refs.push({tesseraId: id, layer, parentId: known?.parentId ?? null, centroid: known?.centroid ?? null, level: known?.level});
     }
     const ordinals = table.take(refs);
     held.push(ordinals);

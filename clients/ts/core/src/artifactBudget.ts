@@ -24,10 +24,17 @@ export function artifactBudgetFor(zoom: number): number {
 }
 
 /**
- * The level a tiered layer is drawn at when the server served every level: the deepest whose
+ * The level a tiered layer is drawn at, over the levels the response actually carried: the deepest
+ * whose
  * artifacts, with every level above it, fit the budget — so a 16 / 46 / 161 / 574 layer draws
  * its 16 at the overview and refines as the zoom deepens, following the cut the budget asks
  * for. `countsByLevel[i]` is how many were served at level `i`; level 0 is always drawn.
+ *
+ * **It is a drawing choice over what arrived, not over the layer.** Since 2026-08-28 a request that
+ * names no `levels` is answered at the levels the layer's declared zoom ranges give for its depth
+ * (decision 0103), so the response usually carries fewer levels than the layer has and this picks
+ * among those. An earlier revision of this comment said "when the server served every level", which
+ * was the behaviour then and is now the `levels: "all"` case alone.
  */
 export function levelForBudget(countsByLevel: readonly number[], budget: number): number {
   let level = 0;
