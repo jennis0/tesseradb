@@ -93,7 +93,13 @@ export class TesseraArtifactCard extends TesseraElement {
 
   override render() {
     const {artifact, refusal} = this.shown;
-    const heading = html`<h2 part="title">Cluster<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button></h2>`;
+    // The heading names what this is — the level's title on a levelled layer (a *County*, an
+    // *Admin 2*), the layer's title otherwise — read off the served row, whose `rung` is the wire's.
+    const metaLayers = this.resolvedStore?.get('meta')?.layers ?? [];
+    const row = artifact ? this.resolvedStore?.get('artifacts')?.served.find((a) => a.tesseraId === artifact.id) : undefined;
+    const decl = row ? metaLayers.find((l) => l.name === row.layer) : undefined;
+    const what = (row && decl?.levels.find((lv) => lv.level === row.rung)?.title) || decl?.title || 'Artifact';
+    const heading = html`<h2 part="title">${what}<button part="close" type="button" aria-label="Close" @click=${() => emit(this, 'tessera-close', {what: 'artifact'})}>${icon('close', 14)}</button></h2>`;
     if (refusal) {
       return html`<div class="panel">${heading}<span part="state" data-state="refused"><span part="refusal">${refusal.code}: ${refusal.detail}</span></span></div>`;
     }

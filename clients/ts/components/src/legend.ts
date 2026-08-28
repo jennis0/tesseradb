@@ -67,9 +67,13 @@ export class TesseraLegend extends TesseraElement {
   private choose(value: string): void {
     const s = this.resolvedStore;
     if (!s) return;
-    const chosen = value === '' ? null : value;
+    // `cluster:<layer>@<level>` is a level of a levelled layer: the colouring is the layer's and
+    // the level is chosen with it, in one gesture.
+    const at = value.lastIndexOf('@');
+    const chosen = value === '' ? null : at > 0 ? value.slice(0, at) : value;
     s.setColourBy(chosen);
     emit(this, 'tessera-colourchange', {colourBy: chosen});
+    if (at > 0) this.chooseLevel(value.slice(at + 1));
   }
 
   /** The level the map colours and labels at: `null` is the deepest served (the cut's leaves). */
@@ -106,9 +110,20 @@ export class TesseraLegend extends TesseraElement {
           <div class="col"><span class="xs muted">Colour by</span>
             <select part="select" aria-label="Colour by" @change=${(e: Event) => this.choose((e.target as HTMLSelectElement).value)}>
               <option value="" ?selected=${colourBy === null}>none</option>
-              ${artifacts.layers.map((l) => {
+              ${artifacts.layers.flatMap((l) => {
+                // **A levelled layer is offered level by level, by the titles the corpus declared** —
+                // Country, Admin 1 … Admin 4 — because that is what the colouring *is* on such a
+                // layer: membership at one level. "clusters" named the mechanism, not the data
+                // (the owner, 2026-08-28). A layer without levels is offered once, by its title.
                 const value = `${CLUSTER_PREFIX}${l}`;
-                return html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>clusters</option>`;
+                const decl = meta.layers.find((x) => x.name === l);
+                if (!decl || decl.levels.length === 0) {
+                  return [html`<option part="cluster-option" value=${value} ?selected=${colourBy === value}>${decl?.title || l}</option>`];
+                }
+                return decl.levels.map(
+                  (lv) =>
+                    html`<option part="cluster-option" value=${`${value}@${lv.level}`} ?selected=${colourBy === value && this.level === lv.level}>${lv.title || `level ${lv.level}`}</option>`
+                );
               })}
               ${columns.map((c) => html`<option value=${c.name} ?selected=${colourBy === c.name}>${c.name}</option>`)}
             </select></div>
