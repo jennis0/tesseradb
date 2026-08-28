@@ -98,7 +98,7 @@ export type StoreOptions = {
    */
   instruments?: {
     onFrame?(info: {plan: {choice: DepthChoice}; timings: import('./types.js').Timings | null; bytes: number; held: number; fetched: number; calibration: {mTarget: number; visibleInView: number | undefined}; replica: {bytes: number; points: number; bands: number}}): void;
-    onTrace?(kind: string, fields: Record<string, number>): void;
+    onTrace?(kind: string, fields: Record<string, number | string>): void;
   };
 };
 
@@ -555,7 +555,7 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
-  function onTrace(kind: string, fields: Record<string, number>): void {
+  function onTrace(kind: string, fields: Record<string, number | string>): void {
     // A revalidation observed a (possibly new) content key without redrawing the marks.
     if (kind === 'revalidate') {
       recomputeStale();

@@ -69,7 +69,7 @@ export type PresenterEvents = {
   /** A frame reached the presented slot. Fires at most once per scheduler tick. */
   onPresented(presented: Presented): void;
   onStatus(status: PresentedStatus, refusal: Refusal | null): void;
-  onTrace?(kind: string, fields: Record<string, number>): void;
+  onTrace?(kind: string, fields: Record<string, number | string>): void;
   /** Named phases, for a trace that wants to time the fold and the derive. */
   onPhase?<T>(kind: string, fn: () => T, fields?: Record<string, number>): T;
 };

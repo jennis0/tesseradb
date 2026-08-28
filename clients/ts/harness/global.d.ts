@@ -39,11 +39,12 @@ interface Window {
     lanes?: {
       decode: {ms: number; workerMs: number | null; points: number; bytes: number; at: number}[];
       absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
+      /** `region` and `coverage` are emitted with numbers only; the trace at large is not. */
       region: Record<string, number> | null;
       coverage: Record<string, number> | null;
       longTasks: {ms: number; at: number}[];
     };
-    instruments?: {depth: number; tiles: number; predictedMarks: number; limitedBy: string; bytes: number};
+    instruments?: {depth: number; tiles: number; predictedMarks: number; source: string; limitedBy: string; bytes: number};
     [extra: string]: unknown;
   };
 }

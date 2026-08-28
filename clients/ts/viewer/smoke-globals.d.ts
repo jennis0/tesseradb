@@ -22,6 +22,6 @@ interface Window {
     timings: {outlines: number; outlinesDrawn: number; labels: number};
     cluster: {layersOn: string[]; servedIds: string[]};
     /** The demo's instrument numbers, which the §4 surface omits and the demo publishes. */
-    instruments?: {depth: number; tiles: number; predictedMarks: number; limitedBy: string; bytes: number};
+    instruments?: {depth: number; tiles: number; predictedMarks: number; source: string; limitedBy: string; bytes: number};
   };
 }

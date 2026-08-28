@@ -518,6 +518,63 @@ that one GeoNames principal exceeds on its own at deep zoom — batching amortis
 rate for that layer stays poor. `x-tessera-server-us` stops at the first flush and so never saw
 any of it; the artifact pass runs after.
 
+## The depth choice reads the counts, not an average (`demo/perf-depth`, 2026-08-28)
+
+**The mark budget stays at 500,000 and the prediction was wrong.** `chooseDepth` predicted a
+request's marks as `tiles × m_target`, a learned average marks-per-tile corrected per response by
+`calibrate` — damped at 0.5 and clamped to [0.25×, 4×] of the deployment's `theta_target_marks`.
+That model assumes tile occupancy is roughly uniform. It is, for an embedding; it is not for a
+gazetteer, where ocean cells are empty and land cells saturate at `k`, and no single average
+describes both. Measured on GeoNames (13.5 × 10⁶ points, `k` = 500, budget 500,000): a wide view
+the picker sent to **depth 10 was answered with 2,076,760 points — 100 MB**, four times the budget,
+and four times is exactly the clamp, so the correction was already pinned at its bound with nothing
+left to give. The owner's trace shows 45 MB and 112 MB responses at the opening views, with rAF
+gaps of p50 84 ms / p95 289 ms behind them.
+
+**The exact number was already on the wire.** Every response's *tiles* frame carries the per-tile
+masked count at the depth it was asked for (contracts §3.2 item 1), so the marks a candidate depth
+costs is `Σ min(k, count)` over the cells the request addresses — the server's own cap clause
+(§7.2), arithmetic rather than a model. `budget.ts` sums it and takes the deepest depth that fits:
+the sum is non-decreasing in depth, since splitting a cell can only spread its members across more
+caps, so the first depth to miss the budget is the last one to fit. Where the counts are held at
+another depth the sum becomes a bound — `min(count, k · 4^Δ)` from above, an ancestor's in-view
+children from below — and where no counts cover the view at all the average model answers exactly
+as it did. The *sub-cells* frame (kind 2) would carry exact counts one or more depths finer, but
+nothing in this client asks for it: `underlay_offset` is never sent, and the rasteriser in
+`viewer/src/underlay.ts` is the only consumer of that frame.
+
+On a synthetic of the measured shape — a solid block of saturated ground filling a quarter of a
+64 × 64-tile view, 10⁸ members, `k` = 500, budget 500,000, `m_target` at its 4× clamp — the average
+model chooses depth 9, predicts 655,360 marks and would be served **2,048,000**; the count model
+chooses depth 7, predicts 128,000 and is served **128,000**. Its prediction at depth 8 is 512,000,
+which is the truth and 2% over the budget, so it declines that depth rather than rounding into it.
+
+The calibration loop is kept and is corrected against the average model's own figure — `DepthChoice`
+carries `averageMarks` beside `predictedMarks` — never against the count-driven one: the loop is a
+model of the average, a ratio between two predictions is not an error in either, and the average
+stays the fallback for the first request of a session and for ground the replica has not covered.
+`maxTiles`, the depth floor and the `holdDepth` hysteresis are unchanged.
+
+**What the counts cover is settled when they are adopted, not when they are read.** A cell absent
+from a response is empty, so counts are only safe over ground actually fetched — reading a hole as
+empty chooses a depth *too deep*, which is the fault this replaced. The driver takes the field from
+each foreground response's own bands, over the fetched rectangle, widened to the frame's whole
+render rectangle where the replica's coverage says every tile of it is held; a view outside that
+falls back to the average until the next response re-anchors it. Anticipatory ring responses are
+not adopted (a bite is one piece of its region by design), but what a ring buys reaches the field
+through the coverage test on the next foreground response.
+
+Instrumentation: `plan.choice` gains `source` (`counts` / `bound` / `average`) and `averageMarks`;
+the demo's *Depth chosen* panel shows *from* beside the drift; and the driver's `request` and
+`arrived` traces carry `predicted`, `from` and — on arrival — `actual`, so a `?trace=1` recording
+answers prediction-against-served for every request of a session without a probe.
+
+Nine tests beside the existing budget ones (`core/test/budget.test.ts`); `check-clients.sh` green,
+core 295 passing of 301. ⊘ **The first request of a session is still the average model's** — its
+counts arrive with the response it chose the size of — so the opening view is unimproved and
+everything after it is count-driven. ⊘ **Not measured on GeoNames itself**: the figures above are
+the defect's measurement and a synthetic of its shape, not a re-run.
+
 ## What each step owes a measurement
 
 The design's §5.10 figures are modelled. Step 2's harness measures, and this file records:

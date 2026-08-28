@@ -121,8 +121,8 @@ function observeLongTasks(lanes: Lanes): void {
 type Lanes = {
   decode: {ms: number; workerMs: number | null; points: number; bytes: number; at: number}[];
   absorb: {split: number[]; store: number[]; remap: number[]; remapPoints: number[]; sliceMaxMs: number};
-  region: Record<string, number> | null;
-  coverage: Record<string, number> | null;
+  region: Record<string, number | string> | null;
+  coverage: Record<string, number | string> | null;
   /** The ten longest main-thread tasks, ms and their start time on `performance.now()`'s clock. */
   longTasks: {ms: number; at: number}[];
 };
@@ -294,6 +294,7 @@ function openSession(preset: Dataset['presets'][number]): void {
             depth: info.plan.choice.depth,
             tiles: info.plan.choice.tiles,
             predictedMarks: info.plan.choice.predictedMarks,
+            source: info.plan.choice.source,
             limitedBy: info.plan.choice.limitedBy,
             bytes: info.bytes
           };

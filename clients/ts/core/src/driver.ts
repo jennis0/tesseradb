@@ -1,5 +1,5 @@
-import {calibrate, type DepthChoice} from './budget.js';
-import {plan, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
+import {calibrate, tileRectOfBbox, type CountCell, type CountField, type DepthChoice} from './budget.js';
+import {plan, worldBbox, type Plan, type PlannerInputs, type Viewport} from './prefetch.js';
 import {rectContains, rectContainsTile, rectIntersection, type TileRect} from './rects.js';
 import type {Replica, ReplicaFrame} from './replica.js';
 import {TesseraError} from './client.js';
@@ -62,7 +62,7 @@ export type DriverEvents = {
   onFrame(verdict: {tier: 'fold'; plan: Plan} | {tier: 'derive'; plan: Plan; frame: ReplicaFrame}): void;
   onStatus?(status: 'loading' | 'shown' | 'empty' | 'refused' | 'retrying', detail?: unknown): void;
   /** The Phase-0 instrumentation stream: request/arrived/covered/ring/ringskip/revalidate. */
-  onTrace?(kind: string, fields: Record<string, number>): void;
+  onTrace?(kind: string, fields: Record<string, number | string>): void;
 };
 
 export type DriverOptions = {
@@ -115,6 +115,22 @@ export class Driver {
   // Scheduler-facing state (client-architecture §3): what is asked of the server is set here.
   private mTarget: number;
   private lastVisibleInView: number | undefined;
+  /**
+   * The per-cell masked counts the last response left, and the rectangle they were read over.
+   *
+   * **The depth choice is arithmetic over these** wherever they cover the view (`budget.ts`), the
+   * average `mTarget` answering only where they do not. They are snapshotted from the response's
+   * own bands — the *tiles* frame's counts arrive as `Band.visible` and the frame already holds
+   * every band over the render rect — rather than read from the store per plan: walking a depth's
+   * bands on every plan is per-frame work that scales with what is held rather than with what is
+   * drawn, which is the shape of fault `bands.ts` has measured twice.
+   *
+   * **Adopted after the response's own reconcile, exactly as the calibration is.** A field taken
+   * mid-response would let the derive that draws the arrival choose a depth nothing is held at, so
+   * the marks it just paid for would be redrawn as stand-ins and immediately re-requested. The
+   * counts a response brings decide the *next* plan, and the depth hold governs when that lands.
+   */
+  private counts: CountField | null = null;
   /** The presented-frame handle — all the driver knows of what is on screen. */
   private presented: {want: TileRect; depth: number; version: number; standInStale: boolean} | null =
     null;
@@ -203,15 +219,21 @@ export class Driver {
     return this.presented;
   }
 
-  private trace(kind: string, fields: Record<string, number>): void {
+  private trace(kind: string, fields: Record<string, number | string>): void {
     this.events.onTrace?.(kind, fields);
   }
 
   private planFor(view: ViewState, velocity?: [number, number]): Plan {
+    const viewport = this.viewportOf(view);
+    // The planner derives this box again from the same viewport. Four multiplications and a clamp,
+    // recomputed here rather than threaded through, because asking the replica what it holds is the
+    // one question the planner is kept free of — see `prefetch.ts`'s doc on the layer split.
     const inputs: PlannerInputs = {
-      viewport: this.viewportOf(view),
+      viewport,
       budget: this.o.budget,
       mTarget: this.mTarget,
+      counts: this.countsFor(worldBbox(viewport, 1)),
+      k: this.meta.kMaxMarks,
       maxTiles: this.meta.maxTilesPerRequest,
       visibleInView: this.lastVisibleInView,
       velocity,
@@ -225,6 +247,38 @@ export class Driver {
 
   private viewportOf(view: ViewState): Viewport {
     return {target: [view.target[0], view.target[1]], zoom: view.zoom, width: this.width, height: this.height};
+  }
+
+  /**
+   * The count field, where it can speak for this view: the view's own tiles, at the field's depth,
+   * inside the region the field is complete for. A pan past that edge falls back to the average
+   * model until the next response re-anchors the field — the same self-repair the calibration has.
+   */
+  private countsFor(bbox: [number, number, number, number]): CountField | undefined {
+    const field = this.counts;
+    if (!field) return undefined;
+    return rectContains(field.covers, tileRectOfBbox(bbox, field.depth)) ? field : undefined;
+  }
+
+  /**
+   * Adopt the counts a response left, over the widest rectangle they are complete for.
+   *
+   * The cells are read after the absorb, so every non-empty tile of the region just fetched carries
+   * a band among them and a tile of it absent from them is empty ground. The wider rectangle the
+   * frame spans can be claimed too, but only where the replica's coverage says every tile of it is
+   * held — which a pan back over ground fetched earlier makes true, and which is how an
+   * anticipatory ring at this depth reaches the field at all. A rectangle claimed without that
+   * check would read its unfetched tiles as empty and choose a depth too deep, which is the fault
+   * the count route exists to remove.
+   *
+   * **The ring's own responses are not adopted.** A bite is one piece of its region by design, so
+   * its rectangle is not complete when it lands, and its shallower bands would replace an exact
+   * field with a bound. What a ring buys reaches the field on the next foreground response, through
+   * the coverage test above.
+   */
+  private adopt(depth: number, cells: CountCell[], fetched: TileRect, spans: TileRect): void {
+    const whole = this.replica.novelIn(spans, depth, this.meta.kMaxMarks) === 0;
+    this.counts = {depth, cells, covers: whole ? spans : fetched};
   }
 
   /** Every view-state change enters here. */
@@ -446,6 +500,7 @@ export class Driver {
     this.velocity = undefined;
     this.lastTarget = null;
     this.anticipationEligible = false;
+    this.counts = null;
   }
 
   private async anticipate(): Promise<void> {
@@ -514,7 +569,13 @@ export class Driver {
     const movedAt = this.movedAt || this.clock.now();
     const startedAt = this.clock.now();
     this.lastRequestAt = startedAt;
-    this.trace('request', {depth: choice.depth, n: choice.tiles, waited: startedAt - movedAt});
+    this.trace('request', {
+      depth: choice.depth,
+      n: choice.tiles,
+      waited: startedAt - movedAt,
+      predicted: Math.round(choice.predictedMarks),
+      from: choice.source
+    });
     this.events.onStatus?.('loading');
 
     try {
@@ -531,31 +592,49 @@ export class Driver {
       );
       if (generation !== this.generation) return;
       const arrivedAt = this.clock.now();
+
+      // The response's own figures, over the rect the prediction was for — the VISIBLE box, not the
+      // wider render rect the frame spans. Review F6: summing over 1.69x the predicted area
+      // inflated `actual` and silenced the calibration loop in the one direction that mattered.
+      //
+      // The cells are read over the whole render rect, because that is what the next plan may ask
+      // about; `countsFor` decides per plan whether they cover the view it is planning for.
+      const cells: CountCell[] = [];
+      let visible = 0;
+      let actual = 0;
+      for (const b of frame.exact) {
+        cells.push({x: b.x, y: b.y, count: Number(b.visible)});
+        if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
+        visible += Number(b.visible);
+        actual += b.served;
+      }
+
+      // Prediction against what was served, in the trace rather than only in the demo's probe. The
+      // overshoot that motivated the count-driven choice was diagnosed from response *sizes* and a
+      // separate probe; a recording that carries both figures per request answers it directly.
       this.trace('arrived', {
         ms: arrivedAt - startedAt,
         n: frame.plan.bytes,
         server: Math.round((frame.response?.timings.serverUs ?? 0) / 1000),
         depth: choice.depth,
         novel: frame.plan.novel,
-        wanted: frame.plan.wanted
+        wanted: frame.plan.wanted,
+        predicted: Math.round(choice.predictedMarks),
+        actual,
+        from: choice.source
       });
 
       this.heldBbox = {bbox: [0, 0, 0, 0], depth: choice.depth};
       this.reconcile('response', view);
 
-      // Calibration over the rect the prediction was for — the VISIBLE box, not the wider render
-      // rect the frame spans. Review F6: summing over 1.69x the predicted area inflated `actual`
-      // and silenced the loop in the one direction that mattered.
-      let visible = 0;
-      let actual = 0;
-      for (const b of frame.exact) {
-        if (!rectContainsTile(planned.visible.rect, b.x, b.y)) continue;
-        visible += Number(b.visible);
-        actual += b.served;
-      }
+      this.adopt(choice.depth, cells, planned.visible.rect, planned.render);
       this.lastVisibleInView = visible;
+      // Corrected against the AVERAGE model's own figure, never against the count-driven one it may
+      // have superseded: the loop is a model of the average, and a ratio between two predictions is
+      // not an error in either. The average stays the fallback for a view no counts describe, so it
+      // has to keep learning while the counts are deciding (`budget.ts`).
       this.mTarget = calibrate(
-        {predictedMarks: choice.predictedMarks, actualMarks: actual, visibleInView: visible},
+        {predictedMarks: choice.averageMarks, actualMarks: actual, visibleInView: visible},
         this.mTarget,
         this.meta.thetaTargetMarks
       );
@@ -572,7 +651,7 @@ export class Driver {
       // failure or supersession must not touch the *new* request's bookkeeping (review finding 7).
       if (planned.foreground.rect !== planned.visible.rect) {
         try {
-          await this.replica.fetchRegion(
+          const margin = await this.replica.fetchRegion(
             planned.foreground.rect,
             choice.depth,
             this.meta.kMaxMarks,
@@ -583,6 +662,14 @@ export class Driver {
           );
           if (generation !== this.generation) return;
           this.reconcile('response', view);
+          // The margin widens the field: it is ground the client now holds at the same depth, and
+          // the next gesture is exactly what it was bought for.
+          this.adopt(
+            choice.depth,
+            margin.exact.map((b) => ({x: b.x, y: b.y, count: Number(b.visible)})),
+            planned.foreground.rect,
+            planned.render
+          );
         } catch {
           // Already drawn; the margin buys the next gesture, not this one.
         }

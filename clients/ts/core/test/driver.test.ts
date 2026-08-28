@@ -39,17 +39,24 @@ function emptyResponse(pin = 'p1'): ViewportResponse {
 }
 
 /**
- * One served point in tile (0,0) with a large visible count. An all-empty response reports
- * `visibleInView = 0`, which reads as saturation and pins every later depth choice at the floor —
- * so any test about the budget's depth arithmetic needs the planner to stay unsaturated.
+ * A block of saturated tiles — prefixes `0 … n-1`, which at any depth is the 4x2 arrangement of
+ * tiles (0..3, 0..1) for `n = 8` — each carrying one served point and a visible count far above the
+ * cap.
+ *
+ * An all-empty response reports `visibleInView = 0` and no counts at all, which reads as saturation
+ * to both depth models and pins every later choice at the floor — so any test about the budget's
+ * depth arithmetic needs a response with ground under it. Saturated tiles, because the count-driven
+ * choice is `Σ min(k, count)`: a capped tile costs `k` wherever it sits, so the arithmetic a test
+ * asserts on follows from the tile *layout* alone.
  */
-function servedResponse(visible: bigint): ViewportResponse {
+function servedResponse(visible: bigint, tiles = 1): ViewportResponse {
+  const prefixes = Array.from({length: tiles}, (_, i) => BigInt(i));
   const result: ViewportResult = {
-    tiles: [{tile: 0n, visible, matched: visible, served: 1n}],
-    ids: new BigUint64Array([1n]),
-    codes: new BigUint64Array([1n]),
-    positions: new Float64Array([1, 1]),
-    world: new Float32Array([0.1, 0.1]),
+    tiles: prefixes.map((tile) => ({tile, visible, matched: visible, served: 1n})),
+    ids: BigUint64Array.from(prefixes.map((p) => p + 1n)),
+    codes: BigUint64Array.from(prefixes.map((p) => p + 1n)),
+    positions: Float64Array.from(prefixes.flatMap(() => [1, 1])),
+    world: Float32Array.from(prefixes.flatMap(() => [0.1, 0.1])),
     scalars: {},
     subCells: null,
     membership: {},
@@ -330,7 +337,7 @@ describe('driver', () => {
     // all mid-session. Two mechanics are pinned together: `setBudget` reaches the next plan,
     // and it suspends the depth hold, which would otherwise pin a one-step depth change to the
     // presented depth and turn the covered path's early return into "the control does nothing".
-    const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n)});
+    const h = harness({prefetch: false, respond: () => servedResponse(10_000_000n, 8)});
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(600); // fetch, calibration, settle → presented at the budget's depth
     // Same view again: covered, and the settle's banked suspension is consumed and re-armed.
@@ -339,8 +346,10 @@ describe('driver', () => {
     expect(h.calls.length).toBeGreaterThan(0);
     expect(h.calls.every((c) => c.zoom === 10)).toBe(true);
 
-    // At this harness's view the default budget chooses depth 10 and 2,000 chooses depth 9 —
-    // one step, exactly what the un-suspended hold would defer.
+    // At this harness's view the default budget chooses depth 10 and 2,000 chooses depth 9 — one
+    // step, exactly what the un-suspended hold would defer. The figures are the counts' own: the
+    // eight capped tiles cost 8 x k = 4,000 marks at depth 10 and fold into two tiles, 1,000 marks,
+    // at depth 9.
     h.driver.setBudget(2_000);
     h.driver.schedule(h.view, 400, 300);
     await h.clock.advance(1_000);
