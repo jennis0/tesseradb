@@ -628,12 +628,19 @@ export class TesseraMap extends TesseraElement {
   // ---- hover and pick -----------------------------------------------------------------------
 
   /**
-   * The drawn shapes a hover is resolved against, held until the served set, the level or the
-   * roster moves. Built with nothing hovered and nothing opened, so it is the served geometry and
-   * not the smoothed line: a smoothed contour is inside the served ring, and an index that shrank
-   * under the pointer would drop the hover it had just taken.
+   * The drawn shapes a hover is resolved against, held until the served set, the fetched hulls,
+   * the level or the roster move. Built with nothing hovered and nothing opened, so it is the
+   * served geometry rather than the drawn curve — the curve is a smoothing and not the shape, and
+   * a hover answered against it would answer about a line the wire never sent.
+   *
+   * **A shape here is the artifact's `box` until its hull arrives.** The viewport is asked for
+   * centroids and boxes, so at rest every candidate is a rectangle and the hover is coarser than
+   * it was: two clusters whose boxes overlap are separated by depth and by the mark under the
+   * pointer (`hoverAt`'s `prefer`), which is the wire's own membership and a better answer than
+   * geometry gave. The hull for whatever the hover lands on is fetched immediately, and the index
+   * is rebuilt around it when it lands.
    */
-  private contoursHeld: {served: object; level: number | null; meta: object | null; shapes: ContourShape[]} | null = null;
+  private contoursHeld: {served: object; hulls: object; level: number | null; meta: object | null; shapes: ContourShape[]} | null = null;
 
   private contours(): ContourShape[] {
     const s = this.resolvedStore;
@@ -642,9 +649,9 @@ export class TesseraMap extends TesseraElement {
     const meta = s?.get('meta') ?? null;
     const level = this.clusterLevel ?? null;
     const held = this.contoursHeld;
-    if (held && held.served === a.served && held.level === level && held.meta === meta) return held.shapes;
+    if (held && held.served === a.served && held.hulls === a.hulls && held.level === level && held.meta === meta) return held.shapes;
     const shapes = hoverShapes(outlineData(a, {opened: null, hovered: null, level: level ?? undefined, scheme: this.scheme(), meta}));
-    this.contoursHeld = {served: a.served, level, meta, shapes};
+    this.contoursHeld = {served: a.served, hulls: a.hulls, level, meta, shapes};
     return shapes;
   }
 
@@ -676,6 +683,10 @@ export class TesseraMap extends TesseraElement {
     this.hoveredArtifact = world
       ? hoverAt(this.contours(), world, this.hoveredArtifact, TesseraMap.HOVER_MARGIN_PX / 2 ** this.viewState.zoom, own)
       : null;
+    // **The shape is fetched where it is drawn.** The viewport carries no hull; this asks for the
+    // one the map is about to draw. Idempotent, so calling it on every pointer move costs one
+    // request per artifact per principal and nothing thereafter.
+    if (this.hoveredArtifact !== null) this.resolvedStore?.needHull(this.hoveredArtifact);
     if (picked.kind !== 'mark') {
       if (this.hover) this.hover = null;
       return;
@@ -706,6 +717,9 @@ export class TesseraMap extends TesseraElement {
     switch (picked.kind) {
       case 'artifact':
         this.lastPick = null;
+        // The opened artifact draws its shape too, and the card's own request does not carry it
+        // into the projection the map reads.
+        s?.needHull(picked.id);
         void s?.openArtifact(picked.id);
         return;
       case 'mark':

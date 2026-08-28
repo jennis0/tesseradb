@@ -84,7 +84,8 @@ fn what_a_triangulation_costs_against_the_dig() {
             let g = grid_components(&p, alpha_sq, r);
             let n = g.iter().copied().max().map(|m| m + 1).unwrap_or(0);
             sweep[k] = n;
-            sweep_same[k] = usize::from(n == component_count && refines(&labels, &g) && refines(&g, &labels));
+            sweep_same[k] =
+                usize::from(n == component_count && refines(&labels, &g) && refines(&g, &labels));
         }
 
         // Is a member ever inside a ring that is not its own? Measured, not assumed: nothing in the
@@ -163,7 +164,12 @@ fn what_a_triangulation_costs_against_the_dig() {
 
     let sum = |f: fn(&Row) -> f64| rows.iter().map(f).sum::<f64>();
     let count = |f: fn(&Row) -> usize| rows.iter().map(f).sum::<usize>();
-    println!("\n{} artifacts, {} … {} distinct member positions", rows.len(), rows[0].members, rows[rows.len() - 1].members);
+    println!(
+        "\n{} artifacts, {} … {} distinct member positions",
+        rows.len(),
+        rows[0].members,
+        rows[rows.len() - 1].members
+    );
     println!(
         "whole layer: gather {:.0} ms, dig {:.0} ms | sort {:.0} ms, delaunay {:.0} ms, components {:.0} ms, peel {:.0} ms (triangulated route is {:.2}× the dig)",
         sum(|r| r.gather_ms),
@@ -178,6 +184,63 @@ fn what_a_triangulation_costs_against_the_dig() {
     println!(
         "largest artifact: {} members — gather {:.0} ms, dig {:.0} ms | delaunay {:.0} ms, components {:.0} ms, peel {:.0} ms",
         big.members, big.gather_ms, big.dig_ms, big.tri_ms, big.comp_ms, big.peel_ms
+    );
+
+    // **The one-shape-per-request view, which is the question ruling A is now asked at.** With
+    // `computed` on the wire the server derives a hull for the artifact the client draws and for
+    // no other, so the layer sums above are the wrong denominator: what a viewer waits for is one
+    // artifact's shape, and what rides the wire is one artifact's vertices. Reported as
+    // percentiles over the 197 artifacts rather than as a total.
+    let pct = |mut v: Vec<f64>, p: f64| {
+        v.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+        v[((v.len() as f64 * p) as usize).min(v.len() - 1)]
+    };
+    let dig_one: Vec<f64> = rows.iter().map(|r| r.gather_ms + r.dig_ms).collect();
+    let tri_one: Vec<f64> = rows
+        .iter()
+        .map(|r| r.gather_ms + r.sort_ms + r.tri_ms + r.comp_ms + r.peel_ms)
+        .collect();
+    println!(
+        "\none shape, gather included — the dig: p50 {:.1} ms, p90 {:.1} ms, worst {:.0} ms",
+        pct(dig_one.clone(), 0.5),
+        pct(dig_one.clone(), 0.9),
+        pct(dig_one.clone(), 1.0),
+    );
+    println!(
+        "one shape, gather included — triangulated: p50 {:.1} ms, p90 {:.1} ms, worst {:.0} ms",
+        pct(tri_one.clone(), 0.5),
+        pct(tri_one.clone(), 0.9),
+        pct(tri_one.clone(), 1.0),
+    );
+    let ratio: Vec<f64> = rows
+        .iter()
+        .map(|r| (r.sort_ms + r.tri_ms + r.comp_ms + r.peel_ms) / r.dig_ms.max(1e-9))
+        .collect();
+    println!(
+        "triangulated / dig, per artifact: p50 {:.1}×, p90 {:.1}×, worst {:.1}×",
+        pct(ratio.clone(), 0.5),
+        pct(ratio.clone(), 0.9),
+        pct(ratio.clone(), 1.0),
+    );
+    let dig_bytes: Vec<f64> = rows
+        .iter()
+        .map(|r| (r.dig_vertices * 8 + r.dig_rings * 4) as f64)
+        .collect();
+    let peel_bytes: Vec<f64> = rows
+        .iter()
+        .map(|r| (r.vertices * 8 + r.rings * 4) as f64)
+        .collect();
+    println!(
+        "one shape on the wire — the dig: p50 {:.0} B, worst {:.0} B; split-then-peel: p50 {:.0} B, worst {:.0} B",
+        pct(dig_bytes.clone(), 0.5),
+        pct(dig_bytes, 1.0),
+        pct(peel_bytes.clone(), 0.5),
+        pct(peel_bytes, 1.0),
+    );
+    println!(
+        "the delaunay is {:.0}% of the triangulated route's own time over the layer",
+        100.0 * sum(|r| r.tri_ms)
+            / (sum(|r| r.sort_ms) + sum(|r| r.tri_ms) + sum(|r| r.comp_ms) + sum(|r| r.peel_ms)),
     );
     println!(
         "wire: dig {} vertices ({} B), split-then-peel {} vertices in {} rings ({} B at 8 per vertex + 4 per ring)",
@@ -232,7 +295,10 @@ same partition on {} of {} artifacts, a sound coarsening on {} more, unsound on 
         "members inside a ring that is not their own: {}",
         count(|r| r.foreign)
     );
-    let mut ratios: Vec<f64> = rows.iter().map(|r| r.peel_area / r.wrap_area.max(1.0)).collect();
+    let mut ratios: Vec<f64> = rows
+        .iter()
+        .map(|r| r.peel_area / r.wrap_area.max(1.0))
+        .collect();
     ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
     println!(
         "peel area / wrap: mean {:.3}, median {:.3}, min {:.3}",
@@ -377,10 +443,11 @@ fn refines(coarse: &[usize], fine: &[usize]) -> bool {
 /// members do not have.
 fn grid_components(p: &[[u32; 2]], alpha_sq: i128, r: u64) -> Vec<usize> {
     let side = ((alpha_sq as f64).sqrt() / r as f64).ceil().max(1.0) as u64;
-    let (x0, y0) = p.iter().fold((u32::MAX, u32::MAX), |(x, y), q| (x.min(q[0]), y.min(q[1])));
-    let cell = |q: &[u32; 2]| -> (u64, u64) {
-        ((q[0] - x0) as u64 / side, (q[1] - y0) as u64 / side)
-    };
+    let (x0, y0) = p
+        .iter()
+        .fold((u32::MAX, u32::MAX), |(x, y), q| (x.min(q[0]), y.min(q[1])));
+    let cell =
+        |q: &[u32; 2]| -> (u64, u64) { ((q[0] - x0) as u64 / side, (q[1] - y0) as u64 / side) };
     let mut first: std::collections::HashMap<(u64, u64), usize> = std::collections::HashMap::new();
     for (i, q) in p.iter().enumerate() {
         first.entry(cell(q)).or_insert(i);
@@ -540,7 +607,10 @@ fn peel(p: &[[u32; 2]], tri: &Triangulation, alpha_sq: i128) -> Vec<[u32; 2]> {
         if v == start {
             break;
         }
-        assert!(ring.len() <= p.len(), "the peeled boundary revisits a vertex");
+        assert!(
+            ring.len() <= p.len(),
+            "the peeled boundary revisits a vertex"
+        );
     }
     // The engine's convention: counter-clockwise, starting at the lowest vertex, so a shape is a
     // vertex list and not a vertex list up to rotation.

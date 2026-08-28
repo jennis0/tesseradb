@@ -265,6 +265,13 @@ export class ArtifactChannel {
           // the points on screen are the point path's business.
           k: 0,
           layers,
+          // **The centroid and the box, and not the hull.** A hull is derived per artifact per
+          // request over the members this principal can see, and the map draws one — the hovered
+          // or the opened artifact's — while a settled view carries a couple of hundred. Measured
+          // on the 2.42M-member corpus at 2.03 s for the response against 0.17 s for this one, and
+          // 263 KB against 26 KB. The one shape that draws is fetched by identifier when it is
+          // needed (`store.ts`'s `needHull`).
+          computed: ['centroid', 'box'],
           // A budgeted cut for the view (design §6): the coarse ancestors at the overview, refined
           // as the zoom deepens, rather than every artifact of a nested or tiered layer at once.
           artifactBudget: artifactBudgetFor(view.zoom)

@@ -21,7 +21,6 @@ export {resolvePick, artifactOfMark, type Picked, type PickInfo} from './pick.js
 export {materialiseStandIn, type StandInBuffers} from './assemble.js';
 export {markStyle, deckOpacity, ANTIALIAS_ABOVE_PX, type MarkStyle} from './marks-style.js';
 export {
-  cutCorners,
   distanceToRing,
   hoverAt,
   pointInRing,

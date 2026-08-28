@@ -59,6 +59,7 @@ use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
 use tessera_store::{tile_ranges_all, tile_ranges_within};
+use tessera_types::layer::ComputedProperty;
 use tessera_types::{EntityId, GenerationStamp, RowId, TesseraId, API_VERSION};
 
 use crate::cache::{CacheWaitEnded, Peek, RowProjectionKey, SessionGeometry};
@@ -227,7 +228,8 @@ impl PointColumns {
             bytes += col.wire_bytes_estimate();
         }
         // A u64 and a validity bit per point per membership column.
-        bytes += self.membership.len() * (self.tessera_ids.len() * 8 + self.tessera_ids.len().div_ceil(8));
+        bytes += self.membership.len()
+            * (self.tessera_ids.len() * 8 + self.tessera_ids.len().div_ceil(8));
         bytes
     }
 }
@@ -430,6 +432,40 @@ pub enum LevelSelection<'a> {
     Named(&'a [u32]),
 }
 
+/// Which of a layer's **declared** computed properties a viewport answers for.
+///
+/// **The property this is built to preserve: a request may narrow the declaration and can never
+/// widen it.** Every form below is intersected with what the layer declared, so asking for `hull`
+/// on a layer that declares none yields none, and asking for less is never a route to more. The
+/// closure rule is untouched — whatever is computed is still a function of `membership ∩ M_auth`
+/// and nothing else (`annotations.md` §4.2) — so this is a **cost** control of exactly the kind the
+/// declaration itself is, moved one step closer to the request that pays for it.
+///
+/// **Why the request needs a say at all.** The declaration is per layer and the drawing is per
+/// artifact: a client draws a hull for the one artifact under the pointer and centroids for the
+/// other 196, and with only a layer-level declaration it had to be served 197 hulls to draw one.
+/// Measured on `clusters/hdbscan` over the 2.42M corpus, that was 94% of a `k = 0` artifacts
+/// request (`artifact-shapes.md` §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputedSelection<'a> {
+    /// Everything the layer declared — the absent request field, and what every client received
+    /// before there was a field.
+    Declared,
+    /// Exactly these, intersected with the declaration. **Empty is none**: a caller who names no
+    /// property has asked for counts and no geometry, which is a real request and not a mistake.
+    Named(&'a [ComputedProperty]),
+}
+
+impl ComputedSelection<'_> {
+    /// Whether a declared property is answered for.
+    pub(crate) fn selects(&self, property: ComputedProperty) -> bool {
+        match self {
+            ComputedSelection::Declared => true,
+            ComputedSelection::Named(names) => names.contains(&property),
+        }
+    }
+}
+
 /// Whether one level of one layer is answered for.
 ///
 /// Split out of the serving loop so the rule is readable on its own and a test can state it
@@ -592,6 +628,12 @@ pub struct ViewportRequest<'a> {
     /// cleared their own test. It sits beside `artifact_budget` for that reason and carries the same
     /// warning: §8.4's maximum depth was a disclosure control and this is not one.
     pub levels: LevelSelection<'a>,
+    /// Which of each layer's declared computed properties to answer for. See
+    /// [`ComputedSelection`].
+    ///
+    /// [`ViewportRequest::new`] starts at [`ComputedSelection::Declared`], which is what the wire's
+    /// absent field means and what every response carried before the field existed.
+    pub computed: ComputedSelection<'a>,
 }
 
 impl<'a> ViewportRequest<'a> {
@@ -610,6 +652,7 @@ impl<'a> ViewportRequest<'a> {
             layers: LayerSelection::All,
             artifact_budget: None,
             levels: LevelSelection::Declared,
+            computed: ComputedSelection::Declared,
         }
     }
 
@@ -622,6 +665,13 @@ impl<'a> ViewportRequest<'a> {
     /// See [`ViewportRequest::artifact_budget`].
     pub fn artifact_budget(mut self, budget: Option<u32>) -> Self {
         self.artifact_budget = budget;
+        self
+    }
+
+    /// Answer for these computed properties of every layer that declares them. See
+    /// [`ComputedSelection`].
+    pub fn computed(mut self, computed: ComputedSelection<'a>) -> Self {
+        self.computed = computed;
         self
     }
 
@@ -1594,6 +1644,7 @@ impl Engine {
             layers: req_layers,
             artifact_budget,
             levels: req_levels,
+            computed: req_computed,
         } = req;
         // Load the generation pointer exactly once, at request start (see `GenerationHandle`'s
         // doc at its definition) — every subsequent read below (pin check, row-projection cache,
@@ -2154,6 +2205,7 @@ impl Engine {
             req_layers,
             artifact_budget,
             req_levels,
+            req_computed,
             zoom,
             mask_identity,
         )?;
@@ -2169,7 +2221,10 @@ impl Engine {
         let membership = if artifacts.is_empty() {
             None
         } else {
-            let gathered: Vec<u32> = swept.iter().flat_map(|ts| ts.rows.iter().copied()).collect();
+            let gathered: Vec<u32> = swept
+                .iter()
+                .flat_map(|ts| ts.rows.iter().copied())
+                .collect();
             let resolved = crate::membership_column::Resolved::new(gathered, &served_layers);
             (!resolved.is_empty()).then_some(resolved)
         };
@@ -3790,6 +3845,9 @@ impl Engine {
         requested: LayerSelection<'_>,
         artifact_budget: Option<u32>,
         levels: LevelSelection<'_>,
+        // Which declared properties this request pays for — a narrowing of the declaration and
+        // never a widening of it (`ComputedSelection`).
+        computed: ComputedSelection<'_>,
         // The request's tile depth, which `LevelSelection::Declared` joins against each layer's
         // declared per-level zoom ranges. The two are the same 0–16 coordinate.
         zoom: u8,
@@ -3910,12 +3968,18 @@ impl Engine {
             // Parsed once per layer. A name outside the vocabulary cannot reach here — the
             // declaration was refused at registration — so an unparseable one is dropped rather
             // than erroring the whole response.
+            //
+            // **The request narrows it, and only ever narrows it.** The intersection is taken here
+            // so that a property the request did not ask for is never computed at all — the point
+            // of the field is the work it does not do, and filtering the *result* would keep the
+            // hull's cost while dropping its bytes.
             let declared_derived: Vec<crate::derived::ComputedProperty> = layer
                 .declaration
                 .content
                 .computed
                 .iter()
                 .filter_map(|name| crate::derived::ComputedProperty::parse(name))
+                .filter(|property| computed.selects(*property))
                 .collect();
 
             // **The predicate's inputs, resolved once per layer rather than per level**: the

@@ -1,13 +1,17 @@
 import {describe, expect, it} from 'vitest';
-import {cutCorners, distanceToRing, hoverAt, pointInRing, ringWithin, shapeBbox, signedArea2, smoothRing, type ContourShape, type Ring} from '../src/contours.js';
+import {distanceToRing, hoverAt, pointInRing, ringWithin, shapeBbox, signedArea2, smoothRing, type ContourShape, type Ring} from '../src/contours.js';
 
 /**
- * The smoothing, and the containment it is built to keep.
+ * The smoothing: a periodic cubic B-spline through the served ring, the construction DataMapPlot
+ * draws its contours with.
  *
- * **Containment is the test, not area.** The corner cutting that was deleted from `layer.ts` took
- * area off at convex corners and put it on at reflex ones; its own note records that the total
- * *fell* while the boundary crossed into ground with no visible member in it. Every claim below
- * is about where the boundary is.
+ * **Containment is no longer the test, and a bound is.** The corner cutting this replaces refused
+ * to round a reflex corner, because the chord across a notch lies outside the polygon; the result
+ * was a shape whose convex arcs were smooth and whose concavities were as angular as the wire.
+ * Since the owner's ruling of 2026-08-28 a shape is a summary of where a cluster is rather than a
+ * per-point assertion, so a curve that passes a little outside its own ring is admissible and a
+ * curve that claims ground the members do not occupy is not. What the tests below pin is the
+ * **bound** on how far outside it goes, and that it goes nowhere near the far side of a notch.
  */
 
 /** A ring's unsigned area — used only to say that a smoothed ring is smaller, never that it is right. */
@@ -56,31 +60,52 @@ function circle(n = 24, r = 1): Ring {
   return Array.from({length: n}, (_, i): [number, number] => [r * Math.cos((2 * Math.PI * i) / n), r * Math.sin((2 * Math.PI * i) / n)]);
 }
 
+/** The largest distance from a point of `inner` to the closed region `outer` — 0 where it is inside. */
+function excursion(inner: readonly [number, number][], outer: readonly [number, number][]): number {
+  let worst = 0;
+  for (const p of inner) {
+    if (pointInRing(p, outer)) continue;
+    worst = Math.max(worst, distanceToRing(p, outer));
+  }
+  return worst;
+}
+
+/** The longest edge of a ring — the scale the excursion bound is stated in. */
+function longestEdge(ring: readonly [number, number][]): number {
+  let m = 0;
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i]!;
+    const b = ring[(i + 1) % ring.length]!;
+    m = Math.max(m, Math.hypot(b[0] - a[0], b[1] - a[1]));
+  }
+  return m;
+}
+
 describe('smoothRing', () => {
-  it('stays inside the source ring on the notched square that caught the deleted cutting', () => {
+  it('leaves the source ring by at most a third of its longest edge, on every shape', () => {
+    // The bound the drawing rests on: at a knot the curve sits (Pᵢ₋₁ + 4Pᵢ + Pᵢ₊₁)/6, a sixth of
+    // the second difference from the vertex, and every point of a span is in the convex hull of
+    // its four control points. A third of the longest served edge covers both.
+    for (const source of [NOTCHED, star(), star(7, 1, 0.5), circle(20), circle(8)]) {
+      const smoothed = smoothRing(source);
+      expect(excursion(smoothed, source)).toBeLessThanOrEqual(longestEdge(source) / 3);
+    }
+  });
+
+  it('rounds a reflex corner rather than refusing it — the whole reason for the change', () => {
     const smoothed = smoothRing(NOTCHED);
-    expect(ringWithin(smoothed, NOTCHED)).toBe(true);
-    // The notch is the quadrant x < 0.5, y > 0.5, and nothing drawn may reach into it. (0.47, 0.55)
-    // is where three unguarded Chaikin rounds put the boundary — the failure this replaces.
-    for (const p of [[0.47, 0.55], [0.4, 0.6], [0.25, 0.75], [0.49, 0.51]] as [number, number][]) {
+    // The notch's corner is at (0.5, 0.5). The cutting this replaces kept it exactly, so a right
+    // angle survived every round; the spline passes near it and turns through it gently.
+    expect(smoothed.some((p) => Math.abs(p[0] - 0.5) < 1e-12 && Math.abs(p[1] - 0.5) < 1e-12)).toBe(false);
+    expect(Math.max(...turns(smoothed))).toBeLessThan(60);
+    // And it is still a notch: the far side of it is nowhere near the drawn curve.
+    for (const p of [[0.1, 0.9], [0.25, 0.75], [0.05, 0.95]] as [number, number][]) {
       expect(pointInRing(p, smoothed)).toBe(false);
     }
     // The three quadrants that are the shape are still the shape.
     for (const p of [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75]] as [number, number][]) {
       expect(pointInRing(p, smoothed)).toBe(true);
     }
-    // And the reflex corner is still where the wire put it: a notch the members leave is not
-    // rounded away, in either direction.
-    expect(smoothed.some((p) => Math.abs(p[0] - 0.5) < 1e-12 && Math.abs(p[1] - 0.5) < 1e-12)).toBe(true);
-  });
-
-  it('stays inside a star’s five reflex corners, where cutting every corner would not', () => {
-    const source = star();
-    const smoothed = smoothRing(source);
-    expect(ringWithin(smoothed, source)).toBe(true);
-    // What the unguarded cut does, for contrast: cutting every corner regardless leaves the ring.
-    const naive = chaikin(source, 3);
-    expect(ringWithin(naive, source)).toBe(false);
   });
 
   it('is visibly smoother where the shape is convex — the corners open out', () => {
@@ -88,63 +113,60 @@ describe('smoothRing', () => {
     const smoothed = smoothRing(source);
     const before = Math.max(...turns(source));
     const after = Math.max(...turns(smoothed));
-    // A 16-gon turns 22.5° a corner; three rounds put every turn under a fifth of that.
+    // A 16-gon turns 22.5° a corner. The total turning of a closed curve is 360° whatever is
+    // drawn, so what smoothing does is spread it: four samples a span divide each corner roughly
+    // four ways, and the sharpest turn falls to about a quarter.
     expect(before).toBeGreaterThan(20);
-    expect(after).toBeLessThan(before / 5);
+    expect(after).toBeLessThan(before / 3.5);
+    // Convex all through, so the curve is strictly inside — a B-spline is in the convex hull of
+    // its control points, and here that is the source ring.
     expect(ringWithin(smoothed, source)).toBe(true);
-    // Convex all through, so nothing is kept: two new vertices a corner, three rounds.
-    expect(smoothed.length).toBe(source.length * 8);
   });
 
-  it('leaves a reflex corner sharp and smooths the convex ones around it', () => {
-    const smoothed = smoothRing(NOTCHED);
-    const sharp = turns(smoothed).filter((t) => t > 45);
-    // One corner is still a right angle — the reflex one — and every other turn is gentle.
-    expect(sharp.length).toBe(1);
-    expect(sharp[0]).toBeCloseTo(90, 6);
-  });
-
-  it('never grows: a smoothed ring’s area is at most the source’s', () => {
-    for (const source of [NOTCHED, star(), star(7, 1, 0.5), circle(20)]) {
-      const smoothed = smoothRing(source);
-      expect(area(smoothed)).toBeLessThanOrEqual(area(source) + 1e-12);
-      // Area is not the check, though — containment is. Both, on every shape.
-      expect(ringWithin(smoothed, source)).toBe(true);
+  it('costs four samples a vertex and nothing per served artifact', () => {
+    for (const source of [NOTCHED, star(), circle(20)]) {
+      expect(smoothRing(source).length).toBe(source.length * 4);
     }
+    // The sample density is the caller's, so a shape read at a deep zoom can ask for more.
+    expect(smoothRing(circle(20), 8).length).toBe(160);
   });
 
-  it('hands back a ring with no corner worth cutting', () => {
+  it('hands back a ring with no span to fit', () => {
     const triangle: Ring = [[0, 0], [1, 0], [0, 1]];
     expect(smoothRing(triangle)).toEqual(triangle);
     expect(smoothRing([[0, 0], [1, 1]] as Ring)).toEqual([[0, 0], [1, 1]]);
   });
 
-  it('one round keeps every vertex on the source boundary', () => {
-    // The property the containment argument rests on: a cut point is on an edge, so no vertex the
-    // construction produces is outside the ring, whatever the corner.
-    for (const source of [NOTCHED, star()]) {
-      for (const p of cutCorners(source)) {
-        expect(distanceToRing(p, source)).toBeLessThan(1e-12);
-      }
+  it('smooths rather than interpolates, and the knot values say where the curve is', () => {
+    // The property that separates this from a corner cut: the curve does not pass through the
+    // vertices. At the knot before vertex i it is exactly (Pᵢ₋₁ + 4Pᵢ + Pᵢ₊₁)/6.
+    const source = circle(8);
+    const smoothed = smoothRing(source, 1);
+    for (let i = 0; i < source.length; i++) {
+      const p0 = source[(i + 7) % 8]!;
+      const p1 = source[i]!;
+      const p2 = source[(i + 1) % 8]!;
+      expect(smoothed[i]![0]).toBeCloseTo((p0[0] + 4 * p1[0] + p2[0]) / 6, 12);
+      expect(smoothed[i]![1]).toBeCloseTo((p0[1] + 4 * p1[1] + p2[1]) / 6, 12);
     }
   });
 
   it('costs what it is said to cost, on the largest hull the demo corpus serves', () => {
     // 757 vertices across 10 rings is the largest shape on `clusters/hdbscan` at the overview
     // (artifact-shapes §9). One shape's worth of smoothing, timed.
-    const rings = Array.from({length: 10}, (_, i) => circle(14, 1 + i / 10));
+    const rings = Array.from({length: 10}, (_, i) => circle(76, 1 + i / 10));
     const started = performance.now();
     let vertices = 0;
     for (const ring of rings) vertices += smoothRing(ring).length;
     const ms = performance.now() - started;
-    expect(vertices).toBe(140 * 8);
+    expect(vertices).toBe(760 * 4);
     // Generous — the point is the order of magnitude, and that it is per drawn shape, not per
-    // served one. Measured at about 1 ms for the ten rings on this machine.
+    // served one.
     expect(ms).toBeLessThan(50);
   });
 });
 
-/** Chaikin's corner cutting with no containment guard — the construction that was deleted. */
+/** Chaikin's corner cutting — kept as the foil {@link ringWithin} is demonstrated against. */
 function chaikin(ring: readonly [number, number][], rounds: number): Ring {
   let current: Ring = ring.map((p) => [p[0], p[1]] as [number, number]);
   for (let r = 0; r < rounds; r++) {
@@ -169,7 +191,6 @@ describe('ringWithin', () => {
 
   it('accepts a ring that sits exactly on the source’s boundary', () => {
     expect(ringWithin(NOTCHED, NOTCHED)).toBe(true);
-    expect(ringWithin(cutCorners(NOTCHED), NOTCHED)).toBe(true);
   });
 });
 

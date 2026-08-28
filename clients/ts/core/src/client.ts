@@ -211,6 +211,9 @@ export class TesseraClient {
     // never thinks about levels gets the one a map would draw. Sent only when the caller named
     // something, so "follow the declaration" and "give me these" stay distinct request shapes.
     if (req.levels !== undefined) body.levels = req.levels;
+    // **Absent is the layer's declaration and an empty array is *none***, so this is sent only
+    // when the caller named something — an omitted field and `[]` mean opposite things here.
+    if (req.computed !== undefined) body.computed = req.computed;
     // The stamp travels as the parsed object the server sent, under the wire name `pin`. Kept as
     // an opaque string on this side so a client never has to know its shape.
     if (req.stamp) body.pin = JSON.parse(req.stamp);
@@ -371,11 +374,19 @@ export class TesseraClient {
       layer: string;
       key?: string;
       masked_count: number;
+      centroid?: [number, number];
+      box?: [number, number, number, number];
+      hull?: [number, number][][];
     };
     return {
       layer: served.layer,
       // Absent rather than null when the publisher supplied none.
       key: served.key ?? null,
+      // Absent where the layer declares the property, or rather does not: geometry is never
+      // withheld from an artifact that is served at all, so an absence is a fact about the layer.
+      centroid: served.centroid ?? null,
+      box: served.box ?? null,
+      hull: served.hull ?? null,
       // JSON carries it as a number, and a count is not an identifier: it is bounded by the
       // corpus, so nothing here can reach 2^53. Widened to `bigint` anyway, because it is the same
       // quantity the wire delivers as `u64` and a panel must be able to print the two the same way.

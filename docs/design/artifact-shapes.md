@@ -1,11 +1,12 @@
 # The shape of a served artifact
 
-**Status:** Normative — 2026-08-28 (r3). It governs what the `hull` vocabulary word means, and
+**Status:** Normative — 2026-08-28 (r4). It governs what the `hull` vocabulary word means, and
 `annotations.md` §4.2 and `contracts.md` §3.2 defer to it on the shape's geometry. The rulings that
 closed it are in Appendix R.
 
 **Owns:** which geometric family the derived `hull` belongs to, how its parameter is fixed, how its
-members are grouped into rings, whether it carries holes, and what a client must do with the answer.
+members are grouped into rings, whether it carries holes, **which requests pay for it** (§8 C), and
+what a client must do with the answer.
 It does not own the declaration syntax (`annotations.md` §4.2), the wire columns (`contracts.md`
 §3.2) or the closure rule that makes any of it safe (**I2**, restated at the artifact).
 
@@ -28,7 +29,8 @@ column compares implementations rather than algorithms. Both read `notebook-2m4`
 
 ## 1. What a viewer receives
 
-For each served artifact whose layer declares `hull`, over `membership ∩ M_auth` and nothing else:
+For each served artifact whose layer declares `hull` **and whose request asked for it** (§8 C),
+over `membership ∩ M_auth` and nothing else:
 
 - The visible members are partitioned into **α-groups** (§5).
 - Each group is drawn as **one simple ring**, counter-clockwise from its lowest vertex, dug inward
@@ -212,12 +214,38 @@ The triangulated route is **3.2×** the dig over the layer, and a single artifac
 crosses a second on its own. **Half of ruling C's margin was the old budget**, and this is where
 that has to be said plainly: at 64 the dig cost 0.82 s and the ratio was 7.6–8.1×, so raising the
 budget to 2,048 (§8 B) bought fidelity partly out of the same time the triangulation was refused
-for. What the χ-shape now buys has changed shape too — it sends **67% fewer hull bytes** than the
-dig does, and its area is no longer the tighter of the two: 0.789 of the wrap against the dig's
-0.771. The refusal stands on the 3.2× and on the triangulation being a dependency and a second per
-artifact on its own, and it was not re-litigated here; if the workspace ever carries a triangulation
-for another reason, the peel itself is cheap and this is the first thing to revisit, and the wire
-figure is now the argument for doing so.
+for. What the χ-shape buys over a whole layer has changed shape too — it sends **67% fewer hull
+bytes** than the dig does, and its area is no longer the tighter of the two: 0.789 of the wrap
+against the dig's 0.771.
+
+**Re-ruled 2026-08-28 at the scale that now matters, and the answer is the same one for a different
+reason.** A response derives a hull for the artifact the client draws and for no other (§8 C), so a
+layer sum is the wrong denominator: what a viewer waits for is *one* artifact's shape, and what
+rides the wire is one artifact's vertices. Measured per artifact over the same 197, gather included,
+in `hull_triangulation.rs`:
+
+| | p50 | p90 | worst |
+|---|---|---|---|
+| the dig | 1.7 ms | 19.9 ms | **259 ms** |
+| triangulated (sort + Delaunay + components + χ-peel) | 4.9 ms | 35.3 ms | **1,859 ms** |
+| ratio, per artifact | 3.7× | 6.2× | 11.2× |
+| one shape on the wire — the dig | 748 B | — | 6,060 B |
+| one shape on the wire — the χ-peel | 300 B | — | 1,668 B |
+
+**The byte argument is gone and the latency argument has arrived.** 67% of a layer's hull bytes was
+131 KB; 67% of one shape's is about 450 bytes, which is nothing beside the 26 KB response it rides
+in. Against that, the shape a viewer waits for went from a number nobody could feel to the whole
+cost of a hover — and the root of the collapsed HDBSCAN tree, which holds the entire corpus and is
+hovered like any other artifact, is 0.21 s with the dig against 2.11 s with a triangulation. Two
+seconds is not a hover.
+
+**The α-complex and the χ-shape are one decision here, not two.** The α-complex is what the
+containment ruling re-admits, and it is the tighter of the two — fill 1.000 by construction against
+the χ-shape's 0.992 — but both begin with the same Delaunay triangulation, which is **76% of the
+triangulated route's own time** over the layer. Choosing between them moves nothing in the table
+above, so nothing about the re-admission changes the comparison with the dig. **Ruling A stands: the
+dig keeps the job**, now on interaction latency rather than on layer-wide cost. Revisit it if the
+workspace acquires a triangulation for another reason, or if a way is found to bound the root's.
 
 ## 5. Grouping the members
 
@@ -348,16 +376,57 @@ the cap could start deciding shapes again on a layer nobody has measured. Past 2
 bought on any measured layer, and the worst case a pathological membership can put on the wire —
 16 KB of `hull_x`/`hull_y` for one artifact — is what the guard is for.
 
-**What it costs on the wire, in a response.** A real `k = 0` artifacts request over the whole extent
-for `clusters/hdbscan`, as the principal holding this bundle's top 176 terms, goes from **130,471 to
-262,055 bytes**, of which `hull_x` and `hull_y` are **103,288 → 230,984** — 79% of that response
-before, 88% after. The same request at `k = 5,000` over a zoom-4 viewport, which also carries tiles
+**What a request costs, before and after `computed`** (§8 C, 2026-08-28). A `k = 0` artifacts
+request over the whole extent, as the principal holding this bundle's 176 terms, against the same
+server on one machine — the median of four runs, nothing cached anywhere:
+
+| request | before | after (`computed: ["centroid", "box"]`) |
+|---|---|---|
+| `clusters/hdbscan`, 197 artifacts | **2,032 ms**, 263,079 B | **164 ms**, 26,406 B |
+| `clusters/toponymy`, `levels: "all"`, 797 artifacts | **803 ms**, 534,630 B | **81 ms**, 91,237 B |
+| `taxonomy/arxiv`, 209 artifacts — declares no hull | 74 ms, 26,916 B | 74 ms, 26,916 B |
+
+The taxonomy row is the control and it does not move, which is the point: it was already the cost
+of an artifacts request without a hull, and the two clustering rows now sit beside it. **The hull
+was 92% of the first request's time and 90% of its bytes.**
+
+**What a hover costs, end to end**, on the same server: the one `/v1/artifacts/{id}` call the client
+makes when the pointer lands on a shape (§9). **2–5 ms** for artifacts of 6,000 to 34,000 members,
+**188 ms** for the 2.42M-member root and **265 ms** for the 1.84M-member artifact below it, JSON
+bodies of 0.7–15 KB. So the whole layer's shapes cost less than one of them did, and the two that
+are slow are slow only when they are pointed at.
+
+**What it cost on the wire before any of this**, kept because §8 B's ruling rests on it. The same
+`clusters/hdbscan` request went from **130,471 to 262,055 bytes** when the budget moved 64 → 2,048,
+of which `hull_x` and `hull_y` are **103,288 → 230,984** — 79% of that response before, 88% after. The same request at `k = 5,000` over a zoom-4 viewport, which also carries tiles
 and 5,000 points, goes from **287,223 to 418,807 bytes**: the layer's shapes are 46% on top of a
 response that was 124 KB of points and tiles without them. The derivation cost is the other half of
 the price and is in §7 — 0.91 → 1.91 s for all 197 artifacts at full membership. The largest
 single artifact barely moves — 0.16 → 0.17 s — because it never exhausted 64 in the first place:
 the root of the collapsed tree holds the whole corpus and is very nearly convex, so it spends 29
 digs and stops.
+
+**A request says which declared properties it wants, and that is the one thing it does choose**
+*(C, 2026-08-28)*. `/v1/viewport` carries `computed`: absent is the layer's own declaration, a list
+is that list **intersected** with the declaration, and the empty list is counts with no geometry.
+It narrows and can never widen, so a layer that declares no hull serves none however it is asked,
+and the intersection is taken before the property is computed rather than after — what the field
+buys is the work not done.
+
+**It exists because the declaration is per layer and the drawing is per artifact.** A client draws
+a hull for the artifact under the pointer and centroids for the rest, so with only a layer-level
+declaration it was served 197 shapes to draw one: 92% of the request's time (§7). The client now
+asks the viewport for `centroid` and `box` and asks `/v1/artifacts/{id}` for the one shape it
+draws.
+
+**It is not the dialable family this section refuses, and the difference is not a matter of
+degree.** A family or an α would let a caller ask the same members a *different question* and read
+the answer against the first; `computed` asks strictly fewer of the same questions. There is one
+value of each property for a given membership, every request that receives it receives the same
+one, and a request that asks for less is served less. A name outside the three-word vocabulary is a
+`422` rather than an absence — the vocabulary is deployment schema, fixed and published in
+`/v1/meta`, so refusing discloses nothing, where an unreachable *layer* name is viewer data and is
+absent instead.
 
 **A dialable α is the one that must not exist**, and for a sharper reason than a dialable family. A
 family is a function of `membership ∩ M_auth` like everything else here, and five families over one
@@ -369,13 +438,52 @@ principal's own wrap is what closes that, and it is why α is not a declared per
 
 ## 9. What the client must do
 
+**Asking for the shape.** The viewport request carries `computed: ["centroid", "box"]` (§8 C) and
+the shape for the artifact that draws is fetched from `POST /v1/artifacts/{id}`, which has always
+served the same geometry from the same predicate. The client asks when the pointer lands on a shape
+and when one is opened; the answer is held per identifier, and **dropped whenever the principal
+could have changed**, because a hull is derived from that principal's own visible members.
+
+**Until the shape arrives, the artifact's `box` is drawn and answers the hover.** That is the same
+fallback a layer declaring no hull has always taken, and it is a real change to what a hover feels
+like: at rest every candidate is a rectangle, so two clusters whose boxes overlap are separated by
+depth, by the smaller box, and by the artifact the mark under the pointer belongs to — which is the
+wire's own membership column and a better answer than geometry gave. The index is rebuilt around
+the true shape when it lands.
+
 **Drawing.** One outline datum per ring, all of them carrying the artifact's `tessera_id`.
-`outlineOf` maps a ring's vertices through `gridToWorld` and hands them to a `PolygonLayer`, and it
-must keep refusing to smooth them: Chaikin cuts a reflex corner *outward*, and a drawn shape must
-not claim area the served shape does not have. Vertex counts changed with the budget (§8 B) and the client's
-work did not: the largest shape on `clusters/hdbscan` is now **757 vertices** across at most 10
-rings, against 144 before, and a `PolygonLayer` ring of 757 vertices is the same call as one of
-144.
+`outlineOf` maps a ring's vertices through `gridToWorld` and hands them to a `PolygonLayer`. Vertex
+counts changed with the budget (§8 B) and the client's work did not: the largest shape on
+`clusters/hdbscan` is **757 vertices** across at most 10 rings, against 144 before, and a
+`PolygonLayer` ring of 757 vertices is the same call as one of 144.
+
+**Smoothing, and where it belongs.** The drawn ring is a **periodic uniform cubic B-spline** through
+the served vertices, sampled four times per span — DataMapPlot's construction (`alpha_shapes.py`
+fits `splprep(..., s=spline_coeff, per=True)` and evaluates it with `splev` at a multiple of the
+vertex density; the α shape underneath is as angular as ours), in its closed knot-free form. It
+replaces a containment-preserving corner cut, which is deleted: that refused to round a **reflex**
+corner because the chord across a notch lies outside the polygon, so a dug shape's concavities
+stayed as angular as the wire while its convex arcs rounded, which is the opposite of what a
+contour should look like.
+
+**It is client-side, and the served ring does not move.** Three reasons, in the order they bind.
+The guarantee in §1 that every vertex is a visible member's position is worth more than the curve
+is: a served spline would put invented points on the wire, and every containment argument here —
+the ring inside its group's wrap, the shape inside the members' wrap — is about vertices that are
+members. Second, the curve is a **display** choice that depends on the zoom it is read at, which
+the server does not know; the client picks the sample density and can raise it on a deep zoom for
+nothing. Third, it costs four times the vertices, and serving them would put that multiple on
+every shape rather than on the one that draws.
+
+**What the curve may and may not do.** It smooths rather than interpolates: at a knot it sits at
+`(Pᵢ₋₁ + 4Pᵢ + Pᵢ₊₁)/6`, a sixth of the second difference from the vertex — inward at a convex
+corner and outward at a reflex one — and every point of a span lies in the convex hull of its four
+control points, so the excursion outside the served ring is bounded by a third of the longest
+adjacent served edge. A dug ring's edges are α-scale lengths in the cloud's own units, so the curve
+reaches at most a fraction of the members' own spacing past their outline. Under §4's ruling that
+is an imprecise summary of where the cluster is, not a claim about ground the members do not
+occupy. **Anything that reasons about containment reads the served ring**: the pick, the hover
+index, and the containment oracle the client's own tests use.
 
 **Picking.** The outline polygon is what answers a pick, filled at zero alpha so the pick pass sees
 it, and the parallel `artifactIds` array assumes one polygon per artifact. That assumption is what
@@ -411,6 +519,12 @@ to, can end up knowing something about data they were not served.*
 - The whole shape is a **subset of the convex wrap** of the visible members, so it says strictly less
   about where the members a principal cannot see are sitting. Several rings say less again: they are
   the same members drawn without the ground between them.
+
+- **Asking for fewer properties serves fewer** (§8 C). The intersection is with the layer's own
+  declaration, so no request reaches a property a layer did not declare, and every property that is
+  served is the same value it would have had if it had not been asked for by name. There is nothing
+  a caller can learn by asking twice with different selections that one of the two answers did not
+  already carry.
 
 **No register row, and this note is where that is recorded** — Appendix C's head note asks that a
 check which found nothing sit beside the mechanism it checked rather than in the register.
@@ -458,3 +572,29 @@ check which found nothing sit beside the mechanism it checked rather than in the
   area is no longer the tighter of the two (0.789 against the dig's 0.771). And §2's fill and
   overlap figures were measured at 64 and are left standing as a **lower bound**, marked at the
   claim, because re-measuring fill needs the probe's α-complex and no ruling turned on them.
+- **r4 — 2026-08-28. The shape is served where it is drawn, the family is re-ruled at that scale,
+  and the drawn ring is a spline.** Two things forced it. The owner ruled (§4's head) that
+  containment is not required, which re-admits the α-complex and spline smoothing; and a
+  measurement found the hull was **92% of a `k = 0` artifacts request** — 2.03 s for
+  `clusters/hdbscan`'s 197 shapes against 0.07 s for a layer declaring none — while the client
+  draws **one**.
+  **C (new): `/v1/viewport` carries `computed`** (§8 C), a narrowing of each layer's own
+  declaration and never a widening of it. The request above is now **164 ms and 26 KB**, and
+  `clusters/toponymy` at every level 803 ms → 81 ms. It is not the dialable family §8 refuses: a
+  family would let a caller ask the same members a different question, where this asks strictly
+  fewer of the same ones.
+  **A re-ruled, and the answer did not move**: at one shape per request the χ-shape's 67% fewer
+  hull bytes is worth about 450 bytes on the one shape drawn, while the triangulation it needs is
+  3.7× the dig at the median and 11.2× at worst — 2.11 s against 0.21 s on the corpus root, which
+  is hovered like any other artifact. The α-complex and the χ-shape share that triangulation (76%
+  of the route's time), so the re-admission changes nothing in the comparison. The dig keeps the
+  job, now on interaction latency rather than on layer-wide cost.
+  **Smoothing landed client-side** (§9): a periodic uniform cubic B-spline through the served
+  vertices, DataMapPlot's construction, replacing the containment-preserving corner cut that
+  refused to round a reflex corner. The served ring is unchanged and is what every containment
+  argument and the pick still read; the drawn curve leaves it by at most a third of the longest
+  adjacent edge.
+  One consequence is recorded rather than smoothed over: **a hover is resolved against the `box`
+  until the shape arrives**, so at rest the map's hover index is rectangles. Depth, the smaller
+  box and the mark's own membership column separate them, and the index is rebuilt on the true
+  shape when it lands — 2–5 ms for an ordinary cluster, 188 ms for the corpus root.

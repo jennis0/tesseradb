@@ -284,7 +284,27 @@ export type ViewportRequest = {
    * would be a wrong map rather than half a map.
    */
   artifactBudget?: number;
+  /**
+   * Which of each layer's **declared** computed properties — `'centroid'`, `'box'`, `'hull'` — the
+   * response should carry.
+   *
+   * **Omitted is the layer's own declaration**, so a client that never thinks about geometry is
+   * answered exactly as it was before this field existed. An array answers for those, intersected
+   * with what each layer declared; the empty array is counts and no geometry.
+   *
+   * **It narrows and never widens.** Naming `'hull'` on a layer that declares none serves none.
+   *
+   * The reason to narrow is cost, and it is large: a hull is derived per artifact per request from
+   * the members this principal can see, and a viewport carrying 197 clusters derives 197 of them
+   * while the map draws one. Measured on a 2.42M-member corpus, that was 2.03 s against 0.17 s for
+   * the same request asking for `['centroid', 'box']`. Ask the drill-down route
+   * ({@link TesseraClient.artifact}) for the one hull that is drawn.
+   */
+  computed?: ComputedProperty[];
 };
+
+/** The three derived geometries a layer may declare, and a request may ask for. */
+export type ComputedProperty = 'centroid' | 'box' | 'hull';
 
 /**
  * One tile's exact masked counts.
@@ -557,4 +577,20 @@ export type ItemDetail = {fields: Record<string, unknown>; externalId: string | 
  * declared size**: what a drill-down adds over the wire's own row is a name for the layer, not a
  * way behind the count.
  */
-export type ArtifactDetail = {layer: string; key: string | null; maskedCount: bigint};
+export type ArtifactDetail = {
+  layer: string;
+  key: string | null;
+  maskedCount: bigint;
+  /**
+   * The artifact's declared geometry, computed for this principal — the same values and the same
+   * grid units the viewport's artifacts frame carries, from the same predicate. `null` where the
+   * layer declares none.
+   *
+   * **This route is where a hull is now fetched from.** The viewport asks for centroids and boxes
+   * and this asks for the one shape that draws, which is what the drawing has always needed and
+   * what the viewport was paying 197× over to supply (see {@link ViewportRequest.computed}).
+   */
+  centroid: [number, number] | null;
+  box: [number, number, number, number] | null;
+  hull: [number, number][][] | null;
+};

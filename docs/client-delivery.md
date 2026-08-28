@@ -419,7 +419,45 @@ different-principal row, both of which need counts that corpus's default princip
 says the client "must keep refusing to smooth" a hull, which was written when the only smoothing on
 offer was the unguarded one. The construction here is `⊆` the source ring by construction, which is
 the property that sentence exists to protect; the sentence needs the owner's amendment, and until it
-has one the design and the code disagree in letter.
+has one the design and the code disagree in letter. *(Resolved by the `contour2` track below: the
+owner ruled that containment is not required, §9 was rewritten, and the corner cut was replaced by
+the spline it was standing in for.)*
+
+## The contour and its cost (`contour2`, 2026-08-28)
+
+Two things came together: the owner's ruling that a hull need not contain every member — *"it
+really doesn't matter if a small number of points are outside the hull, so long as it's showing the
+overall shape correctly"* — and a measurement that the hull was **92% of a `k = 0` artifacts
+request** while the client draws one shape.
+
+| | where it stands |
+|---|---|
+| **serve the shape where it is drawn** | **done**. `/v1/viewport` gains `computed` (contracts §3.2 r42, `artifact-shapes.md` §8 C): absent is the layer's declaration, a list is intersected with it, `[]` is counts and no geometry. It narrows and can never widen, and the intersection is taken before the property is computed. The client asks the viewport for `centroid` and `box` and the drill-down route for the one shape it draws (`TesseraStore.needHull`) |
+| **reconsider the family at one shape per request** | **done, and the dig keeps the job** (`artifact-shapes.md` §4.1, re-ruled). At that scale the χ-shape's 67% fewer hull bytes is worth ~450 B on the one shape drawn, while its triangulation is 3.7× the dig at the median, 11.2× at worst, and **2.11 s against 0.21 s** on the corpus root, which is hovered like anything else. The α-complex — what the ruling re-admits — shares that triangulation (76% of the route's time), so the re-admission changes nothing in the comparison |
+| **smooth the drawn ring as DataMapPlot does** | **done, client-side**. A periodic uniform cubic B-spline through the served vertices, sampled four times a span — the closed knot-free form of `splprep(..., per=True)` + `splev`. It replaces the reflex-aware corner cut, which is deleted: that refused to round a reflex corner, so a dug shape's concavities stayed angular while its convex arcs rounded. Client-side because the served ring must keep every vertex a member's own position, because the sample density is a zoom-dependent display choice the server cannot make, and because it costs 4× the vertices — on the one shape drawn rather than on all of them |
+
+**Measured**, `notebook-2m4` at full membership (176 terms, 2,422,486 items), `k = 0` over the whole
+extent, median of four runs against one server on one machine:
+
+| request | before | after |
+|---|---|---|
+| `clusters/hdbscan`, 197 artifacts | 2,032 ms, 263,079 B | **164 ms, 26,406 B** |
+| `clusters/toponymy`, `levels: "all"`, 797 artifacts | 803 ms, 534,630 B | **81 ms, 91,237 B** |
+| `taxonomy/arxiv`, 209 artifacts — declares no hull | 74 ms, 26,916 B | 74 ms, 26,916 B (control) |
+
+**A hover, end to end** — the one `/v1/artifacts/{id}` call: 2–5 ms for artifacts of 6,000–34,000
+members, **188 ms** for the 2.42M-member root, 265 ms for the 1.84M one; bodies 0.7–15 KB.
+
+**One consequence is recorded rather than smoothed over.** A hover is resolved against the served
+`box` until the shape arrives, so at rest the hover index is rectangles. Depth, the smaller box and
+the mark's own membership column (D12) separate them, and the index is rebuilt on the true shape
+when it lands.
+
+**Not done, and reported rather than worked around**: the `bundle-notebook-2m4` bundle and the
+`client-corpus` worktree holding it were removed mid-session, so every figure above was taken
+against a bundle rebuilt from `data/notebook-2m4-live/` into a scratch directory and served on a
+scratch port (38701). It reproduces the design's published triangulation figures to within a few
+per cent, and the demo servers on 37585/37589/37590 were neither restarted nor stopped.
 
 ## What each step owes a measurement
 
