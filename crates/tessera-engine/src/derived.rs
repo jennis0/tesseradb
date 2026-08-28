@@ -52,6 +52,9 @@
 //! would have hidden: the input is reduced before the shape is computed
 //! ([`QUANTISE_DIVISIONS`]), and the answer is not computed twice ([`crate::derived_cache`]).
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use croaring::Bitmap;
 use tessera_spatial::morton::unsplit32;
 use tessera_store::read::SegmentData;
@@ -1144,9 +1147,19 @@ fn longest_bridge(rings: &[Ring], alpha_sq: i128) -> Option<(usize, usize)> {
 /// an edge from elsewhere on the boundary can still cross it with both its endpoints outside, which
 /// is exactly what two arms of a crescent digging towards each other would do. The check is
 /// `O(V)` against a boundary the budget bounds, so it costs nothing worth trading the property for.
+///
+/// **The box around the dig triangle retires most edges before any arithmetic is done on them.**
+/// Every one of the four tests below needs a point of `f` inside the box spanned by `a`, `c` and
+/// `b`: two are `segments_meet` against a segment lying in that box, and the other two ask whether a
+/// named point lies on a closed segment inside it. So an edge whose own box misses the triangle's
+/// answers all four with `false`, and four `u32` comparisons stand in for ten `i128` orientations.
+/// It is a filter and not a rule — an edge that survives it is tested exactly as before — so the
+/// admissible set is unchanged.
 fn dig_is_admissible(poly: &[Vertex], i: usize, c: [u32; 2]) -> bool {
     let n = poly.len();
     let (a, b) = (poly[i].pos, poly[(i + 1) % n].pos);
+    let lo = [a[0].min(b[0]).min(c[0]), a[1].min(b[1]).min(c[1])];
+    let hi = [a[0].max(b[0]).max(c[0]), a[1].max(b[1]).max(c[1])];
 
     let (prev, next) = ((i + n - 1) % n, (i + 1) % n);
     for j in 0..n {
@@ -1154,6 +1167,13 @@ fn dig_is_admissible(poly: &[Vertex], i: usize, c: [u32; 2]) -> bool {
             continue;
         }
         let (f0, f1) = (poly[j].pos, poly[(j + 1) % n].pos);
+        if f0[0].min(f1[0]) > hi[0]
+            || f0[0].max(f1[0]) < lo[0]
+            || f0[1].min(f1[1]) > hi[1]
+            || f0[1].max(f1[1]) < lo[1]
+        {
+            continue;
+        }
         // `c` already on the boundary would make the new edges touch it rather than cross the
         // interior — and it is what leaves a point set in convex position untouched.
         if on_segment(f0, f1, c) {
@@ -1178,17 +1198,34 @@ fn dig_is_admissible(poly: &[Vertex], i: usize, c: [u32; 2]) -> bool {
     true
 }
 
-/// The members bucketed into a square grid, each bucket carrying the bounding box of what it holds.
+/// The members bucketed into a square grid, each bucket carrying the bounding box of what it holds,
+/// **with a tree of boxes over the buckets themselves** so that a candidate search descends to the
+/// few buckets that can hold the answer instead of scoring every one of them.
 ///
 /// **A bounding box per bucket, not the cell's own geometry**, because the box is tighter and needs
 /// no cell-boundary arithmetic to be exact: the minimum of a cross product over a box is attained at
 /// a corner, so one corner per bucket bounds every member in it and the whole bucket is skipped when
 /// that bound cannot beat the best candidate found so far. The bound is exact in `i128`, so pruning
 /// never discards the answer.
+///
+/// **The tree is what made the dig cheap, and the flat list is what made it expensive.** Scoring
+/// every bucket and sorting the scores is `O(C log C)` *per dig*, and a large artifact's grid is
+/// thousands of buckets against a search that then reads two or three of them — measured at **455
+/// of the 775 ms** the whole layer's shape construction cost, against 57 ms for the admissibility
+/// check the same profile was expected to find at the top (`artifact-shapes.md` §7.4). The tree
+/// costs one bottom-up pass at build and turns the per-dig term into a descent.
 struct Buckets {
     /// Every member, reordered so each bucket's members are contiguous.
     points: Vec<[u32; 2]>,
+    /// The occupied buckets in Morton order of their cell coordinates, which is the order
+    /// [`build_tree`] halves — a range of it is a compact region rather than a strip of rows, so
+    /// the boxes above it are tight enough to prune against.
     cells: Vec<Cell>,
+    /// The tree over `cells`, built bottom-up so that **the root is the last node**; an empty
+    /// bucket list has no nodes at all.
+    tree: Vec<Node>,
+    /// The descent's frontier, kept across digs so a search costs no allocation.
+    heap: BinaryHeap<Reverse<(i128, u32)>>,
 }
 
 struct Cell {
@@ -1196,6 +1233,17 @@ struct Cell {
     max: [u32; 2],
     start: usize,
     len: usize,
+}
+
+/// A node of the bucket tree: the box over the buckets it covers, and either their range in
+/// [`Buckets::cells`] (a leaf) or its two children.
+struct Node {
+    min: [u32; 2],
+    max: [u32; 2],
+    /// The child node indices, or `(range start, range end)` when `leaf`.
+    a: u32,
+    b: u32,
+    leaf: bool,
 }
 
 impl Buckets {
@@ -1233,7 +1281,10 @@ impl Buckets {
             cursor[k] += 1;
         }
 
-        let mut cells = Vec::new();
+        // **In Morton order of the cell coordinates, not in row-major order**, because it is the
+        // order [`build_tree`] halves: a range of a row-major list is a strip of rows spanning the
+        // whole grid in `x`, and a box over it prunes against nothing.
+        let mut cells: Vec<(u64, Cell)> = Vec::new();
         for k in 0..total {
             let (start, end) = (offsets[k], offsets[k + 1]);
             if start == end {
@@ -1244,14 +1295,30 @@ impl Buckets {
                 min = [min[0].min(q[0]), min[1].min(q[1])];
                 max = [max[0].max(q[0]), max[1].max(q[1])];
             }
-            cells.push(Cell {
-                min,
-                max,
-                start,
-                len: end - start,
-            });
+            let (cx, cy) = (k as u64 % axis, k as u64 / axis);
+            cells.push((
+                interleave_cell(cx, cy),
+                Cell {
+                    min,
+                    max,
+                    start,
+                    len: end - start,
+                },
+            ));
         }
-        Buckets { points, cells }
+        cells.sort_unstable_by_key(|(key, _)| *key);
+        let cells: Vec<Cell> = cells.into_iter().map(|(_, cell)| cell).collect();
+
+        let mut tree = Vec::with_capacity(2 * cells.len());
+        if !cells.is_empty() {
+            build_tree(&cells, 0, cells.len(), &mut tree);
+        }
+        Buckets {
+            points,
+            cells,
+            tree,
+            heap: BinaryHeap::new(),
+        }
     }
 
     /// The member closest to the line through `a` and `b`, among those on the interior side of
@@ -1278,57 +1345,143 @@ impl Buckets {
     /// Exhaustive over the members that qualify — the bucket bound only skips buckets that provably
     /// cannot hold a better candidate — because it is that minimality, and nothing else, that makes
     /// the dig triangle empty and so keeps every member inside the shape.
-    fn nearest_inside(&self, a: [u32; 2], b: [u32; 2]) -> Option<[u32; 2]> {
+    fn nearest_inside(&mut self, a: [u32; 2], b: [u32; 2]) -> Option<[u32; 2]> {
+        if self.tree.is_empty() {
+            return None;
+        }
         let (dx, dy) = (b[0] as i128 - a[0] as i128, b[1] as i128 - a[1] as i128);
         let cross =
             |q: [u32; 2]| dx * (q[1] as i128 - a[1] as i128) - dy * (q[0] as i128 - a[0] as i128);
+        // The cross product is affine in the position, so its minimum over a box sits at whichever
+        // corner the two coefficients — `dx` on y, `−dy` on x — select. That is the same bound the
+        // flat list took per bucket; what the tree adds is that one box retires a whole subtree.
+        let bound = |min: [u32; 2], max: [u32; 2]| {
+            cross([
+                if dy <= 0 { min[0] } else { max[0] },
+                if dx >= 0 { min[1] } else { max[1] },
+            ])
+        };
+        // **A candidate has to be inside the slab as well as near the line, and the slab is what
+        // does the pruning.** The three conditions a member must meet are each a linear form in its
+        // position, so each is maximised over a box at the corner its two coefficients pick: a box
+        // whose best corner already fails one of them holds no candidate at all, whatever its
+        // distance to the line. Without this a bucket lying along the edge's own line — far past
+        // either endpoint, and so holding nothing that projects inside the segment — scores a bound
+        // near zero and is opened on every dig; with it the descent reaches the buckets over the
+        // void the edge bridges and stops. **Measured at 428 ms of the layer's dig against 71 ms**
+        // (`artifact-shapes.md` §7.4).
+        let feasible = |min: [u32; 2], max: [u32; 2]| {
+            let corner = |ux: i128, uy: i128| {
+                [
+                    if ux >= 0 { max[0] } else { min[0] },
+                    if uy >= 0 { max[1] } else { min[1] },
+                ]
+            };
+            cross(corner(-dy, dx)) >= 0
+                && dot(a, b, corner(dx, dy)) > 0
+                && dot(b, a, corner(-dx, -dy)) > 0
+        };
 
-        // Buckets in increasing bound, so the first one visited holds a near-answer and every later
-        // bound is compared against a `best` that is already small. Walked in bucket order instead,
-        // the pruning test only starts biting after a bucket that happens to be near the edge turns
-        // up, and on a large membership that is most of the grid scanned before it does.
-        let mut order: Vec<(i128, usize)> = self
-            .cells
-            .iter()
-            .enumerate()
-            .map(|(i, cell)| {
-                // The cross product is affine in the position, so its minimum over the bucket's box
-                // sits at whichever corner the two coefficients — `dx` on y, `−dy` on x — select.
-                let corner = [
-                    if dy <= 0 { cell.min[0] } else { cell.max[0] },
-                    if dx >= 0 { cell.min[1] } else { cell.max[1] },
-                ];
-                (cross(corner), i)
-            })
-            .collect();
-        order.sort_unstable();
-
+        // **Best-first, so the first leaf reached holds a near answer and the descent stops as soon
+        // as the smallest remaining bound cannot beat it.** The order the buckets are visited in is
+        // an efficiency property and nothing more: a bucket is skipped only where its box provably
+        // holds no better candidate, and `best` is the minimum of a total order on `(distance,
+        // position)`, so the answer is the one an exhaustive scan finds, whatever the order.
         let mut best: Option<(i128, [u32; 2])> = None;
-        for (bound, index) in order {
+        let root = self.tree.len() as u32 - 1;
+        self.heap.clear();
+        let (min, max) = (self.tree[root as usize].min, self.tree[root as usize].max);
+        if feasible(min, max) {
+            self.heap.push(Reverse((bound(min, max), root)));
+        }
+        while let Some(Reverse((node_bound, index))) = self.heap.pop() {
             if let Some((found, _)) = best {
-                if bound > found {
+                if node_bound > found {
                     break;
                 }
             }
-            let cell = &self.cells[index];
-            for &q in &self.points[cell.start..cell.start + cell.len] {
-                let d = cross(q);
-                if d < 0 || dot(a, b, q) <= 0 || dot(b, a, q) <= 0 {
+            let node = &self.tree[index as usize];
+            let (first, second, leaf) = (node.a, node.b, node.leaf);
+            if !leaf {
+                for child in [first, second] {
+                    let n = &self.tree[child as usize];
+                    if !feasible(n.min, n.max) {
+                        continue;
+                    }
+                    self.heap.push(Reverse((bound(n.min, n.max), child)));
+                }
+                continue;
+            }
+            for cell in &self.cells[first as usize..second as usize] {
+                if !feasible(cell.min, cell.max) {
                     continue;
                 }
-                let better = match best {
-                    None => true,
-                    // Ties are broken on the position itself, so the answer does not depend on the
-                    // order the buckets happen to be walked in.
-                    Some((bd, bq)) => d < bd || (d == bd && q < bq),
-                };
-                if better {
-                    best = Some((d, q));
+                if let Some((found, _)) = best {
+                    if bound(cell.min, cell.max) > found {
+                        continue;
+                    }
+                }
+                for &q in &self.points[cell.start..cell.start + cell.len] {
+                    let d = cross(q);
+                    if d < 0 || dot(a, b, q) <= 0 || dot(b, a, q) <= 0 {
+                        continue;
+                    }
+                    let better = match best {
+                        None => true,
+                        // Ties are broken on the position itself, so the answer does not depend on
+                        // the order the buckets happen to be walked in.
+                        Some((bd, bq)) => d < bd || (d == bd && q < bq),
+                    };
+                    if better {
+                        best = Some((d, q));
+                    }
                 }
             }
         }
         best.map(|(_, q)| q)
     }
+}
+
+/// How many buckets a leaf of [`Buckets::tree`] holds. Four, so the tree is a fifth the size of the
+/// bucket list and its last two levels — where a box is barely tighter than the buckets under it —
+/// are a straight scan rather than a heap operation each.
+const BUCKET_TREE_LEAF: usize = 4;
+
+/// Builds [`Buckets::tree`] over `cells[lo..hi]` bottom-up, returning the node's own index.
+///
+/// The split is the range's midpoint rather than a median of coordinates, because the buckets are
+/// already in Morton order: halving that order halves the region, and a split chosen on coordinates
+/// would cost a pass per level to buy a box that is no tighter.
+fn build_tree(cells: &[Cell], lo: usize, hi: usize, out: &mut Vec<Node>) -> u32 {
+    if hi - lo <= BUCKET_TREE_LEAF {
+        let (mut min, mut max) = (cells[lo].min, cells[lo].max);
+        for cell in &cells[lo..hi] {
+            min = [min[0].min(cell.min[0]), min[1].min(cell.min[1])];
+            max = [max[0].max(cell.max[0]), max[1].max(cell.max[1])];
+        }
+        out.push(Node {
+            min,
+            max,
+            a: lo as u32,
+            b: hi as u32,
+            leaf: true,
+        });
+        return out.len() as u32 - 1;
+    }
+    let mid = lo + (hi - lo) / 2;
+    let a = build_tree(cells, lo, mid, out);
+    let b = build_tree(cells, mid, hi, out);
+    let (na, nb) = (&out[a as usize], &out[b as usize]);
+    let min = [na.min[0].min(nb.min[0]), na.min[1].min(nb.min[1])];
+    let max = [na.max[0].max(nb.max[0]), na.max[1].max(nb.max[1])];
+    out.push(Node {
+        min,
+        max,
+        a,
+        b,
+        leaf: false,
+    });
+    out.len() as u32 - 1
 }
 
 /// Buckets per axis: about 64 members to a bucket, and never more than 64 axis divisions, so a small
@@ -1566,6 +1719,129 @@ mod tests {
         let rings = concave_rings(members);
         assert_eq!(rings.len(), 1, "expected one group, got {}", rings.len());
         rings.into_iter().next().unwrap()
+    }
+
+    /// The candidate a plain scan over every member finds, applying the three conditions
+    /// [`Buckets::nearest_inside`] applies and nothing else — the oracle the indexed search is held
+    /// to.
+    fn nearest_inside_by_scan(members: &[[u32; 2]], a: [u32; 2], b: [u32; 2]) -> Option<[u32; 2]> {
+        let (dx, dy) = (b[0] as i128 - a[0] as i128, b[1] as i128 - a[1] as i128);
+        let mut best: Option<(i128, [u32; 2])> = None;
+        for &q in members {
+            let d = dx * (q[1] as i128 - a[1] as i128) - dy * (q[0] as i128 - a[0] as i128);
+            if d < 0 || dot(a, b, q) <= 0 || dot(b, a, q) <= 0 {
+                continue;
+            }
+            if best.is_none_or(|(bd, bq)| d < bd || (d == bd && q < bq)) {
+                best = Some((d, q));
+            }
+        }
+        best.map(|(_, q)| q)
+    }
+
+    /// **The bucket tree prunes and never chooses.** Every box it skips is one whose best corner
+    /// fails a condition the candidate must meet, so the descent returns what an exhaustive scan
+    /// returns — which is the property the dig's containment argument rests on, minimality being
+    /// what makes the dug triangle empty.
+    ///
+    /// The queries are every pair of members at a stride, so they cover edges across the cloud, along
+    /// its boundary and inside it — including the degenerate ones a ring never presents but the
+    /// search must still answer the same way twice.
+    #[test]
+    fn the_indexed_candidate_search_answers_what_a_scan_answers() {
+        for cloud in [moon(), flower(), two_clouds(), sample(4_000, 900, |_, _| true)] {
+            let mut members = cloud.clone();
+            members.sort_unstable();
+            members.dedup();
+            let mut grid = Buckets::build(&members);
+            let stride = (members.len() / 40).max(1);
+            let mut asked = 0usize;
+            for i in (0..members.len()).step_by(stride) {
+                for j in (0..members.len()).step_by(stride) {
+                    if i == j {
+                        continue;
+                    }
+                    let (a, b) = (members[i], members[j]);
+                    assert_eq!(
+                        grid.nearest_inside(a, b),
+                        nearest_inside_by_scan(&members, a, b),
+                        "the tree and the scan disagree on the edge {a:?} → {b:?}"
+                    );
+                    asked += 1;
+                }
+            }
+            assert!(asked > 1_000, "the sweep asked {asked} questions");
+        }
+    }
+
+    /// Whether the dig is admissible, tested against every edge of the ring rather than against the
+    /// ones whose box meets the dig triangle's — the oracle the filter in [`dig_is_admissible`] is
+    /// held to.
+    fn admissible_by_scan(poly: &[Vertex], i: usize, c: [u32; 2]) -> bool {
+        let n = poly.len();
+        let (a, b) = (poly[i].pos, poly[(i + 1) % n].pos);
+        let (prev, next) = ((i + n - 1) % n, (i + 1) % n);
+        for j in 0..n {
+            if j == i {
+                continue;
+            }
+            let (f0, f1) = (poly[j].pos, poly[(j + 1) % n].pos);
+            if on_segment(f0, f1, c) {
+                return false;
+            }
+            if j == prev {
+                if on_segment(a, c, f0) {
+                    return false;
+                }
+            } else if segments_meet(a, c, f0, f1) {
+                return false;
+            }
+            if j == next {
+                if on_segment(b, c, f1) {
+                    return false;
+                }
+            } else if segments_meet(c, b, f0, f1) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// **The box around the dig triangle is a filter and not a rule.** An edge it retires is one
+    /// that cannot meet the two new edges at all, so the admissible set is the one the full pass
+    /// finds — which is what keeps the ring simple, the property the wire's fill depends on.
+    #[test]
+    fn the_admissibility_filter_retires_only_edges_that_cannot_meet_the_dig() {
+        for cloud in [moon(), flower(), two_clouds()] {
+            let mut members = cloud.clone();
+            members.sort_unstable();
+            members.dedup();
+            let convex = convex_hull_of_sorted(&members);
+            if convex.len() < 3 {
+                continue;
+            }
+            let poly: Vec<Vertex> = convex
+                .iter()
+                .map(|&pos| Vertex {
+                    pos,
+                    retired: false,
+                })
+                .collect();
+            let mut asked = 0usize;
+            for i in 0..poly.len() {
+                // Every member is offered as the candidate, not only the one the dig would pick, so
+                // the filter is asked about triangles a dig never reaches as well as the ones it does.
+                for c in members.iter().step_by((members.len() / 60).max(1)) {
+                    assert_eq!(
+                        dig_is_admissible(&poly, i, *c),
+                        admissible_by_scan(&poly, i, *c),
+                        "the filter and the full pass disagree on edge {i} against {c:?}"
+                    );
+                    asked += 1;
+                }
+            }
+            assert!(asked > 100, "the sweep asked {asked} questions");
+        }
     }
 
     #[test]
