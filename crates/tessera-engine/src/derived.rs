@@ -443,7 +443,7 @@ pub const SERVED_QUANTISE_DIVISIONS: u32 = QUANTISE_DIVISIONS;
 /// measuring its own copy of it.
 #[doc(hidden)]
 pub fn quantised(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
-    quantise(points, divisions, REDUCTION_FLOOR)
+    quantise(points, divisions, REDUCTION_FLOOR).map(|(reduced, _)| reduced)
 }
 
 /// `floor` is [`REDUCTION_FLOOR`] on every serving route. It is a parameter rather than a constant
@@ -451,7 +451,9 @@ pub fn quantised(points: &[[u32; 2]], divisions: u32) -> Option<Vec<[u32; 2]>> {
 /// has one within a cell, α survives, the answer does not depend on the arrival order — hold at any
 /// size and are tested on clouds small enough to check exhaustively, where the served floor would
 /// switch the reduction off and leave nothing to assert about.
-fn quantise(points: &[[u32; 2]], divisions: u32, floor: usize) -> Option<Vec<[u32; 2]>> {
+/// The cell side is returned beside the representatives because it is the input's own resolution,
+/// which is what a [`DigFloor`] is measured in.
+fn quantise(points: &[[u32; 2]], divisions: u32, floor: usize) -> Option<(Vec<[u32; 2]>, u64)> {
     // The squared distance below is `u64`, and the bound that keeps it from overflowing is that a
     // cell side is at most `2^32 / divisions` rounded up to a power of two: at 16 divisions a
     // half-side is under 2^29 and its square under 2^58. Every caller is the constant or the sweep,
@@ -641,7 +643,7 @@ fn quantise(points: &[[u32; 2]], divisions: u32, floor: usize) -> Option<Vec<[u3
     // returns as a *set* is a function of the member positions alone — the fold's representative
     // rule is order-independent and the merge below restores it where the runs were not ordered —
     // and the set is what the shape is computed from.
-    Some(out)
+    Some((out, side))
 }
 
 /// One occupied cell, as [`quantise`] folds it out of the members: the run of consecutive members
@@ -850,6 +852,40 @@ impl Octagon {
 /// see [`extreme_octagon`] for why a margin makes an inexact test an exact answer.
 const OCTAGON_MARGIN: f64 = 65_536.0;
 
+/// **Where the dig may be told to stop short of what it would dig on its own** — the two forms of
+/// *do not dig finer than the input's own resolution*, and both are `0` on every serving route.
+///
+/// The members are reduced to one representative per occupied cell of a grid across the artifact's
+/// own extent ([`QUANTISE_DIVISIONS`]) before the shape is computed, so a representative's position
+/// is known to the construction only to within a cell. The hypothesis this exists to test is that a
+/// dig finer than a cell is a dig into noise. It is measured in `tests/hull_geometry.rs`'s
+/// `the_resolution_floor` and neither form is served (`artifact-shapes.md` §7.5):
+///
+/// - `bridge_cells` — refuse to dig a bridge shorter than this many cells. **Inert, measured, and
+///   the reason is that the dig already stops at α**: an edge is dug only where it is longer than
+///   α, and α is between **34 and 270 binning cells** on every artifact of the measurement layer
+///   that is reduced at all. Nothing below 64 cells moves a vertex, a byte or an area; at 64 the
+///   first shapes change and a boundary departs by 12% of an artifact's own extent.
+/// - `depth_cells` — refuse a dig whose triangle is shallower than this many cells, the depth being
+///   the candidate's own distance to the edge it would replace. This one bites, because the
+///   candidate is the *nearest* member to the line and so the carve is shallow by construction:
+///   at one cell the layer's shapes go 26,740 → 18,414 vertices for an unchanged area, and members
+///   outside their own shape go 1,809 → 2. What it costs is one artifact's deep narrow crevice —
+///   a boundary departure of 26% of that artifact's extent for no area at all — and **whether that
+///   trade is worth taking is a ruling on what the shape claims, which is the owner's** (§8 B).
+///
+/// **The alternative both forms are measured instead of is a *drawn* pixel**, and it is refused for
+/// the reason the binning resolution is refused it (§7.1): stopping at what the request's zoom
+/// resolves would give two viewers of one artifact two different shapes, put the zoom in the derived
+/// cache's key (§7.2), and hand `/v1/artifacts/{id}` — which carries no zoom — nothing to answer
+/// with. A cell is a property of the artifact; a pixel is a property of the request.
+#[doc(hidden)]
+#[derive(Clone, Copy, Default)]
+pub struct DigFloor {
+    pub bridge_cells: u64,
+    pub depth_cells: u64,
+}
+
 #[doc(hidden)]
 pub fn dig_rings(points: &[[u32; 2]], budget: usize) -> (Vec<Vec<[u32; 2]>>, bool) {
     dig_rings_at(points, budget, QUANTISE_DIVISIONS)
@@ -866,12 +902,34 @@ pub fn dig_rings_at(
     budget: usize,
     divisions: u32,
 ) -> (Vec<Vec<[u32; 2]>>, bool) {
+    dig_rings_at_floor(points, budget, divisions, DigFloor::default())
+}
+
+/// [`dig_rings_at`] with the stopping rule the caller names ([`DigFloor`]) — the **third**
+/// measurement seam, public for [`dig_rings`]'s reason. `DigFloor::default()` is what every serving
+/// route takes and is the dig stopping where it always did.
+#[doc(hidden)]
+pub fn dig_rings_at_floor(
+    points: &[[u32; 2]],
+    budget: usize,
+    divisions: u32,
+    floor: DigFloor,
+) -> (Vec<Vec<[u32; 2]>>, bool) {
     // **Reduce the input before computing the shape** ([`QUANTISE_DIVISIONS`]). It happens ahead of
     // the sort, which is where most of a large artifact's cost was: the corpus root's 2.42M
     // positions cost 121 ms to wrap and 167 ms to dig, and both figures are dominated by ordering
     // members whose individual positions the drawing cannot resolve.
     let reduced = quantise(points, divisions, REDUCTION_FLOOR);
-    let points: &[[u32; 2]] = reduced.as_deref().unwrap_or(points);
+    // The two floors as squared lengths ([`DigFloor`]). An unreduced membership carries its
+    // members' exact positions and so has no cell and no floor, whatever the caller asked for.
+    let squared = |cells: u64| -> i128 {
+        reduced.as_ref().map_or(0, |&(_, side)| {
+            let span = (side * cells) as i128;
+            span * span
+        })
+    };
+    let (bridge_sq, depth_sq) = (squared(floor.bridge_cells), squared(floor.depth_cells));
+    let points: &[[u32; 2]] = reduced.as_ref().map_or(points, |(r, _)| r.as_slice());
 
     let mut p: Vec<[u32; 2]> = points.to_vec();
     p.sort_unstable();
@@ -884,6 +942,12 @@ pub fn dig_rings_at(
     }
 
     let alpha_sq = bridge_threshold(&convex);
+    // **α groups the members and a floor never does**, because the two answer different questions:
+    // whether these members are one cloud, which is a fact about the members, and whether this
+    // bridge is worth another vertex, which is a fact about what the input can resolve. Raising the
+    // grouping threshold would merge clouds the members do not have between them, which is what §3
+    // exists to refuse.
+    let dig_sq = alpha_sq.max(bridge_sq);
     let (labels, groups) = alpha_groups(&p, alpha_sq);
     let mut rings: Vec<Ring> = if groups == 1 {
         // The whole membership is one group, which is the ordinary case; the wrap is already
@@ -905,14 +969,24 @@ pub fn dig_rings_at(
     // wire carried when there was one ring, and not a budget that multiplies with the group count.
     let mut inserted = 0usize;
     while inserted < budget {
-        let Some((r, i)) = longest_bridge(&rings, alpha_sq) else {
+        let Some((r, i)) = longest_bridge(&rings, dig_sq) else {
             break;
         };
         let ring = &mut rings[r];
         let n = ring.poly.len();
         let (a, b) = (ring.poly[i].pos, ring.poly[(i + 1) % n].pos);
+        // The dig's depth is the candidate's own distance to the edge it replaces, compared
+        // squared so no root is taken: `cross(c)² > depth² · |ab|²`.
+        let deep_enough = |c: [u32; 2]| -> bool {
+            if depth_sq == 0 {
+                return true;
+            }
+            let (dx, dy) = (b[0] as i128 - a[0] as i128, b[1] as i128 - a[1] as i128);
+            let cross = dx * (c[1] as i128 - a[1] as i128) - dy * (c[0] as i128 - a[0] as i128);
+            cross * cross > depth_sq * (dx * dx + dy * dy)
+        };
         match ring.grid.nearest_inside(a, b) {
-            Some(c) if dig_is_admissible(&ring.poly, i, c) => {
+            Some(c) if deep_enough(c) && dig_is_admissible(&ring.poly, i, c) => {
                 // The replaced edge's flag goes with it; `poly[i]` now carries `(a, c)` and the
                 // inserted vertex carries `(c, b)`, both fresh.
                 ring.poly.insert(
@@ -931,7 +1005,7 @@ pub fn dig_rings_at(
     // Exhaustion is *the budget ran out while a bridge was still live*, which is what a cap acting
     // as a fidelity control looks like — distinct from a dig that stopped because every remaining
     // edge is shorter than α or has no candidate.
-    let exhausted = inserted == budget && longest_bridge(&rings, alpha_sq).is_some();
+    let exhausted = inserted == budget && longest_bridge(&rings, dig_sq).is_some();
 
     let mut out: Vec<Vec<[u32; 2]>> = rings
         .into_iter()
@@ -1844,6 +1918,59 @@ mod tests {
         }
     }
 
+    /// **Neither floor is served, and the seam that measures them is inert at its default.** The
+    /// served route must be the dig stopping where α says it stops; a floor is something
+    /// `tests/hull_geometry.rs`'s `the_resolution_floor` asks for and nothing else does.
+    #[test]
+    fn the_served_dig_carries_no_floor() {
+        for cloud in [moon(), flower(), two_clouds()] {
+            assert_eq!(
+                dig_rings_at(&cloud, DIG_BUDGET, QUANTISE_DIVISIONS).0,
+                dig_rings_at_floor(&cloud, DIG_BUDGET, QUANTISE_DIVISIONS, DigFloor::default()).0,
+            );
+        }
+    }
+
+    /// **A floor only ever stops the dig earlier**, on a membership large enough for the reduction
+    /// to engage and so for a cell to exist at all: fewer vertices, the same rings — the grouping is
+    /// α's and no floor touches it — and every vertex still a member's own position.
+    ///
+    /// The two forms are measured against each other in `the_resolution_floor`; what is pinned here
+    /// is that neither can invent a vertex or split a group, whatever the layer.
+    #[test]
+    fn a_floor_stops_the_dig_earlier_and_does_nothing_else() {
+        let cloud = sample(76_000, 300, |x, y| x * x + y * y < 300 * 300);
+        let members: std::collections::HashSet<[u32; 2]> = cloud.iter().copied().collect();
+        let base = dig_rings_at_floor(&cloud, usize::MAX, 32, DigFloor::default()).0;
+        assert!(
+            base.iter().map(|r| r.len()).sum::<usize>() > 8,
+            "the baseline shape has something to lose"
+        );
+        for floor in [
+            DigFloor {
+                bridge_cells: 2,
+                depth_cells: 0,
+            },
+            DigFloor {
+                bridge_cells: 0,
+                depth_cells: 2,
+            },
+        ] {
+            let rings = dig_rings_at_floor(&cloud, usize::MAX, 32, floor).0;
+            assert_eq!(rings.len(), base.len(), "a floor is not a grouping");
+            assert!(
+                rings.iter().map(|r| r.len()).sum::<usize>()
+                    <= base.iter().map(|r| r.len()).sum::<usize>(),
+                "a floor can only refuse a dig"
+            );
+            for ring in &rings {
+                for v in ring {
+                    assert!(members.contains(v), "{v:?} is not a member");
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_shape_contains_every_member() {
         let members = moon();
@@ -2189,7 +2316,7 @@ mod tests {
     #[test]
     fn every_representative_is_a_member_and_every_member_has_one() {
         let members = sample(5_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
-        let reduced = quantise(&members, 32, 0).expect("a cloud this dense reduces");
+        let reduced = quantise(&members, 32, 0).expect("a cloud this dense reduces").0;
         assert!(
             reduced.len() * 3 < members.len(),
             "no reduction: {} of {}",
@@ -2226,7 +2353,7 @@ mod tests {
                 x * x + y * y <= 5_000 * 5_000 && (x < 0 || y.abs() > 2_000)
             }),
         ] {
-            let reduced = quantise(&cloud, 32, 0).expect("a cloud this dense reduces");
+            let reduced = quantise(&cloud, 32, 0).expect("a cloud this dense reduces").0;
             assert_eq!(
                 convex_hull(&reduced),
                 convex_hull(&cloud),
@@ -2260,8 +2387,8 @@ mod tests {
         let members = sample(20_000, 5_000, |x, y| x * x + y * y <= 5_000 * 5_000);
         let mut shuffled = members.clone();
         shuffled.reverse();
-        let mut a = quantise(&members, 32, 0).expect("reduces");
-        let mut b = quantise(&shuffled, 32, 0).expect("reduces");
+        let mut a = quantise(&members, 32, 0).expect("reduces").0;
+        let mut b = quantise(&shuffled, 32, 0).expect("reduces").0;
         a.sort_unstable();
         b.sort_unstable();
         assert_eq!(a, b);
@@ -2301,7 +2428,7 @@ mod tests {
             for divisions in [16u32, 64, 256, 1_024] {
                 cloud.push([9_000, 9_000]);
                 let (Some(mine), reference) = (
-                    quantise(&cloud, divisions, 0),
+                    quantise(&cloud, divisions, 0).map(|(r, _)| r),
                     extreme_octagon(&cloud),
                 ) else {
                     continue;
@@ -2344,8 +2471,8 @@ mod tests {
             .copied()
             .collect();
 
-        let mut once = quantise(&sorted, 64, 0).expect("reduces");
-        let mut twice = quantise(&twice_over, 64, 0).expect("reduces");
+        let mut once = quantise(&sorted, 64, 0).expect("reduces").0;
+        let mut twice = quantise(&twice_over, 64, 0).expect("reduces").0;
         once.sort_unstable();
         once.dedup();
         twice.sort_unstable();

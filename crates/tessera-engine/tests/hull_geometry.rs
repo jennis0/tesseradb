@@ -15,7 +15,7 @@
 //! `tessera_engine::derived`'s own tests and, through the serving path, in `artifact_content.rs`.
 
 use std::time::Instant;
-use tessera_engine::derived::{compute, ComputedProperty};
+use tessera_engine::derived::{compute, ComputedProperty, DigFloor};
 
 #[path = "common/corpus.rs"]
 mod corpus;
@@ -682,3 +682,158 @@ fn the_cell_occupancy() {
         "a member cannot share a cell with fewer than one member"
     );
 }
+
+/// **What a stopping rule at the input's own resolution costs and buys** — the sweep behind
+/// `derived::DIG_FLOOR_CELLS` and `artifact-shapes.md` §7.5.
+///
+/// The members are reduced to one representative per occupied cell before the shape is computed, so
+/// a representative's position is known to the construction only to within a cell; the hypothesis
+/// is that a bridge shorter than a cell is being split on a distinction the input does not carry.
+/// The sweep is over the floor in cells, `0` being the dig with no floor at all, and every fidelity
+/// column is against that shape on the terms §7.1 already uses: the boundary's departure as a
+/// fraction of the artifact's own extent, the area ratio, and members outside their own shape.
+///
+/// **α is reported beside the cell**, because the dig already stops at α — an edge is dug only when
+/// it is longer than that — so the floor can only bite where a cell is the longer of the two. That
+/// column is the one the reading of this sweep turns on.
+///
+/// ```text
+/// TESSERA_HULL_BUNDLE=<…>/bundle-notebook-2m4 \
+///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_resolution_floor
+/// ```
+#[test]
+#[ignore]
+fn the_resolution_floor() {
+    let corpus = corpus::open();
+    let d = tessera_engine::derived::SERVED_QUANTISE_DIVISIONS;
+    let cells: Vec<u64> = std::env::var("TESSERA_HULL_FLOORS")
+        .unwrap_or_else(|_| "1,2,4,8,16,32,64".into())
+        .split(',')
+        .map(|s| s.trim().parse::<u64>().expect("a cell count"))
+        .collect();
+    let mut floors: Vec<(&str, DigFloor)> = vec![("none", DigFloor::default())];
+    for &c in &cells {
+        floors.push((
+            "bridge",
+            DigFloor {
+                bridge_cells: c,
+                depth_cells: 0,
+            },
+        ));
+    }
+    for &c in &cells {
+        floors.push((
+            "depth",
+            DigFloor {
+                bridge_cells: 0,
+                depth_cells: c,
+            },
+        ));
+    }
+
+    let mut clouds: Vec<Vec<[u32; 2]>> = Vec::new();
+    for (_, visible) in &corpus.memberships {
+        let positions = corpus::gather(visible, &corpus.locator);
+        if positions.len() >= 3 {
+            clouds.push(positions);
+        }
+    }
+
+    // How the two lengths compare, per artifact, before any shape is dug: the cell the input is
+    // binned to against the α the dig already stops at.
+    let mut ratios: Vec<f64> = Vec::new();
+    let mut reduced_artifacts = 0usize;
+    for cloud in &clouds {
+        let Some(side) = cell_side(cloud, d) else {
+            continue;
+        };
+        reduced_artifacts += 1;
+        ratios.push((ring::alpha_sq(cloud) as f64).sqrt() / side as f64);
+    }
+    println!(
+        "{} of {} artifacts are reduced at all; α in binning cells: p0 {:.1}, p50 {:.1}, p100 {:.1}",
+        reduced_artifacts,
+        clouds.len(),
+        pct(&mut ratios.clone(), 0.0),
+        pct(&mut ratios.clone(), 0.5),
+        pct(&mut ratios.clone(), 1.0),
+    );
+
+    let mut base: Vec<Base> = Vec::new();
+    for cloud in &clouds {
+        let rings =
+            tessera_engine::derived::dig_rings_at_floor(cloud, usize::MAX, d, DigFloor::default())
+                .0;
+        base.push(Base {
+            ms: 0.0,
+            area: rings.iter().map(|r| double_area(r)).sum::<i128>() as f64,
+            vertices: rings.iter().map(|r| r.len()).sum(),
+            alpha_sq: ring::alpha_sq(cloud) as f64,
+            extent: extent_of(cloud),
+            rings,
+        });
+    }
+
+    println!(
+        "\nfloor,cells,vertices,rings,hull_bytes,dig_ms,area_median,area_worst,excursion_median,excursion_worst,outside,outside_worst"
+    );
+    for (kind, f) in &floors {
+        let cells = f.bridge_cells.max(f.depth_cells);
+        let (mut vertices, mut rings_total, mut dig_ms) = (0usize, 0usize, 0.0f64);
+        let mut areas: Vec<f64> = Vec::new();
+        let mut excursions: Vec<f64> = Vec::new();
+        let (mut outside_total, mut outside_worst) = (0usize, 0.0f64);
+        for (cloud, b) in clouds.iter().zip(&base) {
+            let t = Instant::now();
+            let rings = tessera_engine::derived::dig_rings_at_floor(cloud, usize::MAX, d, *f).0;
+            dig_ms += t.elapsed().as_secs_f64() * 1e3;
+            vertices += rings.iter().map(|r| r.len()).sum::<usize>();
+            rings_total += rings.len();
+            areas.push(rings.iter().map(|r| double_area(r)).sum::<i128>() as f64 / b.area.max(1.0));
+            excursions.push(ring::excursion(&rings, &b.rings) / b.extent);
+            let outside = cloud
+                .iter()
+                .filter(|m| !rings.iter().any(|r| contains(r, **m)))
+                .count();
+            outside_total += outside;
+            outside_worst = outside_worst.max(outside as f64 / cloud.len() as f64);
+        }
+        println!(
+            "{kind},{cells},{vertices},{rings_total},{},{dig_ms:.0},{:.4},{:.4},{:.5},{:.5},{outside_total},{:.5}",
+            8 * vertices + 4 * rings_total,
+            pct(&mut areas.clone(), 0.5),
+            pct(&mut areas.clone(), 0.0),
+            pct(&mut excursions.clone(), 0.5),
+            pct(&mut excursions.clone(), 1.0),
+            outside_worst,
+        );
+        assert!(
+            base.iter().map(|b| b.vertices).sum::<usize>() >= vertices,
+            "a floor can only stop the dig earlier"
+        );
+    }
+}
+
+/// The side of the cell the reduction bins to, or `None` where the artifact is not reduced at all —
+/// read off the representatives the engine computes rather than rebuilt from the constant, so the
+/// two cannot drift.
+fn cell_side(cloud: &[[u32; 2]], divisions: u32) -> Option<u64> {
+    let reduced = tessera_engine::derived::quantised(cloud, divisions)?;
+    let _ = reduced;
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for q in cloud {
+        x0 = x0.min(q[0]);
+        y0 = y0.min(q[1]);
+        x1 = x1.max(q[0]);
+        y1 = y1.max(q[1]);
+    }
+    let (wx, wy) = ((x1 - x0) as u64 + 1, (y1 - y0) as u64 + 1);
+    Some(
+        1u64 << wx
+            .max(wy)
+            .div_ceil(divisions as u64)
+            .next_power_of_two()
+            .trailing_zeros(),
+    )
+}
+
