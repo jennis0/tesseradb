@@ -42,7 +42,8 @@ Read this section for the state; the tables below for what each step owes and wh
   [`artifact-cache-handover.md`](artifact-cache-handover.md) — why it is the only bound a scattered
   layer has, the facts it turns on, the filter bit it needs, and the traps. The filter bit is
   **S13**, done; the channel holding its payloads is step **`cache 2`**, done.
-  **Step 3 is designed and the recommendation is not to build it** (§4a of the map): payload elision
+  **Step 3 is designed and mostly recommended against**
+  ([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md), and §4a of the map): payload elision
   saves about 60% of the frame and not 95% — the served identifier list is a floor no cache removes —
   while a client holding a level whole and picking from it locally costs no artifact traffic at all.
   That is a client policy rather than a wire feature, so it needs neither the contracts change nor

@@ -152,6 +152,11 @@ undecided is whether the *fetch model* is written down as an obligation.
 
 ## 4a. Step 3, costed — and why it should probably not be built yet
 
+**Superseded in shape by [`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md)**
+(2026-08-28), which states the whole fetch surface — the scope and filter axes, the three filter
+modes, the claim, and what each side owes — on the owner's own framing. What follows is the costing
+that fed it, kept because the numbers are the argument for deferring a bits-only mode.
+
 **Written 2026-08-28, after steps 1 and 2. Nothing here is decided; §4a.4 is the ruling to make.**
 
 ### 4a.1 The floor: the served identifier list, which no cache removes
