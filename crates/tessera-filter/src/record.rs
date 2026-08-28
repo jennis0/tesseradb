@@ -675,25 +675,29 @@ impl RecordBlob {
         Ok(bytes)
     }
 
-    /// The whole row `entity` carries, decoded — or `None` where it has none.
+    /// The block holding `rank`: the last one whose first rank is at or below it — always
+    /// defined, since `check_directory` proved block 0's first rank is 0.
+    fn block_of(&self, rank: u32) -> usize {
+        self.first_rank.partition_point(|&fr| fr <= rank) - 1
+    }
+
+    /// One row out of an already-decompressed block, addressed by its rank.
     ///
-    /// One block read and one decompress (records §3's cost shape). Every failure of the
-    /// addressing — an offset outside the block, a row that does not tile against its neighbour,
-    /// a discriminant naming another entity — refuses rather than answers.
-    pub fn fields_of(&self, entity: u32) -> Result<Option<Vec<RecordField>>, RecordError> {
-        if !self.hasrow.contains(entity) {
-            return Ok(None);
-        }
-        let rank = (self.hasrow.rank(entity) - 1) as u32;
-        // The last block whose first rank is at or below the target — always defined, since
-        // `check_directory` proved block 0's first rank is 0.
-        let block = self.first_rank.partition_point(|&fr| fr <= rank) - 1;
-        let bytes = self.block_bytes(block)?;
+    /// **The per-read half of the fail-closed rule, stated once.** Both readers that address a
+    /// single row — [`Self::fields_of`] and [`Self::for_each_row_in`] — come through here, so the
+    /// tiling check and the discriminant check cannot hold on one route and not the other.
+    fn row_at(
+        &self,
+        bytes: &[u8],
+        block: usize,
+        rank: u32,
+        entity: u32,
+    ) -> Result<Vec<RecordField>, RecordError> {
         let rows = self.rows_in_block(block)?;
         let local = (rank - self.first_rank[block]) as usize;
         let list_lo = self.list_offsets[block] as usize;
         let offset = self.row_offsets[list_lo + local] as usize;
-        let (fields, end) = decode_row(&bytes, offset, entity)?;
+        let (fields, end) = decode_row(bytes, offset, entity)?;
         // Rows tile their block: this row must end exactly where the next begins, or at the
         // block's end. A gap or an overlap is an addressing defect with no other symptom, and
         // the check is two comparisons per read.
@@ -708,7 +712,61 @@ impl RecordBlob {
                  row at {expected_end}; the block does not tile and the read is refused"
             )));
         }
-        Ok(Some(fields))
+        Ok(fields)
+    }
+
+    /// The whole row `entity` carries, decoded — or `None` where it has none.
+    ///
+    /// One block read and one decompress (records §3's cost shape). Every failure of the
+    /// addressing — an offset outside the block, a row that does not tile against its neighbour,
+    /// a discriminant naming another entity — refuses rather than answers.
+    ///
+    /// **One entity per call, one decompress per call**, with nothing held between calls: a
+    /// caller that wants many rows must not loop this, and [`Self::for_each_row_in`] is the read
+    /// for that. Measured on the GeoNames bundle, a served artifact's name cost ~163 µs through
+    /// here — 408 ms for the 2 518 artifacts of one viewport, against 1.3 ms for the same viewport
+    /// with no layer.
+    pub fn fields_of(&self, entity: u32) -> Result<Option<Vec<RecordField>>, RecordError> {
+        if !self.hasrow.contains(entity) {
+            return Ok(None);
+        }
+        let rank = (self.hasrow.rank(entity) - 1) as u32;
+        let block = self.block_of(rank);
+        let bytes = self.block_bytes(block)?;
+        self.row_at(&bytes, block, rank, entity).map(Some)
+    }
+
+    /// The rows of the entities in `wanted` that this blob holds, **decompressing each block it
+    /// touches once**, in ascending entity order.
+    ///
+    /// This is [`Self::fields_of`] amortised over a set, and the set is what makes it worth
+    /// having: entities ascend, so ranks ascend, so blocks ascend, and one `Vec<u8>` of block
+    /// bytes serves every wanted row inside it. Cost is O(blocks touched) rather than
+    /// O(entities), which for a set contiguous in entity space — an artifact level, whose ids are
+    /// one reserved run — is the difference between a decompress per artifact and one per 256 KiB
+    /// of rows.
+    ///
+    /// An entity in `wanted` with no row is simply not visited; absence is an answer here exactly
+    /// as it is for [`Self::fields_of`], and never an error.
+    pub fn for_each_row_in(
+        &self,
+        wanted: &Bitmap,
+        f: &mut dyn FnMut(u32, Vec<RecordField>) -> Result<(), RecordError>,
+    ) -> Result<(), RecordError> {
+        let mut present = wanted.clone();
+        present.and_inplace(&self.hasrow);
+        let mut loaded: Option<usize> = None;
+        let mut bytes: Vec<u8> = Vec::new();
+        for entity in present.iter() {
+            let rank = (self.hasrow.rank(entity) - 1) as u32;
+            let block = self.block_of(rank);
+            if loaded != Some(block) {
+                bytes = self.block_bytes(block)?;
+                loaded = Some(block);
+            }
+            f(entity, self.row_at(&bytes, block, rank, entity)?)?;
+        }
+        Ok(())
     }
 
     /// Every row in has-row (= entity) order, decompressing each block once — the read the

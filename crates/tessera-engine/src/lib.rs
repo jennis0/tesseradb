@@ -6,6 +6,7 @@
 //! `/control/changes` or `/control/ingest` acceptance advances the overlay/buffer, or a
 //! `tessera build` advances the bundle.
 
+pub mod artifact_content;
 pub mod artifacts;
 mod cache;
 pub mod cancel;

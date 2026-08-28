@@ -439,3 +439,57 @@ fn a_stack_of_disjoint_layers_answers_each_from_its_own() {
     let refused = RecordStack::open(Some(&base), &[extent_a], Access::Mapped);
     assert!(refused.is_err(), "a truncated extent refuses the whole stack");
 }
+
+/// **The set read and the single read agree, row for row, and the set read decompresses each block
+/// once.** The whole point of `for_each_row_in` is that a caller wanting many rows stops paying a
+/// decompress per row; the risk it introduces is an addressing one, since it holds a block's bytes
+/// across several rows and could serve one row's offsets against another block's bytes.
+///
+/// Ten rows at three per block, so the wanted set spans block boundaries in both directions: it
+/// asks for both rows of one block and skips a block entirely.
+#[test]
+fn a_set_read_agrees_with_the_single_reads_it_replaces() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = write_fixture(dir.path(), 10, 3 * ROW_BYTES);
+    let blob = open(&p).expect("the blob opens");
+    assert_eq!(blob.block_count(), 4, "10 rows at 3 per block");
+
+    // Ranks 0, 1 (block 0), 4 (block 1), 7 and 8 (block 2) — block 3 is skipped, and one entity
+    // that has no row at all is asked for.
+    let mut wanted = Bitmap::new();
+    for rank in [0u32, 1, 4, 7, 8] {
+        wanted.add(entity_of_rank(rank));
+    }
+    wanted.add(entity_of_rank(0) + 1);
+
+    let mut got: Vec<(u32, Vec<RecordField>)> = Vec::new();
+    blob.for_each_row_in(&wanted, &mut |entity, fields| {
+        got.push((entity, fields));
+        Ok(())
+    })
+    .expect("a well-formed set read");
+
+    let want: Vec<(u32, Vec<RecordField>)> = [0u32, 1, 4, 7, 8]
+        .iter()
+        .map(|rank| {
+            let entity = entity_of_rank(*rank);
+            (entity, fields_for(entity))
+        })
+        .collect();
+    assert_eq!(got, want, "the entity with no row is absent, not an error");
+
+    // Asking for everything is the whole-blob walk, in the same order.
+    let mut all = Vec::new();
+    blob.for_each_row_in(&Bitmap::from_range(0..u32::MAX), &mut |entity, fields| {
+        all.push((entity, fields));
+        Ok(())
+    })
+    .expect("a well-formed set read");
+    let mut streamed = Vec::new();
+    blob.for_each_row(&mut |entity, fields| {
+        streamed.push((entity, fields));
+        Ok(())
+    })
+    .expect("the streaming walk");
+    assert_eq!(all, streamed);
+}

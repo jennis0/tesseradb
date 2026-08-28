@@ -629,6 +629,11 @@ pub struct Engine {
     /// the projections beside it, and on the store's version alone, because a level's parent
     /// pointers are the same whichever view is served.
     pub(crate) lineages: Arc<crate::cut::Lineages>,
+    /// One supplied-content table per `(layer, level)` — see
+    /// [`crate::artifact_content::LevelContents`]. Keyed per *deployment* like the two caches
+    /// above it: what an artifact's name says is a property of what was published, and the
+    /// verdict that decides whether a viewer is served it runs before this is read.
+    pub(crate) level_contents: Arc<crate::artifact_content::LevelContents>,
     /// D-D: the ONE shared compute pool every admitted `viewport` request's tile loop `install`s
     /// onto (`Engine::viewport`). Built once, here, at open — never per request, and never a
     /// second pool anywhere else in this crate (no nested throttling). `pool.install` from more
@@ -1248,6 +1253,7 @@ impl Engine {
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
             derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
+            level_contents: Arc::new(crate::artifact_content::LevelContents::new()),
             pool,
             bundle_root: bundle_root.to_path_buf(),
             config,
@@ -2399,6 +2405,7 @@ impl Engine {
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
                 lineages: Arc::clone(&self.lineages),
+                level_contents: Arc::clone(&self.level_contents),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2456,6 +2463,7 @@ impl Engine {
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
                 lineages: Arc::clone(&self.lineages),
+                level_contents: Arc::clone(&self.level_contents),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
                 // re-checks write-path §7's base-segment relation against the fold's own output,
                 // and `tessera-server`'s loader checks only an explicitly set one.
@@ -2529,6 +2537,17 @@ impl Engine {
     /// only — counts of structures, naming no artifact, no layer and no principal.
     pub fn artifact_cache_held(&self) -> (usize, usize) {
         (self.artifact_projections.held(), self.lineages.held())
+    }
+
+    /// The supplied-content tables' gauges — see
+    /// [`crate::artifact_content::ContentCacheStats`]. Its own accessor rather than a third
+    /// element of the two tuples above, because it reports bytes as well as a count and those
+    /// two report neither.
+    ///
+    /// Operator plane only, beside them: counts of structures a deployment built, naming no
+    /// artifact, no layer and no principal.
+    pub fn artifact_content_cache_stats(&self) -> crate::artifact_content::ContentCacheStats {
+        self.level_contents.stats()
     }
 
     /// How many containment partitions this engine has composed (`crate::containment`).
