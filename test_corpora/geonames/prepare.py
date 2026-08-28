@@ -543,6 +543,9 @@ control = "127.0.0.1:8083"
 max_k   = 200
 session_credential_env  = "TESSERA_GEONAMES_SESSION_CRED"
 operator_credential_env = "TESSERA_GEONAMES_OPERATOR_CRED"
+# Development only — the origins the demo viewer is served from, so a browser on this machine
+# can talk to this process (client-interaction §7). The list is enumerated: a wildcard is refused.
+dev_cors_origins        = ["http://localhost:5173", "http://127.0.0.1:5173"]
 """
     )
 
