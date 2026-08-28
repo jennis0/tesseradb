@@ -1,12 +1,17 @@
 /**
  * The drawn contour's geometry: the smoothing that produces it, and what answers a hover over it.
  *
- * Two rules govern this module, and both are about not saying more than the server said.
+ * Two rules govern this module.
  *
- * - **A smoothed ring is contained in the ring it came from.** Containment is the property, not
- *   area: corner cutting takes area off at convex corners and adds it at reflex ones, so a shape
- *   whose total area fell can still have crossed into ground with no visible member in it. Every
- *   construction here is `⊆` its input **by construction** — see {@link smoothRing}.
+ * - **The served ring is the shape; the drawn curve is a smoothing of it.** {@link smoothRing} is
+ *   a periodic cubic B-spline through the served vertices, which is how DataMapPlot's contours are
+ *   made (`alpha_shapes.py`: `splprep(..., per=True)` then `splev`). It does not interpolate, so
+ *   the curve sits a little inside a convex corner and a little outside a reflex one — bounded
+ *   locally, and permitted since the owner's ruling of 2026-08-28 that a shape is a summary of
+ *   where a cluster is rather than a per-point assertion (`artifact-shapes.md` §4). What is
+ *   forbidden is claiming ground the members do not occupy, and a curve that follows the ring
+ *   within a fraction of its own edges does not. **Anything that reasons about containment reads
+ *   the served ring, never the drawn curve.**
  * - **Only a shape that is drawn answers a hover.** The resolution is {@link hoverAt}: deepest
  *   wins where shapes overlap, and a hovered shape holds the hover until the pointer leaves it.
  */
@@ -87,98 +92,80 @@ function crossesProperly(p1: readonly [number, number], p2: readonly [number, nu
 }
 
 /**
- * Whether the chord cutting the corner at `vertex` lies inside the ring: it crosses no edge of the
- * ring, and its midpoint is interior.
+ * How many curve samples each ring vertex contributes.
  *
- * The two edges meeting at `vertex` are skipped by index, because the chord's endpoints *are* on
- * them — a touch, not a crossing, and the one case where the orientation test is being asked about
- * points it constructed itself.
+ * Four is where a 16-gon stops looking like a polygon at the zoom a hovered cluster is read at,
+ * and it makes the drawn ring four times the served one — against the eight times three rounds of
+ * corner cutting cost. Only the one or two shapes that draw are smoothed
+ * ({@link outlineData} in `layer.ts`), so this is a per-interaction cost and never a per-served-
+ * artifact one: the largest shape on the measurement layer is 757 vertices across 10 rings, and
+ * 3,028 vertices is one `PolygonLayer` call either way.
  */
-function chordInside(from: readonly [number, number], to: readonly [number, number], ring: readonly [number, number][], vertex: number): boolean {
-  const n = ring.length;
-  const lo0 = Math.min(from[0], to[0]);
-  const hi0 = Math.max(from[0], to[0]);
-  const lo1 = Math.min(from[1], to[1]);
-  const hi1 = Math.max(from[1], to[1]);
-  const incoming = (vertex + n - 1) % n;
-  for (let k = 0; k < n; k++) {
-    if (k === incoming || k === vertex) continue;
-    const a = ring[k]!;
-    const b = ring[(k + 1) % n]!;
-    // A cheap rejection first: most of a ring's edges are nowhere near a corner's chord, and the
-    // orientation tests are what make this O(n²) per round rather than O(n).
-    if (Math.max(a[0], b[0]) < lo0 || Math.min(a[0], b[0]) > hi0 || Math.max(a[1], b[1]) < lo1 || Math.min(a[1], b[1]) > hi1) continue;
-    if (crossesProperly(from, to, a, b)) return false;
-  }
-  return pointInRing([(from[0] + to[0]) / 2, (from[1] + to[1]) / 2], ring);
-}
-
-/** How far along each adjacent edge a corner is cut — Chaikin's quarter. */
-const CUT = 0.25;
-
-const lerp = (a: readonly [number, number], b: readonly [number, number], t: number): [number, number] => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+const SAMPLES_PER_SPAN = 4;
 
 /**
- * One round of **containment-preserving corner cutting**.
+ * A ring smoothed as a **periodic uniform cubic B-spline** through its vertices.
  *
- * At each vertex `V`, with neighbours `P` and `N`, the two cut points `R = V + ¼(P − V)` and
- * `Q = V + ¼(N − V)` lie **on the ring's own edges**, so no vertex this produces is outside the
- * ring. The corner is replaced by the chord `R → Q` — which is what smooths it — and every other
- * edge of the result is a sub-segment of an edge of the input. So the only way out of the ring is
- * a chord, and a chord is emitted only when {@link chordInside} says it stays in:
+ * This is DataMapPlot's construction rather than an approximation of it in spirit only: their
+ * `alpha_shapes.py` fits `scipy.interpolate.splprep(..., s=spline_coeff, per=True)` through the
+ * α-shape's boundary and evaluates it with `splev` at a multiple of the vertex density, and the
+ * α shape underneath is as angular as ours. The periodic uniform cubic B-spline is the closed,
+ * knot-free member of that family: no fitting, no parameter, and `C²` everywhere.
  *
- * - at a **convex** corner the chord cuts across the corner and is inside, unless some other part
- *   of the boundary reaches into the corner — which the test catches rather than assumes;
- * - at a **reflex** corner the chord spans the notch and is outside, so the vertex is kept and
- *   the corner stays sharp. This is the case the deleted implementation got wrong: it cut every
- *   corner, and at a reflex vertex the triangle it removed lay outside the polygon, so the drawn
- *   contour reached into ground with no visible member in it, by up to a quarter of the shorter
- *   adjacent edge.
+ * **It smooths rather than interpolates**, which is the whole difference from the corner cutting
+ * it replaces. Each span between two ring vertices is the cubic
+ * `(b₀P₀ + b₁P₁ + b₂P₂ + b₃P₃)`, so the curve passes near a vertex rather than through it — at a
+ * knot it sits at `(Pᵢ₋₁ + 4Pᵢ + Pᵢ₊₁)/6`, a sixth of the second difference away from `Pᵢ`. At a
+ * convex corner that is inward and at a reflex corner outward, and the outward case is what the
+ * deleted implementation refused to draw at all.
  *
- * A reflex corner is therefore never rounded, and that is not a shortfall to be fixed later: the
- * material at a reflex vertex fills more than half a turn, so any curve replacing the corner has
- * to pass on the far side of it, which is outside. A notch the members leave stays a notch.
+ * **Why the outward case is now allowed.** The bar is no longer containment but *does the shape
+ * claim ground the members do not occupy* (`artifact-shapes.md` §4, owner ruling 2026-08-28). The
+ * excursion is bounded by a third of the longer adjacent served edge, and the served edges of a
+ * dug ring are α-scale lengths in the cloud's own units — so the curve reaches at most a fraction
+ * of the members' own spacing past their outline. That is an imprecise summary of where the
+ * cluster is, not a claim about empty ground, and it buys a boundary that reads as a contour at
+ * every corner rather than at the convex ones only. The refused reflex corner was visible: a dug
+ * shape's concavities stayed as angular as the wire while its convex arcs rounded.
  *
- * The result is `⊆` the input **by construction**, which composes: rounds are applied in sequence,
- * each testing against its own input, so the last is contained in the first.
+ * **The served ring is unaffected**, and it is what the pick reads, what
+ * {@link ringWithin} is asked about, and what any containment reasoning uses. A ring of fewer than
+ * four vertices is handed back as it is: a triangle or a degenerate group has no span to fit.
  */
-export function cutCorners(ring: Ring): Ring {
+export function smoothRing(ring: readonly [number, number][], samplesPerSpan = SAMPLES_PER_SPAN): Ring {
   const n = ring.length;
-  if (n < 3) return ring.map((p) => [p[0], p[1]] as [number, number]);
+  if (n < 4) return ring.map((p) => [p[0], p[1]] as [number, number]);
   const out: Ring = [];
   for (let i = 0; i < n; i++) {
-    const v = ring[i]!;
-    const p = ring[(i + n - 1) % n]!;
-    const q = ring[(i + 1) % n]!;
-    const r = lerp(v, p, CUT);
-    const s = lerp(v, q, CUT);
-    if (chordInside(r, s, ring, i)) {
-      out.push(r, s);
-    } else {
-      out.push(r, [v[0], v[1]], s);
+    const p0 = ring[(i + n - 1) % n]!;
+    const p1 = ring[i]!;
+    const p2 = ring[(i + 1) % n]!;
+    const p3 = ring[(i + 2) % n]!;
+    for (let s = 0; s < samplesPerSpan; s++) {
+      const t = s / samplesPerSpan;
+      const t2 = t * t;
+      const t3 = t2 * t;
+      const b0 = (1 - 3 * t + 3 * t2 - t3) / 6;
+      const b1 = (4 - 6 * t2 + 3 * t3) / 6;
+      const b2 = (1 + 3 * t + 3 * t2 - 3 * t3) / 6;
+      const b3 = t3 / 6;
+      out.push([
+        b0 * p0[0] + b1 * p1[0] + b2 * p2[0] + b3 * p3[0],
+        b0 * p0[1] + b1 * p1[1] + b2 * p2[1] + b3 * p3[1]
+      ]);
     }
   }
   return out;
 }
 
 /**
- * A ring smoothed by {@link cutCorners}, `rounds` times, and **contained in the ring handed in**.
+ * Whether `inner` is contained in `outer` — **an oracle for tests, and not an area comparison**.
  *
- * Three rounds is what reads as a contour rather than a polygon at the zoom a hovered cluster is
- * looked at; a ring of fewer than four vertices is handed back as it is, having no corner worth
- * cutting. Vertex growth is at most 2× a round at a convex corner and 3× at a reflex one, so a
- * 144-vertex hull becomes about 1,200 — which is why only the shapes that **draw** are smoothed
- * ({@link outlineData} in `layer.ts`), one or two of them, and never every served shape.
- */
-export function smoothRing(ring: readonly [number, number][], rounds = 3): Ring {
-  let current: Ring = ring.map((p) => [p[0], p[1]] as [number, number]);
-  if (current.length < 4) return current;
-  for (let round = 0; round < rounds; round++) current = cutCorners(current);
-  return current;
-}
-
-/**
- * Whether `inner` is contained in `outer` — **the test's oracle, and not an area comparison**.
+ * Nothing in the drawing path asks this any more: {@link smoothRing} is a smoothing and not a
+ * containment-preserving cut, and the ruling it was written under has moved. It is kept because
+ * containment is still the right question to ask of the *served* rings — a ring is inside its
+ * group's convex wrap, and a narrow principal's shape is inside a broad one's — and an area
+ * comparison cannot answer it.
  *
  * Every vertex and every edge midpoint of `inner` must be inside `outer` or on its boundary, and
  * no edge of `inner` may cross an edge of `outer`. On the boundary counts as inside: a

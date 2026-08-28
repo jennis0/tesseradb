@@ -165,6 +165,16 @@ export type ArtifactsProjection = {
   /** The served set's ordinals — what an opened artifact resolves through. */
   servedOrdinals: ReadonlySet<number>;
   /**
+   * The hulls fetched by identifier, by `tesseraId` — the shapes the map draws.
+   *
+   * **Not part of the viewport's answer.** The channel asks for centroids and boxes; a consumer
+   * that wants a shape calls {@link TesseraStore.needHull} and reads it here when it lands. An
+   * artifact with no entry has not been asked for or has not answered yet, and a consumer draws
+   * its `box` meanwhile — never a hull from another response, because a hull is derived per
+   * principal and per request.
+   */
+  hulls: ReadonlyMap<bigint, [number, number][][]>;
+  /**
    * A colour for **every ordinal the session table holds**, not only the served set's (§5.10).
    * A band held under a coarser cut, or one fetched a moment before the channel caught up with
    * a finer one, names artifacts that are not in `servedOrdinals`; its points still wear the
@@ -256,6 +266,20 @@ export interface Store {
   setBudget(budget: number): void;
   pick(id: bigint): Promise<void>;
   openArtifact(id: bigint): Promise<void>;
+  /**
+   * Ask for one artifact's hull, if it is not already held.
+   *
+   * **The shape is fetched where it is drawn.** The viewport asks for centroids and boxes
+   * (`artifactChannel.ts`), because a hull costs a per-request derivation over every member this
+   * principal can see and a settled view carries a couple of hundred artifacts while the map draws
+   * one. This is the one that draws: call it for the hovered and the opened artifact, and the
+   * shape arrives in `artifacts.hulls` a moment later.
+   *
+   * Idempotent and cheap to call on every pointer move: a hull already held, or already in flight,
+   * is not asked for twice. The cache is dropped whenever the mask could have moved, because a
+   * hull is derived per principal and holding one across that would draw another viewer's shape.
+   */
+  needHull(id: bigint): void;
   /** Drop the picked point and the opened artifact — a card's close. */
   clearSelection(): void;
   /** The colour scheme the map draws on, so the positional palette reads on its ground (§5.10). */
@@ -338,7 +362,7 @@ export function createStore(options: StoreOptions): Store {
     view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table, servedOrdinals: new Set(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, table, servedOrdinals: new Set(), hulls: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
@@ -364,6 +388,9 @@ export function createStore(options: StoreOptions): Store {
       return token;
     }
     const got = await options.authorise();
+    // A hull is a function of the principal's own visible members, so one held across a change of
+    // token would draw the previous principal's shape against the new one's identifiers.
+    if (token !== got.token) forgetHulls();
     token = got.token;
     expiresAt = got.expiresAt * (got.expiresAt < 1e12 ? 1000 : 1); // seconds or ms, tolerant
     armRenewal();
@@ -616,6 +643,7 @@ export function createStore(options: StoreOptions): Store {
       version: state.version,
       table,
       servedOrdinals,
+      hulls: heldHulls,
       colours: colourTable(),
       palette
     });
@@ -912,6 +940,51 @@ export function createStore(options: StoreOptions): Store {
     }
   }
 
+  // ---- the drawn shape, fetched by identifier (`artifact-shapes.md` §9) -----------------------
+
+  /**
+   * The hulls held for this principal, and the identifiers already asked for.
+   *
+   * **Two maps, because an absence has two meanings.** A hull not in `heldHulls` is either not
+   * asked for or asked for and not answered, and the second must not be asked again on every
+   * pointer move; `askedHulls` is what separates them. A refusal stays in `askedHulls` and out of
+   * `heldHulls`, so a `404` is asked once and drawn as a box — which is what the map does for an
+   * artifact whose layer declares no hull, and the two are indistinguishable on purpose.
+   */
+  let heldHulls = new Map<bigint, [number, number][][]>();
+  let askedHulls = new Set<bigint>();
+
+  /** Both maps go together, and they go whenever the geometry under them could have moved. */
+  function forgetHulls(): void {
+    if (heldHulls.size === 0 && askedHulls.size === 0) return;
+    heldHulls = new Map();
+    askedHulls = new Set();
+    replaceProjection('artifacts', {...projections.artifacts, hulls: heldHulls});
+  }
+
+  function needHull(id: bigint): void {
+    if (askedHulls.has(id)) return;
+    askedHulls.add(id);
+    void (async () => {
+      const t = token;
+      if (!t) return;
+      try {
+        const detail = await client.artifact(t, id, {view: viewId});
+        // The principal may have changed under the request — a renewal, a cleared store — in which
+        // case this answer describes a mask that is no longer the one being drawn.
+        if (!askedHulls.has(id)) return;
+        if (!detail.hull) return;
+        heldHulls = new Map(heldHulls).set(id, detail.hull);
+        replaceProjection('artifacts', {...projections.artifacts, hulls: heldHulls});
+      } catch {
+        // A refused shape is a shape not drawn, and the `box` already in hand answers instead.
+        // There is nothing here to report: `404` covers an unknown identifier, one this principal
+        // may not reach and one below its layer's criterion identically, so a message would be
+        // inventing a distinction the wire does not carry.
+      }
+    })();
+  }
+
   async function openArtifact(id: bigint): Promise<void> {
     if (!token) return;
     try {
@@ -1096,6 +1169,7 @@ export function createStore(options: StoreOptions): Store {
     channel?.reset();
     replica?.reset();
     table.clear();
+    forgetHulls();
     contentKeyAtFrame = '';
     replaceProjection('view', {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
@@ -1149,6 +1223,7 @@ export function createStore(options: StoreOptions): Store {
     setBudget,
     pick,
     openArtifact,
+    needHull,
     clearSelection,
     setScheme,
     select,

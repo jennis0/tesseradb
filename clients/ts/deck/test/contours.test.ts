@@ -21,7 +21,7 @@ const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact =>
 function projection(served: Artifact[]): ArtifactsProjection {
   const table = new SessionArtifactTable();
   const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId})));
-  return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, table, servedOrdinals: new Set(ordinals), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
+  return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, table, servedOrdinals: new Set(ordinals), hulls: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
 /** The area of a closed ring — the shoelace, unsigned. */
@@ -194,9 +194,8 @@ describe('outlineData', () => {
     expect(opened[0]!.polygon).not.toEqual(opened[1]!.polygon);
   });
 
-  it('smooths the rings that draw, and only those, and the smoothed ring stays inside the served one', () => {
+  it('smooths the rings that draw, and only those', () => {
     const g = 2 ** 32 - 1;
-    // A notched ring: the reflex corner an unguarded corner cut used to bulge across.
     const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
     const p = projection([{...artifact(1n, null), hull: [notched]}, artifact(2n, null)]);
     const rest = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
@@ -204,12 +203,25 @@ describe('outlineData', () => {
     for (const o of [{opened: 1n, hovered: null}, {opened: null, hovered: 1n}]) {
       const data = outlineData(p, {...o, level: undefined, scheme: 'light'});
       const drawn = data.find((d) => d.id === 1n)!.polygon;
-      const source = notched.map(gridToWorldXY);
-      expect(drawn.length).toBeGreaterThan(source.length);
-      expect(ringWithin(drawn, source)).toBe(true);
+      expect(drawn.length).toBe(notched.length * 4);
       // The artifact that does not draw keeps the wire's vertices — smoothing is per drawn shape.
       expect(data.find((d) => d.id === 2n)!.polygon.length).toBe(4);
     }
+  });
+
+  it('draws the fetched hull for the artifact whose shape has arrived, and the box for the rest', () => {
+    // The viewport carries no hull (`artifactChannel.ts` asks for centroid and box), so a served
+    // row's outline is its box until `TesseraStore.needHull` answers for it.
+    const g = 2 ** 32 - 1;
+    const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
+    const p = projection([artifact(1n, null), artifact(2n, null)]);
+    const before = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
+    // Four vertices: the box, which is what a hull-less row draws.
+    expect(before.find((d) => d.id === 1n)!.polygon.length).toBe(4);
+
+    const after = outlineData({...p, hulls: new Map([[1n, [ring]]])}, {opened: null, hovered: null, level: undefined, scheme: 'light'});
+    expect(after.find((d) => d.id === 1n)!.polygon).toEqual(ring.map(gridToWorldXY));
+    expect(after.find((d) => d.id === 2n)!.polygon.length).toBe(4);
   });
 
   it('a ring of one artifact overlapping a ring of another is answered by its own row', () => {

@@ -250,7 +250,31 @@ describe('the drill-down', () => {
 
     expect(seen[0]!.url).toBe('http://viewer/v1/artifacts/42');
     expect(seen[0]!.body).toEqual({view: 's0'});
-    expect(detail).toEqual({layer: 'clusters/x', key: 'c-0001', maskedCount: 143n});
+    expect(detail).toEqual({layer: 'clusters/x', key: 'c-0001', maskedCount: 143n, centroid: null, box: null, hull: null});
+  });
+
+  it('carries the geometry, which is what the viewport is no longer asked for', async () => {
+    // The route the drawn shape now comes from: the viewport asks for centroids and boxes and this
+    // answers with the one hull that draws (`artifact-shapes.md` §9).
+    stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            layer: 'clusters/x',
+            masked_count: 3,
+            centroid: [10.5, 20.5],
+            box: [0, 0, 20, 40],
+            hull: [[[0, 0], [20, 0], [20, 40]], [[100, 100], [110, 100], [110, 110]]]
+          }),
+          {status: 200}
+        )
+    );
+    const detail = await client().artifact('tok', 7n, {view: 's0'});
+    expect(detail.centroid).toEqual([10.5, 20.5]);
+    expect(detail.box).toEqual([0, 0, 20, 40]);
+    // A list of rings, not a list of vertices: a membership that is two clouds is two shapes.
+    expect(detail.hull?.length).toBe(2);
+    expect(detail.hull?.[1]?.[0]).toEqual([100, 100]);
   });
 
   it('reads an absent key as none rather than as a missing field', async () => {

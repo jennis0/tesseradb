@@ -62,6 +62,7 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
     version: 1,
     table,
     servedOrdinals: new Set(ordinals),
+    hulls: new Map(),
     colours: new Map([...ordinals].map((o) => [o, [10, 20, 30, 255] as const])),
     palette: 'positional',
     coverage: {current: 3, stale: 0}
@@ -141,7 +142,7 @@ describe('<tessera-artifact-card>', () => {
     const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n, null, ['Alpha']), artifact(2n, 40n, 1n)])});
     (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
-    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n}}, artifactRefusal: null});
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, hull: null}}, artifactRefusal: null});
     await settle(host);
     expect(deepText(deep(host, '[part="count"]'))).toContain('100');
     expect(deep(host, '[part="headline"]')?.textContent).toBe('Alpha');
@@ -158,7 +159,7 @@ describe('<tessera-artifact-card>', () => {
     const host = await mount('<tessera-artifact-card></tessera-artifact-card>');
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([artifact(1n, 100n), artifact(2n, 40n, 1n)])});
     (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
-    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n}}, artifactRefusal: null});
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, hull: null}}, artifactRefusal: null});
     await settle(host);
     expect(deep(host, '[part="headline"]')?.textContent?.trim()).toBe('\u2014');
     expect(deepAll(host, '[part="child"] [part="name"]').map((n) => n.textContent?.trim())).toEqual(['\u2014']);
@@ -219,7 +220,7 @@ describe('<tessera-artifact-card> follows the served set', () => {
     // Opened before the channel has answered for this view: the served set is empty.
     const store = fakeStore({meta: META, status: status({}), artifacts: artifactsProjection([])});
     (host.querySelector('tessera-artifact-card') as unknown as {store: unknown}).store = store;
-    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n}}, artifactRefusal: null});
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, hull: null}}, artifactRefusal: null});
     await settle(host);
     expect(deepAll(host, '[part="child"]').length).toBe(0);
     // The channel answers: the artifact and two children are served. The card re-reads.
@@ -253,7 +254,7 @@ describe('<tessera-explorer> on an artifact selection', () => {
     await settle(host);
     expect(store.calls.find((c) => c.name === 'openArtifact')?.args[0]).toBe(1n);
     expect(fitted).toEqual([]);
-    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n}}, artifactRefusal: null});
+    store.set('selection', {item: null, itemRefusal: null, artifact: {id: 1n, detail: {layer: 'clusters', key: 'c-1', maskedCount: 100n, centroid: null, box: null, hull: null}}, artifactRefusal: null});
     await settle(host);
     const card = deep(host, 'tessera-artifact-card') as HTMLElement;
     expect(card).not.toBeNull();

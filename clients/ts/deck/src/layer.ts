@@ -376,7 +376,7 @@ export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineD
     if (o.level !== undefined && depth > o.level) continue;
     if (!front.has(artifact.tesseraId)) continue;
     if (dependent.has(artifact.layer)) continue;
-    const rings = outlineOf(artifact);
+    const rings = outlineOf(artifact, a.hulls?.get(artifact.tesseraId));
     if (!rings) continue;
     const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
     const opened = artifact.tesseraId === o.opened;
@@ -555,17 +555,26 @@ export function artifactName(a: Artifact): string | null {
  * with no area to draw or to pick — and is left out; where that leaves no ring at all the box
  * answers instead, which is the rule a degenerate single hull already met.
  *
+ * **`fetched` is the hull the drill-down route answered with**, and it wins over the artifact's
+ * own where both exist. The viewport is asked for centroids and boxes, so a served row carries no
+ * hull and the shape for the one artifact that draws arrives by identifier
+ * (`TesseraStore.needHull`); until it does, the box is what is drawn, which is the same fallback a
+ * layer declaring no hull has always taken.
+ *
  * **This returns the wire's vertices and does not smooth them.** The smoothing is
- * {@link smoothRing}, applied by {@link outlineData} to the rings that draw, and it is
- * containment-preserving: plain Chaikin cuts a **reflex** corner outward — the triangle it removes
- * at a reflex vertex lies outside the polygon — so an unguarded corner cut bulged past the served
- * shape at every concavity, by up to a quarter of the shorter adjacent edge. A drawn shape must
- * not claim ground the served shape does not have, and every vertex the engine sends is a visible
- * member's own position.
+ * {@link smoothRing}, applied by {@link outlineData} to the rings that draw. It is a **periodic
+ * cubic B-spline** through the served ring rather than a containment-preserving corner cut: the
+ * curve may sit a little outside the served ring at a reflex corner, bounded by a sixth of the
+ * second difference there, which is a less precise summary of where the cluster is and not a
+ * claim about ground the members do not occupy (`artifact-shapes.md` §4, the owner's ruling of
+ * 2026-08-28). Every vertex the engine sends is still a visible member's own position, and the
+ * served ring — not the drawn curve — is what a pick and any containment reasoning read.
  */
-export function outlineOf(a: Artifact): [number, number][][] | null {
+export function outlineOf(a: Artifact, fetched?: readonly (readonly [number, number][])[] | null): [number, number][][] | null {
   const w = gridToWorld;
-  const rings = (a.hull ?? []).filter((ring) => ring.length >= 3).map((ring) => ring.map(gridToWorldXY));
+  const rings = ((fetched ?? a.hull ?? []) as readonly (readonly [number, number][])[])
+    .filter((ring) => ring.length >= 3)
+    .map((ring) => ring.map(gridToWorldXY));
   if (rings.length > 0) return rings;
   if (a.box) return [[[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]]];
   return null;
