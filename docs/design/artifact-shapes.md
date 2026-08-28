@@ -335,8 +335,10 @@ for `clusters/hdbscan`, as the principal holding this bundle's top 176 terms, go
 before, 88% after. The same request at `k = 5,000` over a zoom-4 viewport, which also carries tiles
 and 5,000 points, goes from **287,223 to 418,807 bytes**: the layer's shapes are 46% on top of a
 response that was 124 KB of points and tiles without them. The derivation cost is the other half of
-the price and is in §7 — 0.91 → 1.91 s for all 197 artifacts at full membership, the largest single
-artifact unchanged at 0.17 s because it is not one of the ones that was capped.
+the price and is in §7 — 0.91 → 1.91 s for all 197 artifacts at full membership. The largest
+single artifact barely moves — 0.16 → 0.17 s — because it never exhausted 64 in the first place:
+the root of the collapsed tree holds the whole corpus and is very nearly convex, so it spends 29
+digs and stops.
 
 **A dialable α is the one that must not exist**, and for a sharper reason than a dialable family. A
 family is a function of `membership ∩ M_auth` like everything else here, and five families over one
