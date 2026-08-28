@@ -279,3 +279,24 @@ paths = [
   "docs/design/artifact-shapes.md",
   "probes/2026-08-27-artifact-shapes/*",
 ]
+
+# Wave 12 — the contour and its cost (controller, 2026-08-28). Acts on the owner's containment
+# ruling and on the measurement that the hull is 94% of an artifacts request while the client draws
+# one: serve the shape where it is drawn, reconsider the family at that scale, smooth as
+# DataMapPlot does.
+[track.contour2]
+paths = [
+  "crates/tessera-engine/src/*",
+  "crates/tessera-engine/tests/*",
+  "crates/tessera-server/src/*",
+  "crates/tessera-server/tests/*",
+  "crates/tessera-types/src/layer.rs",
+  "crates/tessera-wire/*",
+  "clients/ts/core/*",
+  "clients/ts/deck/*",
+  "clients/ts/components/*",
+  "docs/design/artifact-shapes.md",
+  "docs/design/contracts.md",
+  "docs/openapi/tessera.yaml",
+  "probes/2026-08-27-artifact-shapes/*",
+]
