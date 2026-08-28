@@ -13,7 +13,7 @@ import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedSta
 import {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, type WorldPolygon} from './region.js';
 import {layerClosure} from './layers.js';
 import {artifactBudgetFor} from './artifactBudget.js';
-import {artifactColours, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
+import {artifactColours, positionalEntry, type PaletteKind, type PaletteScheme, type Rgba} from './palette.js';
 import type {Band, BandKey} from './bands.js';
 import {bandKey} from './bands.js';
 import {Replica, type ReplicaOptions} from './replica.js';
@@ -686,19 +686,45 @@ export function createStore(options: StoreOptions): Store {
 
   /** The table's version the held `colours` map was built at — a rebuild only when it moved. */
   let colouredAt = -1;
+  /** The palette and ground the held map was built under; either moving is a whole rebuild. */
+  let colouredUnder: {palette: PaletteKind; scheme: PaletteScheme} | null = null;
+  /**
+   * The map the `artifacts` projection publishes. It is a `ReadonlyMap` to every reader and this
+   * is the one writer: an extension for newly named ordinals is applied here, in place, so the
+   * map's identity is what tells a reader an extension from a recolour.
+   */
+  let colourMap = new Map<number, Rgba>();
 
   /**
-   * A colour per live ordinal (§5.10). O(live), which the ordinals' refcounts bound by resident
-   * marks, and only when the table has actually gained or lost an entry — a response that names
-   * artifacts already known rebuilds nothing.
+   * A colour per live ordinal (§5.10), **extended for what the table gained rather than rebuilt
+   * over what it holds**, and only when the table has moved at all — a response naming artifacts
+   * already known computes nothing.
+   *
+   * The distinction the incremental route rests on is the palette's, not an optimisation's.
+   * `positional` is a pure function of one artifact's centroid, so an ordinal's colour is
+   * unaffected by every other ordinal and the table's change list is exactly the work to do; the
+   * map is then **mutated in place and keeps its identity**, which is what lets the lookup
+   * texture tell an extension from a recolour (`lut.ts`). `spread` assigns hues by rank around
+   * the whole set's angle circle, so one arrival moves every colour: it rebuilds whole, at the
+   * table's live count, on any settle that names an artifact.
    */
   function colourTable(): Map<number, Rgba> {
+    const changes = palette === 'positional' && colouredUnder?.palette === 'positional' && colouredUnder.scheme === scheme ? table.changesSince(colouredAt) : null;
     colouredAt = table.version;
-    return artifactColours(
+    colouredUnder = {palette, scheme};
+    if (changes) {
+      for (const {ordinal, kind} of changes) {
+        if (kind === 'freed') colourMap.delete(ordinal);
+        else colourMap.set(ordinal, positionalEntry(table.entry(ordinal)?.centroid ?? null, scheme));
+      }
+      return colourMap;
+    }
+    colourMap = artifactColours(
       table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
       palette,
       scheme
     );
+    return colourMap;
   }
 
   /**

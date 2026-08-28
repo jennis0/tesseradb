@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {NEUTRAL, SessionArtifactTable, artifactColours, type Artifact, type Band, type ScalarColumn} from '@tesseradb/client';
+import {NEUTRAL, SessionArtifactTable, artifactColours, positionalEntry, type Artifact, type Band, type ScalarColumn} from '@tesseradb/client';
 import {LookupTexture, LUT_WIDTH, buildLut, dimmed} from '../src/lut.js';
 import {MarkSlab} from '../src/slab.js';
 import {fakeDevice} from './fake-device.js';
@@ -109,6 +109,97 @@ describe('buildLut', () => {
   });
 });
 
+/**
+ * The rewrite is bounded by what changed, not by what the session table holds: after the artifact
+ * channel's idle promotion the table holds whole levels — 226k entries on GeoNames — while a
+ * settled view names a few hundred it had not seen.
+ */
+describe('a table that only gained ordinals patches the rows they fall in', () => {
+  /** The colour of one ordinal, as the texture holds it. */
+  const texel = (lut: LookupTexture, o: number) => [...lut.colourOf(o)];
+
+  it('writes the new ordinals’ rows and no others, and leaves every other texel as it was', () => {
+    const device = fakeDevice();
+    const lut = new LookupTexture();
+    lut.attach(device);
+    const table = new SessionArtifactTable();
+    // A table wide enough to span rows: the ordinals named next land at the top of the range.
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    const colours = artifactColours(
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
+      'positional'
+    );
+    lut.update({artifacts: {table, colours}}, 'k');
+    expect(device.textureWrites).toBe(1);
+    expect(device.textureRegions).toEqual([{y: 0, height: 2}]);
+    const settled = texel(lut, 7);
+
+    // One artifact named, its colour added to the map the store extends in place.
+    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentId: null, centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
+    colours.set(fresh!, positionalEntry(table.entry(fresh!)!.centroid));
+    expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
+    expect(device.textureWrites).toBe(2);
+    // Row 1 alone — the row the new ordinal falls in — and not the two the texture holds.
+    expect(device.textureRegions[1]).toEqual({y: fresh! >> 10, height: 1});
+    expect(texel(lut, fresh!)).toEqual([...colours.get(fresh!)!]);
+    expect(texel(lut, 7)).toEqual(settled);
+
+    // And the same table again writes nothing.
+    expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(false);
+    expect(device.textureWrites).toBe(2);
+  });
+
+  it('rebuilds whole where a change can move a texel that is not its own', () => {
+    const device = fakeDevice();
+    const lut = new LookupTexture();
+    lut.attach(device);
+    // Two rows of entries, so a whole rebuild and a patch are told apart by the region written.
+    const table = new SessionArtifactTable();
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    const parent = table.ordinalOf('l', 1n);
+    const [child] = table.take([{tesseraId: 9001n, layer: 'l', parentId: 1n, rung: 1, centroid: [2 ** 31, 2 ** 31 + 1e9]}]);
+    const colours = artifactColours(
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
+      'positional'
+    );
+    lut.update({artifacts: {table, colours}, level: 0}, 'k');
+    expect(device.textureRegions).toEqual([{y: 0, height: 2}]);
+    // Coloured at level 0, the child wears the parent's colour.
+    expect([...lut.colourOf(child!)]).toEqual([...colours.get(parent)!]);
+
+    // The parent freed: what resolved *through* it moves, and that is not its own texel, so the
+    // texture is rebuilt whole rather than patched at the freed ordinal's row.
+    table.release([parent]);
+    colours.delete(parent);
+    expect(lut.update({artifacts: {table, colours}, level: 0}, 'k')).toBe(true);
+    expect(device.textureRegions[1]).toEqual({y: 0, height: 2});
+    expect([...lut.colourOf(child!)]).toEqual([...NEUTRAL]);
+  });
+
+  it('keeps the coverage rule: an ordinal the current view was not served is still coloured through a patch', () => {
+    // The point frame names an artifact ahead of the debounced channel. The walk stops at what is
+    // colourable, not at what the view was served, and a patched rewrite must not narrow that.
+    const device = fakeDevice();
+    const lut = new LookupTexture();
+    lut.attach(device);
+    const table = new SessionArtifactTable();
+    table.take(Array.from({length: 2000}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    const parent = table.ordinalOf('l', 1n);
+    const colours = artifactColours(
+      table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})),
+      'positional'
+    );
+    lut.update({artifacts: {table, colours}}, 'k');
+
+    // Named by the point frame alone — no colour of its own — under a parent already held.
+    const [late] = table.take([{tesseraId: 9001n, layer: 'l', parentId: 1n, rung: 1}]);
+    expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
+    // Patched — its row alone — and coloured by the ancestor the walk reaches, not neutral.
+    expect(device.textureRegions[1]).toEqual({y: late! >> 10, height: 1});
+    expect([...lut.colourOf(late!)]).toEqual([...colours.get(parent)!]);
+  });
+});
+
 describe('every colouring interaction is a texture rewrite, never an attribute upload (decision 0100)', () => {
   it('palette, level, highlight and the switch write the texture and not the buffers', () => {
     const {table, a, b, root, named} = served();
@@ -123,8 +214,11 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     slab.sync(bands, 2, {kind: 'uniform'}, null, 'l');
     const uploadsAfterBands = device.bufferWrites;
     expect(uploadsAfterBands).toBeGreaterThan(0);
+    // The colour map is held per palette, as the store holds it: `update` compares it by
+    // identity, so a fresh map of the same colours is a recolour and rewrites (see below).
+    const maps = {positional: artifactColours(named, 'positional'), spread: artifactColours(named, 'spread')};
     const inputs = (palette: 'positional' | 'spread', level?: number, highlight?: number) => ({
-      artifacts: {table, colours: artifactColours(named, palette)},
+      artifacts: {table, colours: maps[palette]},
       level,
       highlight
     });
@@ -141,12 +235,17 @@ describe('every colouring interaction is a texture rewrite, never an attribute u
     // The same inputs again: nothing is written.
     expect(lut.update(inputs('spread', 0, a), `v1|spread|0|${a}`)).toBe(false);
     expect(device.textureWrites).toBe(4);
+    // A different colour map object under the same key is a recolour — the palette or the ground
+    // moved — and rewrites though its contents happen to match: the store extends a map in place
+    // while the palette holds, so a new object is the signal that every colour may have moved.
+    expect(lut.update({artifacts: {table, colours: artifactColours(named, 'spread')}, level: 0, highlight: a}, `v1|spread|0|${a}`)).toBe(true);
+    expect(device.textureWrites).toBe(5);
 
     // The switch between cluster and column colour is a uniform: the slab is asked for the same
     // column encoding with the same carried layer, and uploads nothing.
     slab.sync(bands, 2, {kind: 'uniform'}, null, 'l');
     expect(device.bufferWrites).toBe(uploadsAfterBands);
-    expect(lut.writes).toBe(4);
+    expect(lut.writes).toBe(5);
   });
 
   it('the ordinal attribute uploads through the slab’s dirty span, once per band, and reads back the band’s ordinals', () => {

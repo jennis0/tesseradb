@@ -10,6 +10,8 @@ export type FakeDevice = Device & {
   textureWrites: number;
   /** Writes per buffer, keyed by creation order — the slab creates positions, colours, picking, ordinals. */
   writesByBuffer: number[];
+  /** The region of each texture write, in rows — what a test asserts a patch wrote and no more. */
+  textureRegions: {y: number; height: number}[];
 };
 
 export function fakeDevice(): FakeDevice {
@@ -17,6 +19,7 @@ export function fakeDevice(): FakeDevice {
     bufferWrites: 0,
     textureWrites: 0,
     writesByBuffer: [] as number[],
+    textureRegions: [] as {y: number; height: number}[],
     createBuffer(_props: unknown) {
       const at = dev.writesByBuffer.length;
       dev.writesByBuffer.push(0);
@@ -32,8 +35,9 @@ export function fakeDevice(): FakeDevice {
       return {
         width: props.width,
         height: props.height,
-        writeData: () => {
+        writeData: (_data: unknown, options?: {y?: number; height?: number}) => {
           dev.textureWrites += 1;
+          dev.textureRegions.push({y: options?.y ?? 0, height: options?.height ?? props.height});
         },
         destroy: () => {}
       };

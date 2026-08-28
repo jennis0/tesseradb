@@ -199,3 +199,62 @@ describe('the table is what a colour is built from (§5.10)', () => {
     expect(table.version).toBeGreaterThan(settled);
   });
 });
+
+/**
+ * The change journal: what a colour map and a lookup texture derive their per-settle work from
+ * (`store.ts`, `lut.ts`). The kinds matter to those readers — only `named` says *nothing but this
+ * ordinal's own value moved* — so each is asserted for the batch that produces it.
+ */
+describe('changesSince', () => {
+  it('reports naming, late geometry, a late link and a free, each against the version it moved at', () => {
+    const table = new SessionArtifactTable();
+    const opened = table.version;
+    const [a, b] = table.take([
+      {tesseraId: 1n, layer: 'l', parentId: null, centroid: [10, 20]},
+      {tesseraId: 2n, layer: 'l', parentId: null}
+    ]);
+    expect(table.changesSince(opened)).toEqual([
+      {ordinal: a, kind: 'named'},
+      {ordinal: b, kind: 'named'}
+    ]);
+    // Nothing since the latest version, and a batch naming nothing new adds nothing.
+    expect(table.changesSince(table.version)).toEqual([]);
+    const named = table.version;
+    table.take([{tesseraId: 1n, layer: 'l', parentId: null, centroid: [10, 20]}]);
+    expect(table.changesSince(named)).toEqual([]);
+
+    // A centroid arriving for an entry named without one is a colour arriving; a parent link
+    // arriving for an entry that was already here moves what its descendants resolve to. Both are
+    // reported, and neither is `named`.
+    table.take([{tesseraId: 2n, layer: 'l', parentId: 1n, centroid: [30, 40]}]);
+    expect(table.changesSince(named)).toEqual([
+      {ordinal: b, kind: 'placed'},
+      {ordinal: b, kind: 'linked'}
+    ]);
+
+    // A link set on an ordinal the same batch named is part of naming it: a reader told `linked`
+    // would rebuild for an entry it has never seen.
+    const linked = table.version;
+    table.take([{tesseraId: 3n, layer: 'l', parentId: 1n, centroid: [1, 1]}]);
+    expect(table.changesSince(linked)!.map((c) => c.kind)).toEqual(['named']);
+
+    const before = table.version;
+    // Two references: the batch that named it and the one that re-served it.
+    table.release([a!, a!]);
+    expect(table.changesSince(before)).toEqual([{ordinal: a, kind: 'freed'}]);
+  });
+
+  it('answers nothing for a reader further behind than the journal, or across a clear', () => {
+    const table = new SessionArtifactTable();
+    // Far enough behind that the journal has dropped the reader's version: rebuild whole.
+    for (let i = 0; i < 70_000; i++) table.take([{tesseraId: BigInt(i + 1), layer: 'l', parentId: null}]);
+    expect(table.changesSince(0)).toBeNull();
+    expect(table.changesSince(table.version - 10)).toHaveLength(10);
+
+    // A clear renames nothing it held, so no reader may patch across it.
+    const held = table.version;
+    table.clear();
+    expect(table.changesSince(held)).toBeNull();
+    expect(table.changesSince(table.version)).toEqual([]);
+  });
+});

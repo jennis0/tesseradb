@@ -82,7 +82,8 @@ export {
   SessionArtifactTable,
   NO_ORDINAL,
   type ArtifactEntry,
-  type ArtifactRef
+  type ArtifactRef,
+  type ArtifactTableChange
 } from './artifactTable.js';
 export {
   formatCount,
@@ -97,7 +98,7 @@ export {createStore, CLUSTER_PREFIX, REGION_HELD_LIMIT, type Store} from './stor
 export {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, REGION_TILE_BOUND, type RegionRequest, type WorldPolygon} from './region.js';
 export {layerClosure, layerEntries, type LayerEntry} from './layers.js';
 export {artifactBudgetFor, levelForBudget, BASE_ARTIFACT_BUDGET, MAX_ARTIFACT_BUDGET} from './artifactBudget.js';
-export {artifactColours, hslToRgb, polarOf, positionalColour, GRID32_CENTRE, NEUTRAL, type PaletteKind, type PaletteScheme, type Placed, type Rgba} from './palette.js';
+export {artifactColours, hslToRgb, polarOf, positionalColour, positionalEntry, GRID32_CENTRE, NEUTRAL, type PaletteKind, type PaletteScheme, type Placed, type Rgba} from './palette.js';
 export {MEMBERSHIP_PREFIX} from './decode.js';
 export type {
   ArtifactsProjection,

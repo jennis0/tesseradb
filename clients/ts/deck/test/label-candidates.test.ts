@@ -182,6 +182,43 @@ describe('labelCandidates', () => {
   });
 });
 
+/**
+ * A zoom scales the anchors and nothing else, so the sorted, budgeted list is built once per
+ * served set and each bucket — a quarter of a zoom level — scales a copy. At 34k served the list
+ * cost 38 ms to build and the placement over it 0.2 ms, so building it per bucket was the whole
+ * of a zoom gesture's label work.
+ */
+describe('the candidate list is held per served set, not per zoom bucket', () => {
+  const set = [artifact(1n, 900n, ['first']), artifact(2n, 500n, ['second']), artifact(3n, 300n, ['third'])];
+
+  it('is the same list at every zoom, with the anchors scaled', () => {
+    const p = projection(set);
+    const at9 = labelCandidates(p, META, undefined, 9, 10);
+    const at925 = labelCandidates(p, META, undefined, 9.25, 10);
+    // The text, sizes and boxes are one object shared by every bucket: nothing about them is a
+    // function of zoom.
+    expect(at925.byId).toBe(at9.byId);
+    expect(at925.candidates.map((c) => String(c.id))).toEqual(at9.candidates.map((c) => String(c.id)));
+    expect(at925.candidates.map((c) => c.width)).toEqual(at9.candidates.map((c) => c.width));
+    // The anchors are pixels, and a quarter of a zoom level is a factor of 2^0.25.
+    for (const [i, c] of at925.candidates.entries()) {
+      expect(c.x).toBeCloseTo(at9.candidates[i]!.x * 2 ** 0.25, 6);
+      expect(c.y).toBeCloseTo(at9.candidates[i]!.y * 2 ** 0.25, 6);
+    }
+    // Each bucket gets its own candidate objects: scaling in place would move the held list.
+    expect(at925.candidates[0]).not.toBe(at9.candidates[0]);
+  });
+
+  it('is rebuilt when the served set, the level or the budget moves', () => {
+    const p = projection(set);
+    const first = labelCandidates(p, META, undefined, 9, 10).byId;
+    expect(labelCandidates(p, META, undefined, 9, 2).byId).not.toBe(first);
+    expect(labelCandidates(p, META, 0, 9, 10).byId).not.toBe(first);
+    // A new served set under the same object identity — a response replacing it — is a new list.
+    expect(labelCandidates({...p, version: p.version + 1}, META, undefined, 9, 10).byId).not.toBe(first);
+  });
+});
+
 describe('labelBudget', () => {
   it('is one label per 36,000 px² and never fewer than eight', () => {
     expect(labelBudget(1280, 800)).toBe(28);
