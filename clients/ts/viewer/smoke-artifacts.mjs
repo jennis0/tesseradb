@@ -226,10 +226,10 @@ for (const [layer, rows] of byLayer) {
     );
   }
 }
-console.log(`--- the opened cluster's hull: ${openedDrawn ?? 'not opened'} drawn ---`);
+console.log(`--- the opened cluster's hull: ${openedDrawn ?? 'not opened'} drawn (in artifacts, not rings) ---`);
 console.log('--- geometry held and drawn (the wire’s, per principal) ---');
 for (const s of shotsTaken) {
-  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} shapes held, ${s.drawn?.outlinesDrawn ?? 0} drawn, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
+  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} rings held, ${s.drawn?.outlinesDrawn ?? 0} hulls drawn, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
 }
 // The served geometry must reach the layer under two principals — it is the wire's, derived per
 // principal, and a map that held none would pass every count check while showing a bare field.
@@ -237,6 +237,10 @@ for (const s of shotsTaken) {
 // (the owner's review, 2026-08-26), and the rest sit at zero alpha so they still answer a pick.
 // A label renders wherever a served artifact carries a text, and never where none does: a layer
 // whose artifacts have keys alone draws no label, since a key is an id.
+// `outlines` counts **rings** and `outlinesDrawn` counts **artifacts**: a hull is a list of rings
+// (`artifact-shapes.md` §1), so a cluster whose members are two separated clouds hands the layer
+// two rings and is one hull drawn. The opened-cluster check below is written in the second unit
+// deliberately — opening one cluster highlights one cluster however many pieces its shape has.
 const heldHull = shotsTaken.filter((s) => (s.drawn?.outlines ?? 0) > 0);
 if (heldHull.length < 2) failures.push(`served geometry reached the layer under ${heldHull.length} of 2 principals`);
 for (const s of shotsTaken) {

@@ -218,7 +218,14 @@ describe('the cache releases what a band held', () => {
 });
 
 describe('the membership golden (captured against the demo layer, the layer named with points)', () => {
-  it('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
+  // **Skipped: the golden is a pre-r40 capture** — its `hull_x`/`hull_y` are a flat
+  // `list<uint32>`, and a hull is now a list of rings (contracts §3.2 item 4), so the decoder
+  // refuses the body before it reaches the membership column. The refusal itself is asserted in
+  // `artifacts.client.test.ts`. What restores this: a `tessera serve` built from this branch, and
+  // `node scripts/capture-golden.mjs --artifacts-only` against it. Everything above covers the
+  // column against bodies this test file builds; what is lost meanwhile is the one check that the
+  // column and the artifacts frame agree in a body the server actually sent.
+  it.skip('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
     const {readFileSync} = require('node:fs') as typeof import('node:fs');
     const {join} = require('node:path') as typeof import('node:path');
     const r = decodeViewport(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin'))));

@@ -26,7 +26,11 @@ export function resolvePick(info: PickInfo): Picked {
   if (info.index < 0) return {kind: 'miss'};
   const layer = info.sourceLayer ?? info.layer;
   const props = (layer?.props ?? {}) as {tesseraIds?: BigUint64Array; artifactIds?: bigint[]};
-  // An artifact marker answered — a different kind of thing, on its own route.
+  // An artifact marker answered — a different kind of thing, on its own route. `artifactIds` is a
+  // **row-to-artifact map**, not an index into the served set: an outline row is one *ring* of a
+  // hull (`artifact-shapes.md` §9) and an artifact whose members are two separated clouds holds
+  // two rows, both naming it. The rings may overlap, and it costs nothing — deck answers with one
+  // row and both rows carry the same identifier.
   if (props.artifactIds) {
     const id = props.artifactIds[info.index];
     if (id === undefined) {
