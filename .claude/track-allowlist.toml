@@ -324,3 +324,14 @@ paths = [
   "docs/design/artifact-shapes.md",
   "probes/2026-08-27-artifact-shapes/*",
 ]
+
+# Wave 15 — the gather (controller, 2026-08-28). Contained and general: bin on the Morton code's
+# high bits so positions are un-interleaved only for the representatives that survive. The dig is
+# worked separately and is not this track's.
+[track.gather]
+paths = [
+  "crates/tessera-engine/src/derived.rs",
+  "crates/tessera-engine/tests/hull_geometry.rs",
+  "crates/tessera-spatial/src/*",
+  "docs/design/artifact-shapes.md",
+]
