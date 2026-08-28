@@ -1,4 +1,4 @@
-export {TesseraLayer, artifactName, hasText, clusterLayerOf, encodingOf, encodingSignature, outlineOf, outlineData, hoverShapes, labelBudget, labelCandidates, frontier, attachedTopics, displayName, type TesseraLayerProps, type LayerTimings, type OutlineDatum, type OutlineOptions, type LabelText} from './layer.js';
+export {TesseraLayer, artifactName, hasText, clusterLayerOf, encodingOf, encodingSignature, outlineOf, contourShapes, focusOutlines, labelBudget, labelCandidates, frontier, attachedTopics, displayName, type TesseraLayerProps, type LayerTimings, type Outline, type OutlineSource, type OutlineDatum, type OutlineOptions, type ContourOptions, type LabelText} from './layer.js';
 export {LookupTexture, buildLut, dimmed, LUT_WIDTH, LUT_SHIFT, type LutInputs} from './lut.js';
 export {MarksLayer, type MarksLayerProps} from './marks-layer.js';
 export {placeLabels, labelSize, LABEL_SIZE_MIN, LABEL_SIZE_MAX, wrapLabel, MAX_DISPLACEMENT, MAX_LABEL_LINE_CHARS, MAX_LABEL_LINES, LABEL_LINE_HEIGHT, type LabelCandidate, type PlacedLabel} from './labels.js';

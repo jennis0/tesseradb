@@ -96,10 +96,11 @@ function crossesProperly(p1: readonly [number, number], p2: readonly [number, nu
  *
  * Four is where a 16-gon stops looking like a polygon at the zoom a hovered cluster is read at,
  * and it makes the drawn ring four times the served one — against the eight times three rounds of
- * corner cutting cost. Only the one or two shapes that draw are smoothed
- * ({@link outlineData} in `layer.ts`), so this is a per-interaction cost and never a per-served-
- * artifact one: the largest shape on the measurement layer is 757 vertices across 10 rings, and
- * 3,028 vertices is one `PolygonLayer` call either way.
+ * corner cutting cost. Only the one or two shapes that draw are smoothed, and only where the wire
+ * answered with a hull ({@link focusOutlines} in `layer.ts` — four box corners through a periodic
+ * spline is an oval). So this is a per-interaction cost and never a per-served-artifact one: the
+ * largest shape on the measurement layer is 757 vertices across 10 rings, and 3,028 vertices is
+ * one `PolygonLayer` call either way.
  */
 const SAMPLES_PER_SPAN = 4;
 
@@ -258,8 +259,8 @@ export function shapeDistance(shape: ContourShape, p: readonly [number, number])
  * - **deepest wins** where shapes still overlap — two rings of one artifact, or a frontier
  *   artifact inside another's ring — so the answer is the most specific thing under the cursor,
  *   and it is the served tree that decides rather than paint order;
- * - **only drawn shapes are candidates at all** — the caller passes the frontier, which is what
- *   carries a label and what draws a contour.
+ * - **only shapes a viewer can point at are candidates at all** — the caller passes the frontier,
+ *   which is what carries a label and what draws a contour when the pointer reaches it.
  *
  * Ties on depth are broken by the smaller shape and then by the identifier, so the answer is a
  * function of the pointer, the served set and the mark beneath, and of nothing else.

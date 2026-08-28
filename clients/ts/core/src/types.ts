@@ -152,8 +152,18 @@ export type Layer = {
    * lineage is in its edges, and a level number would say nothing about position in it.
    */
   levels: {level: number; title: string; zoom: [number, number] | null}[];
-  /** The derived vocabulary a client must know to draw anything the layer's artifacts carry. */
-  derivedContent: string[];
+  /**
+   * Which computed properties the layer **declares** — `centroid`, `box`, `hull` — as `/v1/meta`
+   * publishes them in `computed_content` (contracts §3.2 r42). It is the declaration and not a
+   * property of any one artifact: a layer that declares `hull` serves one for every artifact that
+   * exists for this principal, though the viewport asks for centroids and boxes and a client
+   * fetches a shape by identifier when it needs one.
+   *
+   * A client draws from this. A box drawn for an artifact whose layer declares a hull is a
+   * placeholder for a shape that is on its way, and the map draws nothing rather than a rectangle
+   * that becomes a hull a moment later.
+   */
+  computedContent: string[];
   /** The kinds of supplied content its artifacts carry. */
   suppliedContent: string[];
   depsOn: string[];

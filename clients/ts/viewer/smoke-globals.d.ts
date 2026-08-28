@@ -14,9 +14,10 @@ interface Window {
     requests: number;
     view: {depth: number; status: string; visible: number; matched: number; served: number; provisional: number};
     /**
-     * `outlinesDrawn` is the shapes that actually draw, which is not `outlines`: the map holds a
-     * shape per served artifact and draws only the hovered and the opened one, so the pair is what
-     * separates *served* from *on screen* (`map.ts` publishes both from `LayerTimings`).
+     * The outline layer holds **what draws** and nothing else — the hovered and the opened
+     * artifact — so both counts are 0 at rest. They differ in unit: `outlines` counts rings and
+     * `outlinesDrawn` the artifacts they belong to (`map.ts` publishes both from `LayerTimings`).
+     * What may be hovered is the frontier, which the map holds and the layer no longer does.
      */
     timings: {outlines: number; outlinesDrawn: number; labels: number};
     cluster: {layersOn: string[]; servedIds: string[]};

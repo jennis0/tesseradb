@@ -344,7 +344,7 @@
   "layers": [
     {
       "depends_on": [],
-      "derived_content": [],
+      "computed_content": [],
       "hierarchy": {
         "kind": "flat",
         "prune_children": false

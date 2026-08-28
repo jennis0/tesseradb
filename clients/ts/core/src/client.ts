@@ -168,7 +168,7 @@ export class TesseraClient {
         membership: l.membership,
         hierarchy: {kind: l.hierarchy.kind, pruneChildren: l.hierarchy.prune_children},
         levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom ?? null})),
-        derivedContent: l.derived_content,
+        computedContent: l.computed_content,
         suppliedContent: l.supplied_content,
         depsOn: l.depends_on,
         version: l.version
@@ -420,7 +420,7 @@ type RawMeta = {
     membership: Layer['membership'];
     hierarchy: {kind: Layer['hierarchy']['kind']; prune_children: boolean};
     levels: {level: number; title: string; zoom: [number, number] | null}[];
-    derived_content: string[];
+    computed_content: string[];
     supplied_content: string[];
     depends_on: string[];
     version: number;

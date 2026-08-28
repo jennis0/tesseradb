@@ -34,8 +34,11 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  *
  * **It never fetches.** Every projection arrives by property — or, with the `store` convenience,
  * is read off the store the host hands in, which the layer subscribes to and nothing more. Hover
- * and pick are the host's: the sublayers carry `tesseraIds` and `artifactIds`, and `resolvePick`
- * turns deck's pick info into a mark, an artifact, a miss or a broken pick.
+ * and pick are the host's: the mark sublayers carry `tesseraIds` and the label sublayers
+ * `artifactIds`, and `resolvePick` turns deck's pick info into a mark, an artifact, a miss or a
+ * broken pick. **A contour is not in that pass**: what the pointer is over is resolved in JS
+ * against the frontier's shapes ({@link contourShapes}, then `hoverAt`), for a hover and for a
+ * click alike.
  *
  * **Every served mark is drawn.** The length handed to deck is the resident count, unconditionally
  * — no budget, no cap, no filter applies here. Colour is presentation and never decides what is
@@ -46,8 +49,9 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  * `marks` object. The stand-in pieces are materialised once per `standIn` array, memoised on
  * its identity, since the pieces survive most frames by reference.
  *
- * The drawing, in order (§5.10): the hovered and the opened artifact's served `hull` rings or `box`,
- * every other served shape in the data at zero alpha so it still answers a pick; the single-hue
+ * The drawing, in order (§5.10): the hovered and the opened artifact's served `hull` rings, or
+ * its `box` where its layer declares no hull — **and nothing else**, since only those two draw
+ * ({@link focusOutlines}); the single-hue
  * density wash from the exact tiles' counts,
  * filtered so the tile grid never shows (decision 0097); the marks — one `MarksLayer` per
  * retained slab partition, addressed by slot, plus the stand-ins — in their membership colour
@@ -114,10 +118,11 @@ export type LayerTimings = {
   layersMs: number;
   lutWrites: number;
   /**
-   * The **rings** the outline layer holds — the frontier's, which is what may be hovered — and how
-   * many **artifacts** actually draw one; two units on purpose. A hull is a list of rings, so the
-   * held count is what the layer hands deck; the drawn count is what a reader means by "one hull is
-   * showing", which stays one when the opened artifact's shape is two separated clouds.
+   * The **rings** the outline layer holds and the **artifacts** they belong to; two units on
+   * purpose, because a hull is a list of rings. Both count what draws — the hovered and the
+   * opened artifact, so `outlinesDrawn` is 0, 1 or 2 — and neither counts what may be hovered,
+   * which is the frontier and is no longer the layer's to hold ({@link contourShapes}). The two
+   * differ where the drawn artifact's members are two separated clouds: two rings, one hull.
    */
   outlines: number;
   outlinesDrawn: number;
@@ -277,16 +282,15 @@ const NO_POINTS: [number, number][] = [];
 const heldColumnEncoding = new WeakMap<MarkSlab, {encoding: Encoding; colourBy: string | null}>();
 /** A lookup texture per slab, for a host that handed none in. */
 const ownLut = new WeakMap<MarkSlab, LookupTexture>();
-/** The outline polygons, once per served set, opened artifact and zoom bucket. */
-const heldOutlines = new WeakMap<object, {key: string; data: OutlineDatum[]}>();
+/** The drawn outlines, once per served set, fetched hulls, opened artifact and hovered artifact. */
+const heldOutlines = new WeakMap<object, {key: string; hulls: object; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]; placed: number}>();
 
 /**
  * One drawn ring. **A datum is a ring, not an artifact** — a hull is a list of rings
- * (`artifact-shapes.md` §1), and every ring of one artifact carries that artifact's `id`, so the
- * row-to-artifact map the pick reads is this array in order and never an index into the served
- * set.
+ * (`artifact-shapes.md` §1), and every ring of one artifact carries that artifact's `id`, so an
+ * artifact whose members are two separated clouds is two rows here that draw alike.
  */
 export type OutlineDatum = {
   id: bigint;
@@ -296,6 +300,8 @@ export type OutlineDatum = {
   hovered: boolean;
   /** The wire's `rung` — the resolution the artifact is drawn at (contracts §3.2 r44). */
   rung: number;
+  /** Which shape the wire answered with, and so whether the ring was smoothed ({@link outlineOf}). */
+  source: OutlineSource;
   /** The fill and line alphas (0–255) and the line width in pixels this outline draws with. */
   fill: number;
   line: number;
@@ -314,12 +320,21 @@ type LabelDatum = {
 };
 type LeaderDatum = {from: [number, number]; to: [number, number]};
 
-/** The hovered outline: a fuller fill and a firmer line than the hairline, less than the opened one's. */
+/** The hovered outline: a faint fill and a firm line, less than the opened one's. */
 const HOVER_FILL: Record<'light' | 'dark', number> = {light: 26, dark: 33};
 const HOVER_LINE = 150;
 /** The opened outline: the boards' 0.16 fill and a strong line. */
 const OPENED_FILL = 41;
 const OPENED_LINE = 200;
+/**
+ * A `box` draws as an unfilled hairline rectangle, whichever of the two states it is in.
+ *
+ * A box is the axis-aligned bounds of the visible members, not their shape: tinting its interior
+ * would wash ground the members need not occupy at all, and a heavy line would draw the eye to a
+ * rectangle that is a summary of an extent rather than a boundary anyone dug. The line still
+ * carries the artifact's own colour and the state's own alpha, so the highlight reads.
+ */
+const BOX_LINE_WIDTH = 0.8;
 
 export type OutlineOptions = {
   opened: bigint | null;
@@ -330,88 +345,148 @@ export type OutlineOptions = {
   meta?: Meta | null;
 };
 
+/** What is on the map at all: the level cut and the layer roster, and nothing about what draws. */
+export type ContourOptions = {
+  level: number | undefined;
+  meta?: Meta | null;
+};
+
 /**
- * The served outlines and how each draws (§5.10). **A hull is drawn only for the hovered and the
- * opened artifact** — on every layer, nested included (the owner's review, 2026-08-26). At rest
- * the map is colour and names.
+ * Whether a served artifact is drawn at `level` and has no drawn child — {@link frontier}'s rule,
+ * asked of one artifact rather than of the whole served set, which is what the hovered and the
+ * opened artifact need.
+ */
+function onFrontier(a: ArtifactsProjection, artifact: Artifact, level: number | undefined): boolean {
+  const drawn = (x: {rung: number}) => level === undefined || x.rung <= level;
+  if (!drawn(artifact)) return false;
+  return !(a.lineage.childrenOf.get(artifact.tesseraId) ?? []).some((c) => drawn(c));
+}
+
+/** The layers whose artifacts attach their text to another layer's, and draw no shape of their own. */
+function dependentLayers(meta: Meta | null | undefined): Set<string> {
+  return new Set(meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
+}
+
+/**
+ * Whether a layer declares `hull` in its computed set — `/v1/meta`'s `computed_content`
+ * (contracts §3.2 r42), which is the layer's own declaration and not a property of any one
+ * artifact. With no roster in hand this is false, and the box draws.
+ */
+function declaresHull(meta: Meta | null | undefined, layer: string): boolean {
+  const declared = meta?.layers.find((l) => l.name === layer)?.computedContent;
+  return (declared ?? []).includes('hull');
+}
+
+/**
+ * **The shapes a viewer may point at**: one per served artifact on the **frontier**, carrying the
+ * wire's own vertices — the served ring, never the drawn curve — for {@link hoverAt} to resolve a
+ * hover or a click against.
+ *
+ * **The frontier and nothing above it** (the owner's review, 2026-08-27). A response carries a
+ * frontier *and its ancestors*, and every served artifact used to sit in a polygon layer at zero
+ * alpha so that it still answered deck's pick — which made an ancestor nobody can see reachable by
+ * pointing at it: the pointer crossed a parent's invisible ring on its way across a child's and
+ * the hover flipped between the two. A shape that is never drawn is not a thing a viewer can point
+ * at, so it is not here. This is the same set the labels are drawn from — what carries a name
+ * carries a contour and answers a hover. A dependent layer's artifacts (a clustering's topic
+ * labels) are out for the same reason: their text is drawn beneath the name of the artifact they
+ * attach to and they have no shape of their own, so their `box` fallback would put a rectangle
+ * over the map with nothing drawn on it.
+ *
+ * **A shape is the artifact's `box` until its hull arrives.** The viewport is asked for centroids
+ * and boxes, so at rest every entry here is a rectangle; the hull for whatever the pointer lands
+ * on is fetched by identifier (`TesseraStore.needHull`) and this is rebuilt around it when it
+ * lands. A layer that declares no hull draws its box and this is the shape for good.
+ *
+ * A hull's rings are separated groups of the visible members (`artifact-shapes.md` §1), so one
+ * entry holds several rings and a pointer between two of them is inside neither.
+ */
+export function contourShapes(a: ArtifactsProjection, o: ContourOptions): ContourShape[] {
+  const dependent = dependentLayers(o.meta);
+  const front = frontier(a, o.level);
+  const shapes: ContourShape[] = [];
+  for (const artifact of a.served) {
+    if (!front.has(artifact.tesseraId)) continue;
+    if (dependent.has(artifact.layer)) continue;
+    const outline = outlineOf(artifact, a.hulls?.get(artifact.tesseraId));
+    if (!outline) continue;
+    shapes.push({id: artifact.tesseraId, rung: artifact.rung, rings: outline.rings, bbox: shapeBbox(outline.rings)});
+  }
+  return shapes;
+}
+
+/**
+ * **What draws: the hovered artifact and the opened one, and nothing else** — on every layer,
+ * nested included (the owner's review, 2026-08-26). At rest the map is colour and names.
  *
  * The rule already held for a flat layer, whose hulls overlap into a mesh, and the argument is the
- * same one level up: a response carries a frontier **and its ancestors**, so drawing every served
- * hull gave each region its own shape plus its parent's plus its grandparent's, translucent fills
+ * same one level up: a response carries a frontier and its ancestors, so drawing every served hull
+ * gave each region its own shape plus its parent's plus its grandparent's, translucent fills
  * stacking into a murky wash with no cue that the big shape contained the small ones. Exact colour
  * already says where a cluster is and how far it reaches, per principal, so the contours were
  * paying for a thing already drawn.
  *
- * **The rows are the frontier's, and nothing else's** (the owner's review, 2026-08-27). Every
- * served artifact used to stay in the data at zero alpha so that it still answered a pick, which
- * made an ancestor nobody can see reachable by pointing at it: the pointer crossed a parent's
- * invisible ring on its way across a child's, and the hover flipped between the two. A shape that
- * is never drawn is not a thing a viewer can point at, so it is not here. `frontier` is the same
- * set the labels are drawn from — what carries a name carries a contour and answers a hover.
- * A dependent layer's artifacts (a clustering's topic labels) are out for the same reason: their
- * text is drawn beneath the name of the artifact they attach to and they have no shape of their
- * own, so their `box` fallback would put a rectangle over the map with nothing drawn on it.
+ * **So this is asked about two artifacts and never about the served set.** The rest of the
+ * frontier used to be handed to deck at zero alpha to answer a pick, which made a hover change
+ * cost a pass over every served artifact and a re-tessellation of every frontier ring: measured at
+ * 38 ms building the rows and 16 ms more in deck's tessellator, at the 34,385 served boxes an
+ * administrative hierarchy puts on screen at zoom 9, for every boundary the pointer crossed. This
+ * is 0.01 ms at that count, and the pick those rows answered is resolved against
+ * {@link contourShapes} instead — 17 ms once per served set, then 0.75 ms per pointer move.
  *
- * Parents are ordered first so an opened child sits over an opened parent.
+ * **A box is not smoothed, and where a hull is coming it is not drawn at all.** {@link smoothRing}
+ * is a periodic cubic B-spline, and four corners through it is an oval: the rectangle a viewer
+ * hovers must be the rectangle the wire sent. Where the layer declares `hull` the box is a
+ * placeholder for a shape that is on its way by identifier, so nothing draws until it lands —
+ * a rectangle that becomes a hull a moment later reads as the shape changing under the pointer.
+ * The hover still resolves against the box meanwhile ({@link contourShapes}), which is what asks
+ * for the hull in the first place.
  *
  * **A served artifact contributes one row per ring of its hull**, so the length of the result is
- * the ring count and not the served count. Every row of one artifact draws alike, because the
+ * the ring count and not the artifact count. Every row of one artifact draws alike, because the
  * rings are one shape in several pieces and highlighting half of a cluster would be a lie about
- * where its members are.
- *
- * **The rings that draw are smoothed** ({@link smoothRing}), and only those: a smoothed ring is a
- * contained one, but it costs about eight times the vertices, and the one or two shapes on screen
- * are what a viewer sees the line of. The rest carry the wire's own vertices, which is what the
- * hover reads — a smoothed ring is inside the served one, so a pointer between the two lines is
- * still inside the shape it is pointing at.
+ * where its members are. Parents are ordered first so an opened child sits over an opened parent.
  */
-export function outlineData(a: ArtifactsProjection, o: OutlineOptions): OutlineDatum[] {
+export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): OutlineDatum[] {
+  const dependent = dependentLayers(o.meta);
   const data: OutlineDatum[] = [];
-  const front = frontier(a, o.level);
-  const dependent = new Set(o.meta?.layers.filter((l) => l.depsOn.length > 0).map((l) => l.name) ?? []);
-  // The wire's `rung` orders parents first (contracts §3.2 r44): the declared level on a levelled
-  // layer, the response-local chain depth on a treed one — drawn by, never derived.
-  const ordered = [...a.served].sort((x, y) => x.rung - y.rung);
-  for (const artifact of ordered) {
-    const rung = artifact.rung;
-    if (o.level !== undefined && rung > o.level) continue;
-    if (!front.has(artifact.tesseraId)) continue;
+  const seen = new Set<bigint>();
+  // Opened first, so that opening the artifact under the pointer draws it opened and not hovered.
+  for (const id of [o.opened, o.hovered]) {
+    if (id === null || seen.has(id)) continue;
+    seen.add(id);
+    const artifact = a.served.find((x) => x.tesseraId === id);
+    if (!artifact) continue;
     if (dependent.has(artifact.layer)) continue;
-    const rings = outlineOf(artifact, a.hulls?.get(artifact.tesseraId));
-    if (!rings) continue;
+    if (!onFrontier(a, artifact, o.level)) continue;
+    const outline = outlineOf(artifact, a.hulls?.get(id));
+    if (!outline) continue;
+    const box = outline.source === 'box';
+    if (box && declaresHull(o.meta, artifact.layer)) continue;
+    const opened = id === o.opened;
     const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
-    const opened = artifact.tesseraId === o.opened;
-    const hovered = !opened && artifact.tesseraId === o.hovered;
-    const fill = opened ? OPENED_FILL : hovered ? HOVER_FILL[o.scheme] : 0;
-    const line = opened ? OPENED_LINE : hovered ? HOVER_LINE : 0;
-    const width = opened ? 1.2 : hovered ? 1 : 0.8;
     const colour = a.colours.get(ordinal) ?? NEUTRAL;
-    const draws = fill > 0 || line > 0;
-    // **One datum per ring, every one carrying the artifact's own id.** A row is a ring and not an
-    // artifact, which is the whole of what the several-ring wire changes here: two rings of one
-    // artifact may overlap, and a pick answers the same artifact whichever it lands on.
-    for (const ring of rings) {
-      data.push({id: artifact.tesseraId, polygon: draws ? smoothRing(ring) : ring, colour, opened, hovered, rung, fill, line, width});
+    const fill = box ? 0 : opened ? OPENED_FILL : HOVER_FILL[o.scheme];
+    const line = opened ? OPENED_LINE : HOVER_LINE;
+    const width = box ? BOX_LINE_WIDTH : opened ? 1.2 : 1;
+    for (const ring of outline.rings) {
+      data.push({
+        id: artifact.tesseraId,
+        polygon: box ? ring : smoothRing(ring),
+        colour,
+        opened,
+        hovered: !opened,
+        rung: artifact.rung,
+        source: outline.source,
+        fill,
+        line,
+        width
+      });
     }
   }
-  return data;
-}
-
-/**
- * The drawn shapes a hover is resolved against — {@link outlineData}'s rows, one entry per
- * artifact with its rings gathered, which is the unit a hover answers in.
- *
- * Built from the rows rather than from the served set on purpose: what is hoverable is defined in
- * exactly one place, and it is what draws.
- */
-export function hoverShapes(data: readonly OutlineDatum[]): ContourShape[] {
-  const byId = new Map<bigint, [number, number][][]>();
-  const rungs = new Map<bigint, number>();
-  for (const row of data) {
-    (byId.get(row.id) ?? byId.set(row.id, []).get(row.id)!).push(row.polygon);
-    rungs.set(row.id, row.rung);
-  }
-  return [...byId].map(([id, rings]) => ({id, rung: rungs.get(id) ?? 0, rings, bbox: shapeBbox(rings)}));
+  // The wire's `rung` orders parents first (contracts §3.2 r44): the declared level on a levelled
+  // layer, the response-local chain depth on a treed one — drawn by, never derived.
+  return data.sort((x, y) => x.rung - y.rung);
 }
 
 /**
@@ -459,13 +534,8 @@ const TOPIC_SIZE = 12;
  * a levelled layer, whose edges may skip a level (trap 5.4, retired with the column).
  */
 export function frontier(a: ArtifactsProjection, level: number | undefined): Set<bigint> {
-  const drawn = (x: {rung: number}) => level === undefined || x.rung <= level;
   const out = new Set<bigint>();
-  for (const artifact of a.served) {
-    if (!drawn(artifact)) continue;
-    const children = a.lineage.childrenOf.get(artifact.tesseraId) ?? [];
-    if (!children.some((c) => drawn(c))) out.add(artifact.tesseraId);
-  }
+  for (const artifact of a.served) if (onFrontier(a, artifact, level)) out.add(artifact.tesseraId);
   return out;
 }
 
@@ -550,9 +620,20 @@ export function artifactName(a: Artifact): string | null {
   return text !== undefined && text.length > 0 ? text : null;
 }
 
+/** Which of the two shapes the wire answered an artifact's outline with. */
+export type OutlineSource = 'hull' | 'box';
+
+/** A served artifact's outline in world space, and which of the two shapes it is. */
+export type Outline = {rings: [number, number][][]; source: OutlineSource};
+
 /**
  * A served artifact's outline in world space: **its hull's rings**, else its box, else nothing —
  * the wire's own vertices, in the wire's own order, and nothing else.
+ *
+ * **It says which of the two it returned**, because the two are drawn differently and a caller
+ * cannot tell them apart by counting vertices: a box is four corners and so is a square hull.
+ * A hull is smoothed and a box never is ({@link focusOutlines}), and four corners through a
+ * periodic cubic B-spline is an oval.
  *
  * A hull is a list of rings, one per separated group of the visible members (`artifact-shapes.md`
  * §1), so this returns a list of rings and each one is drawn as its own polygon carrying the
@@ -567,7 +648,7 @@ export function artifactName(a: Artifact): string | null {
  * layer declaring no hull has always taken.
  *
  * **This returns the wire's vertices and does not smooth them.** The smoothing is
- * {@link smoothRing}, applied by {@link outlineData} to the rings that draw. It is a **periodic
+ * {@link smoothRing}, applied by {@link focusOutlines} to the hull rings that draw. It is a **periodic
  * cubic B-spline** through the served ring rather than a containment-preserving corner cut: the
  * curve may sit a little outside the served ring at a reflex corner, bounded by a sixth of the
  * second difference there, which is a less precise summary of where the cluster is and not a
@@ -575,13 +656,15 @@ export function artifactName(a: Artifact): string | null {
  * 2026-08-28). Every vertex the engine sends is still a visible member's own position, and the
  * served ring — not the drawn curve — is what a pick and any containment reasoning read.
  */
-export function outlineOf(a: Artifact, fetched?: readonly (readonly [number, number][])[] | null): [number, number][][] | null {
+export function outlineOf(a: Artifact, fetched?: readonly (readonly [number, number][])[] | null): Outline | null {
   const w = gridToWorld;
   const rings = ((fetched ?? a.hull ?? []) as readonly (readonly [number, number][])[])
     .filter((ring) => ring.length >= 3)
     .map((ring) => ring.map(gridToWorldXY));
-  if (rings.length > 0) return rings;
-  if (a.box) return [[[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]]];
+  if (rings.length > 0) return {rings, source: 'hull'};
+  if (a.box) {
+    return {rings: [[[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]]], source: 'box'};
+  }
   return null;
 }
 
@@ -1043,12 +1126,21 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * The served `hull` or `box` for the hovered and the opened artifact, in its own colour, the
-   * opened one strong with a faint fill; every other **frontier** shape in the data at zero alpha
-   * so it still answers a pick ({@link outlineData}). Derived per principal (contracts §3.2), so a
-   * shape is exact for this viewer; nothing is contoured from held marks (decision 0099).
+   * The served `hull` rings — or the `box`, where the layer declares no hull — for the hovered and
+   * the opened artifact, in its own colour, the opened one strong with a faint fill
+   * ({@link focusOutlines}). Derived per principal (contracts §3.2), so a shape is exact for this
+   * viewer; nothing is contoured from held marks (decision 0099).
+   *
+   * **Nothing else is in this layer.** The rest of the frontier used to sit here at zero alpha to
+   * answer deck's pick, which put every served ring through the tessellator on every hover change;
+   * a pick over a contour is resolved in JS instead, against {@link contourShapes}, and a click
+   * takes the same route as the hover (`map.ts`'s `onClick`). So this layer is not pickable and
+   * carries no `artifactIds`: a label still answers deck's pick and names its artifact, and that is
+   * now the only route by which `resolvePick` reports one.
    *
    * The shapes do not depend on the zoom, so the memo survives a zoom that re-places the labels.
+   * It is keyed on the fetched hulls as well as the served set, because a hull arriving by
+   * identifier changes neither the served array nor the projection's version.
    */
   private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number; outlinesDrawn: number}): Layer[] {
     const a = r.artifacts;
@@ -1058,14 +1150,14 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const scheme = this.props.scheme ?? 'dark';
     const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${hovered ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldOutlines.get(a.served) : undefined;
-    if (a && (!held || held.key !== key)) {
-      held = {key, data: outlineData(a, {opened, hovered, level: this.props.clusterLevel, scheme, meta: r.meta})};
+    if (a && (!held || held.key !== key || held.hulls !== a.hulls)) {
+      held = {key, hulls: a.hulls, data: focusOutlines(a, {opened, hovered, level: this.props.clusterLevel, scheme, meta: r.meta})};
       heldOutlines.set(a.served, held);
     }
     const data = held?.data ?? NO_OUTLINES;
     timings.outlinesMs = performance.now() - started;
     timings.outlines = data.length;
-    timings.outlinesDrawn = new Set(data.filter((d) => d.fill > 0 || d.line > 0).map((d) => d.id)).size;
+    timings.outlinesDrawn = new Set(data.map((d) => d.id)).size;
     // The layer exists from the first paint, empty, so its program is linked before it is needed.
     return [
       new PolygonLayer(
@@ -1074,9 +1166,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           visible: data.length > 0,
           data,
           getPolygon: (d: OutlineDatum) => d.polygon,
-          // Filled even at zero alpha: the fill is what answers a pick, and a flat layer's
-          // outline is invisible until hovered while its hull still names the artifact under
-          // the pointer (deck's picking pass reads the picking colour, never the fill's alpha).
+          // A box draws unfilled, which is the whole of what `fill` carries here — every row in
+          // this layer is a shape that draws.
           filled: true,
           getFillColor: (d: OutlineDatum) => [d.colour[0], d.colour[1], d.colour[2], d.fill],
           stroked: true,
@@ -1084,13 +1175,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
           lineWidthUnits: 'pixels' as const,
           getLineWidth: (d: OutlineDatum) => d.width,
           lineWidthMinPixels: 0.8,
-          pickable: this.props.pickable,
-          // The row-to-artifact map the pick reads (`pick.ts`). A row is a **ring**, so this is
-          // not an index into the served set and must not be rebuilt from one: an artifact whose
-          // hull is two rings holds two rows here, both naming it. The hover does not read this —
-          // it resolves against the drawn shapes itself (`hoverAt`), deepest first — but a click
-          // on a contour still comes through deck's pick pass.
-          artifactIds: data.map((d) => d.id),
+          pickable: false,
           parameters: {depthCompare: 'always' as const},
           updateTriggers: {getFillColor: key, getLineColor: key, getLineWidth: key}
         } as never

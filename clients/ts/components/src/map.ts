@@ -10,7 +10,7 @@ import {
   type Store,
   type SelectionShape
 } from '@tesseradb/client';
-import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, encodingOf, encodingSignature, hoverAt, hoverShapes, outlineData, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
+import {LookupTexture, MarkSlab, TesseraLayer, artifactOfMark, clusterLayerOf, contourShapes, encodingOf, encodingSignature, hoverAt, resolvePick, type ContourShape, type Picked} from '@tesseradb/deck';
 import type {PaletteKind, PaletteScheme} from '@tesseradb/client';
 import {TesseraElement, emit, idString} from './base.js';
 import {attachContextRoot, defineOnce} from './define.js';
@@ -70,12 +70,12 @@ export type MapProbe = {
     /** Lookup-texture writes since the map was made — what a colouring interaction costs. */
     lutWrites: number;
     /**
-     * What the last paint held and drew of the artifacts: the **rings** the outline layer carries,
-     * how many **artifacts** actually draw one — the hovered and the opened one, the rest of the
-     * frontier at zero alpha so they still answer a pick — and the labels placed. The two counts
-     * are in different
-     * units because a hull is a list of rings (`artifact-shapes.md` §1): opening a cluster whose
-     * members are two separated clouds hands deck two rings and draws one hull.
+     * What the last paint drew of the artifacts: the **rings** the outline layer carries, the
+     * **artifacts** they belong to — the hovered and the opened one, which is all that draws — and
+     * the labels placed. The first two are in different units because a hull is a list of rings
+     * (`artifact-shapes.md` §1): opening a cluster whose members are two separated clouds hands
+     * deck two rings and draws one hull. Neither counts what may be hovered, which is the frontier
+     * and is held here rather than in the layer (`contours`).
      */
     outlines: number;
     outlinesDrawn: number;
@@ -628,10 +628,10 @@ export class TesseraMap extends TesseraElement {
   // ---- hover and pick -----------------------------------------------------------------------
 
   /**
-   * The drawn shapes a hover is resolved against, held until the served set, the fetched hulls,
-   * the level or the roster move. Built with nothing hovered and nothing opened, so it is the
-   * served geometry rather than the drawn curve — the curve is a smoothing and not the shape, and
-   * a hover answered against it would answer about a line the wire never sent.
+   * The shapes a hover — and a click — is resolved against, held until the served set, the fetched
+   * hulls, the level or the roster move. They are the **served** rings and never the drawn curve:
+   * the curve is a smoothing, and an answer given against it would be about a line the wire never
+   * sent.
    *
    * **A shape here is the artifact's `box` until its hull arrives.** The viewport is asked for
    * centroids and boxes, so at rest every candidate is a rectangle and the hover is coarser than
@@ -650,7 +650,7 @@ export class TesseraMap extends TesseraElement {
     const level = this.clusterLevel ?? null;
     const held = this.contoursHeld;
     if (held && held.served === a.served && held.hulls === a.hulls && held.level === level && held.meta === meta) return held.shapes;
-    const shapes = hoverShapes(outlineData(a, {opened: null, hovered: null, level: level ?? undefined, scheme: this.scheme(), meta}));
+    const shapes = contourShapes(a, {level: level ?? undefined, meta});
     this.contoursHeld = {served: a.served, hulls: a.hulls, level, meta, shapes};
     return shapes;
   }
@@ -659,8 +659,21 @@ export class TesseraMap extends TesseraElement {
   private static readonly HOVER_MARGIN_PX = 4;
 
   /**
+   * The artifact a world point is over, for the hover and for the click alike: the deepest drawn
+   * shape containing it, the one already hovered held until the pointer is clear of it, and the
+   * mark beneath preferred where the caller has one ({@link hoverAt}).
+   *
+   * One route, so that what a click opens is what the pointer was highlighting. Nothing else can
+   * answer it: the outline layer draws the hovered and the opened artifact only and is not
+   * pickable, so a contour never reaches deck's pick pass.
+   */
+  private artifactAt(world: [number, number], prefer: bigint | null): bigint | null {
+    return hoverAt(this.contours(), world, this.hoveredArtifact, TesseraMap.HOVER_MARGIN_PX / 2 ** this.viewState.zoom, prefer);
+  }
+
+  /**
    * What the pointer is over: the tooltip from the mark beneath it, and the hovered artifact from
-   * the **drawn** contours ({@link hoverAt}), not from deck's pick.
+   * the frontier's own shapes ({@link hoverAt}), never from deck's pick.
    *
    * Deck answers a pick with whatever polygon its picking pass finds, which was every served
    * artifact — ancestors included, at zero alpha — so crossing a cluster meant crossing its
@@ -669,6 +682,9 @@ export class TesseraMap extends TesseraElement {
    * containing the pointer wins, and the one already hovered holds until the pointer is clear of
    * it. The mark beneath the pointer is passed as the preference, so the highlighted contour is
    * the cluster whose point the tooltip is describing.
+   *
+   * Deck cannot answer it at all: the outline layer holds the hovered and the opened artifact and
+   * is not pickable, so a contour is never in its pick pass.
    */
   private onHover(info: PickingInfo): void {
     const picked = resolvePick(info as never);
@@ -680,9 +696,7 @@ export class TesseraMap extends TesseraElement {
     // where two hulls interleave over the same ground.
     const own = at && artifacts ? artifactOfMark(at.band, at.i, artifacts, this.clusterLevel ?? undefined) : null;
     const world = this.worldAt(info.x, info.y);
-    this.hoveredArtifact = world
-      ? hoverAt(this.contours(), world, this.hoveredArtifact, TesseraMap.HOVER_MARGIN_PX / 2 ** this.viewState.zoom, own)
-      : null;
+    this.hoveredArtifact = world ? this.artifactAt(world, own) : null;
     // **The shape is fetched where it is drawn.** The viewport carries no hull; this asks for the
     // one the map is about to draw. Idempotent, so calling it on every pointer move costs one
     // request per artifact per principal and nothing thereafter.
@@ -730,9 +744,21 @@ export class TesseraMap extends TesseraElement {
         void s?.pick(picked.id);
         this.paint();
         return;
-      case 'miss':
-        this.lastPick = {kind: 'miss'};
+      case 'miss': {
+        // Deck found nothing, which does not mean the pointer is over nothing: a contour is not in
+        // its pick pass. Resolve the click exactly as the hover is resolved, so what opens is what
+        // was highlighted, and fall back to a miss where the point is in no drawn shape.
+        const world = this.worldAt(info.x, info.y);
+        const id = world ? this.artifactAt(world, null) : null;
+        if (id === null) {
+          this.lastPick = {kind: 'miss'};
+          return;
+        }
+        this.lastPick = null;
+        s?.needHull(id);
+        void s?.openArtifact(id);
         return;
+      }
       case 'broken':
         this.lastPick = picked;
         return;

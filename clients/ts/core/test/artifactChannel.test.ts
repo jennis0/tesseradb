@@ -338,7 +338,7 @@ const decl = (over: Partial<Layer> = {}): Layer => ({
   membership: 'enumerated',
   hierarchy: {kind: 'tiered', pruneChildren: false},
   levels: [{level: 0, title: 'coarse', zoom: null}],
-  derivedContent: [],
+  computedContent: [],
   suppliedContent: [],
   depsOn: [],
   version: 1,

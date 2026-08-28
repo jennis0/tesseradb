@@ -26,11 +26,13 @@ export function resolvePick(info: PickInfo): Picked {
   if (info.index < 0) return {kind: 'miss'};
   const layer = info.sourceLayer ?? info.layer;
   const props = (layer?.props ?? {}) as {tesseraIds?: BigUint64Array; artifactIds?: bigint[]};
-  // An artifact marker answered — a different kind of thing, on its own route. `artifactIds` is a
-  // **row-to-artifact map**, not an index into the served set: an outline row is one *ring* of a
-  // hull (`artifact-shapes.md` §9) and an artifact whose members are two separated clouds holds
-  // two rows, both naming it. The rings may overlap, and it costs nothing — deck answers with one
-  // row and both rows carry the same identifier.
+  // An artifact's label answered — a different kind of thing, on its own route. `artifactIds` is a
+  // **row-to-artifact map**, not an index into the served set: a wrapped name is several text rows
+  // of one label, and every one of them carries the artifact's own identifier.
+  //
+  // **A contour does not come through here.** The outline layer draws the hovered and the opened
+  // artifact and is not pickable; what the pointer is over is resolved against the frontier's
+  // served shapes in JS (`hoverAt`), for a click as for a hover.
   if (props.artifactIds) {
     const id = props.artifactIds[info.index];
     if (id === undefined) {

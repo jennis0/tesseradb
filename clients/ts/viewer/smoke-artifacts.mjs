@@ -91,17 +91,23 @@ const artifactList = async () =>
   });
 
 /**
- * What the map holds and draws of the artifacts, from the probe: the served shapes the outline
- * layer carries, how many of those draw, placed labels, the layers on —
- * and how many served artifacts carry a text, read off the explorer's store, since an artifact
- * with no text draws no label (its key is an id, never a name).
+ * What the map draws of the artifacts, from the probe: the rings the outline layer carries, the
+ * artifacts they belong to, placed labels, the layers on — and, read off the explorer's store,
+ * how many served artifacts carry a text and how many carry geometry.
+ *
+ * The two store reads are here because the probe cannot answer them. An artifact with no text
+ * draws no label (its key is an id, never a name), and the outline layer holds only what draws —
+ * the hovered and the opened artifact — so *the wire's geometry reached this client* is asked of
+ * the store, which is where that geometry lands.
  */
 const drawn = async () =>
   page.evaluate(() => {
     const p = window.__tesseraProbe;
-    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
-    const named = explorer?.store?.get('artifacts').served.filter((a) => (a.content[0] ?? '').length > 0).length ?? 0;
-    return p ? {outlines: p.timings.outlines, outlinesDrawn: p.timings.outlinesDrawn, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length, named} : null;
+    const explorer = /** @type {{store: {get(name: 'artifacts'): {served: {content: string[]; box: unknown; hull: unknown}[]}} | null} | null} */ (/** @type {unknown} */ (document.querySelector('tessera-explorer')));
+    const served = explorer?.store?.get('artifacts').served ?? [];
+    const named = served.filter((a) => (a.content[0] ?? '').length > 0).length;
+    const withGeometry = served.filter((a) => a.box !== null || a.hull !== null).length;
+    return p ? {outlines: p.timings.outlines, outlinesDrawn: p.timings.outlinesDrawn, labels: p.timings.labels, layersOn: p.cluster.layersOn, served: p.cluster.servedIds.length, named, withGeometry} : null;
   });
 
 // The picker is rendered from `/v1/meta`, so nothing can be counted until the first response has
@@ -173,7 +179,7 @@ for (const r of results) {
     .map(([k, v]) => `#${k.slice(-6)}=${v.toLocaleString()}`)
     .join(' ');
   console.log(
-    `  ${(r.layer ?? '?').padEnd(28)} ${r.principal.padEnd(26)} served=${String(r.served ?? (r.empty ? 0 : '?')).padStart(4)}  shapes=${String(r.drawn?.outlines ?? '?').padStart(3)} drawn=${String(r.drawn?.outlinesDrawn ?? '?').padStart(2)} labels=${String(r.drawn?.labels ?? '?').padStart(3)}  ${sample}`
+    `  ${(r.layer ?? '?').padEnd(28)} ${r.principal.padEnd(26)} served=${String(r.served ?? (r.empty ? 0 : '?')).padStart(4)}  shapes=${String(r.drawn?.withGeometry ?? '?').padStart(3)} drawn=${String(r.drawn?.outlinesDrawn ?? '?').padStart(2)} labels=${String(r.drawn?.labels ?? '?').padStart(3)}  ${sample}`
   );
 }
 console.log('--- the same cluster, across principals ---');
@@ -226,22 +232,23 @@ for (const [layer, rows] of byLayer) {
 console.log(`--- the opened cluster's hull: ${openedDrawn ?? 'not opened'} drawn (in artifacts, not rings) ---`);
 console.log('--- geometry held and drawn (the wire’s, per principal) ---');
 for (const s of shotsTaken) {
-  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.outlines ?? 0} rings held, ${s.drawn?.outlinesDrawn ?? 0} hulls drawn, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
+  console.log(`  ${s.label.padEnd(26)} ${String(s.list.served ?? 0).padStart(3)} clusters, ${s.drawn?.withGeometry ?? 0} with geometry, ${s.drawn?.outlines ?? 0} rings drawn over ${s.drawn?.outlinesDrawn ?? 0} artifacts, ${s.drawn?.labels ?? 0} labels (${s.drawn?.named ?? 0} with a text)  ${s.file}`);
 }
-// The served geometry must reach the layer under two principals — it is the wire's, derived per
+// The served geometry must reach the client under two principals — it is the wire's, derived per
 // principal, and a map that held none would pass every count check while showing a bare field.
-// **None of it draws at rest**: a hull is drawn only for the hovered and the opened artifact
-// (the owner's review, 2026-08-26), and the rest sit at zero alpha so they still answer a pick.
+// **None of it draws at rest**: a shape is drawn only for the hovered and the opened artifact
+// (the owner's review, 2026-08-26), and the rest of the frontier is not handed to deck at all —
+// what the pointer is over is resolved against the served shapes in JS.
 // A label renders wherever a served artifact carries a text, and never where none does: a layer
 // whose artifacts have keys alone draws no label, since a key is an id.
 // `outlines` counts **rings** and `outlinesDrawn` counts **artifacts**: a hull is a list of rings
 // (`artifact-shapes.md` §1), so a cluster whose members are two separated clouds hands the layer
 // two rings and is one hull drawn. The opened-cluster check below is written in the second unit
 // deliberately — opening one cluster highlights one cluster however many pieces its shape has.
-const heldHull = shotsTaken.filter((s) => (s.drawn?.outlines ?? 0) > 0);
-if (heldHull.length < 2) failures.push(`served geometry reached the layer under ${heldHull.length} of 2 principals`);
+const heldHull = shotsTaken.filter((s) => (s.drawn?.withGeometry ?? 0) > 0);
+if (heldHull.length < 2) failures.push(`served geometry reached the client under ${heldHull.length} of 2 principals`);
 for (const s of shotsTaken) {
-  if ((s.drawn?.outlinesDrawn ?? 0) > 0) failures.push(`${s.label}: ${s.drawn.outlinesDrawn} hull(s) drawn with nothing hovered or opened`);
+  if ((s.drawn?.outlinesDrawn ?? 0) > 0) failures.push(`${s.label}: ${s.drawn.outlinesDrawn} shape(s) drawn with nothing hovered or opened`);
 }
 if (openedDrawn !== 1) failures.push(`opening a cluster drew ${openedDrawn} hull(s), not 1`);
 for (const s of shotsTaken) {

@@ -21,7 +21,7 @@ const META: Meta = {
   views: [{id: 's0', displayName: 'default'}],
   quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200},
   declaredScalars: [],
-  layers: [{name: 'clusters/a', title: 'a', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], derivedContent: ['centroid', 'box'], suppliedContent: [], depsOn: [], version: 1}],
+  layers: [{name: 'clusters/a', title: 'a', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid', 'box'], suppliedContent: [], depsOn: [], version: 1}],
   selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000},
   maxTilesPerRequest: 4096,
   filterOperands: []
@@ -152,9 +152,9 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     // The same box, as the outline draws it: world units, one conversion for both readers. With no
     // hull the outline is the box, which is one ring — `extentOf` reads the served `box` whatever
     // the hull is, so nothing here moved when the hull became a list of rings.
-    const rings = outlineOf(FAR)!;
-    expect(rings.length).toBe(1);
-    const outline = rings[0]!;
+    const shape = outlineOf(FAR)!;
+    expect([shape.source, shape.rings.length]).toEqual(['box', 1]);
+    const outline = shape.rings[0]!;
     expect(outline[0]).toEqual([gridToWorld(FAR.box![0]), gridToWorld(FAR.box![1])]);
     expect(outline[0]![0]).toBeCloseTo(WORLD_SIZE * 0.75, 6);
     const [wx0, wy0] = outline[0]!;

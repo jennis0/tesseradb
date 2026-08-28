@@ -1,6 +1,6 @@
 import {describe, expect, it} from 'vitest';
 import {SessionArtifactTable, gridToWorldXY, servedLineage, type Artifact, type ArtifactsProjection, type Meta} from '@tesseradb/client';
-import {hoverShapes, outlineData, outlineOf} from '../src/layer.js';
+import {contourShapes, focusOutlines, outlineOf} from '../src/layer.js';
 import {ringWithin, shapeContains} from '../src/contours.js';
 
 /** The served shape as it is drawn, and which of the served shapes the map actually draws. */
@@ -18,6 +18,13 @@ const artifact = (id: bigint, parentId: bigint | null, count = 10n): Artifact =>
   rung: 0,
   matched: null
 });
+
+/**
+ * The layer roster as `/v1/meta` publishes it: each layer's declared computed set — the wire's
+ * `computed_content` (contracts §3.2 r42) — and what it depends on.
+ */
+const meta = (layers: {name: string; computedContent?: string[]; depsOn?: string[]}[]): Meta =>
+  ({layers: layers.map((l) => ({name: l.name, computedContent: l.computedContent ?? [], depsOn: l.depsOn ?? []}))}) as unknown as Meta;
 
 /**
  * The served set as the wire delivers it (contracts §3.2 r44): on this treed fixture `rung` is the
@@ -73,9 +80,10 @@ describe('outlineOf', () => {
     // than the reflex one puts on — so an area comparison alone would have missed it.)
     const g = 2 ** 32 - 1;
     const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
-    const rings = outlineOf({...artifact(1n, null), hull: [notched]})!;
-    expect(rings.length).toBe(1);
-    const drawn = rings[0]!;
+    const outline = outlineOf({...artifact(1n, null), hull: [notched]})!;
+    expect(outline.source).toBe('hull');
+    expect(outline.rings.length).toBe(1);
+    const drawn = outline.rings[0]!;
     // The wire's vertices, in the wire's order, through the one grid-to-world conversion.
     expect(drawn).toEqual(notched.map(gridToWorldXY));
     const side = drawn[1]![0];
@@ -92,15 +100,22 @@ describe('outlineOf', () => {
     }
   });
 
-  it('falls back to the box, and to nothing where the wire carries neither', () => {
+  it('says which shape it answered with, and falls back to the box, then to nothing', () => {
+    // The two are indistinguishable by counting vertices — a box is four corners and so is a
+    // square hull — and they are drawn differently, so the caller is told rather than left to
+    // guess (a box through the smoothing is an oval).
     const a = artifact(1n, null);
-    expect(outlineOf(a)!.map((r) => r.length)).toEqual([4]);
-    expect(outlineOf({...a, hull: null})!.map((r) => r.length)).toEqual([4]);
+    expect(outlineOf(a)!.source).toBe('hull');
+    expect(outlineOf({...a, hull: null})!.source).toBe('box');
+    expect(outlineOf({...a, hull: null})!.rings.map((r) => r.length)).toEqual([4]);
     expect(outlineOf({...a, hull: null, box: null})).toBeNull();
     // A degenerate group is its own members (`artifact-shapes.md` §1) — a ring of one or two
     // vertices has no area to draw or to pick, so the box answers for the artifact instead.
-    expect(outlineOf({...a, hull: [[[0, 0], [1, 1]]]})!.map((r) => r.length)).toEqual([4]);
-    expect(outlineOf({...a, hull: []})!.map((r) => r.length)).toEqual([4]);
+    expect(outlineOf({...a, hull: [[[0, 0], [1, 1]]]})!.source).toBe('box');
+    expect(outlineOf({...a, hull: []})!.source).toBe('box');
+    // A hull that arrived by identifier wins over the artifact's own, and is still a hull.
+    const fetched = outlineOf({...a, hull: null}, [[[0, 0], [1, 0], [1, 1]]])!;
+    expect([fetched.source, fetched.rings.length]).toEqual(['hull', 1]);
   });
 
   it('draws every ring of a hull, and drops only the degenerate ones', () => {
@@ -108,7 +123,7 @@ describe('outlineOf', () => {
     const left: [number, number][] = [[0, 0], [g / 4, 0], [g / 4, g / 4], [0, g / 4]];
     const right: [number, number][] = [[(3 * g) / 4, (3 * g) / 4], [g, (3 * g) / 4], [g, g], [(3 * g) / 4, g]];
     // Two separated clouds and a one-member group: the wire's three rings, of which two draw.
-    const rings = outlineOf({...artifact(1n, null), hull: [left, right, [[g / 2, g / 2]]]})!;
+    const rings = outlineOf({...artifact(1n, null), hull: [left, right, [[g / 2, g / 2]]]})!.rings;
     expect(rings).toEqual([left.map(gridToWorldXY), right.map(gridToWorldXY)]);
     // No ring reaches the ground between them, which is the whole reason the wire is nested.
     const middle: [number, number] = [gridToWorldXY([g / 2, g / 2])[0], gridToWorldXY([g / 2, g / 2])[1]];
@@ -116,59 +131,27 @@ describe('outlineOf', () => {
   });
 });
 
-describe('outlineData', () => {
-  const alphas = (data: ReturnType<typeof outlineData>) => Object.fromEntries(data.map((d) => [String(d.id), [d.fill, d.line, d.width]]));
+describe('contourShapes — what may be hovered', () => {
+  const ids = (a: ArtifactsProjection, o: {level?: number; meta?: Meta} = {}) =>
+    contourShapes(a, {level: o.level, meta: o.meta ?? null}).map((s) => String(s.id));
 
-  it('holds the frontier and nothing above it — an ancestor draws nothing and answers nothing', () => {
-    // Three levels of one chain. Only the leaf is on the map, so only the leaf is in the data:
+  it('holds the frontier and nothing above it — an ancestor answers nothing', () => {
+    // Three levels of one chain. Only the leaf is on the map, so only the leaf may be pointed at:
     // an artifact nobody can see is not a thing a viewer can point at (the owner's review,
-    // 2026-08-27). Keeping the ancestors here at zero alpha is what made the hover flip between
-    // a cluster and its sub-cluster as the pointer crossed the child's ring inside the parent's.
+    // 2026-08-27). Keeping the ancestors made the hover flip between a cluster and its
+    // sub-cluster as the pointer crossed the child's ring inside the parent's.
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
-    for (const scheme of ['light', 'dark'] as const) {
-      const rest = outlineData(p, {opened: null, hovered: null, level: undefined, scheme});
-      expect(rest.map((d) => String(d.id))).toEqual(['3']);
-      expect(rest.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
-      // It still carries its polygon, which is what answers a pick and what the hover reads.
-      expect(rest.every((d) => d.polygon.length >= 3)).toBe(true);
-    }
-    const some = alphas(outlineData(p, {opened: 3n, hovered: null, level: undefined, scheme: 'light'}));
-    expect(some['3']).toEqual([41, 200, 1.2]);
-    // Opening an ancestor draws nothing: it is not on the map to be opened.
-    expect(outlineData(p, {opened: 1n, hovered: null, level: undefined, scheme: 'light'}).length).toBe(1);
+    expect(ids(p)).toEqual(['3']);
+    // A flat layer is all frontier.
+    expect(ids(projection([artifact(1n, null), artifact(2n, null), artifact(3n, null)]))).toEqual(['1', '2', '3']);
   });
 
-  it('a flat layer is all frontier — every artifact draws and answers', () => {
-    const p = projection([artifact(1n, null), artifact(2n, null), artifact(3n, null)]);
-    const none = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
-    expect(none.length).toBe(3);
-    expect(none.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
-    const some = alphas(outlineData(p, {opened: 2n, hovered: 3n, level: undefined, scheme: 'light'}));
-    expect(some['2']).toEqual([41, 200, 1.2]);
-    expect(some['3']![1]).toBe(150);
-  });
-
-  it('the opened artifact is strong, and the hovered one firmer than nothing', () => {
-    const p = projection([artifact(1n, null), artifact(2n, null)]);
-    const data = alphas(outlineData(p, {opened: 1n, hovered: 2n, level: undefined, scheme: 'dark'}));
-    expect(data['1']).toEqual([41, 200, 1.2]);
-    expect(data['2']![1]).toBe(150);
-    expect(data['2']![0]).toBeGreaterThan(0);
-    // Hovering the opened one changes nothing: opened wins.
-    const same = alphas(outlineData(p, {opened: 1n, hovered: 1n, level: undefined, scheme: 'dark'}));
-    expect(same['1']).toEqual([41, 200, 1.2]);
-  });
-
-  it('a level moves the frontier up: the deepest artifact the level admits draws', () => {
+  it('a level moves the frontier up: the deepest artifact the level admits answers', () => {
     const p = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n)]);
-    const data = outlineData(p, {opened: null, hovered: null, level: 1, scheme: 'light'});
-    expect(data.map((d) => String(d.id))).toEqual(['2']);
-    expect(data.every((d) => d.fill === 0 && d.line === 0)).toBe(true);
-    const hovered = outlineData(p, {opened: null, hovered: 2n, level: 1, scheme: 'light'});
-    expect(hovered.find((d) => d.id === 2n)!.line).toBe(150);
+    expect(ids(p, {level: 1})).toEqual(['2']);
     // A branch that stops above the level is still on the frontier — `frontier`'s own rule.
     const stops = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 2n), artifact(4n, 1n)]);
-    expect(new Set(outlineData(stops, {opened: null, hovered: null, level: 1, scheme: 'light'}).map((d) => String(d.id)))).toEqual(new Set(['2', '4']));
+    expect(new Set(ids(stops, {level: 1}))).toEqual(new Set(['2', '4']));
   });
 
   it('leaves a dependent layer’s artifacts out — they have no shape, and their box is not one', () => {
@@ -177,99 +160,147 @@ describe('outlineData', () => {
     // the viewer cannot see. Their text is drawn beneath the name they attach to (§5.10, D13).
     const topic: Artifact = {...artifact(9n, null), layer: 'topics', hull: null};
     const p = projection([artifact(1n, null), topic]);
-    const meta = {layers: [{name: 'clusters', depsOn: []}, {name: 'topics', depsOn: ['clusters']}]} as unknown as Meta;
-    expect(outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light', meta}).map((d) => String(d.id))).toEqual(['1']);
-    // With no roster to say which layer depends on which, every served layer draws.
-    expect(outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'}).map((d) => String(d.id))).toEqual(['1', '9']);
+    expect(ids(p, {meta: meta([{name: 'clusters'}, {name: 'topics', depsOn: ['clusters']}])})).toEqual(['1']);
+    // With no roster to say which layer depends on which, every served layer answers.
+    expect(ids(p)).toEqual(['1', '9']);
   });
 
-  it('gives one row per ring, every row carrying the artifact — the pick’s row-to-artifact map', () => {
-    const g = 2 ** 32 - 1;
-    const left: [number, number][] = [[0, 0], [g / 4, 0], [g / 4, g / 4], [0, g / 4]];
-    const right: [number, number][] = [[(3 * g) / 4, (3 * g) / 4], [g, (3 * g) / 4], [g, g], [(3 * g) / 4, g]];
-    const two = {...artifact(1n, null), hull: [left, right]};
-    const p = projection([two, artifact(2n, null)]);
-    const data = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'dark'});
-    // Three rows for two artifacts. An `artifactIds` array built from the served set would be one
-    // short here, and every pick past the first artifact would answer the wrong cluster.
-    expect(data.length).toBe(3);
-    expect(data.map((d) => String(d.id))).toEqual(['1', '1', '2']);
-    // Undrawn, so these are the wire's own vertices — which is what the hover reads.
-    expect(data.filter((d) => d.id === 1n).map((d) => d.polygon)).toEqual([left.map(gridToWorldXY), right.map(gridToWorldXY)]);
-    // Both of the opened artifact's rings draw alike: the rings are one shape in pieces, and
-    // highlighting half of a cluster would say something false about where its members are.
-    const opened = outlineData(p, {opened: 1n, hovered: null, level: undefined, scheme: 'dark'}).filter((d) => d.id === 1n);
-    expect(opened.map((d) => [d.fill, d.line])).toEqual([[41, 200], [41, 200]]);
-    expect(opened[0]!.polygon).not.toEqual(opened[1]!.polygon);
-  });
-
-  it('smooths the rings that draw, and only those', () => {
-    const g = 2 ** 32 - 1;
-    const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
-    const p = projection([{...artifact(1n, null), hull: [notched]}, artifact(2n, null)]);
-    const rest = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
-    expect(rest.find((d) => d.id === 1n)!.polygon).toEqual(notched.map(gridToWorldXY));
-    for (const o of [{opened: 1n, hovered: null}, {opened: null, hovered: 1n}]) {
-      const data = outlineData(p, {...o, level: undefined, scheme: 'light'});
-      const drawn = data.find((d) => d.id === 1n)!.polygon;
-      expect(drawn.length).toBe(notched.length * 4);
-      // The artifact that does not draw keeps the wire's vertices — smoothing is per drawn shape.
-      expect(data.find((d) => d.id === 2n)!.polygon.length).toBe(4);
-    }
-  });
-
-  it('draws the fetched hull for the artifact whose shape has arrived, and the box for the rest', () => {
-    // The viewport carries no hull (`artifactChannel.ts` asks for centroid and box), so a served
-    // row's outline is its box until `TesseraStore.needHull` answers for it.
-    const g = 2 ** 32 - 1;
-    const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
-    const p = projection([artifact(1n, null), artifact(2n, null)]);
-    const before = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
-    // Four vertices: the box, which is what a hull-less row draws.
-    expect(before.find((d) => d.id === 1n)!.polygon.length).toBe(4);
-
-    const after = outlineData({...p, hulls: new Map([[1n, [ring]]])}, {opened: null, hovered: null, level: undefined, scheme: 'light'});
-    expect(after.find((d) => d.id === 1n)!.polygon).toEqual(ring.map(gridToWorldXY));
-    expect(after.find((d) => d.id === 2n)!.polygon.length).toBe(4);
-  });
-
-  it('a ring of one artifact overlapping a ring of another is answered by its own row', () => {
-    // Two rings of one artifact may overlap (`artifact-shapes.md` §1), and so may rings of two
-    // artifacts. Nothing here dedupes by id: the pick reads a row, and the row names the artifact.
-    const g = 2 ** 32 - 1;
-    const square: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [0, g / 2]];
-    const overlapping: [number, number][] = [[g / 4, g / 4], [(3 * g) / 4, g / 4], [(3 * g) / 4, (3 * g) / 4], [g / 4, (3 * g) / 4]];
-    const p = projection([{...artifact(1n, null), hull: [square, overlapping]}]);
-    const data = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'light'});
-    expect(data.length).toBe(2);
-    expect(new Set(data.map((d) => d.id))).toEqual(new Set([1n]));
-  });
-
-  it('parents are ordered before their children, so an opened child draws over an opened parent', () => {
-    // Two branches, so both a rung-0 and a rung-2 artifact are on the frontier; the rung is the wire's.
-    const p = projection([artifact(3n, 2n), artifact(1n, null), artifact(2n, 1n)]);
-    const data = outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'dark'});
-    expect(data.map((d) => d.rung)).toEqual([2]);
-    const branched = projection([artifact(3n, 2n), artifact(1n, null), artifact(2n, 1n), artifact(4n, null)]);
-    expect(outlineData(branched, {opened: null, hovered: null, level: undefined, scheme: 'dark'}).map((d) => d.rung)).toEqual([0, 2]);
-  });
-});
-
-describe('hoverShapes', () => {
   it('is one entry per artifact, gathering its rings — the unit a hover answers in', () => {
     const g = 2 ** 32 - 1;
     const left: [number, number][] = [[0, 0], [g / 4, 0], [g / 4, g / 4], [0, g / 4]];
     const right: [number, number][] = [[(3 * g) / 4, (3 * g) / 4], [g, (3 * g) / 4], [g, g], [(3 * g) / 4, g]];
-    const p = projection([{...artifact(1n, null), hull: [left, right]}, artifact(2n, 1n)]);
-    const shapes = hoverShapes(outlineData(p, {opened: null, hovered: null, level: undefined, scheme: 'dark'}));
-    // Artifact 1 is an ancestor here, so the only shape is its child's.
-    expect(shapes.map((s) => String(s.id))).toEqual(['2']);
     const flat = projection([{...artifact(1n, null), hull: [left, right]}, artifact(2n, null)]);
-    const both = hoverShapes(outlineData(flat, {opened: null, hovered: null, level: undefined, scheme: 'dark'}));
-    expect(both.map((s) => [String(s.id), s.rings.length, s.rung])).toEqual([['1', 2, 0], ['2', 1, 0]]);
+    const shapes = contourShapes(flat, {level: undefined});
+    expect(shapes.map((s) => [String(s.id), s.rings.length, s.rung])).toEqual([['1', 2, 0], ['2', 1, 0]]);
     // The box is the rings', so a pointer between two separated groups is in neither.
-    const one = both[0]!;
+    const one = shapes[0]!;
     expect(shapeContains(one, gridToWorldXY([g / 8, g / 8]))).toBe(true);
     expect(shapeContains(one, gridToWorldXY([g / 2, g / 2]))).toBe(false);
+  });
+
+  it('answers against the box until the hull fetched by identifier arrives', () => {
+    // The viewport carries no hull (`artifactChannel.ts` asks for centroid and box), so a served
+    // row's shape is its box until `TesseraStore.needHull` answers for it — which is what the
+    // hover over that box asks for.
+    const g = 2 ** 32 - 1;
+    const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
+    const p = projection([{...artifact(1n, null), hull: null}, {...artifact(2n, null), hull: null}]);
+    expect(contourShapes(p, {level: undefined}).map((s) => s.rings[0]!.length)).toEqual([4, 4]);
+    const after = contourShapes({...p, hulls: new Map([[1n, [ring]]])}, {level: undefined});
+    expect(after.find((s) => s.id === 1n)!.rings[0]).toEqual(ring.map(gridToWorldXY));
+    expect(after.find((s) => s.id === 2n)!.rings[0]!.length).toBe(4);
+  });
+
+  it('carries the wire’s own vertices — the served ring, never the drawn curve', () => {
+    const g = 2 ** 32 - 1;
+    const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
+    const p = projection([{...artifact(1n, null), hull: [notched]}]);
+    expect(contourShapes(p, {level: undefined})[0]!.rings[0]).toEqual(notched.map(gridToWorldXY));
+  });
+});
+
+describe('focusOutlines — what draws', () => {
+  const rows = (data: ReturnType<typeof focusOutlines>) => Object.fromEntries(data.map((d) => [String(d.id), [d.fill, d.line, d.width]]));
+  const options = (o: Partial<Parameters<typeof focusOutlines>[1]>) => ({opened: null, hovered: null, level: undefined, scheme: 'light' as const, ...o});
+
+  it('holds the hovered and the opened artifact, and nothing else', () => {
+    // The rest of the frontier used to be in this data at zero alpha so that it answered deck's
+    // pick, which put every served ring through the tessellator on every hover change. The pick
+    // is resolved against `contourShapes` now, so the layer holds only what draws.
+    const p = projection([artifact(1n, null), artifact(2n, null), artifact(3n, null)]);
+    expect(focusOutlines(p, options({}))).toEqual([]);
+    expect(focusOutlines(p, options({hovered: 2n})).map((d) => String(d.id))).toEqual(['2']);
+    expect(focusOutlines(p, options({opened: 1n, hovered: 3n})).map((d) => String(d.id))).toEqual(['1', '3']);
+  });
+
+  it('the opened artifact is strong, the hovered one fainter, and opened wins where they are one', () => {
+    const p = projection([artifact(1n, null), artifact(2n, null)]);
+    const data = rows(focusOutlines(p, options({opened: 1n, hovered: 2n, scheme: 'dark'})));
+    expect(data['1']).toEqual([41, 200, 1.2]);
+    expect(data['2']![1]).toBe(150);
+    expect(data['2']![0]).toBeGreaterThan(0);
+    const same = focusOutlines(p, options({opened: 1n, hovered: 1n, scheme: 'dark'}));
+    expect(same.map((d) => [String(d.id), d.opened, d.fill, d.line])).toEqual([['1', true, 41, 200]]);
+  });
+
+  it('draws nothing for an artifact that is not on the frontier, or that no response served', () => {
+    const p = projection([artifact(1n, null), artifact(2n, 1n)]);
+    // 1 is an ancestor of 2: it is not on the map, so opening it draws nothing.
+    expect(focusOutlines(p, options({opened: 1n}))).toEqual([]);
+    expect(focusOutlines(p, options({opened: 2n})).map((d) => String(d.id))).toEqual(['2']);
+    expect(focusOutlines(p, options({hovered: 404n}))).toEqual([]);
+    // A level moves the frontier up, and with it what may draw.
+    expect(focusOutlines(p, options({opened: 2n, level: 0}))).toEqual([]);
+    expect(focusOutlines(p, options({opened: 1n, level: 0})).map((d) => String(d.id))).toEqual(['1']);
+  });
+
+  it('leaves a dependent layer’s artifacts out — their box is not a shape', () => {
+    const topic: Artifact = {...artifact(9n, null), layer: 'topics', hull: null};
+    const p = projection([artifact(1n, null), topic]);
+    const roster = meta([{name: 'clusters'}, {name: 'topics', depsOn: ['clusters']}]);
+    expect(focusOutlines(p, options({hovered: 9n, meta: roster}))).toEqual([]);
+    expect(focusOutlines(p, options({hovered: 9n})).map((d) => String(d.id))).toEqual(['9']);
+  });
+
+  it('gives one row per ring, both drawing alike, parents ordered first', () => {
+    const g = 2 ** 32 - 1;
+    const left: [number, number][] = [[0, 0], [g / 4, 0], [g / 4, g / 4], [0, g / 4]];
+    const right: [number, number][] = [[(3 * g) / 4, (3 * g) / 4], [g, (3 * g) / 4], [g, g], [(3 * g) / 4, g]];
+    const p = projection([{...artifact(1n, null), hull: [left, right]}, artifact(2n, null)]);
+    // Both of the opened artifact's rings draw alike: the rings are one shape in pieces, and
+    // highlighting half of a cluster would say something false about where its members are.
+    const opened = focusOutlines(p, options({opened: 1n, scheme: 'dark'}));
+    expect(opened.map((d) => [d.fill, d.line])).toEqual([[41, 200], [41, 200]]);
+    expect(opened[0]!.polygon).not.toEqual(opened[1]!.polygon);
+    // A hovered child over an opened parent: the parent's rows come first, so the child draws over.
+    const nested = projection([artifact(1n, null), artifact(2n, 1n), artifact(3n, 1n)]);
+    expect(focusOutlines(nested, options({opened: 3n, hovered: 2n})).map((d) => d.rung)).toEqual([1, 1]);
+  });
+
+  it('smooths a hull and never a box: four corners through the spline is an oval', () => {
+    const g = 2 ** 32 - 1;
+    const notched: [number, number][] = [[0, 0], [g, 0], [g, g], [g / 2, g], [g / 2, g / 2], [0, g / 2]];
+    const p = projection([{...artifact(1n, null), hull: [notched]}, {...artifact(2n, null), hull: null}]);
+    const drawn = focusOutlines(p, options({hovered: 1n}))[0]!;
+    expect(drawn.source).toBe('hull');
+    expect(drawn.polygon.length).toBe(notched.length * 4);
+    // The smoothed curve is a summary of the served ring, not a claim beyond it at the convex
+    // corners: every vertex of the served ring's own quadrants stays where the members are.
+    expect(ringWithin(notched.map(gridToWorldXY), notched.map(gridToWorldXY))).toBe(true);
+    // The box: the wire's four corners, unchanged and unsmoothed, and drawn as a hairline with
+    // no fill — a box is the bounds of the visible members and not their shape.
+    const box = focusOutlines(p, options({hovered: 2n}))[0]!;
+    expect(box.source).toBe('box');
+    expect(box.polygon).toEqual([
+      gridToWorldXY([0, 0]),
+      gridToWorldXY([g, 0]),
+      gridToWorldXY([g, g]),
+      gridToWorldXY([0, g])
+    ]);
+    expect([box.fill, box.line, box.width]).toEqual([0, 150, 0.8]);
+    expect(focusOutlines(p, options({opened: 2n}))[0]!.width).toBe(0.8);
+  });
+
+  it('draws nothing where the layer declares a hull and none has arrived, and the hull when it has', () => {
+    // The viewport carries no hull, so a served row on a hull-declaring layer has a box and a
+    // shape on its way by identifier. A rectangle that becomes a hull a moment later reads as the
+    // shape changing under the pointer, so nothing is drawn until it lands — while the hover
+    // still resolves against that box, which is what asks for the hull.
+    const g = 2 ** 32 - 1;
+    const ring: [number, number][] = [[0, 0], [g / 2, 0], [g / 2, g / 2], [g / 4, g / 3], [0, g / 2]];
+    const p = projection([{...artifact(1n, null), hull: null}]);
+    const declares = meta([{name: 'clusters', computedContent: ['centroid', 'box', 'hull']}]);
+    expect(focusOutlines(p, options({hovered: 1n, meta: declares}))).toEqual([]);
+    expect(contourShapes(p, {level: undefined, meta: declares}).map((s) => String(s.id))).toEqual(['1']);
+    const arrived = focusOutlines({...p, hulls: new Map([[1n, [ring]]])}, options({hovered: 1n, meta: declares}));
+    expect(arrived.length).toBe(1);
+    expect(arrived[0]!.source).toBe('hull');
+    expect(arrived[0]!.polygon.length).toBe(ring.length * 4);
+    // A layer that declares no hull draws its box, which is its shape for good.
+    const plain = meta([{name: 'clusters', computedContent: ['centroid', 'box']}]);
+    expect(focusOutlines(p, options({hovered: 1n, meta: plain})).map((d) => d.polygon.length)).toEqual([4]);
+    // With no roster in hand the box draws: a client that cannot read the declaration draws what
+    // the wire gave it rather than nothing at all.
+    expect(focusOutlines(p, options({hovered: 1n})).map((d) => d.polygon.length)).toEqual([4]);
   });
 });

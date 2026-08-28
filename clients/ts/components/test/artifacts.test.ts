@@ -18,7 +18,7 @@ const layer = (name: string, depsOn: string[] = []): Layer => ({
   membership: 'enumerated',
   hierarchy: {kind: 'flat', pruneChildren: false},
   levels: [],
-  derivedContent: ['centroid'],
+  computedContent: ['centroid'],
   suppliedContent: [],
   depsOn,
   version: 1

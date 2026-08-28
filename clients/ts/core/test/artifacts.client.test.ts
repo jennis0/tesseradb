@@ -125,7 +125,7 @@ describe('/v1/meta', () => {
           membership: 'enumerated',
           hierarchy: {kind: 'flat', prune_children: false},
           levels: [{level: 0, title: 'clusters', zoom: null}],
-          derived_content: [],
+          computed_content: [],
           supplied_content: [],
           depends_on: [],
           version: 3
@@ -146,7 +146,7 @@ describe('/v1/meta', () => {
         membership: 'enumerated',
         hierarchy: {kind: 'flat', pruneChildren: false},
         levels: [{level: 0, title: 'clusters', zoom: null}],
-        derivedContent: [],
+        computedContent: [],
         suppliedContent: [],
         depsOn: [],
         version: 3
