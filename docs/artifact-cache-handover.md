@@ -1,11 +1,14 @@
 # Handover — the client's artifact cache, and the filter bit it needs
 
-**Date:** 2026-08-28 · **Status:** **Steps 1 and 2 are done; the wire affordance is not.** The
-filter bit is ruled, written down and on the wire
+**Date:** 2026-08-28 · **Status:** **Steps 1–3 are done or ruled; step 4's corpus does not
+exist.** The filter bit is ruled, written down and on the wire
 ([decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md), contracts r42,
 `client-delivery.md` S13), and the channel now holds payloads across a served-set change (step
-`cache 2`). What remains is §6's steps 3 and 4 — the wire affordance, and a corpus to measure on.
-This is a work list and the record of what was established on the way to it, not a design.
+`cache 2`). Step 3 is designed and ruled
+([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2): no held-set claim —
+an opt-in column projection, ⊘ unbuilt, and a fetch model that is policy rather than obligation.
+What remains is step 4 — a corpus to measure on. This is a work list and the record of what was
+established on the way to it, not a design.
 
 **Read [`client-delivery.md`](client-delivery.md) first** — it is the status record for client work,
 on the convention [`artifact-delivery.md`](artifact-delivery.md) set, and it wins over this document
@@ -139,25 +142,26 @@ than negative there, so a whole-membership bit would be exact on the projecting 
 narrow on the per-tile and render-column ones. The cost is that the count beside the bit is not so
 scoped, which the wire says at the field. 0104's *What is in view* has the argument.
 
-**⊘ The wire affordance is undesigned.** How does a client say what it holds? A list of held
-identifiers is worse than the payload it saves (464 655 ids is 3.7 MB). With 0103 landed, a level is
-the compact unit — *I hold levels 0 and 1 of this layer at content key X* is a few bytes. That shape
-is a proposal, not a decision.
+**The wire affordance is designed and ruled** (2026-08-28): the client never says what it holds.
+[`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) §4 declines every shape in
+which the client supplies rows — the held-set claim included — and its §5.2 specifies the one
+affordance that survived, an opt-in column projection (⊘ unbuilt).
 
-**⊘ Whether a client may hold a level whole and pick from it locally.** The owner settled the
+**Whether a client may hold a level whole and pick from it locally.** The owner settled the
 objection that this over-draws: an artifact's geometry and count are over its whole visible
 membership, never the part in view, so an artifact drawn with its edge off screen never claimed
-otherwise, and the server's intersection test is a fetch bound rather than an assertion. What is
-undecided is whether the *fetch model* is written down as an obligation.
+otherwise, and the server's intersection test is a fetch bound rather than an assertion. **Ruled
+2026-08-28**: the fetch model is policy, not obligation — the obligations are the three rules of
+the protocol document's §7.2.
 
 ## 4a. Step 3, costed — and why it should probably not be built yet
 
-**Superseded in shape by [`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md)**
-(2026-08-28), which states the whole fetch surface — the scope and filter axes, the three filter
-modes, the claim, and what each side owes — on the owner's own framing. What follows is the costing
-that fed it, kept because the numbers are the argument for deferring a bits-only mode.
-
-**Written 2026-08-28, after steps 1 and 2. Nothing here is decided; §4a.4 is the ruling to make.**
+**Superseded by [`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2**
+(2026-08-28), which rules the space: the claim — (i) and (ii) below — is declined, (iii) is the
+fetch model and is policy, and the one wire affordance is a column projection. ⊘ **The byte model
+below is wrong, measured**: the 40 B floor is 97.1 B through the frame as built, so the elision the
+claim buys is 22% and not 60% — the corrected table is the protocol document's §8. Kept for the
+shape comparison; do not quote its numbers.
 
 ### 4a.1 The floor: the served identifier list, which no cache removes
 
@@ -168,14 +172,17 @@ elide identity, and the floor is what identity costs.
 **Modelled, not measured**, from the frame as contracts §3.2 defines it: `tessera_id` 8 B,
 `parent_id` 8 B, `level` 4 B, `matched` a bit, and `layer` as a **repeated string**, which is the
 column that dominates — `clusters/toponymy` is 18 bytes on every row, there being no dictionary
-encoding on this frame. Call it 40 B an artifact against the ~110 B the whole frame measures
-(`evidence/memos/2026-08-28-artifact-response-volume.md` §1: 49.0 MB over 464,655 artifacts). **So
-payload elision alone saves about 60% of the frame and not 95%**, and the scattered flat layer §1 is
-about — 231,645 artifacts, served in full on every request — still pays ~9 MB a settled view with a
-perfect cache. Two thirds of a bad number is a bad number.
+encoding on this frame. That modelled 40 B; **measured through the frame as built it is 97.1 B**,
+because a nulled fixed-width column still writes its slot, a nulled variable-length column still
+writes its offsets, and `masked_count` cannot be nulled at all (the protocol document's §8 carries
+the table and its provenance). **So payload elision alone saves 22% of the frame, not the 60% an
+earlier revision claimed here**, and the scattered flat layer §1 is about — 231,645 artifacts,
+served in full on every request — still pays ~22 MB a settled view with a perfect claim. A fifth of
+a bad number is a bad number, which is half of why the claim was declined.
 
 Dictionary-encoding `layer` is worth doing on its own and belongs to neither step: one column, no
-semantics, and it takes the floor to ~20 B.
+semantics, ~14% of every full response (125.0 → ~107 B/row measured). The 13.6 B/row identity row
+needs the projection's own schema (protocol §5.2), not an encoding change.
 
 ### 4a.2 Three shapes, and what each actually buys
 
@@ -224,11 +231,9 @@ them. The reason is §6 step 4's, unchanged: **the corpus that would show the di
 exist**, so any affordance built now is sized against a modelled number, and (i) is bounded by a
 floor that (iii) does not have.
 
-⊘ **The owner's ruling is owed on one thing before (iii) can be built**: whether *the client may
-hold a level whole and pick from it locally* becomes a written obligation, and on what basis it
-decides to — the fetch model §4's third ⊘ names. There is no cardinality hint to decide it by (S5,
-declined), so the client must decide by observation, and what it observes is the size of the answer
-it just got.
+**Ruled 2026-08-28**: (iii) is the fetch model, and it is **policy rather than a written
+obligation** — the obligations are the protocol document's §7.2, three rules. The client decides by
+observation (S5 stays declined), and what it observes is the size of the answer it just got.
 
 ## 5. Traps — things that look right and are not
 
@@ -283,13 +288,16 @@ level in the *absent* case only.
    2026-08-28): a cap counted in artifacts is not a bound in bytes, the two differing by orders of
    magnitude between a count-only layer and one carrying hulls, so the drop rules are the whole
    bound and a byte cap is left to be built if it is ever wanted.
-3. **Design the wire affordance** for *what I hold*, once (1) and (2) have shown what the client
-   actually needs. This is the step that needs a contracts change and a leak-register pass.
+3. ~~**Design the wire affordance** for *what I hold*.~~ **Done 2026-08-28**
+   ([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2): there is no *what
+   I hold* — every shape in which the client supplies rows is declined, and the affordance is an
+   opt-in column projection (`artifact_rows`), specified with its schema and its disclosure
+   reasoning, ⊘ unbuilt. Build timing is the owner's, with step 4's corpus the honest trigger.
 4. **Measure on a scattered layer**, not on GeoNames. The corpus for it does not exist yet: an
    attribute layer over `admin4`'s 231 645 values on the GeoNames rung would produce one, and that
    is a corpus change rather than a code change.
 
-**Steps 1 and 2 are done; steps 3 and 4 are not.** ⊘ **Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
+**Steps 1–3 are done or ruled; step 4 is not.** ⊘ **Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
 scale, so the case this work is for is currently unmeasured — say so rather than quoting the
 regional figures.
 

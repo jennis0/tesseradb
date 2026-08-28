@@ -42,14 +42,18 @@ Read this section for the state; the tables below for what each step owes and wh
   [`artifact-cache-handover.md`](artifact-cache-handover.md) — why it is the only bound a scattered
   layer has, the facts it turns on, the filter bit it needs, and the traps. The filter bit is
   **S13**, done; the channel holding its payloads is step **`cache 2`**, done.
-  **Step 3 is designed and mostly recommended against**
-  ([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md), and §4a of the map): payload elision
-  saves about 60% of the frame and not 95% — the served identifier list is a floor no cache removes —
-  while a client holding a level whole and picking from it locally costs no artifact traffic at all.
-  That is a client policy rather than a wire feature, so it needs neither the contracts change nor
-  the leak-register pass step 3 was expected to need; it needs one owner ruling, on whether the fetch
-  model becomes a written obligation. The scattered corpus that would measure any of it still does
-  not exist.
+  **Step 3 is designed and ruled**
+  ([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2, 2026-08-28): the
+  held-set claim is declined — measured, payload elision through the frame as built saves 22%, not
+  the 60% an earlier revision of this paragraph carried — and no shape in which the client supplies
+  rows returns. A client holding a level whole and picking from it locally costs no artifact
+  traffic at all, and that fetch model is ruled **policy, not obligation** — the obligations are
+  three rules (the bit from the response; drop on content-key rotation; rows never assembled from
+  partial history), kept small so the provided client never becomes required. The one wire
+  affordance is an opt-in column projection — identity rows at 13.6 B/row measured — ⊘ unbuilt,
+  alongside two encoding changes (dictionary-encoded `layer`, the hull columns) that cheapen every
+  response for every caller and precede it in value. The scattered corpus that would measure any of
+  it still does not exist.
 - **What is not built** is in the server-tracks table: the selection operand and its verbs (S6,
   designed and reviewed, not built), the fetch-model hint (S5, declined), predicate membership for
   k-means (S8, deferred), a per-branch cut (S9, closed as not a defect), and — until 2026-08-28 — the tiered layer's
