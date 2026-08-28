@@ -195,12 +195,12 @@ export function ringWithin(inner: readonly [number, number][], outer: readonly [
 // ---- what answers a hover ---------------------------------------------------------------------
 
 /**
- * One artifact's drawn shape, as the hover reads it: every ring it draws, its depth in the served
- * tree, and the bounding box of the lot for a cheap rejection.
+ * One artifact's drawn shape, as the hover reads it: every ring it draws, the wire's `rung` it is
+ * drawn at (contracts §3.2 r44), and the bounding box of the lot for a cheap rejection.
  */
 export type ContourShape = {
   id: bigint;
-  depth: number;
+  rung: number;
   rings: readonly (readonly [number, number][])[];
   bbox: [number, number, number, number];
 };
@@ -279,11 +279,11 @@ export function hoverAt(
     if (!inside) continue;
     if (shape.id === sticky) held = shape;
     if (shape.id === prefer) preferred = shape;
-    if (best === null || shape.depth > best.depth) {
+    if (best === null || shape.rung > best.rung) {
       best = shape;
       continue;
     }
-    if (shape.depth < best.depth) continue;
+    if (shape.rung < best.rung) continue;
     const a = boxArea(shape);
     const b = boxArea(best);
     if (a < b || (a === b && shape.id < best.id)) best = shape;

@@ -19,13 +19,30 @@ const artifact = (id: bigint, count: bigint, content: string[] = [], layer = 'cl
   hull: null,
   content,
   parentId,
-  level: 0
+  rung: 0,
+  matched: null
 });
 
-function projection(served: Artifact[]): ArtifactsProjection {
+/**
+ * The served set as the wire delivers it (contracts §3.2 r44): on this treed fixture `rung` is the
+ * response-local parent-chain depth, computed here exactly as the server computes it after the cut
+ * — a root, and a child of an unserved parent, at 0. It stands in for the server; nothing under
+ * test derives it again.
+ */
+function withRungs(served: Artifact[]): Artifact[] {
+  const byId = new Map(served.map((a) => [a.tesseraId, a]));
+  const depthOf = (a: Artifact, guard = 0): number => {
+    const parent = a.parentId === null ? undefined : byId.get(a.parentId);
+    return parent && guard < 1024 ? depthOf(parent, guard + 1) + 1 : 0;
+  };
+  return served.map((a) => ({...a, rung: depthOf(a)}));
+}
+
+function projection(input: Artifact[]): ArtifactsProjection {
+  const served = withRungs(input);
   const table = new SessionArtifactTable();
-  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId})));
-  return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, table, servedOrdinals: new Set(ordinals), hulls: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
+  const ordinals = table.take(served.map((a) => ({tesseraId: a.tesseraId, layer: a.layer, parentId: a.parentId, rung: a.rung})));
+  return {layer: 'clusters', layers: ['clusters'], served, lineage: servedLineage(served), status: 'shown', refusal: null, version: 1, held: 0, table, servedOrdinals: new Set(ordinals), hulls: new Map(), colours: new Map(), palette: 'positional', coverage: {current: 0, stale: 0}};
 }
 
 const META = {layers: [{name: 'clusters', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: []}, {name: 'topics', hierarchy: {kind: 'flat', pruneChildren: false}, depsOn: ['clusters']}]} as unknown as Meta;

@@ -112,7 +112,7 @@ describe('the membership column in the decoder', () => {
   });
 });
 
-const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l', level = 0): Artifact => ({
+const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l', rung = 0): Artifact => ({
   layer,
   tesseraId: id,
   key: `c-${id}`,
@@ -122,7 +122,7 @@ const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l', level
   hull: null,
   content: [],
   parentId,
-  level
+  rung
 });
 
 /** A response of `tiles.length` tiles, each of its own served count, with a membership column. */
@@ -137,7 +137,8 @@ function result(tiles: number[], local: number[], ids: bigint[], artifacts: Arti
     scalars: {},
     membership: {l: {index: Uint16Array.from(local), ids: BigUint64Array.from(ids)}},
     subCells: null,
-    artifacts
+    artifacts,
+    artifactsIdentity: null
   };
 }
 
@@ -218,14 +219,10 @@ describe('the cache releases what a band held', () => {
   });
 });
 
-describe('the membership golden (captured against the demo layer, the layer named with points)', () => {
-  // **Skipped: the golden is a pre-r40 capture** — its `hull_x`/`hull_y` are a flat
-  // `list<uint32>`, and a hull is now a list of rings (contracts §3.2 item 4), so the decoder
-  // refuses the body before it reaches the membership column. The refusal itself is asserted in
-  // `artifacts.client.test.ts`. What restores this: a `tessera serve` built from this branch, and
-  // `node scripts/capture-golden.mjs --artifacts-only` against it. Everything above covers the
-  // column against bodies this test file builds; what is lost meanwhile is the one check that the
-  // column and the artifacts frame agree in a body the server actually sent.
+describe('the membership golden (captured against the notebook layer, the layer named with points)', () => {
+  // An r44 capture (2026-08-28; `artifacts.client.test.ts` says how). Everything above covers the
+  // column against bodies this test file builds; this is the one check that the column and the
+  // artifacts frame agree in a body the server actually sent.
   it('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
     const {readFileSync} = require('node:fs') as typeof import('node:fs');
     const {join} = require('node:path') as typeof import('node:path');
@@ -249,8 +246,8 @@ describe('the membership golden (captured against the demo layer, the layer name
 
 describe('a band is coloured by the response that carried it (§5.10)', () => {
   /** The same artifact, with a centroid — what a positional colour is a function of. */
-  const placed = (id: bigint, dx: number, parentId: bigint | null = null, level = 0): Artifact => ({
-    ...artifact(id, parentId, 'l', level),
+  const placed = (id: bigint, dx: number, parentId: bigint | null = null, rung = 0): Artifact => ({
+    ...artifact(id, parentId, 'l', rung),
     centroid: [GRID32_CENTRE + dx, GRID32_CENTRE]
   });
 

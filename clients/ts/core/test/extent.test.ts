@@ -38,7 +38,7 @@ const FAR: Artifact = {
   hull: null,
   content: [],
   parentId: null,
-  level: 0
+  rung: 0
 };
 
 function response(): ViewportResponse {

@@ -616,15 +616,29 @@ fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
     for batch in reader {
         let batch = batch.unwrap();
         let column = |i: usize| batch.column(i).clone();
+        // `layer` is dictionary-encoded (contracts §3.2 r43): u16 keys over utf8 values.
         let layer = column(0);
-        let layer = layer.as_any().downcast_ref::<StringArray>().unwrap();
+        let layer = layer
+            .as_any()
+            .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::UInt16Type>>()
+            .unwrap()
+            .clone();
+        let layer_values = layer.values().clone();
+        let layer_values = layer_values
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .clone();
+        let layer_at =
+            |i: usize| layer_values.value(layer.key(i).expect("layer is never null")).to_string();
         let ids = column(1);
         let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap();
         let keys = column(2);
         let keys = keys.as_any().downcast_ref::<StringArray>().unwrap();
         let counts = column(3);
         let counts = counts.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let parents = column(13);
+        // Column 11 of the r43 order — after `content` at 10, before `rung` at 12.
+        let parents = column(11);
         let parents = parents.as_any().downcast_ref::<UInt64Array>().unwrap();
         let f64_at = |col: usize, i: usize| {
             let a = batch.column(col).clone();
@@ -648,7 +662,7 @@ fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
             rows.push((
                 ids.value(i),
                 ClientArtifact {
-                    layer: layer.value(i).to_string(),
+                    layer: layer_at(i),
                     key: keys.is_valid(i).then(|| keys.value(i).to_string()),
                     masked_count: counts.value(i),
                     centroid,

@@ -596,10 +596,15 @@ pub struct DecodedViewport {
     pub points: Vec<PointRow>,
     /// `(cell, count)` — `None` when no kind-2 frame was present (underlay unrequested).
     pub sub_cells: Option<Vec<(u64, u64)>>,
-    /// The kind-5 artifacts frame. `None` only if the response carried no artifacts channel at
-    /// all — a served response always carries one, empty or not, so `Some(vec![])` and `None` are
-    /// different facts and a test may assert on either.
+    /// The kind-5 artifacts frame in the full projection. `None` if the response carried no
+    /// artifacts channel at all — a served response always carries one, empty or not, so
+    /// `Some(vec![])` and `None` are different facts and a test may assert on either — and also
+    /// when the frame arrived in the identity projection, which lands in
+    /// [`DecodedViewport::artifacts_identity`] instead.
     pub artifacts: Option<Vec<ArtifactRow>>,
+    /// The kind-5 frame in the identity projection (`artifact_rows: "identity"`) — four columns,
+    /// told apart from the full frame by its schema.
+    pub artifacts_identity: Option<Vec<ArtifactIdentityRow>>,
     /// The kind-4 trailer, parsed. Its key set is asserted here — the one server-authored JSON
     /// region of the body must not quietly acquire a field the comparator never sees
     /// (`streamed-serving.md` §7).
@@ -612,7 +617,7 @@ pub struct DecodedViewport {
     pub deterministic_bytes: Vec<u8>,
 }
 
-/// One row of the kind-5 artifacts frame, as a test reads it back.
+/// One row of the kind-5 artifacts frame, as a test reads it back — either projection.
 ///
 /// `PartialEq` and not `Eq`: a centroid is a mean and travels as `f64`.
 #[derive(Debug, Clone, PartialEq)]
@@ -626,10 +631,25 @@ pub struct ArtifactRow {
     /// is *the layer declares none* and never *withheld*.
     pub centroid: Option<[f64; 2]>,
     pub bbox: Option<[u32; 4]>,
-    /// The hull's **rings**, one per separated group of the visible members.
+    /// The hull's **rings**, one per separated group of the visible members. `None` both where
+    /// the trailing hull columns are absent (no served layer declares one) and where they carry a
+    /// per-row null.
     pub hull: Option<Vec<Vec<[u32; 2]>>>,
-    /// The declared resolution this artifact sits at — 0 on a treed or flat layer.
-    pub level: u32,
+    /// The rung this artifact is drawn at — the declared level on a levelled layer, the
+    /// response-local parent-chain depth on a treed one, 0 on a flat one.
+    pub rung: u32,
+    /// Whether a member this principal may see, inside the requested tiles, matched the request's
+    /// filter. `None` where the request carried none.
+    pub matched: Option<bool>,
+}
+
+/// The identity projection's four columns (`artifact_rows: "identity"`), read back by a test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactIdentityRow {
+    pub layer: String,
+    pub tessera_id: u64,
+    pub rung: u32,
+    pub matched: Option<bool>,
 }
 
 fn str_col(
@@ -676,6 +696,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let mut points = Vec::new();
     let mut sub_cells: Option<Vec<(u64, u64)>> = None;
     let mut artifacts: Option<Vec<ArtifactRow>> = None;
+    let mut artifacts_identity: Option<Vec<ArtifactIdentityRow>> = None;
     let mut trailer: Option<serde_json::Value> = None;
     let mut point_frames = 0usize;
     let mut deterministic_end = 0usize;
@@ -716,13 +737,68 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                 deterministic_end = at + frame_len;
             }
             tessera_wire::FRAME_ARTIFACTS => {
-                assert!(artifacts.is_none(), "exactly one artifacts frame");
-                let rows = artifacts.get_or_insert_with(Vec::new);
+                assert!(
+                    artifacts.is_none() && artifacts_identity.is_none(),
+                    "exactly one artifacts frame"
+                );
                 let reader = StreamReader::try_new(Cursor::new(payload.to_vec()), None).unwrap();
+                // The projection is read off the schema: the identity frame is exactly four
+                // columns, the full frame's fixed prefix is fourteen with the two hull columns
+                // trailing when any served layer declares one.
+                let identity = reader.schema().fields().len() == 4;
                 for batch in reader {
                     let batch = batch.unwrap();
-                    let layer = str_col(&batch, 0);
+                    // `layer` is dictionary-encoded in both projections (u16 keys over utf8).
+                    let layer_at = |i: usize| -> String {
+                        let column = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<arrow::array::DictionaryArray<
+                                arrow::datatypes::UInt16Type,
+                            >>()
+                            .expect("`layer` is dictionary-encoded, u16 keys over utf8");
+                        let values = column
+                            .values()
+                            .as_any()
+                            .downcast_ref::<arrow::array::StringArray>()
+                            .unwrap();
+                        values.value(column.key(i).expect("layer is never null")).to_string()
+                    };
                     let tessera_id = u64_col(&batch, 1);
+                    let u32_col_at = |col: usize, name: &str| {
+                        batch
+                            .column(col)
+                            .as_any()
+                            .downcast_ref::<arrow::array::UInt32Array>()
+                            .unwrap_or_else(|| panic!("`{name}` is a UInt32 at column {col}"))
+                            .clone()
+                    };
+                    let bool_at = |col: usize, i: usize, name: &str| {
+                        let column = batch
+                            .column(col)
+                            .as_any()
+                            .downcast_ref::<arrow::array::BooleanArray>()
+                            .unwrap_or_else(|| {
+                                panic!("`{name}` is a nullable Boolean at column {col}")
+                            });
+                        column.is_valid(i).then(|| column.value(i))
+                    };
+                    if identity {
+                        // (layer, tessera_id, rung, matched) — positional, the positions being
+                        // contract exactly as the full frame's fixed prefix is.
+                        let rows = artifacts_identity.get_or_insert_with(Vec::new);
+                        let rung = u32_col_at(2, "rung");
+                        for i in 0..batch.num_rows() {
+                            rows.push(ArtifactIdentityRow {
+                                layer: layer_at(i),
+                                tessera_id: tessera_id.value(i),
+                                rung: rung.value(i),
+                                matched: bool_at(3, i, "matched"),
+                            });
+                        }
+                        continue;
+                    }
+                    let rows = artifacts.get_or_insert_with(Vec::new);
                     let key = str_col(&batch, 2);
                     let masked_count = u64_col(&batch, 3);
                     let f64_at = |col: usize, i: usize| {
@@ -741,6 +817,15 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             .unwrap();
                         a.is_valid(i).then(|| a.value(i))
                     };
+                    // The two hull columns TRAIL the fixed prefix and are present only when a
+                    // served layer declares a hull — an absent column, distinguishable from a
+                    // null one, so 0076's null rule gains no third reading.
+                    let hulls = batch.num_columns() > 14;
+                    if hulls {
+                        assert_eq!(batch.num_columns(), 16, "hull_x and hull_y travel together");
+                        assert_eq!(batch.schema().field(14).name(), "hull_x");
+                        assert_eq!(batch.schema().field(15).name(), "hull_y");
+                    }
                     // One axis of the hull, as **a list of rings**. The two levels are the schema's,
                     // not a convention: a decoder written against the single-ring shape fails its
                     // downcast here rather than concatenating the rings into one polygon.
@@ -769,28 +854,39 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         })
                     };
                     for i in 0..batch.num_rows() {
-                        let hull = match (hull_axis(10, i), hull_axis(11, i)) {
-                            (Some(xs), Some(ys)) => {
-                                assert_eq!(
-                                    xs.len(),
-                                    ys.len(),
-                                    "the two axes disagree about how many rings this hull has"
-                                );
-                                Some(
-                                    xs.into_iter()
-                                        .zip(ys)
-                                        .map(|(rx, ry)| {
-                                            assert_eq!(rx.len(), ry.len(), "a ring's axes differ in length");
-                                            rx.into_iter().zip(ry).map(|(x, y)| [x, y]).collect()
-                                        })
-                                        .collect(),
-                                )
+                        let hull = if !hulls {
+                            None
+                        } else {
+                            match (hull_axis(14, i), hull_axis(15, i)) {
+                                (Some(xs), Some(ys)) => {
+                                    assert_eq!(
+                                        xs.len(),
+                                        ys.len(),
+                                        "the two axes disagree about how many rings this hull has"
+                                    );
+                                    Some(
+                                        xs.into_iter()
+                                            .zip(ys)
+                                            .map(|(rx, ry)| {
+                                                assert_eq!(
+                                                    rx.len(),
+                                                    ry.len(),
+                                                    "a ring's axes differ in length"
+                                                );
+                                                rx.into_iter()
+                                                    .zip(ry)
+                                                    .map(|(x, y)| [x, y])
+                                                    .collect()
+                                            })
+                                            .collect(),
+                                    )
+                                }
+                                (None, None) => None,
+                                _ => panic!("a hull with one axis and not the other"),
                             }
-                            (None, None) => None,
-                            _ => panic!("a hull with one axis and not the other"),
                         };
                         rows.push(ArtifactRow {
-                            layer: layer.value(i).to_string(),
+                            layer: layer_at(i),
                             tessera_id: tessera_id.value(i),
                             key: key
                                 .is_valid(i)
@@ -807,15 +903,14 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                 ]
                             }),
                             hull,
-                            // Column 14, after `parent_id` at 13 — read positionally here on
-                            // purpose, because that position is contract and a test that read by
-                            // name would not notice a column inserted ahead of it.
-                            level: batch
-                                .column(14)
-                                .as_any()
-                                .downcast_ref::<arrow::array::UInt32Array>()
-                                .expect("`level` is a non-nullable UInt32 at column 14")
-                                .value(i),
+                            // Column 12, after `content` at 10 and `parent_id` at 11 — read
+                            // positionally here on purpose, because the fixed prefix's positions
+                            // are contract and a test that read by name would not notice a column
+                            // inserted ahead of it.
+                            rung: u32_col_at(12, "rung").value(i),
+                            // Column 13, last of the fixed prefix — positionally for the same
+                            // reason, and nullable: null is *the request carried no filter*.
+                            matched: bool_at(13, i, "matched"),
                         });
                     }
                 }
@@ -880,6 +975,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
         points,
         sub_cells,
         artifacts,
+        artifacts_identity,
         trailer,
         point_frames,
         deterministic_bytes: bytes[..deterministic_end].to_vec(),

@@ -120,3 +120,5 @@ prevent.
 | [0100](0100-the-render-target-is-multi-million-marks-and-ten-thousand-artifacts.md) | 2026-08-25 | The render target is multi-million marks and 10⁴-plus artifacts a layer |
 | [0101](0101-the-client-is-never-responsible-for-disclosure.md) | 2026-08-24 | The client is never responsible for disclosure; its obligations are truthfulness |
 | [0102](0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md) | 2026-08-26 | The viewer plane gains an enumerated production CORS origin list; the session plane does not |
+| [0103](0103-a-request-naming-no-levels-is-answered-at-the-declared-ones.md) | 2026-08-28 | A request naming no levels is answered at the declared ones, and there is no artifact ceiling |
+| [0104](0104-a-filter-answers-a-boolean-per-served-artifact.md) | 2026-08-28 | A filter answers a boolean per served artifact, over what is in view |

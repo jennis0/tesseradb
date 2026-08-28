@@ -421,13 +421,13 @@ export class TesseraExplorer extends TesseraElement {
     const layer = clusterLayerOf(s.get('legend').colourBy) ?? a.layers[0] ?? null;
     const declared = layer ? meta.layers.find((l) => l.name === layer) : null;
     if (!declared || declared.levels.length === 0) return null;
-    // **The served artifact's own declared level**, straight off the wire — not the table's entry,
-    // which is the same number today and one indirection away from it, and not a count of parent
-    // links, which is what this used to be and answered a different question.
+    // **The served artifact's own `rung`**, straight off the wire — on a levelled layer, which is
+    // the only kind reaching here, that is its declared level (contracts §3.2 r44), and never a
+    // count of parent links, which answered a different question.
     const counts: number[] = [];
     for (const x of a.served) {
       if (x.layer !== layer) continue;
-      counts[x.level] = (counts[x.level] ?? 0) + 1;
+      counts[x.rung] = (counts[x.rung] ?? 0) + 1;
     }
     for (let i = 0; i < counts.length; i++) counts[i] ??= 0;
     if (counts.length <= 1) return null;

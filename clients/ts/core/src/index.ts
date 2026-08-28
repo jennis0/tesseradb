@@ -69,6 +69,10 @@ export {
 } from './filters.js';
 export {
   ArtifactChannel,
+  artifactInView,
+  declaredLevelsAt,
+  PROMOTE_IDLE_MS,
+  scopeKindOf,
   servedLineage,
   subtreeOf,
   type ArtifactChannelState,
@@ -77,7 +81,6 @@ export {
 export {
   SessionArtifactTable,
   NO_ORDINAL,
-  rungOf,
   type ArtifactEntry,
   type ArtifactRef
 } from './artifactTable.js';

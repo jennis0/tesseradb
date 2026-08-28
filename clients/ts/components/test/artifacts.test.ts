@@ -46,7 +46,8 @@ const artifact = (id: bigint, count: bigint, parentId: bigint | null = null, con
   hull: null,
   content,
   parentId,
-  level: 0
+  rung: 0,
+  matched: null
 });
 
 function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']): ArtifactsProjection {
@@ -60,6 +61,7 @@ function artifactsProjection(served: Artifact[], layers = ['clusters', 'labels']
     status: 'shown',
     refusal: null,
     version: 1,
+    held: served.length,
     table,
     servedOrdinals: new Set(ordinals),
     hulls: new Map(),

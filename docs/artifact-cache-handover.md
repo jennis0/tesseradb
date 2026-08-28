@@ -1,12 +1,19 @@
 # Handover — the client's artifact cache, and the filter bit it needs
 
-**Date:** 2026-08-28 · **Status:** **Nothing is built.** This is a work list and the record of what
-was established on the way to it, not a design. Two of the questions below are the owner's and one
-of them was answered in conversation and never written down, which is the first thing to fix.
+**Date:** 2026-08-28 · **Status:** **Steps 1–3 are done or ruled; step 4's corpus does not
+exist.** The filter bit is ruled, written down and on the wire
+([decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md), contracts r43,
+`client-delivery.md` S15), and the channel now holds payloads across a served-set change (step
+`cache 2`). Step 3 is designed, ruled and built
+([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r3, contracts r44): no
+held-set claim — an opt-in column projection, the rung column, the two encodings, and a fetch model
+that is policy rather than obligation, shipped in the channel. What remains is step 4 — a corpus to
+measure on. This is a work list and the record of what was
+established on the way to it, not a design.
 
 **Read [`client-delivery.md`](client-delivery.md) first** — it is the status record for client work,
 on the convention [`artifact-delivery.md`](artifact-delivery.md) set, and it wins over this document
-wherever they differ. **There is no row for this work yet**; §7 says where it goes.
+wherever they differ. **The row is S15**, which carries step 1; §7 says how the rest lands there.
 
 ## 0. Where authority lives
 
@@ -92,9 +99,10 @@ but do not re-derive them from scratch.
 
 ## 3. What is already built and can be relied on
 
-- **`levels` on the request and `level` on the *artifacts* frame** (0103, contracts r41).
-- **`SessionArtifactTable`**, with `level` (the wire's declared level), `depth` (the parent-chain
-  count) and `rungOf` picking between them — see §5.4.
+- **`levels` on the request and `rung` on the *artifacts* frame** (0103, contracts r41; `level`
+  renamed and re-meant at r44 — the drawing rung, computed server-side per layer kind).
+- **`SessionArtifactTable`**, holding each artifact's `rung` straight off the wire — `rungOf` and
+  the client-side `depth` are deleted, see §5.4.
 - **Client-obligations rules 6 and 7**, which already say what a held artifact set is and when it
   goes.
 - **The masked-count histogram cache** on the server side, keyed per level version with the overlay
@@ -105,9 +113,9 @@ but do not re-derive them from scratch.
 
 ## 4. What is open
 
-**⊘ The filter bit — ruled in conversation on 2026-08-28 and written down nowhere.** The owner's
-words were that filters should *"return boolean membership mask for filtered artifacts"*. The
-agreed shape:
+**The filter bit is ruled, written down and built** — [decision 0104](decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md),
+2026-08-28, from the owner's words that filters should *"return boolean membership mask for filtered
+artifacts"*. The shape, as it now stands on the wire:
 
 - **A boolean per served artifact under a filter**: `membership ∩ M_sel ≠ ∅`, an early-exiting
   intersection, and **not a filtered count**. A count would put a second number beside the artifact
@@ -121,29 +129,113 @@ agreed shape:
 - **The client cannot compute it.** The points it holds are a sample of `matched`, so deriving
   *which clusters still have members* from them gives false negatives for exactly the small clusters
   a filter is used to find — the **sample-as-set error in geometry**, stated at
-  [`design/client-interaction.md`](design/client-interaction.md) §2. (Two documents point at
-  `annotations.md` §9 for that rule and it is not there — that section is *What it costs*. Cite
-  client-interaction §2 until the pointers are corrected.)
+  [`design/client-interaction.md`](design/client-interaction.md) §2. (`client-interaction.md` §2 pointed at
+  `annotations.md` §9 for that rule, which is *What it costs*; it now points at §4.2, the closure
+  rule a derived property obeys.)
 - **No leak-register row.** Appendix C's preamble gives the inclusion test: *a row exists only where
   a viewer, reading responses they are entitled to, can end up knowing something about data they
   were not served*, and *data the service serves never qualifies*. The bit is over a subset of the
   principal's own visible members.
 
-**This ruling exists only in a chat, and a ruling that exists only in a chat does not exist.** Write
-it to `docs/decisions/` before building — the same first step `client-handover.md` §1 required of
-its own rulings. Decision files are frozen to everyone but the owner, so **ask** rather than
-transcribing unasked.
+**One thing the ruling did not say, and the decision settles**: the bit is scoped to the request's
+tiles rather than to the whole visible membership — `membership ∩ viewport ∩ M_auth ∩ M_sel`. Two of
+the three routes a filter takes into row space are *silent* outside the request's own domain rather
+than negative there, so a whole-membership bit would be exact on the projecting crossing and quietly
+narrow on the per-tile and render-column ones. The cost is that the count beside the bit is not so
+scoped, which the wire says at the field. 0104's *What is in view* has the argument.
 
-**⊘ The wire affordance is undesigned.** How does a client say what it holds? A list of held
-identifiers is worse than the payload it saves (464 655 ids is 3.7 MB). With 0103 landed, a level is
-the compact unit — *I hold levels 0 and 1 of this layer at content key X* is a few bytes. That shape
-is a proposal, not a decision.
+**The wire affordance is designed and ruled** (2026-08-28): the client never says what it holds.
+[`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) §4 declines every shape in
+which the client supplies rows — the held-set claim included — and its §5.2 specifies the one
+affordance that survived, an opt-in column projection (built 2026-08-28, contracts r44).
 
-**⊘ Whether a client may hold a level whole and pick from it locally.** The owner settled the
+**Whether a client may hold a level whole and pick from it locally.** The owner settled the
 objection that this over-draws: an artifact's geometry and count are over its whole visible
 membership, never the part in view, so an artifact drawn with its edge off screen never claimed
-otherwise, and the server's intersection test is a fetch bound rather than an assertion. What is
-undecided is whether the *fetch model* is written down as an obligation.
+otherwise, and the server's intersection test is a fetch bound rather than an assertion. **Ruled
+2026-08-28**: the fetch model is policy, not obligation — the obligations are the three rules of
+the protocol document's §7.2.
+
+## 4a. Step 3, costed — and why it should probably not be built yet
+
+**Superseded by [`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2**
+(2026-08-28), which rules the space: the claim — (i) and (ii) below — is declined, (iii) is the
+fetch model and is policy, and the one wire affordance is a column projection. ⊘ **The byte model
+below is wrong, measured**: the 40 B floor is 97.1 B through the frame as built, so the elision the
+claim buys is 22% and not 60% — the corrected table is the protocol document's §8. Kept for the
+shape comparison; do not quote its numbers.
+
+### 4a.1 The floor: the served identifier list, which no cache removes
+
+A response's artifacts frame is two things — *which artifacts are in view* and *what each one is* —
+and only the second is what the store now holds. So the affordance can elide payloads and cannot
+elide identity, and the floor is what identity costs.
+
+**Modelled, not measured**, from the frame as contracts §3.2 defines it: `tessera_id` 8 B,
+`parent_id` 8 B, `level` 4 B, `matched` a bit, and `layer` as a **repeated string**, which is the
+column that dominates — `clusters/toponymy` is 18 bytes on every row, there being no dictionary
+encoding on this frame. That modelled 40 B; **measured through the frame as built it is 97.1 B**,
+because a nulled fixed-width column still writes its slot, a nulled variable-length column still
+writes its offsets, and `masked_count` cannot be nulled at all (the protocol document's §8 carries
+the table and its provenance). **So payload elision alone saves 22% of the frame, not the 60% an
+earlier revision claimed here**, and the scattered flat layer §1 is about — 231,645 artifacts,
+served in full on every request — still pays ~22 MB a settled view with a perfect claim. A fifth of
+a bad number is a bad number, which is half of why the claim was declined.
+
+Dictionary-encoding `layer` is worth doing on its own and belongs to neither step: one column, no
+semantics, ~14% of every full response (125.0 → ~107 B/row measured). The 13.6 B/row identity row
+needs the projection's own schema (protocol §5.2), not an encoding change.
+
+### 4a.2 Three shapes, and what each actually buys
+
+**(i) A held-set claim by level** — *I hold layer L level k whole at content key X* — is the
+handover's own proposal (§4). It is a few bytes, and the server elides the payload columns for that
+level. **But it only elides the payload**, so it lands on §4a.1's floor; and a client can claim it
+honestly only where it holds the level *whole*, which it knows only by having asked over the whole
+extent. The claim's failure mode is benign — a false claim draws artifacts with no geometry, a
+client bug that withholds nothing — but the win is bounded by the floor.
+
+**(ii) A held-set claim by tile**, mirroring `delta-serving.md`'s declared-tiles form for points:
+the client names the tiles it has already been answered for, and the server subtracts their
+candidate set. Exact at any granularity and compact. **It is also the one that does not compose with
+the rest of the request**: what a client was served for a tile depends on the `levels` it named and
+on `artifact_budget`'s cut, so *served for tiles T* is not determined by T, and a claim that assumed
+it would elide a payload the client never received. Making it sound means carrying the level set and
+the budget in the claim and having the server reject any mismatch — a second request shape to keep
+true against the first.
+
+**(iii) No affordance at all: fetch the level whole, once, and pick from it locally.** 0103 already
+expresses it — `levels: [k]` over the full extent — and the owner has already settled the objection
+that local picking over-draws (§4: geometry and count are over the whole visible membership, so an
+artifact drawn with its edge off screen never claimed otherwise, and the server's intersection test
+is a fetch bound rather than an assertion). A client that holds a level whole then pans and zooms
+within it with **no artifact traffic at all** — not a smaller frame, none — which is the only one of
+the three that goes below §4a.1's floor.
+
+### 4a.3 What (iii) costs, stated rather than implied
+
+- **One large response up front** — the level whole for this principal, which for GeoNames' admin 4
+  is 231,645 artifacts. 49 MB once is a different problem from 49 MB per settled view, and it is not
+  obviously an acceptable one (the response-volume memo §5 Q2 says exactly this).
+- **A filter still needs the server.** `matched` is per request (decision 0104), so a filtered view
+  costs a round trip whatever is held — one that can ask for the bits alone.
+- **Freshness is already answered**: the point path carries the content key on every response, so a
+  client learns of a rotation without asking the artifact channel anything.
+- **It is a client policy, not a wire feature**, so it needs no contracts change and no
+  leak-register pass — the two things step 3 was expected to need.
+
+### 4a.4 The recommendation
+
+**Do not build a wire affordance yet.** Build (iii) as the channel's fetch model where the client
+can hold a level whole, keep asking per viewport where it cannot, dictionary-encode `layer` to lower
+the floor for the case that keeps asking, and leave (i) and (ii) unbuilt until something measures
+them. The reason is §6 step 4's, unchanged: **the corpus that would show the difference does not
+exist**, so any affordance built now is sized against a modelled number, and (i) is bounded by a
+floor that (iii) does not have.
+
+**Ruled 2026-08-28**: (iii) is the fetch model, and it is **policy rather than a written
+obligation** — the obligations are the protocol document's §7.2, three rules. The client decides by
+observation (S5 stays declined), and what it observes is the size of the answer it just got.
 
 ## 5. Traps — things that look right and are not
 
@@ -161,8 +253,11 @@ tiles it already holds, and an elided tile contributes no artifacts, so a cluste
 depend on whether its ground happened to be novel — **the map would lose clusters as the cache
 warmed**. The channel asks for itself with `k = 0`.
 
-**5.4 `level` and `depth` are different numbers and only one is right per layer.** The wire's
-`level` is the declared rung; `depth` is the parent-chain count. A **levelled** layer's resolution
+**5.4 `level` and `depth` are different numbers and only one is right per layer** — **moved
+into the wire 2026-08-28** (the `rung` column, contracts r44; protocol §5.3): the server now serves
+the drawing rung computed the right way per layer kind and `rungOf` is deleted, so no client picks.
+The trap is kept as the record of why. The wire's `level` was the declared rung; `depth` the
+parent-chain count. A **levelled** layer's resolution
 is its declared level, because an edge may skip a rung — counting links put 490 of
 `clusters/toponymy`'s 797 artifacts at the wrong level. A **treed** layer declares no levels, so
 every artifact arrives at level 0 and the chain depth *is* its resolution; reading the declared
@@ -181,26 +276,40 @@ level in the *absent* case only.
 
 ## 6. A suggested order
 
-1. **Write the filter-bit decision** (owner), then build it: the boolean on the *artifacts* frame,
-   present only when the request carries filters. `ArtifactRecords::intersects_visible` is already
-   the shape of the probe. Prove it with a test that a filter moves the bit and moves neither the
-   masked count nor the served set.
-2. **Teach the channel to hold.** Separate the served identifier list from the payload store, ask
-   only for payloads not already held, and drop the store on an identity-key or content-key change
-   exactly as rule 7 says. No wire change yet — the saving is in what the client re-parses and
-   re-uploads to the GPU, and it is measurable on its own.
-3. **Design the wire affordance** for *what I hold*, once (1) and (2) have shown what the client
-   actually needs. This is the step that needs a contracts change and a leak-register pass.
+1. ~~**Write the filter-bit decision** (owner), then build it.~~ **Done 2026-08-28** (0104, S15):
+   `matched` on the *artifacts* frame, null where the request carried no filter; the probe is
+   `ArtifactRows::matched`, which asks candidacy's own three routes of a narrower set;
+   `artifact_filter_bit.rs` proves the bit against the generator's closed forms and proves the
+   served set and the masked counts unmoved.
+2. ~~**Teach the channel to hold.**~~ **Done 2026-08-28** (`cache 2`): the served identifier list is
+   still replaced wholesale and the payloads accumulate beside it in `ArtifactChannel`, keyed
+   `(layer, tessera_id)`, dropped whole when the identity key or the content key the store was
+   filled under rotates and on reset — rule 7 exactly. The ordinal reference is taken once when a
+   payload enters and released when it leaves, so an artifact panned away from and back is not
+   renamed; the store then reuses the colour map rather than rebuilding it, which is where the
+   saving actually lands. The bit is read from the response every time and never from the store.
+   **Without step 3 the response still carries every payload**, so nothing is saved on the wire or
+   in parsing yet — what is saved is naming, colouring and the lookup texture. **No cap** (owner,
+   2026-08-28): a cap counted in artifacts is not a bound in bytes, the two differing by orders of
+   magnitude between a count-only layer and one carrying hulls, so the drop rules are the whole
+   bound and a byte cap is left to be built if it is ever wanted.
+3. ~~**Design the wire affordance** for *what I hold*.~~ **Done 2026-08-28**
+   ([`design/artifact-fetch-protocol.md`](design/artifact-fetch-protocol.md) r2): there is no *what
+   I hold* — every shape in which the client supplies rows is declined, and the affordance is an
+   opt-in column projection (`artifact_rows`), specified with its schema and its disclosure
+   reasoning — **built the same day** with the rung column and the two encodings (contracts r44),
+   and the fetch model shipped in the channel, its idle promotion ungated by owner ruling.
 4. **Measure on a scattered layer**, not on GeoNames. The corpus for it does not exist yet: an
    attribute layer over `admin4`'s 231 645 values on the GeoNames rung would produce one, and that
    is a corpus change rather than a code change.
 
-**⊘ Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
+**Steps 1–3 are done or ruled; step 4 is not.** ⊘ **Step 4's corpus does not exist.** Nothing in `test_corpora/` declares a scattered layer at
 scale, so the case this work is for is currently unmeasured — say so rather than quoting the
 regional figures.
 
 ## 7. Where status goes
 
-Add an **S-row** to [`client-delivery.md`](client-delivery.md)'s server-tracks table when the work
-starts — the convention that file already carries, and the same one S10 used for the level. This
-document is the map; that table is the record, and it moves in the change that moves the work.
+**S15** is the row, added when step 1 landed — the convention that file already carries, and the
+same one S10 used for the level. This document is the map; that table is the record, and it moves in
+the change that moves the work. Steps 2 and 3 are client steps rather than server tracks, so they
+join the steps table above it.
