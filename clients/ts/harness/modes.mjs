@@ -20,10 +20,17 @@ const url = args.url ?? 'http://localhost:5173/?prefetch=0&dataset=2m4';
 const headless = 'headless' in args;
 const executablePath = args.executable;
 
+// **A page served from another port.** The demo enumerates one browser origin in
+// `serve.dev_cors_origins` — `http://localhost:5173` — so a viewer run on another port cannot
+// reach the server at all, and every claim below reads as a detached store rather than as a
+// configuration. Where the URL is not that origin the *browser's* origin check is switched off
+// rather than the server's: this is a measuring browser, and a running demo is not touched.
+const sameOrigin = new URL(url).port === '5173';
+const originFlags = sameOrigin ? [] : ['--disable-web-security'];
 const browser = await chromium.launch(
   headless
-    ? {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox'], ...(executablePath ? {executablePath} : {})}
-    : {headless: false, args: ['--disable-gpu-sandbox'], ...(executablePath ? {executablePath} : {})}
+    ? {args: ['--use-gl=swiftshader', '--enable-unsafe-swiftshader', '--disable-gpu-sandbox', ...originFlags], ...(executablePath ? {executablePath} : {})}
+    : {headless: false, args: ['--disable-gpu-sandbox', ...originFlags], ...(executablePath ? {executablePath} : {})}
 );
 const page = await browser.newPage({viewport: {width: 1440, height: 900}});
 const consoleErrors = [];

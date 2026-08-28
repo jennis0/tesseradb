@@ -29,10 +29,13 @@ Read this section for the state; the tables below for what each step owes and wh
   the string `"all"` (D9), and a dependent artifact carrying its target's masked count (D13). The
   viewer plane gained `serve.cors_origins` (D10, [decision 0102](decisions/0102-the-viewer-plane-gains-an-enumerated-cors-origin-list.md)).
   A served hull is now a **concave** shape over the masked members rather than a convex wrap.
-- **Two owner reviews are answered**, both recorded below: the first on the built explorer (the
+- **Three owner reviews are answered**, all recorded below: the first on the built explorer (the
   four bugs and the boards), the second on the 2.4M map (the glow, the polygons, and the hierarchy
-  reading as clutter). The map now draws colour and names at rest, a hull only for the hovered and
-  the opened artifact, labels on the frontier alone, and the density wash off by default.
+  reading as clutter), the third on the contours and the hover (angular hulls, and a hover flipping
+  between a cluster and its sub-clusters). The map now draws colour and names at rest, a hull only
+  for the hovered and the opened artifact — smoothed, and contained in the served ring by
+  construction — labels on the frontier alone, the density wash off by default, and a hover that
+  only the drawn frontier answers, deepest first, held until the pointer leaves the shape.
 - **Three demo corpora** are served by `run_demo.sh`: `notebook-2m4` (2.42M, seven layers — the one
   to judge on), `notebook` (50,000, the same shape), and `2m4` (k-means only, the original).
 - **What is not built** is in the server-tracks table: the selection operand and its verbs (S6,
@@ -321,11 +324,13 @@ square in the test, three rounds put the boundary through (0.47, 0.55) of a side
 shape has nothing, **while the ring's total area fell**, because the convex corners take off more
 than the reflex one puts back: an area comparison alone would have missed it, so the test is a
 containment one. It is a display matter and not a disclosure — the client invents no vertex from
-data — but a drawn shape must not claim ground the served shape does not have. The smoothing is
-**gone** rather than made reflex-aware: the shape no longer needs it, its corners being the members'
-own positions rather than a convex wrap's artefacts, and it cost eight times the vertices on every
-served outline (about 130 to 700 on one shape) with an outline materialised for every served
-artifact, drawn or not, because the polygon is what answers a pick.
+data — but a drawn shape must not claim ground the served shape does not have. The smoothing was
+**deleted** rather than made reflex-aware, on the reading that the shape no longer needed it — its
+corners being the members' own positions rather than a convex wrap's artefacts — and that it cost
+eight times the vertices on every served outline (about 130 to 700 on one shape) with an outline
+materialised for every served artifact, drawn or not, because the polygon is what answers a pick.
+**The owner rejected that resolution on 2026-08-27** and it is superseded below: a corner cut can be
+made containment-preserving, and only the shapes that draw need smoothing.
 
 **Two things the smoke scripts stopped checking, and now check again.** `smoke-artifacts.mjs` keyed
 its list rows by **what the row said**, so once a nameless artifact drew a placeholder instead of its
@@ -345,6 +350,72 @@ components 72, react 10, spike 5, wire-example 7, plain-html 4, canvas-store 3);
 the branch's viewer was served on its own port, reached through a same-origin proxy — the running
 deployments enumerate only `http://localhost:5173` in `serve.dev_cors_origins` and restarting them
 to add an origin was not worth the interruption.
+
+**Reviewed by the owner a third time, 2026-08-27** — on the built map: *"The hulls remain very
+angular and don't match the smooth contours that is what I've continually asked for. The hover over
+also doesn't really work, it's very unstable when moving the mouse, flipping between categories and
+subcategories within it, making it quite ugly."* Both were ours, and both came from a controller
+decision that was wrong. Answered on the `contours` track (branch `client/contours`).
+
+| # | the owner's point | where it stands |
+|---|---|---|
+| 16 | the hulls are angular where the boards show smooth contours | **done**: the smoothing is back, and it is **containment-preserving by construction**. Every point a corner cut produces is a quarter of the way along one of the ring's own edges, so no vertex it makes is outside the ring; the only edge that can leave is the chord across a corner, and a chord is emitted only where it is checked to stay inside. A convex corner rounds; a reflex corner keeps its vertex and stays sharp, which is not a shortfall to be fixed later — the material at a reflex vertex fills more than half a turn, so any curve replacing it has to pass on the far side, which is outside. A notch the members leave stays a notch. **Containment is the test, not area**: the deleted implementation's own note records its total area *falling* while its boundary crossed into empty ground, so `ringWithin` is the oracle — every vertex and edge midpoint inside or on the source, and no edge crossing it — checked on the notched square that caught the deletion and on a five-pointed star, against an unguarded Chaikin for contrast |
+| 17 | the hover flips between a cluster and its sub-clusters on a few pixels of movement | **done**, and the cause was row 11's other half. `outlineData` kept **every served artifact** pickable at zero alpha while only the frontier drew, so the pointer crossed invisible ancestors and deck answered with whichever its picking pass found. Three rules together: the rows are the **frontier's** alone — the same set the labels are drawn from, and a dependent layer's artifacts are out, having no shape of their own and a `box` that is not one; the **deepest** shape containing the pointer wins, by the served tree and not by paint order, ties broken by the smaller shape then the identifier; and the artifact already hovered **holds** until the pointer is clear of its shape by four pixels. The mark under the pointer is passed as the preference, so the highlighted contour is the cluster whose point the tooltip is describing |
+
+**Measured** (2026-08-28, headed Chromium 1208 on WSLg, notebook-2m4's full principal at
+1440 × 900; re-run before quoting). Only the rings that **draw** are smoothed — one or two shapes,
+not the seventy-five rings the layer holds — because three rounds cost about eight times the
+vertices. Building the outline rows costs **0 ms at rest** (memoised, nothing smoothed) and
+**8–10 ms when the hovered shape changes**, once per change and not per frame; the corner test is
+O(n²) in a ring's vertices per round, over a ring that at most doubles a round. The largest hull the
+corpus serves is 144 vertices over 10 rings.
+
+**The hover, driven by a real pointer** — `clients/ts/harness/hover.mjs`, headed, `page.mouse` at a
+human pace with the map's own `hoveredArtifact` read after every step. A synthetic-event test does
+not reach deck's picking pass, which is how this shipped. Five claims, **0 of 5 before the change
+and 5 of 5 after**, on the same corpus and the same camera:
+
+- *only the drawn frontier answers a hover* — 70 pointer positions over five glides. Before: the
+  root, `69605800`, answered from inside its children. After: nothing off the frontier.
+- *a crossing changes the answer only where a drawn boundary is crossed* — twenty steps of four
+  pixels across one cluster's edge. Before: `696058×9 → —×5 → 543605×2 → —×1 → 543605×1 → —×1 →
+  543605×1`, five changes with no boundary between them. After: `—×10 → 543605×10`, none.
+- *a few pixels of movement inside one cluster never change the answer* — sixteen moves within
+  three pixels of one interior point. Before: `—×4 → 543605×2 → —×6 → 543605×2 → —×2`. After: one
+  answer, sixteen times. This is the owner's sentence, measured.
+- *a nested region never answers with the ancestor*, and *in and back out changes only at a
+  boundary* — the child `54360519` under the root. Before: the root answered for nine of twenty
+  positions each way. After: one change in, one change out.
+
+The measure is deliberately not "count the flips": a straight glide can honestly leave a cluster's
+arm and re-enter it. What must never happen is the answer changing between two positions inside
+exactly the same drawn shapes and clear of every line, which is what crossing an *invisible*
+ancestor produced.
+
+**Shots**, `/home/joe/tessera-evidence/contours/` — the same artifact, the same camera, hovered:
+`contour-before-wide.png` and `contour-after-wide.png` (`51669315`, one ring of 75 vertices, 6,660
+members, zoomed to its own extent so the line fills the frame), with `corner-before.png` and
+`corner-after.png` the top corner enlarged — the after line is rounded and lies strictly inside the
+before line. `contour-before-multi-ring.png` and `contour-after-multi-ring.png` are `54360519`, ten
+rings over 144 vertices. `hover-before.log` and `hover-after.log` are the two runs above.
+
+**Gate after this pass** (2026-08-28): `check-clients.sh` green (core 237 with 6 skipped, deck 114,
+components 72, react 10, spike 5, wire-example 8, plain-html 4, canvas-store 3);
+`check-doc-links.py` 0 errors over 756 files (15 warnings, all pre-existing citation drift under
+`probes/`); harness **9 of 9** and `modes.mjs` **15 of 15**, headed on notebook-2m4 and 2m4
+respectively. The demo servers were left running and the branch's viewer was served on port 5199;
+`harness.mjs` and `modes.mjs` now switch the **browser's** origin check off when the URL is not
+`http://localhost:5173`, which is the one origin the running demo enumerates — the alternative was
+restarting a demo the owner was using. Against the 50,000-row `notebook` corpus two harness claims
+fail on this branch **and on the commit it branched from** — the stale-view row and the
+different-principal row, both of which need counts that corpus's default principal does not produce
+— so the harness is run on `notebook-2m4`, as the previous two reviews were.
+
+**One file outside the track's allowlist is required and was not touched**: `artifact-shapes.md` §9
+says the client "must keep refusing to smooth" a hull, which was written when the only smoothing on
+offer was the unguarded one. The construction here is `⊆` the source ring by construction, which is
+the property that sentence exists to protect; the sentence needs the owner's amendment, and until it
+has one the design and the code disagree in letter.
 
 ## What each step owes a measurement
 
