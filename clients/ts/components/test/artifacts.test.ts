@@ -237,6 +237,24 @@ describe('<tessera-artifact-card> follows the served set', () => {
   });
 });
 
+describe('<tessera-explorer> and the map’s tooltip slot', () => {
+  it('forwards the tooltip slot only when the host supplied one, so the map’s fallback survives', async () => {
+    // A slot assigned an empty slot counts as filled and hides the fallback: the hover rendered as
+    // an empty bordered box beside the pointer (the owner's review, 2026-08-28).
+    const bare = await mount('<tessera-explorer></tessera-explorer>');
+    (bare.querySelector('tessera-explorer') as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({})});
+    await settle(bare);
+    const map = deep(bare, 'tessera-map') as HTMLElement | null;
+    expect(map).not.toBeNull();
+    expect(map!.querySelector('slot[name="tooltip"]')).toBeNull();
+
+    const given = await mount('<tessera-explorer><div slot="tooltip">mine</div></tessera-explorer>');
+    (given.querySelector('tessera-explorer') as unknown as {store: unknown}).store = fakeStore({meta: META, status: status({})});
+    await settle(given);
+    expect((deep(given, 'tessera-map') as HTMLElement).querySelector('slot[name="tooltip"]')).not.toBeNull();
+  });
+});
+
 describe('<tessera-explorer> on an artifact selection', () => {
   it('selects — the card — and never moves the camera; fit is the card’s own button', async () => {
     const host = await mount('<tessera-explorer></tessera-explorer>');

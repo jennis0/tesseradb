@@ -89,6 +89,13 @@ deliberately does not read past a gap. So the level gets an explicit `-` artifac
 that set — 1,373 of them across the whole corpus, against 464,000 real ones. Nothing is dropped and
 every edge exists.
 
+**Every admin artifact carries a name, and it is the code where GeoNames has no other** (2026-08-28).
+The layer declares a supplied `name`, and a layer declaring a supplied kind is refused an artifact
+without one, so `artifacts-admin.parquet` names all 464,000: countries, admin1 and admin2 from the
+publisher's own tables, admin3, admin4 and the placeholder levels by their qualified code. Without
+it the demo showed every region as unnamed — a key is never shown as a name (the client's rule) —
+and its hovered outlines were boxes belonging to nothing a viewer could read.
+
 **`population` is `i64`.** Two reefs in Kiribati carry negative populations. That is plainly an
 error in GeoNames and is what the file says; carrying it means a range filter shows it.
 

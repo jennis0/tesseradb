@@ -966,6 +966,11 @@ export class TesseraMap extends TesseraElement {
         </div>`;
     return html`<div
         part="canvas"
+        @pointerleave=${() => {
+          // deck only reports picks while the pointer is over it; a hover left standing when the
+          // pointer moves onto a panel is a box beside nothing.
+          if (this.hover) this.hover = null;
+        }}
         @pointerdown=${{handleEvent: this.onPointerDown, capture: true}}
         @pointermove=${{handleEvent: this.onPointerMove, capture: true}}
         @pointerup=${{handleEvent: this.onPointerUp, capture: true}}

@@ -24,6 +24,7 @@ admin4          = "vocab-admin4.parquet"
 timezone        = "vocab-timezone.parquet"
 members_feature = "members-feature.parquet"
 members_admin   = "members-admin.parquet"
+artifacts_admin = "artifacts-admin.parquet"
 
 [defaults]
 source = "points"
@@ -264,6 +265,11 @@ source = "members_feature"
 [[layer]]
 name                      = "admin/hierarchy"
 title                     = "Administrative hierarchy"
+# Enrichment beside an open value set: the artifacts are what the member file names, and this
+# table gives each its name — published for countries, admin1 and admin2; the code itself for
+# admin3, admin4 and the placeholder levels, which GeoNames names no other way. Every artifact
+# carries one, because a layer declaring a supplied kind is refused an artifact without it.
+source                    = "artifacts_admin"
 views                     = ["world"]
 membership                = "enumerated"
 value_set                 = "open"
@@ -302,6 +308,13 @@ zoom  = [12, 16]
 # "zoom to this region" for the region the viewer can actually see.
 [layer.content]
 computed = ["centroid", "box"]
+
+# A region's name is true whether or not any document exists, so it inherits the artifact's own
+# visibility rather than requiring a generating set (configuration.md, `[[layer.content.supplied]]`).
+[[layer.content.supplied]]
+name                      = "name"
+type                      = "text"
+require_member_visibility = "inherited"
 
 [layer.members]
 source = "members_admin"

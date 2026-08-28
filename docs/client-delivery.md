@@ -497,6 +497,20 @@ non-cause. Every figure below was taken against the demo servers on this machine
 | **a swallowed switch failure** | the picker's handler is `void activate(…)`, so a refusal from authorise or meta vanished and `switching` stayed set; overlapping switches were unguarded | reported like every other refusal, and a superseded activation stands down |
 | **colour dropping on zoom, arXiv `2m4`** | **not a defect**: the k-means layer's membership is the notebook's sample — its 24 clusters sum to ~180,000 of 2,422,486 — so at depth 6 the marks drawn are members and at depth 10 most are not, and are drawn neutral. S8 (membership by predicate) is the deferral that would change it | nothing; screenshots at both depths are the evidence |
 
+Two more from the owner's next look, fixed the same day: **every admin artifact read "—"** — the
+rung attached no text, and by the 2026-08-26 ruling a key is never shown as a name, so
+`test_corpora/geonames/prepare.py` now writes `artifacts-admin.parquet`, every admin artifact's
+name as the layer's supplied `name` — published for countries, admin1 and admin2, the code itself
+for admin3, admin4 and the placeholder levels, because a layer declaring a supplied kind is
+refused an artifact without one (the build's own check); and **an empty black box beside
+the pointer** — the explorer forwarded an empty `tooltip` slot into the map, which counts as
+filled and hid the map's fallback, and a hover was never cleared when the pointer left the
+canvas. Two left as a brief for the next agent, `~/.claude/plans/2026-08-28-demo-followups.md`:
+the lag at continental zoom is 15–20 MiB a pan (the server answers in under a second; 34,385
+artifacts served at depth 10 because the budget is inert on a tiered layer and the declared level
+ranges overlap), and the ovals are a `box`-only layer's hovered outline going through the hull's
+B-spline.
+
 On GeoNames the colour drop was the second row: the channel's request for the deeper level never
 landed, so bands went neutral and stayed. Two things are reported rather than fixed: the filter
 panel enumerating a 231,645-value `derived` vocabulary as a tick list at all, and a 64 MiB bound

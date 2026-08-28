@@ -383,6 +383,10 @@ export class TesseraExplorer extends TesseraElement {
     </div>`;
     const sheetBody = this.sheet === 'filters' ? html`${filters}${sheetFooter}` : this.sheet === 'layers' ? html`${toolbar}${layersPanel}` : this.sheet === 'artifacts' ? html`${selectionPanel}${list}` : this.sheet === 'detail' ? detail : nothing;
 
+    // **The tooltip slot is forwarded only when the host supplied one.** A slot assigned another
+    // slot counts as filled even when that slot has nothing in it, so forwarding unconditionally
+    // suppressed the map's own fallback — the hover rendered as an empty bordered box beside the
+    // pointer (the owner's review, 2026-08-28).
     return html`<div part="frame" @tessera-artifactfit=${(e: CustomEvent<{id: string}>) => this.map?.fitTo(BigInt(e.detail.id))} @tessera-close=${() => this.closeDetail()}>
       <tessera-map
         colour-by=${this.colourBy || nothing}
@@ -397,7 +401,7 @@ export class TesseraExplorer extends TesseraElement {
         @click=${() => this.requestUpdate()}
       >
         <div slot="bottom-left" class="in-map-strip"><slot name="status"><tessera-status></tessera-status></slot></div>
-        <slot name="tooltip" slot="tooltip"></slot>
+        ${this.querySelector('[slot="tooltip"]') ? html`<slot name="tooltip" slot="tooltip"></slot>` : nothing}
       </tessera-map>
       ${this.layout === 'overlay' ? html`${overlayLeft}${overlayRight}` : docked}
       ${this.sheet && sheetBody !== nothing ? html`<div part="sheet" role="dialog">${sheetBody}</div>` : nothing}

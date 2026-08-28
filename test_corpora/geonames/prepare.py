@@ -1,7 +1,7 @@
 """GeoNames — 13,463,857 features, the ladder's first geographic rung.
 
-One DuckDB pass over `allCountries.txt` produces the points file, five vocabularies and two member
-files. No GPU, no embedding, no projection in the UMAP sense — the coordinates are already WGS84
+One DuckDB pass over `allCountries.txt` produces the points file, eight vocabularies, two member
+files and the admin layer's artifact names. No GPU, no embedding, no projection in the UMAP sense — the coordinates are already WGS84
 and become positions by [`..common.projection`][] and quantisation, which is why this rung is the
 cheapest real map in the corpus.
 
@@ -337,6 +337,37 @@ def main() -> None:
         path = out / f"vocab-{name}.parquet"
         con.execute(f"COPY ({query}) TO '{path}' (FORMAT parquet)")
         sizes[name] = con.execute(f"SELECT count(*) FROM '{path}'").fetchone()[0]
+
+    # --- the admin layer's names ------------------------------------------------------------
+    # One row per artifact, carrying its name as the layer's supplied `name` content: countries
+    # from `countryInfo.txt`, admin1 and admin2 from GeoNames' own code tables, and the code itself
+    # everywhere else — admin3 and admin4, which GeoNames publishes no names for, and the
+    # placeholder `-` levels. **Every artifact, not only the named ones**: a layer declaring a
+    # supplied kind is one whose every artifact carries it, and the build refuses an artifact that
+    # does not ("carries no supplied content, and this layer declares 1 kind(s)"). Enrichment
+    # beside an open value set: the artifacts are still exactly what the member file names.
+    con.execute(
+        f"""COPY (
+            SELECT level::UINTEGER AS level, key, [[coalesce(title, key)]] AS contents FROM (
+                SELECT 0 AS level, k.key, v.title FROM (SELECT DISTINCT country_artifact AS key FROM points) k
+                    LEFT JOIN '{out / "vocab-country.parquet"}' v USING (key)
+                UNION ALL SELECT 1, k.key, v.title FROM (SELECT DISTINCT admin1 AS key FROM points) k
+                    LEFT JOIN '{out / "vocab-admin1.parquet"}' v USING (key)
+                UNION ALL SELECT 2, k.key, v.title FROM (SELECT DISTINCT admin2 AS key FROM points) k
+                    LEFT JOIN '{out / "vocab-admin2.parquet"}' v USING (key)
+                UNION ALL SELECT 3, key, NULL FROM (SELECT DISTINCT admin3 AS key FROM points)
+                UNION ALL SELECT 4, key, NULL FROM (SELECT DISTINCT admin4 AS key FROM points)
+            ) WHERE key IS NOT NULL
+            ORDER BY level, key
+        ) TO '{out / "artifacts-admin.parquet"}' (FORMAT parquet, COMPRESSION zstd)"""
+    )
+    named = con.execute(
+        f"""SELECT level, count(*), count(*) FILTER (contents[1][1] <> key)
+            FROM '{out / "artifacts-admin.parquet"}' GROUP BY level ORDER BY level"""
+    ).fetchall()
+    print("  admin artifacts, and how many carry a published name rather than their code:")
+    for level, total, titled in named:
+        print(f"    {('country', 'admin1', 'admin2', 'admin3', 'admin4')[level]:<8} {total:>8,}  named {titled:>8,}")
 
     # --- member files -------------------------------------------------------------------------
     # One row per point, `key` a list whose positions are the declared levels — the shape
