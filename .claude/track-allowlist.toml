@@ -259,3 +259,13 @@ paths = [
   "clients/ts/harness/*",
   "clients/ts/viewer/*",
 ]
+
+# Wave 10 — the contour and the hover (controller, 2026-08-28, on the owner's third look review).
+[track.contours]
+paths = [
+  "clients/ts/core/*",
+  "clients/ts/deck/*",
+  "clients/ts/components/*",
+  "clients/ts/harness/*",
+  "clients/ts/viewer/*",
+]
