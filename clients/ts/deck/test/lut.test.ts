@@ -200,6 +200,33 @@ describe('a table that only gained ordinals patches the rows they fall in', () =
   });
 });
 
+describe('an ordinal named before its colour exists', () => {
+  it('is written neutral, then coloured on the update after the map is extended in place', () => {
+    const device = fakeDevice();
+    const lut = new LookupTexture();
+    lut.attach(device);
+    const table = new SessionArtifactTable();
+    table.take(Array.from({length: 50}, (_, i) => ({tesseraId: BigInt(i + 1), layer: 'l', parentId: null, centroid: [2 ** 31 + i, 2 ** 31] as [number, number]})));
+    const colours = artifactColours(table.liveEntries().map(({ordinal, entry}) => ({ordinal, centroid: entry.centroid})), 'positional');
+    lut.update({artifacts: {table, colours}}, 'k');
+    // A points frame names an ordinal and the layer draws before the store has coloured it.
+    const [fresh] = table.take([{tesseraId: 9001n, layer: 'l', parentId: null, centroid: [2 ** 31 - 5e8, 2 ** 31 + 5e8]}]);
+    lut.update({artifacts: {table, colours}}, 'k');
+    expect([...lut.colourOf(fresh!)]).toEqual([...NEUTRAL]);
+    const writes = device.textureWrites;
+    // Nothing changed: no write.
+    expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(false);
+    expect(device.textureWrites).toBe(writes);
+    // The store extends the same map in place; the next draw colours the ordinal, one row written.
+    colours.set(fresh!, positionalEntry(table.entry(fresh!)!.centroid));
+    expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(true);
+    expect(device.textureWrites).toBe(writes + 1);
+    expect([...lut.colourOf(fresh!)]).toEqual([...colours.get(fresh!)!]);
+    // And settled means settled: the same inputs again write nothing.
+    expect(lut.update({artifacts: {table, colours}}, 'k')).toBe(false);
+  });
+});
+
 describe('every colouring interaction is a texture rewrite, never an attribute upload (decision 0100)', () => {
   it('palette, level, highlight and the switch write the texture and not the buffers', () => {
     const {table, a, b, root, named} = served();

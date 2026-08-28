@@ -100,7 +100,7 @@ export function lutRows(range: number): number {
  * gets the same bytes, and there are at most `colours.size` distinct answers — so the memo is
  * worth building for a whole pass and is handed back for a patch to share.
  */
-function texelWriter(inputs: LutInputs, data: Uint8Array): (ordinal: number) => void {
+function texelWriter(inputs: LutInputs, data: Uint8Array): (ordinal: number) => boolean {
   const {table, colours} = inputs.artifacts;
   const highlight = inputs.highlight ?? NO_ORDINAL;
   const bytesOf = new Map<number, Rgba>();
@@ -115,16 +115,24 @@ function texelWriter(inputs: LutInputs, data: Uint8Array): (ordinal: number) => 
   const neutral = highlight !== NO_ORDINAL ? dimmed(NEUTRAL) : NEUTRAL;
   return (o: number) => {
     let c: Rgba;
+    // **Settled** means the texel is final for this map: neutral by right (no ordinal, a freed
+    // slot) or coloured. A live ordinal whose walk finds no colour is *not* settled — the map
+    // simply has not been extended to it yet — and the caller keeps it to try again.
+    let settled = true;
     if (o === NO_ORDINAL) c = neutral;
     else if (!table.entry(o)) c = NEUTRAL;
     else {
       const resolved = table.resolve(o, colours, inputs.level);
-      c = resolved === NO_ORDINAL ? neutral : colourOf(resolved);
+      if (resolved === NO_ORDINAL) {
+        c = neutral;
+        settled = false;
+      } else c = colourOf(resolved);
     }
     data[o * 4] = c[0];
     data[o * 4 + 1] = c[1];
     data[o * 4 + 2] = c[2];
     data[o * 4 + 3] = c[3];
+    return settled;
   };
 }
 
@@ -132,13 +140,14 @@ function texelWriter(inputs: LutInputs, data: Uint8Array): (ordinal: number) => 
  * The table's bytes, over the ordinal range: `0` is the neutral, every other ordinal the colour
  * of what it resolves to. Returns the rows the texture needs, a power of two.
  */
-export function buildLut(inputs: LutInputs): {data: Uint8Array; rows: number; range: number} {
+export function buildLut(inputs: LutInputs): {data: Uint8Array; rows: number; range: number; pending: number[]} {
   const range = Math.max(1, inputs.artifacts.table.range);
   const rows = lutRows(range);
   const data = new Uint8Array(LUT_WIDTH * rows * 4);
   const write = texelWriter(inputs, data);
-  for (let o = 0; o < range; o++) write(o);
-  return {data, rows, range};
+  const pending: number[] = [];
+  for (let o = 0; o < range; o++) if (!write(o)) pending.push(o);
+  return {data, rows, range, pending};
 }
 
 /**
@@ -146,19 +155,20 @@ export function buildLut(inputs: LutInputs): {data: Uint8Array; rows: number; ra
  * for none. The caller uploads that span and nothing else; ordinals are named from the top of
  * the range, so on a settle the span is a tail of a row or two.
  */
-export function patchLut(inputs: LutInputs, data: Uint8Array, ordinals: readonly number[]): {from: number; to: number} | null {
+export function patchLut(inputs: LutInputs, data: Uint8Array, ordinals: readonly number[]): {from: number; to: number; pending: number[]} | null {
   if (ordinals.length === 0) return null;
   const write = texelWriter(inputs, data);
+  const pending: number[] = [];
   let from = Infinity;
   let to = 0;
   for (const o of ordinals) {
     if (o * 4 + 3 >= data.length) continue;
-    write(o);
+    if (!write(o)) pending.push(o);
     const row = o >> LUT_SHIFT;
     if (row < from) from = row;
     if (row + 1 > to) to = row + 1;
   }
-  return to > from ? {from, to} : null;
+  return to > from ? {from, to, pending} : null;
 }
 
 /**
@@ -184,6 +194,16 @@ export class LookupTexture {
   private builtFrom: ReadonlyMap<number, Rgba> | null = null;
   /** The rows {@link bytes} holds, which is the texture's height once one is attached. */
   private builtRows = 0;
+  /**
+   * Live ordinals whose texel is neutral only because the colour map had not reached them when
+   * they were written. **An ordinal is named before it is coloured**: a points frame's own
+   * artifacts frame grows the table, the layer draws, and the store extends the colour map *in
+   * place* a moment later — the same object, which this texture compares by identity. Without
+   * this set that extension was invisible and the ordinal stayed grey until something unrelated
+   * rebuilt the texture whole (found on GeoNames, 2026-08-28: the map opened grey and flashed
+   * coloured on a zoom). Re-tried on every update that would otherwise write nothing.
+   */
+  private pending = new Set<number>();
   /** Texture writes since construction — the count a test asserts against attribute uploads. */
   writes = 0;
   bytes: Uint8Array = new Uint8Array(4);
@@ -217,7 +237,7 @@ export class LookupTexture {
    */
   update(inputs: LutInputs, key: string): boolean {
     const {table, colours} = inputs.artifacts;
-    if (key === this.key && table.version === this.builtAt && colours === this.builtFrom) return false;
+    if (key === this.key && table.version === this.builtAt && colours === this.builtFrom) return this.settle(inputs);
     const rows = lutRows(table.range);
     const patch =
       key === this.key && colours === this.builtFrom && rows === this.builtRows && this.bytes.length === LUT_WIDTH * rows * 4
@@ -228,15 +248,18 @@ export class LookupTexture {
     this.builtFrom = colours;
     if (patch) {
       const span = patchLut(inputs, this.bytes, patch);
-      if (span && this.texture) {
-        this.texture.writeData(this.bytes.subarray(span.from * LUT_WIDTH * 4, span.to * LUT_WIDTH * 4), {y: span.from, width: LUT_WIDTH, height: span.to - span.from});
-        this.writes += 1;
+      if (span) {
+        for (const o of span.pending) this.pending.add(o);
+        this.upload(span);
       }
-      return span !== null;
+      // Ordinals waiting from earlier patches may have been coloured by the same extension.
+      const settled = this.settle(inputs);
+      return span !== null || settled;
     }
     const built = buildLut(inputs);
     this.bytes = built.data;
     this.builtRows = built.rows;
+    this.pending = new Set(built.pending);
     if (this.device) {
       if (!this.texture || this.rows !== built.rows) {
         this.texture?.destroy();
@@ -252,6 +275,36 @@ export class LookupTexture {
       this.writes += 1;
     }
     return true;
+  }
+
+  /** Upload one row span of the held bytes, where a device is attached. */
+  private upload(span: {from: number; to: number}): void {
+    if (!this.texture) return;
+    this.texture.writeData(this.bytes.subarray(span.from * LUT_WIDTH * 4, span.to * LUT_WIDTH * 4), {y: span.from, width: LUT_WIDTH, height: span.to - span.from});
+    this.writes += 1;
+  }
+
+  /**
+   * Re-try the pending ordinals against the current map: the ones whose walk now finds a colour
+   * are written and uploaded, the rest wait. Nothing is written when none is ready, so a texture
+   * with nothing pending costs a set-size check per update.
+   */
+  private settle(inputs: LutInputs): boolean {
+    if (this.pending.size === 0) return false;
+    const {table, colours} = inputs.artifacts;
+    const ready: number[] = [];
+    for (const o of this.pending) {
+      if (!table.entry(o)) {
+        this.pending.delete(o);
+        continue;
+      }
+      if (table.resolve(o, colours, inputs.level) !== NO_ORDINAL) ready.push(o);
+    }
+    if (ready.length === 0) return false;
+    const span = patchLut(inputs, this.bytes, ready);
+    for (const o of ready) this.pending.delete(o);
+    if (span) this.upload(span);
+    return span !== null;
   }
 
   /** The colour the texture holds for an ordinal — what the harness reads back for a point. */
