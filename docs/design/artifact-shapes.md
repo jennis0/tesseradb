@@ -125,6 +125,25 @@ not a thing a wire-size guard should be allowed to decide.
 
 ## 4. The family
 
+> **RULED 2026-08-28: containment is not required, and the test below is narrowed to what it was
+> for.** The owner: *"it really doesn't matter if a small number of points are outside the hull, so
+> long as it's showing the overall shape correctly."* A shape is a **summary of where a cluster is**,
+> not a per-point assertion — that is what the membership column is, and what
+> [decision 0099](../decisions/0099-the-map-follows-datamapplot-and-cluster-colour-is-exact-only.md)
+> governs. A member drawn a little outside its own outline is an imprecise summary; it asserts
+> nothing false about that member and nothing at all about members the viewer cannot see, so it is
+> not a disclosure question and it was wrong to treat it as one. What the test still forbids is a
+> shape that **claims ground the members do not occupy** — the convex wrap's swallowed voids, an
+> ellipse over a crescent — because that misstates where the cluster is.
+>
+> **What this re-admits**, all of it rejected below on containment alone: the **α-complex**, whose
+> fill is 1.000 by construction and which yields components and holes without being asked; **spline
+> smoothing** of the drawn ring, which is how DataMapPlot's contours are actually made
+> (`alpha_shapes.py`: an α-complex over Delaunay simplices by circumradius, then a periodic
+> smoothing spline through it); and **containment-breaking simplification**, which is the cheapest
+> byte saving available. §4's table's *contains every member* column is retained as a fact about
+> each family, no longer as a bar.
+
 The admissibility test is one question, and it decides most of the survey: **does every vertex
 correspond to a visible member's position, or does the shape claim ground no member occupies?** A
 shape whose vertices are members says exactly what the data says; a shape whose vertices are
