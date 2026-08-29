@@ -2676,8 +2676,24 @@ fn push_numeric_chunks(
 ///
 /// **The dictionary's ordinals are positions in the sorted distinct term set**, exactly as a
 /// keyword's are in its key set, and the postings are written in that same order — so posting *i*
-/// belongs to the *i*-th key the dictionary holds. A `BTreeMap` is what keeps those two in step
-/// without a second sort to get wrong: its iteration order *is* the dictionary's order.
+/// belongs to the *i*-th key the dictionary holds. The accumulator is a `HashMap` and the order is
+/// restored by **one explicit sort** below: a hash map's iteration order is not an order at all,
+/// and emitting from it would make the dictionary — and so every ordinal in the postings — a
+/// function of the hasher's seed. The sort is a total order because the keys are distinct, so the
+/// emitted sequence is exactly the one a `BTreeMap` accumulator produced. What the map buys is the
+/// accumulation: ~10⁷ distinct terms take ~2×10⁸ lookups over a corpus this size, and a B-tree
+/// spends ~7 cache-missing levels on each of them.
+///
+/// **A term's first sighting is the only one that allocates.** The analyser hands back borrowed
+/// tokens ([`tessera_analyse::Analyser::for_each_token`]) and the lookup is by `&str`, so a term
+/// already in the map costs no `String` — where `tokens()` allocated one per token occurrence and
+/// the map dropped all but the first.
+///
+/// **The postings stream through [`tessera_authz::postings::PostingsSpool`]** rather than being
+/// collected. Buffering held three live copies of the whole posting set — the per-term entity
+/// lists, a `Vec<Vec<u8>>` of every encoded record, and the Arrow builder's copy of those — and the
+/// spool's module doc argues its byte-identity with the buffered writer, which is what makes this a
+/// second access rather than a second format.
 ///
 /// **A term repeated within one document contributes one posting entry.** The analyser keeps
 /// duplicates and order because the positional payload upgrade (§4.5) needs both; a posting is a
@@ -2719,13 +2735,16 @@ fn write_text_index(
             ))
         })?;
 
-    let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
-    for entity in 0..values.len() {
+    let mut terms: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
+    // The analyser's normalisation buffer, held across the whole column rather than per document.
+    let mut scratch = tessera_analyse::TokenScratch::default();
+    // **Absent runs are skipped a word at a time**, not an entity at a time: presence is a bit
+    // vector, one column of this corpus is 84.5% absent, and the alternative is a call and a shift
+    // per entity to learn nothing.
+    for entity in values.present_entities() {
         // Absence is `Null`, and the empty string is a value a corpus may hold — the same
         // out-of-band rule the string families share. Neither yields a term.
-        if !values.is_present(entity) {
-            continue;
-        }
+        //
         // Borrowed: this walks every string in the corpus, and a clone per entity would be a
         // second copy of the column for the duration of the tokenise.
         let Some(prose) = values.str_at(entity) else {
@@ -2736,29 +2755,53 @@ fn write_text_index(
             )));
         };
         let entity = entity as u32;
-        for token in analyser.tokens(prose) {
-            let postings = terms.entry(token).or_default();
-            // Entities arrive ascending, so the duplicate a repeated term produces is always the
-            // last entry — no sort and no set needed to collapse it.
-            if postings.last() != Some(&entity) {
-                postings.push(entity);
+        analyser.for_each_token(prose, &mut scratch, &mut |token| {
+            // Looked up before it is owned: a term already seen costs no allocation, which over a
+            // corpus is every occurrence but the first of every word.
+            if let Some(postings) = terms.get_mut(token) {
+                // Entities arrive ascending, so the duplicate a repeated term produces is always
+                // the last entry — no sort and no set needed to collapse it.
+                if postings.last() != Some(&entity) {
+                    postings.push(entity);
+                }
+            } else {
+                terms.insert(token.to_string(), vec![entity]);
             }
-        }
+        });
     }
 
+    // The dictionary's order, restored once. Distinct keys, so this is a total order and the
+    // sequence is the `BTreeMap` accumulator's exactly — see the doc above on why the sort is
+    // mandatory rather than tidy.
+    let mut terms: Vec<(String, Vec<u32>)> = terms.into_iter().collect();
+    terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+
     let dict_path = column_dir.join(tessera_filter::DICT_FILE);
-    tessera_filter::write_sorted_dict(&dict_path, terms.keys().map(String::as_str))
+    tessera_filter::write_sorted_dict(&dict_path, terms.iter().map(|(term, _)| term.as_str()))
         .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
     fsync_file(&dict_path)?;
 
-    let per_term: Vec<Vec<u32>> = terms.into_values().collect();
     let postings_path = column_dir.join("postings.arrow");
-    tessera_authz::postings::write_postings(
-        &postings_path,
-        &per_term,
-        SMALL_TERM_THRESHOLD_DEFAULT,
-    )
-    .map_err(|e| BuildError::io(&postings_path, e))?;
+    // Beside the file it assembles, and removed by `finish` — the spool-then-assemble discipline
+    // this repo applies to every file whose records are sized as they are written. A build that
+    // fails here leaves the spool behind with the rest of the half-written partition.
+    let spool_path = postings_path.with_extension("spool");
+    let mut spool = tessera_authz::postings::PostingsSpool::create(&spool_path)
+        .map_err(|e| BuildError::io(&spool_path, e))?;
+    for (ordinal, (_, entities)) in terms.into_iter().enumerate() {
+        let record = tessera_authz::postings::encode_posting(
+            ordinal,
+            &entities,
+            SMALL_TERM_THRESHOLD_DEFAULT,
+        )
+        .map_err(|e| BuildError::io(&postings_path, e))?;
+        spool
+            .append(&record)
+            .map_err(|e| BuildError::io(&spool_path, e))?;
+    }
+    spool
+        .finish(&postings_path)
+        .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
 
     Ok(vec![dict_path, postings_path])

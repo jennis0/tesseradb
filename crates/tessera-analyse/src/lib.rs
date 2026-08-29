@@ -223,23 +223,60 @@ impl Analyser {
     /// design's named escalation for, and it is a recall shortfall on word-internal queries rather
     /// than a coverage hole.
     pub fn tokens(&self, text: &str) -> Vec<String> {
-        let normalised = self.nfkc.normalize(text);
-        let folded = self.case.fold_string(&normalised);
+        let mut scratch = TokenScratch::default();
         let mut out = Vec::new();
+        self.for_each_token(text, &mut scratch, &mut |token| out.push(token.to_string()));
+        out
+    }
+
+    /// The same tokens as [`Self::tokens`], **borrowed** rather than owned, over buffers the
+    /// caller keeps between documents.
+    ///
+    /// The two stages before the segmenter each produce a whole second copy of the document, and
+    /// [`Self::tokens`] then produces a third, one `String` per token — so a column of 7.4×10⁷
+    /// short names costs on the order of 4×10⁸ allocations to index, of which the index keeps a
+    /// few per cent: a term seen before is looked up and the freshly allocated key dropped. Here
+    /// the normalisation lands in a buffer that is reused for the next document and every token is
+    /// a slice of the folded one, so the caller allocates only where it decides to keep something
+    /// (`pipeline.rs`'s text index allocates on a term's first sighting alone).
+    ///
+    /// **The token sequence is [`Self::tokens`]'s exactly** — that function is written in terms of
+    /// this one, so there is one segmentation rule rather than two that could drift, and the golden
+    /// vectors pin both at once.
+    ///
+    /// ⊘ The case folder still allocates where a document is not already folded. Writing its
+    /// output into a reused buffer needs `writeable::Writeable` in scope, which is a direct
+    /// dependency whose version has to track icu4x's own or the trait is a different type; the
+    /// NFKC stage has an inherent sink method and takes the buffer.
+    pub fn for_each_token(&self, text: &str, scratch: &mut TokenScratch, f: &mut impl FnMut(&str)) {
+        // Written unconditionally, where `normalize` returns a `Cow` that borrows an
+        // already-normalised input: that borrow costs a full normalising pass into a checking sink
+        // to discover, so the branch it saves is a copy, not the work.
+        scratch.normalised.clear();
+        let _ = self.nfkc.normalize_to(text, &mut scratch.normalised);
+        let folded = self.case.fold_string(&scratch.normalised);
         let mut breaks = self.words.segment_str(&folded);
-        let mut start = match breaks.next() {
-            Some(first) => first,
-            None => return out,
+        let Some(mut start) = breaks.next() else {
+            return;
         };
         for end in breaks {
             let segment = &folded[start..end];
             if segment.chars().any(|c| self.alphanumeric(c)) {
-                out.push(segment.to_string());
+                f(segment);
             }
             start = end;
         }
-        out
     }
+}
+
+/// The buffers [`Analyser::for_each_token`] reuses across documents.
+///
+/// Held by the caller rather than by the [`Analyser`], which is shared across threads and holds no
+/// request state — a scratch inside it would have to be a lock or a thread-local, and the callers
+/// that want it are already single sweeps with somewhere to put one.
+#[derive(Default)]
+pub struct TokenScratch {
+    normalised: String,
 }
 
 #[cfg(test)]
