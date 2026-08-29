@@ -1329,13 +1329,28 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     } else {
         {
             let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
+            // **A contiguous id range makes the search a subtraction**, and whether it is
+            // contiguous is checked rather than assumed. `source_ids` is sorted and free of
+            // duplicates, so a range spanning exactly its own length can only be
+            // `ids_first + i` at every `i` — the fast path is provably the same answer, not a
+            // convention about how a caller numbers its rows.
+            //
+            // It is worth the branch because this closure runs **once per member entry**: a
+            // lineage list per point at the Overture rung is 3×10⁸ of them, and a binary search
+            // into 74M sorted `u64` is ~27 dependent cache misses where the subtraction is one.
+            let dense = ids_last - ids_first + 1 == source_ids.len() as u64;
             crate::layers::publish(
                 &plan,
                 &|source| {
-                    source_ids
-                        .binary_search(&source)
-                        .ok()
-                        .map(|ordinal| entity_of_ordinal[ordinal] as u64)
+                    let ordinal = if dense {
+                        source
+                            .checked_sub(ids_first)
+                            .filter(|o| (*o as usize) < source_ids.len())
+                            .map(|o| o as usize)
+                    } else {
+                        source_ids.binary_search(&source).ok()
+                    };
+                    ordinal.map(|ordinal| entity_of_ordinal[ordinal] as u64)
                 },
                 n,
                 &args.out.join(crate::PREFIX),

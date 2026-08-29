@@ -54,6 +54,7 @@ use tessera_plugin::Plugin;
 // the call sites below reading as what they do rather than as which file they are in.
 use tessera_store::derived;
 use tessera_store::derived::{Filed, LevelShape, PostingSlice, SignatureIndex};
+use tessera_store::permutation::ProjectScratch;
 use tessera_store::RowSpace;
 use tessera_types::layer::{MembershipSource, RegisteredLayer, ServingLayout};
 
@@ -71,8 +72,30 @@ pub struct LevelLayoutReport {
     /// rather than as a blank map at one zoom band.
     pub zoom: Option<(u32, u32)>,
     pub shape: LevelShape,
+    /// How many artifacts the level's registry holds, which is **not** [`LevelShape::artifacts`]:
+    /// the shape counts the ones whose stored membership the walk found rows in, and an attribute
+    /// predicate's membership is not stored at all (see [`Self::observed`]).
+    pub registered: u64,
+    /// Whether [`Self::shape`] describes anything. False for an attribute predicate, whose members
+    /// *are* the value column and are evaluated per request, so the walk this pass makes finds no
+    /// rows and every figure in the shape comes out zero — for a level that holds its artifacts and
+    /// serves them. Reporting those zeros reads as an empty layer and is how an hour was spent
+    /// looking for a defect in a layer that was working (2026-08-28, the Overture rung).
+    pub observed: bool,
     pub pinned: bool,
     pub chosen: ServingLayout,
+}
+
+impl LevelLayoutReport {
+    /// The artifact count to *report* — the observed one where there is one, and the registry's
+    /// otherwise. Never the input to a layout choice, which stays [`LevelShape::artifacts`].
+    fn artifacts(&self) -> u64 {
+        if self.observed {
+            self.shape.artifacts
+        } else {
+            self.registered
+        }
+    }
 }
 
 /// What the pass produced, for the manifest and for the report.
@@ -106,6 +129,11 @@ pub fn run(
 ) -> ArtifactPass {
     let started = Instant::now();
     let mut pass = ArtifactPass::default();
+    // **One set of projection buffers for the whole pass.** Every walk below projects a membership
+    // per artifact, and `Permutation::project` allocates and zeroes a 512 KB stamp on each call —
+    // it is written for one call per session and says so. Shared through a `RefCell` because the
+    // walks are `Fn` closures.
+    let scratch = std::cell::RefCell::new(ProjectScratch::default());
 
     let levels: Vec<(String, u32)> = store
         .levels_and_extents()
@@ -152,7 +180,7 @@ pub fn run(
         // way and what differs is what is held while it runs.
         let shape = derived::observe_shape(space.base_rows(), &|visit| {
             for (ordinal, record) in store.level(layer, *level) {
-                visit(ordinal, &space.project_base(&record.members));
+                visit(ordinal, &space.project_base_with(&record.members, &mut scratch.borrow_mut()));
             }
         });
         let layout = derived::choose(&registered.declaration, shape);
@@ -167,6 +195,11 @@ pub fn run(
                 .find(|l| l.level == *level)
                 .and_then(|l| l.zoom),
             shape,
+            registered: store.level(layer, *level).count() as u64,
+            observed: !matches!(
+                registered.declaration.membership,
+                MembershipSource::Attribute(_)
+            ),
             pinned: registered.declaration.layout.is_some(),
             chosen: layout,
         });
@@ -207,7 +240,7 @@ pub fn run(
             layout: *layout,
             bytes: derived::project_tile_index(ordinals, space.base_rows(), &|visit| {
                 for (ordinal, record) in store.level(layer, *level) {
-                    visit(ordinal, &space.project_base(&record.members));
+                    visit(ordinal, &space.project_base_with(&record.members, &mut scratch.borrow_mut()));
                 }
             }),
         });
@@ -238,7 +271,7 @@ pub fn run(
         let ordinals = store.level(layer, *level).count() as u32;
         let bytes = derived::project_row_column(ordinals, space.base_rows(), *layout, &|visit| {
             for (ordinal, record) in store.level(layer, *level) {
-                visit(ordinal, &space.project_base(&record.members));
+                visit(ordinal, &space.project_base_with(&record.members, &mut scratch.borrow_mut()));
             }
         });
         match bytes {
@@ -381,6 +414,22 @@ pub fn report(pass: &ArtifactPass) {
         pass.elapsed_ms
     );
     for level in &pass.levels {
+        // **A level whose membership is not stored has no shape to print**, and printing the zeros
+        // the walk returned would say it holds nothing. Its artifacts are its column's values and
+        // its form follows from the membership, so the count and the form are the whole of what
+        // there is to say.
+        if !level.observed {
+            eprintln!(
+                "  {} level {} [{}]: {} artifact(s) from its column — served {}; no spread to \
+                 observe, the membership being the column rather than a stored bitmap",
+                level.layer,
+                level.level,
+                level.view,
+                level.registered,
+                level.chosen.pin_word(),
+            );
+            continue;
+        }
         eprintln!(
             "  {} level {} [{}]: {} artifact(s), {:.3} everywhere, {:.1} blocks/artifact, \
              {} — served {}{}",
@@ -434,7 +483,7 @@ pub fn report(pass: &ArtifactPass) {
             continue;
         }
         levels.sort_by_key(|l| l.level);
-        let total: u64 = levels.iter().map(|l| l.shape.artifacts).sum();
+        let total: u64 = levels.iter().map(|l| l.artifacts()).sum();
         let ranges = levels.iter().any(|l| l.zoom.is_some());
         if ranges {
             eprintln!(
@@ -459,13 +508,13 @@ pub fn report(pass: &ArtifactPass) {
             match l.zoom {
                 Some((lo, hi)) => eprintln!(
                     "    level {} [{}]: {} artifact(s), zoom {lo}–{hi}",
-                    l.level, l.view, l.shape.artifacts
+                    l.level, l.view, l.artifacts()
                 ),
                 // A level with no range of its own beside levels that have one is served at every
                 // depth: it has no scale to be outside of.
                 None => eprintln!(
                     "    level {} [{}]: {} artifact(s), no zoom range — served at every depth",
-                    l.level, l.view, l.shape.artifacts
+                    l.level, l.view, l.artifacts()
                 ),
             }
         }

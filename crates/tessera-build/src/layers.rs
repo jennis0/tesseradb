@@ -71,6 +71,8 @@ use tessera_types::layer::RegisteredLayer;
 use tessera_types::layer::{parent_edges, LayerDeclaration, ListMeaning, ValueSet};
 use tessera_types::EntityId;
 
+use rayon::prelude::*;
+
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
 use crate::error::{BuildError, Result};
 
@@ -136,8 +138,21 @@ struct ResolvedArtifact {
 pub struct LayerPlan {
     declarations: Vec<LayerDeclaration>,
     /// Keyed `(layer, level, key)`, which is also the publication order — see the module doc on
-    /// determinism.
-    artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
+    /// determinism. **The value is an index into [`Self::bodies`], not the artifact itself**: the
+    /// per-point path resolves a key to that index once and then writes through it, where holding
+    /// the artifact here made every member entry a `BTreeMap` probe whose key comparison walks two
+    /// heap `String`s. At the Overture rung that was three probes and two allocations per entry
+    /// over 3×10⁸ entries.
+    ///
+    /// The map is still what publication order is read off, so ordinals — which are identity under
+    /// I9 — remain a function of the keys and never of arena order.
+    artifacts: BTreeMap<(String, u32, String), usize>,
+    /// The artifacts themselves, named by the index [`Self::artifacts`] carries. Append-only: an
+    /// index handed out stays valid for the whole read.
+    bodies: Vec<PlannedArtifact>,
+    /// The address of each body, at the same index — so a resolved key can be carried as one
+    /// `usize` and still name itself when a refusal has to quote it.
+    addresses: Vec<Address>,
     /// Member rows whose key said *this point is in no artifact*, per source.
     unclustered: Vec<UnclusteredRows>,
     /// How many artifacts each layer's member source **created** — a key the artifacts source did
@@ -146,6 +161,29 @@ pub struct LayerPlan {
     /// knowingly, and the mitigation is that the number is printed. The wire says the same thing in
     /// its own 200.
     minted: BTreeMap<String, u64>,
+}
+
+impl LayerPlan {
+    /// The index of `address`, minting an empty artifact for it if the plan does not hold one.
+    ///
+    /// **Minted into the plan, never over it**: an address already present keeps the artifact it
+    /// has, members and all.
+    fn intern(&mut self, address: Address) -> usize {
+        let next = self.bodies.len();
+        match self.artifacts.entry(address.clone()) {
+            std::collections::btree_map::Entry::Occupied(e) => *e.get(),
+            std::collections::btree_map::Entry::Vacant(e) => {
+                e.insert(next);
+                self.bodies.push(PlannedArtifact::default());
+                self.addresses.push(address);
+                next
+            }
+        }
+    }
+
+    fn address_of(&self, index: usize) -> &Address {
+        &self.addresses[index]
+    }
 }
 
 /// How many rows of one member source named no artifact.
@@ -293,6 +331,8 @@ impl Default for PublishedLayers {
 /// (`annotation-write-cycle.md` §6.1).
 pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Result<LayerPlan> {
     let mut plan = LayerPlan {
+        bodies: Vec::new(),
+        addresses: Vec::new(),
         declarations: declarations.to_vec(),
         artifacts: BTreeMap::new(),
         unclustered: Vec::new(),
@@ -493,9 +533,8 @@ fn read_artifacts(
                 }
                 (None, None) => PlannedMembership::default(),
             };
-            plan.artifacts.insert(
-                address.clone(),
-                PlannedArtifact {
+            let index = plan.intern(address.clone());
+            plan.bodies[index] = PlannedArtifact {
                     membership,
                     contents: match contents.as_ref() {
                         None => Vec::new(),
@@ -504,8 +543,7 @@ fn read_artifacts(
                     attached_to: attachment,
                     parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
                     shape: bbox_at(path, &bounds, row, &address.2)?,
-                },
-            );
+            };
         }
     }
     Ok(())
@@ -542,9 +580,8 @@ fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Re
                 )))
             }
         };
-        plan.artifacts.insert(
-            address,
-            PlannedArtifact {
+        let index = plan.intern(address);
+        plan.bodies[index] = PlannedArtifact {
                 membership: match (&row.members, &row.excluding) {
                     // Both is refused at parse, where the declaration can name the artifact.
                     (Some(members), _) => PlannedMembership::Included(members.clone()),
@@ -562,8 +599,7 @@ fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Re
                 attached_to,
                 parent_key: row.parent.clone(),
                 shape: inline_bbox(layer, &row.key, row.bbox.as_deref())?,
-            },
-        );
+        };
     }
     Ok(())
 }
@@ -630,15 +666,15 @@ fn read_members(
     let (mut unclustered, mut read) = (0u64, 0u64);
     // Built on the first integer batch and not before: a text-keyed layer never pays for it, and a
     // layer of 10⁷ artifacts pays once rather than per point.
-    let mut roster: Option<IntegerRoster> = None;
+    let mut roster: Option<KeyRoster> = None;
     // The edges a list column declared, child address → parent key. **One entry per child, not one
     // per row**: a cluster of a hundred thousand points states its parent a hundred thousand times,
     // and the second statement onward is a comparison rather than an insertion. Applied once the
     // whole source has been read, so a conflict is found wherever in the file it sits.
-    let mut lineage: BTreeMap<Address, String> = BTreeMap::new();
+    let mut lineage: BTreeMap<usize, usize> = BTreeMap::new();
     // Reused across rows rather than allocated per point: one slot per position in the row's list,
     // `None` where the entry named no artifact.
-    let mut entries: Vec<Option<Member>> = Vec::new();
+    let mut entries: Vec<Option<usize>> = Vec::new();
     let mut said_level_is_ignored = false;
     for batch in batches(path)? {
         let batch = batch?;
@@ -679,18 +715,18 @@ fn read_members(
                         unclustered += 1;
                         continue;
                     };
-                    let address = member.address(&roster);
+                    let name = plan.address_of(member).2.clone();
                     // **A null `entity` is a refusal, not entity zero.** Arrow's `value` reads the
                     // values buffer whatever the validity bitmap says, and a Parquet writer leaves
                     // a zero there — so a producer whose join missed a row would publish the
                     // corpus's lowest-numbered document into the cluster, moving its masked count
                     // for every viewer who can see that one document.
                     if entity.is_null(row) {
-                        return Err(null_entity(path, &address.2));
+                        return Err(null_entity(path, &name));
                     }
                     attach_member(
                         plan,
-                        address,
+                        member,
                         path,
                         entity.value(row),
                         rank.as_ref().and_then(|c| value_index(c, row)),
@@ -727,10 +763,10 @@ fn read_members(
                         continue;
                     }
                     for member in entries.iter().flatten() {
-                        attach_member(plan, member.address(&roster), path, source, rank)?;
+                        attach_member(plan, *member, path, source, rank)?;
                     }
                     if listed.meaning.declares_edges() {
-                        record_lineage(&entries, &roster, &mut lineage, path)?;
+                        record_lineage(&entries, plan, &mut lineage, path)?;
                     }
                 }
             }
@@ -760,25 +796,32 @@ fn resolve_member(
     value_set: ValueSet,
     path: &Path,
     plan: &mut LayerPlan,
-    roster: &mut Option<IntegerRoster>,
-) -> Result<Option<Member>> {
+    roster: &mut Option<KeyRoster>,
+) -> Result<Option<usize>> {
     Ok(match read {
         KeyRead::Unclustered => None,
         KeyRead::Named(name) => {
-            let address = (layer.to_string(), level, name.to_string());
-            if !plan.artifacts.contains_key(&address) {
-                if value_set == ValueSet::Closed {
-                    return Err(undeclared_key(path, &address));
+            // **Interned exactly as an integer key is**, and for the same reason: the address is
+            // built once per artifact rather than once per point. Building it here allocated the
+            // layer name and the key on every member entry and then probed a `BTreeMap` whose
+            // comparison walks both — three times over, counting `attach_member` and the lineage.
+            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
+            match roster.text(level, name) {
+                Some(index) => Some(index),
+                None => {
+                    let address = (layer.to_string(), level, name.to_string());
+                    if value_set == ValueSet::Closed {
+                        return Err(undeclared_key(path, &address));
+                    }
+                    let index = plan.intern(address.clone());
+                    Some(roster.insert_text(level, name, address, index))
                 }
-                plan.artifacts
-                    .insert(address.clone(), PlannedArtifact::default());
             }
-            Some(Member::Named(address))
         }
         KeyRead::Numbered(value) => {
-            let roster = roster.get_or_insert_with(|| IntegerRoster::of_layer(layer, plan));
+            let roster = roster.get_or_insert_with(|| KeyRoster::of_layer(layer, plan));
             match roster.get(level, value) {
-                Some(index) => Some(Member::Interned(index)),
+                Some(index) => Some(index),
                 None => {
                     // The one decimal string an integer key ever costs: once per artifact minted,
                     // never once per point. The spelling is the one
@@ -792,8 +835,8 @@ fn resolve_member(
                     // from the plan — the roster is built once and indexes only the keys that spell
                     // an integer exactly — so an insert here would replace an artifact that already
                     // holds members with an empty one.
-                    plan.artifacts.entry(address.clone()).or_default();
-                    Some(Member::Interned(roster.insert(level, value, address)))
+                    let index = plan.intern(address.clone());
+                    Some(roster.insert(level, value, address, index))
                 }
             }
         }
@@ -803,15 +846,15 @@ fn resolve_member(
 /// Put one source entity into an artifact — its membership, or the generating set of one rank.
 fn attach_member(
     plan: &mut LayerPlan,
-    address: &Address,
+    index: usize,
     path: &Path,
     source: u64,
     rank: Option<u32>,
 ) -> Result<()> {
-    let entry = plan
-        .artifacts
-        .get_mut(address)
-        .expect("resolved against the plan, or minted into it");
+    // **One index, not a probe.** The key was resolved to this once when the artifact was first
+    // met; every member entry after that writes straight through it.
+    let key = plan.addresses[index].2.clone();
+    let entry = &mut plan.bodies[index];
     match rank {
         None => match &mut entry.membership {
             PlannedMembership::Rows(members) => members.push(source),
@@ -826,11 +869,11 @@ fn attach_member(
                      They are two shapes of one thing, so which one a masked count divides by \
                      would be the order the sources were read",
                     path.display(),
-                    address.2
+                    key
                 )))
             }
         },
-        Some(index) => content_at_rank(entry, index).generated_from.push(source),
+        Some(rank) => content_at_rank(entry, rank).generated_from.push(source),
     }
     Ok(())
 }
@@ -850,19 +893,24 @@ fn null_entity(path: &Path, what: &str) -> BuildError {
 /// of a hundred thousand points states its parent a hundred thousand times and the second statement
 /// onward is a comparison rather than an insertion.
 fn record_lineage(
-    entries: &[Option<Member>],
-    roster: &Option<IntegerRoster>,
-    lineage: &mut BTreeMap<Address, String>,
+    entries: &[Option<usize>],
+    plan: &LayerPlan,
+    lineage: &mut BTreeMap<usize, usize>,
     path: &Path,
 ) -> Result<()> {
     for (parent, child) in parent_edges(entries) {
-        let parent = parent.address(roster).2.as_str();
-        let child = child.address(roster);
         match lineage.get(child) {
-            Some(first) if first != parent => return Err(two_parents(path, child, first, parent)),
+            Some(first) if first != parent => {
+                return Err(two_parents(
+                    path,
+                    plan.address_of(*child),
+                    &plan.address_of(*first).2,
+                    &plan.address_of(*parent).2,
+                ))
+            }
             Some(_) => {}
             None => {
-                lineage.insert(child.clone(), parent.to_string());
+                lineage.insert(*child, *parent);
             }
         }
     }
@@ -876,19 +924,24 @@ fn record_lineage(
 /// same conflict as two points disagreeing.
 fn apply_lineage(
     plan: &mut LayerPlan,
-    lineage: BTreeMap<Address, String>,
+    lineage: BTreeMap<usize, usize>,
     path: &Path,
 ) -> Result<()> {
-    for (child, parent) in lineage {
-        let artifact = plan
-            .artifacts
-            .get_mut(&child)
-            .expect("a child of the lineage was resolved against the plan, or minted into it");
+    // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
+    // several a corpus carries is reported must not depend on the order keys happened to be met —
+    // it is the order they sort in, which is what it has always been. One sort of at most one entry
+    // per child, against one probe per member row.
+    let mut in_order: Vec<(usize, usize)> = lineage.into_iter().collect();
+    in_order.sort_by(|a, b| plan.address_of(a.0).cmp(plan.address_of(b.0)));
+    for (child, parent) in in_order {
+        let parent_key = plan.address_of(parent).2.clone();
+        let address = plan.address_of(child).clone();
+        let artifact = &mut plan.bodies[child];
         match &artifact.parent_key {
-            Some(declared) if *declared != parent => {
-                return Err(two_parents(path, &child, declared, &parent))
+            Some(declared) if *declared != parent_key => {
+                return Err(two_parents(path, &address, declared, &parent_key))
             }
-            _ => artifact.parent_key = Some(parent),
+            _ => artifact.parent_key = Some(parent_key),
         }
     }
     Ok(())
@@ -936,7 +989,7 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 #[allow(clippy::too_many_arguments)]
 pub fn publish(
     plan: &LayerPlan,
-    resolve: &dyn Fn(u64) -> Option<u64>,
+    resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
     high_water: u64,
     prefix_dir: &Path,
     partition: &str,
@@ -1003,44 +1056,82 @@ pub fn publish(
     // declared by exclusion is complemented against the entity space this build assigned, once, so
     // the hierarchy checks below and the store beneath them see the same set an inclusion would
     // have written — and no later stage has a spelling left to learn.
-    let mut resolved: BTreeMap<Address, ResolvedArtifact> = BTreeMap::new();
-    for ((layer, level, key), artifact) in &plan.artifacts {
-        resolved.insert(
-            (layer.clone(), *level, key.clone()),
-            resolve_artifact(layer, *level, key, artifact, resolve, high_water)?,
-        );
-    }
+    // **Resolved in parallel, collected in key order.** Each artifact's resolution reads only its
+    // own planned body and the `resolve` closure, which is a lookup into two immutable arrays — so
+    // there is no cross-artifact state and nothing to order. The *output* order is the `BTreeMap`'s
+    // and therefore the keys', not the scheduler's, which is what keeps ordinals a function of the
+    // artifacts under I9.
+    //
+    // It is the one phase of this stage worth parallelising first: it is a pure map, and at the
+    // Overture rung it is 3×10⁸ member entries through the source-id lookup.
+    let resolved: BTreeMap<Address, ResolvedArtifact> = plan
+        .artifacts
+        .par_iter()
+        .map(|((layer, level, key), index)| {
+            resolve_artifact(
+                layer,
+                *level,
+                key,
+                &plan.bodies[*index],
+                resolve,
+                high_water,
+            )
+            .map(|artifact| ((layer.clone(), *level, key.clone()), artifact))
+        })
+        .collect::<Result<_>>()?;
+
+    // **The hierarchy checks run before a single entity is allocated**, which is both the cheaper
+    // and the more useful order: they read `declarations` and `resolved` and touch neither the
+    // registry nor the store, and a structural fault in the edges is worth refusing before the
+    // publication that assigns permanent ids rather than after it. It also lets `resolved` be
+    // *consumed* below — the memberships are the largest thing this stage holds and nothing else
+    // needs them whole.
+    let (violations, coverage) = verify_hierarchies(&plan.declarations, &resolved)?;
 
     // Grouped by `(layer, level)`, each level's artifacts in key order — so a level's
     // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
     // row order.
-    let mut batched: BTreeMap<(&str, u32), Vec<(&str, &ResolvedArtifact)>> = BTreeMap::new();
-    for ((layer, level, key), artifact) in &resolved {
+    //
+    // **Owned, so a level's members are freed as it publishes.** Borrowing held every level's
+    // `Vec<EntityId>` alive until the last level was published, so the peak carried the whole
+    // corpus's memberships twice over — once as entity vectors and once as the Roaring bitmaps
+    // built from them. Consuming `resolved` here means each level's vectors drop at the end of the
+    // iteration that turned them into bitmaps.
+    let mut batched: BTreeMap<(String, u32), Vec<(String, ResolvedArtifact)>> = BTreeMap::new();
+    for ((layer, level, key), artifact) in resolved {
         batched
-            .entry((layer.as_str(), *level))
+            .entry((layer, level))
             .or_default()
-            .push((key.as_str(), artifact));
+            .push((key, artifact));
     }
 
     // **Published in declaration order, which is the order that honours `depends_on`.** An
     // attachment resolves against what is already published, so a label layer must follow the layer
     // it attaches into — and iterating the map instead would publish in alphabetical order, making
     // an operator's file work or fail on how their layers happen to sort.
-    let mut order: Vec<(&str, u32)> = Vec::with_capacity(batched.len());
+    let mut order: Vec<(String, u32)> = Vec::with_capacity(batched.len());
     for declaration in &plan.declarations {
         let name = declaration.name.as_str();
-        order.extend(batched.keys().filter(|(layer, _)| *layer == name).copied());
+        order.extend(
+            batched
+                .keys()
+                .filter(|(layer, _)| layer == name)
+                .cloned(),
+        );
     }
 
     for address in order {
-        let (layer, level) = address;
+        let (layer, level) = (address.0.as_str(), address.1);
         let artifacts = batched
             .remove(&address)
             .expect("every address came from the map a statement ago");
         let mut incoming = Vec::with_capacity(artifacts.len());
-        for (key, artifact) in artifacts {
+        for (key, artifact) in &artifacts {
             incoming.push(incoming_artifact(key, artifact));
         }
+        // The entity vectors are done with the moment they are bitmaps; holding them through the
+        // publication is what made the peak twice what it needed to be.
+        drop(artifacts);
         let record = registry
             .prepare_publish(
                 layer,
@@ -1051,6 +1142,10 @@ pub fn publish(
                 &tessera_lifecycle::no_pending,
             )
             .map_err(|e| BuildError::Invalid(format!("publishing into {layer}: {e}")))?;
+        // The record carries its own copy of every membership, so the bitmaps this built are dead
+        // the moment `prepare_publish` returns — a level's worth of them, held to the end of the
+        // loop for nothing.
+        drop(incoming);
         registry.apply(&record);
         let refused = store.apply(&record, 0);
         if refused > 0 {
@@ -1071,7 +1166,6 @@ pub fn publish(
         }
     }
 
-    let (violations, coverage) = verify_hierarchies(&plan.declarations, &resolved)?;
     let (layers, _tombstones) = registry.snapshot();
     let mut published = PublishedLayers {
         layers,
@@ -1191,11 +1285,11 @@ fn verify_dependencies(plan: &LayerPlan) -> Result<()> {
         .iter()
         .map(|d| (d.name.as_str(), d.depends_on.as_slice()))
         .collect();
-    for ((layer, _, key), artifact) in &plan.artifacts {
+    for ((layer, _, key), index) in &plan.artifacts {
         let Some(depends_on) = declared.get(layer.as_str()) else {
             continue;
         };
-        match &artifact.attached_to {
+        match &plan.bodies[*index].attached_to {
             None if !depends_on.is_empty() => {
                 return Err(BuildError::Invalid(format!(
                     "layer '{layer}' declares depends_on {depends_on:?}, so every artifact it \
@@ -1342,23 +1436,49 @@ fn verify_hierarchies(
     for (address, children) in &children_of {
         let (layer, level, parent_key) = address;
         let parent = &artifacts[address];
-        // **A set per parent, not a scan per member.** The membership test is the inner loop of
-        // both checks below, and a linear `contains` over a parent holding the whole corpus makes
-        // this pass quadratic in the level's largest artifact.
-        let held: std::collections::HashSet<u64> = parent.members.iter().map(|e| e.raw()).collect();
-        let mut covered: std::collections::HashSet<u64> =
-            std::collections::HashSet::with_capacity(held.len());
+        // **The parent's distinct members, in order** — `resolve_artifact` sorted them, so this is
+        // a run-skip rather than a sort. It replaces a `HashSet<u64>` per parent, which for a
+        // country-level division holding 2×10⁷ points was a ~300 MB table built and torn down, with
+        // a second one beside it for what the children covered.
+        let mut held: Vec<u64> = parent.members.iter().map(|e| e.raw()).collect();
+        held.dedup();
+        // One bit per distinct member, so `covered.len()` becomes a popcount: 2.5 MB where the
+        // second `HashSet` was 300 MB, and the counts it feeds are identical by construction.
+        let mut covered = vec![0u64; held.len().div_ceil(64)];
+        let mut covered_count = 0u64;
 
         for child_address in children {
             let child = &artifacts[child_address];
             let (_, child_level, child_key) = child_address;
             let mut escaping = 0u64;
+            // **Galloping from a cursor**, both sides being sorted: a child whose members sit in
+            // one region of the parent's finds them in a few probes each rather than a full
+            // binary search, and the walk is cache-resident where the hash table was not.
+            let mut cursor = 0usize;
             for member in child.members.iter().map(|e| e.raw()) {
-                if held.contains(&member) {
-                    covered.insert(member);
-                } else {
+                if cursor < held.len() && held[cursor] > member {
+                    cursor = 0;
+                }
+                let mut step = 1usize;
+                while cursor + step < held.len() && held[cursor + step] <= member {
+                    step *= 2;
+                }
+                let hi = (cursor + step).min(held.len());
+                match held[cursor..hi].binary_search(&member) {
+                    Ok(offset) => {
+                        let at = cursor + offset;
+                        cursor = at;
+                        let (word, bit) = (at / 64, at % 64);
+                        if covered[word] >> bit & 1 == 0 {
+                            covered[word] |= 1u64 << bit;
+                            covered_count += 1;
+                        }
+                    }
                     // Reported, not refused: the tree is real, its rollup guarantee is not.
-                    escaping += 1;
+                    Err(offset) => {
+                        cursor = (cursor + offset).min(held.len().saturating_sub(1));
+                        escaping += 1;
+                    }
                 }
             }
             if escaping > 0 {
@@ -1380,7 +1500,7 @@ fn verify_hierarchies(
             parent: parent_key.clone(),
             children: children.len() as u32,
             members: held.len() as u64,
-            stray_members: (held.len() - covered.len()) as u64,
+            stray_members: held.len() as u64 - covered_count,
         });
     }
 
@@ -1406,37 +1526,69 @@ fn detect_cycles(
     artifacts: &BTreeMap<Address, ResolvedArtifact>,
     kind_of: &BTreeMap<&str, tessera_types::layer::HierarchyKind>,
 ) -> Result<()> {
-    for (layer, level, key) in artifacts.keys() {
+    // One `key → parent` map per nested level, in key order. The walk below reads nothing else, so
+    // building this once is what lets it borrow rather than clone an `Address` at every step — the
+    // per-artifact walk allocated three `String`s per step and ran a step per ancestor.
+    //
+    // A `BTreeMap` at both levels, because the order artifacts are visited in is the order this
+    // reports a cycle in, and that order must stay `artifacts.keys()`'s.
+    let mut levels: BTreeMap<(&str, u32), BTreeMap<&str, Option<&str>>> = BTreeMap::new();
+    for ((layer, level, key), artifact) in artifacts {
         if !matches!(
             kind_of.get(layer.as_str()),
             Some(tessera_types::layer::HierarchyKind::Nested)
         ) {
             continue;
         }
-        let bound = artifacts
-            .keys()
-            .filter(|(l, v, _)| l == layer && v == level)
-            .count();
-        let mut node = key.clone();
-        for _ in 0..=bound {
-            let Some(artifact) = artifacts.get(&(layer.clone(), *level, node.clone())) else {
-                break;
-            };
-            match artifact.parent_key.as_deref() {
-                None => break,
-                Some(parent) => node = parent.to_string(),
+        levels
+            .entry((layer.as_str(), *level))
+            .or_default()
+            .insert(key.as_str(), artifact.parent_key.as_deref());
+    }
+
+    // **One visit per artifact, not one walk per artifact.** Each node is coloured once it is known
+    // to reach a root, so a chain already proved good is left the moment it is re-entered — and a
+    // node met while still on the current chain *is* the cycle, which is what the count bound was
+    // standing in for. The bound it replaces was derived by scanning the whole map per artifact,
+    // O(A²), and a `nested` layer puts every artifact at level 0 (`configuration.md`, the four
+    // hierarchy kinds): 600,000 artifacts at the Overture rung, 3.6×10¹¹ key visits, and the whole
+    // of that build's layers stage. It also removes a latent hang — a corpus that genuinely held a
+    // cycle ran the bound's full length for every artifact whose lineage reached it.
+    //
+    // **The artifact reported is the same one**: the walks start in key order and the first start
+    // whose lineage reaches a cycle is the first artifact the counted walk would have failed on.
+    for ((layer, level), parents) in &levels {
+        // 0 unvisited · 1 on the chain being walked · 2 known to reach a root
+        let mut state: std::collections::HashMap<&str, u8> =
+            std::collections::HashMap::with_capacity(parents.len());
+        for start in parents.keys() {
+            let mut chain: Vec<&str> = Vec::new();
+            let mut node = *start;
+            loop {
+                match state.get(node).copied().unwrap_or(0) {
+                    2 => break,
+                    1 => {
+                        return Err(BuildError::Invalid(format!(
+                            "{layer} level {level}: the lineage above {start} does not reach a \
+                             root within the level's own artifact count, so the edges hold a \
+                             cycle — a tree has a root to descend a cut from and a cycle has none"
+                        )))
+                    }
+                    _ => {}
+                }
+                state.insert(node, 1);
+                chain.push(node);
+                match parents.get(node).copied().flatten() {
+                    // A root, or a parent this level does not hold — the chain ends, and what sits
+                    // above a key this level never declared is not this level's to call a cycle.
+                    None => break,
+                    Some(parent) if !parents.contains_key(parent) => break,
+                    Some(parent) => node = parent,
+                }
             }
-        }
-        if artifacts
-            .get(&(layer.clone(), *level, node.clone()))
-            .and_then(|a| a.parent_key.as_deref())
-            .is_some()
-        {
-            return Err(BuildError::Invalid(format!(
-                "{layer} level {level}: the lineage above {key} does not reach a root within the \
-                 level's own artifact count, so the edges hold a cycle — a tree has a root to \
-                 descend a cut from and a cycle has none"
-            )));
+            for node in chain {
+                state.insert(node, 2);
+            }
         }
     }
     Ok(())
@@ -1458,7 +1610,7 @@ fn resolve_artifact(
     level: u32,
     key: &str,
     artifact: &PlannedArtifact,
-    resolve: &dyn Fn(u64) -> Option<u64>,
+    resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
     high_water: u64,
 ) -> Result<ResolvedArtifact> {
     let entities = |ids: &[u64], what: &str| -> Result<Vec<EntityId>> {
@@ -1493,6 +1645,14 @@ fn resolve_artifact(
                 .collect()
         }
     };
+
+    // **Sorted here, once, and not deduped.** Two readers want it in order — the containment pass
+    // below, which walks parent and child together instead of hashing a set per parent, and
+    // `bitmap_of_entities`, which sorts before its bulk add. Deduping here would be wrong: a
+    // containment violation counts member *entries* that escape, duplicates included, and that is
+    // the number an operator is given.
+    let mut members = members;
+    members.sort_unstable_by_key(|e| e.raw());
 
     let mut contents = Vec::with_capacity(artifact.contents.len());
     for (rank, content) in artifact.contents.iter().enumerate() {
@@ -2031,7 +2191,7 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// row's key costs ~54 s at 10⁹ against ~15 s for an integer hash and ~0.5 s where the value is
 /// already an interned code (measured, 10⁵ distinct ids, single-threaded), and cluster ids are
 /// integers, so the common case would pay the worst of the three. The member pass therefore
-/// converts the **roster** once into [`IntegerRoster`] and looks each point up by the integer it
+/// converts the **roster** once into [`KeyRoster`] and looks each point up by the key it
 /// already has: a point whose cluster is on the roster formats nothing and allocates nothing, and
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
@@ -2302,68 +2462,72 @@ fn member_keys<'a>(
     }))
 }
 
-/// One member row's key, resolved to the artifact it names.
-///
-/// **An integer key resolves to an index and never to a string.** The roster is converted once per
-/// layer ([`IntegerRoster`]) and a point's key is looked up as the integer it already is, so a
-/// point whose cluster is known formats nothing and allocates nothing — which is the whole reason
-/// the reader takes an integer column at all. A text key allocates its address exactly as it always
-/// has, there being nothing to intern it against.
-enum Member {
-    Interned(usize),
-    Named(Address),
-}
-
-impl Member {
-    fn address<'a>(&'a self, roster: &'a Option<IntegerRoster>) -> &'a Address {
-        match self {
-            Member::Named(address) => address,
-            Member::Interned(index) => roster
-                .as_ref()
-                .expect("an interned member came from the roster it is read against")
-                .address(*index),
-        }
-    }
-}
-
-/// The layer's artifacts, indexed by the integer their keys spell.
+/// The layer's artifacts, indexed by what their keys spell — the integer, and the text.
 ///
 /// **Built once, before the first member row is read**, which is what keeps the per-point path free
-/// of formatting: a point's integer key is looked up as an integer, and the address it finds is the
-/// one the roster was planned under. The addresses sit in an arena and are named by index, so a
-/// row's several keys can be held at once without cloning one of them.
-struct IntegerRoster {
-    by_key: BTreeMap<(u32, i128), usize>,
-    addresses: Vec<Address>,
+/// of formatting *and* of allocation. A point's integer key is looked up as the integer it already
+/// is; a text key is looked up as a borrowed `&str`. Either way the answer is an index into the
+/// plan's own arena, so a row's several keys are held at once as `usize`s and the artifact they
+/// name is written through without a second lookup.
+///
+/// **The text half is why the Overture rung's layers stage was what it was.** Before it, every
+/// member entry built `(layer.to_string(), level, key.to_string())` and probed a `BTreeMap` whose
+/// comparison walks two heap `String`s — three times over, counting the membership write and the
+/// lineage — at 3×10⁸ entries.
+struct KeyRoster {
+    by_integer: BTreeMap<(u32, i128), usize>,
+    /// `level → key → plan index`, nested so the lookup borrows: a `HashMap<Box<str>, _>` answers
+    /// a `&str`, where a `(u32, String)` tuple key would allocate on every probe — which is the
+    /// whole point of interning the text path.
+    by_text: BTreeMap<u32, std::collections::HashMap<Box<str>, usize>>,
 }
 
-impl IntegerRoster {
-    fn of_layer(layer: &str, plan: &LayerPlan) -> IntegerRoster {
-        let mut roster = IntegerRoster {
-            by_key: BTreeMap::new(),
-            addresses: Vec::new(),
+impl KeyRoster {
+    /// **Built once, over the layer's whole planned roster**, integer and text keys alike.
+    fn of_layer(layer: &str, plan: &LayerPlan) -> KeyRoster {
+        let mut roster = KeyRoster {
+            by_integer: BTreeMap::new(),
+            by_text: BTreeMap::new(),
         };
-        for address in plan.artifacts.keys().filter(|a| a.0 == layer) {
+        for (address, index) in plan.artifacts.iter().filter(|(a, _)| a.0 == layer) {
             if let Some(value) = canonical_integer(&address.2) {
-                roster.insert(address.1, value, address.clone());
+                roster.by_integer.insert((address.1, value), *index);
             }
+            roster
+                .by_text
+                .entry(address.1)
+                .or_default()
+                .insert(address.2.as_str().into(), *index);
         }
         roster
     }
 
     fn get(&self, level: u32, value: i128) -> Option<usize> {
-        self.by_key.get(&(level, value)).copied()
+        self.by_integer.get(&(level, value)).copied()
     }
 
-    fn insert(&mut self, level: u32, value: i128, address: Address) -> usize {
-        let index = self.addresses.len();
-        self.addresses.push(address);
-        self.by_key.insert((level, value), index);
+    fn text(&self, level: u32, key: &str) -> Option<usize> {
+        self.by_text.get(&level)?.get(key).copied()
+    }
+
+    fn insert(&mut self, level: u32, value: i128, address: Address, index: usize) -> usize {
+        self.by_integer.insert((level, value), index);
+        self.by_text
+            .entry(level)
+            .or_default()
+            .insert(address.2.as_str().into(), index);
         index
     }
 
-    fn address(&self, index: usize) -> &Address {
-        &self.addresses[index]
+    fn insert_text(&mut self, level: u32, key: &str, address: Address, index: usize) -> usize {
+        if let Some(value) = canonical_integer(&address.2) {
+            self.by_integer.insert((level, value), index);
+        }
+        self.by_text
+            .entry(level)
+            .or_default()
+            .insert(key.into(), index);
+        index
     }
 }
 

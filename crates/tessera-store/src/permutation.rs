@@ -47,6 +47,18 @@ const HEADER_LEN: usize = 4 + 2 + 2 + 8; // magic, version, reserved, bound
 /// boundary that fell inside a container would split a payload across two of them.
 const BUCKET_SHIFT: u32 = 22;
 
+/// The buffers [`Permutation::project_with`] reuses between calls.
+///
+/// A 512 KB stamp and one `Vec` per bucket. They hold nothing between calls — `project_with`
+/// clears them on entry — so a `Default` one and a reused one give byte-identical results; what
+/// reuse saves is the allocation and the zeroing, which at one projection per artifact is the
+/// dominant cost of the artifact pass rather than a rounding error.
+#[derive(Default)]
+pub struct ProjectScratch {
+    buckets: Vec<Vec<u32>>,
+    stamp: Vec<u64>,
+}
+
 /// Entity IDs decoded from the mask at a time.
 ///
 /// The point of decoding in bulk at all is that croaring's `read_many` is a memcpy per container
@@ -259,6 +271,25 @@ impl Permutation {
     /// grant, held once in the buckets, against the three simultaneous copies the previous form
     /// peaked at. The mmap-backed slot array is never copied, only read.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
+        self.project_with(mask, &mut ProjectScratch::default())
+    }
+
+    /// [`Self::project`], reusing a caller's scratch buffers.
+    ///
+    /// **For a caller that projects many masks in a row**, which the artifact pass does — once per
+    /// artifact, three times over per level. The scratch this reuses is a 512 KB stamp plus one
+    /// `Vec` per bucket, and allocating it per call put an `mmap`/`munmap` pair and 128 minor
+    /// faults on every projection: at 6×10⁵ artifacts that is ~10⁸ page faults and hundreds of
+    /// gigabytes of zeroing, for buffers whose contents never outlive the call. The session path
+    /// projects once and keeps [`Self::project`], which allocates as it always did.
+    ///
+    /// Behaviour is identical — the buffers are cleared rather than carried, exactly as a fresh
+    /// allocation would leave them.
+    pub fn project_with(
+        &self,
+        mask: &croaring::Bitmap,
+        scratch: &mut ProjectScratch,
+    ) -> croaring::Bitmap {
         let slots = self.slots();
         // Every row this permutation can yield is below `bound`: `validate_rows` establishes that
         // it is a bijection *onto* `[0, row_count)`, so each row is claimed by a distinct in-bound
@@ -276,8 +307,15 @@ impl Permutation {
             .saturating_mul(5)
             .saturating_div(4)
             .saturating_add(64);
-        let mut buckets: Vec<Vec<u32>> =
-            (0..nbuckets).map(|_| Vec::with_capacity(expected)).collect();
+        let buckets = &mut scratch.buckets;
+        for bucket in buckets.iter_mut() {
+            bucket.clear();
+        }
+        buckets.resize_with(nbuckets, Vec::new);
+        buckets.truncate(nbuckets);
+        for bucket in buckets.iter_mut() {
+            bucket.reserve(expected.saturating_sub(bucket.capacity()));
+        }
 
         let mut window = [0u32; DECODE_WINDOW];
         let mut cursor = mask.cursor();
@@ -298,7 +336,9 @@ impl Permutation {
             }
         }
 
-        let mut stamp = vec![0u64; (1usize << BUCKET_SHIFT) / 64];
+        let stamp = &mut scratch.stamp;
+        stamp.clear();
+        stamp.resize((1usize << BUCKET_SHIFT) / 64, 0);
         let mut sink = Sink::new();
         for (index, rows) in buckets.iter().enumerate() {
             if rows.is_empty() {
@@ -792,6 +832,15 @@ impl RowSpace {
     /// members predate the layer that names them.
     pub fn project_base(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.base.project(mask)
+    }
+
+    /// [`Self::project_base`], reusing a caller's scratch — see [`Permutation::project_with`].
+    pub fn project_base_with(
+        &self,
+        mask: &croaring::Bitmap,
+        scratch: &mut ProjectScratch,
+    ) -> croaring::Bitmap {
+        self.base.project_with(mask, scratch)
     }
 
     /// The rows contributed by the extents at or after `from` — the only part a flush recomputes.

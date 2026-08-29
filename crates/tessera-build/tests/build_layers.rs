@@ -826,6 +826,14 @@ fn edges_holding_a_cycle_are_refused() {
     );
     let err = result.expect_err("a cycle is a refusal");
     assert!(format!("{err}").contains("cycle"), "{err}");
+    // **Which artifact it names is pinned**, not incidental. The detection is one colour-marked
+    // pass rather than a counted walk per artifact, and the two agree only because both start
+    // their walks in key order — so the first artifact whose lineage reaches the cycle is the one
+    // reported. `t-a` sorts before `t-b`.
+    assert!(
+        format!("{err}").contains("above t-a"),
+        "the first artifact in key order whose lineage reaches the cycle: {err}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2536,4 +2544,153 @@ fn a_box_and_a_shape_declaration_are_refused_apart() {
         message.contains("not a box this build will store"),
         "{message}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A predicate over a **category** column, which is the shape every real declaration uses
+// ---------------------------------------------------------------------------------------------
+
+/// The same fixture as [`write_banded_points`], with the band as a **vocabulary key** rather than
+/// a bare integer — which is what a category column is read from.
+fn write_graded_points(path: &Path) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("grade", DataType::Utf8, false),
+    ]));
+    let ids: Vec<u64> = (0..N_ITEMS).collect();
+    let xs: Vec<f64> = ids.iter().map(|e| ((e * 37) % 1000) as f64).collect();
+    let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
+    let grades: Vec<&str> = ids
+        .iter()
+        .map(|e| ["alpha", "beta", "gamma", "delta", "epsilon"][(e % 5) as usize])
+        .collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(StringArray::from(grades)),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+const GRADE_SCHEMA_AND_LAYER: &str = r#"
+[[vocabulary]]
+name       = "grade"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  alpha = 1
+  beta = 2
+  gamma = 3
+  delta = 4
+  epsilon = 5
+
+[[attribute]]
+name       = "grade"
+type       = "category"
+vocabulary = "grade"
+render     = true
+index      = true
+
+[[layer]]
+name                      = "grades/by-value"
+views                     = ["s0"]
+membership                = { attribute = "grade" }
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+"#;
+
+fn category_predicate_inputs() -> Inputs {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let dir = tmp.path().to_path_buf();
+    let points = dir.join("points.parquet");
+    let pairs = dir.join("pairs.parquet");
+    let config = dir.join("config.toml");
+    write_graded_points(&points);
+    write_pairs(&pairs);
+    std::fs::write(
+        &config,
+        format!(
+            r#"
+[sources]
+points = "points.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "s0"
+extent           = {{ min = 0.0, max = 1000.0 }}
+point_visibility = {{ default = "public" }}
+{GRADE_SCHEMA_AND_LAYER}
+"#
+        ),
+    )
+    .unwrap();
+    Inputs {
+        _tmp: tmp,
+        points,
+        pairs,
+        config,
+        dir,
+    }
+}
+
+/// **A predicate over a category column mints one artifact per value present**, exactly as one over
+/// a plain integer column does.
+///
+/// The distinction matters because it is the only shape a real declaration has:
+/// `a_build_mints_an_attribute_predicates_artifacts_from_its_column` above reads a bare indexed
+/// `u32`, and every column a corpus points a predicate at is a category with a vocabulary. A layer
+/// that registers, reserves an entity run and then derives nothing is declared, reachable and
+/// serving nothing — the state `membership`'s own refusals exist to prevent.
+#[test]
+fn a_predicate_over_a_category_column_mints_its_values() {
+    let inputs = category_predicate_inputs();
+    let out = inputs.at("bundle");
+    let report = run(&inputs, &out).expect("a category predicate layer builds");
+    assert!(report.items > 0);
+
+    let manifest = manifest_of(&out);
+    let level = manifest
+        .level_versions
+        .iter()
+        .find(|v| v.layer == "grades/by-value" && v.level == 0)
+        .expect("the level's version reaches the manifest — the values were published at all");
+    assert_eq!(level.version, 1, "the values were minted in one publication");
+    let extents: Vec<_> = manifest
+        .membership_extents
+        .iter()
+        .filter(|e| e.layer == "grades/by-value")
+        .collect();
+    assert_eq!(
+        extents.len(),
+        1,
+        "a predicate over a category is durable like any other"
+    );
+    // **The count, which is the assertion the `band` case above does not make** — and the one that
+    // says the roster was read out of the column rather than merely reserved. Five keys are
+    // authored and every one of them is carried by 50 of the 250 points.
+    assert_eq!(
+        extents[0].count, 5,
+        "one artifact per value the column carries"
+    );
+
+    // ⊘ **The artifact pass's own report is not asserted here**, it being printed rather than
+    // returned. What it prints for this level is the count above and not `LevelShape`'s: a
+    // predicate's members are the value column and are evaluated per request, so the pass's walk
+    // over stored memberships finds no rows and every figure in the shape comes back zero — for a
+    // level that holds five artifacts and serves them. `LevelLayoutReport::observed` is what keeps
+    // that from being printed as an empty layer.
 }

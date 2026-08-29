@@ -448,12 +448,18 @@ pub struct ArtifactStore {
     /// There is no route that sets one without the other, and a level's vectors are grown together;
     /// a box for an ordinal with no record would be a membership rule for an artifact that does not
     /// exist, and a record with no box on a shape layer is refused at publication.
-    shapes: BTreeMap<(String, u32), Vec<Option<Bbox>>>,
+    /// Nested for [`ArtifactStore::keys`]' reason: `shape_of` is asked once per artifact by
+    /// `unpublished`, and a tuple key made every one of those a `String` allocation.
+    shapes: BTreeMap<String, BTreeMap<u32, Vec<Option<Bbox>>>>,
     /// `(layer, level, key) → ordinal`. **An index, not a second copy of the truth**: it
     /// exists so a batch of ten thousand artifacts can be checked for duplicate keys in
     /// `O(n log n)` rather than rescanning the level per artifact, which is `O(n²)` and reachable
     /// at the sizes this stage publishes.
-    keys: BTreeMap<(String, u32, String), u32>,
+    /// Nested `layer → level → key` rather than a flat `(String, u32, String)` tuple, and that is
+    /// the whole reason for the shape: a `BTreeMap<String, _>` answers a `&str`, so a lookup
+    /// borrows where a tuple key forced two `String` allocations at every probe — on a path the
+    /// serving side takes as well as the build.
+    keys: BTreeMap<String, BTreeMap<u32, BTreeMap<String, u32>>>,
     /// Where the oldest surviving publication sits in the log — the bound rotation may not reclaim
     /// past. See [`ArtifactStore::oldest_wal_pos`].
     oldest_wal_pos: Option<u64>,
@@ -519,7 +525,11 @@ impl ArtifactStore {
     ) {
         if let Some(key) = &record.key {
             self.keys
-                .insert((layer.to_string(), level, key.clone()), ordinal);
+                .entry(layer.to_string())
+                .or_default()
+                .entry(level)
+                .or_default()
+                .insert(key.clone(), ordinal);
         }
         let edge = record
             .attached_to
@@ -547,7 +557,12 @@ impl ArtifactStore {
                 entry.push(dependent);
             }
         }
-        let boxes = self.shapes.entry((layer.to_string(), level)).or_default();
+        let boxes = self
+            .shapes
+            .entry(layer.to_string())
+            .or_default()
+            .entry(level)
+            .or_default();
         if boxes.len() <= idx {
             boxes.resize(idx + 1, None);
         }
@@ -558,7 +573,8 @@ impl ArtifactStore {
     /// which is every artifact of every layer whose membership is not a shape.
     pub fn shape_of(&self, layer: &str, level: u32, ordinal: u32) -> Option<Bbox> {
         self.shapes
-            .get(&(layer.to_string(), level))
+            .get(layer)
+            .and_then(|levels| levels.get(&level))
             .and_then(|boxes| boxes.get(ordinal as usize))
             .copied()
             .flatten()
@@ -621,9 +637,7 @@ impl ArtifactStore {
 
     /// The ordinal a caller's own key names in this level, if any.
     pub fn ordinal_of_key(&self, layer: &str, level: u32, key: &str) -> Option<u32> {
-        self.keys
-            .get(&(layer.to_string(), level, key.to_string()))
-            .copied()
+        self.keys.get(layer)?.get(&level)?.get(key).copied()
     }
 
     /// The log position of the oldest surviving publication, or `None` if none survives.
@@ -879,7 +893,7 @@ impl ArtifactStore {
             self.bump(layer, level);
         }
         self.levels.retain(|(l, _), _| l != layer);
-        self.keys.retain(|(l, _, _), _| l != layer);
+        self.keys.remove(layer);
         self.dependents.clear();
         let edges: Vec<(EntityId, EntityId)> = self
             .levels
@@ -1208,7 +1222,11 @@ impl ArtifactStore {
                 let Some(record) = slot else { continue };
                 if retired.contains(record.entity.raw() as u32) {
                     if let Some(key) = &record.key {
-                        self.keys.remove(&(layer.clone(), *level, key.clone()));
+                        if let Some(levels) = self.keys.get_mut(layer.as_str()) {
+                            if let Some(keys) = levels.get_mut(level) {
+                                keys.remove(key.as_str());
+                            }
+                        }
                     }
                     if let Some(attachment) = &record.attached_to {
                         gone.push((attachment.entity, record.entity));

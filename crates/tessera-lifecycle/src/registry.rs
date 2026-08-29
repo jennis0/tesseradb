@@ -771,13 +771,23 @@ impl LayerRegistry {
         // [`LayerRegistry::parent_ref`], which the ingest route's edge check shares. A child's
         // parent is often a **sibling in this batch** that has no ordinal until this call assigns
         // one, which is what `batch_ordinal` answers and why the resolution takes it.
+        // **Indexed once rather than scanned per lookup.** `parent_ref` asks this before it asks
+        // the store, so a level whose artifacts name siblings pays a linear pass over the batch for
+        // every one of them — O(n²), and reachable at the sizes this stage publishes, which is the
+        // very thing [`ArtifactStore::keys`] exists to avoid for the duplicate check above. The
+        // first position is the *only* position: that duplicate check has already refused a batch
+        // repeating a key, so the map answers exactly what `position` did.
+        let batch_index: std::collections::HashMap<&str, usize> = incoming
+            .iter()
+            .enumerate()
+            .filter_map(|(i, a)| a.key.as_deref().map(|key| (key, i)))
+            .collect();
         let batch_ordinal = |key: &str| {
-            incoming
-                .iter()
-                .position(|a| a.key.as_deref() == Some(key))
+            batch_index
+                .get(key)
                 .map(|i| crate::wal::ParentRef {
                     level,
-                    ordinal: first_ordinal as u32 + i as u32,
+                    ordinal: first_ordinal as u32 + *i as u32,
                 })
                 .or_else(|| pending(key))
         };
