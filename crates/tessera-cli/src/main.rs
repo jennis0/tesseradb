@@ -98,6 +98,17 @@ enum Command {
         #[arg(long, value_parser = parse_byte_size)]
         memory_budget: Option<u64>,
 
+        /// Print each pipeline stage's wall time, row count and peak RSS as it completes.
+        ///
+        /// **What it is for**: "which of the twelve stages bends with scale" is the question every
+        /// sizing decision here turns on, and without this a build reports one total and one
+        /// stage's own figure — so an optimisation is aimed at whichever stage was last watched
+        /// through `top`. The observer sees durations and counts and nothing derived from the
+        /// corpus, and the timed path is the shipping one: `build` is `build_observed` with a
+        /// no-op, so there is no second code path to drift.
+        #[arg(long)]
+        stage_timings: bool,
+
         /// Carry `identity.key` and `identity.idset` forward from an existing bundle's
         /// MANIFEST.json. **This is the normal rebuild path** (contracts §2.2).
         #[arg(long, value_name = "BUNDLE_ROOT")]
@@ -862,6 +873,30 @@ fn collect_bindings(
 }
 
 /// `--file NAME=PATH`. Split at the **first** `=` so a path may contain one.
+/// Prints one line per pipeline stage as it completes, for `--stage-timings`.
+///
+/// **Peak RSS is the process's high-water at the moment the stage ended**, not the stage's own —
+/// it only ever rises, so a stage that adds nothing repeats the last figure. What it locates is
+/// the stage the peak arrived in, which is the question `--memory-budget` is answered against.
+struct StageTimings;
+
+impl tessera_build::observer::BuildObserver for StageTimings {
+    fn stage_end(
+        &self,
+        stage: tessera_build::observer::BuildStage,
+        elapsed: std::time::Duration,
+        rows: u64,
+        peak_rss_kib: u64,
+    ) {
+        eprintln!(
+            "stage {:>16}  {:>8.2}s  rows={rows:<12} peak={:>6} MiB",
+            stage.name(),
+            elapsed.as_secs_f64(),
+            peak_rss_kib / 1024,
+        );
+    }
+}
+
 fn parse_file_binding(raw: &str) -> Result<(String, PathBuf), String> {
     let (key, path) = raw.split_once('=').ok_or_else(|| {
         format!(
@@ -1347,6 +1382,7 @@ fn main() -> ExitCode {
             no_oracle_pairs,
             batch_items,
             memory_budget,
+            stage_timings,
             carry_id_key_from,
             identity_file,
             mint_id_key,
@@ -1529,7 +1565,13 @@ fn main() -> ExitCode {
                 layers: config.layers,
                 layer_inputs: acquired.layers,
             };
-            match tessera_build::build(&args) {
+            let observer = StageTimings;
+            let built = if stage_timings {
+                tessera_build::build_observed(&args, &observer)
+            } else {
+                tessera_build::build(&args)
+            };
+            match built {
                 Ok(report) => {
                     // **Written beside the build rather than inside it**, because it is derived
                     // from the declaration and from nothing the build computes — which is also why
