@@ -141,6 +141,7 @@ use tessera_store::write::{
 };
 use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
+use crate::column::EntityColumn;
 use crate::error::{BuildError, Result};
 use crate::input;
 use crate::observer::{BuildObserver, BuildStage, StageTimer};
@@ -286,8 +287,10 @@ const JOIN_CHUNK_ROWS: usize = 1 << 26;
 /// where a chunk ends.
 ///
 /// What it bounds is the headers: [`staging_rows`] prices a row at the join key plus each column's
-/// fixed width, and a string's *contents* ride on top of its 24-byte header, so a column of long
-/// prose overshoots this figure by whatever it averages per value.
+/// fixed width, and a string's *contents* ride on top of that, so a column of long prose overshoots
+/// this figure by whatever it averages per value. **Since the columns were mapped (`column.rs`)
+/// what it bounds is a file rather than the heap** — page cache the kernel may reclaim, not memory
+/// the machine must have.
 const JOIN_STAGE_BYTES: usize = 256 << 20;
 
 /// How many rows of `attributes` fit in [`JOIN_STAGE_BYTES`], at least one and never more than the
@@ -300,17 +303,19 @@ fn staging_rows(attributes: &[&crate::config::Attribute], n: u64) -> usize {
     (JOIN_STAGE_BYTES / per_row).clamp(1, n.max(1) as usize)
 }
 
-/// One staged slot's width in [`ScalarColumnData`], which for the string families is the `String`
-/// header alone — the bytes it points at are the corpus's and are not this buffer's to bound.
+/// One staged slot's width, as the budget above prices it.
+///
+/// ⊘ **The string families are priced at the 24-byte `String` header they no longer cost** — a
+/// staged string slot is an 8-byte arena offset now, and the characters are the arena's
+/// (`column.rs`). The figure stands where it is: it makes the buffer smaller than the budget rather
+/// than larger, and moving it moves every chunk boundary.
 fn staged_width(ty: ScalarType) -> usize {
     match ty {
         ScalarType::Bool | ScalarType::U8 | ScalarType::I8 => 1,
         ScalarType::U16 | ScalarType::I16 => 2,
         ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
         ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-            std::mem::size_of::<String>()
-        }
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => std::mem::size_of::<String>(),
     }
 }
 
@@ -1351,8 +1356,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // pins; the scan mints into it for every novel key, and its final state — carried past this
     // call — is what step 11 below records into `MANIFEST.vocabularies`.
     let mut minters = args.schema.open_minters();
-    let (attributes_by_entity, coverage) =
-        read_attributes_by_entity(args, n, &source_ids, &entity_of_ordinal, &mut minters)?;
+    // The columns' files live in the same `.build-tmp/` as the spill and band files, so a killed
+    // build leaves them to the next `TmpDir::create` exactly as it leaves those.
+    let scratch = crate::column::ColumnScratch::new(tmp.path());
+    let (attributes_by_entity, coverage) = read_attributes_by_entity(
+        args,
+        n,
+        &source_ids,
+        &entity_of_ordinal,
+        &mut minters,
+        &scratch,
+    )?;
     // **Printed here, where the join has just happened and the numbers are the join's own.** The
     // linear build reports the identical figures from its own pass, so the two builds agree about
     // coverage exactly as they agree about bytes.
@@ -1458,7 +1472,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         .zip(args.schema.attributes.iter())
     {
         if !attribute.render {
-            *column = EntityColumn::filled(attribute.ty, 0);
+            column.release();
         }
     }
     timer.end(BuildStage::ColumnRelease, n);
@@ -1668,153 +1682,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     Ok(report)
 }
 
-/// One attribute's values in entity order: a typed column, with presence beside it.
-///
-/// **This replaced a `Vec<ScalarValue>` per column, and the difference is the whole reason a build
-/// above 10⁸ items completes.** `ScalarValue` carries a `Utf8(String)` variant, so every slot costs
-/// 32 bytes whatever the column declared — a `u8` column pays for a pointer, a length, a capacity
-/// and a tag. One such vector per column is allocated *and written* for every entity before the
-/// attribute pass reads its first row, so the cost is paid in full even by a build that fails
-/// immediately after. At 2,422,486 items it is a rounding error beside the geometry pass's 28N; at
-/// 250,000,000 items across five columns it is 40 GB, and the build is OOM-killed having produced
-/// nothing but the postings of the pass before it. `filter-index` §4 priced this as "outside the
-/// memory plan regardless" — typed, the same five columns are the schema's declared 12 B/row, and
-/// the ceiling that paragraph describes is no longer where the plan runs out.
-///
-/// **Presence is a bit rather than a value, because a typed column has no spare one.**
-/// `ScalarValue::Null` gave the old intermediate an absent representation for free; a `Vec<u8>` has
-/// no `u8` to reserve. So absence is carried alongside, which is also the shape the output already
-/// wanted — the presence bitmaps written beside each render column are exactly this. It costs an
-/// eighth of a byte per entity: 31 MB at 250,000,000, against the gigabytes the typing saves.
-///
-/// A slot whose value is absent keeps its type's zero. That is what every consumer of an absent
-/// value already reads — the reserved code 0 for a category, the render placeholder elsewhere — so
-/// no consumer distinguishes "absent" by the payload, only by this bit.
-pub(crate) struct EntityColumn {
-    data: ScalarColumnData,
-    present: Vec<u64>,
-}
-
-impl EntityColumn {
-    pub(crate) fn filled(ty: ScalarType, n: usize) -> Self {
-        Self {
-            data: ScalarColumnData::filled(ty, n),
-            present: vec![0u64; n.div_ceil(64)],
-        }
-    }
-
-    /// Collect an entity-ordered sequence into a typed column, for a caller that already holds the
-    /// values in entity order rather than discovering them in file order.
-    /// `ExactSizeIterator` rather than `IntoIterator`, so the length is known without collecting:
-    /// buffering into a `Vec<ScalarValue>` first would rebuild, for one moment, exactly the
-    /// 32-B-per-value intermediate this type exists to avoid.
-    pub(crate) fn from_values<I>(ty: ScalarType, values: I, name: &str) -> std::io::Result<Self>
-    where
-        I: IntoIterator<Item = ScalarValue>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let values = values.into_iter();
-        let mut column = Self::filled(ty, values.len());
-        for (entity, value) in values.enumerate() {
-            column.set(entity, value, name)?;
-        }
-        Ok(column)
-    }
-
-    pub(crate) fn set(
-        &mut self,
-        entity: usize,
-        value: ScalarValue,
-        name: &str,
-    ) -> std::io::Result<()> {
-        // Absent: the zero stands, and the bit is *cleared* to say so rather than merely left
-        // alone. Clearing matters where slots are reused — the staging buffer in
-        // [`read_attributes_by_entity`] writes a fresh chunk over the last one, and a bit left set
-        // by a previous row would make this row's absence read as that row's value.
-        if matches!(value, ScalarValue::Null) {
-            self.present[entity / 64] &= !(1u64 << (entity % 64));
-            return Ok(());
-        }
-        self.present[entity / 64] |= 1u64 << (entity % 64);
-        self.data.set(entity, value, name)
-    }
-
-    pub(crate) fn is_present(&self, entity: usize) -> bool {
-        self.present[entity / 64] >> (entity % 64) & 1 == 1
-    }
-
-    pub(crate) fn value_at(&self, entity: usize) -> ScalarValue {
-        if self.is_present(entity) {
-            self.data.get(entity)
-        } else {
-            ScalarValue::Null
-        }
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    /// The column in entity order. Yields **owned** values, where the `Vec<ScalarValue>` this
-    /// replaced yielded references: a fixed-width value is a copy either way, and a `Utf8` one
-    /// clones a string the caller previously cloned itself at the point of use.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = ScalarValue> + '_ {
-        (0..self.len()).map(|entity| self.value_at(entity))
-    }
-
-    /// The entities that carry a value, ascending, **skipping an absent run 64 at a time**.
-    ///
-    /// The sweeps that walk a whole column do per-entity work only where there is a value, and
-    /// presence is a bit vector: a column 84.5% absent — which one column of the campaign's corpus
-    /// is — costs a shift and a branch per absent entity through [`Self::is_present`] to learn
-    /// nothing, against one test per 64 here. The yielded order is ascending, which every caller
-    /// relies on: the postings each builds are sorted by construction, not by a later sort.
-    pub(crate) fn present_entities(&self) -> impl Iterator<Item = usize> + '_ {
-        let words = &self.present;
-        // The word being drained, with each yielded bit cleared out of it. The trailing word's
-        // bits above the column's length are never set — the vector is allocated zeroed and `set`
-        // is indexed by an entity — so no bound test is needed per bit.
-        let mut residual = 0u64;
-        let mut next_word = 0usize;
-        std::iter::from_fn(move || loop {
-            if residual != 0 {
-                let bit = residual.trailing_zeros() as usize;
-                residual &= residual - 1;
-                return Some((next_word - 1) * 64 + bit);
-            }
-            residual = *words.get(next_word)?;
-            next_word += 1;
-        })
-    }
-
-    /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
-    /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s clone would
-    /// be a second copy of every string in the corpus.
-    pub(crate) fn str_at(&self, entity: usize) -> Option<&str> {
-        self.is_present(entity)
-            .then(|| self.data.str_at(entity))
-            .flatten()
-    }
-
-    /// Move one value across from a staging column, leaving the source slot absent. Used to land a
-    /// resolved chunk into entity order without going through [`Self::value_at`], whose `Utf8` arm
-    /// would clone every string in the chunk.
-    pub(crate) fn take_from(
-        &mut self,
-        entity: usize,
-        src: &mut EntityColumn,
-        pos: usize,
-        name: &str,
-    ) -> std::io::Result<()> {
-        if !src.is_present(pos) {
-            return Ok(());
-        }
-        src.present[pos / 64] &= !(1u64 << (pos % 64));
-        let value = src.data.take(pos);
-        self.set(entity, value, name)
-    }
-}
-
 /// Read the declared attribute columns into **entity-major** vectors, one per declared attribute,
 /// with one pass per attribute source.
 ///
@@ -1840,6 +1707,7 @@ fn read_attributes_by_entity(
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
 ) -> Result<(Vec<EntityColumn>, Vec<crate::AttributeCoverage>)> {
     if args.schema.is_empty() {
         return Ok((Vec::new(), Vec::new()));
@@ -1849,8 +1717,8 @@ fn read_attributes_by_entity(
     // the `ScalarValue` vector it reads like, and what that costs at 10⁸ items and above.
     let mut by_entity: Vec<EntityColumn> = attributes
         .iter()
-        .map(|a| EntityColumn::filled(a.ty, n as usize))
-        .collect();
+        .map(|a| EntityColumn::filled(scratch, a.ty, n as usize))
+        .collect::<Result<_>>()?;
     // **One sweep per source, not one over a single corpus file.** Each declared attribute names
     // the file it is read from, so the groups are the passes; a build whose columns sit in three
     // files reads three files, and each one joins on the identity column its own group declared.
@@ -1863,6 +1731,7 @@ fn read_attributes_by_entity(
             source_ids,
             entity_of_ordinal,
             minters,
+            scratch,
             &mut by_entity,
             &mut coverage,
         )?;
@@ -1879,6 +1748,7 @@ fn read_one_attribute_source(
     source_ids: &[u64],
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
+    scratch: &crate::column::ColumnScratch,
     by_entity: &mut [EntityColumn],
     coverage: &mut Vec<crate::AttributeCoverage>,
 ) -> Result<()> {
@@ -1923,8 +1793,8 @@ fn read_one_attribute_source(
     let staged_rows = staging_rows(attributes, n);
     let mut staged: Vec<EntityColumn> = attributes
         .iter()
-        .map(|a| EntityColumn::filled(a.ty, staged_rows))
-        .collect();
+        .map(|a| EntityColumn::filled(scratch, a.ty, staged_rows))
+        .collect::<Result<_>>()?;
     let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
 
     // How many entities came away with a value in each of this group's columns — counted where the
@@ -1959,12 +1829,19 @@ fn read_one_attribute_source(
                     *count += 1;
                 }
                 let name = &args.schema.attributes[column].name;
-                by_entity[column]
-                    .take_from(entity, src, pos as usize, name)
-                    .map_err(|e| BuildError::Invalid(format!("attribute '{name}': {e}")))?;
+                // Not wrapped with the column's name: every error this can raise already carries
+                // it (`column.rs`) or names the file it could not write.
+                by_entity[column].take_from(entity, src, pos as usize, name)?;
             }
             Ok(())
-        })
+        })?;
+        // Every string in the chunk has been moved across, so the staging arena starts the next
+        // chunk empty rather than growing to the whole source's payload — the buffer is reused and
+        // its bytes are appended (`column.rs`).
+        for column in staged.iter_mut() {
+            column.reset_staging();
+        }
+        Ok(())
     };
 
     input::scan_attributes(
@@ -2071,10 +1948,10 @@ fn read_one_attribute_source(
 /// out by prefix sums. Bands partition ascending code space, so [`KeyedPostingsSpool`]'s
 /// ascending-key check holds across them unchanged.
 ///
-/// What the banding does *not* bound is the attribute tail this reads from: `by_entity` is already
-/// a `Vec<ScalarValue>` per column at ~24 B per value, which filter-index §4 prices as outside the
-/// memory plan at 10⁹ regardless. That is the reader's ceiling, stated where it is paid; this pass
-/// no longer adds a second copy of the column to it.
+/// What the banding does *not* bound is the attribute tail this reads from — but that tail is no
+/// longer memory: `by_entity` is mapped (`column.rs`), so what this pass reads is page cache the
+/// kernel may reclaim, and the band budget bounds the only anonymous buffer left in the emit. This
+/// pass adds no second copy of the column to either.
 pub(crate) fn write_filter_postings(
     partition_dir: &Path,
     schema: &crate::config::Schema,
@@ -3437,6 +3314,8 @@ mod tests {
     /// refused the declaration — the caller declared a column and the corpus silently dropped it.
     #[test]
     fn a_category_is_blob_resident_exactly_when_it_has_no_entity_space_home() {
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
         let category = crate::config::Attribute {
             name: "department".to_string(),
             field: None,
@@ -3486,9 +3365,10 @@ mod tests {
         };
         // One entity; values are per column, in declaration order.
         let by_entity = vec![
-            EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
+            EntityColumn::from_values(&scratch, ScalarType::U16, [ScalarValue::U16(7)], "colour")
                 .expect("typed column"),
             EntityColumn::from_values(
+                &scratch,
                 ScalarType::Utf8,
                 [ScalarValue::Utf8("kept".to_string())],
                 "note",
@@ -3522,8 +3402,13 @@ mod tests {
         };
         let only_category =
             [
-                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                    .expect("typed column"),
+                EntityColumn::from_values(
+                    &scratch,
+                    ScalarType::U16,
+                    [ScalarValue::U16(7)],
+                    "colour",
+                )
+                .expect("typed column"),
             ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage accepts");
@@ -3538,8 +3423,13 @@ mod tests {
         };
         let only_category =
             [
-                EntityColumn::from_values(ScalarType::U16, [ScalarValue::U16(7)], "colour")
-                    .expect("typed column"),
+                EntityColumn::from_values(
+                    &scratch,
+                    ScalarType::U16,
+                    [ScalarValue::U16(7)],
+                    "colour",
+                )
+                .expect("typed column"),
             ];
         let written =
             write_record_blob(dir.path(), &schema, &only_category).expect("blob stage writes");
@@ -3571,10 +3461,13 @@ mod tests {
     /// the band budget a memory knob rather than a format decision.
     #[test]
     fn banding_the_postings_emit_does_not_change_its_bytes() {
+        let scratch_dir = tempfile::tempdir().expect("tempdir");
+        let scratch = crate::column::ColumnScratch::new(scratch_dir.path());
         let dir = tempfile::tempdir().expect("tempdir");
         // Codes scattered across a 32-bit space, as `vocabulary` mints them, with one code held
         // heavily enough to cross the Roaring threshold and code 0 (absent) carried too.
         let values = EntityColumn::from_values(
+            &scratch,
             ScalarType::U32,
             (0..5_000u32).map(|e| {
                 ScalarValue::U32(match e % 7 {

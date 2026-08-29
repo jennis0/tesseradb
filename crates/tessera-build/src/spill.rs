@@ -30,37 +30,100 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 
 use crate::error::{BuildError, Result};
 
-/// An entity-indexed `u32` scratch array, backed by a file under `.build-tmp/` instead of the heap.
+/// Reserve `bytes` of **allocated** blocks for `file`, extending it to that length.
+///
+/// **`posix_fallocate` and not `set_len`, because these files are written through a mapping.** A
+/// `set_len` leaves a sparse file: its blocks are allocated at the moment a page is first written,
+/// and a filesystem that cannot allocate one then has no way to tell the writer — a store through a
+/// mapping has no return value to fail. The kernel raises **SIGBUS** instead, and the build dies
+/// mid-pass with a signal that reads like corruption. Observed here: a build of the 7.4×10⁷ corpus
+/// was killed by SIGBUS in the attribute pass while another process on the box filled the disk.
+///
+/// Allocating up front turns that into an ordinary refusal at the column's creation, naming the
+/// file and saying `No space left on device` — before the pass that would have died. Where the
+/// space is there it costs nothing: on an extent filesystem this is bookkeeping, not writing.
+///
+/// A filesystem that does not implement it (`EOPNOTSUPP`, `ENOSYS`, or `EINVAL` from one that
+/// refuses the request) falls back to `set_len` and the sparse behaviour above — worse than the
+/// allocation, better than refusing to build there at all.
+fn reserve(file: &File, path: &Path, bytes: u64) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: `fd` is this call's own open file and `posix_fallocate` touches nothing else. It
+    // returns an errno rather than setting one, so there is no `errno` read to race.
+    let code = unsafe { libc::posix_fallocate(file.as_raw_fd(), 0, bytes as libc::off_t) };
+    match code {
+        0 => Ok(()),
+        libc::EOPNOTSUPP | libc::ENOSYS | libc::EINVAL => {
+            file.set_len(bytes).map_err(|e| BuildError::io(path, e))
+        }
+        errno => Err(BuildError::io(
+            path,
+            std::io::Error::from_raw_os_error(errno),
+        )),
+    }
+}
+
+/// An entity-indexed scratch array of a plain-old-data element, backed by a file under
+/// `.build-tmp/` instead of the heap.
 ///
 /// **This exists so that a pass bounded by the corpus stops being bounded by RAM.** The build's
-/// entity-major scratch — a coordinate axis per entity, and the like — is written once at a random
-/// index during one scan and read once at a random index during a later one, and is never sorted.
-/// As a `Vec` that is 4 B per entity of *anonymous* memory, which the kernel may not reclaim: 1 GB
-/// at 2.5×10⁸ and 4 GB at 10⁹, per array, that a machine must simply have. Mapped, the same bytes
-/// are page cache — the kernel keeps what fits and evicts the rest under pressure, so a smaller
-/// machine gets slower rather than OOM-killed, and a larger one is no worse off because the pages
-/// stay resident anyway.
+/// entity-major scratch — a coordinate axis per entity, a declared column's values, the presence
+/// bits beside them — is written once at a random index during one scan and read once at a random
+/// index during a later one, and is never sorted. As a `Vec` that is `size_of::<T>()` per entity of
+/// *anonymous* memory, which the kernel may not reclaim: 1 GB at 2.5×10⁸ and 4 GB at 10⁹ for a
+/// `u32` array alone, per array, that a machine must simply have. Mapped, the same bytes are page
+/// cache — the kernel keeps what fits and evicts the rest under pressure, so a smaller machine gets
+/// slower rather than OOM-killed, and a larger one is no worse off because the pages stay resident
+/// anyway.
 ///
 /// **It carries no receipt, unlike the bucket and band files above, and the reason is the
 /// lifetime rather than an inconsistency.** Those are written, closed, and read back — a torn or
 /// doubly-appended file is a real risk and feeds the permanent entity-ID assignment (I9). This is
 /// a mapping held open across its only writer and its only reader in one process: there is no
-/// close-and-reopen for a receipt to guard, and its contents are re-derivable from the points file
+/// close-and-reopen for a receipt to guard, and its contents are re-derivable from the source files
 /// in any case. What it does share is the directory and its lifecycle, so a killed build leaves it
-/// to the next `TmpDir::create` exactly like the rest.
+/// to the next `TmpDir::create` exactly like the rest — and a *released* array unlinks its own file
+/// at once (see [`Drop`]), so a stage that finishes with a column gives the disk back without
+/// waiting for the build to end.
+///
+/// A zero-length array holds no file and no mapping: `mmap` refuses an empty file, and a column
+/// released mid-build ([`crate::column::EntityColumn::release`]) or a schema with nothing declared
+/// both want exactly that state.
 #[derive(Debug)]
-pub(crate) struct MappedU32 {
-    map: memmap2::MmapMut,
+pub(crate) struct MappedArray<T: Zeroable> {
+    /// `None` for a zero-length array, which owns no file either.
+    map: Option<memmap2::MmapMut>,
+    path: Option<PathBuf>,
     len: usize,
+    element: PhantomData<T>,
 }
 
-impl MappedU32 {
+/// An element a [`MappedArray`] may hold: one whose every bit pattern is a valid value, so that the
+/// zeros a fresh file reads as are a legal initial value rather than undefined behaviour.
+///
+/// # Safety
+///
+/// An implementor must be `Copy`, contain no padding and no niche — every bit pattern of its size
+/// must be a value it may hold. `bool` is the type this rules out and the reason the trait is
+/// unsafe: `2u8` is not a `bool`, so a `bool` column stores `u8` and converts at its edges.
+pub(crate) unsafe trait Zeroable: Copy {}
+
+macro_rules! zeroable {
+    ($($t:ty),* $(,)?) => { $(unsafe impl Zeroable for $t {})* };
+}
+zeroable!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+
+impl<T: Zeroable> MappedArray<T> {
     /// A zeroed array of `len` values at `<dir>/<name>`.
     pub(crate) fn zeroed(dir: &Path, name: &str, len: usize) -> Result<Self> {
+        if len == 0 {
+            return Ok(Self::empty());
+        }
         let path = dir.join(name);
         let file = OpenOptions::new()
             .read(true)
@@ -69,27 +132,209 @@ impl MappedU32 {
             .truncate(true)
             .open(&path)
             .map_err(|e| BuildError::io(&path, e))?;
-        // A fresh file reads as zeros, which is the initial value every caller wants; `set_len`
-        // makes those zeros addressable without writing them.
+        // A fresh file reads as zeros, which is the initial value every caller wants; the
+        // reservation makes those zeros addressable without writing them.
         let bytes = (len as u64)
-            .checked_mul(4)
-            .expect("entity count times 4 exceeds u64");
-        file.set_len(bytes).map_err(|e| BuildError::io(&path, e))?;
+            .checked_mul(std::mem::size_of::<T>() as u64)
+            .expect("element count times width exceeds u64");
+        reserve(&file, &path, bytes)?;
         // SAFETY: the file is this build's own, created empty under a directory it owns, and the
         // mapping is not shared with another process. Its length is fixed for the mapping's life.
-        let map = unsafe { memmap2::MmapMut::map_mut(&file) }.map_err(|e| BuildError::io(&path, e))?;
-        Ok(MappedU32 { map, len })
+        let map =
+            unsafe { memmap2::MmapMut::map_mut(&file) }.map_err(|e| BuildError::io(&path, e))?;
+        Ok(MappedArray {
+            map: Some(map),
+            path: Some(path),
+            len,
+            element: PhantomData,
+        })
     }
 
-    /// The array. Taken once by the caller and held as an ordinary slice for the rest of the pass —
-    /// there is no shared-borrow accessor beside it because every caller both fills and reads it,
-    /// and one binding for both is what keeps the mapping's exclusivity obvious.
-    pub(crate) fn as_mut_slice(&mut self) -> &mut [u32] {
-        // SAFETY: `mmap` returns a page-aligned pointer, so `u32` alignment holds; the mapping is
-        // `len * 4` bytes by construction; and `&mut self` gives exclusive access to it.
-        unsafe { std::slice::from_raw_parts_mut(self.map.as_mut_ptr().cast::<u32>(), self.len) }
+    /// The array with no elements — no file, no mapping, nothing to unlink.
+    pub(crate) fn empty() -> Self {
+        MappedArray {
+            map: None,
+            path: None,
+            len: 0,
+            element: PhantomData,
+        }
+    }
+
+    /// The array, read-only.
+    pub(crate) fn as_slice(&self) -> &[T] {
+        match &self.map {
+            // SAFETY: `mmap` returns a page-aligned pointer, so `T`'s alignment holds; the mapping
+            // is `len * size_of::<T>()` bytes by construction; `T: Zeroable` makes every byte
+            // pattern in it a value; and `&self` bars a concurrent write through `as_mut_slice`.
+            Some(map) => unsafe { std::slice::from_raw_parts(map.as_ptr().cast::<T>(), self.len) },
+            None => &[],
+        }
+    }
+
+    /// The array, writable. Taken once by the caller and held as an ordinary slice for the rest of
+    /// the pass where the pass both fills and reads it — one binding for both is what keeps the
+    /// mapping's exclusivity obvious.
+    pub(crate) fn as_mut_slice(&mut self) -> &mut [T] {
+        match &mut self.map {
+            // SAFETY: as `as_slice`, and `&mut self` gives exclusive access to the mapping.
+            Some(map) => unsafe {
+                std::slice::from_raw_parts_mut(map.as_mut_ptr().cast::<T>(), self.len)
+            },
+            None => &mut [],
+        }
     }
 }
+
+impl<T: Zeroable> Drop for MappedArray<T> {
+    fn drop(&mut self) {
+        // Unlinked as the array is released rather than at `TmpDir::close`, so the disk comes back
+        // at the stage boundary that stopped needing it. Best effort: the directory removal at the
+        // end of the build (or the next build's `TmpDir::create`) covers whatever this misses.
+        //
+        // The mapping is dropped first: unlinking an open mapping is legal on Unix and the pages
+        // stay valid, but there is no reason to leave the order to chance.
+        self.map = None;
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// An append-only byte arena backed by a file under `.build-tmp/`.
+///
+/// **The variable-width half of [`MappedArray`]'s argument.** A string column in entity order was a
+/// `Vec<String>`: 24 bytes of header per entity before a character is stored — 1.77 GB at
+/// 7.4×10⁷ — and a separate heap allocation per row with its own allocator overhead on top. Here
+/// the bytes are appended in *arrival* order into one growing file and the entity-indexed array
+/// holds where each landed, so the per-row header and the per-row allocation both go: what stays
+/// anonymous is nothing, and what the column costs is one 8-byte offset per entity plus the
+/// characters themselves, on disk.
+///
+/// **Arrival order, not entity order**, which is what makes it a single pass: the attribute join
+/// discovers values in the source file's order and scatters them by entity, so an entity-ordered
+/// arena would need a prefix-sum pass over lengths and a second scan of the source. Nothing reads
+/// the arena sequentially — every read is `offset` → slice — so its order carries no meaning.
+///
+/// **Growth remaps rather than copies.** The file is extended in doublings and mapped afresh; the
+/// bytes already written stay where they are (they are page cache belonging to the file, and a
+/// `MAP_SHARED` write is visible to the next mapping of the same file), so growth costs a syscall
+/// pair and no memcpy. Every borrowed slice is tied to `&self`, so the borrow checker already bars
+/// a read across a growth.
+#[derive(Debug)]
+pub(crate) struct MappedArena {
+    /// `None` for the arena of a released column, which owns no file and is never appended to.
+    file: Option<File>,
+    path: Option<PathBuf>,
+    map: Option<memmap2::MmapMut>,
+    /// Bytes handed out so far — the offset the next append lands at.
+    used: u64,
+    /// Bytes the file and the mapping currently cover.
+    capacity: u64,
+}
+
+/// The arena's first mapping, and the floor its doubling starts from.
+const ARENA_MIN_BYTES: u64 = 1 << 20;
+
+impl MappedArena {
+    pub(crate) fn create(dir: &Path, name: &str) -> Result<Self> {
+        let path = dir.join(name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| BuildError::io(&path, e))?;
+        Ok(MappedArena {
+            file: Some(file),
+            path: Some(path),
+            map: None,
+            used: 0,
+            capacity: 0,
+        })
+    }
+
+    /// The arena with no file — what a released column's storage becomes.
+    pub(crate) fn empty() -> Self {
+        MappedArena {
+            file: None,
+            path: None,
+            map: None,
+            used: 0,
+            capacity: 0,
+        }
+    }
+
+    /// Append `bytes` and return the offset they landed at.
+    pub(crate) fn append(&mut self, bytes: &[u8]) -> Result<u64> {
+        let offset = self.used;
+        let end = offset + bytes.len() as u64;
+        if end > self.capacity {
+            self.grow(end)?;
+        }
+        if !bytes.is_empty() {
+            let map = self.map.as_mut().expect("a grown arena holds its mapping");
+            map[offset as usize..end as usize].copy_from_slice(bytes);
+        }
+        self.used = end;
+        Ok(offset)
+    }
+
+    /// The `len` bytes at `offset`. Panics where the range is not one this arena handed out, which
+    /// is a defect in the caller's own index rather than an input error.
+    pub(crate) fn bytes(&self, offset: u64, len: usize) -> &[u8] {
+        let map = self
+            .map
+            .as_ref()
+            .expect("an arena that handed out an offset holds its mapping");
+        &map[offset as usize..offset as usize + len]
+    }
+
+    /// Forget everything written, keeping the file and the mapping. The staging buffer the
+    /// attribute join fills is *reused* per chunk, so without this its arena would grow to the
+    /// whole source's payload rather than one chunk's.
+    pub(crate) fn reset(&mut self) {
+        self.used = 0;
+    }
+
+    fn grow(&mut self, need: u64) -> Result<()> {
+        let capacity = need
+            .max(self.capacity.saturating_mul(2))
+            .max(ARENA_MIN_BYTES);
+        // A released column's arena owns no file, and nothing appends to one: reaching here is a
+        // caller that kept a column past `release`.
+        let (Some(file), Some(path)) = (&self.file, &self.path) else {
+            return Err(BuildError::Invalid(
+                "an arena with no file cannot be appended to".into(),
+            ));
+        };
+        reserve(file, path, capacity)?;
+        // The old mapping is dropped before the new one is taken: the writes it carried are in the
+        // file's page cache already (`MAP_SHARED`), so the fresh mapping sees every one of them.
+        self.map = None;
+        // SAFETY: the file is this build's own, created under a directory it owns, and the mapping
+        // is not shared with another process. Its length is fixed until the next `grow`, which
+        // takes `&mut self` and drops this mapping before extending it.
+        self.map =
+            Some(unsafe { memmap2::MmapMut::map_mut(file) }.map_err(|e| BuildError::io(path, e))?);
+        self.capacity = capacity;
+        Ok(())
+    }
+}
+
+impl Drop for MappedArena {
+    fn drop(&mut self) {
+        // As `MappedArray`: the disk comes back when the column does, not at the end of the build.
+        self.map = None;
+        if let Some(path) = self.path.take() {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+/// The `u32` array the geometry pass keeps its entity-major scratch in — the first caller of
+/// [`MappedArray`] and the one whose doc comment argued the case.
+pub(crate) type MappedU32 = MappedArray<u32>;
 
 /// Buffer size for spill I/O, both directions. Four mebibytes: large enough that the syscall
 /// cost is noise against the encode/decode work, small enough to be irrelevant against the
@@ -641,6 +886,82 @@ mod tests {
     #[test]
     fn mix64_matches_the_splitmix64_test_vector() {
         assert_eq!(mix64(0), 0xE220_A839_7B1D_CDAF);
+    }
+
+    // ---- mapped arrays and the arena --------------------------------------------------
+
+    #[test]
+    fn a_mapped_array_reads_back_what_was_scattered_into_it_and_unlinks_itself() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("scatter.u64");
+        {
+            let mut array = MappedArray::<u64>::zeroed(temp.path(), "scatter.u64", 1_000).unwrap();
+            assert!(path.is_file());
+            assert!(
+                array.as_slice().iter().all(|&v| v == 0),
+                "a fresh mapping reads as zeros"
+            );
+            // Written at a random index, as every caller writes: a stride coprime with the length.
+            for step in 0..1_000usize {
+                let index = (step * 137) % 1_000;
+                array.as_mut_slice()[index] = index as u64 * 3;
+            }
+            for index in 0..1_000usize {
+                assert_eq!(array.as_slice()[index], index as u64 * 3);
+            }
+        }
+        assert!(!path.exists(), "the file goes when the array does");
+    }
+
+    /// **The array's blocks are allocated, not merely addressable.** A sparse mapping raises
+    /// SIGBUS on the first write the filesystem cannot back, which is a build killed by a signal
+    /// rather than a refusal naming the file — see [`reserve`].
+    #[test]
+    fn a_mapped_array_reserves_its_blocks_rather_than_leaving_them_sparse() {
+        use std::os::unix::fs::MetadataExt;
+        let temp = tempfile::TempDir::new().unwrap();
+        let bytes = 4 << 20;
+        let _array = MappedArray::<u32>::zeroed(temp.path(), "dense.u32", bytes / 4).unwrap();
+        let metadata = fs::metadata(temp.path().join("dense.u32")).unwrap();
+        assert_eq!(metadata.len(), bytes as u64);
+        assert!(
+            metadata.blocks() * 512 >= bytes as u64,
+            "{} B of file is backed by {} B of blocks",
+            metadata.len(),
+            metadata.blocks() * 512
+        );
+    }
+
+    #[test]
+    fn an_empty_mapped_array_owns_nothing() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let array = MappedArray::<u32>::zeroed(temp.path(), "nothing.u32", 0).unwrap();
+        assert!(array.as_slice().is_empty());
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn the_arena_holds_every_record_across_its_growths() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("arena.bytes");
+        {
+            let mut arena = MappedArena::create(temp.path(), "arena.bytes").unwrap();
+            // Past the first mapping (1 MiB) several times over, so the records that were written
+            // before each remap are the ones under test.
+            let record = |i: usize| format!("{i}:{}", "y".repeat(i % 4_096)).into_bytes();
+            let mut placed: Vec<(u64, usize)> = Vec::new();
+            for i in 0..4_000usize {
+                let bytes = record(i);
+                placed.push((arena.append(&bytes).unwrap(), bytes.len()));
+            }
+            for (i, &(offset, len)) in placed.iter().enumerate() {
+                assert_eq!(arena.bytes(offset, len), record(i), "record {i}");
+            }
+            // Reset hands the same offsets out again, which is what bounds a reused buffer.
+            arena.reset();
+            assert_eq!(arena.append(b"first").unwrap(), 0);
+        }
+        assert!(!path.exists(), "the file goes when the arena does");
     }
 
     // ---- bucket files -----------------------------------------------------------------

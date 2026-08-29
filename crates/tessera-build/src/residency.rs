@@ -19,16 +19,27 @@
 //!
 //! - the **sorted source ids** and the **ordinal→entity map**, 12 bytes an item, because a member
 //!   and an attribute row are both named by source id and both have to resolve;
-//! - every **declared column in entity order**, which for a fixed-width type is its width and for
-//!   a `text`, `keyword` or `utf8` one is a `String` *per entity* — 24 bytes of header before a
-//!   character is stored — plus a presence bit per column;
 //! - the **layer member tables**, whole: one `Vec<u64>` of source ids per artifact as the plan is
 //!   read, the same rows again as resolved entities, and the published memberships in the store.
 //!
 //! **None of it is a batch.** The loop's residency shrinks when the stride does; this does not
-//! shrink at all, because a column in entity order is *n* values by construction and a member table
-//! is its own size. So the honest answer is not a smaller batch, it is a refusal that names the
-//! number — which is what this module computes and `plan_build` acts on.
+//! shrink at all, because a member table is its own size. So the honest answer is not a smaller
+//! batch, it is a refusal that names the number — which is what this module computes and
+//! `plan_build` acts on.
+//!
+//! # What moved off the heap, and is still counted
+//!
+//! Every **declared column in entity order** was the other half of this list and the larger half of
+//! the campaign's kills: a fixed-width type at its own width, a `text`, `keyword` or `utf8` one at a
+//! `String` *per entity* — 24 bytes of header before a character was stored — plus a presence bit
+//! each. They are now files under `.build-tmp/`, mapped rather than held ([`crate::column`]), so
+//! they cost the machine page cache the kernel may evict and not memory it must have.
+//!
+//! They are still modelled, and still printed, as **mapped** terms: an operator whose disk is the
+//! constraint has the same right to see the number as one whose memory is. What changed is that
+//! [`Residency::total`] — the figure `--memory-budget` is compared against — leaves them out. A
+//! model that kept charging them would refuse builds that now fit, which is the failure mode of
+//! carrying a cost model past the thing it modelled.
 //!
 //! # What the numbers are, and what they are not
 //!
@@ -58,16 +69,19 @@ use tessera_spatial::ScalarType;
 /// batch loop's own model carries a constant of the same size and for the same reason.
 pub(crate) const SLACK: u64 = 64 << 20;
 
-/// A `String` in a `Vec<String>`: pointer, length, capacity. Paid **per entity** by every
-/// variable-width column before a single character is stored, which is what makes a text column at
-/// 2.5×10⁸ items six gigabytes of headers on its own.
-const STRING_HEADER: u64 = 24;
+/// What a string value costs in the entity-indexed array of [`crate::column::EntityColumn`]: the
+/// arena offset alone. The characters ride in the arena and are counted as its payload; the
+/// `String` header this replaced was 24 bytes per entity, paid before a character was stored.
+const ARENA_OFFSET: u64 = 8;
 
 /// One named term of the residency, so a refusal prints where the bytes are rather than a total.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Term {
     pub what: String,
     pub bytes: u64,
+    /// A file under `.build-tmp/` rather than anonymous memory — reported, but not charged against
+    /// the memory budget.
+    pub mapped: bool,
 }
 
 /// The entity-order residency, term by term.
@@ -77,19 +91,30 @@ pub(crate) struct Residency {
 }
 
 impl Residency {
+    /// What the build asks the *machine* for: the anonymous terms only. A mapped term is page cache
+    /// and is reported rather than charged (see the module docs).
     pub fn total(&self) -> u64 {
-        self.terms.iter().map(|t| t.bytes).sum()
+        self.terms
+            .iter()
+            .filter(|t| !t.mapped)
+            .map(|t| t.bytes)
+            .sum()
     }
 
-    /// The terms, largest first, as one line each — the form a refusal prints. Largest first
-    /// because the operator's next move is to drop or narrow whatever is at the top.
+    /// The terms as one line each — the form a refusal prints. **Charged first, largest first
+    /// within each half**, because the operator's next move is to drop or narrow whatever is at the
+    /// top of what they are being refused for; the mapped terms follow, marked, because they are
+    /// the disk the same build wants.
     pub fn describe(&self) -> String {
         let mut terms = self.terms.clone();
-        terms.sort_by_key(|t| std::cmp::Reverse(t.bytes));
+        terms.sort_by_key(|t| (t.mapped, std::cmp::Reverse(t.bytes)));
         terms
             .iter()
             .filter(|t| t.bytes > 0)
-            .map(|t| format!("\n  {:>9} MiB  {}", t.bytes >> 20, t.what))
+            .map(|t| {
+                let mapped = if t.mapped { " (mapped)" } else { "" };
+                format!("\n  {:>9} MiB{mapped}  {}", t.bytes >> 20, t.what)
+            })
             .collect()
     }
 }
@@ -107,8 +132,8 @@ pub(crate) struct ColumnCost {
     pub payload_bytes: u64,
 }
 
-/// Whether one entity's value is a `String` in [`crate::pipeline::EntityColumn`]'s storage — which
-/// is what makes the column's characters a term of their own rather than part of its width.
+/// Whether one entity's value lives in [`crate::column::EntityColumn`]'s arena — which is what
+/// makes the column's characters a term of their own rather than part of its width.
 fn is_variable_width(ty: ScalarType) -> bool {
     matches!(
         ty,
@@ -116,8 +141,8 @@ fn is_variable_width(ty: ScalarType) -> bool {
     )
 }
 
-/// The fixed width one entity's value occupies in [`crate::pipeline::EntityColumn`]'s typed
-/// storage. A variable-width type answers [`STRING_HEADER`] here and carries its characters in
+/// The fixed width one entity's value occupies in [`crate::column::EntityColumn`]'s typed
+/// storage. A variable-width type answers [`ARENA_OFFSET`] here and carries its characters in
 /// [`ColumnCost::payload_bytes`].
 fn fixed_width(ty: ScalarType) -> u64 {
     match ty {
@@ -126,7 +151,7 @@ fn fixed_width(ty: ScalarType) -> u64 {
         ScalarType::U16 | ScalarType::I16 => 2,
         ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
         ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
-        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => STRING_HEADER,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => ARENA_OFFSET,
     }
 }
 
@@ -159,10 +184,12 @@ pub(crate) fn entity_order_residency(
                 "the sorted source ids, 8 B/item (input.rs; released after the layer publication)"
                     .into(),
             bytes: 8 * n,
+            mapped: false,
         },
         Term {
             what: "the ordinal→entity map, 4 B/item".into(),
             bytes: 4 * n,
+            mapped: false,
         },
     ];
     for (index, column) in columns.iter().enumerate() {
@@ -176,14 +203,15 @@ pub(crate) fn entity_order_residency(
         terms.push(Term {
             what: if column.payload_bytes > 0 {
                 format!(
-                    "declared column {index} ({ty}): {width} B/item of header plus \
-                     {} MiB of characters",
+                    "declared column {index} ({ty}): {width} B/item of offset plus \
+                     {} MiB of characters, in .build-tmp/",
                     column.payload_bytes >> 20
                 )
             } else {
-                format!("declared column {index} ({ty}): {width} B/item")
+                format!("declared column {index} ({ty}): {width} B/item, in .build-tmp/")
             },
             bytes,
+            mapped: true,
         });
     }
     if member_rows > 0 {
@@ -193,11 +221,13 @@ pub(crate) fn entity_order_residency(
                  resolved entities and the published memberships, all three resident at once"
             ),
             bytes: member_rows.saturating_mul(BYTES_PER_MEMBER_ROW),
+            mapped: false,
         });
     }
     terms.push(Term {
         what: "slack for decode buffers, stage scratch and the allocator".into(),
         bytes: SLACK,
+        mapped: false,
     });
     Residency { terms }
 }
@@ -304,26 +334,35 @@ mod tests {
     fn the_tail_is_linear_in_the_item_count_and_the_batch_stride_reaches_none_of_it() {
         let small = campaign_residency(10_000_000, 200);
         let large = campaign_residency(50_000_000, 200);
-        // Five times the corpus, five times the residency to within the fixed slack.
-        let ratio = large.total() as f64 / small.total() as f64;
+        // Five times the corpus, five times the residency — exactly, net of the one term that is
+        // not a function of the corpus at all.
+        let ratio = (large.total() - SLACK) as f64 / (small.total() - SLACK) as f64;
         assert!(
-            (4.9..5.1).contains(&ratio),
+            (4.99..5.01).contains(&ratio),
             "the tail should scale with the corpus, got {ratio}"
         );
     }
 
-    /// A `text` column is a `String` per entity **before a character is stored**, and that header
-    /// alone is three times the widest fixed-width column the schema can declare.
+    /// **A declared column is reported and not charged.** The whole of a text column — its
+    /// per-entity offsets, its presence bits and every character of the corpus's prose — is a file
+    /// under `.build-tmp/`, so it appears in the breakdown at its full size and adds nothing to the
+    /// figure `--memory-budget` is compared against.
     #[test]
-    fn a_variable_width_column_costs_a_string_header_per_entity() {
+    fn a_declared_column_is_reported_as_mapped_and_charged_at_nothing() {
         let n = 10_000_000;
-        let bare = entity_order_residency(n, &[], 0).total();
-        let text = entity_order_residency(n, &[column(ScalarType::Text, 0)], 0).total() - bare;
-        let widest = entity_order_residency(n, &[column(ScalarType::U64, 0)], 0).total() - bare;
-        assert_eq!(text, 24 * n + n.div_ceil(8));
+        let bare = entity_order_residency(n, &[], 0);
+        let with_text = entity_order_residency(n, &[column(ScalarType::Text, 400 * n)], 0);
+        assert_eq!(with_text.total(), bare.total());
+        let term = with_text
+            .terms
+            .iter()
+            .find(|t| t.mapped)
+            .expect("the column is a term of its own");
+        assert_eq!(term.bytes, 8 * n + n.div_ceil(8) + 400 * n);
         assert!(
-            text > 2 * widest,
-            "{text} B of string headers should dwarf {widest} B of the widest fixed column"
+            with_text.describe().contains("(mapped)"),
+            "the breakdown must say which terms are files: {}",
+            with_text.describe()
         );
     }
 
@@ -340,7 +379,8 @@ mod tests {
         );
     }
 
-    /// The description leads with the largest term, because that is the one the operator acts on.
+    /// The description leads with the largest **charged** term, because that is the one the
+    /// operator is being refused for and the one they can act on.
     #[test]
     fn the_breakdown_leads_with_the_term_worth_acting_on() {
         let described = campaign_residency(50_000_000, 200).describe();
@@ -349,9 +389,10 @@ mod tests {
             .find(|l| !l.trim().is_empty())
             .unwrap_or_default();
         assert!(
-            first.contains("text"),
-            "the text column is the largest term at this schema; got {first}"
+            first.contains("member row"),
+            "the member tables are the largest charged term at this schema; got {first}"
         );
+        assert!(!first.contains("(mapped)"), "got {first}");
     }
 
     /// **The measurement the model is checked against.** Writes a corpus of `N` items with a text
@@ -582,12 +623,17 @@ require_member_visibility = "none"
     }
 
     /// And the same build fits under a budget that covers it, so the pre-flight is a bound and not
-    /// a blanket.
+    /// a blanket — and it leaves nothing behind, which is worth an assertion now that the columns
+    /// are files in that directory rather than heap (`column.rs`).
     #[test]
     fn the_same_build_fits_under_a_budget_that_covers_the_tail() {
         let (mut args, _temp) = fixture(20_000);
         args.memory_budget = Some(2 << 30);
         crate::build(&args).expect("2 GiB covers a twenty-thousand-item tail");
+        assert!(
+            !args.out.join(".build-tmp").exists(),
+            "a successful build takes its scratch directory with it"
+        );
     }
 
     #[test]

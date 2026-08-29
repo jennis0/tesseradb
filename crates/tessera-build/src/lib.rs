@@ -21,6 +21,7 @@
 
 pub mod artifact_pass;
 pub mod check;
+mod column;
 pub mod config;
 pub mod deep;
 pub mod disclosure;
@@ -29,8 +30,8 @@ pub mod input;
 pub mod layers;
 pub mod observer;
 mod pipeline;
-pub mod shapes;
 mod residency;
+pub mod shapes;
 pub(crate) mod spill;
 
 use rayon::prelude::*;
@@ -1018,15 +1019,20 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // paying a transpose is better than two emit paths that could disagree about a record's
     // contents (which `write_manifests` exists to prevent for the same reason).
     let filter_paths = {
-        let by_entity: Vec<pipeline::EntityColumn> = args
+        // The oracle's columns are mapped exactly as the streaming pipeline's are (`column.rs`),
+        // so this path holds its own `.build-tmp/` for the length of the emit.
+        let tmp = spill::TmpDir::create(&args.out)?;
+        let scratch = column::ColumnScratch::new(tmp.path());
+        let by_entity: Vec<column::EntityColumn> = args
             .schema
             .attributes
             .iter()
             .enumerate()
-            .map(|(column, attribute)| {
-                pipeline::EntityColumn::from_values(
+            .map(|(index, attribute)| {
+                column::EntityColumn::from_values(
+                    &scratch,
                     attribute.ty,
-                    tiler_items.iter().map(|i| i.scalars[column].clone()),
+                    tiler_items.iter().map(|i| i.scalars[index].clone()),
                     &attribute.name,
                 )
                 .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))
@@ -1044,6 +1050,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             &args.schema,
             &by_entity,
         )?);
+        drop(by_entity);
+        tmp.close()?;
         paths
     };
 
