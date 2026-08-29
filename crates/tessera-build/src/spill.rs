@@ -581,6 +581,430 @@ fn next_byte(reader: &mut impl Read) -> std::io::Result<Option<u8>> {
 }
 
 // --------------------------------------------------------------------------------------------
+// Text-index run files
+// --------------------------------------------------------------------------------------------
+
+/// FNV-1a over a term's bytes — the fingerprint a run file's anchor mixes in place of the `u32`
+/// term id the band files have.
+///
+/// A text run's records are keyed by the term *string*: there is no term id yet, because assigning
+/// one is what the merge these files feed does. So the anchor cannot use [`pack_pair`], and it
+/// folds the key's bytes to 64 bits instead. Not cryptographic, and for the same reason
+/// [`mix64`]'s doc gives: this defends against truncation, a torn write and a doubly-appended
+/// file, not against an adversary with write access to the build's own scratch.
+fn fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Appends one **text run**: a sorted, distinct term stream with each term's ascending entity
+/// list, spilled by one worker of the text index's chunk pass and consumed once by its merge.
+///
+/// **On disk:** no header, then one record per term —
+/// `varint(shared) ‖ varint(suffix_len) ‖ suffix ‖ varint(count) ‖ varint(entity₀) ‖
+/// varint(entityᵢ − entityᵢ₋₁)…`. `shared` is the term's common prefix with its predecessor *in
+/// this file*, which is the same front coding the dictionary itself uses and for the same reason:
+/// a sorted term stream repeats its prefixes, and the corpus that makes this file large is exactly
+/// the one whose terms share them. Integrity is external, via the [`SpillReceipt`].
+///
+/// **The entity delta is per TERM, not per file**, which is where this differs from
+/// [`BandWriter`]. A band file's records ascend in entity across the whole file because its
+/// emitter walks items in assignment order; a run's do not — the run is term-major, so entities
+/// restart at each term's own first. Both are refused at the write site rather than decoded into a
+/// wrong posting later: terms must ascend strictly across the file, entities strictly within a
+/// record.
+pub(crate) struct TextRunWriter {
+    path: PathBuf,
+    writer: BufWriter<File>,
+    prev: Vec<u8>,
+    terms: u64,
+    /// Entities still owed for the open term. A record's count is written before its entities, so
+    /// a term is only complete when every one it promised has arrived — and `finish` refuses a
+    /// file whose last record never was.
+    owed: u32,
+    /// The last entity written for the open term, for the delta.
+    last_entity: u32,
+    started: bool,
+    /// Records written: `(term, entity)` pairs, so a truncation anywhere in a record shows up.
+    count: u64,
+    anchor: u64,
+    /// [`fingerprint`] of the open term, folded once per record rather than once per pair.
+    mark: u64,
+}
+
+impl TextRunWriter {
+    pub(crate) fn create(path: &Path) -> Result<TextRunWriter> {
+        let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
+        Ok(TextRunWriter {
+            path: path.to_path_buf(),
+            writer: BufWriter::with_capacity(SPILL_BUF_BYTES, file),
+            prev: Vec::new(),
+            terms: 0,
+            owed: 0,
+            last_entity: 0,
+            started: false,
+            count: 0,
+            anchor: 0,
+            mark: 0,
+        })
+    }
+
+    /// Open a record: the term, and how many entities will follow.
+    ///
+    /// **Split from [`Self::push_entity`] because a merge cannot hold the slice.** A worker
+    /// spilling its own accumulator has the entity list in hand; a cascade pass merging sixty-four
+    /// runs into one has a *stream*, and the term it is writing may be carried by a quarter of the
+    /// corpus. Buffering that to satisfy a slice signature would reintroduce, in the merge, the
+    /// residency the merge exists to bound.
+    pub(crate) fn begin(&mut self, term: &[u8], entities: u32) -> Result<()> {
+        if self.owed > 0 {
+            return Err(BuildError::Invalid(format!(
+                "text run {}: term {:?} opens while {} entities are still owed on {:?}",
+                self.path.display(),
+                String::from_utf8_lossy(term),
+                self.owed,
+                String::from_utf8_lossy(&self.prev)
+            )));
+        }
+        if self.terms > 0 && term <= self.prev.as_slice() {
+            return Err(BuildError::Invalid(format!(
+                "text run {}: terms must ascend strictly: {:?} follows {:?}",
+                self.path.display(),
+                String::from_utf8_lossy(term),
+                String::from_utf8_lossy(&self.prev)
+            )));
+        }
+        if term.is_empty() {
+            return Err(BuildError::Invalid(format!(
+                "text run {}: the empty string is not a term",
+                self.path.display()
+            )));
+        }
+        if entities == 0 {
+            return Err(BuildError::Invalid(format!(
+                "text run {}: term {:?} carries no entity — a term exists in this file only \
+                 because something carried it",
+                self.path.display(),
+                String::from_utf8_lossy(term)
+            )));
+        }
+        let shared = common_prefix_len(&self.prev, term);
+        write_varint(&mut self.writer, &self.path, shared as u32)?;
+        write_varint(&mut self.writer, &self.path, (term.len() - shared) as u32)?;
+        self.writer
+            .write_all(&term[shared..])
+            .map_err(|e| BuildError::io(&self.path, e))?;
+        write_varint(&mut self.writer, &self.path, entities)?;
+
+        self.mark = fingerprint(term);
+        self.prev.clear();
+        self.prev.extend_from_slice(term);
+        self.terms += 1;
+        self.owed = entities;
+        self.started = false;
+        self.last_entity = 0;
+        Ok(())
+    }
+
+    /// Append one entity to the open record. Entities must ascend strictly within a term — refused
+    /// here, at the write site, rather than decoded into a wrong posting a stage later.
+    pub(crate) fn push_entity(&mut self, entity: u32) -> Result<()> {
+        if self.owed == 0 {
+            return Err(BuildError::Invalid(format!(
+                "text run {}: entity {entity} arrives with no open term",
+                self.path.display()
+            )));
+        }
+        let delta = if self.started {
+            entity
+                .checked_sub(self.last_entity)
+                .filter(|d| *d > 0)
+                .ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "text run {}: term {:?}'s entities must ascend strictly: {entity} \
+                         follows {}",
+                        self.path.display(),
+                        String::from_utf8_lossy(&self.prev),
+                        self.last_entity
+                    ))
+                })?
+        } else {
+            entity
+        };
+        write_varint(&mut self.writer, &self.path, delta)?;
+        self.last_entity = entity;
+        self.started = true;
+        self.owed -= 1;
+        self.count += 1;
+        self.anchor = self.anchor.wrapping_add(mix64(self.mark ^ entity as u64));
+        Ok(())
+    }
+
+    /// One whole record — [`Self::begin`] and its entities — for the caller that holds the list.
+    /// Written in terms of the streaming pair so there is one encoding rule rather than two that
+    /// could drift.
+    pub(crate) fn push(&mut self, term: &[u8], entities: &[u32]) -> Result<()> {
+        let count = u32::try_from(entities.len()).map_err(|_| {
+            BuildError::Invalid(format!(
+                "text run {}: term {:?} carries more entities than a u32 can count",
+                self.path.display(),
+                String::from_utf8_lossy(term)
+            ))
+        })?;
+        self.begin(term, count)?;
+        for &entity in entities {
+            self.push_entity(entity)?;
+        }
+        Ok(())
+    }
+
+    /// Flush, fsync, and hand back the receipt [`TextRunReader::open`] must be given.
+    pub(crate) fn finish(self) -> Result<SpillReceipt> {
+        if self.owed > 0 {
+            return Err(BuildError::Invalid(format!(
+                "text run {}: {} entities are still owed on term {:?}",
+                self.path.display(),
+                self.owed,
+                String::from_utf8_lossy(&self.prev)
+            )));
+        }
+        let TextRunWriter {
+            path,
+            writer,
+            count,
+            anchor,
+            ..
+        } = self;
+        let file = writer
+            .into_inner()
+            .map_err(|e| BuildError::io(&path, e.into_error()))?;
+        file.sync_all().map_err(|e| BuildError::io(&path, e))?;
+        Ok(SpillReceipt {
+            path,
+            count,
+            anchor,
+        })
+    }
+}
+
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+/// Streams a text run back **term by term**, verifying count and anchor at end of stream.
+///
+/// **The head's entities are not decoded until they are asked for.** A k-way merge holds one open
+/// reader per run and compares only their head terms, so a reader that eagerly materialised each
+/// head's entity list would put *k* whole posting lists in memory to choose between *k* strings —
+/// which is the residency this whole pass exists to bound. [`Self::advance`] reads the term and
+/// its length and stops; [`Self::take_entities`] decodes them, and `advance` drains whatever a
+/// caller left rather than trusting it to have consumed the record.
+///
+/// Verification is terminal, exactly as [`BandReader`]'s is and for the same reason — a running
+/// sum can only be checked once the stream ends — and the merge drains every run to completion.
+pub(crate) struct TextRunReader {
+    path: PathBuf,
+    reader: BufReader<File>,
+    /// The head term, front-decoded against its predecessor.
+    term: Vec<u8>,
+    /// [`fingerprint`] of `term`, held so the anchor costs one fold per record and not one per
+    /// pair.
+    mark: u64,
+    /// Entities of the head not yet decoded.
+    pending: u32,
+    /// Entities of the head already decoded — what makes the first delta absolute and the rest
+    /// relative, and it cannot be inferred from `last_entity` because entity 0 is a legal first.
+    taken: u32,
+    /// The last entity decoded within the head, for the delta.
+    last_entity: u32,
+    expect_count: u64,
+    expect_anchor: u64,
+    count: u64,
+    anchor: u64,
+    done: bool,
+}
+
+impl TextRunReader {
+    pub(crate) fn open(receipt: &SpillReceipt) -> Result<TextRunReader> {
+        let file = File::open(&receipt.path).map_err(|e| BuildError::io(&receipt.path, e))?;
+        Ok(TextRunReader {
+            path: receipt.path.clone(),
+            reader: BufReader::with_capacity(SPILL_BUF_BYTES, file),
+            term: Vec::new(),
+            mark: 0,
+            pending: 0,
+            taken: 0,
+            last_entity: 0,
+            expect_count: receipt.count,
+            expect_anchor: receipt.anchor,
+            count: 0,
+            anchor: 0,
+            done: false,
+        })
+    }
+
+    /// Move to the next term, returning `false` at a *verified* end of stream.
+    pub(crate) fn advance(&mut self) -> Result<bool> {
+        if self.done {
+            return Ok(false);
+        }
+        // Whatever the caller did not take: decoded and anchored, never skipped by seeking, so a
+        // malformation inside a record the merge had no use for is still caught.
+        while self.pending > 0 {
+            self.next_entity()?;
+        }
+        let first = match next_byte(&mut self.reader).map_err(|e| BuildError::io(&self.path, e))? {
+            None => {
+                self.verify_end()?;
+                return Ok(false);
+            }
+            Some(byte) => byte,
+        };
+        let shared = self.decode_varint(first)? as usize;
+        if shared > self.term.len() {
+            return Err(self.malformed(&format!(
+                "shared prefix {shared} exceeds the previous term's {} bytes",
+                self.term.len()
+            )));
+        }
+        let suffix_len = {
+            let byte = self.require_byte()?;
+            self.decode_varint(byte)? as usize
+        };
+        self.term.truncate(shared);
+        // Read through `take` and grow rather than `resize`-then-`read_exact`: `suffix_len` comes
+        // off the file, and a corrupted one would otherwise be an allocation of whatever it says
+        // before a single byte is checked against what the file actually holds.
+        let got = (&mut self.reader)
+            .take(suffix_len as u64)
+            .read_to_end(&mut self.term)
+            .map_err(|e| BuildError::io(&self.path, e))?;
+        if got != suffix_len {
+            return Err(self.malformed("truncated inside a term's bytes"));
+        }
+        if self.term.is_empty() {
+            return Err(self.malformed("the empty string is not a term"));
+        }
+        // Refused rather than decoded: the writer refuses a zero-entity record, so one here is a
+        // malformed file and not a term that lost its postings.
+        let count = {
+            let byte = self.require_byte()?;
+            self.decode_varint(byte)?
+        };
+        if count == 0 {
+            return Err(self.malformed("a term with no entities"));
+        }
+        if self.count + count as u64 > self.expect_count {
+            return Err(self.malformed(&format!(
+                "trailing data: more pairs than the receipt's count {}",
+                self.expect_count
+            )));
+        }
+        self.mark = fingerprint(&self.term);
+        self.pending = count;
+        self.taken = 0;
+        self.last_entity = 0;
+        Ok(true)
+    }
+
+    /// The head term. Meaningful only after [`Self::advance`] returned `true`.
+    pub(crate) fn term(&self) -> &[u8] {
+        &self.term
+    }
+
+    /// How many entities the head carries, decoded or not.
+    pub(crate) fn pending(&self) -> u32 {
+        self.pending
+    }
+
+    /// Decode the head's remaining entities into `sink`, ascending.
+    pub(crate) fn take_entities(&mut self, sink: &mut impl FnMut(u32) -> Result<()>) -> Result<()> {
+        while self.pending > 0 {
+            let entity = self.next_entity()?;
+            sink(entity)?;
+        }
+        Ok(())
+    }
+
+    fn next_entity(&mut self) -> Result<u32> {
+        let byte = self.require_byte()?;
+        let delta = self.decode_varint(byte)?;
+        let entity = if self.taken == 0 {
+            delta
+        } else {
+            if delta == 0 {
+                return Err(self.malformed("an entity delta of 0 repeats an entity"));
+            }
+            let last = self.last_entity;
+            last.checked_add(delta).ok_or_else(|| {
+                self.malformed(&format!("entity delta {delta} overflows u32 above {last}"))
+            })?
+        };
+        self.last_entity = entity;
+        self.taken += 1;
+        self.pending -= 1;
+        self.count += 1;
+        self.anchor = self.anchor.wrapping_add(mix64(self.mark ^ entity as u64));
+        Ok(entity)
+    }
+
+    fn verify_end(&mut self) -> Result<()> {
+        if self.count != self.expect_count {
+            return Err(self.malformed(&format!(
+                "pair count mismatch: decoded {} pairs but the receipt says {}",
+                self.count, self.expect_count
+            )));
+        }
+        if self.anchor != self.expect_anchor {
+            return Err(self.malformed(&format!(
+                "content anchor mismatch: recomputed {:#018x} but the receipt says {:#018x} — \
+                 the file's bytes are not the bytes that were written",
+                self.anchor, self.expect_anchor
+            )));
+        }
+        self.done = true;
+        Ok(())
+    }
+
+    fn decode_varint(&mut self, first: u8) -> Result<u32> {
+        let mut value = (first & 0x7F) as u32;
+        if first & 0x80 == 0 {
+            return Ok(value);
+        }
+        let mut shift = 7u32;
+        loop {
+            let byte = self.require_byte()?;
+            if shift == 28 {
+                if byte & 0xF0 != 0 {
+                    return Err(self.malformed("varint overflows u32"));
+                }
+                return Ok(value | ((byte as u32) << 28));
+            }
+            value |= ((byte & 0x7F) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+    }
+
+    fn require_byte(&mut self) -> Result<u8> {
+        match next_byte(&mut self.reader).map_err(|e| BuildError::io(&self.path, e))? {
+            Some(byte) => Ok(byte),
+            None => Err(self.malformed("truncated mid-record")),
+        }
+    }
+
+    fn malformed(&self, detail: &str) -> BuildError {
+        BuildError::Invalid(format!("text run {}: {detail}", self.path.display()))
+    }
+}
+
+// --------------------------------------------------------------------------------------------
 // Tests
 // --------------------------------------------------------------------------------------------
 
@@ -960,5 +1384,176 @@ mod tests {
         // tree — creation must refuse rather than build atop unexplained state.
         fs::write(temp.path().join(".build-tmp"), b"not a directory").unwrap();
         assert!(TmpDir::create(temp.path()).is_err());
+    }
+
+    // ---- text run files ---------------------------------------------------------------
+
+    fn write_text_run(path: &Path, records: &[(&str, Vec<u32>)]) -> SpillReceipt {
+        let mut writer = TextRunWriter::create(path).unwrap();
+        for (term, entities) in records {
+            writer.push(term.as_bytes(), entities).unwrap();
+        }
+        writer.finish().unwrap()
+    }
+
+    fn read_text_run(receipt: &SpillReceipt) -> Result<Vec<(String, Vec<u32>)>> {
+        let mut reader = TextRunReader::open(receipt)?;
+        let mut out = Vec::new();
+        while reader.advance()? {
+            let term = String::from_utf8(reader.term().to_vec()).unwrap();
+            let expected = reader.pending();
+            let mut entities = Vec::new();
+            reader.take_entities(&mut |entity| {
+                entities.push(entity);
+                Ok(())
+            })?;
+            assert_eq!(
+                entities.len() as u32,
+                expected,
+                "`pending` promised the count"
+            );
+            out.push((term, entities));
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn text_run_round_trips() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let long: Vec<(&str, Vec<u32>)> = vec![
+            // Entity 0 first, which is where an absolute-vs-delta confusion in the first slot
+            // would show: a decoder that treated it as a delta from a non-zero register reads a
+            // different entity, and every posting after it shifts.
+            ("aardvark", vec![0]),
+            ("aardvark2", vec![0, 1, 2, 63, 64, 65, u32::MAX]),
+            // Shares a long prefix with its predecessor — the front coding's own case.
+            ("aardvark2b", vec![7]),
+            ("zebra", (0..5_000u32).map(|e| e * 3).collect()),
+            ("日本語", vec![1, 2]),
+        ];
+        let cases: Vec<Vec<(&str, Vec<u32>)>> = vec![vec![], vec![("only", vec![9])], long];
+        for (i, records) in cases.iter().enumerate() {
+            let path = temp.path().join(format!("text-run-{i}.spill"));
+            let receipt = write_text_run(&path, records);
+            assert_eq!(
+                receipt.count,
+                records.iter().map(|(_, e)| e.len() as u64).sum::<u64>()
+            );
+            let read = read_text_run(&receipt).unwrap();
+            let want: Vec<(String, Vec<u32>)> = records
+                .iter()
+                .map(|(t, e)| (t.to_string(), e.clone()))
+                .collect();
+            assert_eq!(read, want);
+        }
+    }
+
+    #[test]
+    fn text_run_flip_is_an_anchor_mismatch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("text-run.spill");
+        let records = vec![("alpha", vec![1, 5, 9]), ("bravo", vec![2, 4])];
+        let receipt = write_text_run(&path, &records);
+        // The last byte is an entity delta: flipping it changes a posting and nothing else, which
+        // is exactly the failure a count check alone would miss.
+        let last = fs::read(&path).unwrap().len() - 1;
+        flip_byte(&path, last);
+        let message = err_string(read_text_run(&receipt));
+        assert!(message.contains("anchor mismatch"), "got: {message}");
+        assert!(message.contains("text-run.spill"), "got: {message}");
+    }
+
+    #[test]
+    fn text_run_truncation_is_caught() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("text-run.spill");
+        let records = vec![("alpha", vec![1, 5, 9]), ("bravo", vec![2, 4])];
+        for cut in [1usize, 2, 3, 4, 5] {
+            let receipt = write_text_run(&path, &records);
+            truncate_by(&path, cut);
+            let message = err_string(read_text_run(&receipt));
+            assert!(
+                message.contains("truncated") || message.contains("count mismatch"),
+                "cut {cut} got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_run_trailing_data_is_caught() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("text-run.spill");
+        let records = vec![("alpha", vec![1, 5, 9])];
+        let receipt = write_text_run(&path, &records);
+        // A whole extra record, well formed: `zz` with one entity. Only the receipt's pair count
+        // separates it from a legitimate stream.
+        append(&path, &[0, 2, b'z', b'z', 1, 3]);
+        let message = err_string(read_text_run(&receipt));
+        assert!(message.contains("trailing data"), "got: {message}");
+    }
+
+    #[test]
+    fn text_run_refuses_an_emitter_that_does_not_ascend() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // A writer apiece: a refused push may already have written a record's header, so the file
+        // one leaves behind is only ever discarded — which is what a build that fails here does.
+        let refused: Vec<(&str, &[u8], &[u32])> = vec![
+            ("a term that regresses", b"alpha", &[3]),
+            ("a term that repeats", b"bravo", &[3]),
+            ("a term with no entity", b"charlie", &[]),
+            ("an entity that repeats", b"charlie", &[5, 5]),
+            ("an entity that regresses", b"charlie", &[5, 4]),
+        ];
+        for (i, (what, term, entities)) in refused.into_iter().enumerate() {
+            let path = temp.path().join(format!("refused-{i}.spill"));
+            let mut writer = TextRunWriter::create(&path).unwrap();
+            writer.push(b"bravo", &[1, 2]).unwrap();
+            assert!(writer.push(term, entities).is_err(), "{what}");
+        }
+    }
+
+    proptest! {
+        /// Any sorted, distinct term stream with ascending entity lists round-trips exactly.
+        #[test]
+        fn any_text_run_round_trips(
+            raw in prop::collection::vec(
+                (prop::collection::vec(prop::num::u8::ANY, 1..6),
+                 prop::collection::vec(prop::num::u32::ANY, 1..8)),
+                0..40),
+        ) {
+            let mut records: Vec<(Vec<u8>, Vec<u32>)> = raw
+                .into_iter()
+                .map(|(term, mut entities)| {
+                    entities.sort_unstable();
+                    entities.dedup();
+                    (term, entities)
+                })
+                .collect();
+            records.sort_by(|a, b| a.0.cmp(&b.0));
+            records.dedup_by(|a, b| a.0 == b.0);
+
+            let temp = tempfile::TempDir::new().unwrap();
+            let path = temp.path().join("text-run.spill");
+            let mut writer = TextRunWriter::create(&path).unwrap();
+            for (term, entities) in &records {
+                writer.push(term, entities).unwrap();
+            }
+            let receipt = writer.finish().unwrap();
+
+            let mut reader = TextRunReader::open(&receipt).unwrap();
+            let mut read: Vec<(Vec<u8>, Vec<u32>)> = Vec::new();
+            while reader.advance().unwrap() {
+                let term = reader.term().to_vec();
+                let mut entities = Vec::new();
+                reader
+                    .take_entities(&mut |entity| {
+                        entities.push(entity);
+                        Ok(())
+                    })
+                    .unwrap();
+                read.push((term, entities));
+            }
+            prop_assert_eq!(read, records);
+        }
     }
 }

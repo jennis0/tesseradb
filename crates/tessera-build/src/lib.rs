@@ -1037,8 +1037,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         // pipeline writes.
         // The text columns' timing is the streaming pipeline's stage split (`observer.rs`); this
         // path is the equivalence oracle and is not observed, so it drops it.
-        let (mut paths, _text) =
-            pipeline::write_filter_postings(&partition_dir, &args.schema, &by_entity)?;
+        let (mut paths, _text) = pipeline::write_filter_postings(
+            &partition_dir,
+            &args.schema,
+            &by_entity,
+            args.memory_budget
+                .unwrap_or_else(pipeline::detect_memory_budget),
+        )?;
         paths.extend(pipeline::write_record_blob(
             &partition_dir,
             &args.schema,

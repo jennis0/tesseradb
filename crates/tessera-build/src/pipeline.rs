@@ -478,6 +478,12 @@ impl BucketStore {
 /// Everything the memory budget decides, decided once and printed. See `BuildArgs::batch_items`
 /// for why the batch size is derived deterministically and recorded rather than re-derived.
 struct BuildPlan {
+    /// The memory budget this plan was derived under — the operator's `--memory-budget` or the
+    /// detected one. Carried rather than re-detected, so every stage that sizes itself against the
+    /// budget sizes against the *same* number: `detect_memory_budget` reads `MemAvailable`, which
+    /// falls as the build fills memory, and a second reading late in the run would derive a
+    /// smaller budget from the build's own success at using the first.
+    budget: u64,
     batch_items: u64,
     batches: u64,
     bucket_in_ram: bool,
@@ -498,7 +504,7 @@ struct BuildPlan {
 /// a 4 GiB container on a 48 GiB machine that reads only the first sizes its batches for 38 GiB and
 /// is OOM-killed by the limit that always owned the answer — which is the failure this crate exists
 /// to prevent, arriving through the detector rather than through the batch size.
-fn detect_memory_budget() -> u64 {
+pub(crate) fn detect_memory_budget() -> u64 {
     const FALLBACK: u64 = 24 << 30;
     let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") else {
         return FALLBACK;
@@ -741,6 +747,7 @@ fn plan_build(
     }
 
     Ok(BuildPlan {
+        budget,
         batch_items,
         batches,
         bucket_in_ram,
@@ -1429,8 +1436,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // here (stage 5, permanent under I9) and the values have just been read, which are the two
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
     // attribute values exist.
-    let (filter_paths, text_index) =
-        write_filter_postings(&partition_dir, &args.schema, &attributes_by_entity)?;
+    let (filter_paths, text_index) = write_filter_postings(
+        &partition_dir,
+        &args.schema,
+        &attributes_by_entity,
+        plan.budget,
+    )?;
     // The text columns' share, charged out of the block rather than measured beside it — the two
     // interleave over one column loop, so a boundary in time cannot separate them.
     timer.charge(BuildStage::TextIndex, text_index.elapsed, text_index.terms);
@@ -1787,6 +1798,51 @@ impl EntityColumn {
         })
     }
 
+    /// [`Self::present_entities`] over one contiguous entity range `[lo, hi)`, skipping an absent
+    /// run 64 at a time exactly as that does.
+    ///
+    /// **This is what makes a column-wide pass divisible.** The text index splits entity space
+    /// into chunks and indexes them in parallel, and every consumer of a chunk's output relies on
+    /// the yielded order being ascending *and* on the chunks partitioning the column — so the
+    /// range is masked into the boundary words rather than filtered out of the whole-column
+    /// iterator, which would make each chunk cost a scan of every other chunk's presence bits.
+    pub(crate) fn present_entities_in(
+        &self,
+        lo: usize,
+        hi: usize,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let words = &self.present;
+        let lo = lo.min(self.len());
+        let hi = hi.min(self.len());
+        let first_word = lo / 64;
+        let end_word = hi.div_ceil(64);
+        let mut next_word = first_word;
+        let mut residual = 0u64;
+        std::iter::from_fn(move || loop {
+            if residual != 0 {
+                let bit = residual.trailing_zeros() as usize;
+                residual &= residual - 1;
+                return Some((next_word - 1) * 64 + bit);
+            }
+            if next_word >= end_word {
+                return None;
+            }
+            let mut word = words[next_word];
+            // The two boundary words are the whole of the range logic: a chunk starts and ends
+            // mid-word in general, and a bit outside `[lo, hi)` left set here would be indexed
+            // twice — once by this chunk and once by its neighbour — which the merge would see as
+            // a repeated entity in one term's postings.
+            if next_word == first_word {
+                word &= u64::MAX << (lo % 64);
+            }
+            if next_word == end_word - 1 && !hi.is_multiple_of(64) {
+                word &= !(u64::MAX << (hi % 64));
+            }
+            residual = word;
+            next_word += 1;
+        })
+    }
+
     /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
     /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s clone would
     /// be a second copy of every string in the corpus.
@@ -2079,8 +2135,16 @@ pub(crate) fn write_filter_postings(
     partition_dir: &Path,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
+    memory_budget: u64,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
-    write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
+    let entities = by_entity.first().map_or(0, EntityColumn::len);
+    write_filter_postings_banded(
+        partition_dir,
+        schema,
+        by_entity,
+        POSTINGS_BAND_ROWS,
+        TextIndexPlan::for_budget(memory_budget, entities),
+    )
 }
 
 /// What the text columns cost inside [`write_filter_postings`]'s loop: the wall time and the terms
@@ -2105,6 +2169,7 @@ fn write_filter_postings_banded(
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     band_rows: usize,
+    text_plan: TextIndexPlan,
 ) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     let mut paths = Vec::new();
     let mut text = TextIndexCost::default();
@@ -2120,7 +2185,7 @@ fn write_filter_postings_banded(
         // themselves are in the record blob, which no scan reads (records §4.4).
         if attribute.ty == ScalarType::Text {
             let started = std::time::Instant::now();
-            let written = write_text_index(&column_dir, attribute, values)?;
+            let written = write_text_index(&column_dir, attribute, values, text_plan)?;
             text.elapsed += started.elapsed();
             text.terms += written.terms;
             paths.extend(written.paths);
@@ -2729,51 +2794,188 @@ fn push_numeric_chunks(
     Ok(())
 }
 
-/// Does this column owe a postings file?
+/// How the text index's chunk pass is sized: the entities one chunk covers, and the bytes one
+/// worker may accumulate before it spills a run.
 ///
-/// Two independent reasons, and the second is the one a reader will not expect.
+/// **Both are needed, and neither would do alone.** The chunk count is what the pass parallelises
+/// over, so it follows the machine; the byte budget is what bounds a worker's residency, and it
+/// has to hold whatever the documents turn out to be. A column of short names and a column of
+/// abstracts differ by two orders of magnitude in terms per entity, so a plan that sized chunks
+/// alone would be a memory bound only for the corpus it was measured on.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TextIndexPlan {
+    chunk_entities: usize,
+    worker_bytes: usize,
+    merge_slice_cap: usize,
+}
+
+/// The share of the build's memory budget the text pass may hold across all its workers.
 ///
-/// **`index = true`** is the obvious one: the column is declared filterable, and postings are
-/// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
+/// A sixteenth, and capped: the pass runs inside the entity-order tail `residency.rs` models —
+/// every declared column is resident beside it — so this is a transient on top of the build's
+/// largest resident set, not a stage with the machine to itself. A sixteenth of an auto-derived
+/// budget on a 48 GB box is the 2 GiB cap.
 ///
-/// **`visibility = "derived"`** is the other, and it is *not* optional. That control gates the
-/// existence of a value name, and the gate is membership-derived: a value is offered only if the
-/// principal can see an item carrying it (per-point-attributes §3.3). Deriving that needs the
-/// per-`(column, code)` member sets, which are exactly these postings. Without them `/v1/categories`
-/// would have to derive membership by scanning the value column per request — which is inside a
-/// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
-/// compute-admission justification ("no mask composition, no projection, no file IO") false.
+/// **It is a ceiling and not a working set.** What the pass actually holds is `threads` live
+/// workers' accumulators, and a worker reaches the budget only on a corpus whose documents are
+/// long enough to fill it: 7.4×10⁷ Overture names over 96 chunks on twelve threads spilled one run
+/// per chunk and 555 MB of run in total, so no worker came near it. The budget's job is to bound
+/// the corpus that *would* exceed it, not to describe the one that does not.
 ///
-/// So a `derived` category gets postings whatever its `index` says. This is the one place the
-/// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
-/// that does not answer identically and differ only in latency, but here a disclosure control depends
-/// on them existing.
+/// ⊘ This term is deliberately **not** added to `residency.rs`'s model. It is a sixteenth of the
+/// same budget the model is checked against, which is inside the factor of two that module states
+/// as its own error bar, and adding it would turn builds that fit today into refusals.
+const TEXT_BUDGET_SHARE: u64 = 16;
+const TEXT_BUDGET_MAX: u64 = 2 << 30;
+const TEXT_BUDGET_MIN: u64 = 128 << 20;
+
+/// The floor on a chunk: below this, splitting entity space buys nothing and costs a spill file
+/// per chunk. Every test corpus in the repository is one chunk by this rule, which is why the
+/// chunk seam below exists for the tests that need several.
+const TEXT_MIN_CHUNK_ENTITIES: usize = 1 << 16;
+
+/// The floor on a worker's byte budget, so a tiny `--memory-budget` cannot derive a plan that
+/// spills a run per document.
+const TEXT_MIN_WORKER_BYTES: usize = 8 << 20;
+
+/// What one distinct term costs the accumulator beyond its characters: the hash table's slot for
+/// a `Box<[u8]>` and a `Vec<u32>`, the allocator's rounding on both, and the load factor the table
+/// keeps. **A conservative estimate, not a measurement** — it is the input to a memory bound, so
+/// erring high spills a run early and erring low is the failure the bound exists to prevent. The
+/// characters are charged at twice their length for the same reason (malloc rounding on a short
+/// key is most of the key).
+const TEXT_TERM_ENTRY_BYTES: usize = 80;
+
+/// What one posting costs: four bytes of `u32` charged at eight, because a `Vec` grows by doubling
+/// and is on average half empty.
+const TEXT_POSTING_BYTES: usize = 8;
+
+/// Entities held as a `u32` slice for one merged term before the encode switches to Roaring.
+///
+/// **This is the merge's only unbounded term, and this is what bounds it.** A term carried by a
+/// quarter of the corpus is 10⁸ entities at 10⁹ items, which as a `Vec<u32>` is 400 MB for one
+/// record — the residency `tessera_authz::postings::encode_posting_bitmap` was added to remove
+/// from compaction's fold, for exactly this reason. Above the cap the merge accumulates into a
+/// `Bitmap` instead and encodes from that; the two encoders are byte-identical over the same set
+/// (pinned by `postings::the_bitmap_and_slice_encoders_agree_byte_for_byte`), so the cap is a
+/// memory knob and not a format decision. 16 MB, which no vocabulary reaches by accident.
+const TEXT_MERGE_SLICE_CAP: usize = 1 << 22;
+
+impl TextIndexPlan {
+    /// The plan a build's memory budget derives.
+    pub(crate) fn for_budget(budget: u64, entities: usize) -> TextIndexPlan {
+        let threads = rayon::current_num_threads().max(1);
+        let allowance = (budget / TEXT_BUDGET_SHARE).clamp(TEXT_BUDGET_MIN, TEXT_BUDGET_MAX);
+        let worker_bytes = (allowance as usize / threads).max(TEXT_MIN_WORKER_BYTES);
+        // **Eight chunks a thread, and the number is measured rather than chosen.** A
+        // segmentation's cost per entity varies by an order of magnitude with the script — the
+        // dictionary-backed scripts against the rule-based ones — and entity space is *sorted by
+        // access term*, which for a geographic corpus means sorted by country. So the slow scripts
+        // are contiguous, not spread. At two chunks a thread over 7.4×10⁷ Overture names, 23 of
+        // the 24 chunks finished within 25 s of each other and the twenty-fourth ran alone for a
+        // further 90 s: the stage's wall time was one chunk's. Splitting finer costs a little more
+        // spill (a term repeated in more runs) and buys most of that tail back, and it costs
+        // no memory at all — the budget below is per *worker*, and only `threads` of them are ever
+        // live, however many chunks there are. At eight the same column's chunk pass finished in
+        // ~80 s against ~115 s, and the stage in 96.35 s against 148.00 s.
+        //
+        // ⊘ **The tail is smaller, not gone.** Four of the 96 chunks still ran ~60 s after the
+        // other 92 had finished, so most of the chunk pass is still one region's segmentation.
+        // Splitting finer again would need the fan-in raised with it, and is worth about a
+        // further 30 s on this corpus — measured, not modelled, and not taken.
+        let chunk_entities = entities
+            .div_ceil((threads * 8).max(1))
+            .max(TEXT_MIN_CHUNK_ENTITIES);
+        TextIndexPlan {
+            chunk_entities,
+            worker_bytes,
+            merge_slice_cap: TEXT_MERGE_SLICE_CAP,
+        }
+    }
+
+    /// An explicit plan, for the tests that must force several chunks and several runs a chunk out
+    /// of a corpus small enough to assert over.
+    #[cfg(test)]
+    fn explicit(
+        chunk_entities: usize,
+        worker_bytes: usize,
+        merge_slice_cap: usize,
+    ) -> TextIndexPlan {
+        TextIndexPlan {
+            chunk_entities: chunk_entities.max(1),
+            worker_bytes: worker_bytes.max(1),
+            merge_slice_cap,
+        }
+    }
+}
+
 /// One text column's entity-space index: the per-layer token dictionary and the postings over it.
 ///
 /// **The dictionary's ordinals are positions in the sorted distinct term set**, exactly as a
 /// keyword's are in its key set, and the postings are written in that same order — so posting *i*
-/// belongs to the *i*-th key the dictionary holds. The accumulator is a `HashMap` and the order is
-/// restored by **one explicit sort** below: a hash map's iteration order is not an order at all,
-/// and emitting from it would make the dictionary — and so every ordinal in the postings — a
-/// function of the hasher's seed. The sort is a total order because the keys are distinct, so the
-/// emitted sequence is exactly the one a `BTreeMap` accumulator produced. What the map buys is the
-/// accumulation: ~10⁷ distinct terms take ~2×10⁸ lookups over a corpus this size, and a B-tree
-/// spends ~7 cache-missing levels on each of them.
+/// belongs to the *i*-th key the dictionary holds. Both files are produced by one pass over one
+/// sorted term stream, so an ordinal cannot drift between them: the ordinal a term gets is the one
+/// [`tessera_filter::SortedDictWriter::push`] returns, and the record encoded against it is
+/// appended to the postings spool before the next term is read.
+///
+/// # The shape: chunk, spill, merge
+///
+/// **The accumulator used to be one `HashMap` over the whole corpus, and that was a memory cost
+/// with no ceiling.** Every distinct term in the corpus and every posting of every term were live
+/// at once, then copied whole into a `Vec` for the sort before a byte was written — a function of
+/// corpus size with nothing to bound it, in the same file whose category emit bands its own
+/// transient to a constant the caller chooses. It was also entirely serial, over the most
+/// expensive per-entity work the build does.
+///
+/// So the pass is now three steps:
+///
+/// 1. **Chunk.** Entity space is split into contiguous ascending ranges ([`TextIndexPlan`]) and the
+///    ranges are indexed in parallel. Each worker accumulates its own `(term → entities)` map.
+/// 2. **Spill.** A worker writes its map out as a **sorted run** ([`crate::spill::TextRunWriter`])
+///    when its tracked footprint reaches the plan's per-worker budget, and again at the end of its
+///    chunk. So a worker's residency is the budget whatever the documents are, and the run count
+///    grows instead of the peak.
+/// 3. **Cascade**, where there are more runs than one merge may hold file descriptors for
+///    ([`TEXT_MERGE_FAN_IN`]). Groups of runs are merged into intermediate runs, in order, until
+///    what is left fits in one merge. Nothing but a very large corpus reaches this.
+/// 4. **Merge.** The runs are merged k-way on the term, and each merged term's entity lists are
+///    concatenated in run order. That is what makes the entity lists ascending *for free*: chunks
+///    partition entity space ascending, a worker's runs are emitted in the order it walked its
+///    chunk, and the run list is held in that same order — so concatenation is already sorted and
+///    no per-term sort exists anywhere in the pass.
+///
+/// **The output is a function of the corpus alone, never of the plan.** The dictionary is the
+/// sorted distinct term set and a posting is the set of entities carrying its term; neither
+/// depends on where a chunk boundary fell or how often a worker spilled.
+/// [`tests::chunking_the_text_index_does_not_change_its_bytes`] is the assertion, over a corpus
+/// whose entity count straddles the chunk sizes it is emitted under — a boundary that split a
+/// term's postings between two runs and lost one half would otherwise be invisible.
+///
+/// # What each step costs, and what bounds it
+///
+/// * The chunk pass holds `threads × worker_bytes`, which is [`TEXT_BUDGET_SHARE`] of the build's
+///   memory budget. Nothing in it scales with the corpus.
+/// * The merge holds one open reader per run — a read buffer and the head *term*, never the head's
+///   entities, which is why [`crate::spill::TextRunReader`] decodes a record's postings only when
+///   they are asked for. The run count is capped by the cascade, so this is a constant too.
+/// * One merged term's entity list is capped at [`TEXT_MERGE_SLICE_CAP`], above which it
+///   accumulates into a Roaring bitmap and encodes through the byte-identical bitmap encoder.
+///
+/// # The pieces that did not change
 ///
 /// **A term's first sighting is the only one that allocates.** The analyser hands back borrowed
-/// tokens ([`tessera_analyse::Analyser::for_each_token`]) and the lookup is by `&str`, so a term
-/// already in the map costs no `String` — where `tokens()` allocated one per token occurrence and
-/// the map dropped all but the first.
+/// tokens ([`tessera_analyse::Analyser::for_each_token`]) and the lookup is by `&[u8]`, so a term
+/// already in the map costs no allocation.
 ///
 /// **The postings stream through [`tessera_authz::postings::PostingsSpool`]** rather than being
-/// collected. Buffering held three live copies of the whole posting set — the per-term entity
-/// lists, a `Vec<Vec<u8>>` of every encoded record, and the Arrow builder's copy of those — and the
-/// spool's module doc argues its byte-identity with the buffered writer, which is what makes this a
-/// second access rather than a second format.
+/// collected, and the dictionary through [`tessera_filter::SortedDictWriter`]: neither file is
+/// ever held whole in memory.
 ///
 /// **A term repeated within one document contributes one posting entry.** The analyser keeps
 /// duplicates and order because the positional payload upgrade (§4.5) needs both; a posting is a
-/// set, so the duplicate collapses here rather than in the analyser.
+/// set, so the duplicate collapses here rather than in the analyser. Entities reach a worker
+/// ascending, so the duplicate is always the accumulator's last entry — the same `last()` test as
+/// before, and it stays correct because a chunk is an ascending range and never a scattered set.
 ///
 /// The singleton encoding is `tessera-authz`'s, unchanged: a term carried by few enough entities is
 /// a bare `u32` array rather than a serialised bitmap, which is what the string-storage campaign
@@ -2783,6 +2985,7 @@ fn write_text_index(
     column_dir: &Path,
     attribute: &crate::config::Attribute,
     values: &EntityColumn,
+    plan: TextIndexPlan,
 ) -> Result<WrittenTextIndex> {
     // The identity was resolved at the schema parse; the name is its first component. Resolving it
     // again here rather than threading an `Analyser` down keeps the build's contract with the
@@ -2811,13 +3014,94 @@ fn write_text_index(
             ))
         })?;
 
-    let mut terms: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
-    // The analyser's normalisation buffer, held across the whole column rather than per document.
+    // ---- 1. the chunk pass, in parallel, spilling sorted runs -------------------------------
+    let chunks: Vec<(usize, usize)> = (0..values.len())
+        .step_by(plan.chunk_entities)
+        .map(|lo| (lo, (lo + plan.chunk_entities).min(values.len())))
+        .collect();
+    // **One analyser, shared.** Its construction deserialises the segmenter's dictionary data —
+    // the cost the type exists to amortise — and it holds no per-document state, so it is `Sync`
+    // and the workers borrow it. What each worker does hold of its own is the normalisation
+    // scratch, which is per document by nature.
+    let receipts: Vec<Vec<spill::SpillReceipt>> = chunks
+        .par_iter()
+        .enumerate()
+        .map(|(chunk, &(lo, hi))| {
+            index_text_chunk(
+                column_dir,
+                chunk,
+                lo,
+                hi,
+                values,
+                attribute,
+                &analyser,
+                plan.worker_bytes,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Flattened in chunk order, and each chunk's own runs in the order it wrote them: the merge
+    // concatenates a term's entity lists in exactly this order, and it is ascending in entity only
+    // because this order is.
+    let receipts: Vec<spill::SpillReceipt> = receipts.into_iter().flatten().collect();
+
+    // ---- 2. the cascade, where a corpus produced more runs than one merge may hold open ------
+    let receipts = cascade_text_runs(column_dir, receipts)?;
+
+    // ---- 3. the merge: one sorted term stream into both files -------------------------------
+    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
+    let postings_path = column_dir.join("postings.arrow");
+    // Beside the file it assembles, and removed by `finish` — the spool-then-assemble discipline
+    // this repo applies to every file whose records are sized as they are written. A build that
+    // fails here leaves the spool behind with the rest of the half-written partition.
+    let spool_path = postings_path.with_extension("spool");
+    let terms = merge_text_runs(
+        &dict_path,
+        &postings_path,
+        &spool_path,
+        &receipts,
+        plan.merge_slice_cap,
+    )?;
+    fsync_file(&dict_path)?;
+    fsync_file(&postings_path)?;
+    for receipt in &receipts {
+        std::fs::remove_file(&receipt.path).map_err(|e| BuildError::io(&receipt.path, e))?;
+    }
+
+    Ok(WrittenTextIndex {
+        paths: vec![dict_path, postings_path],
+        terms,
+    })
+}
+
+/// Index one contiguous entity range, spilling one or more sorted runs.
+///
+/// The worker's whole residency is `terms`, and it is what the byte budget bounds: the tracked
+/// figure is an estimate ([`TEXT_TERM_ENTRY_BYTES`]) rather than an allocator reading, so it is
+/// deliberately generous. A run is spilled the moment the estimate reaches the budget — mid
+/// document is not possible, because the check sits between documents, so the true overshoot is
+/// one document's terms.
+#[allow(clippy::too_many_arguments)]
+fn index_text_chunk(
+    column_dir: &Path,
+    chunk: usize,
+    lo: usize,
+    hi: usize,
+    values: &EntityColumn,
+    attribute: &crate::config::Attribute,
+    analyser: &tessera_analyse::Analyser,
+    worker_bytes: usize,
+) -> Result<Vec<spill::SpillReceipt>> {
+    let mut receipts = Vec::new();
+    let mut terms: std::collections::HashMap<Box<[u8]>, Vec<u32>> =
+        std::collections::HashMap::new();
+    let mut bytes = 0usize;
+    let mut seq = 0usize;
+    // The analyser's normalisation buffer, held across the whole chunk rather than per document.
     let mut scratch = tessera_analyse::TokenScratch::default();
     // **Absent runs are skipped a word at a time**, not an entity at a time: presence is a bit
     // vector, one column of this corpus is 84.5% absent, and the alternative is a call and a shift
     // per entity to learn nothing.
-    for entity in values.present_entities() {
+    for entity in values.present_entities_in(lo, hi) {
         // Absence is `Null`, and the empty string is a value a corpus may hold — the same
         // out-of-band rule the string families share. Neither yields a term.
         //
@@ -2834,57 +3118,359 @@ fn write_text_index(
         analyser.for_each_token(prose, &mut scratch, &mut |token| {
             // Looked up before it is owned: a term already seen costs no allocation, which over a
             // corpus is every occurrence but the first of every word.
-            if let Some(postings) = terms.get_mut(token) {
+            if let Some(postings) = terms.get_mut(token.as_bytes()) {
                 // Entities arrive ascending, so the duplicate a repeated term produces is always
                 // the last entry — no sort and no set needed to collapse it.
                 if postings.last() != Some(&entity) {
                     postings.push(entity);
+                    bytes += TEXT_POSTING_BYTES;
                 }
             } else {
-                terms.insert(token.to_string(), vec![entity]);
+                terms.insert(token.as_bytes().into(), vec![entity]);
+                bytes += TEXT_TERM_ENTRY_BYTES + 2 * token.len() + TEXT_POSTING_BYTES;
             }
         });
+        if bytes >= worker_bytes {
+            spill_text_run(column_dir, chunk, &mut seq, &mut terms, &mut receipts)?;
+            bytes = 0;
+        }
+    }
+    spill_text_run(column_dir, chunk, &mut seq, &mut terms, &mut receipts)?;
+    Ok(receipts)
+}
+
+/// Sort a worker's accumulator by term and write it out as one run, leaving the accumulator empty.
+///
+/// The sort is over **borrowed keys**: a `Vec<(Box<[u8]>, Vec<u32>)>` of the map's contents would
+/// be the same second copy of every term the whole-corpus accumulator paid at its one sort, only
+/// per run. Replacing the map rather than clearing it is what makes the byte budget mean
+/// something — a cleared table keeps its capacity, so the next fill would count from zero against
+/// memory that was never released.
+fn spill_text_run(
+    column_dir: &Path,
+    chunk: usize,
+    seq: &mut usize,
+    terms: &mut std::collections::HashMap<Box<[u8]>, Vec<u32>>,
+    receipts: &mut Vec<spill::SpillReceipt>,
+) -> Result<()> {
+    if terms.is_empty() {
+        return Ok(());
+    }
+    let path = column_dir.join(format!("text-run-{chunk:05}-{seq:04}.spill"));
+    let mut writer = spill::TextRunWriter::create(&path)?;
+    {
+        let mut order: Vec<&[u8]> = terms.keys().map(|key| &**key).collect();
+        order.sort_unstable();
+        for term in order {
+            writer.push(term, &terms[term])?;
+        }
+    }
+    receipts.push(writer.finish()?);
+    *terms = std::collections::HashMap::new();
+    *seq += 1;
+    Ok(())
+}
+
+/// A k-way merge over open run cursors, yielding each distinct term once with its entities in
+/// ascending order.
+///
+/// The heap holds **run indices**, and the comparison reaches into the readers — so a term is
+/// never copied into the heap and the merge allocates nothing per record. Ties break by run index,
+/// which is what puts the runs carrying one term in ascending entity order: the run list is held
+/// in chunk order, chunks partition entity space ascending, and a worker's own runs are in the
+/// order it walked its chunk.
+struct TextRunMerge {
+    cursors: Vec<spill::TextRunReader>,
+    heap: Vec<usize>,
+    /// The selected term. Held as bytes because that is what the cursors compare on, and because
+    /// the caller needs it after the runs carrying it have left the heap.
+    term: Vec<u8>,
+    /// The runs whose head is the selected term, ascending — drained in this order.
+    selected: Vec<usize>,
+    /// Entities the selected term carries across all of them.
+    postings: u64,
+}
+
+impl TextRunMerge {
+    fn open(receipts: &[spill::SpillReceipt]) -> Result<TextRunMerge> {
+        let mut cursors: Vec<spill::TextRunReader> = Vec::with_capacity(receipts.len());
+        let mut heap: Vec<usize> = Vec::with_capacity(receipts.len());
+        for receipt in receipts {
+            let mut reader = spill::TextRunReader::open(receipt)?;
+            // A run with no terms at all — an empty chunk — verifies its receipt here and takes no
+            // place in the heap.
+            if reader.advance()? {
+                heap.push(cursors.len());
+            }
+            cursors.push(reader);
+        }
+        for root in (0..heap.len() / 2).rev() {
+            text_heap_sift_down(&mut heap, &cursors, root);
+        }
+        Ok(TextRunMerge {
+            cursors,
+            heap,
+            term: Vec::new(),
+            selected: Vec::new(),
+            postings: 0,
+        })
     }
 
-    // The dictionary's order, restored once. Distinct keys, so this is a total order and the
-    // sequence is the `BTreeMap` accumulator's exactly — see the doc above on why the sort is
-    // mandatory rather than tidy.
-    let mut terms: Vec<(String, Vec<u32>)> = terms.into_iter().collect();
-    terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    /// Select the next distinct term, or `false` when every run is exhausted. The previous term's
+    /// runs are advanced here rather than by the caller, so a caller that took fewer entities than
+    /// the term carried still leaves the stream where the next record starts.
+    fn next_term(&mut self) -> Result<bool> {
+        for &run in &self.selected {
+            if self.cursors[run].advance()? {
+                text_heap_push(&mut self.heap, &self.cursors, run);
+            }
+        }
+        self.selected.clear();
+        self.postings = 0;
+        let Some(&first) = self.heap.first() else {
+            return Ok(false);
+        };
+        self.term.clear();
+        self.term.extend_from_slice(self.cursors[first].term());
+        while self
+            .heap
+            .first()
+            .is_some_and(|&top| self.cursors[top].term() == self.term.as_slice())
+        {
+            let top = text_heap_pop(&mut self.heap, &self.cursors);
+            self.postings += self.cursors[top].pending() as u64;
+            self.selected.push(top);
+        }
+        Ok(true)
+    }
 
-    let dict_path = column_dir.join(tessera_filter::DICT_FILE);
-    tessera_filter::write_sorted_dict(&dict_path, terms.iter().map(|(term, _)| term.as_str()))
-        .map_err(|e| BuildError::io(&dict_path, std::io::Error::from(e)))?;
-    fsync_file(&dict_path)?;
+    fn term(&self) -> &[u8] {
+        &self.term
+    }
 
-    let postings_path = column_dir.join("postings.arrow");
-    // Beside the file it assembles, and removed by `finish` — the spool-then-assemble discipline
-    // this repo applies to every file whose records are sized as they are written. A build that
-    // fails here leaves the spool behind with the rest of the half-written partition.
-    let spool_path = postings_path.with_extension("spool");
-    let mut spool = tessera_authz::postings::PostingsSpool::create(&spool_path)
-        .map_err(|e| BuildError::io(&spool_path, e))?;
-    let count = terms.len() as u64;
-    for (ordinal, (_, entities)) in terms.into_iter().enumerate() {
-        let record = tessera_authz::postings::encode_posting(
-            ordinal,
-            &entities,
-            SMALL_TERM_THRESHOLD_DEFAULT,
-        )
-        .map_err(|e| BuildError::io(&postings_path, e))?;
+    /// How many entities the selected term carries. Known before a single one is decoded, which is
+    /// what lets the caller choose an encoder without buffering to find out.
+    fn postings(&self) -> u64 {
+        self.postings
+    }
+
+    /// Feed the selected term's entities to `sink`, ascending, checking the ascent as it goes.
+    ///
+    /// The check is over the *merged* list, not each run's: a run's own ascent is the writer's
+    /// business, and what could go wrong here is the run ordering. `encode_posting` re-checks the
+    /// slice path, but the bitmap path has no such check to make — a `Bitmap` is a set — which is
+    /// why the test lives here rather than there.
+    fn drain(&mut self, sink: &mut impl FnMut(u32) -> Result<()>) -> Result<()> {
+        let mut last: Option<u32> = None;
+        for &run in &self.selected {
+            self.cursors[run].take_entities(&mut |entity| {
+                if let Some(previous) = last {
+                    if entity <= previous {
+                        return Err(BuildError::Invalid(format!(
+                            "text run merge: entity {entity} does not ascend past {previous} — \
+                             the runs were not merged in entity order"
+                        )));
+                    }
+                }
+                last = Some(entity);
+                sink(entity)
+            })?;
+        }
+        Ok(())
+    }
+}
+
+/// Runs opened at once by one merge.
+///
+/// **A merge holds a file descriptor per run, and the run count is a function of the corpus.** A
+/// worker spills whenever its budget fills, so a corpus far larger than memory produces far more
+/// runs than a process may hold open — which would be `EMFILE` at hour two on exactly the corpus
+/// this whole shape exists to make buildable. Above the cap the runs are merged in passes: groups
+/// of [`TEXT_MERGE_FAN_IN`] into one intermediate run each, until what is left fits in one merge.
+/// An intermediate run is written by the same writer as a worker's, so the cascade adds a pass and
+/// not a format.
+///
+/// A hundred and twenty-eight, which is comfortably under the 1,024 soft limit a Linux process
+/// ordinarily starts with and above the run count an ordinary corpus produces — 7.4×10⁷ Overture
+/// names at eight chunks a thread on twelve cores is 96 runs, one merge and no cascade. The passes
+/// are sequential: the cascade is I/O and the final merge is sequential anyway, so running the
+/// groups in parallel would buy a fraction of a rare path at the cost of multiplying the very
+/// descriptor count the cap exists to hold down — `threads × fan-in` is not a number this can
+/// bound on a machine whose core count it does not know.
+const TEXT_MERGE_FAN_IN: usize = 128;
+
+/// Reduce `receipts` to at most [`TEXT_MERGE_FAN_IN`] runs, deleting each pass's inputs as it goes.
+///
+/// Groups are taken in order and each group merges in order, so the entity ordering the final
+/// merge relies on survives every pass.
+fn cascade_text_runs(
+    column_dir: &Path,
+    mut receipts: Vec<spill::SpillReceipt>,
+) -> Result<Vec<spill::SpillReceipt>> {
+    let mut pass = 0usize;
+    while receipts.len() > TEXT_MERGE_FAN_IN {
+        let mut merged = Vec::with_capacity(receipts.len().div_ceil(TEXT_MERGE_FAN_IN));
+        for (group, runs) in receipts.chunks(TEXT_MERGE_FAN_IN).enumerate() {
+            let path = column_dir.join(format!("text-merge-{pass:02}-{group:05}.spill"));
+            let mut merge = TextRunMerge::open(runs)?;
+            let mut writer = spill::TextRunWriter::create(&path)?;
+            while merge.next_term()? {
+                let count = u32::try_from(merge.postings()).map_err(|_| {
+                    BuildError::Invalid(format!(
+                        "text run merge: term {:?} carries more entities than a u32 can count",
+                        String::from_utf8_lossy(merge.term())
+                    ))
+                })?;
+                writer.begin(merge.term(), count)?;
+                merge.drain(&mut |entity| writer.push_entity(entity))?;
+            }
+            merged.push(writer.finish()?);
+            // Deleted per group rather than per pass: a corpus that reaches the cascade at all is
+            // one whose runs are large, and holding a whole pass's inputs beside a whole pass's
+            // outputs would double the spill's peak on disk for no reason.
+            for receipt in runs {
+                std::fs::remove_file(&receipt.path)
+                    .map_err(|e| BuildError::io(&receipt.path, e))?;
+            }
+        }
+        receipts = merged;
+        pass += 1;
+    }
+    Ok(receipts)
+}
+
+/// Merge the sorted runs into the dictionary and the postings, and return the term count.
+fn merge_text_runs(
+    dict_path: &Path,
+    postings_path: &Path,
+    spool_path: &Path,
+    receipts: &[spill::SpillReceipt],
+    merge_slice_cap: usize,
+) -> Result<u64> {
+    let mut merge = TextRunMerge::open(receipts)?;
+
+    let dict_file = std::fs::File::create(dict_path).map_err(|e| BuildError::io(dict_path, e))?;
+    let mut dict = tessera_filter::SortedDictWriter::new(std::io::BufWriter::new(dict_file))
+        .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+    let mut spool = tessera_authz::postings::PostingsSpool::create(spool_path)
+        .map_err(|e| BuildError::io(spool_path, e))?;
+
+    let mut entities: Vec<u32> = Vec::new();
+    let mut staged: Vec<u32> = Vec::new();
+    let mut written = 0u64;
+
+    while merge.next_term()? {
+        let term = std::str::from_utf8(merge.term()).map_err(|e| {
+            BuildError::Invalid(format!(
+                "text run merge: a term is not UTF-8 ({e}) — the analyser emits `&str`, so this \
+                 is a corrupted run rather than a corpus value"
+            ))
+        })?;
+        let ordinal = dict
+            .push(term)
+            .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+
+        let record = if merge.postings() <= merge_slice_cap as u64 {
+            entities.clear();
+            merge.drain(&mut |entity| {
+                entities.push(entity);
+                Ok(())
+            })?;
+            tessera_authz::postings::encode_posting(
+                ordinal as usize,
+                &entities,
+                SMALL_TERM_THRESHOLD_DEFAULT,
+            )
+            .map_err(|e| BuildError::io(postings_path, e))?
+        } else {
+            // The cap's other side: a term this large is one record, and holding it as `u32`s
+            // would be the only term in the pass whose residency the plan does not bound.
+            let mut bitmap = croaring::Bitmap::new();
+            staged.clear();
+            merge.drain(&mut |entity| {
+                staged.push(entity);
+                if staged.len() >= TEXT_MERGE_STAGE_ENTITIES {
+                    bitmap.add_many(&staged);
+                    staged.clear();
+                }
+                Ok(())
+            })?;
+            if !staged.is_empty() {
+                bitmap.add_many(&staged);
+                staged.clear();
+            }
+            tessera_authz::postings::encode_posting_bitmap(&bitmap, SMALL_TERM_THRESHOLD_DEFAULT)
+                .map_err(|e| BuildError::io(postings_path, e))?
+        };
         spool
             .append(&record)
-            .map_err(|e| BuildError::io(&spool_path, e))?;
+            .map_err(|e| BuildError::io(spool_path, e))?;
+        written += 1;
     }
-    spool
-        .finish(&postings_path)
-        .map_err(|e| BuildError::io(&postings_path, e))?;
-    fsync_file(&postings_path)?;
 
-    Ok(WrittenTextIndex {
-        paths: vec![dict_path, postings_path],
-        terms: count,
-    })
+    dict.finish()
+        .map_err(|e| BuildError::io(dict_path, std::io::Error::from(e)))?;
+    spool
+        .finish(postings_path)
+        .map_err(|e| BuildError::io(postings_path, e))?;
+    Ok(written)
+}
+
+/// Entities staged before each hand-off to croaring in the merge's bitmap arm — the same batching
+/// `tessera_roaring` uses, and for the same reason: `add_many` amortises over a run of values.
+const TEXT_MERGE_STAGE_ENTITIES: usize = 1 << 16;
+
+/// Order two runs by their head term, ties broken by run index so that equal terms leave the heap
+/// in ascending entity order.
+fn text_run_before(cursors: &[spill::TextRunReader], a: usize, b: usize) -> bool {
+    match cursors[a].term().cmp(cursors[b].term()) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => a < b,
+    }
+}
+
+fn text_heap_sift_down(heap: &mut [usize], cursors: &[spill::TextRunReader], mut node: usize) {
+    loop {
+        let left = node * 2 + 1;
+        if left >= heap.len() {
+            return;
+        }
+        let right = left + 1;
+        let child = if right < heap.len() && text_run_before(cursors, heap[right], heap[left]) {
+            right
+        } else {
+            left
+        };
+        if !text_run_before(cursors, heap[child], heap[node]) {
+            return;
+        }
+        heap.swap(node, child);
+        node = child;
+    }
+}
+
+fn text_heap_push(heap: &mut Vec<usize>, cursors: &[spill::TextRunReader], run: usize) {
+    heap.push(run);
+    let mut node = heap.len() - 1;
+    while node > 0 {
+        let parent = (node - 1) / 2;
+        if !text_run_before(cursors, heap[node], heap[parent]) {
+            return;
+        }
+        heap.swap(node, parent);
+        node = parent;
+    }
+}
+
+fn text_heap_pop(heap: &mut Vec<usize>, cursors: &[spill::TextRunReader]) -> usize {
+    let top = heap[0];
+    let last = heap.pop().expect("the heap is not empty");
+    if !heap.is_empty() {
+        heap[0] = last;
+        text_heap_sift_down(heap, cursors, 0);
+    }
+    top
 }
 
 /// One text column's index: the files written, and the term count [`BuildStage::TextIndex`]
@@ -2894,6 +3480,25 @@ struct WrittenTextIndex {
     terms: u64,
 }
 
+/// Does this column owe a postings file?
+///
+/// Two independent reasons, and the second is the one a reader will not expect.
+///
+/// **`index = true`** is the obvious one: the column is declared filterable, and postings are
+/// how a broad-coverage filter stays inside its latency budget (filter-index §2.3).
+///
+/// **`visibility = "derived"`** is the other, and it is *not* optional. That control gates the
+/// existence of a value name, and the gate is membership-derived: a value is offered only if the
+/// principal can see an item carrying it (per-point-attributes §3.3). Deriving that needs the
+/// per-`(column, code)` member sets, which are exactly these postings. Without them `/v1/categories`
+/// would have to derive membership by scanning the value column per request — which is inside a
+/// *filter's* latency budget but not inside this endpoint's, and would make contracts §3.2's
+/// compute-admission justification ("no mask composition, no projection, no file IO") false.
+///
+/// So a `derived` category gets postings whatever its `index` says. This is the one place the
+/// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
+/// that does not answer identically and differ only in latency, but here a disclosure control depends
+/// on them existing.
 fn postings_are_owed(schema: &crate::config::Schema, attribute: &crate::config::Attribute) -> bool {
     if attribute.index {
         return true;
@@ -3563,6 +4168,199 @@ mod tests {
             }],
             "the public category's value is the blob row"
         );
+    }
+
+    /// **The chunking must not be observable in the artefact.** A chunk boundary is a place one
+    /// worker's accumulator ends and another's begins, and a run boundary is a place one worker
+    /// spills mid-chunk — so a column emitted in one chunk and the same column emitted in chunks
+    /// of seven have to be the same two files. That is what makes the plan a memory knob rather
+    /// than a format decision, and it is the assertion an off-by-one at a boundary fails: a term
+    /// whose postings split across two runs and lost half of them changes only the bytes.
+    ///
+    /// The plans below straddle deliberately. `1` and `7` do not divide the corpus and do not
+    /// align to the 64-entity words presence is stored in; `64` and `128` align exactly; `4_096`
+    /// is one chunk for the whole column. The byte budgets force between one and dozens of runs a
+    /// chunk, and the merge-slice caps put the same corpus through both posting encoders — a term
+    /// carried by every entity goes through the `u32` slice under the large cap and through
+    /// Roaring under the small one, and the two must agree byte for byte.
+    #[test]
+    fn chunking_the_text_index_does_not_change_its_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attribute = text_fixture_attribute();
+        let values = EntityColumn::from_values(
+            ScalarType::Text,
+            (0..N_TEXT).map(text_fixture_prose),
+            "abstract",
+        )
+        .expect("typed column");
+
+        let mut files: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+        for (k, plan) in [
+            TextIndexPlan::explicit(4_096, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(1, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(7, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(64, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(128, 1 << 30, 1 << 22),
+            TextIndexPlan::explicit(999, 1 << 30, 1 << 22),
+            // The byte budget, forcing several runs inside one chunk — including one small
+            // enough that every document spills.
+            TextIndexPlan::explicit(4_096, 1, 1 << 22),
+            TextIndexPlan::explicit(4_096, 4_096, 1 << 22),
+            TextIndexPlan::explicit(1_000, 4_096, 1 << 22),
+            // The merge's other encoder: a cap of 1 sends every term above one posting through
+            // the Roaring arm.
+            TextIndexPlan::explicit(4_096, 1 << 30, 1),
+            TextIndexPlan::explicit(7, 1, 1),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let column_dir = dir.path().join(format!("plan-{k}"));
+            std::fs::create_dir_all(&column_dir).expect("column dir");
+            let written =
+                write_text_index(&column_dir, &attribute, &values, plan).expect("text index");
+            assert_eq!(
+                written.terms,
+                expected_text_postings().len() as u64,
+                "plan {k} wrote the wrong term count"
+            );
+            // Nothing but the two artefacts is left behind: every run this plan spilled is gone.
+            let left: Vec<String> = std::fs::read_dir(&column_dir)
+                .expect("read dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".spill"))
+                .collect();
+            assert!(left.is_empty(), "plan {k} left {left:?} behind");
+            files.push((
+                std::fs::read(column_dir.join(tessera_filter::DICT_FILE)).expect("dict"),
+                std::fs::read(column_dir.join("postings.arrow")).expect("postings"),
+            ));
+        }
+        let (dict, postings) = files.first().expect("at least one plan").clone();
+        for (k, emitted) in files.iter().enumerate().skip(1) {
+            assert_eq!(emitted.0, dict, "plan {k}'s dictionary differs");
+            assert_eq!(emitted.1, postings, "plan {k}'s postings differ");
+        }
+    }
+
+    /// And the index says what the column says: every term the analyser produces is a key, and its
+    /// posting is exactly the entities whose prose carries it — read back through the readers that
+    /// will serve it, over a plan of many chunks and many runs apiece, so what is asserted is the
+    /// merge's output and not one worker's accumulator.
+    #[test]
+    fn the_merged_text_index_holds_every_term_and_the_entities_carrying_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let values = EntityColumn::from_values(
+            ScalarType::Text,
+            (0..N_TEXT).map(text_fixture_prose),
+            "abstract",
+        )
+        .expect("typed column");
+        write_text_index(
+            dir.path(),
+            &text_fixture_attribute(),
+            &values,
+            TextIndexPlan::explicit(97, 2_048, 1 << 22),
+        )
+        .expect("text index");
+
+        let dict = tessera_filter::SortedDict::open(
+            &dir.path().join(tessera_filter::DICT_FILE),
+            tessera_filter::Access::Read,
+        )
+        .expect("the token dictionary opens");
+        let postings = tessera_authz::postings::PostingsReader::open(
+            &dir.path().join("postings.arrow"),
+            false,
+        )
+        .expect("the postings open");
+
+        let expected = expected_text_postings();
+        assert_eq!(dict.len() as usize, expected.len());
+        assert_eq!(postings.term_count() as usize, expected.len());
+        for (ordinal, (term, entities)) in expected.iter().enumerate() {
+            assert_eq!(
+                dict.resolve(term).expect("a readable dictionary"),
+                Some(ordinal as u32),
+                "term {term:?} is at the wrong ordinal"
+            );
+            let posting = postings
+                .posting_at(ordinal as u32)
+                .expect("a readable posting")
+                .expect("every term in the dictionary has a posting");
+            let got: Vec<u32> = match posting {
+                tessera_authz::postings::PostingRef::Array(bytes) => bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes(c.try_into().expect("four bytes")))
+                    .collect(),
+                tessera_authz::postings::PostingRef::Roaring(view) => view.iter().collect(),
+            };
+            assert_eq!(&got, entities, "term {term:?} carries the wrong entities");
+        }
+    }
+
+    /// The corpus both text tests read. 4,096 entities, and every shape the emit has to survive:
+    /// a term carried by every entity (well past the Roaring threshold and past a 64-entity
+    /// presence word), terms carried by exactly one, a term repeated inside one document, mixed
+    /// scripts, whole absent runs longer than a presence word, and the empty string — which is a
+    /// legal value that yields no term, and is not absence.
+    const N_TEXT: usize = 4_096;
+
+    fn text_fixture_attribute() -> crate::config::Attribute {
+        crate::config::Attribute {
+            name: "abstract".to_string(),
+            field: None,
+            title: None,
+            ty: ScalarType::Text,
+            analyser: Some(
+                tessera_analyse::analyser(tessera_analyse::UNICODE)
+                    .expect("the unicode analyser ships")
+                    .identity(),
+            ),
+            vocabulary: None,
+            value_set: None,
+            index: true,
+            render: false,
+        }
+    }
+
+    fn text_fixture_prose(entity: usize) -> ScalarValue {
+        // A 64-entity absent run, word-aligned, and a second one that is not.
+        if (256..320).contains(&entity) || (1_001..1_101).contains(&entity) {
+            return ScalarValue::Null;
+        }
+        if entity.is_multiple_of(313) {
+            return ScalarValue::Utf8(String::new());
+        }
+        let mut prose = format!("common item{entity}");
+        match entity % 5 {
+            0 => prose.push_str(" quick brown fox"),
+            1 => prose.push_str(" quick quick silver"),
+            2 => prose.push_str(" 日本語のテキスト quick"),
+            3 => prose.push_str(" Ω STRASSE ﬁle"),
+            _ => prose.push_str(" brown bear"),
+        }
+        ScalarValue::Utf8(prose)
+    }
+
+    /// The expected `(term, entities)` set, derived from the fixture through the analyser itself —
+    /// the same route `tessera tokenise` gives the conformance oracle, so this asserts the index
+    /// against the analyser rather than against a second tokeniser that could drift.
+    fn expected_text_postings() -> Vec<(String, Vec<u32>)> {
+        let analyser = tessera_analyse::analyser(tessera_analyse::UNICODE).expect("the analyser");
+        let mut terms: std::collections::BTreeMap<String, Vec<u32>> = Default::default();
+        for entity in 0..N_TEXT {
+            let ScalarValue::Utf8(prose) = text_fixture_prose(entity) else {
+                continue;
+            };
+            for token in analyser.tokens(&prose) {
+                let postings = terms.entry(token).or_default();
+                if postings.last() != Some(&(entity as u32)) {
+                    postings.push(entity as u32);
+                }
+            }
+        }
+        terms.into_iter().collect()
     }
 
     /// **The band count must not be observable in the artefact.** A band boundary is a place the
