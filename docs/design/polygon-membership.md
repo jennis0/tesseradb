@@ -1,18 +1,12 @@
 # Shape membership — requirements and design
 
-**Status:** **Draft r5 — designed, reviewed and owner-ruled 2026-08-29; promotion waits on stage 2's
-first measurements (§9).** §2 is the requirements set the owner directed on 2026-08-27 and is
-unchanged. §3 onward is the design, drafted against the provisional
-[`selection-operand.md`](selection-operand.md) so that a published boundary and a drawn lasso are
-one mechanism asked at two times (R13). The eight rulings of §13 are taken and the adversarial
-review's seventeen findings are dispositioned in Appendix R — four of them changed what is held
-and when it is built (§6.3). **Stages 1 and 2 are built** (2026-08-29): the core, and the artifact
-type — the four kinds, the blob, the held structures, the flush's resolution, the build's and the
-check's reports, `PUT /control/layers`. **Stage 3 is built** (2026-08-29): the wire's one drawn
-geometry per artifact, `shape_x`/`shape_y`, the `shape` ask, the vertex rule at serve, the three
-authored content kinds, `/v1/meta`'s kind, and the client drawing every kind through one path.
-Stage 4 — the region leaf — is not. It amends `configuration.md` §1 and `annotations.md` §4.2 at
-the sites §12 names, and `contracts.md` §3.2 at r45.
+**Status:** **Normative — 2026-08-29 (r6).** Designed, taken through one adversarial review
+(Appendix R, r4), owner-ruled (§13), and **built in four stages the same day** (§12), each in its
+own worktree and gate-green: the core, the artifact type, the wire and client, the region leaf.
+The figures in §9 are measured on one Overture part; the world-scale figures stay modelled and
+say so. What remains unbuilt is scoped out in §11 — `wgs84` shapes wait on `projections.md`,
+saving a selection as a shape waits on the edit pass, and the export verb — and each is marked ⊘
+at its claim. §2 is the requirements set the owner directed on 2026-08-27, unchanged.
 
 The document is named for the polygon because that is the consumer that forced it; the design is
 for **shapes** — box, circle, ellipse and polygon — with one semantics (§4.1).
@@ -994,3 +988,6 @@ kind in one column pair (§7.1), views sharing a coordinate system sharing a sha
 flush resolving membership before publish (§6.3). Also from the owner's questions the same day:
 the flush is a per-row source and the serving layout is chosen rather than fixed (§6.2, §6.3), with
 the precomputation trade stated against the delivery record's 78.5 GB / 4 GB measurement (§9).
+
+**r6 (2026-08-29).** Promoted to Normative on the four stages landing (§12) — the last, the
+region leaf, promoting `selection-operand.md` with it and removing `architecture.md` §8.2's ⊘.
