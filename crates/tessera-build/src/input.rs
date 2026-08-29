@@ -1426,7 +1426,7 @@ pub fn read_vocabulary_file(
 /// `minters` is threaded through rather than owned here so the caller can hand its final state —
 /// every binding this scan minted, on top of whatever the schema seeded it with — to the manifest
 /// writer once the whole scan (there is exactly one, per build) has completed.
-pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
+pub fn scan_attributes<F: FnMut(u64, &mut Vec<ScalarValue>)>(
     path: &Path,
     fields: &Fields,
     schema_decl: &crate::config::Schema,
@@ -1500,11 +1500,15 @@ pub fn scan_attributes<F: FnMut(u64, &[ScalarValue])>(
             if limit.is_some_and(|l| entity_id >= l) {
                 continue;
             }
+            // **Handed over rather than lent**: the visitor moves each value into its staging
+            // column, where borrowing it made every string in the source a second copy for the
+            // one line that landed it. The clear here is what makes that safe — a visitor that
+            // drains leaves nothing, one that returns early leaves a row this overwrites.
             row_values.clear();
             for (attribute, column) in columns.iter().zip(&decoded) {
                 row_values.push(column.value(row, attribute, schema_decl)?);
             }
-            visit(entity_id, &row_values);
+            visit(entity_id, &mut row_values);
         }
     }
     Ok(())

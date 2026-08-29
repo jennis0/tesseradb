@@ -980,13 +980,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                         return;
                     };
                     matched_rows += 1;
-                    for ((&column, value), count) in
-                        group.attributes.iter().zip(values).zip(present.iter_mut())
+                    // Moved out of the scan's row buffer, which it clears per row — an early
+                    // return above leaves the row for that clear rather than for this loop.
+                    for ((&column, value), count) in group
+                        .attributes
+                        .iter()
+                        .zip(values.drain(..))
+                        .zip(present.iter_mut())
                     {
                         if !matches!(value, ScalarValue::Null) {
                             *count += 1;
                         }
-                        tiler_items[position].scalars[column] = value.clone();
+                        tiler_items[position].scalars[column] = value;
                     }
                 },
             )?;

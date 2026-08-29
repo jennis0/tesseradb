@@ -269,6 +269,51 @@ fn term_of(packed_entry: u64) -> u32 {
 /// Rows buffered per [`join_chunk`] flush: 2²⁶ rows × 16 B ≈ 1 GiB of transient, constant in N.
 const JOIN_CHUNK_ROWS: usize = 1 << 26;
 
+/// The attribute join's staging buffer, **in bytes**.
+///
+/// A row count is the wrong unit for this buffer, and at corpus scale it stops being a bound at
+/// all: [`JOIN_CHUNK_ROWS`] is 67,108,864, so a 73,631,092-point corpus staged 91% of itself in one
+/// chunk — a near-complete second copy of every column the source carries, two flushes, and none of
+/// the chunking the sweep is chunked for. Sized in bytes the same buffer is a constant the schema
+/// cannot inflate: a wider schema takes fewer rows per chunk and more chunks, which is what a
+/// staging buffer is supposed to do.
+///
+/// **Chunk boundaries are unobservable in the output**, which is what makes this number free to
+/// choose. Source ids are duplicate-checked before this pass, so no entity is written twice;
+/// [`join_chunk`]'s own contract leaves the order *within* a chunk unspecified; and vocabulary
+/// codes are minted in `scan_attributes`'s per-batch pre-pass, driven by parquet batch order and
+/// not by this. Nothing identity-bearing — entity ids, ordinals, minting order — is a function of
+/// where a chunk ends.
+///
+/// What it bounds is the headers: [`staging_rows`] prices a row at the join key plus each column's
+/// fixed width, and a string's *contents* ride on top of its 24-byte header, so a column of long
+/// prose overshoots this figure by whatever it averages per value.
+const JOIN_STAGE_BYTES: usize = 256 << 20;
+
+/// How many rows of `attributes` fit in [`JOIN_STAGE_BYTES`], at least one and never more than the
+/// corpus.
+fn staging_rows(attributes: &[&crate::config::Attribute], n: u64) -> usize {
+    // The join key beside each staged row — `(source_id, pos)`, 16 bytes and not the 12 an earlier
+    // comment claimed — plus one typed slot per column. Each column's presence bit adds an eighth
+    // of a byte per row on top, which is left out rather than rounded up to a whole one.
+    let per_row: usize = 16 + attributes.iter().map(|a| staged_width(a.ty)).sum::<usize>();
+    (JOIN_STAGE_BYTES / per_row).clamp(1, n.max(1) as usize)
+}
+
+/// One staged slot's width in [`ScalarColumnData`], which for the string families is the `String`
+/// header alone — the bytes it points at are the corpus's and are not this buffer's to bound.
+fn staged_width(ty: ScalarType) -> usize {
+    match ty {
+        ScalarType::Bool | ScalarType::U8 | ScalarType::I8 => 1,
+        ScalarType::U16 | ScalarType::I16 => 2,
+        ScalarType::U32 | ScalarType::I32 | ScalarType::F32 => 4,
+        ScalarType::U64 | ScalarType::I64 | ScalarType::F64 | ScalarType::TimestampUs => 8,
+        ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+            std::mem::size_of::<String>()
+        }
+    }
+}
+
 /// Resolve a chunk of `(source_id, payload)` rows to ordinals by sorting the chunk and merging
 /// it against the sorted `source_ids` in one sequential sweep. See the module docs: this is how
 /// every pass maps ids to ordinals without assuming anything about the ids' shape, and without
@@ -1864,10 +1909,9 @@ fn read_one_attribute_source(
     // not — but a tenth of what was asserted.
     //
     // Chunked, both sides ascend and the sweep is sequential, which is the same trade the geometry
-    // pass makes for the same reason. The cost is a staging buffer: `chunk` at 12 B/row plus one
-    // typed row per column, ~1.6 GB at `JOIN_CHUNK_ROWS` — transient, freed here, and bounded by
-    // the corpus only through the `min` below.
-    let staged_rows = JOIN_CHUNK_ROWS.min(n as usize).max(1);
+    // pass makes for the same reason. The cost is a staging buffer, and **it is sized in bytes**:
+    // see [`JOIN_STAGE_BYTES`] for why a row count is the wrong unit here.
+    let staged_rows = staging_rows(attributes, n);
     let mut staged: Vec<EntityColumn> = attributes
         .iter()
         .map(|a| EntityColumn::filled(a.ty, staged_rows))
@@ -1923,9 +1967,14 @@ fn read_one_attribute_source(
         args.limit,
         |source_id, values| {
             let pos = chunk.len();
-            for ((column, value), attribute) in staged.iter_mut().zip(values).zip(attributes.iter())
+            // Drained, not cloned: the scan's row buffer is cleared per row, so a value moved out
+            // here costs a pointer where a clone cost a copy of every string in the source.
+            for ((column, value), attribute) in staged
+                .iter_mut()
+                .zip(values.drain(..))
+                .zip(attributes.iter())
             {
-                if let Err(e) = column.set(pos, value.clone(), &attribute.name) {
+                if let Err(e) = column.set(pos, value, &attribute.name) {
                     mistyped.get_or_insert_with(|| e.to_string());
                 }
             }
