@@ -665,37 +665,32 @@ direction 2026-08-24). The demo's `clusters.json` sidecar is retired at §9 step
 
 ### 5.11 Selection — box and lasso
 
-The wire has no spatial operand: the request's bbox is the only region there is, and
-client-interaction §9 rules that selection should become a **content-addressed filter operand**
-— composable with other filters, cached like them, with the matched-versus-visible highlight for
-free. ⊘ That operand is not built, for a rectangle or a polygon. What follows is what a
-selection can do with the wire as it is, what waits on the operand, and how the two are kept
-apart on screen.
+**A selection is a filter** *(r-next, 2026-08-29; [`selection-operand.md`](selection-operand.md),
+Normative; the shape work's stage 4)*. The wire has the spatial operand client-interaction §9
+asked for: the `region` leaf — a box or a lasso in the view's own coordinates, or a published
+shape by its `tessera_id` — composable with the other filters, cached per generation, exact for
+the shape against each point's stored position. The store composes the selection into **every**
+request's `filters` (`all_of` with the draft's expression; `none_of` over the leaf for *outside*),
+so the marks, every count and each artifact's `matched` bit narrow to it the moment it settles,
+and the region's own count is the presented frame's `matched` sum — **no counting request of its
+own**, no rasterisation, no tile bound, no depth walk. `region` carries `matched` (the items
+inside that the other filters admit), `visible` (the region alone — the same number while no other
+filter is on, and `null` while one is, the frame having answered a narrower question), `served`
+(the held marks inside against `matched`, a sample, so both figures always — P2) and the wire's
+`verdict`: `Masked.exact` is true when `x-tessera-region` said `exact` **and** the replica holds
+every tile of the shape's extent at the frame's depth; a cover — a shape whose perimeter exceeded
+the deployment's `max_region_cells` — or a frame that did not cover the shape renders inexact.
+The live highlight while dragging is the client's own computation (P1) by **the server's own
+predicate** — even-odd over the 32-bit grid, a point on an edge inside, in exact integer
+arithmetic — so the highlight and the count agree along the edge; the highlight is the shape the
+user drew, never the cells (decision 0097).
 
-**With the wire as it is.** A viewport response is per-tile counts plus points. A drawn region
-is answered by one counting request (`k = 0`, as the artifact channel asks) in the **`tiles`
-form** (contracts §3.2): the store rasterises the shape to Morton prefixes at a depth chosen so
-the request stays under a client-side bound of a few thousand tiles — never "as deep as a
-pixel", which for a full-screen box is 10⁶ tiles against a `max_tiles_per_request` of 262,144
-and a response of megabytes — and asks for exactly those cells, so the sum is the answer to the
-question asked rather than a bbox count subsetted afterwards. The sum is licensed by
-derivability (client-interaction P3: it equals what the request returns); the live highlight
-while dragging is the client's own computation (P1). **The highlight is the shape the user
-drew** — the tile grid is a fact about storage and is never shown (owner direction
-2026-08-24) — and `region` carries the depth it was counted at: where a counted cell exceeds a
-screen pixel at the current view, the region's `Masked`s are **not exact**, and render as such,
-because a number that is exact for a cell cover the user cannot see is not exact for the shape
-they can. The cell grid is 2¹⁶ per axis, so that is the ordinary case at the overview and the
-exception once zoomed in. The served items inside are the held marks whose positions fall in
-the shape — a sample, so `served` is a `Count` whose `total` is the region's `matched` (P2: both
-numbers, always). One request per settled gesture, debounced like the artifact channel.
-
-**What waits on the operand**, greyed with the reason on hover rather than omitted: *filter to
-this* (the selection composed with the other filters, so the counts and the map narrow to it)
-is the operand; *export* (the items in the region as a table) is client-interaction §8.1's
-bulk-export verb with its refusing threshold; *save as artifact* (a per-analyst selection,
-annotations §8.3) is the runtime-artifact path artifact-system §10 lists as not built. Each is a
-server-side verb, asked for in D11.
+*Filter to this* on the artifact card and *outside this* beside it are the leaf by artifact,
+under the artifact's own verdict. What still waits, greyed with the reason on hover: *export*
+(the items in the region as a table) is client-interaction §8.1's bulk-export verb with its
+refusing threshold, ⊘ `POST /v1/region`, specified and unbuilt; *save as artifact* (a
+per-analyst selection, annotations §8.3) is the runtime-artifact path artifact-system §10 lists
+as not built.
 
 Undrawn items are never painted into the mark layer (client-interaction §9): the region's list
 is a panel, and the map highlights only what it already draws.

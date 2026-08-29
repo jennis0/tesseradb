@@ -860,6 +860,12 @@ struct RawServe {
     #[serde(default)]
     max_shape_vertices: Option<u64>,
     #[serde(default)]
+    max_region_vertices: Option<u64>,
+    #[serde(default)]
+    max_region_cells: Option<usize>,
+    #[serde(default)]
+    region_cache_bytes: Option<u64>,
+    #[serde(default)]
     session_credential_file: Option<PathBuf>,
     #[serde(default)]
     session_credential_env: Option<String>,
@@ -970,6 +976,19 @@ pub struct Config {
     /// is a `422` naming the count and the cap. Published on `/v1/meta`. The held decomposition
     /// is reported and never capped; this bounds the one input a caller can simplify.
     pub max_shape_vertices: u64,
+    /// The most vertices a `region` filter leaf's polygon may carry (selection-operand §2): over
+    /// it the request is a `422` naming the count and the cap. Published on `/v1/meta`'s
+    /// `selection` block. A vertex count is the caller's own arithmetic, which is why this one
+    /// refuses where `max_region_cells` does not.
+    pub max_region_vertices: u64,
+    /// The most boundary cells a `region` leaf's decomposition may hold at one depth
+    /// (selection-operand §6). **Not a refusal**: over it the descent stops at the deepest depth
+    /// that fits and the answer is a cover, said on `x-tessera-region`. Published on `/v1/meta`.
+    pub max_region_cells: usize,
+    /// The byte bound on the region decomposition cache (`tessera_engine::region`), which is
+    /// shared across principals and pruned per generation; a decomposition is a perimeter's worth
+    /// of work, so a bound that evicts costs latency and nothing else.
+    pub region_cache_bytes: u64,
     /// Emit `x-tessera-stage-ns` on viewport responses. **Fails closed**: absent means false, and
     /// even true does nothing in a binary built without the `bench-timing` feature. The header
     /// carries only durations and row counts — no identifier, no per-principal label (SA §9) —
@@ -1193,6 +1212,18 @@ const DEFAULT_MAX_TILES_PER_REQUEST: usize = 262_144;
 /// thousands of values, where an unpaged response is megabytes against a measured 79 KB viewport
 /// response and, being per-principal, shares no cache with anyone.
 const DEFAULT_MAX_CATEGORY_VALUES: usize = 1_000;
+
+/// A `region` leaf's vertex cap. A lasso is drawn with a mouse at one vertex per pointer event, so
+/// a few hundred is an elaborate one; ten thousand leaves room for a client that hands over a
+/// polygon it holds rather than one it drew, and stays well inside what the descent's per-edge
+/// cost makes a millisecond's work. The publication cap (`max_shape_vertices`) is two orders
+/// larger because a held shape pays its decomposition once.
+const DEFAULT_MAX_REGION_VERTICES: u64 = 10_000;
+
+/// The region decomposition cache's bound. A whole-world box at the cell budget is a few
+/// megabytes of ranges and contexts; this holds dozens of such shapes, and an ordinary lasso is
+/// kilobytes.
+const DEFAULT_REGION_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The compute pool should fill the machine. `available_parallelism` fails only when the OS
 /// genuinely cannot answer the question (SA has no fallback story for that host); treated as 1
@@ -2546,6 +2577,18 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_shape_vertices
             .unwrap_or(tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES),
+        max_region_vertices: raw
+            .serve
+            .max_region_vertices
+            .unwrap_or(DEFAULT_MAX_REGION_VERTICES),
+        max_region_cells: raw
+            .serve
+            .max_region_cells
+            .unwrap_or(tessera_engine::DEFAULT_MAX_REGION_CELLS),
+        region_cache_bytes: raw
+            .serve
+            .region_cache_bytes
+            .unwrap_or(DEFAULT_REGION_CACHE_BYTES),
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
         dev_cors_origins,
         cors_origins,

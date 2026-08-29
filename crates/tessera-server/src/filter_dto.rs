@@ -28,10 +28,13 @@
 //! this path is forbidden to act on, per the rule above. So the client may use whichever it holds —
 //! and it holds codes, since the points batch ships codes and nothing else.
 
+use std::sync::Arc;
+
 use serde_json::Value;
 
-use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, Scalar};
-use tessera_types::AttrLocalId;
+use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, RegionLeaf, Scalar};
+use tessera_engine::shapes::{Bounds, CanonError, ShapeF64};
+use tessera_types::{AttrLocalId, TesseraId};
 
 use crate::error::ApiError;
 
@@ -41,16 +44,25 @@ use crate::error::ApiError;
 use tessera_engine::filter::UNRESOLVABLE_VALUE as UNRESOLVABLE_ID;
 const UNRESOLVABLE: u32 = UNRESOLVABLE_ID.raw();
 
+/// What a `region` leaf is canonicalised against (selection-operand §2, `polygon-membership.md`
+/// §4.3–§4.4): the request's view's extent, and the deployment's vertex cap.
+pub struct RegionContext {
+    pub extent: Bounds,
+    pub max_vertices: u64,
+}
+
 /// Parse `filters` into an expression, or refuse.
 ///
 /// `family_of` reports a column's family, or `None` for a name that is not a declared filterable
-/// column. `resolve` maps `(column, key)` to a code.
+/// column. `resolve` maps `(column, key)` to a code. `region` is what a `region` leaf's geometry
+/// is quantised against.
 pub fn parse(
     filters: &Value,
     family_of: &dyn Fn(&str) -> Option<Family>,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
+    region: &RegionContext,
 ) -> Result<FilterExpr, ApiError> {
-    parse_node(filters, family_of, resolve)
+    parse_node(filters, family_of, resolve, region)
 }
 
 fn bad(detail: impl Into<String>) -> ApiError {
@@ -61,6 +73,7 @@ fn parse_node(
     node: &Value,
     family_of: &dyn Fn(&str) -> Option<Family>,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
+    region: &RegionContext,
 ) -> Result<FilterExpr, ApiError> {
     let obj = node
         .as_object()
@@ -84,7 +97,7 @@ fn parse_node(
             })?;
             let kids = arr
                 .iter()
-                .map(|k| parse_node(k, family_of, resolve))
+                .map(|k| parse_node(k, family_of, resolve, region))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(match combinator {
                 "all_of" => FilterExpr::AllOf(kids),
@@ -97,6 +110,9 @@ fn parse_node(
                 _ => FilterExpr::NoneOf(kids),
             })
         }
+        // **The reserved word, before any column** (selection-operand §2): the build refuses a
+        // column of this name, so the key can mean one thing.
+        tessera_engine::filter::REGION_COLUMN => Ok(FilterExpr::Region(parse_region(body, region)?)),
         column => {
             // **An unknown column is an error; an unknown value is not.** See the module header.
             let Some(family) = family_of(column) else {
@@ -111,6 +127,164 @@ fn parse_node(
             })
         }
     }
+}
+
+/// A `region` leaf's body: exactly one of `polygon`, `bbox`, `circle`, `ellipse` — with `space`,
+/// `view` if absent — or `artifact` (`polygon-membership.md` §8).
+///
+/// **Geometry is canonicalised here, at the boundary**, against the view's extent and through the
+/// same `fixed32` the tiler applies to a point, so what the engine holds is the grid-unit form
+/// and two callers drawing one shape send one value. What refuses: a coordinate that is not one,
+/// an inverted box, a non-positive radius or axis, too few vertices, too many (`422` naming the
+/// count and the cap), an unknown key, and `wgs84` — refused naming `projections.md`, no view
+/// projecting anything yet (§4.3, ruling (f)). A shape wholly outside the extent is not refused:
+/// it holds no rows, and a request may ask that.
+fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiError> {
+    let obj = body
+        .as_object()
+        .ok_or_else(|| bad("`region` takes an object with exactly one of polygon, bbox, circle, ellipse or artifact"))?;
+    const KINDS: [&str; 5] = ["polygon", "bbox", "circle", "ellipse", "artifact"];
+    let named: Vec<&str> = obj
+        .keys()
+        .map(String::as_str)
+        .filter(|k| KINDS.contains(k))
+        .collect();
+    if named.len() != 1 {
+        return Err(bad(format!(
+            "`region` takes exactly one of polygon, bbox, circle, ellipse or artifact; this one \
+             carries {}",
+            if named.is_empty() {
+                "none".to_string()
+            } else {
+                named.join(", ")
+            }
+        )));
+    }
+    for key in obj.keys() {
+        if key != named[0] && key != "space" {
+            return Err(bad(format!(
+                "`region` takes {} and `space`, not '{key}'",
+                named[0]
+            )));
+        }
+    }
+    let kind = named[0];
+    match obj.get("space").and_then(Value::as_str) {
+        None => {}
+        Some("view") => {}
+        Some("wgs84") => {
+            return Err(bad(
+                "`region.space = \"wgs84\"` is refused: no view projects anything yet \
+                 (`projections.md` is provisional), so a shape in degrees cannot be quantised \
+                 into the view's grid — send the shape in the view's own space (`view`)",
+            ))
+        }
+        Some(other) => {
+            return Err(bad(format!(
+                "`region.space` is `view` or `wgs84`, not '{other}'"
+            )))
+        }
+    }
+    if obj.contains_key("space") && obj.get("space").and_then(Value::as_str).is_none() {
+        return Err(bad("`region.space` is a string"));
+    }
+    if kind == "artifact" {
+        if obj.contains_key("space") {
+            return Err(bad("`region.artifact` names a published shape and carries no `space`"));
+        }
+        let id = match &obj["artifact"] {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.parse::<u64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| bad("`region.artifact` is a tessera_id — a whole number, or its decimal string"))?;
+        return Ok(RegionLeaf::Artifact(TesseraId::new(id)));
+    }
+    let number = |v: &Value, what: &str| -> Result<f64, ApiError> {
+        v.as_f64()
+            .filter(|f| f.is_finite())
+            .ok_or_else(|| bad(format!("`region.{kind}`: {what} must be a finite number")))
+    };
+    let numbers = |n: usize| -> Result<Vec<f64>, ApiError> {
+        let arr = obj[kind].as_array().ok_or_else(|| {
+            bad(format!("`region.{kind}` takes an array of {n} numbers"))
+        })?;
+        if arr.len() != n {
+            return Err(bad(format!(
+                "`region.{kind}` takes {n} numbers, not {}",
+                arr.len()
+            )));
+        }
+        arr.iter().map(|v| number(v, "each entry")).collect()
+    };
+    let shape = match kind {
+        "polygon" => {
+            let arr = obj["polygon"]
+                .as_array()
+                .ok_or_else(|| bad("`region.polygon` takes an array of [x, y] vertices"))?;
+            if arr.len() < 3 {
+                return Err(bad(format!(
+                    "`region.polygon` needs at least three vertices; this one has {}",
+                    arr.len()
+                )));
+            }
+            if arr.len() as u64 > ctx.max_vertices {
+                return Err(bad(format!(
+                    "`region.polygon` carries {} vertices; the deployment's `max_region_vertices` \
+                     is {} (`/v1/meta`'s selection block). Simplify the shape before sending it",
+                    arr.len(),
+                    ctx.max_vertices
+                )));
+            }
+            let mut ring = Vec::with_capacity(arr.len());
+            for v in arr {
+                let pair = v
+                    .as_array()
+                    .filter(|p| p.len() == 2)
+                    .ok_or_else(|| bad("`region.polygon`: each vertex is [x, y]"))?;
+                ring.push((number(&pair[0], "x")?, number(&pair[1], "y")?));
+            }
+            ShapeF64::Polygon(vec![vec![ring]])
+        }
+        "bbox" => {
+            let b = numbers(4)?;
+            ShapeF64::Bbox {
+                min_x: b[0],
+                min_y: b[1],
+                max_x: b[2],
+                max_y: b[3],
+            }
+        }
+        "circle" => {
+            let c = numbers(3)?;
+            ShapeF64::Circle {
+                cx: c[0],
+                cy: c[1],
+                r: c[2],
+            }
+        }
+        "ellipse" => {
+            let e = numbers(5)?;
+            ShapeF64::Ellipse {
+                cx: e[0],
+                cy: e[1],
+                a: e[2],
+                b: e[3],
+                angle_degrees: e[4],
+            }
+        }
+        _ => unreachable!("the kind was checked against the five"),
+    };
+    let (canonical, _report) = shape.canonical(&ctx.extent).map_err(|e| match e {
+        CanonError::NotFinite => bad(format!("`region.{kind}`: a coordinate is not finite")),
+        CanonError::InvertedBox => bad(
+            "`region.bbox` is [x0, y0, x1, y1] with x0 <= x1 and y0 <= y1",
+        ),
+        CanonError::NonPositiveAxis => bad(format!(
+            "`region.{kind}`: the radius and the axes must be positive"
+        )),
+    })?;
+    Ok(RegionLeaf::Shape(Arc::new(canonical)))
 }
 
 fn parse_operand(
@@ -415,9 +589,106 @@ mod tests {
         }
     }
 
+    fn region_ctx() -> RegionContext {
+        RegionContext {
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            max_vertices: 8,
+        }
+    }
+
     fn parse_str(text: &str) -> Result<FilterExpr, ApiError> {
         let v: Value = serde_json::from_str(text).unwrap();
-        parse(&v, &schema("department"), &codes)
+        parse(&v, &schema("department"), &codes, &region_ctx())
+    }
+
+    #[test]
+    fn a_region_polygon_parses_to_its_canonical_shape() {
+        let expr = parse_str(r#"{"region": {"polygon": [[0, 0], [500, 0], [500, 500], [0, 500]]}}"#)
+            .unwrap();
+        let FilterExpr::Region(RegionLeaf::Shape(shape)) = expr else {
+            panic!("a region leaf");
+        };
+        assert_eq!(shape.vertex_count(), 4);
+        // The same shape with `space = "view"` is the same value.
+        let again = parse_str(
+            r#"{"region": {"polygon": [[0, 0], [500, 0], [500, 500], [0, 500]], "space": "view"}}"#,
+        )
+        .unwrap();
+        assert_eq!(again, FilterExpr::Region(RegionLeaf::Shape(shape)));
+    }
+
+    #[test]
+    fn a_region_bbox_circle_and_ellipse_parse() {
+        for text in [
+            r#"{"region": {"bbox": [10, 10, 20, 20]}}"#,
+            r#"{"region": {"circle": [500, 500, 100]}}"#,
+            r#"{"region": {"ellipse": [500, 500, 100, 50, 30]}}"#,
+        ] {
+            assert!(matches!(
+                parse_str(text).unwrap(),
+                FilterExpr::Region(RegionLeaf::Shape(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn a_region_by_artifact_takes_an_integer_or_its_decimal_string() {
+        for text in [r#"{"region": {"artifact": 42}}"#, r#"{"region": {"artifact": "42"}}"#] {
+            assert_eq!(
+                parse_str(text).unwrap(),
+                FilterExpr::Region(RegionLeaf::Artifact(TesseraId::new(42)))
+            );
+        }
+    }
+
+    #[test]
+    fn a_region_refuses_what_it_must() {
+        for (text, needle) in [
+            // Two vertices is not a polygon.
+            (r#"{"region": {"polygon": [[0, 0], [1, 1]]}}"#, "at least three"),
+            // Over the cap, naming the count and the cap.
+            (
+                r#"{"region": {"polygon": [[0,0],[1,0],[2,0],[3,0],[4,0],[5,0],[6,0],[7,0],[8,0]]}}"#,
+                "9 vertices; the deployment's `max_region_vertices` is 8",
+            ),
+            // Two kinds, or none.
+            (r#"{"region": {"bbox": [0,0,1,1], "circle": [0,0,1]}}"#, "exactly one of"),
+            (r#"{"region": {}}"#, "exactly one of"),
+            // `wgs84` names the design that would admit it.
+            (r#"{"region": {"bbox": [0,0,1,1], "space": "wgs84"}}"#, "projections.md"),
+            (r#"{"region": {"bbox": [0,0,1,1], "space": "utm"}}"#, "`view` or `wgs84`"),
+            // The canonical form's own refusals.
+            (r#"{"region": {"bbox": [5,5,1,1]}}"#, "x0 <= x1"),
+            (r#"{"region": {"circle": [5,5,0]}}"#, "positive"),
+            // An unknown key beside the kind.
+            (r#"{"region": {"bbox": [0,0,1,1], "depth": 4}}"#, "not 'depth'"),
+            // An artifact carries no space.
+            (r#"{"region": {"artifact": 1, "space": "view"}}"#, "carries no `space`"),
+        ] {
+            let err = parse_str(text).unwrap_err();
+            let ApiError::Contract(detail) = err else {
+                panic!("{text}: expected a 422, got {err:?}");
+            };
+            assert!(detail.contains(needle), "{text}: {detail}");
+        }
+    }
+
+    #[test]
+    fn a_region_composes_and_negates_like_any_leaf() {
+        let expr = parse_str(
+            r#"{"all_of": [{"department": {"eq": "eng"}},
+                           {"none_of": [{"region": {"bbox": [0, 0, 10, 10]}}]}]}"#,
+        )
+        .unwrap();
+        let FilterExpr::AllOf(kids) = expr else {
+            panic!("all_of");
+        };
+        assert!(matches!(kids[1], FilterExpr::NoneOf(_)));
     }
 
     #[test]

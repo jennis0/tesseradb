@@ -2555,6 +2555,7 @@ impl WritePath {
                     live,
                     generation,
                     row_projection_cache,
+                    region_cache: flush.region_cache,
                     artifact_projections: flush.artifact_projections,
                     shapes: flush.shapes,
                     lineages: flush.lineages,
@@ -3470,6 +3471,12 @@ pub(crate) struct MaintenanceDeps {
     /// per-session value, so leaving it to the first request after the flip is a stall of tens of
     /// seconds for whoever arrives first.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The region decompositions (`crate::region`), pruned of superseded generations at every
+    /// geometry swap exactly as the row-projection cache is — a row-space artefact keyed on a
+    /// generation is unusable after it (I11), and only retention is left to do.
+    pub(crate) region_cache: Arc<
+        crate::single_flight::SingleFlightCache<crate::region::RegionKey, crate::region::RegionDecomposition>,
+    >,
     /// The spatial levels' held shapes and per-segment pieces (`crate::shapes`) — filled by the
     /// flush before its publication, rebuilt at a publication into a shape layer, re-resolved at
     /// the fold and the merge.
@@ -4418,6 +4425,10 @@ struct Executor {
     /// projections of generations now older than the retention depth. Runs at the swap — see
     /// `RowProjectionCache::prune_generations_below`.
     row_projection_cache: Arc<RowProjectionCache>,
+    /// See [`MaintenanceDeps::region_cache`].
+    region_cache: Arc<
+        crate::single_flight::SingleFlightCache<crate::region::RegionKey, crate::region::RegionDecomposition>,
+    >,
     /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
     /// [`MaintenanceDeps::artifact_projections`].
     artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
@@ -4665,6 +4676,14 @@ struct Executor {
 }
 
 impl Executor {
+    /// Drop the region decompositions of generations older than the retention depth — the same
+    /// pass, at the same swap, as `RowProjectionCache::prune_generations_below`.
+    fn prune_region_cache(&self, segments_version: u64) {
+        let floor = segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS);
+        self.region_cache
+            .retain_keys(|key| key.segments_version >= floor);
+    }
+
     /// Drain deny to empty, then execute **at most one** work item, then repeat — blocking only
     /// once both queues have been *observed* empty.
     ///
@@ -5195,6 +5214,7 @@ impl Executor {
 
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.prune_region_cache(segments_version);
         self.health.merges.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -11079,6 +11099,7 @@ impl Executor {
         // generation itself is held by nothing but the requests already in flight against it.
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.prune_region_cache(segments_version);
         self.health.flushes.fetch_add(1, Ordering::Relaxed);
         self.health.record_tier_fragmentation(completed.tier_tally);
 
@@ -11357,6 +11378,7 @@ impl Executor {
         // would delete the input to the very patch it exists to enable.
         self.row_projection_cache
             .prune_generations_below(segments_version.saturating_sub(KEEP_SUPERSEDED_GENERATIONS));
+        self.prune_region_cache(segments_version);
         Ok(())
     }
 

@@ -308,6 +308,14 @@ async fn meta(
             // caller can simplify before submitting rather than learn the number from a `422`.
             // A deployment constant, identical for every principal.
             "max_shape_vertices": state.max_shape_vertices,
+            // The `region` leaf's two bounds (selection-operand §2), on the same argument: a
+            // client choosing a shape is choosing a cost, and a refusal it cannot predict is
+            // indistinguishable from its own arithmetic being wrong. Over the first is a `422`
+            // naming the count and the cap; over the second is **not a refusal** — the answer
+            // is a cover, said on `x-tessera-region`. Deployment constants, identical for every
+            // principal.
+            "max_region_vertices": state.max_region_vertices,
+            "max_region_cells": state.max_region_cells,
         },
         // The annotation layers this principal may know exist, and what each declared.
         //
@@ -687,6 +695,9 @@ struct FirstFlush {
     coordinates: tessera_engine::ViewCoordinates,
     stamp: GenerationStamp,
     stale: bool,
+    /// The region leaves' verdict — the `x-tessera-region` header, absent when the request
+    /// carried none.
+    region: Option<tessera_engine::RegionVerdict>,
     /// The serialised tiles frame plus, when the §3.3 underlay was requested, the sub-cells
     /// frame — the body's first bytes, prepended ahead of the channel.
     first_frames: Vec<u8>,
@@ -831,6 +842,7 @@ impl ViewportSink for WireSink {
             coordinates: head.coordinates,
             stamp: head.stamp.clone(),
             stale: head.stale,
+            region: head.region,
             first_frames: frames,
             server_us: self.start.elapsed().as_micros() as u64,
         };
@@ -973,6 +985,18 @@ fn run_viewport_stream(
                 .iter()
                 .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
                 .collect();
+            // A `region` leaf is canonicalised here, against the view's own extent — the one
+            // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
+            // every coordinate refusal are `422`s before any compute (selection-operand §2).
+            let region = crate::filter_dto::RegionContext {
+                extent: tessera_engine::shapes::Bounds {
+                    x_min: meta.quantisation.x_min,
+                    x_max: meta.quantisation.x_max,
+                    y_min: meta.quantisation.y_min,
+                    y_max: meta.quantisation.y_max,
+                },
+                max_vertices: state.max_region_vertices,
+            };
             match crate::filter_dto::parse(
                 value,
                 &|column| filterable.get(column).copied(),
@@ -980,6 +1004,7 @@ fn run_viewport_stream(
                     let vocabulary = vocab_of.get(column)?;
                     meta.vocabularies.get(vocabulary)?.code_of(key)
                 },
+                &region,
             ) {
                 Ok(expr) => Some(expr),
                 // The pre-first-flush channel, the same one an engine refusal takes: nothing is
@@ -1392,6 +1417,14 @@ async fn viewport(
         .header("x-tessera-stale", if first.stale { "1" } else { "0" })
         .header("x-tessera-server-us", first.server_us.to_string())
         .header("x-tessera-admission-us", admission_us.to_string());
+    // The region verdict (selection-operand §6), on `x-tessera-stale`'s precedent: a client
+    // reading counts alone should not have to decode a batch to learn whether they are exact.
+    // Absent when the request carried no region leaf. A function of the shape and the grid alone,
+    // settled before the first row was read — never of the rows.
+    let response = match first.region {
+        Some(verdict) => response.header("x-tessera-region", verdict.header_value()),
+        None => response,
+    };
 
     // No `x-tessera-stage-ns` header any more: whole-request timings cannot precede the body
     // they describe, so the stage breakdown rides the trailer frame (same double gate).

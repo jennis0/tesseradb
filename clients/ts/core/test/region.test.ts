@@ -1,129 +1,119 @@
 import {describe, expect, it} from 'vitest';
-import {MAX_DEPTH, WORLD_SIZE, tileXY} from '../src/coords.js';
-import {REGION_TILE_BOUND, cellExceedsPixel, insideBox, rasteriseBox} from '../src/region.js';
+import {WORLD_SIZE} from '../src/coords.js';
+import {insideBox, insidePolygon, parseRegionVerdict, quantise, regionOperand, withRegion} from '../src/region.js';
 
 /**
- * A box becomes one `tiles`-form request under a bound, and the count under it is typed exact
- * only where the cell is no wider than a pixel (design §5.11, decision 0097).
+ * The client's half of the region contract (`selection-operand.md` §8): the leaf's spelling, the
+ * verdict read off the wire, and the highlight's predicate — the server's own even-odd rule over
+ * the quantised grid, with a point on an edge inside and the half-open ray for a tie.
  */
 
-describe('rasteriseBox — Morton prefixes at the deepest depth under the bound', () => {
-  it('names every tile the box intersects and nothing else', () => {
-    // A quarter of the world: at depth 6 that is 32 × 32 = 1,024 tiles; depth 7 would be 4,096
-    // (exactly the bound, allowed); depth 8 overflows. So the request is at depth 7.
-    const r = rasteriseBox([0, 0, WORLD_SIZE / 2 - 1e-6, WORLD_SIZE / 2 - 1e-6]);
-    expect(r.depth).toBe(7);
-    expect(r.tiles.length).toBe(4096);
-    const xs = new Set<number>();
-    for (const t of r.tiles) {
-      const {x, y} = tileXY(t, 7);
-      expect(x).toBeLessThan(64);
-      expect(y).toBeLessThan(64);
-      xs.add(x);
-    }
-    expect(xs.size).toBe(64);
-    expect(new Set(r.tiles.map(String)).size).toBe(r.tiles.length);
-  });
+/** A world coordinate exactly on grid unit `n`. */
+const at = (n: number) => (n / 4294967296) * WORLD_SIZE;
 
-  it('never exceeds the bound, whatever the box', () => {
-    for (const box of [
-      [0, 0, WORLD_SIZE, WORLD_SIZE],
-      [10, 10, 11, 11],
-      [100, 200, 300, 220],
-      [0, 0, 0.001, 0.001]
-    ] as [number, number, number, number][]) {
-      const r = rasteriseBox(box);
-      expect(r.tiles.length).toBeLessThanOrEqual(REGION_TILE_BOUND);
-      expect(r.tiles.length).toBeGreaterThan(0);
-    }
-  });
-
-  it('goes as deep as the grid for a box smaller than a cell', () => {
-    // A sub-cell box still names the cell it falls in, at the grid's own depth.
-    const r = rasteriseBox([10, 10, 10.001, 10.001]);
-    expect(r.depth).toBe(MAX_DEPTH);
-    expect(r.tiles.length).toBe(1);
-  });
-
-  it('takes a box whose corners arrive in either order, and clamps to the world', () => {
-    const a = rasteriseBox([300, 220, 100, 200]);
-    const b = rasteriseBox([100, 200, 300, 220]);
-    expect(a).toEqual(b);
-    const c = rasteriseBox([-50, -50, WORLD_SIZE + 50, WORLD_SIZE + 50]);
-    expect(c.depth).toBe(6);
-    expect(c.tiles.length).toBe(4096);
-  });
-
-  it('honours a tighter bound', () => {
-    const r = rasteriseBox([0, 0, WORLD_SIZE, WORLD_SIZE], 16);
-    expect(r.depth).toBe(2);
-    expect(r.tiles.length).toBe(16);
+describe('quantise — the 32-bit grid the server tests on', () => {
+  it('is fixed32 restated over the world: floor, clamped to the grid', () => {
+    expect(quantise(0)).toBe(0);
+    expect(quantise(-1)).toBe(0);
+    expect(quantise(WORLD_SIZE)).toBe(4294967295);
+    expect(quantise(WORLD_SIZE / 2)).toBe(2147483648);
+    expect(quantise(at(1000))).toBe(1000);
   });
 });
 
-describe('cellExceedsPixel — the exactness rule', () => {
-  it('is the ordinary case at the overview', () => {
-    // At zoom 0 the world is 512 px, so a depth-6 cell is 8 px.
-    expect(cellExceedsPixel(6, 0)).toBe(true);
+describe('insidePolygon — even-odd on the grid, an edge inside, the half-open ray', () => {
+  const square = [
+    [at(1000), at(1000)],
+    [at(3000), at(1000)],
+    [at(3000), at(3000)],
+    [at(1000), at(3000)]
+  ] as const;
+
+  it('answers the interior and the exterior', () => {
+    expect(insidePolygon(at(2000), at(2000), square)).toBe(true);
+    expect(insidePolygon(at(500), at(2000), square)).toBe(false);
+    expect(insidePolygon(at(2000), at(3500), square)).toBe(false);
   });
-  it('is the exception once zoomed in', () => {
-    // A depth-d cell is 512 · 2^(z − d) px: one pixel exactly at z = d − 9.
-    expect(cellExceedsPixel(16, 7)).toBe(false);
-    expect(cellExceedsPixel(16, 6)).toBe(false);
-    expect(cellExceedsPixel(16, 7.5)).toBe(true);
-    expect(cellExceedsPixel(12, 3)).toBe(false);
-    expect(cellExceedsPixel(12, 4)).toBe(true);
+
+  it('counts a point on an edge, and on a vertex, as inside', () => {
+    expect(insidePolygon(at(1000), at(2000), square)).toBe(true);
+    expect(insidePolygon(at(2000), at(3000), square)).toBe(true);
+    expect(insidePolygon(at(3000), at(3000), square)).toBe(true);
+    expect(insidePolygon(at(1000), at(1000), square)).toBe(true);
+  });
+
+  it('is exact on the grid: one unit outside an edge is outside', () => {
+    expect(insidePolygon(at(999), at(2000), square)).toBe(false);
+    expect(insidePolygon(at(3001), at(2000), square)).toBe(false);
+  });
+
+  it('answers a self-crossing lasso by parity', () => {
+    // A bow tie: the two lobes are inside, the crossing's pinch is an edge.
+    const bowtie = [
+      [at(0), at(0)],
+      [at(4000), at(4000)],
+      [at(4000), at(0)],
+      [at(0), at(4000)]
+    ] as const;
+    expect(insidePolygon(at(1000), at(2000), bowtie)).toBe(true);
+    expect(insidePolygon(at(3000), at(2000), bowtie)).toBe(true);
+    expect(insidePolygon(at(2000), at(1000), bowtie)).toBe(false);
+  });
+
+  it('handles a ray through a vertex once, not twice', () => {
+    // A diamond: a horizontal ray from its centre-left passes through the left vertex's level
+    // only at the vertex itself; the half-open rule counts exactly one of the two edges there.
+    const diamond = [
+      [at(2000), at(1000)],
+      [at(3000), at(2000)],
+      [at(2000), at(3000)],
+      [at(1000), at(2000)]
+    ] as const;
+    expect(insidePolygon(at(2000), at(2000), diamond)).toBe(true);
+    expect(insidePolygon(at(500), at(2000), diamond)).toBe(false);
+    expect(insidePolygon(at(3500), at(2000), diamond)).toBe(false);
   });
 });
 
-describe('insideBox', () => {
-  it('is closed on every side', () => {
-    expect(insideBox(1, 1, [1, 1, 2, 2])).toBe(true);
-    expect(insideBox(2, 2, [1, 1, 2, 2])).toBe(true);
-    expect(insideBox(2.1, 2, [1, 1, 2, 2])).toBe(false);
+describe('insideBox — closed on every side, on the grid', () => {
+  it('includes its edges and excludes one unit past them', () => {
+    const box: [number, number, number, number] = [at(10), at(20), at(30), at(40)];
+    expect(insideBox(at(10), at(20), box)).toBe(true);
+    expect(insideBox(at(30), at(40), box)).toBe(true);
+    expect(insideBox(at(31), at(30), box)).toBe(false);
+    expect(insideBox(at(20), at(19), box)).toBe(false);
   });
 });
 
-import {insidePolygon, rasterisePolygon} from '../src/region.js';
-
-describe('the lasso — a polygon rasterised to the tiles it meets (§5.11)', () => {
-  const triangle: [number, number][] = [[0, 0], [WORLD_SIZE, 0], [0, WORLD_SIZE]];
-
-  it('counts a point inside by the even-odd rule, and one outside not', () => {
-    expect(insidePolygon(10, 10, triangle)).toBe(true);
-    expect(insidePolygon(WORLD_SIZE - 1, WORLD_SIZE - 1, triangle)).toBe(false);
-    // A self-crossing bow tie: the two lobes are inside, the crossing's outside is not.
-    const bow: [number, number][] = [[0, 0], [10, 10], [10, 0], [0, 10]];
-    expect(insidePolygon(2, 5, bow)).toBe(true);
-    expect(insidePolygon(8, 5, bow)).toBe(true);
-    expect(insidePolygon(5, 2, bow)).toBe(false);
+describe('regionOperand — the leaf as the wire takes it', () => {
+  it('normalises a box drawn from either corner', () => {
+    expect(regionOperand({kind: 'box', bbox: [5, 6, 1, 2]})).toEqual({bbox: [1, 2, 5, 6]});
   });
-
-  it('names the cells the polygon meets at the box’s depth — a superset of the shape, under the bound', () => {
-    const r = rasterisePolygon(triangle);
-    expect(r.depth).toBe(6);
-    // The lower-left half of a 64 × 64 grid plus the cells the diagonal crosses or touches.
-    expect(r.tiles.length).toBeGreaterThan(2048);
-    expect(r.tiles.length).toBeLessThanOrEqual(2048 + 128);
-    for (const t of r.tiles) {
-      const {x, y} = tileXY(t, 6);
-      expect(x + y).toBeLessThanOrEqual(64);
-    }
+  it('sends a lasso as drawn and an artifact as its id string', () => {
+    expect(regionOperand({kind: 'lasso', points: [[0, 0], [1, 0], [0, 1]]})).toEqual({polygon: [[0, 0], [1, 0], [0, 1]]});
+    expect(regionOperand({kind: 'artifact', id: 12345678901234567890n})).toEqual({artifact: '12345678901234567890'});
   });
+});
 
-  it('includes a cell the polygon crosses without holding its centre, and a cell holding a vertex', () => {
-    // A sliver one world unit wide and a thousandth tall, sitting just above a row boundary at
-    // the grid's own depth (a cell is 1/128 of a unit): no cell centre is inside, yet every cell
-    // along it is crossed by its upper edge, so all 128 are named.
-    const sliver: [number, number][] = [[1, 4.5], [2, 4.5], [2, 4.501], [1, 4.501]];
-    const r = rasterisePolygon(sliver);
-    expect(r.depth).toBe(MAX_DEPTH);
-    expect(r.tiles.length).toBeGreaterThanOrEqual(128);
-    expect(r.tiles.length).toBeLessThanOrEqual(2 * 129);
+describe('withRegion — the leaf composed with the other filters', () => {
+  const leaf = {bbox: [0, 0, 1, 1] as [number, number, number, number]};
+  it('is the leaf alone, the expression alone, or all_of the two', () => {
+    expect(withRegion(null, null)).toBeNull();
+    expect(withRegion(null, leaf)).toEqual({region: leaf});
+    expect(withRegion({a: {eq: 1}}, null)).toEqual({a: {eq: 1}});
+    expect(withRegion({a: {eq: 1}}, leaf)).toEqual({all_of: [{a: {eq: 1}}, {region: leaf}]});
   });
+  it('spells outside as none_of over the leaf', () => {
+    expect(withRegion(null, leaf, true)).toEqual({none_of: [{region: leaf}]});
+    expect(withRegion({a: {eq: 1}}, leaf, true)).toEqual({all_of: [{a: {eq: 1}}, {none_of: [{region: leaf}]}]});
+  });
+});
 
-  it('honours the bound the way the box does', () => {
-    expect(rasterisePolygon(triangle, 16).depth).toBe(2);
-    expect(rasterisePolygon(triangle, 16).tiles.length).toBeLessThanOrEqual(16);
+describe('parseRegionVerdict — x-tessera-region', () => {
+  it('reads exact, a cover at a depth, and nothing', () => {
+    expect(parseRegionVerdict('exact')).toEqual({exact: true, depth: null});
+    expect(parseRegionVerdict('cover; depth=11')).toEqual({exact: false, depth: 11});
+    expect(parseRegionVerdict(null)).toBeNull();
+    expect(parseRegionVerdict('something else')).toBeNull();
   });
 });

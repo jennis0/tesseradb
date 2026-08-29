@@ -1106,7 +1106,9 @@ direction as viewport-addressed requests. The three findings of this date are on
 **Selection should become a
 content-addressed filter operand** rather than a one-shot verb, so it composes with
 other filters, caches per §8.5, and gets §8.1's matched-versus-visible highlight
-affordance for free. And **per-scalar histograms are the one new verb mode 1 needs** —
+affordance for free — built 2026-08-29 as the `region` leaf
+([`selection-operand.md`](selection-operand.md), Normative), content-addressed on the
+canonical shape's digest per generation and shared across principals. And **per-scalar histograms are the one new verb mode 1 needs** —
 distributions are the first thing anyone plots — implementable as build-time
 bin-membership bitmaps, one `and_cardinality` per bin, no scan.
 

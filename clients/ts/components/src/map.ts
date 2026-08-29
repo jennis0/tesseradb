@@ -36,7 +36,8 @@ import {chrome, tokens} from './tokens.js';
  *
  * **Selection** (§5.11): `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` draws
  * a freehand polygon. The highlight while dragging is the shape and nothing else (decision 0097),
- * and the settled shape goes to `store.select`, which counts it over the cells it meets.
+ * and the settled shape goes to `store.select`, which puts it on every request as the `region`
+ * leaf — the map narrows to it and its count is exact for the shape (`selection-operand.md`).
  *
  * **Colour by cluster** is `colour-by="cluster:<layer>"` (§5.10): the map owns the lookup texture
  * beside the slab, and the `palette` property chooses positional or spread (decision 0099).
@@ -58,7 +59,7 @@ export type MapProbe = {
   encoding: string;
   view: {depth: number; status: string; stale: boolean; visible: number; matched: number; served: number; provisional: number};
   /** `ms` is select-to-counted, the store's own clock: the settle, the request and the sum. */
-  region: {depth: number; tiles: number; exact: boolean; visible: number; matched: number; held: number; status: string; ms: number | null} | null;
+  region: {verdict: string; exact: boolean; visible: number | null; matched: number; held: number; status: string; ms: number | null} | null;
   timings: {
     /** Per settle: the slab sync, the wash bin, the lookup texture, the outlines, the labels and the whole layer build, last values in ms. */
     slabMs: number;
@@ -446,14 +447,24 @@ export class TesseraMap extends TesseraElement {
           this.regionPolygon = null;
           this.paint();
         }
+      } else if (region.shape.kind === 'lasso') {
+        if (region.shape !== this.regionShape) {
+          this.regionShape = region.shape;
+          this.regionWorld = null;
+          this.regionPolygon = region.shape.points.map(([x, y]) => dataToWorldXY(x, y, q));
+          this.paint();
+        }
       } else if (region.shape !== this.regionShape) {
+        // An artifact selection draws no shape of its own: the map narrows to its members, and
+        // the opened artifact's outline is the drawing (`polygon-membership.md` §8).
         this.regionShape = region.shape;
         this.regionWorld = null;
-        this.regionPolygon = region.shape.points.map(([x, y]) => dataToWorldXY(x, y, q));
+        this.regionPolygon = null;
         this.paint();
       }
       const ms = region.status === 'loading' ? null : (p.region?.ms ?? performance.now() - this.regionAskedAt);
-      p.region = {depth: region.depth, tiles: region.tiles, exact: region.visible.exact, visible: region.visible.value, matched: region.matched.value, held: region.held.count, status: region.status, ms};
+      const verdict = region.verdict === null ? 'pending' : region.verdict.exact ? 'exact' : `cover; depth=${region.verdict.depth}`;
+      p.region = {verdict, exact: region.matched.exact, visible: region.visible?.value ?? null, matched: region.matched.value, held: region.held.count, status: region.status, ms};
       if (region.status !== 'loading' && region !== this.regionAnnounced) {
         this.regionAnnounced = region;
         emit(this, 'tessera-selectchange', {
@@ -462,7 +473,7 @@ export class TesseraMap extends TesseraElement {
           visible: region.visible,
           matched: region.matched,
           served: region.served,
-          depth: region.depth
+          verdict: region.verdict
         });
       }
     } else if (!region && (this.regionWorld || this.regionPolygon)) {

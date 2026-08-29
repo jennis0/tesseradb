@@ -13,7 +13,8 @@ import './count.js';
  * `<tessera-artifact-card>` — the selected artifact (design §5.3 tier 2, §6), as the boards draw
  * it: the name, its `Masked` count as *members visible to you*, its supplied description, layer
  * and key, the kind of shape its layer draws, *Children in this view* from the served set, *Fit to
- * cluster*, and *Filter to this* greyed until the region leaf is built. **Steady during a
+ * cluster*, *Filter to this* and *Outside this* — the region leaf by artifact, inside and its
+ * complement (`polygon-membership.md` §8). **Steady during a
  * pan by construction**: the count is the drill-down's, over the whole membership as this
  * principal sees it, and moves with the mask and never with the viewport. The children are a live
  * read of the served set — whatever the channel has answered for the view now.
@@ -157,7 +158,14 @@ export class TesseraArtifactCard extends TesseraElement {
             </ul>`
         : nothing}
       <button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>
-      <button part="filter" class="btn" type="button" disabled aria-disabled="true" title="Filtering to an artifact is the region leaf, not yet built (polygon-membership §8, stage 4)">Filter to this</button>
+      <button part="filter" class="btn" type="button" title="Narrow the map and every count to this artifact's members" @click=${() => {
+        s?.select({kind: 'artifact', id: artifact.id});
+        emit(this, 'tessera-selectchange', {shape: {kind: 'artifact', id: artifact.id}, status: 'loading'});
+      }}>${icon('filter', 14)}Filter to this</button>
+      <button part="outside" class="btn" type="button" title="Narrow the map and every count to what is not in this artifact" @click=${() => {
+        s?.select({kind: 'artifact', id: artifact.id, outside: true});
+        emit(this, 'tessera-selectchange', {shape: {kind: 'artifact', id: artifact.id, outside: true}, status: 'loading'});
+      }}>${icon('filter', 14)}Outside this</button>
     </div>`;
   }
 }

@@ -25,6 +25,7 @@ pub mod histogram;
 pub mod layout;
 pub mod membership_column;
 mod merge;
+pub mod region;
 pub mod shapes;
 mod refresh;
 pub mod row_column;
@@ -74,6 +75,7 @@ pub use single_flight::{CacheStats, DEFAULT_WAIT_BUDGET_MS as DEFAULT_SINGLE_FLI
 // writes `use tessera_engine::FragmentCacheStats;` and nothing else.
 pub use derived::ComputedProperty;
 pub use membership_column::MembershipColumn;
+pub use region::{RegionRows, RegionVerdict, DEFAULT_MAX_REGION_CELLS};
 pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{

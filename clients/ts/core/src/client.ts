@@ -6,6 +6,7 @@ import {
   type ViewportHead
 } from './decode.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
+import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
 import type {ArrowType, ArtifactDetail, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, Session, Shape, ShapeKind, TileCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
@@ -201,7 +202,9 @@ export class TesseraClient {
         maxK: m.selection.max_k,
         thetaTargetMarks: m.selection.theta_target_marks,
         maxUnderlayOffset: m.selection.max_underlay_offset,
-        maxCategoryValues: m.selection.max_category_values ?? 1_000
+        maxCategoryValues: m.selection.max_category_values ?? 1_000,
+        maxRegionVertices: m.selection.max_region_vertices ?? 10_000,
+        maxRegionCells: m.selection.max_region_cells ?? 262_144
       },
       // Older servers do not publish it; fall back to the documented default rather than
       // refusing to run against them.
@@ -301,7 +304,10 @@ export class TesseraClient {
       // comparison this client makes is against another value it took from this same header.
       contentKey: (response.headers.get('etag') ?? '').replace(/^"|"$/g, ''),
       pin: response.headers.get('x-tessera-pin'),
-      stale: response.headers.get('x-tessera-stale') === '1'
+      stale: response.headers.get('x-tessera-stale') === '1',
+      // Absent when the request carried no region leaf; `exact` or a cover at a depth otherwise
+      // (`selection-operand.md` §6). A header, so a counts-only reader sees it without a decode.
+      region: parseRegionVerdict(response.headers.get('x-tessera-region'))
     };
     this.decoder ??= this.opts.decoder ?? createDecoder();
     const decodeStarted = performance.now();
@@ -705,6 +711,8 @@ type RawMeta = {
     max_underlay_offset: number;
     max_tiles_per_request?: number;
     max_category_values?: number;
+    max_region_vertices?: number;
+    max_region_cells?: number;
   };
 };
 

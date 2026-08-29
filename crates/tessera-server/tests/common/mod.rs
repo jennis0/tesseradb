@@ -511,6 +511,8 @@ async fn mount_server_with_flush(
         // cursor is exercised by an ordinary request rather than only by a contrived one.
         max_category_values: 4,
         max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+        max_region_vertices: 10_000,
+        max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
         compute_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         ingest_max_batch_rows: ingest_limits.max_batch_rows,

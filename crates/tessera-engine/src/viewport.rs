@@ -877,6 +877,8 @@ pub struct ViewportOut {
     /// argument for per-session scoping survives as an efficiency argument (do not wake clients
     /// whose view did not change), not a security one.
     pub stale: bool,
+    /// See [`ViewportHead::region`].
+    pub region: Option<crate::region::RegionVerdict>,
     pub tiles: Vec<TileCount>,
     /// The annotation artifacts intersecting the request's tiles, each with the count *this*
     /// principal's visible set generates — see [`ArtifactOut`]. Empty when the principal reaches no
@@ -936,6 +938,10 @@ pub struct ViewportHead {
     pub stamp: GenerationStamp,
     /// See [`ViewportOut::stale`].
     pub stale: bool,
+    /// The region leaves' verdict — `x-tessera-region` — or `None` where the request carried no
+    /// region leaf. A function of the shapes and the grid alone, settled before any row is read
+    /// (selection-operand §6).
+    pub region: Option<crate::region::RegionVerdict>,
     /// The **render**-column schema, in declaration order, from the SAME generation the response
     /// is served from — names for the wire's column headers, types so a collecting sink can seed
     /// empty columns for a response that emits no points chunk at all.
@@ -1661,6 +1667,7 @@ impl Engine {
             coordinates: head.coordinates,
             stamp: head.stamp,
             stale: head.stale,
+            region: head.region,
             tiles: sink.tiles,
             artifacts: sink.artifacts,
             points,
@@ -1814,19 +1821,10 @@ impl Engine {
             .cloned()
             .collect();
 
-        // The head, delivered before the sweep: everything the response headers derive from is
-        // known here, and a server that waits for the first flush before committing a status
-        // needs it in hand by then. A refusal is the consumer gone — cancellation, not a fault.
-        sink.head(ViewportHead {
-            coordinates,
-            stamp: answered_from.clone(),
-            stale,
-            render_scalars: render_scalars.clone(),
-        })
-        .map_err(|SinkClosed| EngineError::Cancelled)?;
-        // Reset the clock so the head's construction and delivery are unattributed rather than
-        // silently charged to compose.
-        probe.skip();
+        // The head is delivered below, after the filter is evaluated and before the sweep: its
+        // region verdict is settled by the decomposition, which needs the tile ranges the filter
+        // is evaluated beside, and a server that waits for the first flush before committing a
+        // status has it in hand by then.
 
         // D-C checkpoint: before compose, one of the two long serial-prefix stages this task
         // guards. Placed after the (non-cancellable, D-G) row-projection build so a cancellation
@@ -2071,6 +2069,7 @@ impl Engine {
         // the answer is indistinguishable from a correct one. `/v1/categories` takes the same care
         // for the same reason. It costs nothing here: `session_geometry` above already resolved
         // the same fragment on this request, so this is the identity short-circuit or a cache hit.
+        let mut region_verdict: Option<crate::region::RegionVerdict> = None;
         let mask = match &req.filter {
             None => mask,
             Some(expr) => {
@@ -2082,9 +2081,27 @@ impl Engine {
                     &generation.overlay,
                     &generation.buffer,
                 );
+                // The region leaves' resolver (`crate::region`): a drawn shape through the
+                // generation-keyed decomposition cache, its boundary rows tested under **this
+                // request's composed mask**; a published shape through the artifact's own verdict.
+                // Closed over the mask so the boundary path cannot run without one.
+                let regions = |leaf: &crate::filter::RegionLeaf| {
+                    self.resolve_region(
+                        leaf,
+                        session,
+                        &generation,
+                        view,
+                        view_data,
+                        &segments,
+                        &mask,
+                        denied,
+                        mask_identity,
+                        &cancel,
+                    )
+                };
                 let routed = generation
                     .filter_columns
-                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total)
+                    .evaluate_routed(expr, &candidate, rows_in_ranges <= v_total, &regions)
                     .map_err(|e| {
                         // Caller's fault or the deployment's — `FilterError` decides, at the
                         // variants, because that is where the argument for each one lives.
@@ -2113,22 +2130,46 @@ impl Engine {
                     crate::filter::RoutedFilter::Row(tree) => {
                         let row_bases: Vec<u32> = segments.iter().map(|&(_, base)| base).collect();
                         let domain = crossing_domain(&ranges, &row_bases);
+                        region_verdict = tree.region_verdict();
                         let rows = self.evaluate_row_route(
                             &tree,
                             &view_data.row_space,
                             &segments,
                             &domain,
                             rows_in_ranges,
+                            view_data.row_space.total_rows(),
                         )?;
                         self.filter_row_routed.fetch_add(1, Ordering::Relaxed);
-                        probe.count(|t| &mut t.filter_matched, rows.cardinality());
-                        FilterRows::Viewport { rows, domain }
+                        // **Not counted when a region is in the tree.** Its interior rows have
+                        // not met the mask yet, so the cardinality would be a pre-mask quantity
+                        // about the region — the number selection-operand §7 says may not be
+                        // computed, for a metric or for anything else.
+                        if !tree.has_region() {
+                            probe.count(|t| &mut t.filter_matched, rows.rows().cardinality());
+                        }
+                        rows
                     }
                 };
                 probe.lap(|t| &mut t.filter_cross_ns);
                 mask.with_filter(rows)
             }
         };
+
+        // The head, delivered before the sweep: everything the response headers derive from is
+        // known here — the region verdict last, settled by the decomposition above and never by a
+        // row — and a server that waits for the first flush before committing a status needs it
+        // in hand by then. A refusal is the consumer gone — cancellation, not a fault.
+        sink.head(ViewportHead {
+            coordinates,
+            stamp: answered_from.clone(),
+            stale,
+            region: region_verdict,
+            render_scalars: render_scalars.to_vec(),
+        })
+        .map_err(|SinkClosed| EngineError::Cancelled)?;
+        // Reset the clock so the head's construction and delivery are unattributed rather than
+        // silently charged to the stage that follows.
+        probe.skip();
 
         // §8.5's match-layer count rule: a filtered request serves every match, up to the cap —
         // the θ threshold clause does not thin a filtered selection. Saturating the threshold is
@@ -2443,6 +2484,11 @@ impl Engine {
     /// combines entirely in row space. Evaluation runs on the engine's one shared pool, split
     /// over the domain exactly as the per-tile crossing splits, which is the "existing
     /// parallelism" records §6.2 prices the coarse-zoom cell against.
+    ///
+    /// **The result's extent is the tree's.** A tree of region leaves and projected entity
+    /// verdicts answers over the whole view and comes back [`FilterRows::Complete`]; a render
+    /// leaf anywhere in it, or a per-tile crossing, bounds the answer to the request's domain
+    /// and it comes back [`FilterRows::Viewport`] (selection-operand §5).
     fn evaluate_row_route(
         &self,
         tree: &crate::filter::RowExpr,
@@ -2450,11 +2496,13 @@ impl Engine {
         segments: &[(&SegmentData, u32)],
         domain: &[Range<u32>],
         rows_in_ranges: u64,
-    ) -> Result<croaring::Bitmap> {
+        total_rows: u64,
+    ) -> Result<FilterRows> {
         // The one crossing: every entity-space verdict's row image, computed together. The route
         // between the two crossing shapes is the measured rule the single-operand path uses,
         // summed over the verdicts because that is what the projection would cost.
         let verdicts = tree.entity_verdicts();
+        let mut whole_view = tree.is_whole_view();
         let images: Vec<croaring::Bitmap> = if verdicts.is_empty() {
             Vec::new()
         } else {
@@ -2472,28 +2520,84 @@ impl Engine {
                 Some(images) => {
                     self.filter_crossings_per_tile
                         .fetch_add(1, Ordering::Relaxed);
+                    // A walk over the request's rows is silent outside them, whatever else the
+                    // tree holds.
+                    whole_view = false;
                     images
                 }
                 None => {
-                    // Projection crosses each verdict whole; clamped to the domain so the
-                    // combined answer never claims a row outside what `FilterRows::Viewport`
-                    // says was tested.
                     self.filter_crossings_projected
                         .fetch_add(1, Ordering::Relaxed);
-                    let mut domain_rows = croaring::Bitmap::new();
-                    for range in domain {
-                        domain_rows.add_range(range.clone());
+                    if whole_view {
+                        // Projection crosses each verdict whole, and with nothing in the tree
+                        // bounded by the domain, whole is what the answer is.
+                        verdicts.iter().map(|v| row_space.project(v)).collect()
+                    } else {
+                        // Clamped to the domain so the combined answer never claims a row
+                        // outside what `FilterRows::Viewport` says was tested.
+                        let mut domain_rows = croaring::Bitmap::new();
+                        for range in domain {
+                            domain_rows.add_range(range.clone());
+                        }
+                        verdicts
+                            .iter()
+                            .map(|v| row_space.project(v).and(&domain_rows))
+                            .collect()
                     }
-                    verdicts
-                        .iter()
-                        .map(|v| row_space.project(v).and(&domain_rows))
-                        .collect()
                 }
             }
         };
+        // What a negated region's presence half is, and what a region's rows are clamped to
+        // where the tree is domain-bounded: the whole view, or the request's own rows.
+        let scope = if whole_view {
+            RowScope::WholeView {
+                total_rows: u32::try_from(total_rows).unwrap_or(u32::MAX),
+            }
+        } else {
+            let mut domain_rows = croaring::Bitmap::new();
+            for range in domain {
+                domain_rows.add_range(range.clone());
+            }
+            RowScope::Domain(domain_rows)
+        };
         let mut next_image = 0usize;
-        self.pool
-            .install(|| eval_row_expr(tree, &images, &mut next_image, segments, domain))
+        let rows = self
+            .pool
+            .install(|| eval_row_expr(tree, &images, &mut next_image, segments, domain, &scope))?;
+        Ok(if whole_view {
+            FilterRows::Complete(rows)
+        } else {
+            FilterRows::Viewport {
+                rows,
+                domain: domain.to_vec(),
+            }
+        })
+    }
+}
+
+/// The rows a row-space evaluation answers over — see [`Engine::evaluate_row_route`].
+enum RowScope {
+    /// Every row of the view: the tree holds nothing the request's domain bounds.
+    WholeView { total_rows: u32 },
+    /// The request's own rows, as one bitmap, because a sibling leaf is bounded by them.
+    Domain(croaring::Bitmap),
+}
+
+impl RowScope {
+    /// Every row in scope — a negated region's presence half.
+    fn all_rows(&self) -> croaring::Bitmap {
+        match self {
+            RowScope::WholeView { total_rows } => croaring::Bitmap::from_range(0..*total_rows),
+            RowScope::Domain(rows) => rows.clone(),
+        }
+    }
+
+    /// A whole-view row set, narrowed to the scope where the scope is narrower.
+    fn clamp(&self, rows: &croaring::Bitmap) -> croaring::Bitmap {
+        match self {
+            RowScope::WholeView { .. } => rows.clone(),
+            RowScope::Domain(domain) => rows.and(domain),
+        }
     }
 }
 
@@ -2506,6 +2610,7 @@ fn eval_row_expr(
     next_image: &mut usize,
     segments: &[(&SegmentData, u32)],
     domain: &[Range<u32>],
+    scope: &RowScope,
 ) -> Result<croaring::Bitmap> {
     use crate::filter::RowExpr;
     match expr {
@@ -2522,10 +2627,22 @@ fn eval_row_expr(
             let values = LeafValues::of(*family, operand);
             scan_rows(segments, domain, column, values.predicate())
         }
+        RowExpr::Region(region) => Ok(scope.clamp(&region.rows)),
+        RowExpr::NotInRegion(kids) => {
+            // The complement within the scope: every rowed entity carries a position, so the
+            // presence half of this negation is every row (selection-operand §5). No early exit
+            // on an empty difference — the image cursor's positional rule is simpler kept whole
+            // here than skipped, and a region leaf's kids are already resolved.
+            let mut out = scope.all_rows();
+            for kid in kids {
+                out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain, scope)?);
+            }
+            Ok(out)
+        }
         RowExpr::AllOf(kids) => {
             let mut out: Option<croaring::Bitmap> = None;
             for kid in kids {
-                let kid_rows = eval_row_expr(kid, images, next_image, segments, domain)?;
+                let kid_rows = eval_row_expr(kid, images, next_image, segments, domain, scope)?;
                 out = Some(match out {
                     None => kid_rows,
                     Some(mut acc) => {
@@ -2540,7 +2657,7 @@ fn eval_row_expr(
         RowExpr::AnyOf(kids) => {
             let mut out = croaring::Bitmap::new();
             for kid in kids {
-                out |= eval_row_expr(kid, images, next_image, segments, domain)?;
+                out |= eval_row_expr(kid, images, next_image, segments, domain, scope)?;
             }
             Ok(out)
         }
@@ -2556,7 +2673,7 @@ fn eval_row_expr(
             // entity path argues it).
             let mut out = scan_rows(segments, domain, column, RowPredicate::present_in(*family))?;
             for (i, kid) in kids.iter().enumerate() {
-                out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain)?);
+                out.andnot_inplace(&eval_row_expr(kid, images, next_image, segments, domain, scope)?);
                 if out.is_empty() {
                     // Nothing below can widen an empty difference, so the remaining kids are not
                     // evaluated — **but `images` is positional and their verdicts are still in
@@ -3277,6 +3394,19 @@ const DEPENDENCY_CHAIN_MAX: u32 = 16;
 /// Gathered once per response rather than per artifact: every field is a property of the request —
 /// the viewer, the generation, the view and the composed mask — and none of them is a property of
 /// the artifact being tested.
+/// What [`Engine::gated_artifact`] answers: the artifact, located, with its level's row form and
+/// the verdict's two outputs.
+struct GatedArtifact {
+    name: String,
+    level: u32,
+    ordinal: u32,
+    entity: tessera_types::EntityId,
+    layer: tessera_types::layer::RegisteredLayer,
+    rows: Arc<crate::artifacts::ArtifactRows>,
+    masked_count: u64,
+    rank: Option<u32>,
+}
+
 struct DependencyContext<'a> {
     generation: &'a crate::Generation,
     satisfied: &'a rustc_hash::FxHashSet<tessera_types::TermId>,
@@ -3462,6 +3592,248 @@ impl Engine {
         )
     }
 
+    /// **One artifact, located and gated for one principal** — the predicate
+    /// [`Engine::artifact`] answers by, shared with the region leaf by artifact
+    /// (`polygon-membership.md` §8) so that a shape a viewer may filter through is exactly a shape
+    /// they would be served, by the same call.
+    ///
+    /// **`None` is the only failure shape.** An identifier naming nothing, one naming a point, one
+    /// whose layer this principal does not reach or which is suppressed, one on another view, and
+    /// one below its layer's existence criterion are one answer — C17's posture, and what keeps
+    /// the leaf by artifact from being an oracle over shapes a viewer was not served.
+    #[allow(clippy::too_many_arguments)]
+    fn gated_artifact(
+        &self,
+        session: &Session,
+        generation: &crate::Generation,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
+        segments: &[(&SegmentData, u32)],
+        mask: &EffectiveMask,
+        denied: &croaring::Bitmap,
+        mask_identity: crate::histogram::MaskIdentity,
+        id: TesseraId,
+    ) -> Result<Option<GatedArtifact>> {
+        let (shard, entity) = self.identity_key.invert(id);
+        if shard != generation.bundle.manifest.identity.shard_id {
+            return Ok(None);
+        }
+
+        // Addressing, before authorisation and cheaply: which artifact, if any, this entity is.
+        let Some((name, level, ordinal)) = self.write.locate_artifact(entity) else {
+            return Ok(None);
+        };
+        let Some(layer) = self.write.registered_layer(&name) else {
+            return Ok(None);
+        };
+        if !layer.declaration.views.iter().any(|s| s == view) {
+            return Ok(None);
+        }
+        // Reachability, then the live suppression of the layer itself — the same two steps in the
+        // same order `Engine::visible_layers` and `serve_artifacts` take.
+        let reachable = self.write.resolve_layers(
+            |term| session.satisfied.contains(&term),
+            |label| generation.dict.lookup(label.as_bytes()),
+        );
+        if !reachable.contains(&name)
+            || generation.overlay.is_deleted(layer.entity)
+            || generation.overlay.is_suppressed(layer.entity)
+        {
+            return Ok(None);
+        }
+
+        let source = generation.partition_source();
+        let recorded = layer.layout_of(level);
+        // The predicate's own inputs, resolved once for this identifier — the same rule the
+        // viewport resolves per layer, from the same generation, so an artifact reached by
+        // identifier and one reached by viewport cannot be evaluated against different memberships.
+        let vocabulary = predicate_vocabulary(generation, &layer.declaration);
+        let code_of_key = |key: &str| match vocabulary {
+            Some(vocabulary) => vocabulary.code_of(key),
+            None => key.parse::<u32>().ok(),
+        };
+        let (rows, level_version) = self.write.with_artifacts(|store| {
+            let predicate = predicate_source(
+                &layer.declaration,
+                generation,
+                view,
+                view_data,
+                segments,
+                &code_of_key,
+                &self.shapes,
+                store,
+                level,
+            );
+            (
+                self.artifact_projections.get_or_build(
+                    &generation.prefix,
+                    view,
+                    &name,
+                    level,
+                    store,
+                    &view_data.row_space,
+                    Some(&source),
+                    recorded,
+                    predicate.as_ref(),
+                    generation.segments_version,
+                ),
+                store.level_version(&name, level),
+            )
+        });
+        // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
+        // the column has no per-artifact route to a masked count — see `Engine::masked_counts`.
+        let counts = self.masked_counts(
+            &mask_identity,
+            view,
+            &name,
+            level,
+            level_version,
+            &rows,
+            mask,
+        );
+        // The same containment answers the viewport builds, from the same partition: an identifier
+        // route that resolved containment by a different arm would be a second ranking nobody
+        // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
+        let containment = rows
+            .partition()
+            .map(|p| p.answer_for_one(&session.satisfied));
+        let ctx = DependencyContext {
+            generation,
+            satisfied: &session.satisfied,
+            view,
+            view_data,
+            mask,
+            denied,
+            reachable: &reachable,
+            mask_identity,
+        };
+        let dependency_served = self.dependency_gate(&ctx);
+        let artifact_view = crate::artifacts::ArtifactView {
+            declaration: &layer.declaration,
+            overlay: &generation.overlay,
+            satisfied: &session.satisfied,
+            layer_reachable: true,
+            rows: &rows,
+            mask,
+            dependency_served: &dependency_served,
+            containment,
+            denied,
+            counts,
+        };
+        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
+        // `artifact_visibility` names a field withholds here as it does on the viewport, which is
+        // the same fail-closed answer reached by the same call.
+        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
+            artifact_view.verdict(entity, ordinal, None)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(GatedArtifact {
+            name,
+            level,
+            ordinal,
+            entity,
+            layer,
+            rows,
+            masked_count,
+            rank,
+        }))
+    }
+
+    /// Answer one region leaf for one request (`crate::region`; `crate::filter::RegionResolver`).
+    ///
+    /// A drawn shape: its decomposition from the generation-keyed cache — shared across
+    /// principals, it carries no authorisation — with the boundary rows tested under **this
+    /// request's composed mask**. A published shape: the artifact's held membership, whole and
+    /// exact, only where this principal would be served the artifact; otherwise the empty
+    /// operand, identically for every reason (`polygon-membership.md` §8). An artifact whose
+    /// layer draws an authored shape is an empty operand too — its drawing is content, not a
+    /// membership (§4.1).
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_region(
+        &self,
+        leaf: &crate::filter::RegionLeaf,
+        session: &Session,
+        generation: &crate::Generation,
+        view: &str,
+        view_data: &tessera_store::read::ViewData,
+        segments: &[(&SegmentData, u32)],
+        mask: &EffectiveMask,
+        denied: &croaring::Bitmap,
+        mask_identity: crate::histogram::MaskIdentity,
+        cancel: &Option<CancelToken>,
+    ) -> std::result::Result<crate::region::RegionRows, crate::filter::FilterError> {
+        use crate::filter::{FilterError, RegionLeaf};
+        let never_cancelled = CancelToken::new();
+        let cancel = cancel.as_ref().unwrap_or(&never_cancelled);
+        use crate::region::{digest_of, RegionDecomposition, RegionKey, RegionRows, RegionVerdict};
+        match leaf {
+            RegionLeaf::Shape(shape) => {
+                let max_cells = self.max_region_cells.load(Ordering::Relaxed) as usize;
+                let canonical = shape.encode();
+                let key = RegionKey {
+                    view: view.to_string(),
+                    prefix: generation.prefix.clone(),
+                    segments_version: generation.segments_version,
+                    digest: digest_of(&canonical),
+                    max_cells,
+                };
+                let build = || RegionDecomposition::build(Arc::clone(shape), max_cells, segments);
+                let entry = match self
+                    .region_cache
+                    .get_or_derive_waiting(key, None, cancel, |_| build())
+                {
+                    // A hit is a hit only for these bytes: a digest collision is detected here
+                    // and answered from a fresh, unretained decomposition (selection-operand §5).
+                    Ok(entry) if entry.is_of(&canonical) => entry,
+                    Ok(_) => Arc::new(build()),
+                    Err(crate::single_flight::WaitEnded::Cancelled) => {
+                        return Err(FilterError::RegionUnavailable(
+                            "the request was cancelled while its region was being decomposed"
+                                .to_string(),
+                        ))
+                    }
+                    // A wait that ran out is answered by building here, unretained: the
+                    // decomposition is a perimeter's worth of work, and refusing it would make a
+                    // second viewer's identical lasso a 429.
+                    Err(crate::single_flight::WaitEnded::Budget) => Arc::new(build()),
+                };
+                Ok(RegionRows {
+                    rows: entry.rows_under(mask, segments),
+                    verdict: entry.verdict(),
+                })
+            }
+            RegionLeaf::Artifact(id) => {
+                let gated = self
+                    .gated_artifact(
+                        session,
+                        generation,
+                        view,
+                        view_data,
+                        segments,
+                        mask,
+                        denied,
+                        mask_identity,
+                        *id,
+                    )
+                    .map_err(|e| FilterError::RegionUnavailable(e.to_string()))?;
+                let rows = match gated {
+                    Some(gated)
+                        if gated.layer.declaration.drawn_shape()
+                            != Some(tessera_types::layer::DrawnShape::Authored) =>
+                    {
+                        gated.rows.get(gated.ordinal).cloned().unwrap_or_default()
+                    }
+                    _ => croaring::Bitmap::new(),
+                };
+                Ok(RegionRows {
+                    rows,
+                    verdict: RegionVerdict::Exact,
+                })
+            }
+        }
+    }
+
     /// Drill down on one artifact by the identifier a response handed out.
     ///
     /// **The same predicate the viewport calls, and that is the whole design of this method.** An
@@ -3500,34 +3872,6 @@ impl Engine {
                 return Err(EngineError::StaleIdSet);
             }
         }
-        let (shard, entity) = self.identity_key.invert(id);
-        if shard != generation.bundle.manifest.identity.shard_id {
-            return Ok(None);
-        }
-
-        // Addressing, before authorisation and cheaply: which artifact, if any, this entity is.
-        let Some((name, level, ordinal)) = self.write.locate_artifact(entity) else {
-            return Ok(None);
-        };
-        let Some(layer) = self.write.registered_layer(&name) else {
-            return Ok(None);
-        };
-        if !layer.declaration.views.iter().any(|s| s == view) {
-            return Ok(None);
-        }
-        // Reachability, then the live suppression of the layer itself — the same two steps in the
-        // same order `Engine::visible_layers` and `serve_artifacts` take.
-        let reachable = self.write.resolve_layers(
-            |term| session.satisfied.contains(&term),
-            |label| generation.dict.lookup(label.as_bytes()),
-        );
-        if !reachable.contains(&name)
-            || generation.overlay.is_deleted(layer.entity)
-            || generation.overlay.is_suppressed(layer.entity)
-        {
-            return Ok(None);
-        }
-
         let carriers = generation
             .bundle
             .partitions
@@ -3561,95 +3905,33 @@ impl Engine {
             &view_data.row_space,
             denied,
         );
-
-        let source = generation.partition_source();
-        let recorded = layer.layout_of(level);
-        // The predicate's own inputs, resolved once for this identifier — the same rule the
-        // viewport resolves per layer, from the same generation, so an artifact reached by
-        // identifier and one reached by viewport cannot be evaluated against different memberships.
         let segments = segments_with_row_bases(view, view_data)?;
-        let vocabulary = predicate_vocabulary(&generation, &layer.declaration);
-        let code_of_key = |key: &str| match vocabulary {
-            Some(vocabulary) => vocabulary.code_of(key),
-            None => key.parse::<u32>().ok(),
-        };
-        let (rows, level_version) = self.write.with_artifacts(|store| {
-            let predicate = predicate_source(
-                &layer.declaration,
-                &generation,
-                view,
-                view_data,
-                &segments,
-                &code_of_key,
-                &self.shapes,
-                store,
-                level,
-            );
-            (
-                self.artifact_projections.get_or_build(
-                    &generation.prefix,
-                    view,
-                    &name,
-                    level,
-                    store,
-                    &view_data.row_space,
-                    Some(&source),
-                    recorded,
-                    predicate.as_ref(),
-                    generation.segments_version,
-                ),
-                store.level_version(&name, level),
-            )
-        });
         let mask_identity = self.mask_identity(session, &generation, &geometry);
-        // ⊘ **A cold drill-down on a row-major level pays the level's whole histogram**, because
-        // the column has no per-artifact route to a masked count — see `Engine::masked_counts`.
-        let counts = self.masked_counts(
-            &mask_identity,
-            view,
-            &name,
-            level,
-            level_version,
-            &rows,
-            &mask,
-        );
-        // The same containment answers the viewport builds, from the same partition: an identifier
-        // route that resolved containment by a different arm would be a second ranking nobody
-        // wrote. Lazily, because this route resolves one identifier — see `answer_for_one`.
-        let containment = rows
-            .partition()
-            .map(|p| p.answer_for_one(&session.satisfied));
-        let ctx = DependencyContext {
-            generation: &generation,
-            satisfied: &session.satisfied,
+        // The one predicate, shared with the viewport and with the region leaf by artifact.
+        let Some(gated) = self.gated_artifact(
+            session,
+            &generation,
             view,
             view_data,
-            mask: &mask,
+            &segments,
+            &mask,
             denied,
-            reachable: &reachable,
             mask_identity,
-        };
-        let dependency_served = self.dependency_gate(&ctx);
-        let artifact_view = crate::artifacts::ArtifactView {
-            declaration: &layer.declaration,
-            overlay: &generation.overlay,
-            satisfied: &session.satisfied,
-            layer_reachable: true,
-            rows: &rows,
-            mask: &mask,
-            dependency_served: &dependency_served,
-            containment,
-            denied,
-            counts,
-        };
-        // ⊘ Per-artifact terms arrive with content (Stage 3); until then a layer whose
-        // `artifact_visibility` names a field withholds here as it does on the viewport, which is
-        // the same fail-closed answer reached by the same call.
-        let crate::artifacts::ArtifactVerdict::Serve { masked_count, rank } =
-            artifact_view.verdict(entity, ordinal, None)
+            id,
+        )?
         else {
             return Ok(None);
         };
+        let GatedArtifact {
+            name,
+            level,
+            ordinal,
+            entity,
+            layer,
+            rows,
+            masked_count,
+            rank,
+        } = gated;
         // Same resolution as the viewport's, by the same call — an identifier route that served a
         // different content would be a second ranking nobody wrote.
         let Some(content) = self.supplied_content(
@@ -5895,7 +6177,8 @@ mod tests {
         // first kid — which is what makes the skipped `Entity` the one under test. The images are
         // already crossed against the domain by the caller, so they are unaffected.
         let mut next_image = 0usize;
-        let out = eval_row_expr(&tree, &images, &mut next_image, &[], &[])
+        let scope = RowScope::Domain(croaring::Bitmap::new());
+        let out = eval_row_expr(&tree, &images, &mut next_image, &[], &[], &scope)
             .expect("an empty domain scans cleanly");
 
         assert_eq!(

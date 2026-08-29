@@ -57,9 +57,10 @@ Three things decide the design, and none of them is the index.
 
 ## 2. The operand
 
-**Every filter returns a set the composition can intersect, and there are exactly two kinds**
-(decision 0068). New filter forms add operands rather than changing the shape of the call, which is
-what keeps the retrieval surface enumerable — and Appendix C is exhaustive *because* the surface is.
+**Every filter returns a set the composition can intersect, and there are exactly three kinds**
+(decision 0068; `architecture.md` §8.2's third, admitted 2026-08-29). New filter forms add operands
+rather than changing the shape of the call, which is what keeps the retrieval surface enumerable —
+and Appendix C is exhaustive *because* the surface is.
 
 ```rust
 fn resolve(op: &FilterOperand, idx: &FilterIndex, candidates: Option<&Bitmap>)
@@ -73,6 +74,18 @@ wider — not a general row-space operand, and never a route a statistic chooses
 kinds evaluates its entity-space sub-tree, crosses once by §4's measured rule, evaluates the
 row-space leaves over the crossing's domain and combines there (records §6.2). Both kinds carry §5.1's
 rule unchanged: the set they are evaluated against is the **composed verdict**, never a raw fragment.
+
+The third kind is the **`region` leaf** ([`selection-operand.md`](selection-operand.md), built
+2026-08-29): a row-space set over the **whole view** — a drawn shape decomposed against the Morton
+grid, or a published shape's held membership — exact for the shape against every point's stored
+position, and the one leaf that carries no authorisation, which is why its decomposition is cached
+per generation across principals while its boundary rows are tested under each request's own
+composed mask, masked first. It composes under 0068's crossing rule as the second kind does and
+differs in covering every tile rather than the request's: a tree of region leaves and projected
+entity verdicts answers over the whole view, and a render-column leaf beside it bounds the answer to
+the request's domain. `none_of` over it is the complement within that scope, every rowed entity
+carrying a position. Its verdict — exact, or a cover past the deployment's cell budget — is a
+function of the shape and the grid alone and rides as a response header.
 
 The four rules §8.2 places on the signature above:
 

@@ -684,10 +684,13 @@ well defined because every rowed entity carries a position: the complement of th
 candidate, with a buffered entity matching neither. *Points in this county but not in this city* is
 `all_of: [region(county), none_of: [region(city)]]`, and needs nothing further.
 
-**By artifact reuses the held decomposition and costs no descent**: the leaf's row set is the
-artifact's `ShapeSets` entry — its interior ranges into the same `FilterRows::Complete`, its
-boundary bitmap intersected — so it is cheaper than the same shape sent as vertices, and it is
-always **exact** with no cover fallback, because the publication paid the whole decomposition.
+**By artifact reuses the held membership and costs no descent**: the leaf's row set is the
+artifact's held per-generation membership — the rows bitmap the level's row form holds for it —
+into the same `FilterRows::Complete`, so it is cheaper than the same shape sent as vertices, and
+it is always **exact** with no cover fallback, because the publication paid the whole
+decomposition. The leaf works for any layer whose artifacts have a membership, spatial or not; an
+artifact whose layer draws an **authored** shape is an empty operand, its drawing being content
+and not a membership (§4.1).
 
 **One gate, and it is the artifact's own.** The leaf is answered only for an artifact this
 principal would be **served** — the same verdict `ArtifactView::verdict` gives before any content
@@ -871,7 +874,13 @@ Each stage in its own worktree, on the artifact convention; the status record is
    allowlist, reported rather than edited.
 4. **The region leaf**, both spellings, on the core — selection-operand promoted with its three
    rulings, `region.ts`'s raster path retired. *Amends:* `architecture.md` §8.2 as that document
-   already requires.
+   already requires. **Built 2026-08-29** (`artifacts/shape-region`): `FilterExpr::Region`
+   routed row-space over the whole view, the decomposition cached per generation across principals
+   and the boundary rows tested under each request's mask (`tessera_engine::region`); the leaf by
+   artifact through the same `gated_artifact` predicate `/v1/artifacts/{id}` answers by; the
+   verdict on `x-tessera-region`; `region` reserved at the build; the two constants on
+   `/v1/meta`; the client's selection as the filter with *filter to this* and *outside this* live.
+   ⊘ `architecture.md` §8.2's marker is that document's owner's to remove; this track reports it.
 
 Stage 4 could precede 2; it is placed after because the campaign's boundary rungs are waiting on 2
 and nothing is waiting on 4 that 2 does not also unblock.

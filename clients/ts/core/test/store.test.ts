@@ -4,6 +4,8 @@ import type {Clock} from '../src/driver.js';
 import type {FrameScheduler} from '../src/presented.js';
 import {createStore, type Store} from '../src/store.js';
 import type {Meta, ViewportResponse, ViewportResult} from '../src/types.js';
+import {dataToWorldXY, mortonOfTile} from '../src/coords.js';
+import {tileRectOfBbox} from '../src/budget.js';
 
 /**
  * The store against a fake `TesseraClient`, a fake clock and a fake frame scheduler — no DOM, no
@@ -18,10 +20,35 @@ const META: Meta = {
   quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200},
   declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
   layers: [],
-  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000},
+  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
   maxTilesPerRequest: 4096,
   filterOperands: [{column: 'archive', family: 'category', operands: ['in']}]
 };
+
+/** What the fake sees of a request: enough to answer for every tile it asked about. */
+type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles?: bigint[]; filters?: unknown; k?: number};
+
+/**
+ * A response that answers **every** tile the request spans — one tile of 1,000 items each, the
+ * served points on the first — so a frame's coverage of a region is the client's arithmetic and
+ * not the fixture's shape. `response()` below answers one tile whatever was asked, which every
+ * other test relies on.
+ */
+function responseCovering(req: FakeRequest, contentKey: string, served = 3): ViewportResponse {
+  const base = response(contentKey, 'ik', served);
+  const q = META.quantisation;
+  let prefixes: bigint[];
+  if (req.tiles) prefixes = req.tiles;
+  else {
+    const [x0, y0] = dataToWorldXY(req.bbox![0], req.bbox![1], q);
+    const [x1, y1] = dataToWorldXY(req.bbox![2], req.bbox![3], q);
+    const rect = tileRectOfBbox([Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)], req.zoom);
+    prefixes = [];
+    for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) prefixes.push(mortonOfTile(x, y, req.zoom));
+  }
+  const tiles = prefixes.map((tile, i) => ({tile, visible: 1000n, matched: 1000n, served: i === 0 ? BigInt(served) : 0n}));
+  return {...base, result: {...base.result, tiles}};
+}
 
 function response(contentKey: string, identityKey = 'ik', served = 3): ViewportResponse {
   const result: ViewportResult = {
@@ -42,6 +69,7 @@ function response(contentKey: string, identityKey = 'ik', served = 3): ViewportR
     contentKey,
     pin: contentKey,
     stale: false,
+    region: null,
     bytes: 0
   };
 }
@@ -106,9 +134,25 @@ function fakeScheduler(): FrameScheduler & {flush(): void} {
   };
 }
 
-/** A fake client — only the four verbs the store calls, and a log of the viewport requests. */
-function fakeClient(reply: () => ViewportResponse) {
-  const viewport = vi.fn(async () => reply());
+/** The `region` leaf anywhere in a filter expression, or null — what the fake answers a verdict for. */
+function regionOf(expr: unknown): boolean {
+  if (!expr || typeof expr !== 'object') return false;
+  const node = expr as Record<string, unknown>;
+  if (node.region) return true;
+  for (const key of ['all_of', 'any_of', 'none_of']) {
+    const kids = node[key];
+    if (Array.isArray(kids) && kids.some(regionOf)) return true;
+  }
+  return false;
+}
+
+/**
+ * A fake client — only the four verbs the store calls, and a log of the viewport requests. A
+ * request carrying a `region` leaf is answered with the wire's `exact` verdict, as the server
+ * would say on `x-tessera-region`.
+ */
+function fakeClient(reply: (req: FakeRequest) => ViewportResponse) {
+  const viewport = vi.fn(async (_token: string, req: FakeRequest) => ({...reply(req), region: regionOf(req.filters) ? {exact: true as const, depth: null} : null}));
   const client = {
     meta: async () => META,
     viewport,
@@ -121,7 +165,7 @@ function fakeClient(reply: () => ViewportResponse) {
 }
 
 /** Build a store and drive it to its first shown frame. */
-async function warm(reply: () => ViewportResponse, opts: {clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>}) {
+async function warm(reply: (req: FakeRequest) => ViewportResponse, opts: {clock: ReturnType<typeof fakeClock>; scheduler: ReturnType<typeof fakeScheduler>}) {
   const {client, viewport} = fakeClient(reply);
   const store = createStore({
     viewerUrl: 'http://viewer',
@@ -428,59 +472,101 @@ describe('the colours are rebuilt when the table moves and not per response', ()
   });
 });
 
-describe('select(box) — one counting request in the tiles form (§5.11)', () => {
-  it('asks once at a bounded depth with k = 0, sums the tiles, and types exactness by the cell', async () => {
+describe('select — the selection is the region leaf on every request (§5.11)', () => {
+  /** The `region` leaf of the request's filters, or null. */
+  const leafOf = (req: unknown): unknown => {
+    const body = (req as [string, {filters?: unknown}])[1].filters;
+    const find = (expr: unknown): unknown => {
+      if (!expr || typeof expr !== 'object') return null;
+      const node = expr as Record<string, unknown>;
+      if (node.region) return node.region;
+      for (const key of ['all_of', 'any_of', 'none_of']) {
+        const kids = node[key];
+        if (Array.isArray(kids)) for (const kid of kids) {
+          const found = find(kid);
+          if (found) return found;
+        }
+      }
+      return null;
+    };
+    return find(body);
+  };
+
+  it('puts a box on the next request as a bbox leaf, reads the count off the frame, and types it by the verdict', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
-    const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
+    const {store, viewport} = await warm((req) => responseCovering(req, 'ck1'), {clock, scheduler});
     store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
     await clock.advance(600);
     scheduler.flush();
     expect(store.get('marks').count.shown).toBeGreaterThan(0);
     const before = viewport.mock.calls.length;
 
-    // The whole extent, in data coordinates: 64 × 64 tiles at depth 6 under the 4,096 bound.
-    store.select({kind: 'box', bbox: [0, 100, 0, 200]});
-    store.select({kind: 'box', bbox: [0, 0, 100, 200]});
-    const first = store.get('region')!;
-    expect(first.status).toBe('loading');
-    expect(first.depth).toBe(6);
-    expect(first.tiles).toBe(4096);
+    // The whole extent, drawn from the far corner: the leaf is the box normalised.
+    store.select({kind: 'box', bbox: [100, 200, 0, 0]});
+    const loading = store.get('region')!;
+    expect(loading.status).toBe('loading');
+    expect(loading.verdict).toBeNull();
     // The held marks inside are the client's own fact, known before the server answers.
-    expect(first.held.count).toBe(3);
+    expect(loading.held.count).toBe(3);
 
-    await clock.advance(250);
-    // Two selects, one settled request: debounced like the artifact channel.
-    expect(viewport.mock.calls.length).toBe(before + 1);
-    const req = (viewport.mock.calls[before] as unknown as [string, {tiles?: bigint[]; k?: number; zoom: number; bbox?: unknown}])[1];
-    expect(req.k).toBe(0);
-    expect(req.zoom).toBe(6);
-    expect(req.bbox).toBeUndefined();
-    expect(req.tiles?.length).toBe(4096);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(viewport.mock.calls.length).toBeGreaterThan(before);
+    expect(leafOf(viewport.mock.calls[before])).toEqual({bbox: [0, 0, 100, 200]});
+    // No counting request of its own: every request since the selection carries the leaf.
+    for (const call of viewport.mock.calls.slice(before)) expect(leafOf(call)).not.toBeNull();
 
     const shown = store.get('region')!;
     expect(shown.status).toBe('shown');
-    expect(shown.visible).toEqual({value: 10_000_000, exact: false});
-    expect(shown.matched).toEqual({value: 10_000_000, exact: false});
-    expect(shown.served).toEqual({shown: 3, total: 10_000_000, exact: true});
+    expect(shown.verdict).toEqual({exact: true, depth: null});
+    // Exact: the server said so, and the replica holds every tile of the box — the whole extent
+    // at the depth the driver chose, 1,000 matched in each of the tiles that drew a point, and
+    // the frame's sum is over those.
+    expect(shown.matched.exact).toBe(true);
+    expect(shown.matched.value).toBeGreaterThan(0);
+    // No other filter is on, so the region alone is the same number.
+    expect(shown.visible).toEqual(shown.matched);
+    expect(shown.served).toEqual({shown: 3, total: shown.matched.value, exact: true});
   });
 
-  it('clears the region on select(null) and re-asks on setFilters', async () => {
+  it('clears the region on select(null), composes it with the filters, and re-reads on setFilters', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
     store.select({kind: 'box', bbox: [0, 0, 1, 1]});
-    await clock.advance(250);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(store.get('region')?.status).toBe('shown');
     const asked = viewport.mock.calls.length;
     store.setFilters({archive: {family: 'category', keys: ['cs']}});
     expect(store.get('region')?.status).toBe('loading');
-    await clock.advance(250);
+    await clock.advance(600);
+    scheduler.flush();
     expect(viewport.mock.calls.length).toBeGreaterThan(asked);
+    const body = (viewport.mock.calls[asked] as unknown as [string, {filters: unknown}])[1].filters;
+    expect(body).toEqual({all_of: [{archive: {in: ['cs']}}, {region: {bbox: [0, 0, 1, 1]}}]});
+    const shown = store.get('region')!;
+    expect(shown.status).toBe('shown');
+    // Under another filter, the frame answered the narrower question: `visible` is not it.
+    expect(shown.visible).toBeNull();
+    expect(shown.matched.value).toBe(10_000_000);
+    // The one held tile covers a box this small: exact for the shape.
+    expect(shown.matched.exact).toBe(true);
+
+    const cleared = viewport.mock.calls.length;
     store.select(null);
     expect(store.get('region')).toBeNull();
+    await clock.advance(600);
+    scheduler.flush();
+    expect(viewport.mock.calls.length).toBeGreaterThan(cleared);
+    expect(leafOf(viewport.mock.calls[cleared])).toBeNull();
   });
 
-  it('counts a lasso over the tiles it meets, in the tiles form at the bounded depth', async () => {
+  it('sends a lasso as its polygon, and outside as none_of over it', async () => {
     const clock = fakeClock();
     const scheduler = fakeScheduler();
     const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
@@ -488,28 +574,49 @@ describe('select(box) — one counting request in the tiles form (§5.11)', () =
     await clock.advance(600);
     scheduler.flush();
     const before = viewport.mock.calls.length;
-    // A triangle over the lower-left half of the extent: its bounding box is the whole extent
-    // (depth 6, 4,096 cells), and it meets about half of those cells plus the diagonal.
+    // A triangle over the lower-left half of the extent; the held mark at world (0.1, 0.1) is inside.
     store.select({kind: 'lasso', points: [[0, 0], [100, 0], [0, 200]]});
     const loading = store.get('region')!;
     expect(loading.status).toBe('loading');
-    expect(loading.depth).toBe(6);
-    expect(loading.tiles).toBeGreaterThan(2000);
-    expect(loading.tiles).toBeLessThan(4096);
-    // The held mark at world (0.1, 0.1) is inside the triangle.
     expect(loading.held.count).toBe(3);
-    await clock.advance(250);
-    expect(viewport.mock.calls.length).toBe(before + 1);
-    const req = (viewport.mock.calls[before] as unknown as [string, {tiles?: bigint[]; k?: number; zoom: number}])[1];
-    expect(req.k).toBe(0);
-    expect(req.zoom).toBe(6);
-    expect(req.tiles?.length).toBe(loading.tiles);
-    const shown = store.get('region')!;
-    expect(shown.status).toBe('shown');
-    expect(shown.matched.exact).toBe(false);
+    await clock.advance(600);
+    scheduler.flush();
+    expect(leafOf(viewport.mock.calls[before])).toEqual({polygon: [[0, 0], [100, 0], [0, 200]]});
+    expect(store.get('region')?.status).toBe('shown');
+
+    const flipped = viewport.mock.calls.length;
+    store.select({kind: 'lasso', points: [[0, 0], [100, 0], [0, 200]], outside: true});
+    // Outside the triangle: none of the held marks, and the complement is never covered by one frame.
+    expect(store.get('region')?.held.count).toBe(0);
+    await clock.advance(600);
+    scheduler.flush();
+    const body = (viewport.mock.calls[flipped] as unknown as [string, {filters: unknown}])[1].filters;
+    expect(body).toEqual({none_of: [{region: {polygon: [[0, 0], [100, 0], [0, 200]]}}]});
+    expect(store.get('region')?.matched.exact).toBe(false);
+
     // A lasso too thin to be a polygon is no selection.
     store.select({kind: 'lasso', points: [[0, 0], [1, 1]]});
     expect(store.get('region')).toBeNull();
+  });
+
+  it('filters to an artifact by its id', async () => {
+    const clock = fakeClock();
+    const scheduler = fakeScheduler();
+    const {store, viewport} = await warm(() => response('ck1'), {clock, scheduler});
+    store.setView({bbox: [0, 0, 100, 200], width: 400, height: 400});
+    await clock.advance(600);
+    scheduler.flush();
+    const before = viewport.mock.calls.length;
+    store.select({kind: 'artifact', id: 42n});
+    await clock.advance(600);
+    scheduler.flush();
+    expect(leafOf(viewport.mock.calls[before])).toEqual({artifact: '42'});
+    const shown = store.get('region')!;
+    expect(shown.status).toBe('shown');
+    expect(shown.matched.value).toBe(10_000_000);
+    // The store holds no extent for an artifact it was not served, so it cannot say the frame
+    // covered it: the number is the frame's and is not claimed exact.
+    expect(shown.matched.exact).toBe(false);
   });
 });
 

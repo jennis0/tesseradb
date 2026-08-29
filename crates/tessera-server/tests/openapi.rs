@@ -684,11 +684,20 @@ async fn viewport_carries_the_described_headers_and_framing() {
     let headers = doc["paths"]["/v1/viewport"]["post"]["responses"]["200"]["headers"]
         .as_object()
         .unwrap();
-    for name in headers.keys() {
-        assert!(
-            resp.headers().contains_key(name.as_str()),
-            "response lacks the described header {name}"
-        );
+    for (name, spec) in headers {
+        // A header the description marks optional — `x-tessera-region`, present exactly when
+        // the request carried a region leaf — is checked on the request that asks for it below.
+        if spec["required"].as_bool() == Some(true) {
+            assert!(
+                resp.headers().contains_key(name.as_str()),
+                "response lacks the described header {name}"
+            );
+        } else {
+            assert!(
+                !resp.headers().contains_key(name.as_str()),
+                "the optional header {name} appeared on a request that did not ask for it"
+            );
+        }
     }
     let stale = resp.headers()["x-tessera-stale"].to_str().unwrap().to_string();
     assert!(stale == "0" || stale == "1");
@@ -697,6 +706,31 @@ async fn viewport_carries_the_described_headers_and_framing() {
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     assert!(!decoded.tiles.is_empty());
     assert!(decoded.sub_cells.is_some(), "underlay requested, so the kind-2 frame is present");
+
+    // The region leaf, and the one header it brings (`selection-operand.md` §6): present exactly
+    // when asked for, and one of the two spellings the description gives it.
+    let region_body = viewport_body(json!({
+        "filters": { "all_of": [ { "region": { "bbox": [100.0, 100.0, 900.0, 900.0] } },
+                                 { "none_of": [ { "region": { "circle": [500.0, 500.0, 50.0], "space": "view" } } ] } ] },
+    }));
+    assert_valid(&doc, "ViewportRequest", &region_body);
+    let region_resp = viewport(&f.server, token, &region_body).await;
+    assert_eq!(region_resp.status().as_u16(), 200);
+    let verdict = region_resp
+        .headers()
+        .get("x-tessera-region")
+        .expect("a request carrying a region leaf answers with the verdict")
+        .to_str()
+        .unwrap()
+        .to_string();
+    // The description's pattern, `^(exact|cover; depth=[0-9]+)$`, checked by hand rather than
+    // through a regex crate this test suite does not otherwise carry.
+    let described = verdict == "exact"
+        || verdict
+            .strip_prefix("cover; depth=")
+            .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
+    assert!(described, "x-tessera-region {verdict:?} is not one of the described spellings");
+    assert_eq!(verdict, "exact");
     let artifacts = decoded.artifacts.expect("the named layer is reachable, so kind 5 is present");
     assert_eq!(artifacts.len(), 2);
     assert!(decoded.trailer.is_object());

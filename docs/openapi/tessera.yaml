@@ -332,6 +332,12 @@ paths:
               schema:
                 type: string
                 enum: ["0", "1"]
+            x-tessera-region:
+              description: "Present exactly when the request's `filters` carried a `region` leaf: `exact` when every region's answer is exact for the shape against each point's stored position, or `cover; depth=<d>` when a shape's perimeter exceeded `max_region_cells` and the answer is exact for a cover of it — a superset — taken at depth `d` (`selection-operand.md` §6). A function of the shape and the grid alone, never of the rows, so it says nothing about the corpus; with several region leaves, the coarsest. A leaf by artifact is always exact."
+              required: false
+              schema:
+                type: string
+                pattern: "^(exact|cover; depth=[0-9]+)$"
             x-tessera-server-us:
               description: Server compute after admission to first-flush-ready, microseconds. The whole-stream wall total is the trailer's `stream_us`.
               required: true
@@ -733,7 +739,7 @@ components:
       type: object
       additionalProperties: false
       description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices, max_region_vertices, max_region_cells]
       properties:
         k_min:
           type: integer
@@ -764,6 +770,14 @@ components:
           type: integer
           minimum: 0
           description: The most vertices a published shape may carry after canonicalisation (`polygon-membership.md` §9). Over it, `PUT /control/layers/{name}/artifacts` is a `422` naming the count and the cap; the held decomposition is reported and never capped.
+        max_region_vertices:
+          type: integer
+          minimum: 0
+          description: The most vertices a `region` filter leaf's `polygon` may carry (`selection-operand.md` §2). Over it the request is a `422` naming the count and the cap.
+        max_region_cells:
+          type: integer
+          minimum: 0
+          description: The most boundary cells a `region` leaf's decomposition may hold at one depth (`selection-operand.md` §6). **Not a refusal** — over it the descent stops at the deepest depth that fits and the answer is exact for a cover, said on `x-tessera-region`.
 
     Layer:
       type: object
@@ -1044,6 +1058,12 @@ components:
         **An unknown column or an operator outside the column's family is `422`; an unknown
         *value* is an empty operand** — the one filter rule stated for clients: render *no
         matches* identically for a value you may not see and one that does not exist.
+
+        **`region` is a leaf of its own, not a column** (`selection-operand.md` §2,
+        `polygon-membership.md` §8; the name is reserved at the build): a set of rows over the
+        whole view, composable with every other leaf, negatable with `none_of` — every rowed item
+        carries a position, so the complement is well defined — and cached per generation across
+        principals. The answer's exactness rides on `x-tessera-region`.
       type: object
       minProperties: 1
       maxProperties: 1
@@ -1057,8 +1077,63 @@ components:
         none_of:
           type: array
           items: { $ref: "#/components/schemas/FilterExpr" }
+        region:
+          $ref: "#/components/schemas/RegionLeaf"
       additionalProperties:
         $ref: "#/components/schemas/FilterLeafOperator"
+
+    RegionLeaf:
+      type: object
+      description: |
+        Exactly one of `polygon`, `bbox`, `circle`, `ellipse` — a shape in the view's own space
+        (`/v1/meta`'s quantisation extent), with `space` (`view`, the default and the only value
+        a view honours today; `wgs84` is refused naming `projections.md`) — or `artifact`, a
+        published shape named by its `tessera_id`, answered from its held membership under the
+        artifact's own verdict: an artifact this principal would not be served, an id that names
+        nothing, one on another view, one whose layer draws an authored shape, is an **empty
+        operand**, one answer for every reason.
+
+        A `polygon` is at least three vertices, implicitly closed, even-odd with a point on an
+        edge inside, over `max_region_vertices` a `422`; a `bbox` is `[x0, y0, x1, y1]` closed on
+        every side; a `circle` is `[cx, cy, r]`; an `ellipse` is `[cx, cy, a, b, angle_degrees]`.
+        Coordinates are quantised to the view's 32-bit grid before anything is tested, so a
+        client highlighting its own marks should quantise the same way.
+      additionalProperties: false
+      minProperties: 1
+      maxProperties: 2
+      properties:
+        polygon:
+          type: array
+          minItems: 3
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items: { type: number }
+        bbox:
+          type: array
+          minItems: 4
+          maxItems: 4
+          items: { type: number }
+        circle:
+          type: array
+          minItems: 3
+          maxItems: 3
+          items: { type: number }
+        ellipse:
+          type: array
+          minItems: 5
+          maxItems: 5
+          items: { type: number }
+        artifact:
+          oneOf:
+            - type: integer
+              minimum: 0
+            - type: string
+              pattern: "^[0-9]+$"
+        space:
+          type: string
+          enum: [view, wgs84]
 
     FilterLeafOperator:
       type: object

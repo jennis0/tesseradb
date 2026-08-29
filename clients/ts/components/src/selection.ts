@@ -10,13 +10,15 @@ import './count.js';
 /**
  * `<tessera-selection>` — the selected region (design §5.3 tier 2, §5.11), as the boards draw it
  * (`SelectionFlow.png`): *Shown inside · Matched inside · Visible inside* through
- * `<tessera-count>` — `visible` and `matched` as `Masked`, inexact where a counted cell exceeded a
- * pixel; `served` as the held marks inside against `matched`, both figures always — the shown
- * items as a list (click picks), and the actions.
+ * `<tessera-count>` — `matched` as `Masked`, exact for the shape unless the server answered a
+ * cover (`x-tessera-region`) or the frame did not cover the shape; `visible` only while no other
+ * filter narrows the frame; `served` as the held marks inside against `matched`, both figures
+ * always — the shown items as a list (click picks), and the actions.
  *
- * *Clear* works now. *Filter to this* and *Export* are greyed with the reason on hover rather
- * than omitted: each is a server-side verb asked for in D11 — the selection operand, the
- * bulk-export verb — and ⊘ neither is built.
+ * **The selection is the filter** (`selection-operand.md`): the map and every count narrowed to
+ * it the moment it settled, so *filter to this* is not a button here. *Outside* flips it to the
+ * complement. *Export* and *Save as artifact* are greyed with the reason on hover rather than
+ * omitted: each is a server-side verb asked for in D11 and ⊘ neither is built.
  */
 export class TesseraSelection extends TesseraElement {
   static override styles = [
@@ -76,8 +78,8 @@ export class TesseraSelection extends TesseraElement {
       r.status === 'shown'
         ? html`<div part="counts" class="kv">
             ${kv('Shown inside', html`<tessera-count part="count-served" .count=${r.served} .stale=${stale} figure="shown"></tessera-count>`)}
-            ${kv('Matched inside', html`<tessera-count part="count-matched" .masked=${r.matched} .stale=${stale}></tessera-count>`)}
-            ${kv('Visible inside', html`<tessera-count part="count-visible" .masked=${r.visible} .stale=${stale}></tessera-count>`)}
+            ${kv(r.shape.outside ? 'Matched outside' : 'Matched inside', html`<tessera-count part="count-matched" .masked=${r.matched} .stale=${stale}></tessera-count>`)}
+            ${r.visible ? kv(r.shape.outside ? 'Visible outside' : 'Visible inside', html`<tessera-count part="count-visible" .masked=${r.visible} .stale=${stale}></tessera-count>`) : nothing}
           </div>`
         : nothing;
     const stateRegion =
@@ -85,11 +87,11 @@ export class TesseraSelection extends TesseraElement {
         ? html`<span part="state" data-state="loading"><span class="dot"></span>Counting<span class="skel" aria-hidden="true"></span></span>`
         : r.status === 'refused'
           ? html`<span part="state" data-state="refused">${icon('warn', 14)}Refused<span part="refusal" class="mono">${r.refusal?.code}</span></span>`
-          : html`<span part="state" data-state=${state} title=${`counted at depth ${r.depth} over ${r.tiles.toLocaleString('en-GB')} cells`}>${stale ? html`${icon('clock', 14)}Corpus updated` : nothing}</span>`;
+          : html`<span part="state" data-state=${state} title=${r.verdict === null ? 'not yet answered' : r.verdict.exact ? 'exact for the shape' : `a cover of the shape at depth ${r.verdict.depth}`}>${stale ? html`${icon('clock', 14)}Corpus updated` : nothing}</span>`;
     const ids = Array.from(r.held.ids, idString);
     // Greyed with the reason on hover, never omitted: each waits on a server verb (D11).
     const waiting = (label: unknown, reason: string) => html`<button part="action" class="btn off" type="button" disabled title=${reason}>${label}</button>`;
-    return html`<div class="panel">${heading(r.shape.kind)}${stateRegion}${counts}
+    return html`<div class="panel">${heading(r.shape.outside ? `outside ${r.shape.kind}` : r.shape.kind)}${stateRegion}${counts}
       ${ids.length > 0
         ? html`<div part="label" class="xs muted items-label">Shown items</div>
           <ul part="items" class="list" aria-label="held marks inside the selection">
@@ -108,7 +110,11 @@ export class TesseraSelection extends TesseraElement {
           this.resolvedStore?.select(null);
           emit(this, 'tessera-selectchange', {shape: null});
         }}>${icon('close', 13)}Clear</button>
-        ${waiting(html`${icon('filter', 13)}Filter to this`, 'Needs the selection operand (not yet served)')}
+        <button part="action" class="btn" type="button" title=${r.shape.outside ? 'Filter to the inside of the shape' : 'Filter to the outside of the shape'} @click=${() => {
+          const next = {...r.shape, outside: !r.shape.outside};
+          this.resolvedStore?.select(next);
+          emit(this, 'tessera-selectchange', {shape: next, status: 'loading'});
+        }}>${icon('filter', 13)}${r.shape.outside ? 'Inside' : 'Outside'}</button>
         ${waiting('Export', 'Needs the export verb (not yet served)')}
         ${waiting('Save as artifact', 'Needs the runtime-artifact path (not yet served)')}
       </div>

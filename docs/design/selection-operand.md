@@ -1,13 +1,14 @@
 # The selection operand
 
-**Status:** Provisional — drafted and taken through one adversarial review (Appendix R), 2026-08-26.
-**The three rulings of §10 were taken on 2026-08-29, each as recommended**: (a) the result is a
-row-space set over the whole view; (b) the cached region set is shared across principals, with no
-register row; (c) the exactness verdict rides as a response header. `architecture.md` §8.2 admits
-the third operand kind. What remains before this document becomes normative is the build — the
-shape work's stage 4 ([`polygon-membership.md`](polygon-membership.md) §12), which also gives the
-leaf its second spelling, by published artifact, and its `space` field — and the ⊘ markers below
-are removed as it lands.
+**Status:** Normative — r2, 2026-08-29. Drafted and taken through one adversarial review
+(Appendix R) on 2026-08-26; **the three rulings of §10 were taken on 2026-08-29, each as
+recommended**: (a) the result is a row-space set over the whole view; (b) the cached region set is
+shared across principals, with no register row; (c) the exactness verdict rides as a response
+header. `architecture.md` §8.2 admits the third operand kind. **Built 2026-08-29** as the shape
+work's stage 4 ([`polygon-membership.md`](polygon-membership.md) §12, `artifacts/shape-region`),
+which also gave the leaf its second spelling, by published artifact, and its `space` field; what
+the build changed against the r1 text is in Appendix R's r2 note, and the one ⊘ left (§7, what a
+filter does to artifact display) is an owner question this design never claimed to settle.
 
 **Owns:** what happens when a viewer draws a box or a lasso on the map and asks *how many of my
 items are in it* and *narrow everything to these*. The decomposition of a shape against the Morton
@@ -65,24 +66,27 @@ Three consequences worth seeing before the mechanism:
 
 A **region leaf** in `filters` (contracts §3.2), spelled as the shape that `POST /v1/region` already
 specifies so that the operand and the export verb never disagree about what a shape is.
-⊘ *Specified, not implemented — no server accepts this leaf, and a request carrying one is refused
-today as an unknown column. What a client has instead is the `tiles` form described in §1.*
 
 ```json
 {"all_of": [{"department": {"in": ["eng", "sales"]}},
-            {"region": {"polygon": [[x, y], [x, y], …]}}]}
+            {"region": {"polygon": [[x, y], [x, y], …], "space": "view"}}]}
+{"region": {"artifact": "<tessera_id>"}}
 ```
 
-`region` takes exactly one of `polygon` — at least three vertices, implicitly closed — or `bbox`, as
-`[x0, y0, x1, y1]`. Coordinates are in the view's own world space, the space `/v1/meta`'s
-quantisation bounds define and the client already works in.
+`region` takes exactly one of `polygon` — at least three vertices, implicitly closed — `bbox`, as
+`[x0, y0, x1, y1]`, `circle`, as `[cx, cy, r]`, or `ellipse`, as `[cx, cy, a, b, angle_degrees]`
+(`polygon-membership.md` §4.1's four kinds), each with `space` (§4.3 there: `view` if absent and
+the only value a view honours; `wgs84` is refused naming `projections.md`) — **or `artifact`**, a
+published shape named by its `tessera_id`, which is `polygon-membership.md` §8's second spelling
+and carries nothing else. Coordinates are in the view's own space, the one `/v1/meta`'s
+quantisation extent defines and the client already works in, and are canonicalised **at the wire**
+through the same `fixed32` the tiler applies to a point (`tessera-server`'s `filter_dto`), so the
+engine holds a grid-unit shape and two callers drawing one shape send one value.
 
-**`region` becomes a reserved column name**, refused at the build exactly as `all_of`, `any_of` and
+**`region` is a reserved column name**, refused at the build exactly as `all_of`, `any_of` and
 `none_of` are (decision 0062: a filter expression names columns directly, so a column called `region`
 would make a request mean two things). Refusing it at the declaration is one error against one
-declaration rather than an ambiguity at request time. ⊘ *Specified, not implemented — the build
-today accepts a column named `region`, and a deployment that has declared one cannot gain this
-operand until it is renamed.*
+declaration rather than an ambiguity at request time.
 
 **Two bounds, published as deployment constants** in `/v1/meta`'s `selection` block, on the argument
 that block already carries for `max_tiles_per_request`: a client choosing a shape is choosing a cost,
@@ -293,12 +297,13 @@ x-tessera-region: exact
 x-tessera-region: cover; depth=11
 ```
 
-⊘ *Specified, not implemented — no such header is emitted, and a client has only its own
-`cellExceedsPixel` rule.* A header rather than a body field, on `x-tessera-stale`'s precedent verbatim: a client reading
+A header rather than a body field, on `x-tessera-stale`'s precedent verbatim: a client reading
 counts alone should not have to decode an Arrow batch to learn whether they are exact. It can be a
 header despite the streamed body because the verdict is settled by the decomposition, which precedes
-every count. The depth is carried so a client can apply its own `cellExceedsPixel` rule and say how
-coarse the answer is; §10 (c) puts the header-versus-trailer choice to the owner.
+every count. The depth is carried so a client can say how coarse the answer is; §10 (c) put the
+header-versus-trailer choice to the owner, who took the header. With several region leaves in one
+expression the header carries the coarsest verdict — a cover anywhere, at the shallowest depth any
+leaf stopped at; a leaf by artifact is always exact.
 
 **What the client does with it.** `cover` sets `Masked.exact` false on every number the region
 produced. The client still draws the shape the user drew and never the cells (decision 0097: the
@@ -478,3 +483,54 @@ register row once finding 1 is closed; that composition needs no change to decis
 0068's one-crossing rule; and that the client's existing even-odd rule is the right one to make
 normative rather than replace. What the review could not test at all is the cost model: no arm of
 this route has been run, and every figure in §4 is arithmetic.
+
+**r2 (2026-08-29) — built, and what the build changed.** Promoted to Normative with stage 4 of the
+shape work (`artifacts/shape-region`). Against the r1 text:
+
+1. **The leaf has four geometric spellings and one by artifact** (§2), not two: `circle` and
+   `ellipse` joined `polygon` and `bbox` with the shape work's ruling (h), each carrying `space`;
+   `artifact` is `polygon-membership.md` §8's leaf by published shape, answered from the held
+   membership under the artifact's own verdict and always exact. The reserved column name is
+   refused at the build.
+2. **What is cached is the decomposition, never the rows** (§5, `tessera_engine::region`). The r1
+   text cached "the row set"; a row set tested under a mask cannot be shared across principals,
+   and the ruling (b) shares. So the entry is the interior tiles' rows, the boundary cells with
+   their contexts and their per-segment ranges — a function of `(view, generation, canonical
+   shape, stop depth)` and of no principal — and each request tests the boundary cells' rows under
+   its own composed mask, masked first. The signature `RegionDecomposition::rows_under(mask, …)`
+   takes the mask so the boundary path cannot run without one, which is the assurance a test that
+   the pre-mask cardinality is never materialised could not give; `viewport.rs` skips its
+   `filter_matched` probe count for a tree carrying a region leaf on the same argument. The cache
+   is a second `SingleFlightCache` beside the row projections', bounded by `serve.region_cache_bytes`
+   and pruned of superseded generations at every geometry swap; a digest collision is detected by
+   comparing the canonical bytes and answered from a fresh, unretained decomposition.
+3. **The result's extent is the tree's** (§5). A region leaf's own rows are `FilterRows::Complete`;
+   a tree of region leaves and projected entity verdicts stays complete, and a render-column leaf
+   anywhere in it — or a per-tile crossing — bounds the answer to the request's domain, in which
+   case the region's rows are clamped to that domain and the answer is `FilterRows::Viewport`.
+   `none_of` over a region is the complement within that scope.
+4. **The verdict is settled where the ruling needed it** — the head is delivered after the filter
+   is evaluated and before the sweep, so `x-tessera-region` precedes the streamed body.
+5. **The client** (§8): `region.ts` lost the depth walk, the tile bound, the `k = 0` counting
+   request and `cellExceedsPixel`; a selection *is* the filter — the leaf rides every request, the
+   map and every count narrow to it, and the region's count is the frame's own `matched` sum —
+   with `outside` as `none_of` over the leaf and *filter to this* / *outside this* on the artifact
+   card as the leaf by artifact. The highlight's predicate is the server's: even-odd over the
+   quantised grid, an edge inside, in exact integer arithmetic. `Masked.exact` is the header's
+   verdict *and* the replica holding every tile of the shape's extent — a frame that did not cover
+   the shape counted the part in view.
+6. **Two deployment constants** on `/v1/meta`'s `selection` block: `max_region_vertices`
+   (default 10,000; over it a `422` naming the count and the cap) and `max_region_cells` (default
+   262,144, the perimeter of a whole-world box in depth-16 cells; over it a cover, never a
+   refusal).
+7. **Second readers**: `reference/oracle/filters.py`'s `RegionColumn` — an even-odd walk over each
+   entity's stored position, by artifact through the fixture's own membership — and
+   `conformance/tests/test_region_leaf.py`: the lasso against the oracle under three principals;
+   the cover a superset with one verdict for every principal; the leaf by artifact equal to the
+   masked count and composed with a numeric leaf; `none_of` the complement; an unknown, a
+   suppressed and a withheld artifact one response byte for byte; the reserved name refused at
+   the build. `crates/tessera-engine/tests/region_leaf.rs` holds the same claims against the
+   fixture's generator.
+
+§4's cost model is still **modelled, not measured** by a probe; what the evidence run recorded is in
+[`../evidence/screenshots/2026-08-29-shape-region/`](../evidence/screenshots/2026-08-29-shape-region/README.md).

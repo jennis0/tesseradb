@@ -36,14 +36,17 @@ use crate::state::AppState;
 /// breakdown rides the trailer frame, in-body and outside CORS's reach). `etag`,
 /// `x-tessera-identity-key` and `x-tessera-stale` are the delta-serving coordinates
 /// (`delta-serving.md` §2): a browser client that cannot key a replica cannot revalidate one, and
-/// `etag` is not on the CORS safelist despite being a standard header.
-const EXPOSED: [&str; 6] = [
+/// `etag` is not on the CORS safelist despite being a standard header. `x-tessera-region` is the
+/// region leaf's exactness verdict (`selection-operand.md` §6): a browser client that cannot read
+/// it renders every region count inexact, which is the fail-closed reading and not the answer.
+const EXPOSED: [&str; 7] = [
     "etag",
     "x-tessera-identity-key",
     "x-tessera-stale",
     "x-tessera-pin",
     "x-tessera-server-us",
     "x-tessera-admission-us",
+    "x-tessera-region",
 ];
 
 /// The viewer plane's layer: the development list **and** the production list, together.

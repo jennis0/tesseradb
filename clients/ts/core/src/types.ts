@@ -102,7 +102,30 @@ export type FilterExpr =
   | {all_of: FilterExpr[]}
   | {any_of: FilterExpr[]}
   | {none_of: FilterExpr[]}
+  | {region: RegionOperand}
   | {[column: string]: FilterOperator};
+
+/**
+ * The `region` leaf (`selection-operand.md` §2; `polygon-membership.md` §8): exactly one of a
+ * shape in the view's own data space — `polygon` (at least three vertices, implicitly closed),
+ * `bbox` (`[x0, y0, x1, y1]`), `circle` (`[cx, cy, r]`), `ellipse` (`[cx, cy, a, b,
+ * angle_degrees]`) — with `space` (`view`, the only value a view honours today), or `artifact`, a
+ * published shape's `tessera_id` as a decimal string. `region` is a reserved column name.
+ */
+export type RegionOperand =
+  | {polygon: [number, number][]; space?: 'view'}
+  | {bbox: [number, number, number, number]; space?: 'view'}
+  | {circle: [number, number, number]; space?: 'view'}
+  | {ellipse: [number, number, number, number, number]; space?: 'view'}
+  | {artifact: string};
+
+/**
+ * `x-tessera-region` (`selection-operand.md` §6): whether every region leaf's answer is exact for
+ * the shape against each point's stored position, or exact for a **cover** of it — a superset —
+ * taken at `depth` because the shape's perimeter exceeded `max_region_cells`. A function of the
+ * shape and the grid alone, never of the rows.
+ */
+export type RegionVerdict = {exact: true; depth: null} | {exact: false; depth: number};
 
 /** One column's predicate. Exactly one key — the server refuses a leaf carrying two. */
 export type FilterOperator =
@@ -201,6 +224,13 @@ export type Meta = {
      * page that means "the set ended" from one that means "the deployment truncated".
      */
     maxCategoryValues: number;
+    /** The most vertices a `region` leaf's polygon may carry; over it the request is a `422`. */
+    maxRegionVertices: number;
+    /**
+     * The most boundary cells a `region` leaf's descent may hold at one depth. Not a refusal:
+     * over it the answer is a cover, said on `x-tessera-region` ({@link RegionVerdict}).
+     */
+    maxRegionCells: number;
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;
@@ -670,6 +700,11 @@ export type ViewportResponse = {
    * Nothing expires and no response is withheld while it is `true`.
    */
   stale: boolean;
+  /**
+   * The region leaves' verdict — `null` when the request carried none. `exact: false` sets
+   * `Masked.exact` false on every number the region produced.
+   */
+  region: RegionVerdict | null;
   bytes: number;
 };
 

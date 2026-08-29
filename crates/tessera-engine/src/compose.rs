@@ -235,7 +235,7 @@ pub enum FilterRows {
 }
 
 impl FilterRows {
-    fn rows(&self) -> &Bitmap {
+    pub(crate) fn rows(&self) -> &Bitmap {
         match self {
             FilterRows::Complete(rows) => rows,
             FilterRows::Viewport { rows, .. } => rows,

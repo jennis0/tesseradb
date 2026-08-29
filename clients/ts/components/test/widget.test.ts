@@ -49,7 +49,7 @@ const META = {
   quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1},
   declaredScalars: [],
   layers: [],
-  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000},
+  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
   maxTilesPerRequest: 4096,
   filterOperands: [] as FilterOperandSet[]
 };
@@ -179,11 +179,11 @@ describe('the up-sync', () => {
   it('a region syncs when its counts arrive, not while loading', () => {
     const {model, store} = setUp();
     const shape = {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]};
-    const loading = {shape, status: 'loading' as const, refusal: null, visible: {value: 0, exact: true}, matched: {value: 0, exact: true}, served: {shown: 0, total: 0, exact: true}, depth: 7, tiles: 10, held: {ids: new BigUint64Array(0), positions: new Float32Array(0), count: 0}};
+    const loading = {shape, status: 'loading' as const, refusal: null, visible: {value: 0, exact: true}, matched: {value: 0, exact: true}, served: {shown: 0, total: 0, exact: true}, verdict: {exact: true as const, depth: null}, held: {ids: new BigUint64Array(0), positions: new Float32Array(0), count: 0}};
     store.set('region', loading);
     expect(model.state.region).toBeNull();
     store.set('region', {...loading, status: 'shown', visible: {value: 42, exact: false}});
-    expect(model.state.region).toMatchObject({status: 'shown', visible: {value: 42, exact: false}, depth: 7, tiles: 10});
+    expect(model.state.region).toMatchObject({status: 'shown', visible: {value: 42, exact: false}, verdict: {exact: true, depth: null}});
     expect((model.state.region as {held?: unknown}).held).toBeUndefined();
   });
 

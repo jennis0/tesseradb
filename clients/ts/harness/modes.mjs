@@ -36,13 +36,31 @@ const page = await browser.newPage({viewport: {width: 1440, height: 900}});
 const consoleErrors = [];
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
-/** Every counting request in the `tiles` form — a box or a lasso settled. */
+/**
+ * Every viewport request carrying a `region` leaf — a box or a lasso settled is a *filter*
+ * (`selection-operand.md` §8: the shape rides the request the client was sending anyway), so
+ * what is counted here is the kind of shape each request carried, not a counting request of its
+ * own.
+ */
 const regionRequests = [];
+/** The `region` leaf anywhere in a filter expression, or null. */
+const regionOf = (expr) => {
+  if (!expr || typeof expr !== 'object') return null;
+  if (expr.region) return Object.keys(expr.region).find((k) => k !== 'space') ?? null;
+  for (const key of ['all_of', 'any_of', 'none_of']) {
+    for (const kid of expr[key] ?? []) {
+      const found = regionOf(kid);
+      if (found) return found;
+    }
+  }
+  return null;
+};
 page.on('request', (r) => {
   if (!r.url().includes('/v1/viewport')) return;
   try {
     const body = JSON.parse(r.postData() ?? '{}');
-    if (body.k === 0 && Array.isArray(body.tiles)) regionRequests.push(body.tiles.length);
+    const kind = regionOf(body.filters);
+    if (kind && body.k !== 0) regionRequests.push(kind);
   } catch {
     // Not a request this test reads.
   }
@@ -129,7 +147,7 @@ await glide(900, 500, 500);
 s = await state();
 check('pan: a glide with the button up moves nothing', same(still, s.target), `target ${still} → ${s.target}`);
 
-// 2. box: the button, the attribute, the highlight while dragging, the region and its request after.
+// 2. box: the button, the attribute, the highlight while dragging, the region and the leaf on the request after.
 await press('Box select');
 s = await state();
 check('box: the button sets the mode', s.mode === 'box', `mode=${s.mode}`);
@@ -137,7 +155,7 @@ let asked = regionRequests.length;
 let mid = await drag([[700, 300], [760, 340], [900, 500]]);
 s = await state();
 check('box: the highlight follows the drag', mid[0].drag !== null && mid[1].drag !== null && mid[1].drag?.[2] > mid[0].drag?.[2], `drag ${JSON.stringify(mid[0].drag)} → ${JSON.stringify(mid[1].drag)}`);
-check('box: release counts the region', s.drag === null && s.region === 'box' && regionRequests.length === asked + 1, `region=${s.region}, ${regionRequests.length - asked} counting request(s) of ${regionRequests[regionRequests.length - 1] ?? '?'} tiles`);
+check('box: release filters to the region', s.drag === null && s.region === 'box' && regionRequests.length > asked && regionRequests[regionRequests.length - 1] === 'bbox', `region=${s.region}, ${regionRequests.length - asked} request(s) carrying a ${regionRequests[regionRequests.length - 1] ?? '?'} leaf`);
 check('box: the camera did not move', same(still, s.target), `target ${still} → ${s.target}`);
 
 // 3. back to pan: the glide to the button moves nothing; then a drag moves the camera.
@@ -158,7 +176,7 @@ asked = regionRequests.length;
 mid = await drag([[820, 420], [900, 440], [880, 520], [800, 500]], 300);
 s = await state();
 check('lasso: the polygon grows while drawing', (mid[0].polygon ?? 0) > 1 && (mid[2].polygon ?? 0) > (mid[0].polygon ?? 0), `${mid.map((m) => m.polygon).join(' → ')} vertices`);
-check('lasso: release counts the region', s.polygon === null && s.region === 'lasso' && regionRequests.length === asked + 1, `region=${s.region}, ${regionRequests.length - asked} counting request(s)`);
+check('lasso: release filters to the region', s.polygon === null && s.region === 'lasso' && regionRequests.length > asked && regionRequests[regionRequests.length - 1] === 'polygon', `region=${s.region}, ${regionRequests.length - asked} request(s) carrying a ${regionRequests[regionRequests.length - 1] ?? '?'} leaf`);
 check('lasso: the camera did not move', same(afterPan, s.target), `target ${afterPan} → ${s.target}`);
 
 // 5. pan once more.
