@@ -411,3 +411,32 @@ paths = [
   "docs/evidence/*",
   "reference/oracle/*",
 ]
+
+# Stage 4 of the shape work (polygon-membership.md §12): the region leaf.
+[track.shape-region]
+paths = [
+  "crates/tessera-engine/*",
+  "crates/tessera-filter/*",
+  "crates/tessera-server/*",
+  "crates/tessera-wire/*",
+  "crates/tessera-types/*",
+  "crates/tessera-build/*",
+  "crates/tessera-spatial/*",
+  "crates/tessera-store/*",
+  "clients/ts/*",
+  "clients/py/*",
+  "conformance/*",
+  "reference/*",
+  "docs/design/selection-operand.md",
+  "docs/design/polygon-membership.md",
+  "docs/design/contracts.md",
+  "docs/design/filter-surface.md",
+  "docs/design/filter-result-cache.md",
+  "docs/design/client-components.md",
+  "docs/design/client-interaction.md",
+  "docs/design/configuration.md",
+  "docs/openapi/*",
+  "docs/artifact-delivery.md",
+  "docs/client-delivery.md",
+  "docs/evidence/*",
+]
