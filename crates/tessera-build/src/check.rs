@@ -57,6 +57,9 @@ pub struct SourceChecked {
 pub struct CheckReport {
     pub sources: Vec<SourceChecked>,
     pub findings: Vec<Finding>,
+    /// Per shape layer, what its geometry is — computed from the geometry alone, before any
+    /// build (`polygon-membership.md` §6.5); a layer that could not be sized says why.
+    pub shapes: Vec<std::result::Result<crate::shapes::ShapeLayerReport, String>>,
 }
 
 impl CheckReport {
@@ -167,6 +170,13 @@ pub fn check(config: &Config) -> CheckReport {
         check_view(view, &mut report);
     }
     check_layers(config, &mut report);
+    // **The shape report is the one part of a check that reads rows**, deliberately: the
+    // decomposition's size is what an operator sizing a world-scale boundary set needs, and it is
+    // known from the geometry alone. A finding above means the file the shapes would be read from
+    // may not open, so the rows are read only on a clean schema.
+    if report.is_clean() {
+        report.shapes = crate::shapes::check_reports(config);
+    }
     report
 }
 
@@ -349,7 +359,7 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
                 object: format!("{object} ({} inline artifact(s))", rows.len()),
                 path: None,
             }),
-            Some(ArtifactSource::File { path, fields }) => {
+            Some(ArtifactSource::File { path, fields, .. }) => {
                 if let Some(schema) = open(report, &object, path) {
                     // `key` is the one field a build-published artifact cannot do without: it is
                     // the address that survives a rebuild and what an edge into the layer names.
@@ -366,6 +376,18 @@ fn check_layers(config: &Config, report: &mut CheckReport) {
                             "attached_key",
                             "members",
                             "excluding",
+                            "min_x",
+                            "min_y",
+                            "max_x",
+                            "max_y",
+                            "cx",
+                            "cy",
+                            "r",
+                            "a",
+                            "b",
+                            "angle",
+                            "geometry",
+                            "space",
                         ],
                     );
                 }

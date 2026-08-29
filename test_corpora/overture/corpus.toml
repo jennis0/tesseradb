@@ -1,0 +1,360 @@
+# Overture Maps places + divisions — 73,631,092 places, the ladder's second geographic rung.
+#
+# Produced by `prepare.py`, which copies this file next to the parquets it writes; `[sources]` is
+# relative to the declaring document (configuration.md §3), so the copy beside the data is what
+# `tessera build` reads and this one is what gets reviewed.
+#
+# **The extent is post-projection**, as at the GeoNames rung and for the same reason: Tessera has
+# no projection layer, so `prepare.py` transforms WGS84 to Web Mercator, normalises the whole
+# domain to the unit square and runs y **south**. A 16-bit cell is then exactly an XYZ tile at
+# zoom 16. When native projection lands this becomes `projection = "web_mercator"` with the WGS84
+# box `frame.json` records, and the corpus is rebuilt.
+#
+# **Licence, and it differs from GeoNames'.** Places is CDLA-Permissive 2.0; divisions is **ODbL**,
+# which is share-alike — a derived database distributed publicly carries the obligation. This rung
+# is a measurement fixture and is not distributed, but the boundary layer is the ODbL half and
+# anything published from it inherits that.
+
+[sources]
+points             = "points.parquet"
+category_root      = "vocab-category-root.parquet"
+category           = "vocab-category.parquet"
+basic_category     = "vocab-basic-category.parquet"
+country            = "vocab-country.parquet"
+source_dataset     = "vocab-source-dataset.parquet"
+operating_status   = "vocab-operating-status.parquet"
+division_country   = "vocab-division-country.parquet"
+division_region    = "vocab-division-region.parquet"
+division_county    = "vocab-division-county.parquet"
+members_taxonomy   = "members-taxonomy.parquet"
+artifacts_divisions = "artifacts-divisions.parquet"
+
+[defaults]
+source = "points"
+
+# **The access side is synthetic, and every figure this corpus produces says so.** Overture carries
+# no rights or audience field either, so each place's access term is the country of its first
+# address — the same synthetic compartment the GeoNames rung uses, which is what makes the two
+# rungs' access figures comparable at 5.5× the scale. Places with no country carry no term and take
+# the declared `public` default, which the build reports.
+[[view]]
+name             = "world"
+title            = "Overture places"
+extent           = { min = 0.0, max = 1.0 }
+point_visibility = { field = "country", default = "public" }
+
+# ---------------------------------------------------------------------------------------------
+# Vocabularies. The split is the same structural one the GeoNames rung draws, and it lands
+# differently here because the categorical columns are *orthogonal to the compartment* rather than
+# contained by it.
+#
+# `public` — the three category columns, `source_dataset` and `operating_status`. A category names
+# no country, so serving "somewhere in this corpus there are sushi restaurants" discloses nothing
+# about a compartment a principal does not hold.
+#
+# `derived` — `country` and the three division columns. A division sits inside exactly one country
+# and the country *is* the compartment, so telling a principal barred from France that a French
+# département exists names a compartment they do not hold. Evaluated per request from inside the
+# mask (decision 0090).
+#
+# ⊘ Every vocabulary here is **minted from the corpus**, Overture publishing its taxonomy as
+# documentation rather than as a file in the staged release. Where the GeoNames rung could point
+# `feature_code` at `featureCodes_en.txt` and call it published, these are the corpus's own
+# distinct values. That is why the category vocabularies are `closed` — the roster is what the
+# build saw — and it is the one thing a staged taxonomy file would change.
+# ---------------------------------------------------------------------------------------------
+
+[[vocabulary]]
+name       = "category_root"
+title      = "Category root"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "category_root"
+
+[[vocabulary]]
+name       = "category"
+title      = "Category"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "category"
+
+[[vocabulary]]
+name       = "basic_category"
+title      = "Basic category"
+width      = "u16"
+value_set  = "closed"
+visibility = "public"
+source     = "basic_category"
+
+[[vocabulary]]
+name       = "country"
+title      = "Country"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "country"
+
+[[vocabulary]]
+name       = "source_dataset"
+title      = "Source dataset"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "source_dataset"
+
+[[vocabulary]]
+name       = "operating_status"
+title      = "Operating status"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "operating_status"
+
+[[vocabulary]]
+name       = "division_country"
+title      = "Country division"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "division_country"
+
+[[vocabulary]]
+name       = "division_region"
+title      = "Region"
+width      = "u16"
+value_set  = "closed"
+visibility = "derived"
+source     = "division_region"
+
+# u32 at 39,882: a u16 would ship 61% full on a gazetteer that grows monthly, and the column is
+# indexed and never rendered, so the width is the size of the code space and not bytes in a row.
+[[vocabulary]]
+name       = "division_county"
+title      = "County"
+width      = "u32"
+value_set  = "closed"
+visibility = "derived"
+source     = "division_county"
+
+# ---------------------------------------------------------------------------------------------
+# Attributes. Three category columns over one taxonomy, which is the point of declaring all three:
+# `category_root` is 14 values and a legend, `category` is ~2,100 and the leaf, and
+# `basic_category` is ~300 and is Overture's own *basic level* rollup sitting between them — an
+# ancestor within the same path rather than a fourth axis. Colouring by each in turn is three
+# resolutions of one tree without touching the artifact layer.
+# ---------------------------------------------------------------------------------------------
+
+[[attribute]]
+name       = "category_root"
+type       = "category"
+vocabulary = "category_root"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "category"
+type       = "category"
+vocabulary = "category"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "basic_category"
+type       = "category"
+vocabulary = "basic_category"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "country"
+type       = "category"
+vocabulary = "country"
+render     = true
+index      = true
+
+[[attribute]]
+name       = "source_dataset"
+type       = "category"
+vocabulary = "source_dataset"
+render     = true
+index      = true
+
+# Null on 84% of places, and that is the column's character rather than a defect: Overture records
+# a status where a contributing source asserted one. A filter over it is a filter over the 16%.
+[[attribute]]
+name       = "operating_status"
+type       = "category"
+vocabulary = "operating_status"
+render     = true
+index      = true
+
+# The ladder's first `f32` attribute, and the first numeric whose range is bounded by definition
+# rather than by what the data happened to contain: [0, 1], no nulls. The contrast with GeoNames'
+# `population` — violently skewed, unbounded, one negative — is the reason to carry both.
+[[attribute]]
+name   = "confidence"
+type   = "f32"
+render = true
+
+# The ingest order, as `modification_date` is at GeoNames: entity ids are assigned in this column's
+# order, so replaying the corpus in id order is a time-ordered ingest.
+[[attribute]]
+name   = "update_time"
+type   = "timestamp_us"
+render = true
+
+# 73.6M names averaging 20.8 bytes — ~1.5 GB whole, against 0.18 GB at GeoNames. This is the rung
+# where a text column stops being free, and it is still an order of magnitude below the abstracts
+# the plan expects to force a streaming column at rung 4.
+[[attribute]]
+name   = "name"
+type   = "text"
+index  = true
+
+# Three levels of the boundary tree lifted out of the lineage into indexed columns, so the same
+# containment can be asked for as an attribute predicate as well as through the nested layer below.
+# **Which of the two the surface prefers is what this rung is meant to measure** (campaign plan
+# §9.2), and carrying both is what makes the comparison a measurement rather than an argument.
+# `locality` is deliberately not among them: 553,493 values belongs to the layer, not to a column.
+[[attribute]]
+name       = "division_country"
+type       = "category"
+vocabulary = "division_country"
+index      = true
+
+[[attribute]]
+name       = "division_region"
+type       = "category"
+vocabulary = "division_region"
+index      = true
+
+[[attribute]]
+name       = "division_county"
+type       = "category"
+vocabulary = "division_county"
+index      = true
+
+# ---------------------------------------------------------------------------------------------
+# Three layers, and the three membership kinds they use are the rung's real subject: an enumerated
+# tiered taxonomy, an enumerated nested tree, and an attribute predicate — over one point set.
+# ---------------------------------------------------------------------------------------------
+
+# `tiered` is legal here because the category path is a clean tree, and that was measured rather
+# than assumed (2026-08-28, one part): every category appears at exactly one depth, every category
+# but the 13 roots has exactly one parent, and the last entry of the path is always
+# `taxonomy.primary`. So position *is* level, six levels deep, and the member file is a fixed
+# six-element list with nulls past the leaf.
+[[layer]]
+name                      = "places/taxonomy"
+title                     = "Place taxonomy"
+views                     = ["world"]
+membership                = "enumerated"
+value_set                 = "open"
+hierarchy                 = { kind = "tiered", prune_children = true }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+
+[[layer.levels]]
+level = 0
+title = "Root"
+zoom  = [0, 4]
+
+[[layer.levels]]
+level = 1
+title = "Group"
+zoom  = [3, 7]
+
+[[layer.levels]]
+level = 2
+title = "Category"
+zoom  = [6, 10]
+
+[[layer.levels]]
+level = 3
+title = "Subcategory"
+zoom  = [9, 12]
+
+[[layer.levels]]
+level = 4
+title = "Detail"
+zoom  = [11, 14]
+
+[[layer.levels]]
+level = 5
+title = "Leaf"
+zoom  = [13, 16]
+
+[layer.members]
+source = "members_taxonomy"
+
+# **`nested`, and the campaign plan's `tiered` reading of the same data is wrong.** The plan takes
+# Overture's division subtypes for levels. They are not: a division's hierarchy path runs 1 to 9
+# entries deep, and `locality` occurs at every path position from 1 to 8 — a locality contains a
+# locality. A ladder cannot hold that edge; a tree in the edges can, which is what `nested` is
+# (configuration.md, the four hierarchy kinds: every artifact at level 0, `[[layer.levels]]`
+# refused).
+#
+# **The membership is the polygon** (`polygon-membership.md` §6.1): `membership = "spatial"` with
+# `shape.kind = "polygon"`, each artifact row carrying `division_area`'s own geometry as WKB in
+# the `geometry` column, projected by `prepare.py` into this view's frame. The service resolves
+# which places each division holds from the geometry — at the build over its one segment, at
+# every flush over the segment it publishes — so `members-divisions.parquet` is no longer what
+# the layer reads. The offline join stays for the three lifted attribute columns and for the
+# roster.
+#
+# **The edges are declared**, from each division's own `hierarchies[1]` — the `parent` column —
+# and never derived from containment: `division_area` polygons are generalised for cartography
+# and do not nest reliably, so a tree derived from the geometry would differ from the
+# publisher's. The build reports the children whose bounds escape their parent's and proceeds.
+#
+# ⊘ **A nested layer has no levels, so it has no zoom bound**, and the artifact-response-volume
+# finding at rung 1 (`docs/ingest-campaign.md` §4) was precisely that a tiered layer returns every
+# level whatever the zoom and the zoom→level map is what bounds it. This layer has no such map to
+# offer, at roughly 600,000 artifacts. Expect the finding to bite harder here, and expect it to be
+# this rung's first serving result.
+[[layer]]
+name                      = "boundaries/divisions"
+title                     = "Administrative divisions"
+source                    = "artifacts_divisions"
+views                     = ["world"]
+membership                = "spatial"
+hierarchy                 = { kind = "nested", prune_children = true }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }
+
+[layer.shape]
+kind = "polygon"
+
+# Recomputed per viewer from `membership ∩ M_auth`, so they are contained by construction and take
+# no visibility declaration. Without them a boundary layer cannot answer "zoom to this region" for
+# the region the viewer can actually see.
+[layer.content]
+computed = ["centroid", "box"]
+
+# A division's name is true whether or not any place exists inside it, so it inherits the
+# artifact's own visibility rather than requiring a generating set. Every artifact carries one —
+# a layer declaring a supplied kind is refused an artifact without it — falling back to the GERS
+# uuid where Overture records no name.
+[[layer.content.supplied]]
+name                      = "name"
+type                      = "text"
+require_member_visibility = "inherited"
+
+# The tagged-programme case the campaign plan asks this rung for: an attribute predicate, whose
+# artifacts are the eight distinct values of an indexed column and whose membership is evaluated
+# rather than published. It declares no content, no levels and no hierarchy but `flat`, which is
+# what a predicate membership is allowed.
+[[layer]]
+name                      = "programmes/source"
+title                     = "Contributing dataset"
+views                     = ["world"]
+membership                = { attribute = "source_dataset" }
+value_set                 = "closed"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = { count = 1 }

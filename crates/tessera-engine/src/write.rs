@@ -2031,13 +2031,10 @@ fn artifact_coordinates(
     held: &[tessera_store::manifest::ContainmentExtent],
     held_indexes: &[tessera_store::manifest::TileIndexExtent],
     held_columns: &[tessera_store::manifest::RowColumnExtent],
+    held_shape_rows: &[tessera_store::manifest::ShapeRowsExtent],
+    held_shape_held: &[tessera_store::manifest::ShapeHeldExtent],
     pending_retirement: &[(String, u32)],
-) -> (
-    Vec<tessera_store::manifest::LevelVersion>,
-    Vec<tessera_store::manifest::ContainmentExtent>,
-    Vec<tessera_store::manifest::TileIndexExtent>,
-    Vec<tessera_store::manifest::RowColumnExtent>,
-) {
+) -> ArtifactCoordinates {
     let pending = |layer: &str, level: u32| {
         pending_retirement
             .iter()
@@ -2084,7 +2081,44 @@ fn artifact_coordinates(
         })
         .cloned()
         .collect();
-    (versions, still_true, indexes_still_true, columns_still_true)
+    // The shape row forms take the same filter. The segment half of their key is not part of it:
+    // a segment is immutable and its id never reused, so an entry naming one that no generation
+    // serves any more is a file nothing will claim, and is dropped when the prefix is.
+    let shape_rows_still_true = held_shape_rows
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    let shape_held_still_true = held_shape_held
+        .iter()
+        .filter(|entry| {
+            !pending(&entry.layer, entry.level)
+                && store.level_version(&entry.layer, entry.level) == entry.level_version
+        })
+        .cloned()
+        .collect();
+    ArtifactCoordinates {
+        level_versions: versions,
+        containment: still_true,
+        tile_indexes: indexes_still_true,
+        row_columns: columns_still_true,
+        shape_rows: shape_rows_still_true,
+        shape_held: shape_held_still_true,
+    }
+}
+
+/// What [`artifact_coordinates`] stamps into a side-manifest: the level versions and every
+/// derived-structure list filtered to the entries still true at them.
+struct ArtifactCoordinates {
+    level_versions: Vec<tessera_store::manifest::LevelVersion>,
+    containment: Vec<tessera_store::manifest::ContainmentExtent>,
+    tile_indexes: Vec<tessera_store::manifest::TileIndexExtent>,
+    row_columns: Vec<tessera_store::manifest::RowColumnExtent>,
+    shape_rows: Vec<tessera_store::manifest::ShapeRowsExtent>,
+    shape_held: Vec<tessera_store::manifest::ShapeHeldExtent>,
 }
 
 impl WritePath {
@@ -2486,6 +2520,22 @@ impl WritePath {
             .values()
             .flat_map(|p| p.manifest.row_column_extents.iter().cloned())
             .collect();
+        // The shape row forms the build or the last fold wrote, seeded identically and for the
+        // identical reason.
+        let seeded_shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.shape_rows_extents.iter().cloned())
+            .collect();
+        let seeded_shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent> = generation
+            .load()
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.shape_held_extents.iter().cloned())
+            .collect();
         // The content half, seeded identically and for the identical reason.
         let seeded_content_extents: Vec<tessera_store::manifest::RecordExtent> = generation
             .load()
@@ -2506,6 +2556,7 @@ impl WritePath {
                     generation,
                     row_projection_cache,
                     artifact_projections: flush.artifact_projections,
+                    shapes: flush.shapes,
                     lineages: flush.lineages,
                     level_contents: flush.level_contents,
                     queues: LifecycleQueues {
@@ -2556,6 +2607,8 @@ impl WritePath {
                     containment_extents: seeded_containment_extents,
                     tile_index_extents: seeded_tile_index_extents,
                     row_column_extents: seeded_row_column_extents,
+                    shape_rows_extents: seeded_shape_rows_extents,
+                    shape_held_extents: seeded_shape_held_extents,
                     artifact_record_extents: seeded_content_extents,
                     pending_reclaim: Vec::new(),
                     last_tick: std::time::Instant::now(),
@@ -3417,6 +3470,10 @@ pub(crate) struct MaintenanceDeps {
     /// per-session value, so leaving it to the first request after the flip is a stall of tens of
     /// seconds for whoever arrives first.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The spatial levels' held shapes and per-segment pieces (`crate::shapes`) — filled by the
+    /// flush before its publication, rebuilt at a publication into a shape layer, re-resolved at
+    /// the fold and the merge.
+    pub(crate) shapes: Arc<crate::shapes::ShapeStore>,
     /// The lineages, shared for the half of the same warm that is theirs — see
     /// [`Executor::warm_artifact_caches`].
     pub(crate) lineages: Arc<crate::cut::Lineages>,
@@ -3814,6 +3871,8 @@ mod vocabulary_extensions_tests {
             containment_extents: Vec::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),
@@ -4362,6 +4421,8 @@ struct Executor {
     /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
     /// [`MaintenanceDeps::artifact_projections`].
     artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// See [`MaintenanceDeps::shapes`].
+    shapes: Arc<crate::shapes::ShapeStore>,
     /// The lineages, rebuilt beside them and for the same reason.
     lineages: Arc<crate::cut::Lineages>,
     /// The supplied-content tables, held for the layer drop below. Not warmed at the fold: a
@@ -4571,6 +4632,13 @@ struct Executor {
     /// only difference is the layout tag each entry carries, which says which form the file is in
     /// and is checked against the file's own magic at open.
     row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
+    /// Every persisted shape row form the current prefix holds — one per `(view, layer, level,
+    /// segment)` the build or the last fold wrote one for. Held, filtered and replaced exactly as
+    /// [`Executor::row_column_extents`] is, and by the same code ([`artifact_coordinates`]).
+    shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
+    /// Every persisted decomposition file the current prefix holds, held and filtered as
+    /// [`Executor::shape_rows_extents`] is.
+    shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
     /// Every artifact **content** extent this node has published, complete current state, held for
     /// the reason above and written the same way. The two lists travel together: a membership
     /// without its content leaves an artifact whose description cannot be read, which withholds it.
@@ -5031,6 +5099,8 @@ impl Executor {
             &self.containment_extents,
             &self.tile_index_extents,
             &self.row_column_extents,
+            &self.shape_rows_extents,
+            &self.shape_held_extents,
             &[],
         ) {
             self.health.merge_failures.fetch_add(1, Ordering::Relaxed);
@@ -5048,6 +5118,21 @@ impl Executor {
             .iter()
             .map(|i| i.seg_id.clone())
             .collect();
+        // **The merged segment's shape memberships, before the swap**: its rows are the consumed
+        // segments' rows renumbered, so their pieces do not carry over and the new segment is
+        // resolved whole (`polygon-membership.md` §6.3).
+        for held in self.shapes.levels_of_view(&completed.plan.view) {
+            let (_, cost) = held.resolve(&completed.segment);
+            tracing::info!(
+                layer = %held.layer,
+                level = held.level,
+                view = %completed.plan.view,
+                seg_id = %completed.segment.seg_id,
+                rows_tested = cost.rows_tested,
+                elapsed_ms = cost.elapsed_ms,
+                "a merge resolved its segment against a spatial level's shapes"
+            );
+        }
         let next_bundle = match live.bundle.with_merged(
             &completed.plan.partition,
             &completed.plan.view,
@@ -5756,7 +5841,8 @@ impl Executor {
         // replace-on-mismatch and this fold moves the prefix, so it would go anyway; the *held*
         // tile index and column would not, because a level that flipped is never asked for its old
         // form again and nothing would ever claim the entry.
-        let layouts = self.choose_layouts(&spaces, &pending_retirement);
+        let fold_segments = fold_segments(&to_prefix_dir, &plan.partition, &completed.segments);
+        let layouts = self.choose_layouts(&spaces, &pending_retirement, &fold_segments);
         for (layer, level, chosen) in &layouts {
             if self.live.record_layout(layer, *level, *chosen) {
                 self.artifact_projections.forget_level(layer, *level);
@@ -5783,6 +5869,25 @@ impl Executor {
             &spaces,
             &layouts,
             &pending_retirement,
+            &fold_segments,
+        );
+        // **And the row forms of the spatial levels the columns do not cover**, so the next open
+        // claims what this fold just resolved instead of resolving it again
+        // (`polygon-membership.md` §6.3; owner ruling 2026-08-29).
+        let shape_rows = self.write_shape_rows(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &row_columns,
+            &pending_retirement,
+            &fold_segments,
+        );
+        let shape_held = self.write_shape_held(
+            &to_prefix_dir,
+            &plan.partition,
+            manifest_n,
+            &pending_retirement,
+            &fold_segments,
         );
 
         // ---- step 3b: the report, before anything retires ---------------------------------------
@@ -5873,6 +5978,8 @@ impl Executor {
             containment_extents: Vec::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             artifact_record_extents: self.artifact_record_extents.clone(),
             segments,
             deltas: carried_tiers.clone(),
@@ -6095,6 +6202,8 @@ impl Executor {
             &containment,
             &tile_indexes,
             &row_columns,
+            &shape_rows,
+            &shape_held,
             &pending_retirement,
         ) {
             discard(&format!(
@@ -6157,6 +6266,8 @@ impl Executor {
         self.containment_extents = segments_manifest.containment_extents.clone();
         self.tile_index_extents = segments_manifest.tile_index_extents.clone();
         self.row_column_extents = segments_manifest.row_column_extents.clone();
+        self.shape_rows_extents = segments_manifest.shape_rows_extents.clone();
+        self.shape_held_extents = segments_manifest.shape_held_extents.clone();
         *lock_recover(&self.health.last_fold_report) = degraded;
 
         // ---- steps 5 and 6: open the new prefix, then one swap ---------------------------------
@@ -6574,6 +6685,8 @@ impl Executor {
             &self.containment_extents,
             &self.tile_index_extents,
             &self.row_column_extents,
+            &self.shape_rows_extents,
+            &self.shape_held_extents,
             &[],
         ) {
             self.health
@@ -6855,6 +6968,7 @@ impl Executor {
                     novel_descriptors,
                     max_distinct_terms: self.max_distinct_terms,
                     prefix: generation.prefix.clone(),
+                    shapes: self.shapes.levels_of_view(&view),
                 },
             ));
         }
@@ -7654,22 +7768,27 @@ impl Executor {
         containment: &[tessera_store::manifest::ContainmentExtent],
         tile_indexes: &[tessera_store::manifest::TileIndexExtent],
         row_columns: &[tessera_store::manifest::RowColumnExtent],
+        shape_rows: &[tessera_store::manifest::ShapeRowsExtent],
+        shape_held: &[tessera_store::manifest::ShapeHeldExtent],
         pending_retirement: &[(String, u32)],
     ) -> Result<(), ManifestCommitRefused> {
-        let (level_versions, containment_extents, tile_index_extents, row_column_extents) =
-            self.live.with_artifacts(|store| {
-                artifact_coordinates(
-                    store,
-                    containment,
-                    tile_indexes,
-                    row_columns,
-                    pending_retirement,
-                )
-            });
-        next.level_versions = level_versions;
-        next.containment_extents = containment_extents;
-        next.tile_index_extents = tile_index_extents;
-        next.row_column_extents = row_column_extents;
+        let coordinates = self.live.with_artifacts(|store| {
+            artifact_coordinates(
+                store,
+                containment,
+                tile_indexes,
+                row_columns,
+                shape_rows,
+                shape_held,
+                pending_retirement,
+            )
+        });
+        next.level_versions = coordinates.level_versions;
+        next.containment_extents = coordinates.containment;
+        next.tile_index_extents = coordinates.tile_indexes;
+        next.row_column_extents = coordinates.row_columns;
+        next.shape_rows_extents = coordinates.shape_rows;
+        next.shape_held_extents = coordinates.shape_held;
         crate::geometry::check_manifest_publishable(live_manifest, next)
             .map_err(ManifestCommitRefused::Regresses)?;
         tessera_store::write_segments_manifest(prefix_dir, partition, n, next)
@@ -8877,6 +8996,37 @@ impl Executor {
             );
         }
         let published = Published::registry_applied(&record);
+        // **A shape layer's held structures are rebuilt at publication, and every segment the
+        // generation serves is resolved against them before the ack** (`polygon-membership.md`
+        // §6.3: built at publication and at open, never on a request). The level version moved,
+        // so the cached row form is stale by its own key and the next request joins the pieces
+        // installed here.
+        let generation = self.generation.load_full();
+        let warmed = self.live.with_artifacts(|store| {
+            let (layers, _, _) = self.live.registry_for_publication();
+            // Nothing persisted is claimable here: the level version has just moved past every
+            // file the prefix holds for this layer.
+            self.shapes.warm(
+                &generation.bundle,
+                &layers,
+                store,
+                Some(&layer),
+                &crate::shapes::PersistedPieces::none(),
+            )
+        });
+        if warmed.levels > 0 {
+            tracing::info!(
+                layer = %layer,
+                levels = warmed.levels,
+                artifacts = warmed.artifacts,
+                rows_tested = warmed.rows_tested,
+                build_ms = warmed.build_ms,
+                resolve_ms = warmed.resolve_ms,
+                held_bytes = warmed.held_bytes,
+                "a publication into a shape layer rebuilt its held shapes and resolved every \
+                 segment against them"
+            );
+        }
         // Durable in the log, not yet in a manifest. The registry half of this record reaches
         // `SEGMENTS-<n>.json` at the next flush on the deny lane's mechanism; the membership half
         // has nowhere to reach, which is what the rotation pin holds the log for.
@@ -9423,6 +9573,8 @@ impl Executor {
                 &self.containment_extents,
                 &self.tile_index_extents,
                 &self.row_column_extents,
+                &self.shape_rows_extents,
+                &self.shape_held_extents,
                 &[],
             ) {
                 tracing::error!(
@@ -9877,8 +10029,9 @@ impl Executor {
         &self,
         spaces: &[(String, tessera_store::RowSpace)],
         pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<(String, u32, tessera_types::layer::ServingLayout)> {
-        let Some((_, space)) = spaces.first() else {
+        let Some((first_view, space)) = spaces.first() else {
             return Vec::new();
         };
         let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
@@ -9905,12 +10058,59 @@ impl Executor {
             // `project_base` per artifact either way; what differs is what is held while it runs,
             // and at ten million artifacts a row form here is the gigabytes §7.3 prices — held
             // beside the outgoing generation's own forms, because the fold runs before the flip.
+            //
+            // **A spatial level is observed over its resolved rows** (`polygon-membership.md`
+            // §6.3): every segment the fold wrote is resolved against the level's shapes here,
+            // inside the artifact pass and before anything is written, and the pieces are held
+            // under the new segment ids so the generation about to be published finds them. That
+            // is the fold's re-resolution — everything, because the fold renumbered every row.
+            let spatial = registered.declaration.membership
+                == tessera_types::layer::MembershipSource::Spatial
+                && registered.declaration.shape.is_some();
             let shape = self.live.with_artifacts(|store| {
-                tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
-                    for (ordinal, record) in store.level(&layer, level) {
-                        visit(ordinal, &space.project_base(&record.members));
+                if spatial {
+                    let mut observed = None;
+                    for (view, segment) in fold_segments {
+                        let held = self.shapes.level(
+                            view,
+                            &layer,
+                            level,
+                            store,
+                            &crate::shapes::PersistedPieces::none(),
+                        );
+                        let (piece, cost) = held.resolve(segment);
+                        tracing::info!(
+                            layer = %layer,
+                            level,
+                            view = %view,
+                            seg_id = %segment.seg_id,
+                            rows_tested = cost.rows_tested,
+                            rows_interior = cost.rows_interior,
+                            artifacts_empty = cost.artifacts_empty,
+                            elapsed_ms = cost.elapsed_ms,
+                            "the fold re-resolved a segment against a spatial level's shapes"
+                        );
+                        if view == first_view {
+                            observed = Some(tessera_store::derived::observe_shape(
+                                space.base_rows(),
+                                &|visit| {
+                                    for (ordinal, rows) in piece.iter().enumerate() {
+                                        if let Some(rows) = rows {
+                                            visit(ordinal as u32, rows);
+                                        }
+                                    }
+                                },
+                            ));
+                        }
                     }
-                })
+                    observed.unwrap_or_else(tessera_store::derived::LevelShape::empty)
+                } else {
+                    tessera_store::derived::observe_shape(space.base_rows(), &|visit| {
+                        for (ordinal, record) in store.level(&layer, level) {
+                            visit(ordinal, &space.project_base(&record.members));
+                        }
+                    })
+                }
             });
             let chosen = crate::layout::choose(&registered.declaration, shape);
             tracing::info!(
@@ -9986,6 +10186,7 @@ impl Executor {
         spaces: &[(String, tessera_store::RowSpace)],
         layouts: &[(String, u32, tessera_types::layer::ServingLayout)],
         pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
     ) -> Vec<tessera_store::manifest::RowColumnExtent> {
         let wanted: Vec<(String, u32, tessera_types::layer::ServingLayout)> = layouts
             .iter()
@@ -9994,12 +10195,13 @@ impl Executor {
                     && !pending_retirement
                         .iter()
                         .any(|(l, v)| l == layer && v == level)
-                    // **A predicate level's column is not this fold's to write**, and the reason is
-                    // what it is a column *of*: an attribute layer's labels come from the value
-                    // column the predicate names, and this pass composes from the level's stored
-                    // memberships — which such a level has none of. Composing anyway would write a
-                    // file of nothing but holes, name it in the manifest, and leave the reader
-                    // adopting a column no request will ever claim.
+                    // **An attribute level's column is not this fold's to write**, and the reason
+                    // is what it is a column *of*: its labels come from the value column the
+                    // predicate names, and this pass composes from the level's stored memberships
+                    // — which such a level has none of. Composing anyway would write a file of
+                    // nothing but holes, name it in the manifest, and leave the reader adopting a
+                    // column no request will ever claim. A spatial level's column *is* written,
+                    // from the rows the pass just resolved.
                     && self
                         .live
                         .registered_layer(layer)
@@ -10007,6 +10209,7 @@ impl Executor {
                             matches!(
                                 registered.declaration.membership,
                                 tessera_types::layer::MembershipSource::Enumerated
+                                    | tessera_types::layer::MembershipSource::Spatial
                             )
                         })
             })
@@ -10030,11 +10233,35 @@ impl Executor {
             for (layer, level, layout) in &wanted {
                 let version = store.level_version(layer, *level);
                 let ordinals = store.level(layer, *level).count() as u32;
+                let spatial = self.live.registered_layer(layer).is_some_and(|registered| {
+                    registered.declaration.membership
+                        == tessera_types::layer::MembershipSource::Spatial
+                });
                 for (view, space) in spaces {
-                    let column =
+                    let column = if spatial {
+                        // The fold's segment is the whole base at row base 0, so the piece
+                        // resolved in `choose_layouts` is the level's membership in this view.
+                        let piece = self
+                            .shapes
+                            .get(view, layer, *level)
+                            .and_then(|held| {
+                                fold_segments
+                                    .iter()
+                                    .find(|(v, _)| v == view)
+                                    .and_then(|(_, segment)| held.piece(&segment.seg_id))
+                            });
+                        piece.and_then(|piece| {
+                            crate::row_column::RowColumn::compose(
+                                &crate::artifacts::MembershipRows::of_rows(piece.as_ref().clone()),
+                                space.base_rows(),
+                                *layout,
+                            )
+                        })
+                    } else {
                         crate::row_column::RowColumn::project(ordinals, space, *layout, || {
                             store.level(layer, *level)
-                        });
+                        })
+                    };
                     match column {
                         Some(column) => out.push((
                             view.clone(),
@@ -10083,6 +10310,148 @@ impl Executor {
         )
     }
 
+    /// Write this prefix's shape row forms: for every spatial level `columns` does not cover, the
+    /// piece the fold resolved for each of its segments in `choose_layouts`, keyed by that segment
+    /// and the level's version.
+    ///
+    /// **Every failure is a dropped entry, not a discarded fold** — the form is derived, and an
+    /// open that finds no entry resolves the segment again, loudly.
+    fn write_shape_rows(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        columns: &[tessera_store::manifest::RowColumnExtent],
+        pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
+    ) -> Vec<tessera_store::manifest::ShapeRowsExtent> {
+        let levels: Vec<(String, u32)> = self.live.with_artifacts(|store| {
+            store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .filter(|(layer, _)| {
+                    self.live.registered_layer(layer).is_some_and(|registered| {
+                        registered.declaration.membership
+                            == tessera_types::layer::MembershipSource::Spatial
+                            && registered.declaration.shape.is_some()
+                    })
+                })
+                .collect()
+        });
+        let mut filed: Vec<tessera_store::derived::FiledShapeRows> = Vec::new();
+        for (layer, level) in &levels {
+            let version = self
+                .live
+                .with_artifacts(|store| store.level_version(layer, *level));
+            for (view, segment) in fold_segments {
+                let covered = columns
+                    .iter()
+                    .any(|c| &c.layer == layer && c.level == *level && &c.view == view);
+                if covered {
+                    continue;
+                }
+                let Some(piece) = self
+                    .shapes
+                    .get(view, layer, *level)
+                    .and_then(|held| held.piece(&segment.seg_id))
+                else {
+                    tracing::warn!(
+                        layer = %layer,
+                        level,
+                        view = %view,
+                        seg_id = %segment.seg_id,
+                        "the fold holds no resolved piece for this segment, so no row form is \
+                         written; the next open resolves it"
+                    );
+                    continue;
+                };
+                filed.push(tessera_store::derived::FiledShapeRows {
+                    view: view.clone(),
+                    layer: layer.clone(),
+                    level: *level,
+                    level_version: version,
+                    seg_id: segment.seg_id.clone(),
+                    row_count: segment.row_count,
+                    bytes: tessera_store::derived::shape_rows_bytes(
+                        version,
+                        &segment.seg_id,
+                        segment.row_count,
+                        &piece,
+                    ),
+                });
+            }
+        }
+        tessera_store::derived::file_shape_rows(prefix_dir, partition, n, filed)
+    }
+
+    /// Write this prefix's persisted decompositions: every spatial level's held shapes for each
+    /// fold view, as the level holds them at its current version.
+    fn write_shape_held(
+        &self,
+        prefix_dir: &std::path::Path,
+        partition: &str,
+        n: u64,
+        pending_retirement: &[(String, u32)],
+        fold_segments: &[(String, tessera_store::read::SegmentData)],
+    ) -> Vec<tessera_store::manifest::ShapeHeldExtent> {
+        let filed: Vec<tessera_store::derived::Filed> = self.live.with_artifacts(|store| {
+            let mut out = Vec::new();
+            let levels: Vec<(String, u32)> = store
+                .levels_and_extents()
+                .map(|(layer, level, _)| (layer.to_string(), level))
+                .filter(|(layer, level)| {
+                    !pending_retirement
+                        .iter()
+                        .any(|(l, v)| l == layer && v == level)
+                })
+                .filter(|(layer, _)| {
+                    self.live.registered_layer(layer).is_some_and(|registered| {
+                        registered.declaration.membership
+                            == tessera_types::layer::MembershipSource::Spatial
+                            && registered.declaration.shape.is_some()
+                    })
+                })
+                .collect();
+            for (layer, level) in &levels {
+                let version = store.level_version(layer, *level);
+                for (view, _) in fold_segments {
+                    let Some(held) = self.shapes.get(view, layer, *level) else {
+                        continue;
+                    };
+                    if held.level_version != version {
+                        continue;
+                    }
+                    let shapes: Vec<(Option<&[u8]>, Option<&tessera_store::derived::HeldShape>)> =
+                        (0..held.shapes.len() as u32)
+                            .map(|ordinal| {
+                                (
+                                    store
+                                        .shape_of(layer, *level, ordinal)
+                                        .and_then(|shapes| shapes.for_view(view)),
+                                    held.shapes[ordinal as usize].as_ref(),
+                                )
+                            })
+                            .collect();
+                    out.push(tessera_store::derived::Filed {
+                        view: view.clone(),
+                        layer: layer.clone(),
+                        level: *level,
+                        level_version: version,
+                        layout: tessera_types::layer::ServingLayout::ArtifactMajor,
+                        bytes: tessera_store::derived::shape_held_bytes(version, &shapes),
+                    });
+                }
+            }
+            out
+        });
+        tessera_store::derived::file_shape_held(prefix_dir, partition, n, filed)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn write_tile_indexes(
         &self,
@@ -10118,6 +10487,16 @@ impl Executor {
                         !layouts
                             .iter()
                             .any(|(l, v, layout)| l == layer && v == level && layout.is_row_major())
+                    })
+                    // **A spatial level's index is not projected from its records**, which carry
+                    // no membership — an index of empties would be adopted at open and settle
+                    // nothing. Its index is built at open over the held pieces, one pass per
+                    // level over row extents, which is cheap where the resolution is not.
+                    .filter(|(layer, _)| {
+                        !self.live.registered_layer(layer).is_some_and(|registered| {
+                            registered.declaration.membership
+                                == tessera_types::layer::MembershipSource::Spatial
+                        })
                     })
                     .collect();
                 let mut out = Vec::with_capacity(levels.len() * spaces.len());
@@ -10217,17 +10596,54 @@ impl Executor {
                     // assembled. What such a level pays instead is one derivation on the first
                     // request after the fold, which is what every level paid before this warm
                     // existed.
-                    let predicate_backed =
-                        self.live.registered_layer(layer).is_some_and(|registered| {
-                            !matches!(
-                                registered.declaration.membership,
-                                tessera_types::layer::MembershipSource::Enumerated
-                            )
-                        });
-                    if predicate_backed {
+                    //
+                    // **A spatial level is warmed**, because its membership is held rather than
+                    // evaluated: the fold's artifact pass resolved the new segments against the
+                    // level's shapes, so the join is the O(containers) step and the form built
+                    // here is the one the next request reads.
+                    let registered = self.live.registered_layer(layer);
+                    let membership = registered
+                        .as_ref()
+                        .map(|r| r.declaration.membership.clone());
+                    let spatial = matches!(
+                        membership,
+                        Some(tessera_types::layer::MembershipSource::Spatial)
+                    ) && registered
+                        .as_ref()
+                        .is_some_and(|r| r.declaration.shape.is_some());
+                    if matches!(
+                        membership,
+                        Some(tessera_types::layer::MembershipSource::Attribute(_))
+                    ) || (!spatial
+                        && !matches!(
+                            membership,
+                            Some(tessera_types::layer::MembershipSource::Enumerated)
+                        ))
+                    {
                         continue;
                     }
+                    let segments = if spatial {
+                        crate::viewport::segments_with_row_bases(view, view_data).ok()
+                    } else {
+                        None
+                    };
                     self.live.with_artifacts(|store| {
+                        let predicate = segments.as_ref().map(|segments| {
+                            crate::artifacts::PredicateSource::Spatial(
+                                crate::artifacts::SpatialSource {
+                                    level: self.shapes.level(
+                                        view,
+                                        layer,
+                                        *level,
+                                        store,
+                                        &crate::shapes::PersistedPieces::none(),
+                                    ),
+                                    segments,
+                                    total_rows: u32::try_from(view_data.row_space.total_rows())
+                                        .unwrap_or(u32::MAX),
+                                },
+                            )
+                        });
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
                             view,
@@ -10237,7 +10653,7 @@ impl Executor {
                             &view_data.row_space,
                             Some(&generation.partition_source()),
                             layout,
-                            None,
+                            predicate.as_ref(),
                             generation.segments_version,
                         )
                     });
@@ -10540,6 +10956,8 @@ impl Executor {
             &self.containment_extents,
             &self.tile_index_extents,
             &self.row_column_extents,
+            &self.shape_rows_extents,
+            &self.shape_held_extents,
             &[],
         ) {
             self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
@@ -10551,6 +10969,7 @@ impl Executor {
             return;
         }
 
+        let seg_id = completed.segment.seg_id.clone();
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
             &completed.view,
@@ -10570,6 +10989,35 @@ impl Executor {
                 return;
             }
         };
+
+        // **The segment's shape memberships, installed before the swap** (`polygon-membership.md`
+        // §6.3). The pool resolved them against the levels as held when the flush was planned; a
+        // publication into a shape layer since then rebuilt that level, and a piece resolved over
+        // the old shapes would be installed into nothing a request reads. So each piece is
+        // installed into the level now held, and re-resolved against it where the two differ —
+        // one segment, on this thread, in the window a shape publication and a flush overlap.
+        for piece in completed.shape_pieces {
+            let current = self
+                .shapes
+                .get(&completed.view, &piece.level.layer, piece.level.level);
+            match current {
+                Some(current) if Arc::ptr_eq(&current, &piece.level) => {
+                    current.install(&seg_id, piece.rows);
+                }
+                Some(current) => {
+                    let segment = next_bundle
+                        .partitions
+                        .get(&completed.partition)
+                        .and_then(|p| p.views.get(&completed.view))
+                        .and_then(|v| v.segments.iter().find(|s| s.seg_id == seg_id));
+                    if let Some(segment) = segment {
+                        current.resolve(segment);
+                    }
+                }
+                // The level was dropped meanwhile (its layer was dropped): nothing to hold.
+                None => {}
+            }
+        }
 
         // **Exactly what was consumed, from the then-current buffer.** O(buffered) on this thread,
         // which is the term the deny-ack memo measured as dominant at 1 M buffered (165 ms p50);
@@ -10930,6 +11378,17 @@ impl Executor {
     /// [`Self::publish`] over a generation the caller already holds by `Arc` — a geometry
     /// publication needs the same value afterwards, to hand the background refresh.
     fn publish_arc(&self, next: Arc<Generation>, started: std::time::Instant) -> Published {
+        // **The pieces of segments no view serves any more are dropped at the swap** — a merged or
+        // folded segment's rows were renumbered into its successor, which was resolved before this
+        // publication, so nothing reads the consumed ones again (`crate::shapes`).
+        let live: std::collections::HashSet<String> = next
+            .bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.views.values())
+            .flat_map(|v| v.segments.iter().map(|s| s.seg_id.clone()))
+            .collect();
+        self.shapes.retain_segments(&|seg_id| live.contains(seg_id));
         // **The deny mask's derivation rule, enforced at the one place a generation becomes live.**
         // `crate::compose::derive_denied` states the rule; every build site — the incremental
         // addition on a deny window, the rebuild at each geometry publication, the carry-forward
@@ -11288,4 +11747,46 @@ mod dispatch_rules_tests {
         assert!(!dictionary_moved_under(None, 9));
         assert!(!dictionary_moved_under(None, 0));
     }
+}
+
+/// The segments a fold wrote, opened from the prefix it wrote them into — what its artifact pass
+/// resolves every spatial level against (`polygon-membership.md` §6.3). A segment that will not
+/// open is skipped and said so; the level then resolves it at the flip's warm, on the executor,
+/// which is the same answer later.
+fn fold_segments(
+    prefix_dir: &std::path::Path,
+    partition: &str,
+    segments: &[tessera_store::manifest::SegmentDescriptor],
+) -> Vec<(String, tessera_store::read::SegmentData)> {
+    let mut out = Vec::with_capacity(segments.len());
+    for descriptor in segments {
+        let dir = prefix_dir
+            .join("partitions")
+            .join(partition)
+            .join("views")
+            .join(&descriptor.view)
+            .join("segments")
+            .join(&descriptor.seg_id);
+        let morton = tessera_store::read::MortonSlice::load(&dir.join("morton.u32"));
+        let columns = tessera_store::read::ColumnsRef::load(&dir.join("columns.arrow"));
+        match (morton, columns) {
+            (Ok(morton), Ok(columns)) => out.push((
+                descriptor.view.clone(),
+                tessera_store::read::SegmentData {
+                    seg_id: descriptor.seg_id.clone(),
+                    row_count: descriptor.row_count,
+                    morton,
+                    columns,
+                },
+            )),
+            (Err(error), _) | (_, Err(error)) => tracing::warn!(
+                view = %descriptor.view,
+                seg_id = %descriptor.seg_id,
+                %error,
+                "the fold could not reopen a segment it just wrote; its spatial memberships are \
+                 resolved at the flip instead"
+            ),
+        }
+    }
+    out
 }

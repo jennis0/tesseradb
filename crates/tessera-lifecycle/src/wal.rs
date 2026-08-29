@@ -415,15 +415,14 @@ pub struct PublishedArtifact {
     /// key, and replay applies the address that was decided rather than re-resolving a key
     /// whose target may since have been dropped.
     pub attached_to: Option<PublishedAttachment>,
-    /// The artifact's declared bounding box, `[min_x, min_y, max_x, max_y]`, on a layer whose
-    /// `shape` declares one.
+    /// The artifact's canonical shapes, one per view, on a layer whose `shape` declares a kind.
     ///
-    /// **An array rather than the typed `Bbox`**, so the durable shape is four numbers in a stated
-    /// order and the type's own refusals — non-finite, inverted — stay where publication makes
-    /// them. A record replayed from here is checked again by the same constructor, so a log that
-    /// somehow carried an inverted box restores an artifact with no shape rather than one whose
-    /// membership is a region nobody wrote.
-    pub shape: Option<[f64; 4]>,
+    /// **Canonical rather than as written**, so the log carries what the store holds: the
+    /// caller's coordinates were quantised against each view's frame at publication and reported
+    /// then, and a replay re-applies the stored form rather than re-deriving it against a frame
+    /// that may since have moved. The bytes are the engine's (`polygon-membership.md` §6.6) and
+    /// this crate holds them opaquely, as it holds the membership's.
+    pub shape: Option<crate::membership::ArtifactShapes>,
     /// This artifact's parent in its layer's hierarchy — resolved from the key the caller named,
     /// on `attached_to`'s argument.
     ///
@@ -1925,7 +1924,7 @@ mod tests {
                     // The fifth optional field, and the last one — set here so the round-trip
                     // covers a record carrying every optional at once, which is the arrangement a
                     // positional decoder misreads first.
-                    shape: Some([-1.5, 0.0, 2.5, 4.0]),
+                    shape: crate::membership::ArtifactShapes::new(vec![("s0".into(), vec![1, 2, 3])]),
                 },
             ],
         };

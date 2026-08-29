@@ -27,7 +27,7 @@ use std::path::Path;
 use serde::Serialize;
 use serde_json::json;
 use tessera_types::layer::{
-    ExistenceCriterion, MemberDefault, MembershipSource, ShapeKind, SuppliedRequirement,
+    ExistenceCriterion, MemberDefault, MembershipSource, SuppliedRequirement,
 };
 
 use crate::config::{Config, ValueSet};
@@ -113,11 +113,10 @@ pub struct LayerDisclosure {
     /// - `enumerated` — a stored set per artifact;
     /// - `attribute:<field>` — a predicate over that value column, whose distinct values are the
     ///   layer's artifacts;
-    /// - `spatial:<kind>:depth=<d>` — each artifact's own shape, covered by depth-`d` tiles.
+    /// - `spatial:<kind>` — each artifact's own shape, exactly: `bbox`, `circle`, `ellipse` or
+    ///   `polygon`.
     ///
-    /// **The depth is here because it *is* the membership** (ruling R3): a box covered at depth 4
-    /// and the same box at depth 8 hold different points, so a report naming the kind alone would
-    /// say less about who may see what than the declaration does. ⊘ `spatial:no-shape` is a layer
+    /// ⊘ `spatial:no-shape` is a layer
     /// declared for a shape it does not carry, which holds no artifacts.
     pub membership: String,
     pub content: ContentDisclosure,
@@ -233,19 +232,12 @@ impl Disclosure {
                 depends_on: layer.depends_on.clone(),
                 membership: match &layer.membership {
                     MembershipSource::Enumerated => "enumerated".to_string(),
-                    // **The shape's depth is disclosed with the kind**, because it *is* the
-                    // membership: a box covered by depth-`d` tiles holds different points at a
-                    // different `d`, so a report naming the kind alone would say less than the
-                    // declaration does. ⊘ A spatial layer that declares no shape holds no
+                    // **The kind is disclosed, and nothing else needs to be**: every kind is
+                    // exact — the members are the rows inside the shape — so the kind says the
+                    // whole of who belongs. ⊘ A spatial layer that declares no shape holds no
                     // artifacts, and says so here rather than reading as one that does.
                     MembershipSource::Spatial => match &layer.shape {
-                        Some(shape) => format!(
-                            "spatial:{}:depth={}",
-                            match shape.kind {
-                                ShapeKind::Bbox => "bbox",
-                            },
-                            shape.depth
-                        ),
+                        Some(shape) => format!("spatial:{}", shape.kind.as_str()),
                         None => "spatial:no-shape".to_string(),
                     },
                     MembershipSource::Attribute(field) => format!("attribute:{field}"),

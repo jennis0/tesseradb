@@ -1328,7 +1328,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
+            let plan = crate::layers::read(
+                &args.layers,
+                &args.layer_inputs,
+                &args.extent,
+                tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            )?;
+            crate::report_shapes(&plan.shape_reports);
             crate::layers::publish(
                 &plan,
                 &|source| {
@@ -1548,6 +1554,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     published_layers
         .containment_extents
         .clone_from(&artifact_pass.containment_extents);
+    published_layers
+        .shape_rows_extents
+        .clone_from(&artifact_pass.shape_rows_extents);
+    published_layers
+        .shape_held_extents
+        .clone_from(&artifact_pass.shape_held_extents);
 
     // ---- 11. manifests ---------------------------------------------------------------
     let mut other_paths = vec![

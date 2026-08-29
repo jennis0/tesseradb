@@ -2174,6 +2174,11 @@ struct PublishBody {
     /// key, so accepting an idset beside one would imply a check that never ran.
     #[serde(default)]
     idset: Option<u32>,
+    /// The space every row's shape is in where the row names none (`polygon-membership.md`
+    /// §4.3) — `"view"` if absent, and the one value a view can honour: `"wgs84"` is a `422`
+    /// naming `projections.md`, the whole batch without effect.
+    #[serde(default)]
+    default_space: Option<String>,
     artifacts: Vec<IncomingArtifactBody>,
 }
 
@@ -2201,6 +2206,140 @@ struct IncomingArtifactBody {
     /// stop serving on every route, the ones that traverse no edge included.
     #[serde(default)]
     attached_to: Option<AttachmentBody>,
+    /// The artifact's shape, in its layer's kind's field and no other — the same row shape the
+    /// build reads (decision 0091; `polygon-membership.md` §6.1, §6.4): `bbox = [min_x, min_y,
+    /// max_x, max_y]`, `circle = [cx, cy, r]`, `ellipse = [cx, cy, a, b, angle]`, or `wkt`.
+    /// Required on a layer whose `shape` declares a kind, refused on every other.
+    #[serde(default)]
+    bbox: Option<Vec<f64>>,
+    #[serde(default)]
+    circle: Option<Vec<f64>>,
+    #[serde(default)]
+    ellipse: Option<Vec<f64>>,
+    #[serde(default)]
+    wkt: Option<String>,
+    /// This row's own space, overriding the batch's `default_space`.
+    #[serde(default)]
+    space: Option<String>,
+}
+
+/// One row's shape as the caller wrote it, canonicalised for every view of its layer.
+///
+/// **The same canonicalisation the build applies, and the same report** — clipped, outside, rings
+/// dropped, degrees-looking, the decomposition's size — returned in the response body rather than
+/// printed, so a row published at ingest is published as it would have been at the build. What
+/// refuses is what refuses there: a coordinate that is not one, a non-positive radius or axis, a
+/// polygon over the vertex cap, a kind that is not the layer's, and a `space` the view cannot
+/// honour — each naming the row, the whole batch without effect.
+fn canonical_row_shape(
+    state: &AppState,
+    declaration: &tessera_types::layer::LayerDeclaration,
+    index: usize,
+    artifact: &IncomingArtifactBody,
+    default_space: tessera_engine::shapes::ShapeSpace,
+) -> Result<
+    Option<(
+        tessera_lifecycle::membership::ArtifactShapes,
+        serde_json::Value,
+    )>,
+    ApiError,
+> {
+    use tessera_engine::shapes::{canonical_shapes, shape_input, ShapeInput, ShapeSpace};
+    let refuse = |detail: String| ApiError::Contract(format!("artifact {index}: {detail}"));
+    let mut carried: Vec<(&str, ShapeInput)> = Vec::new();
+    let count = |field: &str, n: usize, want: usize| {
+        refuse(format!("`{field}` has {n} value(s); it is exactly {want}"))
+    };
+    if let Some(v) = &artifact.bbox {
+        let [a, b, c, d] = v[..] else {
+            return Err(count("bbox", v.len(), 4));
+        };
+        carried.push(("bbox", ShapeInput::Bbox([a, b, c, d])));
+    }
+    if let Some(v) = &artifact.circle {
+        let [a, b, c] = v[..] else {
+            return Err(count("circle", v.len(), 3));
+        };
+        carried.push(("circle", ShapeInput::Circle([a, b, c])));
+    }
+    if let Some(v) = &artifact.ellipse {
+        let [a, b, c, d, e] = v[..] else {
+            return Err(count("ellipse", v.len(), 5));
+        };
+        carried.push(("ellipse", ShapeInput::Ellipse([a, b, c, d, e])));
+    }
+    if let Some(text) = &artifact.wkt {
+        carried.push(("wkt", ShapeInput::Wkt(text.clone())));
+    }
+    let Some(kind) = declaration.shape.map(|s| s.kind) else {
+        if !carried.is_empty() {
+            return Err(refuse(
+                "carries a shape, and this layer declares no `shape`. Its members come from the \
+                 stored set its membership names, so a shape beside them is a region nothing \
+                 evaluates"
+                    .to_string(),
+            ));
+        }
+        return Ok(None);
+    };
+    let _space = match artifact.space.as_deref() {
+        None => default_space,
+        Some(word) => ShapeSpace::parse(word).map_err(|e| refuse(format!("`space`: {e}")))?,
+    };
+    let input = match carried.len() {
+        0 => {
+            return Err(refuse(format!(
+                "carries no shape, and this layer's `shape` declares a {}. The shape is the \
+                 whole of such an artifact's membership, so one published without it would count \
+                 zero for every viewer",
+                kind.as_str()
+            )))
+        }
+        1 => carried.pop().expect("one").1,
+        _ => {
+            return Err(refuse(format!(
+                "carries {} — one row has one shape, in its layer's kind's field",
+                carried
+                    .iter()
+                    .map(|(f, _)| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            )))
+        }
+    };
+    let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
+    let q = state.engine.meta().quantisation;
+    let extent = tessera_engine::shapes::Bounds {
+        x_min: q.x_min,
+        x_max: q.x_max,
+        y_min: q.y_min,
+        y_max: q.y_max,
+    };
+    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+    let canonical = canonical_shapes(&shape, &views, &extent, state.max_shape_vertices)
+        .map_err(|e| refuse(e.to_string()))?;
+    let report: Vec<serde_json::Value> = canonical
+        .reports
+        .iter()
+        .map(|(view, r, stats)| {
+            serde_json::json!({
+                "view": view,
+                "clipped": r.clipped,
+                "outside": r.outside,
+                "rings_dropped": r.rings_dropped,
+                "degrees_looking": r.degrees_looking,
+                "vertices_in": r.vertices_in,
+                "vertices_out": r.vertices_out,
+                "parts": stats.parts,
+                "rings": stats.rings,
+                "interior_tiles": stats.interior_tiles,
+                "boundary_cells": stats.boundary_cells,
+            })
+        })
+        .collect();
+    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
+        .ok_or_else(|| refuse("the layer is drawn in no view".to_string()))?;
+    Ok(Some((shapes, serde_json::Value::Array(report))))
 }
 
 /// How a caller names an attachment's target.
@@ -2263,6 +2402,7 @@ async fn publish_artifacts(
         level,
         addressing,
         idset,
+        default_space,
         artifacts,
     } = body.0;
 
@@ -2270,6 +2410,40 @@ async fn publish_artifacts(
         return Err(ApiError::Contract(
             "a publication carries at least one artifact".to_string(),
         ));
+    }
+
+    // **The shapes, canonicalised before anything is resolved or allocated** — a refusal spends
+    // nothing, and the batch is the commit unit. The layer's declaration is the engine's state;
+    // a layer this deployment does not hold is the engine's refusal below, so here it simply
+    // canonicalises nothing.
+    let default_space = match default_space.as_deref() {
+        None => tessera_engine::shapes::ShapeSpace::View,
+        Some(word) => tessera_engine::shapes::ShapeSpace::parse(word)
+            .map_err(|e| ApiError::Contract(format!("`default_space`: {e}")))?,
+    };
+    let declaration = state
+        .engine
+        .registered_layer(&name)
+        .map(|registered| registered.declaration);
+    let mut shapes: Vec<Option<tessera_lifecycle::membership::ArtifactShapes>> =
+        Vec::with_capacity(artifacts.len());
+    let mut shape_reports: Vec<serde_json::Value> = Vec::new();
+    for (index, artifact) in artifacts.iter().enumerate() {
+        match &declaration {
+            Some(declaration) => {
+                match canonical_row_shape(&state, declaration, index, artifact, default_space)? {
+                    Some((canonical, report)) => {
+                        shapes.push(Some(canonical));
+                        shape_reports.push(serde_json::json!({
+                            "key": artifact.key,
+                            "views": report,
+                        }));
+                    }
+                    None => shapes.push(None),
+                }
+            }
+            None => shapes.push(None),
+        }
     }
 
     // Flattened once, so each address form is resolved in a single batched call whatever the shape
@@ -2359,7 +2533,8 @@ async fn publish_artifacts(
     let mut entities = resolved.into_iter().flatten();
     let incoming: Vec<tessera_lifecycle::IncomingArtifact> = artifacts
         .into_iter()
-        .map(|artifact| {
+        .zip(shapes)
+        .map(|(artifact, shape)| {
             let members: Vec<tessera_types::EntityId> =
                 entities.by_ref().take(artifact.members.len()).collect();
             let contents: Vec<tessera_lifecycle::membership::IncomingContent> = artifact
@@ -2378,7 +2553,7 @@ async fn publish_artifacts(
                     key: a.key,
                 }
             });
-            match attached_to {
+            let mut incoming = match attached_to {
                 None => tessera_lifecycle::IncomingArtifact::with_content(
                     artifact.key,
                     members,
@@ -2390,7 +2565,9 @@ async fn publish_artifacts(
                     contents,
                     attached_to,
                 ),
-            }
+            };
+            incoming.shape = shape;
+            incoming
         })
         .collect();
     let keys: Vec<Option<String>> = incoming.iter().map(|a| a.key.clone()).collect();
@@ -2409,10 +2586,14 @@ async fn publish_artifacts(
         .zip(keys)
         .map(|(id, key)| serde_json::json!({ "key": key, "tessera_id": id.raw().to_string() }))
         .collect();
-    Ok((
-        StatusCode::CREATED,
-        Json(serde_json::json!({ "artifacts": published })),
-    ))
+    // **The same report the build prints, in the body** (`polygon-membership.md` §6.4): what
+    // canonicalisation did to each shape, per view, and what its decomposition holds. Absent
+    // where the layer declares no shape, so the enumerated case's response is unchanged.
+    let mut body = serde_json::json!({ "artifacts": published });
+    if !shape_reports.is_empty() {
+        body["shapes"] = serde_json::Value::Array(shape_reports);
+    }
+    Ok((StatusCode::CREATED, Json(body)))
 }
 
 /// `POST /control/faults/arm` — the correctness suite's arming surface (decision 0071;

@@ -63,15 +63,14 @@ pub enum MembershipSource {
     /// A stored set of entities per artifact. Stale between the write and the refresh that rebuilds
     /// it, which is fail-closed: an unrebuilt member has no bit, so every masked count understates.
     Enumerated,
-    /// A shape, decomposed to Morton ranges at request time. Never stale — a point ingested inside
-    /// a boundary is a member on the next request with nothing rebuilt.
+    /// A shape — *the rows whose stored position is inside it*, exactly, for every kind
+    /// (`polygon-membership.md` §4.1). Never stale: a segment's rows are resolved against the
+    /// shapes when the segment is published, so a point ingested inside a boundary is a member on
+    /// the next request with nothing rebuilt.
     ///
     /// **What the shape *is* lives beside this, on [`LayerDeclaration::shape`]**, and a layer that
-    /// declares none holds no artifacts: the depth a box is covered at is part of the membership
-    /// (ruling R3 — the ranges *are* the membership, the polygon is content), so a shape kind with
-    /// no depth would be a rule with nothing to evaluate. The two are separate fields because this
-    /// one says *what invalidates a write* and that one says *what the shape is drawn from*, and
-    /// only the second has anything a caller could get wrong per artifact.
+    /// declares none holds no artifacts. The two are separate fields because this one says *what
+    /// invalidates a write* and that one says *what kind of geometry each artifact carries*.
     Spatial,
     /// A predicate over an existing value column, which the variant names: the membership is
     /// defined by that field's value, so the field is part of the declaration rather than
@@ -98,10 +97,10 @@ pub enum MembershipSource {
 /// not. A level pinned [`RowMajorLabel`](ServingLayout::RowMajorLabel) whose memberships turn out to
 /// overlap is composed **artifact-major**, loudly — see `tessera_engine::layout`.
 ///
-/// **The fourth form is not stored at all.** [`SpatialRanges`](ServingLayout::SpatialRanges) is a
-/// level whose membership is a declared shape: the ranges are recomputed from the generation's own
-/// segments on every request, so there is no file, no adoption coordinate and nothing for a fold to
-/// write. It is here because it is now producible; it was deliberately absent while it was not.
+/// **A spatial level takes one of the same three forms.** Its membership is resolved from the
+/// shapes when a segment is published (`polygon-membership.md` §6.3), and the output is a per-row
+/// source exactly as an enumerated level's member table is — so the pick below chooses between the
+/// same forms for it, and a pin selects between them.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServingLayout {
@@ -122,19 +121,6 @@ pub enum ServingLayout {
     /// A **list** of labels per row, for a level whose memberships overlap. The same scan and the
     /// same histogram at a larger constant.
     RowMajorList,
-    /// **Row ranges, derived from a declared shape** — a `membership = { spatial = … }` level and
-    /// nothing else.
-    ///
-    /// Membership is the shape's Morton decomposition at the declared depth, resolved against this
-    /// generation's segments; candidacy is range-against-viewport arithmetic and the count is a sum
-    /// of [`range_cardinality`](https://docs.rs/croaring)-shaped mask questions, one per range. It
-    /// uses the tile index not at all, so *everywhere* is empty for such a level by construction
-    /// rather than by measurement.
-    ///
-    /// **Never chosen and never pinned.** It follows from the membership source, which is why
-    /// [`ServingLayout::parse_pin`] does not admit its word: a level is served this way because its
-    /// members are a shape, and a level whose members are not a shape has no ranges to serve.
-    SpatialRanges,
 }
 
 impl ServingLayout {
@@ -145,12 +131,6 @@ impl ServingLayout {
             self,
             ServingLayout::RowMajorLabel | ServingLayout::RowMajorList
         )
-    }
-
-    /// Whether this level's membership is a set of row **ranges** rather than a stored set — see
-    /// [`ServingLayout::SpatialRanges`].
-    pub fn is_ranges(self) -> bool {
-        matches!(self, ServingLayout::SpatialRanges)
     }
 
     /// The word a `[[layer]]` block spells this layout with (`configuration.md` §1).
@@ -165,11 +145,6 @@ impl ServingLayout {
             ServingLayout::ArtifactMajor => "rows",
             ServingLayout::RowMajorLabel => "column",
             ServingLayout::RowMajorList => "list",
-            // **Deliberately outside [`ServingLayout::PIN_VOCABULARY`]**, which is what
-            // [`ServingLayout::parse_pin`] admits. The word exists so a trace and the disclosure
-            // report can name the form; it is not a word an operator may write, because the form
-            // follows from the membership rather than from a preference.
-            ServingLayout::SpatialRanges => "ranges",
         }
     }
 
@@ -603,7 +578,7 @@ pub struct LayerDeclaration {
     /// have read are recorded beside it so an operator can see what they were.
     #[serde(default)]
     pub layout: Option<ServingLayout>,
-    /// **What a `membership = "spatial"` layer's shapes are, and how deep they are drawn.**
+    /// **What kind of shape a `membership = "spatial"` layer's artifacts carry.**
     ///
     /// `None` on every other membership source, and refused there. `None` on a spatial layer is the
     /// state that has always existed — a layer declared for a shape it does not yet carry, which
@@ -616,35 +591,63 @@ pub struct LayerDeclaration {
     pub shape: Option<ShapeDeclaration>,
 }
 
-/// What a spatial layer's artifacts are shaped like, and at what resolution their membership is
-/// drawn ([decision R3](../../../docs/design/artifact-serving-at-scale.md): the ranges *are* the
-/// membership, and the polygon is content).
+/// What kind of shape a spatial layer's artifacts carry (`polygon-membership.md` §6.1).
+///
+/// **The kind and nothing else.** Every kind is exact — the members are the rows whose stored
+/// position is inside the shape — so there is no depth, no tolerance and no cover for the
+/// declaration to hold; the geometry itself sits on each artifact's own row in the kind's fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ShapeDeclaration {
-    /// ⊘ **One kind, and the field exists so the second one has somewhere to land.** A bounding box
-    /// is the whole of what is decoded: each artifact declares `min_x`, `min_y`, `max_x`, `max_y`
-    /// on its own row, and a polygon, a radius or a multi-part shape is refused at parse rather
-    /// than covered approximately — an approximate cover is a membership wider than the
-    /// declaration, which is the direction a mistake here must never take.
     pub kind: ShapeKind,
-    /// The Morton depth the shape is covered at, `1..=`[`MAX_SHAPE_DEPTH`].
-    ///
-    /// **This is the membership, not a tuning key.** The tiles that cover a box at this depth are
-    /// exactly its members — a point inside such a tile is a member whether or not it is inside the
-    /// box — so a deeper decomposition is a *different* member set rather than a better
-    /// approximation of the same one. It is disclosed beside the layer for that reason.
-    pub depth: u8,
 }
 
-/// The shapes a [`ShapeDeclaration`] may name.
+/// The four kinds a [`ShapeDeclaration`] may name, with one semantics (`polygon-membership.md`
+/// §4.1): *the rows whose stored position is inside the shape*.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShapeKind {
-    /// An axis-aligned bounding box, four `f64` columns on the artifact's own row.
+    /// An axis-aligned box, closed on every side: `bbox = [min_x, min_y, max_x, max_y]`.
     #[default]
     Bbox,
+    /// `circle = [cx, cy, r]`.
+    Circle,
+    /// `ellipse = [cx, cy, a, b, angle]`, the angle in degrees anticlockwise from the x axis.
+    Ellipse,
+    /// An OGC `MultiPolygon` under the even-odd rule with a point on an edge inside — WKB in a
+    /// table's `geometry` column, WKT inline.
+    Polygon,
 }
+
+impl ShapeKind {
+    /// The word a declaration writes and `disclosure.json`'s `spatial:<kind>` spells.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShapeKind::Bbox => "bbox",
+            ShapeKind::Circle => "circle",
+            ShapeKind::Ellipse => "ellipse",
+            ShapeKind::Polygon => "polygon",
+        }
+    }
+
+    pub fn parse(word: &str) -> Option<Self> {
+        match word {
+            "bbox" => Some(ShapeKind::Bbox),
+            "circle" => Some(ShapeKind::Circle),
+            "ellipse" => Some(ShapeKind::Ellipse),
+            "polygon" => Some(ShapeKind::Polygon),
+            _ => None,
+        }
+    }
+
+    pub const VOCABULARY: [&'static str; 4] = ["bbox", "circle", "ellipse", "polygon"];
+}
+
+/// The vertex cap a published polygon is held to, absent a deployment's own
+/// (`polygon-membership.md` §9, ruling (e)): one million. A shape over it is refused at
+/// publication naming the count and the cap — a vertex count is the caller's own arithmetic and
+/// `ST_Simplify` is the fix — where the held decomposition is reported and never capped.
+pub const DEFAULT_MAX_SHAPE_VERTICES: u64 = 1_000_000;
 
 /// **The artifact key a `membership = { attribute = f }` layer mints for one value of `f`.**
 ///
@@ -665,18 +668,13 @@ pub fn attribute_value_key(code: u32, vocabulary_key: Option<&str>) -> String {
     }
 }
 
-/// The deepest Morton decomposition a `membership = { spatial = … }` layer may declare.
+/// The deepest tile a viewport request may ask at, and so the deepest a level's `zoom` range can
+/// usefully name.
 ///
 /// **Sixteen, because that is where the code space ends.** A Morton code interleaves two 16-bit
 /// cell coordinates (`tessera_spatial::interleave_bits`), so a depth-16 tile is one cell and a
-/// deeper one names a subdivision the geometry cannot express — every tile below it would resolve
-/// to the same range as its parent, which is a membership silently wider than the declaration.
-pub const MAX_SHAPE_DEPTH: u8 = 16;
-
-/// The deepest tile a viewport request may ask at, and so the deepest a level's `zoom` range can
-/// usefully name — the same 0–16 grid `MAX_SHAPE_DEPTH` covers, expressed as the `u32` a
-/// [`LevelDeclaration::zoom`] end carries.
-pub const MAX_TILE_DEPTH: u32 = MAX_SHAPE_DEPTH as u32;
+/// deeper one names a subdivision the geometry cannot express.
+pub const MAX_TILE_DEPTH: u32 = 16;
 
 /// The width a reserved run is aligned and sized to: one Roaring container.
 ///
@@ -854,22 +852,18 @@ impl RegisteredLayer {
     /// The record every level of a freshly registered layer starts at: the form the membership
     /// forces where it forces one, the pin where there is one, and artifact-major otherwise.
     ///
-    /// **A predicate layer's form is not a pick and not a pin.** A shape's membership is a set of
-    /// row ranges and an attribute's *is* the column, so neither has an alternative to be chosen
-    /// between — which is why `validate` refuses a pin on either and why the fold's re-evaluation
-    /// leaves both alone. The registration records the form the serving path will actually take,
-    /// rather than recording artifact-major and having every request disagree with the manifest.
+    /// **An attribute layer's form is not a pick and not a pin**: its membership *is* the column,
+    /// so there is no alternative to be chosen between — which is why `validate` refuses a pin on
+    /// it and why the fold's re-evaluation leaves it alone. A spatial layer's membership is
+    /// resolved into a per-row source at every publication of a segment, so it is picked and
+    /// pinned exactly as an enumerated layer's is.
     pub fn initial_layouts(declaration: &LayerDeclaration) -> Vec<ServingLayout> {
         let forced = match declaration.membership {
-            // ⊘ A spatial layer with no `shape` has no ranges to serve and holds no artifacts, so
-            // it is recorded in the form every derived structure already exists for.
-            MembershipSource::Spatial if declaration.shape.is_none() => None,
-            MembershipSource::Spatial => Some(ServingLayout::SpatialRanges),
             // **The membership is the column** (`design/artifact-serving-at-scale.md` §5.1): a
             // single-valued attribute partitions the corpus, so one label per row is the only form
             // its membership has — there is no per-artifact bitmap to fall back to.
             MembershipSource::Attribute(_) => Some(ServingLayout::RowMajorLabel),
-            MembershipSource::Enumerated => None,
+            MembershipSource::Spatial | MembershipSource::Enumerated => None,
         };
         vec![forced.or(declaration.layout).unwrap_or_default(); declaration.run_count()]
     }
@@ -900,10 +894,9 @@ pub enum DeclarationError {
     FractionOutOfRange(f64),
     /// A proportional criterion on a predicate layer. ⊘ Refused until the owner rules on the
     /// denominator: *"the points inside this shape"* declares no member set and its size changes at
-    /// every write, so the ratio has nothing stable to divide by.
+    /// every write, so the ratio has nothing stable to divide by — and keeping it refused is what
+    /// keeps a shape's declared size off the wire (`polygon-membership.md` §10).
     ProportionalOnPredicate,
-    /// A spatial layer's declared Morton depth is outside `1..=`[`MAX_SHAPE_DEPTH`].
-    ShapeDepthOutOfRange(u8),
     /// A level's `zoom` range has no depth in it — its ends are inverted, or it starts past the
     /// grid's own depth of 16. Refused rather than warned because it has no reading at all: since
     /// the range became the default bound on a response (decision 0103) such a level is served at
@@ -911,9 +904,10 @@ pub enum DeclarationError {
     ZoomRangeEmpty { level: u32, lo: u32, hi: u32 },
     /// A layer declares a `shape` and its membership is not `spatial`, so nothing would read it.
     ShapeWithoutSpatialMembership,
-    /// A predicate layer declares something its derived artifacts cannot carry — content, a
-    /// dependency, levels, its own access labels, or a layout pin. Carries the spelling, so the
-    /// message names the key an operator has to remove.
+    /// An attribute layer declares something its derived artifacts cannot carry — content, a
+    /// dependency, levels, its own access labels, or a layout pin — or a spatial layer names its
+    /// own access-label field. Carries the spelling, so the message names the key an operator has
+    /// to remove.
     PredicateDeclares(String),
     /// A layer naming itself in `depends_on`.
     SelfDependency,
@@ -923,11 +917,6 @@ pub enum DeclarationError {
     ReservedName(String),
     /// The same view, level title or supplied-content name declared twice.
     Duplicate(String),
-    /// A row-major layout pinned on a layer whose membership is a **shape**. A spatial predicate
-    /// has no per-row source, and inverting its ranges into a column would materialise the very
-    /// membership the ranges exist to avoid — so the pin names a form this layer cannot be stored
-    /// in, and is refused rather than ignored (selection memo §4.1).
-    LayoutWithoutRowSource,
     /// A computed property outside [`ComputedProperty::VOCABULARY`].
     ///
     /// **Refused rather than ignored**, and that is a fail-closed choice rather than tidiness: a
@@ -976,12 +965,6 @@ impl std::fmt::Display for DeclarationError {
                  request naming no `levels` is answered at the levels whose range covers its depth, \
                  so this level would be served at none. Omit `zoom` to serve it at every depth"
             ),
-            DeclarationError::ShapeDepthOutOfRange(d) => write!(
-                f,
-                "a spatial layer's `depth` is {d}; it must be between 1 and {MAX_SHAPE_DEPTH}. \
-                 The depth is the membership — a shape is covered by tiles of exactly that depth — \
-                 so there is no safe value for this to default to"
-            ),
             DeclarationError::ShapeWithoutSpatialMembership => write!(
                 f,
                 "a layer declares a `shape` and its `membership` is not `spatial`, so the shape is \
@@ -1004,14 +987,6 @@ impl std::fmt::Display for DeclarationError {
             DeclarationError::SelfDependency => {
                 write!(f, "a layer may not name itself in depends_on")
             }
-            DeclarationError::LayoutWithoutRowSource => write!(
-                f,
-                "a row-major layout ('column' or 'list') needs a per-row source, and \
-                 `membership = \"spatial\"` has none: a shape is decomposed to row ranges at \
-                 request time, and inverting those ranges into a column would materialise the \
-                 membership the ranges exist to avoid. Use `layout = \"rows\"`, or drop the key \
-                 and let the pick be automatic"
-            ),
             DeclarationError::Duplicate(what) => write!(f, "declared twice: {what}"),
             DeclarationError::UnknownComputed(name) => write!(
                 f,
@@ -1107,48 +1082,38 @@ impl LayerDeclaration {
             }
         }
 
-        // **The one layout combination that is refused at parse.** A shape has no per-row source,
-        // so the pin names a form this layer cannot be stored in at all. The other refusal the
-        // selection memo names — `column` on a level whose memberships overlap — is *not* checkable
-        // here: whether an attribute is single-valued is a property of the data rather than of the
-        // declaration. It is checked at the fold, where a double claim is observable, and the level
-        // falls back to artifact-major with a loud trace rather than composing a column whose
-        // labels would each be whichever artifact happened to write last.
-        if self.membership == MembershipSource::Spatial && self.layout.is_some() {
-            return Err(DeclarationError::LayoutWithoutRowSource);
+        // **The shape declaration and the membership are one statement in two fields**, and each
+        // half without the other is a declaration that cannot serve: a `shape` on a layer whose
+        // members are a stored set or a predicate is a rule nothing reads.
+        //
+        // ⊘ A spatial layer with no `shape` is the state this surface has always had: declared,
+        // registered, and holding nothing, because publication into it is refused. It stays
+        // expressible rather than becoming a refusal — it is what a fixture declares while the
+        // shape it will carry is still being written — and the *build* is where it is reported,
+        // beside the artifacts it would have had.
+        if self.shape.is_some() && self.membership != MembershipSource::Spatial {
+            return Err(DeclarationError::ShapeWithoutSpatialMembership);
         }
 
-        // **What a predicate layer may not declare, and why each one is a refusal rather than a
+        // **What an attribute layer may not declare, and why each one is a refusal rather than a
         // warning.** Every item here would leave the layer registered, reachable and serving
         // nothing — which is exactly the state the build already refuses for a layer declared in a
         // view it does not write, and which no client can tell from a layer whose artifacts were
-        // all withheld. The membership is a rule, so the artifacts it names carry their key and
-        // nothing else.
-        // **The shape declaration and the membership are one statement in two fields**, and each
-        // half without the other is a declaration that cannot serve: a `shape` on a layer whose
-        // members are a stored set or a predicate is a rule nothing reads, and the depth is the
-        // membership rather than a tuning key — a box covered at depth 4 and the same box at
-        // depth 8 hold different points — so there is no value for it to default to.
-        match (&self.membership, &self.shape) {
-            (MembershipSource::Spatial, Some(shape)) => {
-                if shape.depth == 0 || shape.depth > MAX_SHAPE_DEPTH {
-                    return Err(DeclarationError::ShapeDepthOutOfRange(shape.depth));
-                }
-            }
-            // ⊘ A spatial layer with no `shape` is the state this surface has always had: declared,
-            // registered, and holding nothing, because publication into it is refused. It stays
-            // expressible rather than becoming a refusal — it is what a fixture declares while the
-            // shape it will carry is still being written — and the *build* is where it is reported,
-            // beside the artifacts it would have had.
-            (MembershipSource::Spatial, None) => {}
-            (_, Some(_)) => return Err(DeclarationError::ShapeWithoutSpatialMembership),
-            (_, None) => {}
-        }
-        if matches!(
-            self.membership,
-            MembershipSource::Spatial | MembershipSource::Attribute(_)
-        ) {
-            let refuse = |what: &str| Err(DeclarationError::PredicateDeclares(what.to_string()));
+        // all withheld. Its membership is a rule over a column, so the artifacts it names are the
+        // column's distinct values and carry their key and nothing else.
+        //
+        // **A spatial layer is not an attribute layer, and the refusals do not reach it**
+        // (`polygon-membership.md` §6.2, ruling (b)). Its artifacts are *published rows* — each has
+        // a key, a shape and, in every boundary set, a name and a parent — so supplied content,
+        // computed content, `depends_on`, levels, any hierarchy and a layout pin are all things
+        // its rows can carry. Computed content is cheap there because the flush resolves every
+        // row's membership into a per-row source; the pin selects between the same forms it
+        // selects between for an enumerated layer. What stays refused on both is the
+        // proportional criterion (above) and, on a spatial layer, naming its own access-label
+        // field: a shape's row carries no label column the registry reads, so the field would
+        // withhold every artifact of the layer for every principal.
+        let refuse = |what: &str| Err(DeclarationError::PredicateDeclares(what.to_string()));
+        if matches!(self.membership, MembershipSource::Attribute(_)) {
             if !self.content.supplied.is_empty() {
                 // A derived artifact has no publication to carry content bytes, and one served
                 // without content its layer declares cannot be told from one whose content was
@@ -1158,30 +1123,34 @@ impl LayerDeclaration {
             }
             if !self.content.computed.is_empty() {
                 // ⊘ A computed property is a function of `membership ∩ M_auth`, and reaching one
-                // artifact's membership on a predicate level costs a scan of the whole column
-                // (attribute) — so it is refused here rather than served at a cost the declaration
-                // does not show. A shape's ranges would make it cheap; refusing both keeps one rule.
+                // artifact's membership on an attribute level costs a scan of the whole column —
+                // so it is refused here rather than served at a cost the declaration does not
+                // show.
                 return refuse("computed content");
             }
             if !self.depends_on.is_empty() {
                 return refuse("depends_on");
             }
             if !self.levels.is_empty() {
-                // The rule produces one artifact per value or per shape, at one resolution. A
-                // second level would be a second rule nobody wrote.
+                // The rule produces one artifact per value, at one resolution. A second level
+                // would be a second rule nobody wrote.
                 return refuse("levels");
             }
             if self.hierarchy.kind != HierarchyKind::Flat {
                 return refuse("a hierarchy other than `flat`");
             }
-            if self.artifact_visibility.carries_own_labels() {
-                // A derived artifact carries no row of its own to read a label off, so naming the
-                // field would withhold every artifact of the layer for every principal.
-                return refuse("`artifact_visibility.field`");
-            }
-            if matches!(self.membership, MembershipSource::Attribute(_)) && self.layout.is_some() {
+            if self.layout.is_some() {
                 return refuse("a layout pin");
             }
+        }
+        if matches!(
+            self.membership,
+            MembershipSource::Spatial | MembershipSource::Attribute(_)
+        ) && self.artifact_visibility.carries_own_labels()
+        {
+            // A derived artifact carries no row of its own to read a label off, so naming the
+            // field would withhold every artifact of the layer for every principal.
+            return refuse("`artifact_visibility.field`");
         }
 
         let mut views: BTreeSet<&str> = BTreeSet::new();
@@ -1404,12 +1373,11 @@ mod tests {
         assert!(ServingLayout::RowMajorList.is_row_major());
     }
 
-    /// **A predicate layer's serving form follows from its membership, so a pin is refused** —
-    /// every pin, in both directions. A shape's members are row ranges and an attribute's members
-    /// *are* the column: neither has a second form for a pin to select between, so a pin here names
-    /// a storage the layer cannot be put in rather than a preference between two that work.
+    /// **An attribute layer's serving form follows from its membership, so a pin is refused**; a
+    /// spatial layer's membership is a per-row source once the flush resolves it, so a pin selects
+    /// between the same forms it selects between for an enumerated layer (ruling (b)).
     #[test]
-    fn a_layout_pin_on_a_predicate_layer_is_refused() {
+    fn a_layout_pin_is_refused_on_an_attribute_layer_and_taken_on_a_spatial_one() {
         for pin in [
             ServingLayout::ArtifactMajor,
             ServingLayout::RowMajorLabel,
@@ -1417,11 +1385,12 @@ mod tests {
         ] {
             let mut shape = decl(HierarchyKind::Flat, vec![]);
             shape.membership = MembershipSource::Spatial;
+            shape.shape = Some(ShapeDeclaration {
+                kind: ShapeKind::Polygon,
+            });
             shape.layout = Some(pin);
-            assert_eq!(
-                shape.validate(),
-                Err(DeclarationError::LayoutWithoutRowSource)
-            );
+            assert!(shape.validate().is_ok(), "{pin:?} on a shape layer");
+            assert_eq!(RegisteredLayer::initial_layouts(&shape), vec![pin]);
 
             let mut attribute = decl(HierarchyKind::Flat, vec![]);
             attribute.membership = MembershipSource::Attribute("severity".into());
@@ -1431,7 +1400,7 @@ mod tests {
                 Err(DeclarationError::PredicateDeclares("a layout pin".into()))
             );
         }
-        // Both are fine with no pin at all, which is the only thing either may say.
+        // Both are fine with no pin at all.
         for source in [
             MembershipSource::Spatial,
             MembershipSource::Attribute("severity".into()),
@@ -1451,14 +1420,13 @@ mod tests {
         shape.membership = MembershipSource::Spatial;
         shape.shape = Some(ShapeDeclaration {
             kind: ShapeKind::Bbox,
-            depth: 4,
         });
+        // A shape layer is picked, not forced: with no pin it starts artifact-major, the form
+        // every derived structure exists for, and the build's pass re-evaluates it.
         assert_eq!(
             RegisteredLayer::initial_layouts(&shape),
-            vec![ServingLayout::SpatialRanges]
+            vec![ServingLayout::ArtifactMajor]
         );
-        // ⊘ And a spatial layer that declares no shape has no ranges to serve — it holds nothing,
-        // so it is recorded in the form every derived structure already exists for.
         shape.shape = None;
         assert_eq!(
             RegisteredLayer::initial_layouts(&shape),
@@ -1472,35 +1440,24 @@ mod tests {
         );
     }
 
-    /// **A depth is the membership, so there is no value for it to default to** — and the ceiling
-    /// is where the code space ends rather than a tuning limit.
+    /// **The four kinds round-trip through their words, and a shape beside a membership that reads
+    /// none is a rule nothing evaluates.**
     #[test]
-    fn a_shape_depth_outside_the_code_space_is_refused() {
-        let spatial = |depth: u8| {
-            let mut d = decl(HierarchyKind::Flat, vec![]);
-            d.membership = MembershipSource::Spatial;
-            d.shape = Some(ShapeDeclaration {
-                kind: ShapeKind::Bbox,
-                depth,
-            });
-            d
-        };
-        for depth in [0u8, MAX_SHAPE_DEPTH + 1, u8::MAX] {
-            assert_eq!(
-                spatial(depth).validate(),
-                Err(DeclarationError::ShapeDepthOutOfRange(depth))
-            );
+    fn a_shape_kind_is_one_of_four_and_needs_a_spatial_membership() {
+        for word in ShapeKind::VOCABULARY {
+            let kind = ShapeKind::parse(word).expect(word);
+            assert_eq!(kind.as_str(), word);
         }
-        for depth in [1u8, 6, MAX_SHAPE_DEPTH] {
-            assert!(spatial(depth).validate().is_ok(), "depth {depth}");
-        }
-        // A shape beside a membership that reads none is a rule nothing evaluates.
+        assert_eq!(ShapeKind::parse("radius"), None);
         for source in [
             MembershipSource::Enumerated,
             MembershipSource::Attribute("severity".into()),
         ] {
-            let mut d = spatial(6);
+            let mut d = decl(HierarchyKind::Flat, vec![]);
             d.membership = source;
+            d.shape = Some(ShapeDeclaration {
+                kind: ShapeKind::Circle,
+            });
             assert_eq!(
                 d.validate(),
                 Err(DeclarationError::ShapeWithoutSpatialMembership)
@@ -1508,16 +1465,58 @@ mod tests {
         }
     }
 
-    /// **What a predicate layer may not declare.** Each of these would register a layer that is
+    /// **A spatial layer may declare what an attribute layer may not** (ruling (b)): its artifacts
+    /// are published rows, so content, a dependency, levels, a hierarchy and a pin all have a row
+    /// to sit on. The one refusal it shares is naming its own access-label field.
+    #[test]
+    fn a_spatial_layer_may_declare_content_levels_and_a_hierarchy() {
+        let base = || {
+            let mut d = decl(HierarchyKind::Flat, vec![]);
+            d.membership = MembershipSource::Spatial;
+            d.shape = Some(ShapeDeclaration {
+                kind: ShapeKind::Polygon,
+            });
+            d
+        };
+        let mut d = base();
+        d.content.supplied = vec![SuppliedContent {
+            name: "name".into(),
+            ty: "text".into(),
+            require_member_visibility: SuppliedRequirement::Inherited,
+        }];
+        d.content.computed = vec!["centroid".into(), "box".into()];
+        d.depends_on = vec!["clusters/y".into()];
+        assert!(d.validate().is_ok(), "{:?}", d.validate());
+
+        let mut d = base();
+        d.hierarchy.kind = HierarchyKind::Nested;
+        assert!(d.validate().is_ok());
+
+        let mut d = base();
+        d.hierarchy.kind = HierarchyKind::Stacked;
+        d.levels = vec![LevelDeclaration {
+            level: 0,
+            title: None,
+            zoom: None,
+        }];
+        assert!(d.validate().is_ok());
+
+        let mut d = base();
+        d.artifact_visibility = ArtifactVisibility::carried("visibility");
+        assert!(matches!(
+            d.validate(),
+            Err(DeclarationError::PredicateDeclares(_))
+        ));
+    }
+
+    /// **What an attribute layer may not declare.** Each of these would register a layer that is
     /// reachable and serves nothing — the state the build already refuses for a layer declared in a
     /// view it does not write, and which no client can tell from one whose artifacts were all
     /// withheld.
     #[test]
     fn a_predicate_layer_declaring_what_it_cannot_carry_is_refused() {
-        for source in [
-            MembershipSource::Spatial,
-            MembershipSource::Attribute("severity".into()),
-        ] {
+        {
+            let source = MembershipSource::Attribute("severity".into());
             let base = || {
                 let mut d = decl(HierarchyKind::Flat, vec![]);
                 d.membership = source.clone();

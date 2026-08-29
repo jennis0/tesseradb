@@ -304,6 +304,10 @@ async fn meta(
             // client that pages must know when a short page means "the set ended" rather than
             // "the deployment truncated".
             "max_category_values": state.max_category_values,
+            // The publication vertex cap a shape is held to (`polygon-membership.md` §9), so a
+            // caller can simplify before submitting rather than learn the number from a `422`.
+            // A deployment constant, identical for every principal.
+            "max_shape_vertices": state.max_shape_vertices,
         },
         // The annotation layers this principal may know exist, and what each declared.
         //

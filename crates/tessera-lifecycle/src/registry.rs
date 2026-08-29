@@ -676,8 +676,8 @@ impl LayerRegistry {
                     return Err(RegistryError::Shape {
                         layer: layer_name.to_string(),
                         detail: format!(
-                            "artifact {i} of this batch carries no bounding box, and this layer's \
-                             `shape` declares one. The box is the whole of such an artifact's \
+                            "artifact {i} of this batch carries no shape, and this layer's \
+                             `shape` declares one. The shape is the whole of such an artifact's \
                              membership, so one published without it would count zero for every \
                              viewer"
                         ),
@@ -687,9 +687,9 @@ impl LayerRegistry {
                     return Err(RegistryError::Shape {
                         layer: layer_name.to_string(),
                         detail: format!(
-                            "artifact {i} of this batch carries a bounding box, and this layer \
-                             declares no `shape`. Its members come from the stored set its \
-                             membership names, so a box beside them is a region nothing evaluates"
+                            "artifact {i} of this batch carries a shape, and this layer declares \
+                             no `shape`. Its members come from the stored set its membership \
+                             names, so a shape beside them is a region nothing evaluates"
                         ),
                     })
                 }
@@ -850,7 +850,7 @@ impl LayerRegistry {
                             entity: a.entity,
                         }),
                     parent: parents[i],
-                    shape: artifact.shape.map(|b| b.as_array()),
+                    shape: artifact.shape.clone(),
                 }
             })
             .collect();

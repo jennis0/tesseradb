@@ -858,6 +858,8 @@ struct RawServe {
     #[serde(default)]
     max_category_values: Option<usize>,
     #[serde(default)]
+    max_shape_vertices: Option<u64>,
+    #[serde(default)]
     session_credential_file: Option<PathBuf>,
     #[serde(default)]
     session_credential_env: Option<String>,
@@ -963,6 +965,11 @@ pub struct Config {
     /// **A performance knob, so it defaults** (SA §7). It bounds a response, not a disclosure:
     /// what a principal may be *told* is `visibility`'s question and is settled before paging starts.
     pub max_category_values: usize,
+    /// The most vertices a published polygon may carry after canonicalisation
+    /// (`polygon-membership.md` §9, ruling (e)): over it, `PUT /control/layers/{name}/artifacts`
+    /// is a `422` naming the count and the cap. Published on `/v1/meta`. The held decomposition
+    /// is reported and never capped; this bounds the one input a caller can simplify.
+    pub max_shape_vertices: u64,
     /// Emit `x-tessera-stage-ns` on viewport responses. **Fails closed**: absent means false, and
     /// even true does nothing in a binary built without the `bench-timing` feature. The header
     /// carries only durations and row counts — no identifier, no per-principal label (SA §9) —
@@ -2535,6 +2542,10 @@ fn parse(text: &str) -> Result<Config> {
             .serve
             .max_category_values
             .unwrap_or(DEFAULT_MAX_CATEGORY_VALUES),
+        max_shape_vertices: raw
+            .serve
+            .max_shape_vertices
+            .unwrap_or(tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES),
         stage_timing: raw.serve.stage_timing.unwrap_or(false),
         dev_cors_origins,
         cors_origins,

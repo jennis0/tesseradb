@@ -56,14 +56,14 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, FixedSizeListArray, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array,
     ListArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use tessera_lifecycle::alloc::Allocator;
 use tessera_lifecycle::membership::{
-    ArtifactStore, Bbox, IncomingArtifact, IncomingAttachment, IncomingContent,
+    ArtifactShapes, ArtifactStore, IncomingArtifact, IncomingAttachment, IncomingContent,
 };
 use tessera_lifecycle::LayerRegistry;
 use tessera_store::manifest::{MembershipExtent, RecordExtent};
@@ -73,6 +73,7 @@ use tessera_types::EntityId;
 
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
 use crate::error::{BuildError, Result};
+use crate::shapes::{inline_shape, shape_declared, ShapeColumns, ShapeContext, ShapeLayerReport, ShapeReader};
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
@@ -83,9 +84,9 @@ struct PlannedArtifact {
     attached_to: Option<IncomingAttachment>,
     /// Parent artifact in a hierarchy, named by the parent's own key.
     parent_key: Option<String>,
-    /// The artifact's declared bounding box, on a layer whose `shape` declares one — which *is* its
-    /// membership there, so `membership` stays empty beside it.
-    shape: Option<Bbox>,
+    /// The artifact's canonical shapes, one per view, on a layer whose `shape` declares one —
+    /// which *is* its membership there, so `membership` stays empty beside it.
+    shape: Option<ArtifactShapes>,
 }
 
 /// How a source spelled one artifact's membership.
@@ -129,12 +130,15 @@ struct ResolvedArtifact {
     contents: Vec<IncomingContent>,
     attached_to: Option<IncomingAttachment>,
     parent_key: Option<String>,
-    shape: Option<Bbox>,
+    shape: Option<ArtifactShapes>,
 }
 
 /// What the build reads: declarations, and the artifacts to publish into them.
 pub struct LayerPlan {
     declarations: Vec<LayerDeclaration>,
+    /// Per shape layer, what its geometry is (`polygon-membership.md` §6.5) — printed by the
+    /// build beside the layer, and completed by the artifact pass with the resolution's cost.
+    pub shape_reports: Vec<ShapeLayerReport>,
     /// Keyed `(layer, level, key)`, which is also the publication order — see the module doc on
     /// determinism.
     artifacts: BTreeMap<(String, u32, String), PlannedArtifact>,
@@ -262,6 +266,8 @@ pub struct PublishedLayers {
     pub tile_index_extents: Vec<tessera_store::manifest::TileIndexExtent>,
     pub row_column_extents: Vec<tessera_store::manifest::RowColumnExtent>,
     pub containment_extents: Vec<tessera_store::manifest::ContainmentExtent>,
+    pub shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent>,
+    pub shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent>,
 }
 
 impl Default for PublishedLayers {
@@ -280,6 +286,8 @@ impl Default for PublishedLayers {
             store: ArtifactStore::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             containment_extents: Vec::new(),
         }
     }
@@ -291,9 +299,15 @@ impl Default for PublishedLayers {
 /// own, which is what retires the discriminator column: there is no second layer's rows in the
 /// file to tell apart, no filter to configure, and no way for a layer to ingest another's rows
 /// (`annotation-write-cycle.md` §6.1).
-pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Result<LayerPlan> {
+pub fn read(
+    declarations: &[LayerDeclaration],
+    inputs: &[LayerSources],
+    extent: &tessera_spatial::Bounds,
+    max_shape_vertices: u64,
+) -> Result<LayerPlan> {
     let mut plan = LayerPlan {
         declarations: declarations.to_vec(),
+        shape_reports: Vec::new(),
         artifacts: BTreeMap::new(),
         unclustered: Vec::new(),
         minted: BTreeMap::new(),
@@ -312,11 +326,37 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
         };
         let enumerated =
             declaration.membership == tessera_types::layer::MembershipSource::Enumerated;
+        // **A shape layer's rows are canonicalised as they are read** — against the frame the
+        // points are quantised in and for every view the layer is drawn in — and what that did is
+        // reported beside the layer, never refused (`crate::shapes`).
+        let mut shapes = shape_declared(declaration).map(|kind| {
+            let default_space = match &input.artifacts {
+                Some(ArtifactSource::File { default_space, .. }) => *default_space,
+                _ => tessera_store::derived::ShapeSpace::View,
+            };
+            ShapeReader::new(
+                &input.name,
+                kind,
+                ShapeContext {
+                    extent: *extent,
+                    views: declaration.views.clone(),
+                    max_vertices: max_shape_vertices,
+                },
+                default_space,
+            )
+        });
         match &input.artifacts {
-            Some(ArtifactSource::File { path, fields }) => {
-                read_artifacts(&input.name, path, fields, enumerated, &mut plan)?
+            Some(ArtifactSource::File { path, fields, .. }) => read_artifacts(
+                &input.name,
+                path,
+                fields,
+                enumerated,
+                &mut plan,
+                shapes.as_mut(),
+            )?,
+            Some(ArtifactSource::Inline(rows)) => {
+                plan_inline(&input.name, rows, &mut plan, shapes.as_mut())?
             }
-            Some(ArtifactSource::Inline(rows)) => plan_inline(&input.name, rows, &mut plan)?,
             // **Which artifacts exist is the layer's own artifact source's to say** — while the
             // layer's value set is closed. Without one a member source would be both the roster and
             // the population, and a mistyped key would publish an artifact rather than fail to find
@@ -324,7 +364,18 @@ pub fn read(declarations: &[LayerDeclaration], inputs: &[LayerSources]) -> Resul
             // does, and a bare clustering declares no artifacts at all
             // (`artifacts-from-points.md` §3).
             None => {
-                if let Some(members) = &input.members {
+                if let Some(reader) = shapes {
+            let parents: Vec<(String, String)> = plan
+                .artifacts
+                .iter()
+                .filter(|((layer, _, _), _)| layer == &input.name)
+                .filter_map(|((_, _, key), artifact)| {
+                    artifact.parent_key.clone().map(|parent| (key.clone(), parent))
+                })
+                .collect();
+            plan.shape_reports.push(reader.finish(parents));
+        }
+        if let Some(members) = &input.members {
                     if declaration.value_set == ValueSet::Closed {
                         return Err(BuildError::Invalid(format!(
                             "{}: layer '{}' binds members with no artifacts of its own, which is \
@@ -400,10 +451,15 @@ fn read_artifacts(
     fields: &Fields,
     enumerated: bool,
     plan: &mut LayerPlan,
+    mut shapes: Option<&mut ShapeReader>,
 ) -> Result<()> {
     for batch in batches(path)? {
         let batch = batch?;
         let key = key_column(path, &batch, fields, "key")?;
+        let shape_columns = match shapes.as_ref() {
+            Some(reader) => Some(ShapeColumns::open(path, &batch, fields, reader.kind())?),
+            None => None,
+        };
         let level = optional_u32(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
         let members = optional_u64_list(path, &batch, fields, "members")?;
@@ -412,12 +468,6 @@ fn read_artifacts(
         let target_level = optional_u32(path, &batch, ATTACHED_LEVEL)?;
         let target_key = optional_utf8(path, &batch, fields, "attached_key")?;
         let parent = optional_utf8(path, &batch, fields, "parent")?;
-        let bounds = [
-            optional_f64(path, &batch, fields, "min_x")?,
-            optional_f64(path, &batch, fields, "min_y")?,
-            optional_f64(path, &batch, fields, "max_x")?,
-            optional_f64(path, &batch, fields, "max_y")?,
-        ];
 
         // **A stored membership on a layer whose members are computed is a refusal**, not a
         // column read anyway: `membership` decides what a write invalidates, and a spatial or
@@ -503,7 +553,17 @@ fn read_artifacts(
                     },
                     attached_to: attachment,
                     parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
-                    shape: bbox_at(path, &bounds, row, &address.2)?,
+                    shape: match (shapes.as_deref_mut(), shape_columns.as_ref()) {
+                        (Some(reader), Some(columns)) => {
+                            let space = columns.space_at(row);
+                            reader.row(
+                                &address.2,
+                                columns.at(path, row, &address.2)?,
+                                space.as_deref(),
+                            )?
+                        }
+                        _ => None,
+                    },
                 },
             );
         }
@@ -517,7 +577,12 @@ fn read_artifacts(
 /// from the same rows, which is what makes an authored layer and a generated one byte-identical in
 /// the bundle — the inline route exists so a handful of curated sets need no Parquet file
 /// (`annotation-write-cycle.md` §6.1).
-fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Result<()> {
+fn plan_inline(
+    layer: &str,
+    rows: &[InlineArtifact],
+    plan: &mut LayerPlan,
+    mut shapes: Option<&mut ShapeReader>,
+) -> Result<()> {
     for row in rows {
         let address = (layer.to_string(), row.level, row.key.clone());
         if plan.artifacts.contains_key(&address) {
@@ -561,40 +626,33 @@ fn plan_inline(layer: &str, rows: &[InlineArtifact], plan: &mut LayerPlan) -> Re
                     .collect(),
                 attached_to,
                 parent_key: row.parent.clone(),
-                shape: inline_bbox(layer, &row.key, row.bbox.as_deref())?,
+                shape: match shapes.as_deref_mut() {
+                    Some(reader) => {
+                        let input = inline_shape(row, reader.kind())
+                            .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
+                        reader.row(&row.key, input, row.space.as_deref())?
+                    }
+                    None => {
+                        if row.bbox.is_some()
+                            || row.circle.is_some()
+                            || row.ellipse.is_some()
+                            || row.wkt.is_some()
+                        {
+                            return Err(BuildError::Invalid(format!(
+                                "layer '{layer}': artifact {} carries a shape, and the layer \
+                                 declares no `[layer.shape]`. Its members come from the stored \
+                                 set its membership names, so a shape beside them is a region \
+                                 nothing evaluates",
+                                row.key
+                            )));
+                        }
+                        None
+                    }
+                },
             },
         );
     }
     Ok(())
-}
-
-/// `bbox = [min_x, min_y, max_x, max_y]` on an inline artifact.
-///
-/// **Four values in a stated order, and a transposition is a refusal rather than a correction.**
-/// Swapping an inverted box silently would publish a membership the author did not write — the
-/// tiles covering the corrected box, over a region they may not have meant to name at all — so the
-/// constructor that refuses it is the one the WAL decode also goes through.
-fn inline_bbox(layer: &str, key: &str, bbox: Option<&[f64]>) -> Result<Option<Bbox>> {
-    let Some(values) = bbox else {
-        return Ok(None);
-    };
-    let [min_x, min_y, max_x, max_y] = values else {
-        return Err(BuildError::Invalid(format!(
-            "layer '{layer}': artifact {key} declares a `bbox` of {} value(s); it is exactly four \
-             — [min_x, min_y, max_x, max_y]",
-            values.len()
-        )));
-    };
-    Bbox::new(*min_x, *min_y, *max_x, *max_y)
-        .map(Some)
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-                "layer '{layer}': artifact {key} declares `bbox = [{min_x}, {min_y}, {max_x}, \
-                 {max_y}]`, which is not a box this build will store — every bound must be finite \
-                 and each maximum at or above its minimum. A transposed box is refused rather than \
-                 swapped: correcting it would publish a membership over a region nobody wrote"
-            ))
-        })
 }
 
 /// One row per `(artifact, entity)`: the memberships, and the generating sets beside them.
@@ -1513,7 +1571,7 @@ fn resolve_artifact(
         contents,
         attached_to: artifact.attached_to.clone(),
         parent_key: artifact.parent_key.clone(),
-        shape: artifact.shape,
+        shape: artifact.shape.clone(),
     })
 }
 
@@ -1534,7 +1592,7 @@ fn incoming_artifact(key: &str, artifact: &ResolvedArtifact) -> IncomingArtifact
         ),
     };
     result.parent_key = artifact.parent_key.clone();
-    result.shape = artifact.shape;
+    result.shape = artifact.shape.clone();
     result
 }
 
@@ -1680,7 +1738,7 @@ fn write_content_extent(
 const LEVEL: &str = "level";
 const ATTACHED_LEVEL: &str = "attached_level";
 
-fn batches(
+pub(crate) fn batches(
     path: &Path,
 ) -> Result<impl Iterator<Item = Result<arrow::record_batch::RecordBatch>> + '_> {
     let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
@@ -1832,61 +1890,6 @@ fn optional_ranked_values<'a>(
     optional_list(path, batch, fields, canonical)
 }
 
-/// One bound of an artifact's bounding box, under the canonical name the `fields` map may move.
-///
-/// `Float64Array` only, and a `Float32` column is a refusal rather than a widening: a box read at
-/// single precision covers different tiles at the deep end of the Morton space from the one the
-/// author wrote, and the tiles *are* the membership.
-fn optional_f64<'a>(
-    path: &Path,
-    batch: &'a arrow::record_batch::RecordBatch,
-    fields: &Fields,
-    canonical: &str,
-) -> Result<Option<&'a Float64Array>> {
-    match optional(path, batch, fields, canonical)? {
-        None => Ok(None),
-        Some(array) => typed(path, array, fields.of(canonical)).map(Some),
-    }
-}
-
-/// The four bounds on one artifact row, or `None` where the row declares none.
-///
-/// **All four or none**, and a row carrying some is a refusal: a box assembled from two present
-/// bounds and two defaults is a region nobody wrote, and on a spatial layer that region *is* the
-/// membership.
-fn bbox_at(
-    path: &Path,
-    columns: &[Option<&Float64Array>; 4],
-    row: usize,
-    key: &str,
-) -> Result<Option<Bbox>> {
-    let present: Vec<Option<f64>> = columns
-        .iter()
-        .map(|column| column.filter(|c| !c.is_null(row)).map(|c| c.value(row)))
-        .collect();
-    if present.iter().all(Option::is_none) {
-        return Ok(None);
-    }
-    let [Some(min_x), Some(min_y), Some(max_x), Some(max_y)] = present[..] else {
-        return Err(BuildError::Invalid(format!(
-            "{}: artifact {key} declares some of min_x/min_y/max_x/max_y and not all four. A box \
-             assembled from the ones that are there is a region nobody wrote, and on a layer whose \
-             `shape` declares one that region is the membership",
-            path.display()
-        )));
-    };
-    Bbox::new(min_x, min_y, max_x, max_y)
-        .map(Some)
-        .ok_or_else(|| {
-            BuildError::Invalid(format!(
-                "{}: artifact {key} declares the box [{min_x}, {min_y}, {max_x}, {max_y}], which \
-                 is not one this build will store — every bound must be finite and each maximum at \
-                 or above its minimum. A transposed box is refused rather than swapped: correcting \
-                 it would publish a membership over a region nobody wrote",
-                path.display()
-            ))
-        })
-}
 
 fn value_at(column: &StringArray, row: usize) -> Option<String> {
     (!column.is_null(row)).then(|| column.value(row).to_string())
@@ -2036,7 +2039,7 @@ fn strings_at(path: &Path, column: &ListArray, row: usize, key: &str) -> Result<
 /// the only decimal string an open layer writes is the one it mints an artifact under, once per
 /// cluster.
 #[derive(Clone, Copy)]
-enum KeyColumn<'a> {
+pub(crate) enum KeyColumn<'a> {
     Text(&'a StringArray),
     I8(&'a Int8Array),
     I16(&'a Int16Array),
@@ -2117,7 +2120,7 @@ impl<'a> KeyColumn<'a> {
     }
 }
 
-fn key_column<'a>(
+pub(crate) fn key_column<'a>(
     path: &Path,
     batch: &'a arrow::record_batch::RecordBatch,
     fields: &Fields,
@@ -2396,6 +2399,12 @@ fn undeclared_key(path: &Path, address: &Address) -> BuildError {
 /// **A key is required**, and its absence is a refusal rather than a generated name: an artifact
 /// published without one can be named by no edge and matched by no later build, and the caller is
 /// the only party who knows what it should be called.
+/// The key at `row`, or its row number where the row names none — for the check's report, where
+/// a nameless row is reported rather than refused.
+pub(crate) fn key_at(key: &KeyColumn, row: usize) -> String {
+    key.key_at(row).unwrap_or_else(|| format!("row {row}"))
+}
+
 fn address(
     path: &Path,
     layer: &str,

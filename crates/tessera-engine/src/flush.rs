@@ -212,6 +212,10 @@ pub(crate) struct FlushContext {
     /// [`promote`].
     pub(crate) max_distinct_terms: u64,
     pub(crate) prefix: String,
+    /// The view's spatial levels, as held when the flush was planned — what the new segment's
+    /// rows are resolved against on the pool, before publication (`polygon-membership.md` §6.3,
+    /// ruling (k); write-path §4.3).
+    pub(crate) shapes: Vec<Arc<crate::shapes::ShapeLevel>>,
 }
 
 /// A flush whose files are durable, awaiting manifest assembly and the swap on the executor.
@@ -283,6 +287,9 @@ pub(crate) struct CompletedFlush {
     /// is scoped to this being `Some`.
     pub(crate) promoted_from_dict_len: Option<u32>,
     pub(crate) prefix: String,
+    /// The segment's membership in every spatial level of its view, resolved on the pool and
+    /// installed at publication.
+    pub(crate) shape_pieces: Vec<crate::shapes::ShapePiece>,
 }
 
 /// Turn a plan into durable files. **Runs on the background pool, over immutable inputs** (§1.1).
@@ -458,6 +465,36 @@ pub(crate) fn execute_flush(
             .map_err(|e| FlushFailed(format!("columns: {e}")))?,
     };
 
+    // ---- the shape memberships (`polygon-membership.md` §6.3) ------------------------------
+    //
+    // **Resolved here, on the pool, as part of the flush's own unit of work and before the
+    // generation that carries this segment is published** — so a point ingested inside a shape is
+    // a member on the next request with nothing rebuilt on that request. Interior tiles are whole
+    // row ranges; the rows in boundary cells are tested one by one over their exact stored
+    // position, with each cell's edges derived once for this segment. A panic here fails the
+    // flush whole, exactly as a segment write would: nothing is published and the buffer stands.
+    let mut shape_pieces = Vec::with_capacity(ctx.shapes.len());
+    for level in &ctx.shapes {
+        let (rows, cost) = level.resolve(&segment);
+        tracing::info!(
+            layer = %level.layer,
+            level = level.level,
+            view = %ctx.view,
+            seg_id = %ctx.seg_id,
+            rows = segment.row_count,
+            rows_tested = cost.rows_tested,
+            rows_interior = cost.rows_interior,
+            artifacts_skipped = cost.artifacts_skipped,
+            elapsed_ms = cost.elapsed_ms,
+            "a flush resolved its segment against a spatial level's shapes"
+        );
+        shape_pieces.push(crate::shapes::ShapePiece {
+            level: Arc::clone(level),
+            rows,
+            cost,
+        });
+    }
+
     Ok(CompletedFlush {
         partition: ctx.partition,
         view: ctx.view,
@@ -480,6 +517,7 @@ pub(crate) fn execute_flush(
         dict: promotion.dict,
         promoted_from_dict_len: promoted_from,
         prefix: ctx.prefix,
+        shape_pieces,
     })
 }
 

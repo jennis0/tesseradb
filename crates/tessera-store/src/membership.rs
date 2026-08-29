@@ -1338,6 +1338,220 @@ impl ListColumnPack {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// The shape row form: one segment's resolved membership of one spatial level
+// (`polygon-membership.md` §6.3), persisted so an open claims it rather than resolving again.
+// ---------------------------------------------------------------------------------------------
+
+const SHAPE_ROWS_MAGIC: &[u8; 4] = b"TSSR";
+const SHAPE_ROWS_VERSION: u16 = 1;
+/// Magic, version, reserved, ordinals, row count, level version, segment-id length.
+const SHAPE_ROWS_HEADER_LEN: usize = 4 + 2 + 2 + 4 + 4 + 8 + 2;
+/// The per-ordinal length that marks a hole — no artifact at that ordinal, as distinct from an
+/// artifact whose membership of this segment is empty, which is a zero-length entry.
+const SHAPE_ROWS_HOLE: u32 = u32::MAX;
+
+fn shape_rows_malformed(what: &str, detail: impl std::fmt::Display) -> StoreError {
+    StoreError::MalformedBundle {
+        detail: format!("shape rows {what}: {detail}"),
+    }
+}
+
+/// Serialise one `(view, layer, level)`'s membership of **one segment**, one entry per ordinal.
+///
+/// ```text
+/// TSSR | u16 version | u16 reserved (0) | u32 ordinals | u32 row_count | u64 level_version
+///      | u16 seg_id_len | seg_id bytes
+///      | per ordinal: u32 len — u32::MAX a hole, 0 an empty membership — then `len` bytes,
+///        a portable Roaring bitmap of segment-local rows
+/// ```
+///
+/// **The key is in the file as well as in the manifest entry that names it**, because the two are
+/// what a reader refuses on: a piece is a function of the segment's rows and the level's shapes at
+/// one level version, and one written against any other segment or version names rows that mean
+/// something else. `row_count` is the segment's, and a bitmap naming a row at or past it is refused
+/// at read rather than trusted.
+///
+/// `entries` is per ordinal: `None` a hole, `Some(bytes)` the bitmap's portable serialisation —
+/// produced by `derived::shape_rows_bytes`, which owns the bitmap side.
+pub fn pack_shape_rows(
+    level_version: u64,
+    seg_id: &str,
+    row_count: u32,
+    entries: &[Option<Vec<u8>>],
+) -> Vec<u8> {
+    let payload: usize = entries.iter().map(|e| 4 + e.as_ref().map_or(0, Vec::len)).sum();
+    let mut out = Vec::with_capacity(SHAPE_ROWS_HEADER_LEN + seg_id.len() + payload);
+    out.extend_from_slice(SHAPE_ROWS_MAGIC);
+    out.extend_from_slice(&SHAPE_ROWS_VERSION.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(entries.len() as u32).to_le_bytes());
+    out.extend_from_slice(&row_count.to_le_bytes());
+    out.extend_from_slice(&level_version.to_le_bytes());
+    out.extend_from_slice(&(seg_id.len() as u16).to_le_bytes());
+    out.extend_from_slice(seg_id.as_bytes());
+    for entry in entries {
+        match entry {
+            None => out.extend_from_slice(&SHAPE_ROWS_HOLE.to_le_bytes()),
+            Some(bytes) => {
+                out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    out
+}
+
+/// One shape row form, framed and checked once at open: the header's key and each entry's extent
+/// are verified before any bitmap is decoded.
+pub struct ShapeRowsPack {
+    bytes: ContainmentBytes,
+    ordinals: u32,
+    row_count: u32,
+    level_version: u64,
+    seg_id: String,
+    /// Byte offset of each ordinal's length word, so an entry is addressed without a second walk.
+    at: Vec<usize>,
+}
+
+impl std::fmt::Debug for ShapeRowsPack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShapeRowsPack")
+            .field("ordinals", &self.ordinals)
+            .field("row_count", &self.row_count)
+            .field("level_version", &self.level_version)
+            .field("seg_id", &self.seg_id)
+            .finish()
+    }
+}
+
+impl ShapeRowsPack {
+    /// Open a written row form, mapped in place.
+    pub fn open(path: &Path) -> Result<Self> {
+        let map = map_read_only(path)?;
+        Self::frame(ContainmentBytes::Mapped(map), &path.display().to_string())
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        Self::frame(ContainmentBytes::Owned(bytes), "(in memory)")
+    }
+
+    /// Every check refuses rather than truncating, on `TileIndexPack::frame`'s argument: a form
+    /// read short leaves every ordinal past the truncation with no rows, which is a masked count
+    /// that silently understates for every viewer.
+    fn frame(bytes: ContainmentBytes, what: &str) -> Result<Self> {
+        let raw = bytes.as_slice();
+        if raw.len() < SHAPE_ROWS_HEADER_LEN {
+            return Err(shape_rows_malformed(
+                what,
+                format!(
+                    "{} bytes is shorter than the {SHAPE_ROWS_HEADER_LEN}-byte header",
+                    raw.len()
+                ),
+            ));
+        }
+        if &raw[0..4] != SHAPE_ROWS_MAGIC {
+            return Err(shape_rows_malformed(what, "magic is not TSSR"));
+        }
+        let version = u16::from_le_bytes([raw[4], raw[5]]);
+        if version != SHAPE_ROWS_VERSION {
+            return Err(shape_rows_malformed(
+                what,
+                format!("version {version}, expected {SHAPE_ROWS_VERSION}"),
+            ));
+        }
+        let reserved = u16::from_le_bytes([raw[6], raw[7]]);
+        if reserved != 0 {
+            return Err(shape_rows_malformed(
+                what,
+                format!("reserved is {reserved}, expected 0"),
+            ));
+        }
+        let read = |at: usize| u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        let ordinals = read(8);
+        let row_count = read(12);
+        let level_version = u64::from_le_bytes(raw[16..24].try_into().expect("eight bytes"));
+        let seg_id_len = usize::from(u16::from_le_bytes([raw[24], raw[25]]));
+        let mut cursor = SHAPE_ROWS_HEADER_LEN;
+        if raw.len() < cursor + seg_id_len {
+            return Err(shape_rows_malformed(what, "truncated inside the segment id"));
+        }
+        let seg_id = std::str::from_utf8(&raw[cursor..cursor + seg_id_len])
+            .map_err(|_| shape_rows_malformed(what, "the segment id is not UTF-8"))?
+            .to_string();
+        cursor += seg_id_len;
+        let mut at = Vec::with_capacity(ordinals as usize);
+        for ordinal in 0..ordinals {
+            if raw.len() < cursor + 4 {
+                return Err(shape_rows_malformed(
+                    what,
+                    format!("truncated at ordinal {ordinal} of {ordinals}"),
+                ));
+            }
+            at.push(cursor);
+            let len = read(cursor);
+            cursor += 4;
+            if len != SHAPE_ROWS_HOLE {
+                let len = len as usize;
+                if raw.len() < cursor + len {
+                    return Err(shape_rows_malformed(
+                        what,
+                        format!("truncated inside ordinal {ordinal}'s bitmap"),
+                    ));
+                }
+                cursor += len;
+            }
+        }
+        if cursor != raw.len() {
+            return Err(shape_rows_malformed(
+                what,
+                format!(
+                    "{} bytes, but the entries end at {cursor} — trailing bytes the packer did \
+                     not write",
+                    raw.len()
+                ),
+            ));
+        }
+        Ok(ShapeRowsPack {
+            bytes,
+            ordinals,
+            row_count,
+            level_version,
+            seg_id,
+            at,
+        })
+    }
+
+    pub fn ordinals(&self) -> u32 {
+        self.ordinals
+    }
+
+    /// The segment's row count the form was resolved over — every row a bitmap names is below it.
+    pub fn row_count(&self) -> u32 {
+        self.row_count
+    }
+
+    pub fn level_version(&self) -> u64 {
+        self.level_version
+    }
+
+    pub fn seg_id(&self) -> &str {
+        &self.seg_id
+    }
+
+    /// One ordinal's entry: `None` at a hole, `Some(&[])` for an empty membership, otherwise the
+    /// bitmap's portable bytes.
+    pub fn entry(&self, ordinal: u32) -> Option<&[u8]> {
+        let raw = self.bytes.as_slice();
+        let at = *self.at.get(ordinal as usize)?;
+        let len = u32::from_le_bytes([raw[at], raw[at + 1], raw[at + 2], raw[at + 3]]);
+        if len == SHAPE_ROWS_HOLE {
+            return None;
+        }
+        Some(&raw[at + 4..at + 4 + len as usize])
+    }
+}
+
 /// The read-only mapping the two row-major columns open with — one function rather than a third
 /// and fourth copy of the same safety argument: the file is opened read-only and the mapping is
 /// never written through, and nothing truncates a published prefix's files while a generation names

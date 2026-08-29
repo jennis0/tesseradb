@@ -1699,6 +1699,18 @@ fn main() -> ExitCode {
             for finding in &report.findings {
                 eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
             }
+            // **The shape layers, sized from the geometry alone** (`polygon-membership.md` §6.5)
+            // — the decomposition an operator sizing a boundary set reads before a build commits
+            // memory to it. Reported, never a finding: nothing here refuses.
+            if !report.shapes.is_empty() {
+                eprintln!("shape layers, from the geometry alone:");
+                for shape in &report.shapes {
+                    match shape {
+                        Ok(shape) => shape.print(),
+                        Err(why) => eprintln!("  not sized: {why}"),
+                    }
+                }
+            }
             if !report.is_clean() {
                 eprintln!(
                     "check FAILED: {} finding(s) across {} source(s). Nothing was read but \
