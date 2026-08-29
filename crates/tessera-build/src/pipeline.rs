@@ -1708,6 +1708,31 @@ impl EntityColumn {
         (0..self.len()).map(|entity| self.value_at(entity))
     }
 
+    /// The entities that carry a value, ascending, **skipping an absent run 64 at a time**.
+    ///
+    /// The sweeps that walk a whole column do per-entity work only where there is a value, and
+    /// presence is a bit vector: a column 84.5% absent — which one column of the campaign's corpus
+    /// is — costs a shift and a branch per absent entity through [`Self::is_present`] to learn
+    /// nothing, against one test per 64 here. The yielded order is ascending, which every caller
+    /// relies on: the postings each builds are sorted by construction, not by a later sort.
+    pub(crate) fn present_entities(&self) -> impl Iterator<Item = usize> + '_ {
+        let words = &self.present;
+        // The word being drained, with each yielded bit cleared out of it. The trailing word's
+        // bits above the column's length are never set — the vector is allocated zeroed and `set`
+        // is indexed by an entity — so no bound test is needed per bit.
+        let mut residual = 0u64;
+        let mut next_word = 0usize;
+        std::iter::from_fn(move || loop {
+            if residual != 0 {
+                let bit = residual.trailing_zeros() as usize;
+                residual &= residual - 1;
+                return Some((next_word - 1) * 64 + bit);
+            }
+            residual = *words.get(next_word)?;
+            next_word += 1;
+        })
+    }
+
     /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
     /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s clone would
     /// be a second copy of every string in the corpus.
@@ -2142,8 +2167,7 @@ pub(crate) fn write_record_blob(
         fields.clear();
         for &column in &blob_columns {
             let attribute = &schema.attributes[column];
-            let Some(value) = record_value_of(&by_entity[column].value_at(entity), attribute)?
-            else {
+            let Some(value) = record_value_of(&by_entity[column], entity, attribute)? else {
                 continue;
             };
             let tag = u16::try_from(column).map_err(|_| {
@@ -2173,12 +2197,18 @@ pub(crate) fn write_record_blob(
 
 /// One staged value as the blob row carries it, or `None` where the entity carries nothing in
 /// this column — the per-family absence rule `write_record_blob`'s doc states.
+///
+/// **The column and the entity, not the value**, so that the string arm can borrow: reading through
+/// `EntityColumn::value_at` clones the `String` and [`RecordValue::Utf8`] then owns a second copy,
+/// which over a text column is two allocations and two copies of every value in the corpus. One
+/// clone remains and is unavoidable — the record value owns its bytes.
 fn record_value_of(
-    value: &ScalarValue,
+    values: &EntityColumn,
+    entity: usize,
     attribute: &crate::config::Attribute,
 ) -> Result<Option<RecordValue>> {
     if attribute.vocabulary.is_some() {
-        let code = category_code(value, &attribute.name)?;
+        let code = category_code(&values.value_at(entity), &attribute.name)?;
         if code == tessera_store::vocabulary::ABSENT_CODE {
             return Ok(None);
         }
@@ -2191,21 +2221,27 @@ fn record_value_of(
             _ => RecordValue::U32(code),
         }));
     }
-    Ok(match value {
+    // The string families first, borrowed. `str_at` answers `None` for an absent entity and for a
+    // column that is not string-backed, and the match below then reads the same absence out of
+    // `value_at` — so the two agree without either having to know which family it is looking at.
+    if let Some(text) = values.str_at(entity) {
+        return Ok(Some(RecordValue::Utf8(text.to_string())));
+    }
+    Ok(match values.value_at(entity) {
         ScalarValue::Null => None,
-        ScalarValue::Bool(v) => Some(RecordValue::Bool(*v)),
-        ScalarValue::U8(v) => Some(RecordValue::U8(*v)),
-        ScalarValue::U16(v) => Some(RecordValue::U16(*v)),
-        ScalarValue::U32(v) => Some(RecordValue::U32(*v)),
-        ScalarValue::U64(v) => Some(RecordValue::U64(*v)),
-        ScalarValue::I8(v) => Some(RecordValue::I8(*v)),
-        ScalarValue::I16(v) => Some(RecordValue::I16(*v)),
-        ScalarValue::I32(v) => Some(RecordValue::I32(*v)),
-        ScalarValue::I64(v) => Some(RecordValue::I64(*v)),
-        ScalarValue::F32(v) => Some(RecordValue::F32(*v)),
-        ScalarValue::F64(v) => Some(RecordValue::F64(*v)),
-        ScalarValue::TimestampUs(v) => Some(RecordValue::TimestampUs(*v)),
-        ScalarValue::Utf8(v) => Some(RecordValue::Utf8(v.clone())),
+        ScalarValue::Bool(v) => Some(RecordValue::Bool(v)),
+        ScalarValue::U8(v) => Some(RecordValue::U8(v)),
+        ScalarValue::U16(v) => Some(RecordValue::U16(v)),
+        ScalarValue::U32(v) => Some(RecordValue::U32(v)),
+        ScalarValue::U64(v) => Some(RecordValue::U64(v)),
+        ScalarValue::I8(v) => Some(RecordValue::I8(v)),
+        ScalarValue::I16(v) => Some(RecordValue::I16(v)),
+        ScalarValue::I32(v) => Some(RecordValue::I32(v)),
+        ScalarValue::I64(v) => Some(RecordValue::I64(v)),
+        ScalarValue::F32(v) => Some(RecordValue::F32(v)),
+        ScalarValue::F64(v) => Some(RecordValue::F64(v)),
+        ScalarValue::TimestampUs(v) => Some(RecordValue::TimestampUs(v)),
+        ScalarValue::Utf8(v) => Some(RecordValue::Utf8(v)),
     })
 }
 
@@ -2290,8 +2326,7 @@ fn write_column_values(
     attribute: &crate::config::Attribute,
     values: &EntityColumn,
 ) -> Result<WrittenColumn> {
-    let mut present = croaring::Bitmap::new();
-    let mut universal = true;
+    let mut presence = Presence::default();
     let mut dict = None;
 
     let mut writer = ValueColumnWriter::create(values_path, presence_path, column_kind(attribute))
@@ -2310,7 +2345,7 @@ fn write_column_values(
     // spend — the empty string is one a corpus may legitimately hold — so absence arrives as
     // `ScalarValue::Null` and the empty string arrives as itself.
     if attribute.ty == ScalarType::Keyword {
-        let present_values = keyword_values(attribute, values, &mut present, &mut universal)?;
+        let present_values = keyword_values(attribute, values, &mut presence)?;
         // The distinct key set, sorted — the dictionary's contents and, by position, the ordinals
         // the column stores. `sort_unstable` is sound where a stable sort would not be, because
         // the elements compared are the keys themselves: equal elements are indistinguishable, and
@@ -2350,10 +2385,9 @@ fn write_column_values(
         for (entity, value) in values.iter().enumerate() {
             let code = category_code(&value, &attribute.name)?;
             if code == tessera_store::vocabulary::ABSENT_CODE {
-                universal = false;
                 continue;
             }
-            present.add(entity as u32);
+            presence.present(entity as u32);
             held.push(code);
             if held.len() >= VALUE_CHUNK {
                 push!(category_chunk(attribute.ty, &held));
@@ -2374,27 +2408,82 @@ fn write_column_values(
         // Reached only where the source said so: `BatchColumn::value` returns `ScalarValue::Null`
         // for a null slot and the values buffer's zero otherwise, which is the distinction that
         // used to be dropped at decode.
-        for (entity, value) in values.iter().enumerate() {
-            if matches!(value, ScalarValue::Null) {
-                universal = false;
-            } else {
-                present.add(entity as u32);
-            }
+        //
+        // The presence bit *is* that distinction — a slot is null exactly where the bit is clear,
+        // whatever the family — so this walks the bits and skips an absent run 64 at a time rather
+        // than materialising a `ScalarValue` per entity to ask it the same question.
+        for entity in values.present_entities() {
+            presence.present(entity as u32);
         }
         push_numeric_chunks(&mut writer, values_path, attribute, values)?;
     }
-    let presence = (!universal).then_some(&present);
+    let presence = presence.written(values.len());
     writer
         .finish(presence)
         .map_err(|e| BuildError::io(values_path, e))?;
     Ok(WrittenColumn {
-        presence: !universal,
+        presence: presence.is_some(),
         dict,
     })
 }
 
-/// One keyword column's present values, in entity order, with `present` and `universal` updated as
-/// the string families update them.
+/// The presence bitmap a column may or may not owe, **populated only once an absence proves it
+/// will be written**.
+///
+/// A column every entity carries a value in gets no bitmap at all ([`write_column_values`] on why
+/// that is the fast path and not an omission), and the pass that discovers this used to build the
+/// bitmap anyway: 7.4×10⁷ `add` calls per column, thrown away at the last line. Here the sweep
+/// reports only the entities that carry a value, ascending; absence is inferred from the gaps and
+/// from the tail, and the bitmap is materialised at the first gap by replaying the run before it.
+///
+/// **The replay is a loop of `add`, not an `add_range`**, so the bitmap receives exactly the call
+/// sequence the eager version made — same entities, same ascending order, same container
+/// promotions, and so the same serialised bytes. A range insert may produce a run container where
+/// individual inserts produce an array one, which is a different file for the same set.
+#[derive(Default)]
+struct Presence {
+    bitmap: croaring::Bitmap,
+    /// The entity after the last one reported present, while no gap has been seen.
+    run: u32,
+    materialised: bool,
+}
+
+impl Presence {
+    /// Report that `entity` carries a value. Entities must arrive ascending.
+    fn present(&mut self, entity: u32) {
+        if !self.materialised {
+            if entity == self.run {
+                self.run = entity + 1;
+                return;
+            }
+            self.materialise();
+        }
+        self.bitmap.add(entity);
+        self.run = entity + 1;
+    }
+
+    /// The bitmap to write, or `None` where the column is universal — every entity of `len`
+    /// present, which is the case the file set states by leaving the bitmap out.
+    fn written(&mut self, len: usize) -> Option<&croaring::Bitmap> {
+        if !self.materialised {
+            if self.run as usize == len {
+                return None;
+            }
+            self.materialise();
+        }
+        Some(&self.bitmap)
+    }
+
+    fn materialise(&mut self) {
+        for entity in 0..self.run {
+            self.bitmap.add(entity);
+        }
+        self.materialised = true;
+    }
+}
+
+/// One keyword column's present values, in entity order, with `presence` told which entities carry
+/// one.
 ///
 /// Separate from the ordinal emit so that the pass which decides *presence* is the pass which
 /// decides *slots*: the k-th set bit's value is at slot k (filter-index §2.1), and the vector this
@@ -2412,15 +2501,12 @@ fn write_column_values(
 fn keyword_values<'a>(
     attribute: &crate::config::Attribute,
     values: &'a EntityColumn,
-    present: &mut croaring::Bitmap,
-    universal: &mut bool,
+    presence: &mut Presence,
 ) -> Result<Vec<&'a str>> {
     let mut out = Vec::new();
-    for entity in 0..values.len() {
-        if !values.is_present(entity) {
-            *universal = false;
-            continue;
-        }
+    // Absent runs are skipped a word at a time; absence itself is what [`Presence`] reads out of
+    // the gaps this leaves.
+    for entity in values.present_entities() {
         // Borrowed, not read through `value_at`: this collects one `&str` per entity across the
         // whole column, so cloning here would be a second copy of every keyword in the corpus.
         let Some(text) = values.str_at(entity) else {
@@ -2438,7 +2524,7 @@ fn keyword_values<'a>(
                 attribute.name
             )));
         }
-        present.add(entity as u32);
+        presence.present(entity as u32);
         out.push(text);
     }
     Ok(out)

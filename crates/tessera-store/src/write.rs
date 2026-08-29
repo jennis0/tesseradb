@@ -859,6 +859,20 @@ macro_rules! fixed_width_columns {
     };
 }
 
+/// The refusal [`ScalarColumnData::push`] and [`ScalarColumnData::set`] share: a value whose tag is
+/// not the column's.
+///
+/// `#[cold]` and out of line because it is the arm neither of those functions expects to reach, and
+/// building its message is the whole of its cost.
+#[cold]
+#[inline(never)]
+fn scalar_tag_mismatch(expected: DataType, name: &str, got: &ScalarValue) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
+    )
+}
+
 impl ScalarColumnData {
     /// An empty column of the given type — what a build allocates before filling it.
     pub fn of(ty: ScalarType, capacity: usize) -> Self {
@@ -899,19 +913,25 @@ impl ScalarColumnData {
     /// rule and its reasoning: a coerced or dropped value shifts every later row of the column
     /// into another row's place, with every value present and none against its own identity.
     pub fn push(&mut self, value: ScalarValue, name: &str) -> io::Result<()> {
-        let expected = self.arrow_type();
+        // **The column's own arm names the type it expected**, rather than one `arrow_type()` call
+        // before the match. That call runs whether or not the value is wrong, and `DataType` is an
+        // owning enum, so a pass over 7.4×10⁷ items across five columns constructed and dropped
+        // ~10⁹ of them to build a message that is almost never wanted.
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match (self, value) {
-                    $((ScalarColumnData::$v(col), ScalarValue::$v(x)) => col.push(x),)*
-                    (ScalarColumnData::Bool(col), ScalarValue::Bool(x)) => col.push(x),
-                    (ScalarColumnData::Utf8(col), ScalarValue::Utf8(x)) => col.push(x),
-                    (_, got) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
-                        ))
-                    }
+                match self {
+                    $(ScalarColumnData::$v(col) => match value {
+                        ScalarValue::$v(x) => col.push(x),
+                        got => return Err(scalar_tag_mismatch($dt, name, &got)),
+                    },)*
+                    ScalarColumnData::Bool(col) => match value {
+                        ScalarValue::Bool(x) => col.push(x),
+                        got => return Err(scalar_tag_mismatch(DataType::Boolean, name, &got)),
+                    },
+                    ScalarColumnData::Utf8(col) => match value {
+                        ScalarValue::Utf8(x) => col.push(x),
+                        got => return Err(scalar_tag_mismatch(DataType::Utf8, name, &got)),
+                    },
                 }
             };
         }
@@ -953,19 +973,23 @@ impl ScalarColumnData {
     /// rule and the same reasoning: a coerced value gives one row another row's identity, with
     /// every value present and none its own.
     pub fn set(&mut self, index: usize, value: ScalarValue, name: &str) -> io::Result<()> {
-        let expected = self.arrow_type();
+        // The expected type is named by the arm rather than computed ahead of the match — see
+        // [`Self::push`] for what that cost the build's attribute pass.
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match (self, value) {
-                    $((ScalarColumnData::$v(col), ScalarValue::$v(x)) => col[index] = x,)*
-                    (ScalarColumnData::Bool(col), ScalarValue::Bool(x)) => col[index] = x,
-                    (ScalarColumnData::Utf8(col), ScalarValue::Utf8(x)) => col[index] = x,
-                    (_, got) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
-                        ))
-                    }
+                match self {
+                    $(ScalarColumnData::$v(col) => match value {
+                        ScalarValue::$v(x) => col[index] = x,
+                        got => return Err(scalar_tag_mismatch($dt, name, &got)),
+                    },)*
+                    ScalarColumnData::Bool(col) => match value {
+                        ScalarValue::Bool(x) => col[index] = x,
+                        got => return Err(scalar_tag_mismatch(DataType::Boolean, name, &got)),
+                    },
+                    ScalarColumnData::Utf8(col) => match value {
+                        ScalarValue::Utf8(x) => col[index] = x,
+                        got => return Err(scalar_tag_mismatch(DataType::Utf8, name, &got)),
+                    },
                 }
             };
         }
