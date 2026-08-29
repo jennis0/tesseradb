@@ -1,10 +1,13 @@
 # The selection operand
 
 **Status:** Provisional — drafted and taken through one adversarial review (Appendix R), 2026-08-26.
-**What remains before it becomes normative:** the three owner rulings in §10 — the space the result
-is expressed in, the scope of its cache, and where the exactness verdict rides on the wire — and the
-amendment to `architecture.md` §8.2 that admitting a third operand kind requires. **Nothing in it is
-built**, and every claim about behaviour is marked accordingly.
+**The three rulings of §10 were taken on 2026-08-29, each as recommended**: (a) the result is a
+row-space set over the whole view; (b) the cached region set is shared across principals, with no
+register row; (c) the exactness verdict rides as a response header. `architecture.md` §8.2 admits
+the third operand kind. What remains before this document becomes normative is the build — the
+shape work's stage 4 ([`polygon-membership.md`](polygon-membership.md) §12), which also gives the
+leaf its second spelling, by published artifact, and its `space` field — and the ⊘ markers below
+are removed as it lands.
 
 **Owns:** what happens when a viewer draws a box or a lasso on the map and asks *how many of my
 items are in it* and *narrow everything to these*. The decomposition of a shape against the Morton
