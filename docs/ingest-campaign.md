@@ -114,62 +114,48 @@ frame is full-world and the points span it. Places cluster into cities, so 73.6M
 
 ### 3.0 Where the build's time goes, at last
 
-`tessera build --stage-timings` was added for this (§4) and this is its first use. Twelve stages,
-73,631,092 points, one 23:16 run:
+`tessera build --stage-timings` was added for this (§4). Its first run charged one 615.0 s number to
+`filter_postings`, which turned out to be four jobs sharing a stage name; splitting them is what
+this table records. 73,631,092 points, one 23:03 run:
 
 | stage | wall | share | peak RSS at end |
 |---|---|---|---|
-| `filter_postings` | **615.0 s** | **44%** | 18,896 MiB |
-| `layers` | 274.5 s | 20% | **18,896 MiB** — the peak arrives here |
-| `attribute_tail` | 232.5 s | 17% | 12,621 MiB |
-| `geometry_read` | 47.1 s | 3% | 3,211 MiB |
-| `assignment` | 47.1 s | 3% | 3,415 MiB |
-| `dictionary` | 32.5 s | 2% | 1,625 MiB |
-| `manifests` | 25.0 s | 2% | 18,896 MiB |
-| the artifact pass | 23.1 s | 2% | — |
-| `segment_write` | 14.4 s | 1% | 18,896 MiB |
-| `signature_sort`, `postings_write`, `source_ids`, `tiler_sort`, `pairs_pack` | 14.7 s total | 1% | — |
+| `text_index` | **411.0 s** | **30%** | 18,400 MiB |
+| `layers` | 335.2 s | 24% | **18,400 MiB** — the peak arrives here |
+| `attribute_tail` | 226.1 s | 16% | 8,393 MiB |
+| `filter_postings` | 70.3 s | 5% | 18,400 MiB |
+| `record_blob` | 53.3 s | 4% | 18,400 MiB |
+| `assignment` | 42.3 s | 3% | 3,419 MiB |
+| `column_release` | 35.3 s | 3% | 18,400 MiB |
+| `manifests` | 32.2 s | 2% | 18,400 MiB |
+| `dictionary` | 30.3 s | 2% | 1,626 MiB |
+| the artifact pass | 30.1 s | 2% | — |
+| `geometry_read` | 28.9 s | 2% | 3,213 MiB |
+| `segment_write` | 25.3 s | 2% | 18,400 MiB |
+| `source_ids`, `pairs_pack`, `signature_sort`, `postings_write`, `tiler_sort` | 9.6 s total | 1% | — |
 
-**`filter_postings` is the largest stage and nothing has ever looked at it.** It is stage 8b — one
-entity-space postings file per `index = true` column — and this declaration indexes **eight**.
-GeoNames indexed nine over 13.5×10⁶ points inside a 6:05 whole build, so this is not simply 5.5×
-bigger; ⊘ whether it is superlinear is not measured.
+**One text column is the largest cost in the build.** `text_index` is 411.0 s over 10,508,413
+distinct terms — 72% of the 615.0 s the unsplit stage reported, against the nine category columns'
+70.3 s. Both investigations of that block modelled the text index at about three quarters of it
+before the split was written; the measurement agrees with them, and neither could have been acted
+on without it. This declaration indexes **ten** columns — nine keyword, one `text` — and the tenth
+is the expensive one.
 
-**Two days of optimisation went into `layers`, which is 20%**, because that was the stage visible
+**Two days of optimisation went into `layers`, which is 24%**, because that was the stage visible
 through `ps` while the build sat in it. That is the failure mode `--stage-timings` exists to end,
 and it is worth stating plainly rather than filing as a lesson.
 
 **The peak arrives in `layers`** and does not move afterwards. That is the first per-stage
 attribution W2 has ever had: if `--memory-budget` is to bound peak RSS, `layers` is the stage it
-must bound, and `attribute_tail` is what it climbs through to reach it.
+must bound, and `attribute_tail` is what it climbs through to reach it. The staircase is two
+structures and no more — the twelve entity-order columns add 5.0 GB at `attribute_tail`, the layer
+plan adds 10.0 GB at `layers`, and every stage after the second holds both without needing to.
 
-**The join is the rung's one engineering result, and it is a 300x one.** The plan's shape — one
-`ST_Within` against all 1.07M `division_area` polygons — ran for **over 50 minutes on 500,000
-places** before it was killed, which is 29 hours for the corpus. The cost is not the polygon count;
-it is that a handful of enormous polygons are tested against nearly every point. Summed bounding-box
-area, measured over the release: **country, region and dependency cover 148,532 deg2 against the
-world's 64,800**, at up to 255,252 vertices apiece, while the five fine subtypes that answer almost
-every place cover 16,652.
-
-Only the *deepest* containing area is wanted — the ancestry comes from the division hierarchy, not
-from a second polygon — so the join runs **finest tier first and each tier sees only what the last
-left unplaced**. The same 4.6M places, all 1.07M polygons, **45 seconds**:
-
-| tier | polygons | time | placed | left |
-|---|---|---|---|---|
-| fine — locality, neighborhood, microhood, macrohood, localadmin | 1,029,095 | 9 s | 2,170,224 | 2,429,062 |
-| county | 38,908 | 13 s | 2,410,516 | 18,546 |
-| coarse — region, dependency, country | 4,191 | 11 s | 13,484 | 5,062 |
-
-5,062 places (0.11%) fall in no polygon at all and are in no artifact, counted rather than refused.
-**County places more than half**, which is Overture's own coverage rather than a choice: 553,493
-localities have a polygon against 3,481,755 that exist only as points.
-
-Two false economies were paid for on the way, and both are recorded in `prepare.py` so they are not
-rediscovered. `CREATE INDEX ... USING RTREE` on the polygon table costs **over an hour and the join
-never reads it** — `SPATIAL_JOIN` plans as a sequential scan of both sides and builds its own index.
-And materialising the polygons whole beside their own partition doubles a ~11 GB resident table for
-nothing.
+⊘ **The two runs are not a controlled comparison.** The 23:15.90 run predates both the stage split
+and the shape-membership merge; this one carries both. The perf work between them is byte-neutral —
+`SEGMENTS-0.json` differs only by `shape_held_extents` and `shape_rows_extents`, two empty fields
+the merge added — so the bundle is unchanged, but the 61 s `layers` rose and the 45 s the filter
+block fell are not separated from run variance and are not attributed.
 
 ### 3.1 Four things the survey corrected in the plan
 
@@ -208,7 +194,7 @@ programmes/source level 0 [world]: 0 artifact(s), 0.000 everywhere, 0.0 blocks/a
 ```
 
 and it read as a layer that is declared, reachable and serving nothing. **It is not.** The manifest
-carries eight artifacts for it and a served viewport returns all eight with masked counts, beside
+carries nine artifacts for it and a served viewport returns all nine with masked counts, beside
 13 taxonomy and 8,448 division artifacts, over a three-country principal at zoom 0.
 
 **Why the zeros are honest and the line was not.** The pass observes a level by walking its

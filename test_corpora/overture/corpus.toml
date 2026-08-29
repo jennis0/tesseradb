@@ -345,7 +345,7 @@ type                      = "text"
 require_member_visibility = "inherited"
 
 # The tagged-programme case the campaign plan asks this rung for: an attribute predicate, whose
-# artifacts are the eight distinct values of an indexed column and whose membership is evaluated
+# artifacts are the nine distinct values of an indexed column and whose membership is evaluated
 # rather than published. It declares no content, no levels and no hierarchy but `flat`, which is
 # what a predicate membership is allowed.
 [[layer]]
