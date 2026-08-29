@@ -320,6 +320,51 @@ impl EntityColumn {
         })
     }
 
+    /// [`Self::present_entities`] over one contiguous entity range `[lo, hi)`, skipping an absent
+    /// run 64 at a time exactly as that does.
+    ///
+    /// **This is what makes a column-wide pass divisible.** The text index splits entity space
+    /// into chunks and indexes them in parallel, and every consumer of a chunk's output relies on
+    /// the yielded order being ascending *and* on the chunks partitioning the column — so the
+    /// range is masked into the boundary words rather than filtered out of the whole-column
+    /// iterator, which would make each chunk cost a scan of every other chunk's presence bits.
+    pub(crate) fn present_entities_in(
+        &self,
+        lo: usize,
+        hi: usize,
+    ) -> impl Iterator<Item = usize> + '_ {
+        let words = self.present.as_slice();
+        let lo = lo.min(self.len());
+        let hi = hi.min(self.len());
+        let first_word = lo / 64;
+        let end_word = hi.div_ceil(64);
+        let mut next_word = first_word;
+        let mut residual = 0u64;
+        std::iter::from_fn(move || loop {
+            if residual != 0 {
+                let bit = residual.trailing_zeros() as usize;
+                residual &= residual - 1;
+                return Some((next_word - 1) * 64 + bit);
+            }
+            if next_word >= end_word {
+                return None;
+            }
+            let mut word = words[next_word];
+            // The two boundary words are the whole of the range logic: a chunk starts and ends
+            // mid-word in general, and a bit outside `[lo, hi)` left set here would be indexed
+            // twice — once by this chunk and once by its neighbour — which the merge would see as
+            // a repeated entity in one term's postings.
+            if next_word == first_word {
+                word &= u64::MAX << (lo % 64);
+            }
+            if next_word == end_word - 1 && !hi.is_multiple_of(64) {
+                word &= !(u64::MAX << (hi % 64));
+            }
+            residual = word;
+            next_word += 1;
+        })
+    }
+
     /// Borrow a string value, or `None` where the entity has none. For the readers that only scan
     /// the column — the keyword dictionary and the text index — where [`Self::iter`]'s copy would
     /// be a second copy of every string in the corpus.
@@ -501,6 +546,42 @@ mod tests {
         assert_eq!(column.value_at(1), ScalarValue::Null);
         assert_eq!(column.str_at(2), Some("value"));
         assert_eq!(column.present_entities().collect::<Vec<_>>(), vec![0, 2]);
+    }
+
+    /// The ranges partition the column and nothing is yielded twice.
+    ///
+    /// A bit outside `[lo, hi)` left set by the boundary masking would be indexed by a chunk and
+    /// by its neighbour both, which the text index's merge sees as a repeated entity in one term's
+    /// postings — a wrong answer with no crash behind it. So the assertion is over strides that
+    /// divide the 64-entity word and strides that do not, and it is over the concatenation rather
+    /// than over each range alone.
+    #[test]
+    fn the_ranges_partition_the_column_at_any_stride() {
+        let (scratch, _dir) = scratch();
+        const N: usize = 300;
+        let mut column = EntityColumn::filled(&scratch, ScalarType::U32, N).unwrap();
+        // A scatter that leaves whole words empty (a run of absences the walk skips 64 at a time)
+        // and words partly filled either side of an unaligned boundary.
+        let present: Vec<usize> = (0..N)
+            .filter(|e| e % 7 == 0 || (64..80).contains(e))
+            .collect();
+        for &e in &present {
+            column.set(e, ScalarValue::U32(e as u32), "t").unwrap();
+        }
+        assert_eq!(column.present_entities().collect::<Vec<_>>(), present);
+        for stride in [1usize, 7, 63, 64, 65, 128, 299, N, N + 11] {
+            let walked: Vec<usize> = (0..N)
+                .step_by(stride)
+                .flat_map(|lo| column.present_entities_in(lo, lo + stride))
+                .collect();
+            assert_eq!(
+                walked, present,
+                "stride {stride} did not partition the column"
+            );
+        }
+        // Past the end, and empty: both are no entities rather than a panic on the trailing word.
+        assert_eq!(column.present_entities_in(N, N + 64).count(), 0);
+        assert_eq!(column.present_entities_in(70, 70).count(), 0);
     }
 
     /// Values arrive by random entity index and the arena grows past its first mapping while they
