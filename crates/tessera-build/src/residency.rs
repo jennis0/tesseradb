@@ -20,7 +20,8 @@
 //! - the **sorted source ids** and the **ordinal→entity map**, 12 bytes an item, because a member
 //!   and an attribute row are both named by source id and both have to resolve;
 //! - the **layer member tables**, whole: one `Vec<u64>` of source ids per artifact as the plan is
-//!   read, the same rows again as resolved entities, and the published memberships in the store.
+//!   read — rewritten in place to the entities they resolve to, so there is one vector and not two
+//!   — and the published memberships in the store.
 //!
 //! **None of it is a batch.** The loop's residency shrinks when the stride does; this does not
 //! shrink at all, because a member table is its own size. So the honest answer is not a smaller
@@ -176,12 +177,12 @@ fn fixed_width(ty: ScalarType) -> u64 {
     }
 }
 
-/// What one layer member row costs, held **three times over** across the publication:
+/// What one layer member row costs, held **twice over** across the publication:
 ///
-/// - 8 bytes as the plan's `Vec<u64>` of source ids, read from the member table and alive until the
-///   publication is over;
-/// - 8 bytes again as the resolved `Vec<EntityId>`, built from the plan rather than replacing it,
-///   because an unresolvable id has to refuse the build with the plan still in hand;
+/// - 8 bytes as the plan's `Vec<u64>` of source ids, read from the member table. The resolution
+///   rewrites that vector in place — a source id and the entity it resolves to are both `u64` — so
+///   the resolved membership *is* the plan's allocation and not a second one beside it. It was two
+///   until 2026-08-29, when the copy was the largest single term in the build's whole peak;
 /// - about 4 more as Roaring — the incoming bitmap, the durable record's bytes and the store's own
 ///   decoded copy, at the ~2 bytes an array container spends on a scattered member and less on a
 ///   dense one.
@@ -189,7 +190,7 @@ fn fixed_width(ty: ScalarType) -> u64 {
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
 /// to be wrong in the direction that costs a rerun rather than a kill.
-const BYTES_PER_MEMBER_ROW: u64 = 20;
+const BYTES_PER_MEMBER_ROW: u64 = 12;
 
 /// The residency of everything the batch loop's model does not cover.
 ///
@@ -259,8 +260,9 @@ pub(crate) fn entity_order_residency(
     if member_rows > 0 {
         terms.push(Term {
             what: format!(
-                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the plan, the \
-                 resolved entities and the published memberships, all three resident at once"
+                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the plan's \
+                 vector, which the resolution rewrites in place, and the published memberships \
+                 beside it"
             ),
             bytes: member_rows.saturating_mul(BYTES_PER_MEMBER_ROW),
             mapped: false,

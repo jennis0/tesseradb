@@ -1146,7 +1146,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(
+            let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
                 &args.extent,
@@ -1159,7 +1159,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 .map(|(position, item)| (item.source_id, position as u64))
                 .collect();
             crate::layers::publish(
-                &plan,
+                &mut plan,
                 &|source| by_source.get(&source).copied(),
                 n,
                 &args.out.join(PREFIX),

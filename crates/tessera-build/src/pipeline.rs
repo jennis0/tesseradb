@@ -1411,7 +1411,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(
+            let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
                 &args.extent,
@@ -1429,7 +1429,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             // into 74M sorted `u64` is ~27 dependent cache misses where the subtraction is one.
             let dense = ids_last - ids_first + 1 == source_ids.len() as u64;
             crate::layers::publish(
-                &plan,
+                &mut plan,
                 &|source| {
                     let ordinal = if dense {
                         source
