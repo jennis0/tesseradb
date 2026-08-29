@@ -148,7 +148,7 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::write::{
-    write_columns, write_morton_codes, write_permutation_iter, ScalarColumnData,
+    write_columns, write_morton_codes, write_permutation_iter, ScalarColumn,
 };
 use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
@@ -762,7 +762,10 @@ fn plan_build(
     // 8 B/item of `x-of-entity`/`y-of-entity`, which outlive the release; 4 B/item of pairs
     // already written as postings.arrow before the window opened.
     let phase_columns = tail.mapped() + 8 * n + 4 * p;
-    let phase_assemble = 4 * p + 26 * n;
+    // The segment write: the spool becoming postings.arrow beside the segment, and the row-order
+    // attribute tail beside both — one mapped file per render column, built here and unlinked with
+    // the record batch that reads it (`residency::render_tail_bytes`).
+    let phase_assemble = 4 * p + 26 * n + crate::residency::render_tail_bytes(&args.schema, n);
     let disk_need = phase_spill
         .max(phase_bands)
         .max(phase_columns)
@@ -1624,7 +1627,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // Held after `x_of_entity`/`y_of_entity` are dropped, so the peak is the record batch plus
         // one attribute tail rather than both — at the widths §3.6 argues for (1–4 B/row against
         // geometry's 8) the tail is the smaller term either way.
-        let tail = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
+        let tail =
+            permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row, &scratch)?;
         drop(entity_row);
         for (column, rows) in tail.presence {
             if let Some(path) =
@@ -1886,9 +1890,9 @@ fn read_one_attribute_source(
                 .iter()
                 .zip(staged.iter_mut())
                 .map(|(&column, src)| {
-                    let home = homes[column]
-                        .take()
-                        .expect("an attribute is read from exactly one source, so one lane owns it");
+                    let home = homes[column].take().expect(
+                        "an attribute is read from exactly one source, so one lane owns it",
+                    );
                     (column, src, home)
                 })
                 .collect();
@@ -3449,37 +3453,58 @@ fn permute_attribute_tail(
     schema: &crate::config::Schema,
     by_entity: Vec<EntityColumn>,
     entity_row: &[u32],
+    scratch: &crate::column::ColumnScratch,
 ) -> Result<AttributeTail> {
+    // **One lane per render column.** The columns are independent all the way down — each is
+    // permuted from its own entity-order column into its own mapped file, and neither the gather
+    // nor the presence sweep touches anything another lane can name — so the loop over them is the
+    // split, exactly as it is in the attribute join. `collect` over an indexed parallel iterator
+    // preserves declared order, which the tail's column order is.
+    //
+    // The entity-order columns are dropped as their lanes finish rather than one at a time down a
+    // serial loop, so their files stand together for the length of this pass. That is disk, and it
+    // is the pass immediately before `tmp.close()`.
+    let lanes: Vec<Result<Option<Lane>>> = schema
+        .attributes
+        .par_iter()
+        .zip(by_entity.into_par_iter())
+        .map(|(attribute, values)| {
+            // **The tail is exactly the render columns.** An `index`-only column is entity-space
+            // and has already been written there; including it here would give it a slot in every
+            // row as well, which is the per-row cost §10.3's routing exists to avoid and — for a
+            // `utf8` column — the one `render` on `utf8` is refused for outright.
+            if !attribute.render {
+                return Ok(None);
+            }
+            let mut column = EntityColumn::filled(scratch, attribute.ty, entity_row.len())?;
+            for (row, &entity) in entity_row.iter().enumerate() {
+                column.set(row, values.value_at(entity as usize), &attribute.name)?;
+            }
+            drop(values);
+            // **The absent slot is left as the mapping's zero, which *is* the render
+            // placeholder.** The column is non-nullable on the wire (contracts R4), so an absent
+            // value has to be written as something; `ScalarValue::or_render_placeholder` gives the
+            // type's zero for every renderable type, and a fresh mapping reads as zeros. Writing
+            // the placeholder explicitly would store the same bytes and lose the presence bit that
+            // says the zero means nothing — which is the bitmap below.
+            // `the_render_placeholder_is_the_zero_a_mapping_reads_as` holds the two together.
+            let presence =
+                render_presence_of((0..entity_row.len()).map(|row| column.is_present(row)));
+            Ok(Some(Lane {
+                name: attribute.name.clone(),
+                presence,
+                values: column.into_values(scratch, &attribute.name)?,
+            }))
+        })
+        .collect();
     let mut presence = Vec::new();
-    let mut out = Vec::with_capacity(by_entity.len());
-    for (attribute, values) in schema.attributes.iter().zip(by_entity) {
-        // **The tail is exactly the render columns.** An `index`-only column is entity-space and
-        // has already been written there; including it here would give it a slot in every row as
-        // well, which is the per-row cost §10.3's routing exists to avoid and — for a `utf8`
-        // column — the one `render` on `utf8` is refused for outright.
-        if !attribute.render {
-            continue;
+    let mut out = Vec::with_capacity(schema.attributes.len());
+    for lane in lanes {
+        let Some(lane) = lane? else { continue };
+        if let Some(rows) = lane.presence {
+            presence.push((lane.name.clone(), rows));
         }
-        // Taken before the substitution below, which is what erases the distinction: the column
-        // itself stays non-nullable (contracts R4) and an absent value is written as the type's
-        // zero, and this is what says that zero means nothing.
-        if let Some(rows) =
-            render_presence_of(entity_row.iter().map(|&e| values.is_present(e as usize)))
-        {
-            presence.push((attribute.name.clone(), rows));
-        }
-        let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
-        for &entity in entity_row {
-            column
-                .push(
-                    values
-                        .value_at(entity as usize)
-                        .or_render_placeholder(attribute.ty),
-                    &attribute.name,
-                )
-                .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))?;
-        }
-        out.push((attribute.name.clone(), column));
+        out.push((lane.name, lane.values));
     }
     Ok(AttributeTail {
         columns: out,
@@ -3487,10 +3512,18 @@ fn permute_attribute_tail(
     })
 }
 
+/// One render column, built by the lane that owns it.
+struct Lane {
+    name: String,
+    /// `None` where every row carries a value — the case that writes no file (decision 0064).
+    presence: Option<Bitmap>,
+    values: ScalarColumn,
+}
+
 /// A segment's attribute tail: the columns `write_columns` takes, and the presence bitmaps that go
 /// beside them (decision 0064) — one per render column that has an absence, in row order.
 struct AttributeTail {
-    columns: Vec<(String, ScalarColumnData)>,
+    columns: Vec<(String, ScalarColumn)>,
     presence: Vec<(String, Bitmap)>,
 }
 

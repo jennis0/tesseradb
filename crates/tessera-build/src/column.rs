@@ -43,8 +43,8 @@
 //! zero length reads as absence would be silently wrong. A slot whose value is absent keeps its
 //! type's zero, which is what every consumer of an absent value already reads.
 
-use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tessera_spatial::{ScalarType, ScalarValue};
 
@@ -82,23 +82,27 @@ macro_rules! fixed_width_columns {
 /// names need is uniqueness within one build and the only place that can promise it is the thing
 /// handing them out. The directory is the build's `.build-tmp/`, so [`crate::spill::TmpDir`] clears
 /// what a killed build leaves behind exactly as it does for the spill and band files.
+///
+/// The counter is atomic because the segment tail builds its render columns one lane per column
+/// and each lane creates its own file. Which lane draws which serial is then a scheduling detail,
+/// and it is allowed to be: these names reach no artefact, and uniqueness is the whole of what is
+/// asked of them.
 #[derive(Debug)]
 pub(crate) struct ColumnScratch {
     dir: PathBuf,
-    next: Cell<u64>,
+    next: AtomicU64,
 }
 
 impl ColumnScratch {
     pub(crate) fn new(dir: &Path) -> Self {
         ColumnScratch {
             dir: dir.to_path_buf(),
-            next: Cell::new(0),
+            next: AtomicU64::new(0),
         }
     }
 
     fn name(&self, kind: &str) -> String {
-        let serial = self.next.get();
-        self.next.set(serial + 1);
+        let serial = self.next.fetch_add(1, Ordering::Relaxed);
         format!("column-{serial}.{kind}")
     }
 }
@@ -396,6 +400,79 @@ impl EntityColumn {
         }
     }
 
+    /// The column's values as the segment writer takes them, **with no copy**: the mapping becomes
+    /// the record batch's Arrow values buffer, and the file is unlinked when the batch releases it.
+    ///
+    /// **This is what keeps the segment's row-order tail off the heap.** The tail was eight
+    /// `Vec`s built by `push` — ~2.4 GB of anonymous memory at 7.4×10⁷ rows, allocated immediately
+    /// after the entity-order columns moved to `.build-tmp/`, and it does not show in today's peak
+    /// only because another stage peaks higher. Filled by index into a mapping and handed over as
+    /// the buffer it will be written from, the same bytes are page cache; a conversion at this
+    /// boundary would give the memory back at exactly the wrong moment.
+    ///
+    /// **The string family is refused rather than carried.** `render` on `keyword` and on `text`
+    /// is refused at the declaration and `utf8` is not declarable at all, so a string column never
+    /// reaches the hot column's tail; reaching here with one is a build defect, and it says so.
+    ///
+    /// `bool` is the one member Arrow does not take as a flat array of itself: its values buffer
+    /// is `rows` bits, so the bytes are packed into a second mapped array on the way out. That
+    /// array is an eighth of the column and is unlinked with it.
+    pub(crate) fn into_values(
+        self,
+        scratch: &ColumnScratch,
+        name: &str,
+    ) -> Result<tessera_store::write::ScalarColumn> {
+        let EntityColumn {
+            ty,
+            data,
+            present,
+            len,
+        } = self;
+        // The presence bits went out as the render presence bitmap beside the column
+        // (decision 0064); the tail itself is non-nullable (contracts R4) and carries no validity
+        // buffer, so this file has no reader left.
+        drop(present);
+        macro_rules! arms {
+            ($(($v:ident, $t:ty)),* $(,)?) => {
+                match data {
+                    $(ColumnData::$v(values) => {
+                        tessera_store::write::ScalarColumn::of(ty, len, values.into_arrow_buffer())
+                    })*
+                    ColumnData::Bool(values) => {
+                        let mut bits = MappedArray::<u8>::zeroed(
+                            &scratch.dir,
+                            &scratch.name("bits"),
+                            len.div_ceil(8),
+                        )?;
+                        {
+                            // Least significant bit first within each byte, which is Arrow's own
+                            // boolean layout.
+                            let packed = bits.as_mut_slice();
+                            for (row, &value) in values.as_slice().iter().enumerate() {
+                                if value != 0 {
+                                    packed[row / 8] |= 1u8 << (row % 8);
+                                }
+                            }
+                        }
+                        drop(values);
+                        tessera_store::write::ScalarColumn::of(
+                            ty,
+                            len,
+                            bits.into_arrow_buffer(),
+                        )
+                    }
+                    ColumnData::Utf8(_) => tessera_store::write::ScalarColumn::of(
+                        ty,
+                        len,
+                        arrow::buffer::Buffer::from_vec(Vec::<u8>::new()),
+                    ),
+                }
+            };
+        }
+        fixed_width_columns!(arms)
+            .map_err(|e| BuildError::Invalid(format!("attribute column '{name}': {e}")))
+    }
+
     /// Forget a staging column's arena, keeping its file. The attribute join reuses one staging
     /// buffer per chunk and every string in it has been moved across by the time a chunk ends, so
     /// without this the buffer's arena would grow to the whole source's payload.
@@ -662,6 +739,45 @@ mod tests {
             assert_eq!(by_entity.str_at(chunk), Some(format!("a{chunk}").as_str()));
         }
         assert_eq!(by_entity.str_at(3), None);
+    }
+
+    /// **The render placeholder is exactly the zero a fresh mapping reads as**, for every type the
+    /// hot column can hold.
+    ///
+    /// The segment's row-order tail relies on it: an absent value is left alone rather than
+    /// written, because the column is non-nullable on the wire (contracts R4) and the byte a
+    /// non-nullable column must carry for an absent value is
+    /// [`ScalarValue::or_render_placeholder`]'s. If the two ever parted, every absent slot of
+    /// every rendered column would carry a different value with no other symptom — the presence
+    /// bitmap beside it would still say *nothing here*, and the bundle would still verify.
+    #[test]
+    fn the_render_placeholder_is_the_zero_a_mapping_reads_as() {
+        let (scratch, _dir) = scratch();
+        // Every renderable type: the string family is refused `render` at the declaration and
+        // `utf8` is not declarable at all, so the tail never holds one.
+        let types = [
+            ScalarType::Bool,
+            ScalarType::U8,
+            ScalarType::U16,
+            ScalarType::U32,
+            ScalarType::U64,
+            ScalarType::I8,
+            ScalarType::I16,
+            ScalarType::I32,
+            ScalarType::I64,
+            ScalarType::F32,
+            ScalarType::F64,
+            ScalarType::TimestampUs,
+        ];
+        for ty in types {
+            let column = EntityColumn::filled(&scratch, ty, 1).unwrap();
+            assert!(!column.is_present(0), "{ty:?}: a fresh slot is absent");
+            assert_eq!(
+                column.data.get(0),
+                ScalarValue::Null.or_render_placeholder(ty),
+                "{ty:?}: the zero a mapping reads as is not the render placeholder"
+            );
+        }
     }
 
     /// A released column holds nothing and unlinks what it held.

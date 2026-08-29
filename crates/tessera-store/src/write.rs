@@ -738,7 +738,7 @@ pub fn write_morton_codes<I: IntoIterator<Item = u32>>(path: &Path, codes: I) ->
 /// Write `columns.arrow` from columns that are already in row order — the fixed two columns of
 /// contracts §2.6, no declared scalars.
 ///
-/// Takes each column **by value** so the `Vec`s become the Arrow buffers with no copy. This
+/// Takes each column **by value** so its bytes become the Arrow buffers with no copy. This
 /// record batch is the largest single structure the batch build materialises (at 10^9 rows,
 /// 8+4 bytes per row), so a copy here would be another twelve gigabytes. Produces
 /// byte-for-byte what [`write_segment`] writes for the same rows and no scalars. Since the
@@ -748,7 +748,7 @@ pub fn write_columns(
     path: &Path,
     tessera_id: Vec<u64>,
     residual: Vec<u32>,
-    scalars: Vec<(String, ScalarColumnData)>,
+    scalars: Vec<(String, ScalarColumn)>,
 ) -> io::Result<()> {
     let rows = tessera_id.len();
     if residual.len() != rows {
@@ -761,14 +761,14 @@ pub fn write_columns(
         ));
     }
     for (name, column) in &scalars {
-        if column.len() != rows {
+        if column.rows() != rows {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
                     "write_columns: declared scalar '{name}' has {} rows, tessera_id has {rows}. \
                      A short column is not a partial write — arrow refuses the batch, and a long \
                      one would put values under the wrong identities",
-                    column.len()
+                    column.rows()
                 ),
             ));
         }
@@ -801,7 +801,7 @@ pub fn write_columns(
     ];
     for (name, column) in scalars {
         fields.push(Field::new(&name, column.arrow_type(), false));
-        columns.push(column.into_array(rows, &name)?);
+        columns.push(column.into_array(&name)?);
     }
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns)
@@ -809,37 +809,59 @@ pub fn write_columns(
     write_single_batch(path, &schema, &batch)
 }
 
-/// One declared scalar's values, column-major and already in row order.
+/// One declared scalar's values, column-major, already in row order, and already laid out as the
+/// **Arrow values buffer they will become** — taken without copying.
 ///
 /// **The column-major counterpart to [`SegmentRow`]'s row-major `scalars`**, and both exist
 /// because the two producers genuinely hold their data differently: a merge or a flush walks rows
-/// and has one row's values at a time, while the tiered batch build permutes whole columns and
-/// would have to transpose 10⁹ rows into per-row vectors to use the other shape. Each `Vec`
-/// *becomes* the Arrow values buffer with no copy.
+/// and has one row's values at a time, while the batch build permutes whole columns and would have
+/// to transpose 10⁹ rows into per-row vectors to use the other shape.
+///
+/// **Bytes rather than a `Vec` per column, because the build's are a file.** This was
+/// `ScalarColumnData`, a `Vec` per declared type filled by `push`: at 7.4×10⁷ rows and eight render
+/// columns that is ~2.4 GB of anonymous memory allocated immediately after the build moved its
+/// entity-order columns off the heap. The build fills a mapped file under `.build-tmp/` and hands
+/// the mapping over ([`crate::write::ScalarColumn::of`]); the buffer *becomes* the record batch's
+/// values buffer, so the record batch costs address space rather than memory, and a conversion
+/// here would give the memory back at exactly the wrong moment.
+///
+/// **Every member is fixed-width, because every render column is.** `render` is refused at the
+/// declaration for `keyword` and for `text`, and `utf8` is not a declarable type at all — the hot
+/// column is a fixed-width slot in every row and prose is not one (per-point-attributes §4.3). So
+/// the string family is not a variant here with an unreachable arm behind it; it is refused by
+/// [`Self::of`], which is the one place a caller could name it.
 #[derive(Debug)]
-pub enum ScalarColumnData {
-    Bool(Vec<bool>),
-    U8(Vec<u8>),
-    U16(Vec<u16>),
-    U32(Vec<u32>),
-    U64(Vec<u64>),
-    I8(Vec<i8>),
-    I16(Vec<i16>),
-    I32(Vec<i32>),
-    I64(Vec<i64>),
-    F32(Vec<f32>),
-    F64(Vec<f64>),
-    TimestampUs(Vec<i64>),
-    Utf8(Vec<String>),
+pub struct ScalarColumn {
+    rows: usize,
+    values: ScalarColumnValues,
+}
+
+/// The declared width behind a [`ScalarColumn`], and what each buffer holds.
+#[derive(Debug)]
+enum ScalarColumnValues {
+    /// **Bit-packed**, `rows` bits from the buffer's first byte, least significant bit first —
+    /// Arrow's own boolean layout, and the one member that is not a flat array of itself.
+    Bool(Buffer),
+    U8(Buffer),
+    U16(Buffer),
+    U32(Buffer),
+    U64(Buffer),
+    I8(Buffer),
+    I16(Buffer),
+    I32(Buffer),
+    I64(Buffer),
+    F32(Buffer),
+    F64(Buffer),
+    TimestampUs(Buffer),
 }
 
 /// The fixed-width members, each with its variant, Arrow array type and Arrow type.
 ///
-/// **Generated rather than written out, because there are eleven of them and five methods.** The
-/// hand-written form was fifty near-identical arms whose only failure mode is a type appearing in
+/// **Generated rather than written out, because there are eleven of them and three methods.** The
+/// hand-written form was thirty near-identical arms whose only failure mode is a type appearing in
 /// ten of them — a column silently taking another's width or another's values, which is a defect
-/// no aggregate check sees. `Bool` and `Utf8` are excluded and written by hand: neither is a flat
-/// slice of itself, which is exactly what the uniform arms assume.
+/// no aggregate check sees. `Bool` is excluded and written by hand: it is not a flat slice of
+/// itself, which is exactly what the uniform arms assume.
 macro_rules! fixed_width_columns {
     ($mac:ident) => {
         $mac! {
@@ -859,110 +881,89 @@ macro_rules! fixed_width_columns {
     };
 }
 
-/// [`ScalarColumnData::push`]'s refusal: a value whose tag is not the column's.
-///
-/// `#[cold]` and out of line because it is the arm the push does not expect to reach, and building
-/// its message is the whole of its cost.
-#[cold]
-#[inline(never)]
-fn scalar_tag_mismatch(expected: DataType, name: &str, got: &ScalarValue) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::InvalidInput,
-        format!("write_columns: scalar '{name}' is {expected:?}, got {got:?}"),
-    )
-}
-
-impl ScalarColumnData {
-    /// An empty column of the given type — what a build allocates before filling it.
-    pub fn of(ty: ScalarType, capacity: usize) -> Self {
+impl ScalarColumn {
+    /// A column of `rows` values of `ty`, over bytes already in Arrow's layout for it: `rows`
+    /// little-endian values for a fixed-width type, `rows` bits for a `bool`.
+    ///
+    /// **Refuses the string family**, which is the only way a caller could ask for a column the
+    /// hot column cannot hold — see the type docs. The length and alignment are checked where the
+    /// array is built ([`typed_column`]), not here, so one place decides what a buffer must be.
+    pub fn of(ty: ScalarType, rows: usize, values: Buffer) -> io::Result<Self> {
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
                 match ty {
-                    $(ScalarType::$v => ScalarColumnData::$v(Vec::with_capacity(capacity)),)*
-                    ScalarType::Bool => ScalarColumnData::Bool(Vec::with_capacity(capacity)),
-                    // A keyword renders as its bytes if it ever renders at all — see
-                    // `arrow_type_of`, which this must agree with.
+                    $(ScalarType::$v => ScalarColumnValues::$v(values),)*
+                    ScalarType::Bool => ScalarColumnValues::Bool(values),
                     ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
-                        ScalarColumnData::Utf8(Vec::with_capacity(capacity))
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "write_columns: a render column is a fixed-width slot in every \
+                                 row and {ty:?} is not one. `render` is refused at the \
+                                 declaration for every string type (per-point-attributes §4.3), \
+                                 so reaching here is a build defect and not a declaration"
+                            ),
+                        ))
                     }
                 }
             };
         }
-        fixed_width_columns!(arms)
+        Ok(ScalarColumn {
+            rows,
+            values: fixed_width_columns!(arms),
+        })
     }
 
-    pub fn len(&self) -> usize {
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(v) => v.len(),)*
-                    ScalarColumnData::Bool(v) => v.len(),
-                    ScalarColumnData::Utf8(v) => v.len(),
-                }
-            };
-        }
-        fixed_width_columns!(arms)
+    pub fn rows(&self) -> usize {
+        self.rows
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
-    /// Append one value, refusing a tag that is not this column's type — [`ColumnSpool::append`]'s
-    /// rule and its reasoning: a coerced or dropped value shifts every later row of the column
-    /// into another row's place, with every value present and none against its own identity.
-    pub fn push(&mut self, value: ScalarValue, name: &str) -> io::Result<()> {
-        // **The column's own arm names the type it expected**, rather than one `arrow_type()` call
-        // before the match. That call runs whether or not the value is wrong, and `DataType` is an
-        // owning enum, so a pass over 7.4×10⁷ items across five columns constructed and dropped
-        // ~10⁹ of them to build a message that is almost never wanted.
-        macro_rules! arms {
-            ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(col) => match value {
-                        ScalarValue::$v(x) => col.push(x),
-                        got => return Err(scalar_tag_mismatch($dt, name, &got)),
-                    },)*
-                    ScalarColumnData::Bool(col) => match value {
-                        ScalarValue::Bool(x) => col.push(x),
-                        got => return Err(scalar_tag_mismatch(DataType::Boolean, name, &got)),
-                    },
-                    ScalarColumnData::Utf8(col) => match value {
-                        ScalarValue::Utf8(x) => col.push(x),
-                        got => return Err(scalar_tag_mismatch(DataType::Utf8, name, &got)),
-                    },
-                }
-            };
-        }
-        fixed_width_columns!(arms);
-        Ok(())
+        self.rows == 0
     }
 
     fn arrow_type(&self) -> DataType {
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(_) => $dt,)*
-                    ScalarColumnData::Bool(_) => DataType::Boolean,
-                    ScalarColumnData::Utf8(_) => DataType::Utf8,
+                match &self.values {
+                    $(ScalarColumnValues::$v(_) => $dt,)*
+                    ScalarColumnValues::Bool(_) => DataType::Boolean,
                 }
             };
         }
         fixed_width_columns!(arms)
     }
 
-    fn into_array(self, rows: usize, name: &str) -> io::Result<ArrayRef> {
+    fn into_array(self, name: &str) -> io::Result<ArrayRef> {
+        let rows = self.rows;
         macro_rules! arms {
             ($(($v:ident, $arr:ident, $dt:expr)),* $(,)?) => {
-                match self {
-                    $(ScalarColumnData::$v(v) => Arc::new($arr::new(
-                        typed_column(name, Buffer::from_vec(v), rows)?,
+                match self.values {
+                    $(ScalarColumnValues::$v(values) => Arc::new($arr::new(
+                        typed_column(name, values, rows)?,
                         None,
                     )) as ArrayRef,)*
-                    // The two that own an allocation this shape does not carry — a bitmap and an
-                    // offset table — so both are built rather than adopted.
-                    ScalarColumnData::Bool(v) => Arc::new(BooleanArray::from(v)),
-                    ScalarColumnData::Utf8(v) => Arc::new(StringArray::from_iter_values(v.iter())),
+                    // The bit-packed member: a boolean array's values buffer is `rows` bits, so
+                    // the length check the others get from `typed_column` is made here against
+                    // the same rule — a short buffer is an `InvalidInput` error, never a panic
+                    // from inside arrow.
+                    ScalarColumnValues::Bool(bits) => {
+                        let needed = rows.div_ceil(8);
+                        if bits.len() < needed {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "write_columns: column '{name}' has {} bytes, {rows} rows of \
+                                     packed bits need {needed}",
+                                    bits.len()
+                                ),
+                            ));
+                        }
+                        Arc::new(BooleanArray::new(
+                            arrow::buffer::BooleanBuffer::new(bits, 0, rows),
+                            None,
+                        ))
+                    }
                 }
             };
         }

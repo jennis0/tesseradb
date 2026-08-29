@@ -103,10 +103,14 @@ fn write_points(path: &Path) {
         vec![
             Arc::new(UInt64Array::from(ids.clone())),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 37) % 1000) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 37) % 1000) as f64)
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 53) % 1000) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 53) % 1000) as f64)
+                    .collect::<Vec<_>>(),
             )),
         ],
     )
@@ -272,10 +276,21 @@ fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
             arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
         for batch in reader {
             let batch = batch.unwrap();
-            let ext = batch.column(0).as_any().downcast_ref::<BinaryArray>().unwrap();
-            let ent = batch.column(1).as_any().downcast_ref::<UInt32Array>().unwrap();
+            let ext = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap();
+            let ent = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
             for i in 0..batch.num_rows() {
-                map.insert(u64::from_le_bytes(ext.value(i).try_into().unwrap()), ent.value(i));
+                map.insert(
+                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
+                    ent.value(i),
+                );
             }
         }
     }
@@ -429,7 +444,10 @@ fn the_empty_string_survives_the_move_and_absence_stays_absent() {
     let absent: Vec<u64> = (0..N)
         .filter(|&e| carried(e) && note_of(e).is_none())
         .collect();
-    assert!(!empty.is_empty() && !absent.is_empty(), "the fixture has both");
+    assert!(
+        !empty.is_empty() && !absent.is_empty(),
+        "the fixture has both"
+    );
     for source in empty {
         assert_eq!(
             rows[&source].get(&0),
