@@ -1,9 +1,9 @@
 //! Build-stage observation.
 //!
-//! `tessera build` is twelve numbered stages (see `pipeline.rs`), and "blank-database ingest as a
-//! function of point count" is really a question about *which* of them bends with scale: the
-//! sorts are n log n, the digest pass is linear in bytes, and several passes are driven by the
-//! size of the source files rather than by `--limit` at all.
+//! `tessera build` is a numbered sequence of stages (see `pipeline.rs`), and "blank-database
+//! ingest as a function of point count" is really a question about *which* of them bends with
+//! scale: the sorts are n log n, the digest pass is linear in bytes, and several passes are driven
+//! by the size of the source files rather than by `--limit` at all.
 //!
 //! **An observer rather than a feature.** [`build`](crate::build) delegates to
 //! [`build_observed`] with a no-op, so there is no API break, no `#[cfg]` in the pipeline, and no
@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-/// The twelve pipeline stages, in execution order.
+/// The pipeline's stages, in execution order.
 ///
 /// Names match the `// ---- n. ...` comments in `pipeline.rs`. Adding a stage means adding a
 /// variant; renaming one means changing both, which is the point — a stage that exists in the
@@ -42,10 +42,28 @@ pub enum BuildStage {
     /// 8. Geometry permuted from ordinal into entity order, plus the declared attribute tail. No
     ///    points-file I/O: [`BuildStage::GeometryRead`] did the reading.
     AttributeTail,
-    /// 8b. Entity-space filter postings, one file per `index = true` column. Its own
-    ///    stage rather than a rider on `PostingsWrite`, which runs before the attribute values
-    ///    have been read; zero-length for a schema that declares no filterable column.
+    /// 8b. Entity-space filter postings for every column that has a **value column** — one file
+    ///    per `index = true` column. Its own stage rather than a rider on `PostingsWrite`, which
+    ///    runs before the attribute values have been read; zero-length for a schema that declares
+    ///    no filterable column.
+    ///
+    ///    Excludes the text columns, which [`BuildStage::TextIndex`] carries: the two share a
+    ///    loop but not a code path, and at 7.4×10⁷ names they did not share an order of magnitude
+    ///    either.
     FilterPostings,
+    /// 8b′. The text columns' entity-space index — the token dictionary and the postings over it —
+    ///    charged out of [`BuildStage::FilterPostings`]'s block rather than measured beside it,
+    ///    because the two interleave over one column loop.
+    TextIndex,
+    /// 8b″. The record blob: the values of every column with no other home, in entity order.
+    ///    Reported separately from the postings it shares a stage boundary with — one number over
+    ///    three jobs is what made the 615 s this block cost at 7.4×10⁷ points a thing to model
+    ///    rather than to read.
+    RecordBlob,
+    /// 8b‴. Releasing the non-render columns, which for a text column is one `String` free per
+    ///    entity. The passes that wanted those values have just run and the tiler wants only the
+    ///    render columns, so this is where the corpus's prose leaves memory.
+    ColumnRelease,
     /// 8c. The declared layers and their artifacts: the member tables read, resolved against the
     ///    entity ids this build assigned, and published through the same registry the control
     ///    plane runs.
@@ -76,6 +94,9 @@ impl BuildStage {
             BuildStage::ExternalIds => "external_ids",
             BuildStage::AttributeTail => "attribute_tail",
             BuildStage::FilterPostings => "filter_postings",
+            BuildStage::TextIndex => "text_index",
+            BuildStage::RecordBlob => "record_blob",
+            BuildStage::ColumnRelease => "column_release",
             BuildStage::Layers => "layers",
             BuildStage::TilerSort => "tiler_sort",
             BuildStage::SegmentWrite => "segment_write",
@@ -83,7 +104,7 @@ impl BuildStage {
         }
     }
 
-    pub const ALL: [BuildStage; 14] = [
+    pub const ALL: [BuildStage; 17] = [
         BuildStage::SourceIds,
         BuildStage::Dictionary,
         BuildStage::PairsPack,
@@ -95,6 +116,9 @@ impl BuildStage {
         BuildStage::AttributeTail,
         BuildStage::Layers,
         BuildStage::FilterPostings,
+        BuildStage::TextIndex,
+        BuildStage::RecordBlob,
+        BuildStage::ColumnRelease,
         BuildStage::TilerSort,
         BuildStage::SegmentWrite,
         BuildStage::Manifests,
@@ -150,5 +174,18 @@ impl<'a> StageTimer<'a> {
         self.observer
             .stage_end(stage, self.start.elapsed(), rows, peak_rss_kib());
         self.start = std::time::Instant::now();
+    }
+
+    /// Report a stage whose duration was measured **inside** the open block, and charge it to
+    /// that block: the start moves forward by `elapsed`, so the enclosing [`Self::end`] reports
+    /// the remainder and the two sum to the wall clock rather than double-counting it.
+    ///
+    /// For the passes that interleave rather than follow one another — the filter-postings loop
+    /// visits a text column and a category column in whatever order the schema declares them, so
+    /// their costs cannot be separated by a boundary in time.
+    pub(crate) fn charge(&mut self, stage: BuildStage, elapsed: Duration, rows: u64) {
+        self.observer
+            .stage_end(stage, elapsed, rows, peak_rss_kib());
+        self.start += elapsed;
     }
 }

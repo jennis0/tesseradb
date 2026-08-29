@@ -1035,7 +1035,10 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         // The record blob beside the postings, from the same entity-major values — the two
         // builds must stay byte-identical, so this path writes every artefact the streaming
         // pipeline writes.
-        let mut paths = pipeline::write_filter_postings(&partition_dir, &args.schema, &by_entity)?;
+        // The text columns' timing is the streaming pipeline's stage split (`observer.rs`); this
+        // path is the equivalence oracle and is not observed, so it drops it.
+        let (mut paths, _text) =
+            pipeline::write_filter_postings(&partition_dir, &args.schema, &by_entity)?;
         paths.extend(pipeline::write_record_blob(
             &partition_dir,
             &args.schema,

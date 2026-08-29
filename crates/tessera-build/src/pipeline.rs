@@ -1429,11 +1429,20 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // here (stage 5, permanent under I9) and the values have just been read, which are the two
     // things the emit needs. It cannot ride on `PostingsWrite` — that stage runs before the
     // attribute values exist.
-    let filter_paths = write_filter_postings(&partition_dir, &args.schema, &attributes_by_entity)?;
-    // The record blob rides the same stage boundary, for the same two reasons: entity ids are
-    // final (I9) and the attribute values are in hand. Its files join the manifest digest at
-    // step 11 with everything else.
+    let (filter_paths, text_index) =
+        write_filter_postings(&partition_dir, &args.schema, &attributes_by_entity)?;
+    // The text columns' share, charged out of the block rather than measured beside it — the two
+    // interleave over one column loop, so a boundary in time cannot separate them.
+    timer.charge(BuildStage::TextIndex, text_index.elapsed, text_index.terms);
+    timer.end(BuildStage::FilterPostings, n);
+
+    // The record blob wants the same two things the postings did — entity ids final under I9, and
+    // the attribute values in hand — so it runs here. Its files join the manifest digest at step 11
+    // with everything else. **Its own stage**: it and the postings and the release below were one
+    // number for three jobs, which is why the 615 s this block cost at 7.4×10⁷ points could be
+    // modelled and not read.
     let record_paths = write_record_blob(&partition_dir, &args.schema, &attributes_by_entity)?;
+    timer.end(BuildStage::RecordBlob, n);
     // **Everything past here wants only the render columns**, and the two passes that wanted the
     // rest have just run. `permute_attribute_tail` skips a non-render column outright (its home is
     // entity space, and giving it a slot in every row is the per-row cost §10.3's routing exists to
@@ -1452,7 +1461,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             *column = EntityColumn::filled(attribute.ty, 0);
         }
     }
-    timer.end(BuildStage::FilterPostings, n);
+    timer.end(BuildStage::ColumnRelease, n);
 
     // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
     // §2.6 r6) — `tessera_id` is computed here, BEFORE the sort (2026-07-30 fold, memo §6):
@@ -2070,8 +2079,21 @@ pub(crate) fn write_filter_postings(
     partition_dir: &Path,
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
-) -> Result<Vec<PathBuf>> {
+) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     write_filter_postings_banded(partition_dir, schema, by_entity, POSTINGS_BAND_ROWS)
+}
+
+/// What the text columns cost inside [`write_filter_postings`]'s loop: the wall time and the terms
+/// written, for [`BuildStage::TextIndex`].
+///
+/// **Measured here rather than at a stage boundary** because the loop visits a text column and a
+/// category column in whatever order the schema declares them, and the two are different code paths
+/// at different costs — a tokenise and a dictionary against a fixed-width scan. One number over
+/// both is what a reader cannot act on.
+#[derive(Default)]
+pub(crate) struct TextIndexCost {
+    pub(crate) elapsed: std::time::Duration,
+    pub(crate) terms: u64,
 }
 
 /// Entity ids the postings emit holds in flight — the shared emit's own constant, so the build and
@@ -2083,8 +2105,9 @@ fn write_filter_postings_banded(
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
     band_rows: usize,
-) -> Result<Vec<PathBuf>> {
+) -> Result<(Vec<PathBuf>, TextIndexCost)> {
     let mut paths = Vec::new();
+    let mut text = TextIndexCost::default();
     for (attribute, values) in schema.attributes.iter().zip(by_entity) {
         if !postings_are_owed(schema, attribute) {
             continue;
@@ -2096,7 +2119,11 @@ fn write_filter_postings_banded(
         // entity-space artefact is the token dictionary and the postings over it; the values
         // themselves are in the record blob, which no scan reads (records §4.4).
         if attribute.ty == ScalarType::Text {
-            paths.extend(write_text_index(&column_dir, attribute, values)?);
+            let started = std::time::Instant::now();
+            let written = write_text_index(&column_dir, attribute, values)?;
+            text.elapsed += started.elapsed();
+            text.terms += written.terms;
+            paths.extend(written.paths);
             continue;
         }
 
@@ -2138,7 +2165,7 @@ fn write_filter_postings_banded(
         fsync_file(&path)?;
         paths.push(path);
     }
-    Ok(paths)
+    Ok((paths, text))
 }
 
 /// Write the record blob — `attrs/record/{blocks.bin,hasrow.roaring,directory.arrow}` — for every
@@ -2756,7 +2783,7 @@ fn write_text_index(
     column_dir: &Path,
     attribute: &crate::config::Attribute,
     values: &EntityColumn,
-) -> Result<Vec<PathBuf>> {
+) -> Result<WrittenTextIndex> {
     // The identity was resolved at the schema parse; the name is its first component. Resolving it
     // again here rather than threading an `Analyser` down keeps the build's contract with the
     // manifest one-directional: what is recorded is what indexed.
@@ -2837,6 +2864,7 @@ fn write_text_index(
     let spool_path = postings_path.with_extension("spool");
     let mut spool = tessera_authz::postings::PostingsSpool::create(&spool_path)
         .map_err(|e| BuildError::io(&spool_path, e))?;
+    let count = terms.len() as u64;
     for (ordinal, (_, entities)) in terms.into_iter().enumerate() {
         let record = tessera_authz::postings::encode_posting(
             ordinal,
@@ -2853,7 +2881,17 @@ fn write_text_index(
         .map_err(|e| BuildError::io(&postings_path, e))?;
     fsync_file(&postings_path)?;
 
-    Ok(vec![dict_path, postings_path])
+    Ok(WrittenTextIndex {
+        paths: vec![dict_path, postings_path],
+        terms: count,
+    })
+}
+
+/// One text column's index: the files written, and the term count [`BuildStage::TextIndex`]
+/// reports.
+struct WrittenTextIndex {
+    paths: Vec<PathBuf>,
+    terms: u64,
 }
 
 fn postings_are_owed(schema: &crate::config::Schema, attribute: &crate::config::Attribute) -> bool {
