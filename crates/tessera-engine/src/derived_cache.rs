@@ -109,10 +109,14 @@ pub(crate) fn properties_bits(declared: &[ComputedProperty]) -> u8 {
 /// use.
 fn weight_bytes(content: &DerivedContent) -> u64 {
     const FLOOR: u64 = 256;
-    let hull = content.hull.as_ref().map_or(0, |rings| {
-        rings.iter().map(|r| r.len() as u64 * 8 + 4).sum::<u64>()
+    let shape = content.shape.as_ref().map_or(0, |parts| {
+        parts
+            .iter()
+            .flat_map(|rings| rings.iter())
+            .map(|r| r.len() as u64 * 8 + 4)
+            .sum::<u64>()
     });
-    FLOOR + hull
+    FLOOR + shape
 }
 
 /// The default resident-byte ceiling, and the one every deployment gets.
@@ -377,7 +381,7 @@ mod tests {
 
     fn shape(x: u32) -> DerivedContent {
         DerivedContent {
-            hull: Some(vec![vec![[x, 0], [x + 1, 0], [x, 1]]]),
+            shape: Some(vec![vec![vec![[x, 0], [x + 1, 0], [x, 1]]]]),
             ..Default::default()
         }
     }
@@ -391,7 +395,7 @@ mod tests {
                 derived += 1;
                 shape(10)
             });
-            assert_eq!(held.hull, shape(10).hull);
+            assert_eq!(held.shape, shape(10).shape);
         }
         assert_eq!(derived, 1);
         let stats = cache.stats();
@@ -407,10 +411,10 @@ mod tests {
         let cache = DerivedCache::default();
         let first = cache.get_or_derive(key(1, 4, 0), || shape(10));
         let second = cache.get_or_derive(key(2, 4, 0), || shape(20));
-        assert_eq!(first.hull, shape(10).hull);
+        assert_eq!(first.shape, shape(10).shape);
         assert_eq!(
-            second.hull,
-            shape(20).hull,
+            second.shape,
+            shape(20).shape,
             "one principal's shape answered another's request"
         );
         assert_eq!(cache.stats().misses, 2);
@@ -424,11 +428,11 @@ mod tests {
     fn a_deny_rotates_the_key_rather_than_editing_the_entry() {
         let cache = DerivedCache::default();
         let before = cache.get_or_derive(key(1, 4, 0), || shape(10));
-        assert_eq!(before.hull, shape(10).hull);
+        assert_eq!(before.shape, shape(10).shape);
         let after = cache.get_or_derive(key(1, 4, 1), || shape(20));
         assert_eq!(
-            after.hull,
-            shape(20).hull,
+            after.shape,
+            shape(20).shape,
             "the pre-deny shape was served after the deny"
         );
     }
@@ -448,7 +452,7 @@ mod tests {
             ..Default::default()
         });
         assert!(
-            boxed.hull.is_none(),
+            boxed.shape.is_none(),
             "a hull was served to a request that did not ask for one"
         );
         assert_eq!(cache.stats().misses, 2);

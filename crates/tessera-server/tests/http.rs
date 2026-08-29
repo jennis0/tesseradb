@@ -745,9 +745,12 @@ async fn stage_timing_header_respects_the_compile_gate_and_carries_no_identifier
         let text = text.as_str();
 
         let fields: Vec<&str> = text.split(',').collect();
+        // 22 engine-side fields, then the sink's own `shape_guard_fired` counter appended
+        // 2026-08-29 (`polygon-membership.md` §7.2) — append-only, so the bench harnesses' positions
+        // before it are unchanged.
         assert_eq!(
             fields.len(),
-            22,
+            23,
             "stage header field count is a contract with the bench harnesses: {text}"
         );
         for f in &fields {

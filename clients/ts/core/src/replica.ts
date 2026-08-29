@@ -2,7 +2,7 @@ import {BandCache, bandSplitter, type Band, type Resolved} from './bands.js';
 import type {SessionArtifactTable} from './artifactTable.js';
 import {rectArea, type TileRect} from './rects.js';
 import {rectToRequestBbox, tileXY} from './coords.js';
-import type {Quantisation, ViewportPart, ViewportResponse} from './types.js';
+import type {Quantisation, ViewportPart, ViewportResponse, RegionVerdict} from './types.js';
 
 /**
  * Layer 1: the read-through replica.
@@ -208,6 +208,7 @@ export class Replica {
   private readonly now: () => number;
   private identityKey = '';
   private contentKey = '';
+  private regionVerdict: RegionVerdict | null = null;
   private validatedAt = Number.NEGATIVE_INFINITY;
 
   constructor(
@@ -247,7 +248,18 @@ export class Replica {
     this.cache.dropIdentity();
     this.identityKey = '';
     this.contentKey = '';
+    this.regionVerdict = null;
     this.validatedAt = Number.NEGATIVE_INFINITY;
+  }
+
+  /**
+   * The `x-tessera-region` verdict the last response observed carried — `null` where it carried
+   * none (`selection-operand.md` §6). A frame derived from held bands has no response of its
+   * own, so the store reads the verdict here rather than off the frame; a `reset` forgets it,
+   * since what follows answers a different question.
+   */
+  get lastRegionVerdict(): RegionVerdict | null {
+    return this.regionVerdict;
   }
 
   get bytes(): number {
@@ -548,13 +560,14 @@ export class Replica {
    * the token. That is the belt to `reset`'s braces: the partition key comes from the server, so a
    * client cannot hold one principal's bands under another's by forgetting to call anything.
    */
-  private observe(from: {identityKey: string; contentKey: string}): void {
+  private observe(from: {identityKey: string; contentKey: string; region?: RegionVerdict | null}): void {
     if (from.identityKey !== this.identityKey) {
       this.cache.dropIdentity();
       this.identityKey = from.identityKey;
     }
     this.contentKey = from.contentKey;
     this.validatedAt = this.now();
+    if (from.region !== undefined) this.regionVerdict = from.region;
   }
 
   /**

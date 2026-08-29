@@ -2649,7 +2649,17 @@ fn compile_attributes(
             return Err(declaration_error(format!(
                 "attribute '{}': that name is a filter combinator (decision 0062), and a filter \
                  expression names columns directly, so a column may not take one. Reserved: \
-                 all_of, any_of, none_of",
+                 all_of, any_of, none_of, region",
+                decl.name
+            )));
+        }
+        // The fourth reserved word, on the same argument: `region` is the spatial leaf
+        // (selection-operand §2), and a column of that name would make a request mean two things.
+        if decl.name == "region" {
+            return Err(declaration_error(format!(
+                "attribute '{}': that name is the filter surface's spatial leaf \
+                 (`selection-operand.md` §2), and a filter expression names columns directly, so \
+                 a column may not take it. Reserved: all_of, any_of, none_of, region",
                 decl.name
             )));
         }

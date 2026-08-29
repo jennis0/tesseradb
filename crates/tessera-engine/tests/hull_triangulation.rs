@@ -42,9 +42,13 @@ fn what_a_triangulation_costs_against_the_dig() {
 
         // The dig, through the serving path, with the gather it shares subtracted out.
         let t1 = Instant::now();
-        let dig = compute(&[ComputedProperty::Hull], visible, &corpus.locator)
-            .hull
-            .expect("declared");
+        // Every α-group is its own part on the wire; the comparison is over the rings.
+        let dig: Vec<Vec<[u32; 2]>> = compute(&[ComputedProperty::Hull], visible, &corpus.locator)
+            .shape
+            .expect("declared")
+            .into_iter()
+            .flatten()
+            .collect();
         let dig_ms = ms(t1) - gather_ms;
 
         // **Both alternatives start from the reduced input the dig now receives** — one real

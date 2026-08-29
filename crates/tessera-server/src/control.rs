@@ -2223,6 +2223,63 @@ struct IncomingArtifactBody {
     space: Option<String>,
 }
 
+/// One ranked content's authored shape — the text at the layer's shape slot — canonicalised for
+/// every view of its layer, by the route [`canonical_row_shape`] takes for a membership shape.
+fn canonical_authored_content(
+    state: &AppState,
+    declaration: &tessera_types::layer::LayerDeclaration,
+    index: usize,
+    rank: usize,
+    kind: tessera_types::layer::ShapeKind,
+    text: &str,
+) -> Result<
+    (
+        tessera_lifecycle::membership::ArtifactShapes,
+        serde_json::Value,
+    ),
+    ApiError,
+> {
+    use tessera_engine::shapes::{authored_shape_input, canonical_shapes, shape_input};
+    let refuse = |detail: String| {
+        ApiError::Contract(format!(
+            "artifact {index}: content {rank}: the authored {} content: {detail}",
+            kind.as_str()
+        ))
+    };
+    let input = authored_shape_input(kind, text).map_err(|e| refuse(e.to_string()))?;
+    let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
+    let q = state.engine.meta().quantisation;
+    let extent = tessera_engine::shapes::Bounds {
+        x_min: q.x_min,
+        x_max: q.x_max,
+        y_min: q.y_min,
+        y_max: q.y_max,
+    };
+    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+    let canonical = canonical_shapes(&shape, &views, &extent, state.max_shape_vertices)
+        .map_err(|e| refuse(e.to_string()))?;
+    let report: Vec<serde_json::Value> = canonical
+        .reports
+        .iter()
+        .map(|(view, r, stats)| {
+            serde_json::json!({
+                "view": view,
+                "clipped": r.clipped,
+                "outside": r.outside,
+                "rings_dropped": r.rings_dropped,
+                "degrees_looking": r.degrees_looking,
+                "vertices_in": r.vertices_in,
+                "vertices_out": r.vertices_out,
+                "parts": stats.parts,
+                "rings": stats.rings,
+            })
+        })
+        .collect();
+    let shapes = tessera_lifecycle::membership::ArtifactShapes::new(canonical.by_view)
+        .ok_or_else(|| refuse("canonicalised to no view".to_string()))?;
+    Ok((shapes, serde_json::Value::Array(report)))
+}
+
 /// One row's shape as the caller wrote it, canonicalised for every view of its layer.
 ///
 /// **The same canonicalisation the build applies, and the same report** — clipped, outside, rings
@@ -2403,7 +2460,7 @@ async fn publish_artifacts(
         addressing,
         idset,
         default_space,
-        artifacts,
+        mut artifacts,
     } = body.0;
 
     if artifacts.is_empty() {
@@ -2443,6 +2500,37 @@ async fn publish_artifacts(
                 }
             }
             None => shapes.push(None),
+        }
+    }
+    // **The authored shape content, read as a membership shape is** (`polygon-membership.md`
+    // §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
+    // slot of every ranked content is canonicalised for every view of the layer — the same
+    // reader, the same report, the same vertex cap — and the slot then holds the canonical bytes
+    // in their content spelling, which is what the blob stores and the serve reads back into
+    // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
+    if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
+        let declaration = declaration.as_ref().expect("an authored slot names a declaration");
+        for (index, artifact) in artifacts.iter_mut().enumerate() {
+            for (rank, content) in artifact.content.iter_mut().enumerate() {
+                let Some(text) = content.values.get_mut(slot) else {
+                    // Short of a value: the engine refuses the row below, naming the count.
+                    continue;
+                };
+                let (canonical, report) = canonical_authored_content(
+                    &state,
+                    declaration,
+                    index,
+                    rank,
+                    kind,
+                    text,
+                )?;
+                shape_reports.push(serde_json::json!({
+                    "key": artifact.key,
+                    "content": rank,
+                    "views": report,
+                }));
+                *text = canonical.content_text();
+            }
         }
     }
 

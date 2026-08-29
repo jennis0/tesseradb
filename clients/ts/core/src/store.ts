@@ -10,7 +10,7 @@ import type {Clock, DriverOptions, ViewState as DriverViewState} from './driver.
 import {countCodesCached, countCodesInPiece, extendRanks, widenDomain, widenDomainOver, type Domain, type Ranks} from './encoding.js';
 import {composeFilters, emptyDraft, type FilterDraft} from './filters.js';
 import {Presenter, defaultFrameScheduler, type FrameScheduler, type PresentedStatus, type Refusal} from './presented.js';
-import {cellExceedsPixel, insideBox, insidePolygon, rasteriseBox, rasterisePolygon, type WorldPolygon} from './region.js';
+import {insideBox, insidePolygon, regionOperand, withRegion, type WorldPolygon} from './region.js';
 import {layerClosure} from './layers.js';
 import {requestLevels} from './artifactChannel.js';
 import {artifactBudgetFor} from './artifactBudget.js';
@@ -28,6 +28,9 @@ import type {
   FilterExpr,
   ItemDetail,
   Meta,
+  RegionVerdict,
+  Shape,
+  ShapeKind,
   ViewportResult
 } from './types.js';
 
@@ -60,13 +63,20 @@ export {formatCount, formatMasked} from './counts.js';
 export type ViewInput = {bbox: [number, number, number, number]; width: number; height: number};
 
 /**
- * A selection shape, in **data coordinates** — the space `setView` takes and `dataXY` returns.
- * A box and a lasso are both counted (§5.11): the lasso is rasterised to the tiles it meets at
- * the same bounded depth, and typed exact by the same cell-versus-pixel rule.
+ * A selection, in **data coordinates** — the space `setView` takes and `dataXY` returns — or a
+ * published shape named by its `tessera_id` (*filter to this* on an artifact card).
+ *
+ * **A selection is a filter** (`selection-operand.md`; §5.11): it rides every viewport request as
+ * the `region` leaf composed with the other filters, so the marks, the counts and the artifacts'
+ * `matched` bits narrow to it, and the region's own count is read off the same frame as
+ * everything else — no counting request of its own. `outside` negates it: `none_of` over the
+ * leaf, the complement within what this principal can see (`polygon-membership.md` §8).
  */
-export type SelectionShape =
+export type SelectionShape = (
   | {kind: 'box'; bbox: [number, number, number, number]}
-  | {kind: 'lasso'; points: [number, number][]};
+  | {kind: 'lasso'; points: [number, number][]}
+  | {kind: 'artifact'; id: bigint}
+) & {outside?: boolean};
 
 /** How to get a viewer token: a fixed string, or a supplier the store renews before expiry. */
 export type TokenSupplier = () => Promise<{token: string; expiresAt: number}>;
@@ -172,15 +182,16 @@ export type ArtifactsProjection = {
   /** The served set's ordinals — what an opened artifact resolves through. */
   servedOrdinals: ReadonlySet<number>;
   /**
-   * The hulls fetched by identifier, by `tesseraId` — the shapes the map draws.
+   * The shapes fetched by identifier, by `tesseraId` — what the map draws.
    *
    * **Not part of the viewport's answer.** The channel asks for centroids and boxes; a consumer
-   * that wants a shape calls {@link TesseraStore.needHull} and reads it here when it lands. An
+   * that wants a shape calls {@link TesseraStore.needShape} and reads it here when it lands. An
    * artifact with no entry has not been asked for or has not answered yet, and a consumer draws
-   * its `box` meanwhile — never a hull from another response, because a hull is derived per
-   * principal and per request.
+   * its `box` meanwhile. A **derived** shape here was fetched by this principal and is dropped
+   * with the principal; a **predicate** or an **authored** one is the same for every principal
+   * and survives a switch (`polygon-membership.md` §7.1, the layer's `shape` kind in the meta).
    */
-  hulls: ReadonlyMap<bigint, [number, number][][]>;
+  shapes: ReadonlyMap<bigint, Shape>;
   /**
    * A colour for **every ordinal the session table holds**, not only the served set's (§5.10).
    * A band held under a coarser cut, or one fetched a moment before the channel caught up with
@@ -206,21 +217,25 @@ export type SelectionProjection = {
 };
 
 /**
- * The selected region and what it holds (§5.11). `visible` and `matched` are the sum over the
- * counted cells, exact only where every cell is at most a screen pixel; `served` is the held marks
- * inside the shape against `matched` — a sample, so both figures always. `status` is the counting
- * request's own: the numbers are `NO_MASKED` until it answers, and a refusal is not a zero.
+ * The selected region and what it holds (§5.11), read off the presented frame: the region is a
+ * leaf of the request, so `matched` is the sum of the frame's `matched` counts — the items inside
+ * the shape that the other filters admit — exact for the shape when the server said so
+ * (`verdict`) and the frame's exact tiles cover the shape, and a cover otherwise. `visible` is
+ * the region alone: the same number where no other filter is on, and `null` where one is — the
+ * frame answered a narrower question, and a figure for the wider one would be a second request.
+ * `served` is the held marks inside against `matched` — a sample, so both figures always.
+ * `status` is the frame's own: `loading` until a derive lands after the selection, and a refusal
+ * of the request carrying the leaf is the region's refusal, never a zero.
  */
 export type RegionProjection = {
   shape: SelectionShape;
   status: 'loading' | 'shown' | 'refused';
   refusal: Refusal | null;
-  visible: Masked;
+  visible: Masked | null;
   matched: Masked;
   served: Count;
-  /** The depth the region was counted at, and how many tiles that was. */
-  depth: number;
-  tiles: number;
+  /** `x-tessera-region`: exact for the shape, or a cover at a depth; `null` until it has answered. */
+  verdict: RegionVerdict | null;
   /** The held marks inside the shape — ids and world positions, the first {@link REGION_HELD_LIMIT}. */
   held: {ids: BigUint64Array; positions: Float32Array; count: number};
 };
@@ -274,19 +289,21 @@ export interface Store {
   pick(id: bigint): Promise<void>;
   openArtifact(id: bigint): Promise<void>;
   /**
-   * Ask for one artifact's hull, if it is not already held.
+   * Ask for one artifact's shape, if it is not already held.
    *
    * **The shape is fetched where it is drawn.** The viewport asks for centroids and boxes
-   * (`artifactChannel.ts`), because a hull costs a per-request derivation over every member this
-   * principal can see and a settled view carries a couple of hundred artifacts while the map draws
-   * one. This is the one that draws: call it for the hovered and the opened artifact, and the
-   * shape arrives in `artifacts.hulls` a moment later.
+   * (`artifactChannel.ts`), because a derived shape costs a per-request derivation over every
+   * member this principal can see and a settled view carries a couple of hundred artifacts while
+   * the map draws one. This is the one that draws: call it for the hovered and the opened
+   * artifact, and the shape arrives in `artifacts.shapes` a moment later, served at the depth the
+   * view is at.
    *
-   * Idempotent and cheap to call on every pointer move: a hull already held, or already in flight,
-   * is not asked for twice. The cache is dropped whenever the mask could have moved, because a
-   * hull is derived per principal and holding one across that would draw another viewer's shape.
+   * Idempotent and cheap to call on every pointer move: a shape already held, or already in
+   * flight, is not asked for twice. A derived shape is dropped whenever the mask could have moved,
+   * because holding one across that would draw another viewer's shape; a predicate or an authored
+   * shape is the same for every principal and is kept.
    */
-  needHull(id: bigint): void;
+  needShape(id: bigint): void;
   /** Drop the picked point and the opened artifact — a card's close. */
   clearSelection(): void;
   /** The colour scheme the map draws on, so the positional palette reads on its ground (§5.10). */
@@ -304,8 +321,6 @@ export interface Store {
 /** The `colourBy` prefix that names a layer's cluster colour rather than a column. */
 export const CLUSTER_PREFIX = 'cluster:';
 
-/** How long a selection must be still before its counting request goes out — the channel's settle. */
-const REGION_SETTLE_MS = 200;
 /** How many held marks a region lists — the panel's list, not the count, which is always whole. */
 export const REGION_HELD_LIMIT = 500;
 
@@ -369,7 +384,7 @@ export function createStore(options: StoreOptions): Store {
     view: {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0},
     marks: {bands: [], standIn: [], count: NO_COUNT},
     tiles: {tiles: []},
-    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), hulls: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
+    artifacts: {layer: null, layers: [], served: [], lineage: servedLineage([]), status: 'idle', refusal: null, version: 0, held: 0, table, servedOrdinals: new Set(), shapes: new Map(), colours: new Map(), palette, coverage: {current: 0, stale: 0}},
     selection: {item: null, itemRefusal: null, artifact: null, artifactRefusal: null},
     region: null,
     filters: {draft: {}, expr: null, values: {}, valueErrors: {}},
@@ -395,9 +410,9 @@ export function createStore(options: StoreOptions): Store {
       return token;
     }
     const got = await options.authorise();
-    // A hull is a function of the principal's own visible members, so one held across a change of
-    // token would draw the previous principal's shape against the new one's identifiers.
-    if (token !== got.token) forgetHulls();
+    // A derived shape is a function of the principal's own visible members, so one held across a
+    // change of token would draw the previous principal's shape against the new one's identifiers.
+    if (token !== got.token) forgetShapes('derived');
     token = got.token;
     expiresAt = got.expiresAt * (got.expiresAt < 1e12 ? 1000 : 1); // seconds or ms, tolerant
     armRenewal();
@@ -456,7 +471,7 @@ export function createStore(options: StoreOptions): Store {
           {
             ...req,
             view: viewId,
-            filters: composeFilters(projections.filters.draft),
+            filters: requestFilters(),
             layers: req.k === 0 ? [] : layersOn,
             ...(req.k === 0 || layersOn.length === 0 ? {} : {artifactBudget: artifactBudgetFor(zoom)}),
             // The levels from the camera zoom, so the membership column names the same cut the
@@ -510,9 +525,11 @@ export function createStore(options: StoreOptions): Store {
       depth: () => projections.view.depth ?? presenter?.frame?.depth,
       maxTiles: meta.maxTilesPerRequest,
       table,
-      // The same composition the point path sends: a filtered view asks the server (the bit is per
-      // request, decision 0104), an unfiltered one over scopes held whole is served locally.
-      filters: () => composeFilters(projections.filters.draft),
+      // The same composition the point path sends — the region leaf included, so an artifact's
+      // `matched` bit is *has a member inside the selection the filters admit*: a filtered view
+      // asks the server (the bit is per request, decision 0104), an unfiltered one over scopes
+      // held whole is served locally.
+      filters: () => requestFilters(),
       // What classifies each layer for the fetch model — levelled and flat scopes may be held
       // whole; treed ones ask per view always.
       declarations: meta.layers,
@@ -544,7 +561,12 @@ export function createStore(options: StoreOptions): Store {
       expired,
       retrying: status === 'retrying'
     });
-    if (status === 'refused' && !refusal) return;
+    // The request carrying the region leaf was refused — a polygon over `max_region_vertices`,
+    // a coordinate that is not one — so the region's numbers are a refusal and never a zero.
+    const region = projections.region;
+    if (status === 'refused' && refusal && region && region.status !== 'refused') {
+      replaceProjection('region', {...region, status: 'refused', refusal, visible: null, matched: NO_MASKED, served: {shown: region.held.count, total: 0, exact: false}});
+    }
   }
 
   /**
@@ -629,6 +651,7 @@ export function createStore(options: StoreOptions): Store {
       channel.schedule({target: v.view.target, zoom: v.view.zoom}, v.width, v.height);
     }
     replaceProjection('tiles', {tiles: frame.tiles});
+    projectRegion(frame, replica?.lastRegionVerdict ?? null, p.fetched !== null, Number(matched));
     accumulateEncoding(frame);
     refreshColours();
     checkColourCoverage();
@@ -685,7 +708,7 @@ export function createStore(options: StoreOptions): Store {
       held: state.held,
       table,
       servedOrdinals,
-      hulls: heldHulls,
+      shapes: heldShapes,
       // **Rebuilt only when the table moved.** A response that names artifacts already held names
       // no new ordinal, so the colours and the lookup texture built from them are the same ones —
       // which is what the channel's payload store buys, and it buys nothing if this rebuilds a map
@@ -911,18 +934,34 @@ export function createStore(options: StoreOptions): Store {
     channel?.schedule({target: v.target, zoom: v.zoom}, v.width, v.height);
   }
 
-  function setFilters(draft: FilterDraft): void {
-    const expr = composeFilters(draft);
-    replaceProjection('filters', {...projections.filters, draft, expr});
-    // A filter narrows what is served without changing the identity key, so bands held under one
-    // filter are renderable under another — the client that changed the question is the only party
-    // that knows the held answers are to a different one (§4).
+  /**
+   * The filter every request carries: the draft's expression composed with the selection's
+   * `region` leaf (`selection-operand.md` §5). One composition site, so the point path, the
+   * artifact channel and the region's own count are answers to one question.
+   */
+  function requestFilters(): FilterExpr | null {
+    return withRegion(composeFilters(projections.filters.draft), selection ? regionOperand(selection) : null, selection?.outside ?? false);
+  }
+
+  /**
+   * The question changed — a filter or the selection — so what is held answers a different one.
+   * A filter narrows what is served without changing the identity key, so bands held under one
+   * filter are renderable under another; the client that changed the question is the only party
+   * that knows the held answers are to a different one (§4).
+   */
+  function requery(): void {
     presenter?.cancel();
     replica?.reset();
     contentKeyAtFrame = '';
     if (lastView) setView(lastView.input);
-    // A region's `matched` is under the filters, so the question changed with them.
-    if (selection) select(selection);
+  }
+
+  function setFilters(draft: FilterDraft): void {
+    const expr = composeFilters(draft);
+    replaceProjection('filters', {...projections.filters, draft, expr});
+    // A region's `matched` is under the filters, so its numbers are to a question just changed.
+    if (selection) projectRegionLoading(selection);
+    requery();
   }
 
   /**
@@ -1031,39 +1070,71 @@ export function createStore(options: StoreOptions): Store {
   // ---- the drawn shape, fetched by identifier (`artifact-shapes.md` §9) -----------------------
 
   /**
-   * The hulls held for this principal, and the identifiers already asked for.
+   * The shapes held, with the kind each was served as, and the identifiers already asked for.
    *
-   * **Two maps, because an absence has two meanings.** A hull not in `heldHulls` is either not
+   * **Two maps, because an absence has two meanings.** A shape not in `heldShapes` is either not
    * asked for or asked for and not answered, and the second must not be asked again on every
-   * pointer move; `askedHulls` is what separates them. A refusal stays in `askedHulls` and out of
-   * `heldHulls`, so a `404` is asked once and drawn as a box — which is what the map does for an
-   * artifact whose layer declares no hull, and the two are indistinguishable on purpose.
+   * pointer move; `askedShapes` is what separates them. A refusal stays in `askedShapes` and out
+   * of `heldShapes`, so a `404` is asked once and drawn as a box — which is what the map does for
+   * an artifact whose layer draws no shape, and the two are indistinguishable on purpose.
+   *
+   * **The kind decides what survives a change of principal** (`polygon-membership.md` §7.1): a
+   * `derived` shape is this principal's and goes with them; a `predicate` or an `authored` one is
+   * identical for every principal served the artifact and is kept. An artifact the new
+   * principal is not served is simply never looked up.
    */
-  let heldHulls = new Map<bigint, [number, number][][]>();
-  let askedHulls = new Set<bigint>();
+  let heldShapes = new Map<bigint, Shape>();
+  let heldKinds = new Map<bigint, ShapeKind>();
+  let askedShapes = new Set<bigint>();
 
-  /** Both maps go together, and they go whenever the geometry under them could have moved. */
-  function forgetHulls(): void {
-    if (heldHulls.size === 0 && askedHulls.size === 0) return;
-    heldHulls = new Map();
-    askedHulls = new Set();
-    replaceProjection('artifacts', {...projections.artifacts, hulls: heldHulls});
+  /** Drop what the principal's change invalidates — every derived shape, or everything. */
+  function forgetShapes(which: 'derived' | 'all'): void {
+    if (heldShapes.size === 0 && askedShapes.size === 0) return;
+    if (which === 'all') {
+      heldShapes = new Map();
+      heldKinds = new Map();
+      askedShapes = new Set();
+    } else {
+      const keep = new Map<bigint, Shape>();
+      const kinds = new Map<bigint, ShapeKind>();
+      for (const [id, shape] of heldShapes) {
+        const kind = heldKinds.get(id);
+        if (kind !== undefined && kind !== 'derived') {
+          keep.set(id, shape);
+          kinds.set(id, kind);
+        }
+      }
+      heldShapes = keep;
+      heldKinds = kinds;
+      askedShapes = new Set(keep.keys());
+    }
+    replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
   }
 
-  function needHull(id: bigint): void {
-    if (askedHulls.has(id)) return;
-    askedHulls.add(id);
+  /** The kind a served artifact's layer draws, from the meta; null where it draws none. */
+  function shapeKindOf(id: bigint): ShapeKind | null {
+    const layer = projections.artifacts.served.find((a) => a.tesseraId === id)?.layer;
+    if (layer === undefined) return null;
+    return projections.meta?.layers.find((l) => l.name === layer)?.shape ?? null;
+  }
+
+  function needShape(id: bigint): void {
+    if (askedShapes.has(id)) return;
+    askedShapes.add(id);
     void (async () => {
       const t = token;
       if (!t) return;
       try {
-        const detail = await client.artifact(t, id, {view: viewId});
+        // The view's own zoom, so the shape is generalised to this screen's pixel.
+        const zoom = presenter?.view?.view.zoom;
+        const detail = await client.artifact(t, id, {view: viewId, ...(zoom === undefined ? {} : {zoom})});
         // The principal may have changed under the request — a renewal, a cleared store — in which
         // case this answer describes a mask that is no longer the one being drawn.
-        if (!askedHulls.has(id)) return;
-        if (!detail.hull) return;
-        heldHulls = new Map(heldHulls).set(id, detail.hull);
-        replaceProjection('artifacts', {...projections.artifacts, hulls: heldHulls});
+        if (!askedShapes.has(id)) return;
+        if (!detail.shape) return;
+        heldShapes = new Map(heldShapes).set(id, detail.shape);
+        heldKinds = new Map(heldKinds).set(id, shapeKindOf(id) ?? 'derived');
+        replaceProjection('artifacts', {...projections.artifacts, shapes: heldShapes});
       } catch {
         // A refused shape is a shape not drawn, and the `box` already in hand answers instead.
         // There is nothing here to report: `404` covers an unknown identifier, one this principal
@@ -1090,24 +1161,30 @@ export function createStore(options: StoreOptions): Store {
 
   // ---- the selected region (§5.11) ------------------------------------------------------------
 
-  let regionTimer: unknown = null;
-  let regionInFlight: AbortController | null = null;
-  /** The counting request's three timestamps — selected, request sent, response in — for the instruments. */
-  let regionClock = {selected: 0, requested: 0, answered: 0};
+  /** A shape in world space: the box, the lasso's polygon, or nothing to highlight by (an artifact). */
+  type WorldShape = {kind: 'box'; box: [number, number, number, number]} | {kind: 'lasso'; polygon: WorldPolygon} | {kind: 'artifact'};
 
-  /** A shape in world space: the box, or the lasso's polygon. */
-  type WorldShape = {kind: 'box'; box: [number, number, number, number]} | {kind: 'lasso'; polygon: WorldPolygon};
+  /** When the selection was made, so the answer can be timed (the instruments' `region` trace). */
+  let selectedAt = 0;
+  /** The last verdict the wire gave for this selection — read off the replica, which observes every response. */
+  let regionVerdict: RegionVerdict | null = null;
 
-  /** The held marks whose world positions fall inside the shape — the region's sample (P1). */
-  function heldInside(world: WorldShape): RegionProjection['held'] {
+  /**
+   * The held marks whose world positions fall inside the shape — the region's sample (P1), by
+   * the server's own predicate over the quantised grid (`region.ts`). An artifact selection has
+   * no client-side predicate: the wire's `membership:<layer>` column is the membership, and the
+   * sample is every held mark, which the request already narrowed to the artifact's members.
+   */
+  function heldInside(world: WorldShape, outside: boolean): RegionProjection['held'] {
     const ids: bigint[] = [];
     const xy: number[] = [];
     let count = 0;
-    const inside = world.kind === 'box' ? (x: number, y: number) => insideBox(x, y, world.box) : (x: number, y: number) => insidePolygon(x, y, world.polygon);
+    const inside =
+      world.kind === 'box' ? (x: number, y: number) => insideBox(x, y, world.box) : world.kind === 'lasso' ? (x: number, y: number) => insidePolygon(x, y, world.polygon) : () => true;
     const take = (band: {ids: BigUint64Array; positions: Float32Array}, i: number) => {
       const x = band.positions[i * 2]!;
       const y = band.positions[i * 2 + 1]!;
-      if (!inside(x, y)) return;
+      if (world.kind !== 'artifact' && inside(x, y) === outside) return;
       count++;
       if (ids.length < REGION_HELD_LIMIT) {
         ids.push(band.ids[i]!);
@@ -1127,6 +1204,7 @@ export function createStore(options: StoreOptions): Store {
   function worldOfShape(shape: SelectionShape): WorldShape | null {
     if (!meta) return null;
     const q = meta.quantisation;
+    if (shape.kind === 'artifact') return {kind: 'artifact'};
     if (shape.kind === 'box') {
       const [x0, y0] = dataToWorldXY(shape.bbox[0], shape.bbox[1], q);
       const [x1, y1] = dataToWorldXY(shape.bbox[2], shape.bbox[3], q);
@@ -1137,100 +1215,113 @@ export function createStore(options: StoreOptions): Store {
   }
 
   /**
-   * Count the selected region: one `k = 0` request in the `tiles` form at the bounded depth,
-   * debounced like the artifact channel so a redrawn shape costs one request per settled gesture.
-   * The held marks inside are computed at once — the client's own facts (P1) — and the numbers
-   * land when the server answers.
+   * The world box the selection's count is over, or `null` where the client cannot know it — an
+   * artifact whose extent the store does not hold. A frame whose exact tiles cover it has counted
+   * the whole shape; one that does not has counted the part in view.
    */
-  function select(shape: SelectionShape | null): void {
-    selection = shape;
-    if (regionTimer) clock.cancel(regionTimer);
-    regionTimer = null;
-    regionInFlight?.abort();
-    regionInFlight = null;
-    const world = shape ? worldOfShape(shape) : null;
-    if (!shape || !world) {
+  function worldExtentOf(shape: SelectionShape): [number, number, number, number] | null {
+    const world = worldOfShape(shape);
+    if (!world) return null;
+    if (world.kind === 'box') return world.box;
+    if (world.kind === 'lasso') {
+      let x0 = Infinity;
+      let y0 = Infinity;
+      let x1 = -Infinity;
+      let y1 = -Infinity;
+      for (const [x, y] of world.polygon) {
+        if (x < x0) x0 = x;
+        if (y < y0) y0 = y;
+        if (x > x1) x1 = x;
+        if (y > y1) y1 = y;
+      }
+      return [x0, y0, x1, y1];
+    }
+    const extent = shape.kind === 'artifact' ? extentOf(shape.id) : null;
+    if (!extent || !meta) return null;
+    const q = meta.quantisation;
+    const [x0, y0] = dataToWorldXY(extent[0], extent[1], q);
+    const [x1, y1] = dataToWorldXY(extent[2], extent[3], q);
+    return [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
+  }
+
+  /** The region as it stands before a frame has answered for it: its held sample, no numbers. */
+  function projectRegionLoading(shape: SelectionShape): void {
+    const world = worldOfShape(shape);
+    if (!world) {
       replaceProjection('region', null);
       return;
     }
-    const {depth, tiles} = world.kind === 'box' ? rasteriseBox(world.box) : rasterisePolygon(world.polygon);
-    const zoom = presenter?.view?.view.zoom ?? 0;
-    const held = heldInside(world);
-    regionClock = {selected: clock.now(), requested: 0, answered: 0};
+    const held = heldInside(world, shape.outside ?? false);
     replaceProjection('region', {
       shape,
       status: 'loading',
       refusal: null,
-      visible: NO_MASKED,
+      visible: null,
       matched: NO_MASKED,
       served: {shown: held.count, total: 0, exact: false},
-      depth,
-      tiles: tiles.length,
+      verdict: regionVerdict,
       held
-    });
-    regionTimer = clock.after(REGION_SETTLE_MS, () => {
-      regionTimer = null;
-      void countRegion(shape, tiles, depth, cellExceedsPixel(depth, zoom));
     });
   }
 
-  async function countRegion(shape: SelectionShape, tiles: bigint[], depth: number, coarse: boolean): Promise<void> {
-    const signal = new AbortController();
-    regionInFlight = signal;
-    try {
-      const tok = await ensureToken();
-      tokenEverUsed = true;
-      regionClock.requested = clock.now();
-      const response = await client.viewport(
-        tok,
-        {view: viewId, zoom: depth, tiles, k: 0, filters: composeFilters(projections.filters.draft), layers: []},
-        signal.signal
-      );
-      regionClock.answered = clock.now();
-      if (regionInFlight !== signal || selection !== shape) return;
-      regionInFlight = null;
-      let visible = 0n;
-      let matched = 0n;
-      for (const t of response.result.tiles) {
-        visible += t.visible;
-        matched += t.matched;
-      }
-      const current = projections.region;
-      if (!current || current.shape !== shape) return;
-      replaceProjection('region', {
-        ...current,
-        status: 'shown',
-        refusal: null,
-        // Exact for the cells asked; exact for the shape only when no cell exceeds a pixel.
-        visible: {value: Number(visible), exact: !coarse},
-        matched: {value: Number(matched), exact: !coarse},
-        // The sample is the held marks inside, against the region's matched — both figures always.
-        served: {shown: current.held.count, total: Number(matched), exact: true}
-      });
-      // The three lanes of a counting request, for the delivery record: the settle, the wire (with
-      // its main-thread decode), and the projection.
-      options.instruments?.onTrace?.('region', {
-        settleMs: regionClock.requested - regionClock.selected,
-        wireMs: regionClock.answered - regionClock.requested,
-        projectMs: clock.now() - regionClock.answered,
-        serverMs: response.timings.serverUs / 1000,
-        tiles: tiles.length
-      });
-    } catch (error) {
-      if (signal.signal.aborted || regionInFlight !== signal) return;
-      regionInFlight = null;
-      const current = projections.region;
-      if (!current || current.shape !== shape) return;
-      const e = error as {code?: string; detail?: string; message?: string};
-      replaceProjection('region', {
-        ...current,
-        status: 'refused',
-        refusal: {code: e.code ?? 'fetch-failed', detail: e.detail ?? e.message ?? String(error)},
-        visible: NO_MASKED,
-        matched: NO_MASKED,
-        served: {shown: current.held.count, total: 0, exact: false}
-      });
+  /**
+   * The region's numbers, read off a presented frame. `matched` is the frame's own sum — the
+   * request carried the leaf, so a tile's `matched` is the items inside the shape the filters
+   * admit. Exact for the shape when the wire said so *and* the frame's exact tiles cover the
+   * shape's extent; an outside selection is never covered by one frame, since its complement is
+   * the whole map.
+   */
+  function projectRegion(frame: Composition, verdict: RegionVerdict | null, derived: boolean, matched: number): void {
+    const shape = selection;
+    const current = projections.region;
+    if (!shape || !current || current.shape !== shape) return;
+    if (verdict) regionVerdict = verdict;
+    // A frame folded from the replica, before any derive answered for this selection, is to the
+    // previous question; the numbers wait for the derive.
+    if (current.status === 'loading' && !derived) return;
+    const world = worldOfShape(shape);
+    if (!world) return;
+    const outside = shape.outside ?? false;
+    const extent = outside ? null : worldExtentOf(shape);
+    // Covered means the replica holds every tile of the shape's extent at the frame's depth —
+    // asked of the replica rather than read off the frame's tile list, which names only the
+    // tiles that drew a point; a tile the region emptied is held, counted and listed nowhere.
+    const covered = extent !== null && replica !== null && meta !== null && replica.novelIn(tileRectOfBbox(extent, frame.depth), frame.depth, meta.selection.kMaxMarks) === 0;
+    const exact = (regionVerdict?.exact ?? false) && covered;
+    const held = heldInside(world, outside);
+    const draftEmpty = composeFilters(projections.filters.draft) === null;
+    const wasLoading = current.status === 'loading';
+    replaceProjection('region', {
+      ...current,
+      status: 'shown',
+      refusal: null,
+      matched: {value: matched, exact},
+      // The region alone is the same question only while no other filter narrows the frame.
+      visible: draftEmpty ? {value: matched, exact} : null,
+      served: {shown: held.count, total: matched, exact: true},
+      verdict: regionVerdict,
+      held
+    });
+    if (wasLoading) options.instruments?.onTrace?.('region', {answerMs: clock.now() - selectedAt, exact: exact ? 1 : 0, depth: regionVerdict?.depth ?? -1});
+  }
+
+  /**
+   * Select a shape — and, with it, filter to it: the leaf joins every request from here on, and
+   * the region's numbers are read off the next frame. `null` clears both.
+   */
+  function select(shape: SelectionShape | null): void {
+    const changed = shape !== selection;
+    selection = shape;
+    regionVerdict = null;
+    selectedAt = clock.now();
+    if (!shape || (shape.kind === 'lasso' && shape.points.length < 3)) {
+      selection = null;
+      replaceProjection('region', null);
+      if (changed) requery();
+      return;
     }
+    projectRegionLoading(shape);
+    requery();
   }
 
   function extentOf(artifactId: bigint): [number, number, number, number] | null {
@@ -1257,21 +1348,22 @@ export function createStore(options: StoreOptions): Store {
     channel?.reset();
     replica?.reset();
     table.clear();
-    forgetHulls();
+    forgetShapes('all');
     contentKeyAtFrame = '';
     replaceProjection('view', {composition: null, depth: 0, visible: NO_MASKED, matched: NO_MASKED, served: NO_COUNT, provisional: 0});
     replaceProjection('marks', {...projections.marks, bands: [], count: NO_COUNT});
     replaceProjection('legend', {ranks: {}, domains: {}, categories: {}, categoryErrors: {}, colourBy});
     replaceProjection('status', {...NO_STATUS});
     selection = null;
+    regionVerdict = null;
     replaceProjection('region', null);
   }
 
   function refresh(): void {
     // Redraw the marks against the refreshed content key — a held layer set goes with it (§4).
     channel?.reset();
+    if (selection) projectRegionLoading(selection);
     if (lastView) setView(lastView.input);
-    if (selection) select(selection);
   }
 
   /** Set by `dispose`: a fetch that lands afterwards writes nothing into a store nobody reads. */
@@ -1281,8 +1373,6 @@ export function createStore(options: StoreOptions): Store {
     disposed = true;
     presenter?.cancel();
     channel?.cancel();
-    if (regionTimer) clock.cancel(regionTimer);
-    regionInFlight?.abort();
     if (renewTimer) clock.cancel(renewTimer);
     client.close();
   }
@@ -1315,7 +1405,7 @@ export function createStore(options: StoreOptions): Store {
     setBudget,
     pick,
     openArtifact,
-    needHull,
+    needShape,
     clearSelection,
     setScheme,
     select,

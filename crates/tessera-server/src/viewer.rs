@@ -308,6 +308,14 @@ async fn meta(
             // caller can simplify before submitting rather than learn the number from a `422`.
             // A deployment constant, identical for every principal.
             "max_shape_vertices": state.max_shape_vertices,
+            // The `region` leaf's two bounds (selection-operand §2), on the same argument: a
+            // client choosing a shape is choosing a cost, and a refusal it cannot predict is
+            // indistinguishable from its own arithmetic being wrong. Over the first is a `422`
+            // naming the count and the cap; over the second is **not a refusal** — the answer
+            // is a cover, said on `x-tessera-region`. Deployment constants, identical for every
+            // principal.
+            "max_region_vertices": state.max_region_vertices,
+            "max_region_cells": state.max_region_cells,
         },
         // The annotation layers this principal may know exist, and what each declared.
         //
@@ -349,6 +357,14 @@ async fn meta(
                     "zoom": l.zoom.map(|(lo, hi)| serde_json::json!([lo, hi])),
                 })).collect::<Vec<_>>(),
                 "computed_content": d.content.computed,
+                // **Which kind the layer's one drawn geometry is** — `derived` (the hull over the
+                // visible members, per principal), `predicate` (the membership shape, identical
+                // for every principal) or `authored` (a supplied drawing), or null where it draws
+                // none (`polygon-membership.md` §7.1). A client reads from it whether a shape
+                // moves with the principal, which decides whether it may hold one against a
+                // `tessera_id` across principals. A declaration fact, published on the same
+                // argument the computed vocabulary is.
+                "shape": d.drawn_shape().map(|k| k.name()),
                 // The **types**, as before: a client draws from them, and publishing them is safe
                 // because an artifact failing containment is absent whole. ⊘ Each entry's `name`
                 // — which distinguishes two contents of one type on one layer — is declared and
@@ -550,8 +566,11 @@ struct ViewportReq {
     /// layer name takes, and the same reason: asking is not a way to learn what exists.
     #[serde(default)]
     levels: Option<LevelsReq>,
-    /// Which of each layer's **declared** computed properties — `centroid`, `box`, `hull` — the
-    /// response should carry.
+    /// Which of each layer's **declared** computed properties — `centroid`, `box`, `shape` — the
+    /// response should carry. `shape` is the layer's **one drawn geometry** of whichever kind
+    /// `/v1/meta` publishes for it — the derived hull, the predicate shape or the authored one
+    /// (`polygon-membership.md` §7.1) — so a request asks for the drawing without knowing its
+    /// derivation; `hull` is the declaration's word and not an ask word.
     ///
     /// **Absent is the declaration's own set**, which is what every response carried before this
     /// field existed. A list answers for exactly those, intersected with what each layer declared,
@@ -676,6 +695,9 @@ struct FirstFlush {
     coordinates: tessera_engine::ViewCoordinates,
     stamp: GenerationStamp,
     stale: bool,
+    /// The region leaves' verdict — the `x-tessera-region` header, absent when the request
+    /// carried none.
+    region: Option<tessera_engine::RegionVerdict>,
     /// The serialised tiles frame plus, when the §3.3 underlay was requested, the sub-cells
     /// frame — the body's first bytes, prepended ahead of the channel.
     first_frames: Vec<u8>,
@@ -722,6 +744,10 @@ struct WireSink {
     arrow_serialise_ns: u64,
     points_total: u64,
     flushes: u64,
+    /// How many served artifacts had their shape's vertex budget fire (`polygon-membership.md`
+    /// §7.2) — the trailer's `stage_ns` companion records it, so a coarser-than-depth drawing is
+    /// a number in the trace and not a guess from the picture.
+    shape_guard_fired: u64,
 }
 
 /// A sink refusal the **server** chose, told apart from the client going away.
@@ -816,6 +842,7 @@ impl ViewportSink for WireSink {
             coordinates: head.coordinates,
             stamp: head.stamp.clone(),
             stale: head.stale,
+            region: head.region,
             first_frames: frames,
             server_us: self.start.elapsed().as_micros() as u64,
         };
@@ -836,6 +863,7 @@ impl ViewportSink for WireSink {
     /// `streamed-serving.md` §2 puts first deliberately.
     fn artifacts(&mut self, artifacts: &[tessera_engine::ArtifactOut]) -> SinkResult {
         let serialise_start = Instant::now();
+        self.shape_guard_fired += artifacts.iter().filter(|a| a.shape_guard_fired).count() as u64;
         let rows: Vec<ArtifactRow<'_>> = artifacts
             .iter()
             .map(|a| ArtifactRow {
@@ -845,7 +873,7 @@ impl ViewportSink for WireSink {
                 masked_count: a.masked_count,
                 centroid: a.derived.centroid,
                 bbox: a.derived.bbox,
-                hull: a.derived.hull.as_deref(),
+                shape: a.derived.shape.as_deref(),
                 content: &a.content,
                 parent_id: a.parent_id.map(|id| id.raw()),
                 rung: a.rung,
@@ -957,6 +985,18 @@ fn run_viewport_stream(
                 .iter()
                 .filter_map(|d| Some((d.name.as_str(), d.vocabulary.as_deref()?)))
                 .collect();
+            // A `region` leaf is canonicalised here, against the view's own extent — the one
+            // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
+            // every coordinate refusal are `422`s before any compute (selection-operand §2).
+            let region = crate::filter_dto::RegionContext {
+                extent: tessera_engine::shapes::Bounds {
+                    x_min: meta.quantisation.x_min,
+                    x_max: meta.quantisation.x_max,
+                    y_min: meta.quantisation.y_min,
+                    y_max: meta.quantisation.y_max,
+                },
+                max_vertices: state.max_region_vertices,
+            };
             match crate::filter_dto::parse(
                 value,
                 &|column| filterable.get(column).copied(),
@@ -964,6 +1004,7 @@ fn run_viewport_stream(
                     let vocabulary = vocab_of.get(column)?;
                     meta.vocabularies.get(vocabulary)?.code_of(key)
                 },
+                &region,
             ) {
                 Ok(expr) => Some(expr),
                 // The pre-first-flush channel, the same one an engine refusal takes: nothing is
@@ -1022,7 +1063,7 @@ fn run_viewport_stream(
         .computed
         .iter()
         .flatten()
-        .filter_map(|name| tessera_engine::ComputedProperty::parse(name))
+        .filter_map(|name| tessera_engine::ComputedProperty::parse_ask(name))
         .collect();
     let computed = match &req.computed {
         Some(_) => ComputedSelection::Named(&computed_named),
@@ -1070,7 +1111,9 @@ fn run_viewport_stream(
                 "flushes": sink.flushes,
             });
             if state.stage_timing {
-                if let Some(csv) = stage_header(&timings, sink.arrow_serialise_ns) {
+                if let Some(csv) =
+                    stage_header(&timings, sink.arrow_serialise_ns, sink.shape_guard_fired)
+                {
                     trailer["stage_ns"] = serde_json::Value::String(csv);
                 }
             }
@@ -1239,11 +1282,11 @@ async fn viewport(
     if let Some(names) = &req.computed {
         if let Some(bad) = names
             .iter()
-            .find(|name| tessera_engine::ComputedProperty::parse(name).is_none())
+            .find(|name| tessera_engine::ComputedProperty::parse_ask(name).is_none())
         {
             return Err(ApiError::Contract(format!(
                 "`computed` names {bad:?}; the computed properties are {}",
-                tessera_engine::ComputedProperty::VOCABULARY.join(", ")
+                tessera_engine::ComputedProperty::ASK_VOCABULARY.join(", ")
             )));
         }
     }
@@ -1307,6 +1350,7 @@ async fn viewport(
         // to there.
         artifact_rows: tessera_engine::ArtifactRows::Full,
         arrow_serialise_ns: 0,
+        shape_guard_fired: 0,
         points_total: 0,
         flushes: 0,
     };
@@ -1373,6 +1417,14 @@ async fn viewport(
         .header("x-tessera-stale", if first.stale { "1" } else { "0" })
         .header("x-tessera-server-us", first.server_us.to_string())
         .header("x-tessera-admission-us", admission_us.to_string());
+    // The region verdict (selection-operand §6), on `x-tessera-stale`'s precedent: a client
+    // reading counts alone should not have to decode a batch to learn whether they are exact.
+    // Absent when the request carried no region leaf. A function of the shape and the grid alone,
+    // settled before the first row was read — never of the rows.
+    let response = match first.region {
+        Some(verdict) => response.header("x-tessera-region", verdict.header_value()),
+        None => response,
+    };
 
     // No `x-tessera-stage-ns` header any more: whole-request timings cannot precede the body
     // they describe, so the stage breakdown rides the trailer frame (same double gate).
@@ -1431,7 +1483,11 @@ fn hex16(bytes: &[u8; 16]) -> String {
 /// `compute_threads` value — the `pool.install` fan-out does not run at all for those requests —
 /// so below that line these per-tile fields do partition the request's own wall clock.
 #[cfg(feature = "bench-timing")]
-fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Option<String> {
+fn stage_header(
+    t: &tessera_engine::StageTimings,
+    arrow_serialise_ns: u64,
+    shape_guard_fired: u64,
+) -> Option<String> {
     // **Append-only.** This is a positional CSV, so inserting a field anywhere but the end silently
     // misaligns every existing consumer — the same reason `served` was appended to the tiles batch
     // rather than slotted next to `visible`. The three trailing fields (theta_anchor_ns,
@@ -1439,7 +1495,7 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
     // grouping the rest follows; `tessera_bench::report::Stages` is JSON-by-name and keeps the
     // readable order.
     Some(format!(
-        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
         t.generation_resolve_ns,
         t.stamp_compare_ns,
         t.view_lookup_ns,
@@ -1462,11 +1518,18 @@ fn stage_header(t: &tessera_engine::StageTimings, arrow_serialise_ns: u64) -> Op
         t.theta_anchor_ns,
         t.underlay_ns,
         t.underlay_cells_evaluated,
+        // Appended 2026-08-29: how many served artifacts had their shape's vertex budget fire
+        // (`polygon-membership.md` §7.2). A counter, after the three trailing fields.
+        shape_guard_fired,
     ))
 }
 
 #[cfg(not(feature = "bench-timing"))]
-fn stage_header(_t: &tessera_engine::StageTimings, _arrow_serialise_ns: u64) -> Option<String> {
+fn stage_header(
+    _t: &tessera_engine::StageTimings,
+    _arrow_serialise_ns: u64,
+    _shape_guard_fired: u64,
+) -> Option<String> {
     None
 }
 
@@ -1616,6 +1679,12 @@ struct ArtifactReq {
     /// Optional, on [`ItemReq::idset`]'s argument.
     #[serde(default)]
     idset: Option<u32>,
+    /// The depth the caller draws at, for the vertex rule a predicate or an authored shape is
+    /// served under (`polygon-membership.md` §7.2): a vertex that would move the drawn edge by
+    /// less than a pixel at this zoom is not sent. Absent serves the whole presimplified shape
+    /// under the 2,048-vertex guard. A derived hull is unaffected.
+    #[serde(default)]
+    zoom: Option<u8>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1635,10 +1704,12 @@ struct ArtifactResp {
     centroid: Option<[f64; 2]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     r#box: Option<[u32; 4]>,
-    /// The hull's **rings**, one per separated group of the visible members — a membership that is
-    /// two clouds is two rings, not one polygon over the gap between them.
+    /// **The artifact's one drawn geometry** — parts, then rings, then vertices — of the kind
+    /// `/v1/meta` publishes for its layer (`polygon-membership.md` §7.1): the derived hull, every
+    /// α-group its own part; the predicate shape; or the authored one. A part's first ring is its
+    /// outer and the rest are holes. Absent where the layer declares none.
     #[serde(skip_serializing_if = "Option::is_none")]
-    hull: Option<Vec<Vec<[u32; 2]>>>,
+    shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
     /// **The rung this artifact sits at** — the declared level on a levelled layer, `0` on a
     /// treed or flat one, which on this one-artifact response is also its response-local chain
     /// depth, there being no parent links to be deep in (the viewport frame's `rung`,
@@ -1683,7 +1754,13 @@ async fn artifact(
         let _gate_permits = gate_permits;
         state
             .engine
-            .artifact(&entry.session, TesseraId::new(raw), req.idset, &req.view)
+            .artifact(
+                &entry.session,
+                TesseraId::new(raw),
+                req.idset,
+                &req.view,
+                req.zoom,
+            )
             .map_err(crate::error::map_engine_error)
     })
     .await
@@ -1699,7 +1776,7 @@ async fn artifact(
         masked_count: served.masked_count,
         centroid: served.derived.centroid,
         r#box: served.derived.bbox,
-        hull: served.derived.hull,
+        shape: served.derived.shape,
         content: served.content,
         rung: served.rung,
     }))

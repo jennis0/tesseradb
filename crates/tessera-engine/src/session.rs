@@ -606,6 +606,16 @@ pub struct Engine {
     pub(crate) plugin: Arc<dyn Plugin>,
     /// The row-projection cache — see [`RowProjectionCache`]'s own doc.
     pub(crate) row_projection_cache: Arc<RowProjectionCache>,
+    /// A region leaf's decomposition per `(view, generation, canonical shape, stop depth)` —
+    /// see [`crate::region`]. Keyed on **no principal**, deliberately: the entry carries no
+    /// authorisation, and the rows inside the shape are tested under each request's own mask
+    /// rather than held (owner ruling 2026-08-29, selection-operand §10 (b)).
+    pub(crate) region_cache:
+        Arc<crate::single_flight::SingleFlightCache<crate::region::RegionKey, crate::region::RegionDecomposition>>,
+    /// `serve.max_region_cells` — the most boundary cells a region's descent may hold at one
+    /// depth before it answers a cover (selection-operand §6). A setter rather than an
+    /// `EngineConfig` field, for [`Engine::set_masked_count_cache_bytes`]'s reason.
+    pub(crate) max_region_cells: AtomicU64,
     /// Artifact memberships in row space, one entry per `(view, layer, level)` — see
     /// [`ArtifactProjections`]. Distinct from the cache above and deliberately so: that one is
     /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
@@ -1290,6 +1300,7 @@ impl Engine {
         }
 
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
+        let region_cache = Arc::new(crate::single_flight::SingleFlightCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
         let refresh_paused = Arc::new(AtomicBool::new(false));
@@ -1306,6 +1317,8 @@ impl Engine {
             // after `open`, having validated the figure; every other embedder (tests, benches,
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
+            region_cache: Arc::clone(&region_cache),
+            max_region_cells: AtomicU64::new(crate::region::DEFAULT_MAX_REGION_CELLS as u64),
             artifact_projections: Arc::clone(&artifact_projections),
             shapes: Arc::clone(&shapes),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
@@ -1885,6 +1898,25 @@ impl Engine {
         self.masked_counts.set_bound_bytes(bytes);
     }
 
+    /// Bound the region decomposition cache (`serve.region_cache_bytes`) — a setter for
+    /// [`Self::set_masked_count_cache_bytes`]'s reason.
+    pub fn set_region_cache_bytes(&self, bytes: u64) {
+        self.region_cache.set_bound_bytes(bytes);
+    }
+
+    /// `serve.max_region_cells` — the boundary-cell budget a region's descent stops at
+    /// (selection-operand §6; published on `/v1/meta`). A setter rather than an `EngineConfig`
+    /// field, for [`Self::set_masked_count_cache_bytes`]'s reason; the default is
+    /// [`crate::region::DEFAULT_MAX_REGION_CELLS`].
+    pub fn set_max_region_cells(&self, cells: usize) {
+        self.max_region_cells.store(cells as u64, Ordering::Relaxed);
+    }
+
+    /// The region cache's gauges, beside the row-projection cache's.
+    pub fn region_cache_stats(&self) -> crate::single_flight::CacheStats {
+        self.region_cache.stats()
+    }
+
     /// How long a request parks on another request's in-flight row-projection build before it is
     /// refused (`serve.single_flight_wait_ms`, decision 0058).
     ///
@@ -2462,6 +2494,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                region_cache: Arc::clone(&self.region_cache),
                 shapes: Arc::clone(&self.shapes),
                 lineages: Arc::clone(&self.lineages),
                 level_contents: Arc::clone(&self.level_contents),
@@ -2521,6 +2554,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                region_cache: Arc::clone(&self.region_cache),
                 shapes: Arc::clone(&self.shapes),
                 lineages: Arc::clone(&self.lineages),
                 level_contents: Arc::clone(&self.level_contents),

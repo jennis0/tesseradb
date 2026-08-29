@@ -511,6 +511,8 @@ async fn mount_server_with_flush(
         // cursor is exercised by an ordinary request rather than only by a contrived one.
         max_category_values: 4,
         max_shape_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+        max_region_vertices: 10_000,
+        max_region_cells: tessera_engine::DEFAULT_MAX_REGION_CELLS,
         compute_gate,
         ingest_admission: IngestAdmission::new(ingest_limits.admission),
         ingest_max_batch_rows: ingest_limits.max_batch_rows,
@@ -632,10 +634,10 @@ pub struct ArtifactRow {
     /// is *the layer declares none* and never *withheld*.
     pub centroid: Option<[f64; 2]>,
     pub bbox: Option<[u32; 4]>,
-    /// The hull's **rings**, one per separated group of the visible members. `None` both where
-    /// the trailing hull columns are absent (no served layer declares one) and where they carry a
-    /// per-row null.
-    pub hull: Option<Vec<Vec<[u32; 2]>>>,
+    /// The artifact's one drawn geometry — parts, then rings, then vertices. `None` both where
+    /// the trailing shape columns are absent (no served layer declares one) and where they carry
+    /// a per-row null.
+    pub shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
     /// The rung this artifact is drawn at — the declared level on a levelled layer, the
     /// response-local parent-chain depth on a treed one, 0 on a flat one.
     pub rung: u32,
@@ -818,72 +820,81 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             .unwrap();
                         a.is_valid(i).then(|| a.value(i))
                     };
-                    // The two hull columns TRAIL the fixed prefix and are present only when a
-                    // served layer declares a hull — an absent column, distinguishable from a
-                    // null one, so 0076's null rule gains no third reading.
-                    let hulls = batch.num_columns() > 14;
-                    if hulls {
-                        assert_eq!(batch.num_columns(), 16, "hull_x and hull_y travel together");
-                        assert_eq!(batch.schema().field(14).name(), "hull_x");
-                        assert_eq!(batch.schema().field(15).name(), "hull_y");
+                    // The two shape columns TRAIL the fixed prefix and are present only when a
+                    // served layer declares a drawn geometry — an absent column, distinguishable
+                    // from a null one, so 0076's null rule gains no third reading.
+                    let shapes = batch.num_columns() > 14;
+                    if shapes {
+                        assert_eq!(batch.num_columns(), 16, "shape_x and shape_y travel together");
+                        assert_eq!(batch.schema().field(14).name(), "shape_x");
+                        assert_eq!(batch.schema().field(15).name(), "shape_y");
                     }
-                    // One axis of the hull, as **a list of rings**. The two levels are the schema's,
-                    // not a convention: a decoder written against the single-ring shape fails its
-                    // downcast here rather than concatenating the rings into one polygon.
-                    let hull_axis = |col: usize, i: usize| {
+                    // One axis of the shape, as **parts of rings**. The three levels are the
+                    // schema's, not a convention: a decoder written against the two-level hull
+                    // shape fails its downcast here rather than reading a part as a ring.
+                    let shape_axis = |col: usize, i: usize| {
                         let a = batch
                             .column(col)
                             .as_any()
                             .downcast_ref::<arrow::array::ListArray>()
                             .unwrap();
                         a.is_valid(i).then(|| {
-                            let rings = a.value(i);
-                            let rings = rings
+                            let parts = a.value(i);
+                            let parts = parts
                                 .as_any()
                                 .downcast_ref::<arrow::array::ListArray>()
-                                .expect("hull_x/hull_y are a list of rings");
-                            (0..rings.len())
-                                .map(|r| {
-                                    let values = rings.value(r);
-                                    let values = values
+                                .expect("shape_x/shape_y are a list of parts");
+                            (0..parts.len())
+                                .map(|p| {
+                                    let rings = parts.value(p);
+                                    let rings = rings
                                         .as_any()
-                                        .downcast_ref::<arrow::array::UInt32Array>()
-                                        .unwrap();
-                                    (0..values.len()).map(|k| values.value(k)).collect::<Vec<_>>()
+                                        .downcast_ref::<arrow::array::ListArray>()
+                                        .expect("a part is a list of rings");
+                                    (0..rings.len())
+                                        .map(|r| {
+                                            let values = rings.value(r);
+                                            let values = values
+                                                .as_any()
+                                                .downcast_ref::<arrow::array::UInt32Array>()
+                                                .unwrap();
+                                            (0..values.len())
+                                                .map(|k| values.value(k))
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .collect::<Vec<_>>()
                                 })
                                 .collect::<Vec<_>>()
                         })
                     };
                     for i in 0..batch.num_rows() {
-                        let hull = if !hulls {
+                        let shape = if !shapes {
                             None
                         } else {
-                            match (hull_axis(14, i), hull_axis(15, i)) {
+                            match (shape_axis(14, i), shape_axis(15, i)) {
                                 (Some(xs), Some(ys)) => {
-                                    assert_eq!(
-                                        xs.len(),
-                                        ys.len(),
-                                        "the two axes disagree about how many rings this hull has"
-                                    );
+                                    assert_eq!(xs.len(), ys.len(), "the axes disagree on parts");
                                     Some(
                                         xs.into_iter()
                                             .zip(ys)
-                                            .map(|(rx, ry)| {
-                                                assert_eq!(
-                                                    rx.len(),
-                                                    ry.len(),
-                                                    "a ring's axes differ in length"
-                                                );
-                                                rx.into_iter()
-                                                    .zip(ry)
-                                                    .map(|(x, y)| [x, y])
-                                                    .collect()
+                                            .map(|(px, py)| {
+                                                assert_eq!(px.len(), py.len(), "rings differ");
+                                                px.into_iter()
+                                                    .zip(py)
+                                                    .map(|(rx, ry)| {
+                                                        assert_eq!(rx.len(), ry.len());
+                                                        rx.into_iter()
+                                                            .zip(ry)
+                                                            .map(|(x, y)| [x, y])
+                                                            .collect::<Vec<_>>()
+                                                    })
+                                                    .collect::<Vec<_>>()
                                             })
                                             .collect(),
                                     )
                                 }
                                 (None, None) => None,
-                                _ => panic!("a hull with one axis and not the other"),
+                                _ => panic!("a shape with one axis and not the other"),
                             }
                         };
                         rows.push(ArtifactRow {
@@ -903,7 +914,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                                     u32_at(9, i).unwrap(),
                                 ]
                             }),
-                            hull,
+                            shape,
                             // Column 12, after `content` at 10 and `parent_id` at 11 — read
                             // positionally here on purpose, because the fixed prefix's positions
                             // are contract and a test that read by name would not notice a column

@@ -181,7 +181,7 @@ fn artifact_entity(engine: &Engine, id: TesseraId) -> EntityId {
 /// extra predicate term exists for.
 fn reachable_by_identifier(engine: &Engine, credential: &[u8], id: TesseraId) -> bool {
     let session = engine.authorise(credential).unwrap();
-    engine.artifact(&session, id, None, "s0").unwrap().is_some()
+    engine.artifact(&session, id, None, "s0", None).unwrap().is_some()
 }
 
 /// **The headline.** Suppress the cluster and its label stops serving — in the viewport *and* on the

@@ -1313,6 +1313,52 @@ pub struct CanonicalShapes {
     pub bounds: Vec<(String, Option<tessera_spatial::shape::Bbox>)>,
 }
 
+/// Read an **authored content's** text as the shape its declared kind names
+/// (`polygon-membership.md` §6.1): a `polygon` is WKT, a `circle` is `cx, cy, r` and an
+/// `ellipse` is `cx, cy, a, b, angle` — the numbers of the row fields a membership shape takes,
+/// comma- or space-separated, in the submission's space. The value then takes exactly the route a
+/// membership shape takes: [`shape_input`], [`canonical_shapes`], the same report and the same
+/// vertex cap. A `bbox` is not an authored kind — a supplied box is the `extent` content that
+/// already exists.
+pub fn authored_shape_input(kind: ShapeKind, text: &str) -> Result<ShapeInput, ShapeRefusal> {
+    let numbers = |want: usize, field: &str| -> Result<Vec<f64>, ShapeRefusal> {
+        let values: Result<Vec<f64>, _> = text
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.parse::<f64>())
+            .collect();
+        let values = values.map_err(|e| {
+            ShapeRefusal(format!(
+                "the `{field}` content {text:?} is not {want} numbers: {e}"
+            ))
+        })?;
+        if values.len() != want {
+            return Err(ShapeRefusal(format!(
+                "the `{field}` content has {} value(s); it is exactly {want}",
+                values.len()
+            )));
+        }
+        Ok(values)
+    };
+    Ok(match kind {
+        ShapeKind::Polygon => ShapeInput::Wkt(text.to_string()),
+        ShapeKind::Circle => {
+            let v = numbers(3, "circle")?;
+            ShapeInput::Circle([v[0], v[1], v[2]])
+        }
+        ShapeKind::Ellipse => {
+            let v = numbers(5, "ellipse")?;
+            ShapeInput::Ellipse([v[0], v[1], v[2], v[3], v[4]])
+        }
+        ShapeKind::Bbox => {
+            return Err(ShapeRefusal(
+                "a `bbox` is not an authored content kind; a supplied box is an `extent`"
+                    .to_string(),
+            ))
+        }
+    })
+}
+
 /// Read a row's shape into the caller's form, checking it against the layer's declared kind.
 pub fn shape_input(kind: ShapeKind, input: ShapeInput) -> Result<ShapeF64, ShapeRefusal> {
     if input.kind() != kind {

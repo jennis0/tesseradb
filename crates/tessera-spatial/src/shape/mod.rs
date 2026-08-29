@@ -139,15 +139,29 @@ impl Shape {
     /// side of the cell at the request's depth) and to its `budget` heaviest; a curve densified
     /// so that no chord departs from it by more than `min_weight`; a box as its four corners.
     pub fn rings(&self, min_weight: u32, budget: usize) -> Vec<Vec<Vec<GridPoint>>> {
+        self.rings_guarded(min_weight, budget).0
+    }
+
+    /// [`Shape::rings`], and whether the `budget` guard fired — a polygon with more vertices above
+    /// `min_weight` than the budget, or a curve whose chord tolerance asked for more vertices than
+    /// it — so a serve can record that the drawing is coarser than the depth alone would make it
+    /// (`polygon-membership.md` §7.2). A box never fires it.
+    pub fn rings_guarded(&self, min_weight: u32, budget: usize) -> (Vec<Vec<Vec<GridPoint>>>, bool) {
         match self {
-            Shape::Bbox(b) => vec![vec![vec![
-                (b.min_x, b.min_y),
-                (b.max_x, b.min_y),
-                (b.max_x, b.max_y),
-                (b.min_x, b.max_y),
-            ]]],
-            Shape::Conic(c) => vec![vec![c.ring(min_weight.max(1), budget)]],
-            Shape::Polygon(p) => p.rings(min_weight, budget),
+            Shape::Bbox(b) => (
+                vec![vec![vec![
+                    (b.min_x, b.min_y),
+                    (b.max_x, b.min_y),
+                    (b.max_x, b.max_y),
+                    (b.min_x, b.max_y),
+                ]]],
+                false,
+            ),
+            Shape::Conic(c) => {
+                let (ring, guarded) = c.ring_guarded(min_weight.max(1), budget);
+                (vec![vec![ring]], guarded)
+            }
+            Shape::Polygon(p) => p.rings_guarded(min_weight, budget),
         }
     }
 }

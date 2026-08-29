@@ -681,8 +681,13 @@ def write_config(
     k_max_marks: int | None = None,
     max_k: int | None = None,
     max_underlay_cells: int | None = None,
+    serve_extra: str | None = None,
 ) -> Path:
     """Write a `tessera.toml`.
+
+    `serve_extra` is appended verbatim to the `[serve]` section — for a suite that means to
+    exercise one more knob (`max_region_cells`, say) without this signature growing a parameter
+    per knob.
 
     `theta_target_marks` defaults to a value large enough to **saturate** theta, which turns §7.2's
     selection into "serve every visible row up to the cap". Suites that assert masking or wire shape
@@ -730,6 +735,8 @@ theta_target_marks = {theta_target_marks}
 """
     if max_underlay_cells is not None:
         config_text += f"max_underlay_cells = {max_underlay_cells}\n"
+    if serve_extra:
+        config_text += serve_extra.rstrip() + "\n"
     config_path = tmp_dir / "tessera.toml"
     config_path.write_text(config_text)
     return config_path
@@ -747,6 +754,7 @@ def spawn_server(
     k_max_marks: int | None = None,
     theta_target_marks: int | None = None,
     max_underlay_cells: int | None = None,
+    serve_extra: str | None = None,
 ) -> tuple[Server, subprocess.Popen]:
     """Start `tessera serve` against `bundle_root`, using `cache_dir`/`wal_path` (defaulting to
     `tmp_dir/cache`, `tmp_dir/wal.log`) for its durable state. Passing the SAME `cache_dir`/
@@ -780,6 +788,7 @@ def spawn_server(
         k_max_marks=k_max_marks,
         theta_target_marks=theta_target_marks,
         max_underlay_cells=max_underlay_cells,
+        serve_extra=serve_extra,
     )
 
     env = os.environ.copy()

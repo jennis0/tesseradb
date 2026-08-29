@@ -44,9 +44,13 @@ fn measure_against_the_corpus() {
         let wrap_ms = t1.elapsed().as_secs_f64() * 1e3;
 
         let t2 = Instant::now();
-        let shape = compute(&[ComputedProperty::Hull], visible, &corpus.locator)
-            .hull
-            .expect("declared");
+        // Every α-group is its own part on the wire; the measurement is over the rings.
+        let shape: Vec<Vec<[u32; 2]>> = compute(&[ComputedProperty::Hull], visible, &corpus.locator)
+            .shape
+            .expect("declared")
+            .into_iter()
+            .flatten()
+            .collect();
         let shape_ms = t2.elapsed().as_secs_f64() * 1e3 - gather_ms;
 
         // **Containment is counted, not asserted** (`artifact-shapes.md` §4's head, ruled

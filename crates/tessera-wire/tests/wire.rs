@@ -284,30 +284,34 @@ fn a_body_cut_at_any_byte_boundary_never_splits_cleanly_short() {
     }
 }
 
-/// **The hull travels as a list of rings, and a reader that expects one ring fails rather than
-/// concatenating them.** Both halves are the point of the nesting: a flat encoding with a separate
-/// offsets column would let a reader that ignored the offsets draw a chord from the end of one ring
-/// to the start of the next, silently and in the shape of a real boundary.
+/// **The shape travels as parts of rings, and a reader that expects rings of vertices fails
+/// rather than concatenating them** (`polygon-membership.md` §7.1). Both halves are the point of
+/// the nesting: a flat encoding with a separate offsets column would let a reader that ignored the
+/// offsets draw a chord from the end of one ring to the start of the next, silently and in the
+/// shape of a real boundary; and one list of rings would have a second part drawn as a hole.
 #[test]
-fn the_artifacts_frame_carries_a_hull_as_a_list_of_rings() {
-    let two_rings = vec![
-        vec![[1u32, 2], [3, 4], [5, 6]],
-        vec![[70, 80], [90, 100], [110, 120], [130, 140]],
+fn the_artifacts_frame_carries_a_shape_as_parts_of_rings() {
+    let two_parts = vec![
+        vec![
+            vec![[1u32, 2], [3, 4], [5, 6]],
+            vec![[70, 80], [90, 100], [110, 120], [130, 140]],
+        ],
+        vec![vec![[7, 1], [8, 1], [9, 2]]],
     ];
     let rows = vec![
         ArtifactRow {
             layer: "clusters/a",
             tessera_id: 7,
             masked_count: 12,
-            hull: Some(&two_rings),
+            shape: Some(&two_parts),
             ..Default::default()
         },
-        // A layer that declares no hull: null, and null is never *withheld*.
+        // A layer with no drawn geometry: null, and null is never *withheld*.
         ArtifactRow {
             layer: "clusters/a",
             tessera_id: 8,
             masked_count: 3,
-            hull: None,
+            shape: None,
             ..Default::default()
         },
     ];
@@ -322,29 +326,35 @@ fn the_artifacts_frame_carries_a_hull_as_a_list_of_rings() {
         .expect("decodes");
 
     // The schema says *rings*, so a decoder written against the single-ring shape stops here.
-    // And the two hull columns are the TRAILING columns — the only ones whose presence varies,
+    // And the two shape columns are the TRAILING columns — the only ones whose presence varies,
     // after every fixed-position column (`artifact-fetch-protocol.md` §8).
     let schema = batch.schema();
     let n = schema.fields().len();
-    assert_eq!(schema.field(n - 2).name(), "hull_x");
-    assert_eq!(schema.field(n - 1).name(), "hull_y");
-    for name in ["hull_x", "hull_y"] {
+    assert_eq!(schema.field(n - 2).name(), "shape_x");
+    assert_eq!(schema.field(n - 1).name(), "shape_y");
+    for name in ["shape_x", "shape_y"] {
         let field = schema.field_with_name(name).expect("column present");
-        let DataType::List(ring) = field.data_type() else {
+        let DataType::List(part) = field.data_type() else {
             panic!("{name} is not a list");
         };
+        let vertices = std::sync::Arc::new(arrow::datatypes::Field::new(
+            "item",
+            DataType::UInt32,
+            false,
+        ));
+        let ring = std::sync::Arc::new(arrow::datatypes::Field::new(
+            "item",
+            DataType::List(vertices),
+            false,
+        ));
         assert_eq!(
-            ring.data_type(),
-            &DataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
-                "item",
-                DataType::UInt32,
-                false
-            ))),
-            "{name} is a list of vertices, not a list of rings"
+            part.data_type(),
+            &DataType::List(ring),
+            "{name} is parts of rings of vertices, three lists deep"
         );
     }
 
-    let axis = |name: &str| -> Vec<Option<Vec<Vec<u32>>>> {
+    let axis = |name: &str| -> Vec<Option<Vec<Vec<Vec<u32>>>>> {
         let column = batch.column_by_name(name).unwrap();
         let outer = column
             .as_any()
@@ -353,35 +363,46 @@ fn the_artifacts_frame_carries_a_hull_as_a_list_of_rings() {
         (0..outer.len())
             .map(|i| {
                 outer.is_valid(i).then(|| {
-                    let rings = outer.value(i);
-                    let rings = rings
+                    let parts = outer.value(i);
+                    let parts = parts
                         .as_any()
                         .downcast_ref::<arrow::array::ListArray>()
-                        .expect("a hull column is a list of rings");
-                    (0..rings.len())
-                        .map(|r| {
-                            let v = rings.value(r);
-                            let v = v
+                        .expect("a shape column is a list of parts");
+                    (0..parts.len())
+                        .map(|p| {
+                            let rings = parts.value(p);
+                            let rings = rings
                                 .as_any()
-                                .downcast_ref::<arrow::array::UInt32Array>()
-                                .unwrap();
-                            (0..v.len()).map(|k| v.value(k)).collect()
+                                .downcast_ref::<arrow::array::ListArray>()
+                                .expect("a part is a list of rings");
+                            (0..rings.len())
+                                .map(|r| {
+                                    let v = rings.value(r);
+                                    let v = v
+                                        .as_any()
+                                        .downcast_ref::<arrow::array::UInt32Array>()
+                                        .unwrap();
+                                    (0..v.len()).map(|k| v.value(k)).collect()
+                                })
+                                .collect()
                         })
                         .collect()
                 })
             })
             .collect()
     };
-    let (xs, ys) = (axis("hull_x"), axis("hull_y"));
-    assert_eq!(xs[0], Some(vec![vec![1, 3, 5], vec![70, 90, 110, 130]]));
-    assert_eq!(ys[0], Some(vec![vec![2, 4, 6], vec![80, 100, 120, 140]]));
-    assert_eq!(xs[1], None, "an undeclared hull is null, not an empty list");
+    let (xs, ys) = (axis("shape_x"), axis("shape_y"));
+    // Part 0 is an outer with one hole; part 1 is a second outer — a hole and a second part are
+    // different things to a renderer, and the nesting keeps them apart.
+    assert_eq!(xs[0], Some(vec![vec![vec![1, 3, 5], vec![70, 90, 110, 130]], vec![vec![7, 8, 9]]]));
+    assert_eq!(ys[0], Some(vec![vec![vec![2, 4, 6], vec![80, 100, 120, 140]], vec![vec![1, 1, 2]]]));
+    assert_eq!(xs[1], None, "a layer with no drawn geometry is null, not an empty list");
     assert_eq!(ys[1], None);
 }
 
 /// **`matched` is nullable because null is a value**: an unfiltered request asked no question, and
 /// a `false` would answer one. Its position — last of the fixed columns, after `rung` — is
-/// contract: decoders index this batch positionally, and only the hull columns may trail it.
+/// contract: decoders index this batch positionally, and only the shape columns may trail it.
 #[test]
 fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
     let rows = vec![
@@ -465,7 +486,7 @@ fn layer_at(batch: &arrow::record_batch::RecordBatch, row: usize) -> String {
     values.value(column.key(row).expect("layer is never null")).to_string()
 }
 
-/// **The full frame's fixed columns sit at fixed positions and the hull columns trail** —
+/// **The full frame's fixed columns sit at fixed positions and the shape columns trail** —
 /// `artifact-fetch-protocol.md` §8's reordering. `layer` is dictionary-encoded and decodes to the
 /// layer names; `rung` is the renamed, re-meant `level` (§5.3) and is non-nullable.
 #[test]
@@ -518,7 +539,7 @@ fn the_artifacts_frame_fixes_its_column_order_and_dictionary_encodes_the_layer()
             "rung",
             "matched",
         ],
-        "no row carries a hull, so the two trailing hull columns are ABSENT from the schema"
+        "no row carries a shape, so the two trailing shape columns are ABSENT from the schema"
     );
     assert_eq!(layer_at(&batch, 0), "clusters/a");
     assert_eq!(layer_at(&batch, 1), "regions/b");
@@ -537,7 +558,7 @@ fn the_artifacts_frame_fixes_its_column_order_and_dictionary_encodes_the_layer()
 /// absent from the schema, never null, so decision 0076's null rule gains no third reading.
 #[test]
 fn the_identity_frame_is_four_columns_with_the_payload_absent_not_null() {
-    let hull = vec![vec![[1u32, 2], [3, 4], [5, 6]]];
+    let shape = vec![vec![vec![[1u32, 2], [3, 4], [5, 6]]]];
     let rows = vec![
         ArtifactRow {
             layer: "clusters/a",
@@ -545,7 +566,7 @@ fn the_identity_frame_is_four_columns_with_the_payload_absent_not_null() {
             masked_count: 12,
             rung: 2,
             matched: Some(true),
-            hull: Some(&hull),
+            shape: Some(&shape),
             ..Default::default()
         },
         ArtifactRow {
@@ -567,7 +588,7 @@ fn the_identity_frame_is_four_columns_with_the_payload_absent_not_null() {
     assert_eq!(
         names,
         vec!["layer", "tessera_id", "rung", "matched"],
-        "a hull on the row does not put a hull column in the identity schema"
+        "a shape on the row does not put a shape column in the identity schema"
     );
     assert_eq!(layer_at(&batch, 0), "clusters/a");
     assert_eq!(layer_at(&batch, 1), "regions/b");
@@ -613,7 +634,7 @@ fn artifact_frame_bytes_per_row_hold_the_measured_bounds() {
             masked_count: (i % 1000) as u64,
             centroid: Some([i as f64, (i * 2) as f64]),
             bbox: Some([i as u32, i as u32, i as u32 + 5, i as u32 + 5]),
-            hull: None,
+            shape: None,
             content: &content[i],
             parent_id: (i % 7 != 0).then_some((i / 7) as u64),
             rung: (i % 3) as u32,

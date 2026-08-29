@@ -120,6 +120,13 @@ pub struct LayerDisclosure {
     /// declared for a shape it does not carry, which holds no artifacts.
     pub membership: String,
     pub content: ContentDisclosure,
+    /// Which kind the layer's **one drawn geometry** is (`polygon-membership.md` §7.1): `derived`
+    /// — the hull over `membership ∩ M_auth`, per principal; `predicate` — the membership shape,
+    /// the same for every principal; `authored` — a supplied `polygon`, `circle` or `ellipse`
+    /// content, gated by that content's own requirement. Null where the layer draws none. A
+    /// disclosure fact because the three are gated differently, and a reviewer reading the kind
+    /// reads which gate the outline is behind.
+    pub shape: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,6 +266,7 @@ impl Disclosure {
                         .collect(),
                     withdraw_on_member_deletion: layer.content.withdraw_on_member_deletion,
                 },
+                shape: layer.drawn_shape().map(|k| k.name().to_string()),
             })
             .collect();
 

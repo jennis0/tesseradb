@@ -36,7 +36,8 @@ import {chrome, tokens} from './tokens.js';
  *
  * **Selection** (§5.11): `mode="box"`, or shift-drag in `pan`, draws a box; `mode="lasso"` draws
  * a freehand polygon. The highlight while dragging is the shape and nothing else (decision 0097),
- * and the settled shape goes to `store.select`, which counts it over the cells it meets.
+ * and the settled shape goes to `store.select`, which puts it on every request as the `region`
+ * leaf — the map narrows to it and its count is exact for the shape (`selection-operand.md`).
  *
  * **Colour by cluster** is `colour-by="cluster:<layer>"` (§5.10): the map owns the lookup texture
  * beside the slab, and the `palette` property chooses positional or spread (decision 0099).
@@ -58,7 +59,7 @@ export type MapProbe = {
   encoding: string;
   view: {depth: number; status: string; stale: boolean; visible: number; matched: number; served: number; provisional: number};
   /** `ms` is select-to-counted, the store's own clock: the settle, the request and the sum. */
-  region: {depth: number; tiles: number; exact: boolean; visible: number; matched: number; held: number; status: string; ms: number | null} | null;
+  region: {verdict: string; exact: boolean; visible: number | null; matched: number; held: number; status: string; ms: number | null} | null;
   timings: {
     /** Per settle: the slab sync, the wash bin, the lookup texture, the outlines, the labels and the whole layer build, last values in ms. */
     slabMs: number;
@@ -72,9 +73,9 @@ export type MapProbe = {
     /**
      * What the last paint drew of the artifacts: the **rings** the outline layer carries, the
      * **artifacts** they belong to — the hovered and the opened one, which is all that draws — and
-     * the labels placed. The first two are in different units because a hull is a list of rings
+     * the labels placed. The first two are in different units because a shape is a list of parts
      * (`artifact-shapes.md` §1): opening a cluster whose members are two separated clouds hands
-     * deck two rings and draws one hull. Neither counts what may be hovered, which is the frontier
+     * deck two parts and draws one shape. Neither counts what may be hovered, which is the frontier
      * and is held here rather than in the layer (`contours`).
      */
     outlines: number;
@@ -446,14 +447,24 @@ export class TesseraMap extends TesseraElement {
           this.regionPolygon = null;
           this.paint();
         }
+      } else if (region.shape.kind === 'lasso') {
+        if (region.shape !== this.regionShape) {
+          this.regionShape = region.shape;
+          this.regionWorld = null;
+          this.regionPolygon = region.shape.points.map(([x, y]) => dataToWorldXY(x, y, q));
+          this.paint();
+        }
       } else if (region.shape !== this.regionShape) {
+        // An artifact selection draws no shape of its own: the map narrows to its members, and
+        // the opened artifact's outline is the drawing (`polygon-membership.md` §8).
         this.regionShape = region.shape;
         this.regionWorld = null;
-        this.regionPolygon = region.shape.points.map(([x, y]) => dataToWorldXY(x, y, q));
+        this.regionPolygon = null;
         this.paint();
       }
       const ms = region.status === 'loading' ? null : (p.region?.ms ?? performance.now() - this.regionAskedAt);
-      p.region = {depth: region.depth, tiles: region.tiles, exact: region.visible.exact, visible: region.visible.value, matched: region.matched.value, held: region.held.count, status: region.status, ms};
+      const verdict = region.verdict === null ? 'pending' : region.verdict.exact ? 'exact' : `cover; depth=${region.verdict.depth}`;
+      p.region = {verdict, exact: region.matched.exact, visible: region.visible?.value ?? null, matched: region.matched.value, held: region.held.count, status: region.status, ms};
       if (region.status !== 'loading' && region !== this.regionAnnounced) {
         this.regionAnnounced = region;
         emit(this, 'tessera-selectchange', {
@@ -462,7 +473,7 @@ export class TesseraMap extends TesseraElement {
           visible: region.visible,
           matched: region.matched,
           served: region.served,
-          depth: region.depth
+          verdict: region.verdict
         });
       }
     } else if (!region && (this.regionWorld || this.regionPolygon)) {
@@ -629,18 +640,19 @@ export class TesseraMap extends TesseraElement {
 
   /**
    * The shapes a hover — and a click — is resolved against, held until the served set, the fetched
-   * hulls, the level or the roster move. They are the **served** rings and never the drawn curve:
+   * shapes, the level or the roster move. They are the **served** rings and never the drawn curve:
    * the curve is a smoothing, and an answer given against it would be about a line the wire never
-   * sent.
+   * sent. They answer *which artifact is under the pointer* and never whether a point is a member
+   * — that is the wire's membership column (`polygon-membership.md` §7.1).
    *
-   * **A shape here is the artifact's `box` until its hull arrives.** The viewport is asked for
-   * centroids and boxes, so at rest every candidate is a rectangle and the hover is coarser than
-   * it was: two clusters whose boxes overlap are separated by depth and by the mark under the
-   * pointer (`hoverAt`'s `prefer`), which is the wire's own membership and a better answer than
-   * geometry gave. The hull for whatever the hover lands on is fetched immediately, and the index
-   * is rebuilt around it when it lands.
+   * **A shape here is the artifact's `box` until its served shape arrives.** The viewport is asked
+   * for centroids and boxes, so at rest every candidate is a rectangle and the hover is coarser
+   * than it was: two clusters whose boxes overlap are separated by depth and by the mark under
+   * the pointer (`hoverAt`'s `prefer`), which is the wire's own membership and a better answer
+   * than geometry gave. The shape for whatever the hover lands on is fetched immediately, and the
+   * index is rebuilt around it when it lands.
    */
-  private contoursHeld: {served: object; hulls: object; level: number | null; meta: object | null; shapes: ContourShape[]} | null = null;
+  private contoursHeld: {served: object; fetched: object; level: number | null; meta: object | null; shapes: ContourShape[]} | null = null;
 
   private contours(): ContourShape[] {
     const s = this.resolvedStore;
@@ -649,9 +661,9 @@ export class TesseraMap extends TesseraElement {
     const meta = s?.get('meta') ?? null;
     const level = this.clusterLevel ?? null;
     const held = this.contoursHeld;
-    if (held && held.served === a.served && held.hulls === a.hulls && held.level === level && held.meta === meta) return held.shapes;
+    if (held && held.served === a.served && held.fetched === a.shapes && held.level === level && held.meta === meta) return held.shapes;
     const shapes = contourShapes(a, {level: level ?? undefined, meta});
-    this.contoursHeld = {served: a.served, hulls: a.hulls, level, meta, shapes};
+    this.contoursHeld = {served: a.served, fetched: a.shapes, level, meta, shapes};
     return shapes;
   }
 
@@ -693,14 +705,14 @@ export class TesseraMap extends TesseraElement {
     const at = slot ? this.slab.markAt(Number(slot[1]), info.index) : null;
     const artifacts = this.resolvedStore?.get('artifacts') ?? null;
     // The mark's own artifact, where there is one — a fact the wire carries, and the tie-break
-    // where two hulls interleave over the same ground.
+    // where two shapes interleave over the same ground.
     const own = at && artifacts ? artifactOfMark(at.band, at.i, artifacts, this.clusterLevel ?? undefined) : null;
     const world = this.worldAt(info.x, info.y);
     this.hoveredArtifact = world ? this.artifactAt(world, own) : null;
-    // **The shape is fetched where it is drawn.** The viewport carries no hull; this asks for the
+    // **The shape is fetched where it is drawn.** The viewport carries no shape; this asks for the
     // one the map is about to draw. Idempotent, so calling it on every pointer move costs one
     // request per artifact per principal and nothing thereafter.
-    if (this.hoveredArtifact !== null) this.resolvedStore?.needHull(this.hoveredArtifact);
+    if (this.hoveredArtifact !== null) this.resolvedStore?.needShape(this.hoveredArtifact);
     if (picked.kind !== 'mark') {
       if (this.hover) this.hover = null;
       return;
@@ -733,7 +745,7 @@ export class TesseraMap extends TesseraElement {
         this.lastPick = null;
         // The opened artifact draws its shape too, and the card's own request does not carry it
         // into the projection the map reads.
-        s?.needHull(picked.id);
+        s?.needShape(picked.id);
         void s?.openArtifact(picked.id);
         return;
       case 'mark':
@@ -755,7 +767,7 @@ export class TesseraMap extends TesseraElement {
           return;
         }
         this.lastPick = null;
-        s?.needHull(id);
+        s?.needShape(id);
         void s?.openArtifact(id);
         return;
       }

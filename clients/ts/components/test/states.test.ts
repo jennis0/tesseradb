@@ -105,7 +105,7 @@ describe('<tessera-status> renders every state through part="state"', () => {
 });
 
 describe('<tessera-selection> — a panel renders the states the same way', () => {
-  it('is detached with no region, counting while loading, refused as a refusal, and inexact when the cell exceeds a pixel', async () => {
+  it('is detached with no region, counting while loading, refused as a refusal, and inexact when the answer is a cover', async () => {
     const host = await mount('<tessera-selection></tessera-selection>');
     const store = fakeStore({status: status({}), view});
     const el = host.querySelector('tessera-selection')!;
@@ -115,25 +115,27 @@ describe('<tessera-selection> — a panel renders the states the same way', () =
 
     const held = {ids: BigUint64Array.from([1n, 2n]), positions: new Float32Array(4), count: 2};
     const shape = {kind: 'box' as const, bbox: [0, 0, 1, 1] as [number, number, number, number]};
-    store.set('region', {shape, status: 'loading', refusal: null, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, served: {shown: 2, total: 0, exact: false}, depth: 6, tiles: 100, held});
+    store.set('region', {shape, status: 'loading', refusal: null, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, served: {shown: 2, total: 0, exact: false}, verdict: null, held});
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('loading');
     expect(deepAll(host, '[part="count"]').length).toBe(0);
 
-    store.set('region', {shape, status: 'refused', refusal: {code: 'contract', detail: 'bad'}, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, served: {shown: 2, total: 0, exact: false}, depth: 6, tiles: 100, held});
+    store.set('region', {shape, status: 'refused', refusal: {code: 'contract', detail: 'bad'}, visible: {value: 0, exact: false}, matched: {value: 0, exact: false}, served: {shown: 2, total: 0, exact: false}, verdict: null, held});
     await settle(host);
     expect(deep(host, '[part="state"]')?.getAttribute('data-state')).toBe('refused');
     expect(deep(host, '[part="refusal"]')?.textContent).toContain('contract');
 
-    store.set('region', {shape, status: 'shown', refusal: null, visible: {value: 900, exact: false}, matched: {value: 800, exact: false}, served: {shown: 2, total: 800, exact: true}, depth: 6, tiles: 100, held});
+    store.set('region', {shape, status: 'shown', refusal: null, visible: {value: 900, exact: false}, matched: {value: 800, exact: false}, served: {shown: 2, total: 800, exact: true}, verdict: {exact: false, depth: 6}, held});
     await settle(host);
     const counts = deepAll(host, '[part="count"]');
     expect(counts.map((c) => c.textContent)).toEqual(['2', '≈ 800', '≈ 900']);
     expect(counts[0]!.getAttribute('data-total')).toBe('800');
     expect(counts[1]!.getAttribute('data-exact')).toBe('false');
     expect(deepAll(host, '[part="item"]').length).toBe(2);
+    // Two verbs wait on the server (export, save); *filter to this* is the selection itself, and
+    // the outside toggle is live.
     const greyed = deepAll(host, '[part="action"][disabled]');
-    expect(greyed.length).toBe(3);
+    expect(greyed.length).toBe(2);
     expect(greyed.every((b) => (b.getAttribute('title') ?? '').length > 0)).toBe(true);
   });
 });

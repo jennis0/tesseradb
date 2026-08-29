@@ -26,16 +26,18 @@ use common::*;
 const DEV_ORIGIN: &str = "http://localhost:5173";
 const PRODUCTION_ORIGIN: &str = "https://app.example";
 
-/// The six response headers a browser client must be able to read: the delta-serving coordinates
-/// it keys and revalidates a replica by (`delta-serving.md` §2), the stamp it echoes, and the two
-/// timings the stats panel shows.
-const EXPOSED: [&str; 6] = [
+/// The seven response headers a browser client must be able to read: the delta-serving
+/// coordinates it keys and revalidates a replica by (`delta-serving.md` §2), the stamp it echoes,
+/// the two timings the stats panel shows, and the region leaf's verdict (`selection-operand.md`
+/// §6), without which every region count renders inexact.
+const EXPOSED: [&str; 7] = [
     "etag",
     "x-tessera-identity-key",
     "x-tessera-stale",
     "x-tessera-pin",
     "x-tessera-server-us",
     "x-tessera-admission-us",
+    "x-tessera-region",
 ];
 
 /// Build a bundle and serve it, with the CORS lists as given.

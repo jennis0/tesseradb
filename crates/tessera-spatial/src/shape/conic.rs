@@ -138,18 +138,25 @@ impl Conic {
     /// A ring around the conic with no chord further than `tolerance` grid units from the curve,
     /// at most `budget` vertices, anticlockwise from the major axis.
     pub fn ring(&self, tolerance: u32, budget: usize) -> Vec<GridPoint> {
+        self.ring_guarded(tolerance, budget).0
+    }
+
+    /// [`Conic::ring`], and whether the budget held the vertex count below what the tolerance
+    /// asked for — the guard of `polygon-membership.md` §7.2, fired for a curve as for a polygon.
+    pub fn ring_guarded(&self, tolerance: u32, budget: usize) -> (Vec<GridPoint>, bool) {
         let (major, minor, angle) = self.axes();
         let tol = f64::from(tolerance);
         // Sagitta of a chord subtending 2π/n on a circle of radius R is R(1 − cos(π/n)).
-        let n = if major <= tol {
+        let wanted = if major <= tol {
             8.0
         } else {
             (std::f64::consts::PI / (1.0 - tol / major).acos()).ceil()
         };
-        let n = (n as usize).clamp(8, budget.max(8));
+        let guarded = wanted > budget.max(8) as f64;
+        let n = (wanted as usize).clamp(8, budget.max(8));
         let (s, c) = angle.sin_cos();
         let clamp = |v: f64| v.round().clamp(0.0, u32::MAX as f64) as u32;
-        (0..n)
+        let ring: Vec<GridPoint> = (0..n)
             .map(|k| {
                 let t = 2.0 * std::f64::consts::PI * k as f64 / n as f64;
                 let (u, v) = (major * t.cos(), minor * t.sin());
@@ -157,7 +164,8 @@ impl Conic {
                 let y = f64::from(self.cy) + s * u + c * v;
                 (clamp(x), clamp(y))
             })
-            .collect()
+            .collect();
+        (ring, guarded)
     }
 }
 

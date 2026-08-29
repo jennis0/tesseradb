@@ -67,8 +67,8 @@ const servedArtifacts = () =>
       parent: x.parentId === null ? null : String(x.parentId),
       layer: x.layer,
       count: Number(x.maskedCount),
-      rings: (x.hull ?? []).filter((r) => r.length >= 3).map((r) => r.map(([px, py]) => [px / G, py / G])),
-      vertices: (x.hull ?? []).reduce((n, r) => n + r.length, 0)
+      rings: (x.shape ?? []).flat().filter((r) => r.length >= 3).map((r) => r.map(([px, py]) => [px / G, py / G])),
+      vertices: (x.shape ?? []).flat().reduce((n, r) => n + r.length, 0)
     }));
   });
 

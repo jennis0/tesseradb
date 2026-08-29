@@ -533,6 +533,10 @@ pub struct AppState {
     pub max_category_values: usize,
     /// The publication vertex cap a shape is held to. See `Config::max_shape_vertices`.
     pub max_shape_vertices: u64,
+    /// A `region` leaf's vertex cap. See `Config::max_region_vertices`.
+    pub max_region_vertices: u64,
+    /// A `region` leaf's boundary-cell budget, published beside it. See `Config::max_region_cells`.
+    pub max_region_cells: usize,
     /// The viewer/session admission gate. Never touched by the control plane.
     pub compute_gate: ComputeGate,
     /// The control plane's own admission bound. Deliberately **not** `compute_gate`: an ingest

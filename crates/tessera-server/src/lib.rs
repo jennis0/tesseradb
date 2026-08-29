@@ -280,6 +280,10 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
     // gives: it exists for a deployment that has a row-major layer at all, which is a property of
     // the corpus rather than of the box.
     engine.set_masked_count_cache_bytes(config.masked_count_cache_bytes);
+    // The region leaf's two knobs (selection-operand §2, §6): the cell budget the descent stops
+    // at, and the bound on the decompositions held across principals.
+    engine.set_max_region_cells(config.max_region_cells);
+    engine.set_region_cache_bytes(config.region_cache_bytes);
     // `single_flight_wait_ms`' consumer — how long a request parks on another request's
     // row-projection build before it is shed (decision 0058).
     engine.set_single_flight_wait_ms(config.single_flight_wait_ms);
@@ -308,6 +312,8 @@ pub fn prepare(config_path: &Path) -> Result<Prepared, BoxError> {
         max_k: config.max_k,
         max_category_values: config.max_category_values,
         max_shape_vertices: config.max_shape_vertices,
+        max_region_vertices: config.max_region_vertices,
+        max_region_cells: config.max_region_cells,
         // Gates only /v1/viewport, /v1/items and /session/authorise (each handler wraps its own
         // closure); never the control plane, and never /healthz, /readyz, /meta or /revoke — the
         // probes are deliberately off the control plane and outside every gate

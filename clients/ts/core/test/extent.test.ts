@@ -22,7 +22,7 @@ const META: Meta = {
   quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200},
   declaredScalars: [],
   layers: [{name: 'clusters/a', title: 'a', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid', 'box'], suppliedContent: [], depsOn: [], version: 1}],
-  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000},
+  selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
   maxTilesPerRequest: 4096,
   filterOperands: []
 };
@@ -35,7 +35,7 @@ const FAR: Artifact = {
   maskedCount: 10n,
   centroid: [GRID32 * 0.875, GRID32 * 0.875],
   box: [GRID32 * 0.75, GRID32 * 0.75, GRID32 - 1, GRID32 - 1],
-  hull: null,
+  shape: null,
   content: [],
   parentId: null,
   rung: 0
@@ -150,11 +150,11 @@ describe('extentOf reads the wire box in 32-bit grid units, as the outlines do',
     for (const v of extent) expect(v).toBeLessThanOrEqual(200);
 
     // The same box, as the outline draws it: world units, one conversion for both readers. With no
-    // hull the outline is the box, which is one ring — `extentOf` reads the served `box` whatever
-    // the hull is, so nothing here moved when the hull became a list of rings.
+    // shape the outline is the box, which is one part of one ring — `extentOf` reads the served
+    // `box` whatever the shape is, so nothing here moved when the shape became parts of rings.
     const shape = outlineOf(FAR)!;
-    expect([shape.source, shape.rings.length]).toEqual(['box', 1]);
-    const outline = shape.rings[0]!;
+    expect([shape.source, shape.parts.length]).toEqual(['box', 1]);
+    const outline = shape.parts[0]![0]!;
     expect(outline[0]).toEqual([gridToWorld(FAR.box![0]), gridToWorld(FAR.box![1])]);
     expect(outline[0]![0]).toBeCloseTo(WORLD_SIZE * 0.75, 6);
     const [wx0, wy0] = outline[0]!;

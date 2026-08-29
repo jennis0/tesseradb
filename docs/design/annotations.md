@@ -939,11 +939,11 @@ The same circle may instead be declared as the layer's **membership** — `membe
 with `shape.kind = "circle"` — and then it says *every point within r of the centre*, which is not
 k-means: which field the row puts the shape in decides the gate, and a membership shape is served
 under the artifact's own verdict alone, so declaring one is declaring it corpus-independent
-([`polygon-membership.md`](polygon-membership.md) §4.1, ruling (h)). ⊘ **Specified, not
-implemented:** `[[layer.content.supplied]]` does not yet take `type = "circle" | "ellipse"`, and a
-supplied `polygon` is still carried as an opaque string rather than read, canonicalised and served
-as a membership shape is — the design's stage 2 lists the three content kinds and this half of it
-is not built. A circle as *content* is today a string the client interprets.
+([`polygon-membership.md`](polygon-membership.md) §4.1, ruling (h)). `[[layer.content.supplied]]`
+takes `type = "polygon" | "circle" | "ellipse"`, read at publication as a membership shape is and
+served as the layer's **authored** drawn geometry through the same `shape_x`/`shape_y` columns
+(`polygon-membership.md` §7.1); the content slot itself is served blank, and a layer declares at
+most one drawn geometry — a supplied circle beside a computed `hull` is refused.
 
 ### 8.7 Terms as artifacts — a case the model was not designed for
 

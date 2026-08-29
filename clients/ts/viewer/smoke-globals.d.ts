@@ -21,6 +21,8 @@ interface Window {
      */
     timings: {outlines: number; outlinesDrawn: number; labels: number};
     cluster: {layersOn: string[]; servedIds: string[]};
+    /** The selected region: the wire's verdict, its count and whether it is typed exact (`map.ts`). */
+    region: {verdict: string; exact: boolean; visible: number | null; matched: number; held: number; status: string; ms: number | null} | null;
     /** The demo's instrument numbers, which the §4 surface omits and the demo publishes. */
     instruments?: {depth: number; tiles: number; predictedMarks: number; source: string; limitedBy: string; bytes: number};
   };

@@ -60,8 +60,8 @@ Read this section for the state; the tables below for what each step owes and wh
   never sent `filters`, so 0104's bit had never reached it; and a locally serving channel now
   receives the point path's content key so rule 7 can fire. The scattered corpus that would
   measure any of it still does not exist.
-- **What is not built** is in the server-tracks table: the selection operand and its verbs (S6,
-  designed and reviewed, not built), the fetch-model hint (S5, declined), predicate membership for
+- **What is not built** is in the server-tracks table: the selection operand's two verbs (S6 —
+  the operand itself and *filter to this* were built 2026-08-29; export and save were not), the fetch-model hint (S5, declined), predicate membership for
   k-means (S8, deferred), a per-branch cut (S9, closed as not a defect), and — until 2026-08-28 — the tiered layer's
   `level` on the wire (S10, now built). The design is at **r5**, with what the building changed in its
   Appendix R; the owner's rulings are decisions 0095–0102.
@@ -101,7 +101,7 @@ client steps can see what they wait on):
 | S3 | D12 — the per-point membership column, deepest served, with its leak-register pass | step 3's colouring | **built** on `server/s3-membership` (2026-08-25): `membership:<layer>` per served layer, nullable `u64`, after the scalars; both layouts; measured; the register row (C30) was **proposed** in [the memo](evidence/memos/2026-08-25-d12-membership-column.md) and **is not taken** — Appendix C's preamble names this column as the specimen of the ratchet and its inclusion test excludes data the service serves (owner direction 2026-08-26) |
 | S4 | D13 — a dependent artifact's target | label counts | **ruled and built** on `server/s3-membership` (2026-08-25): not the target's id — a dependent carries its target's masked count; register note proposed in S3's memo; the drill-down route left for a ruling |
 | S5 | D8 — the fetch-model hint in `/v1/meta` | nothing; the store observes | **not pursued** (owner, 2026-08-25). A hint cannot be the artifact cardinality — that is a corpus-wide count over objects the principal may not individually see (C8) — and a bucketed form still leaks an inequality about it. The store picks its fetch model by observation, which is what it does today |
-| S6 | D11 — the selection operand; the export verb; the runtime-artifact path | *filter to this*, *export*, *save* | **approach ruled 2026-08-26**: the server intersects the shape with the Morton cell structure — interior cells are whole ranges and cost containers touched, boundary cells take a per-point in/out test, so cost follows the perimeter — and the result composes as one filter operand — so *filter to this* needs no second mechanism — and is resolved in **row space**, not entity space: `probes/2026-08-11-viewport-crossing/` measured a Morton-cell→entity structure as the slowest of three routes by 4–400× and larger than the `row_to_entity` array it emulates, because entity ids are assigned in permission-signature order and a cell's entities scatter (the controller's earlier wording said entity space and is corrected here). The boundary test makes the count **exact** for the drawn shape, which the client's cell cover cannot be; past a decomposition cap it falls back to the cover and marks the answer inexact. Touches the filter contract (§8.2), so it wants its own design and review. **Designed and reviewed 2026-08-26** — [`design/selection-operand.md`](design/selection-operand.md), Provisional, one adversarial review dispositioned in its Appendix R. The decomposition, the depth-16 floor the grid imposes, the cover fallback past a published perimeter budget, the cache key, and the argument that **no leak-register row follows**. It leaves three rulings, the first being that the design specifies the result in **row space** rather than entity space: a per-Morton-cell entity set is scattered in entity space and was measured and refuted in `probes/2026-08-11-viewport-crossing/`, which would invert the O(containers touched) interior this ruling asked for. No code |
+| S6 | D11 — the selection operand; the export verb; the runtime-artifact path | *filter to this*, *export*, *save* | **approach ruled 2026-08-26**: the server intersects the shape with the Morton cell structure — interior cells are whole ranges and cost containers touched, boundary cells take a per-point in/out test, so cost follows the perimeter — and the result composes as one filter operand — so *filter to this* needs no second mechanism — and is resolved in **row space**, not entity space: `probes/2026-08-11-viewport-crossing/` measured a Morton-cell→entity structure as the slowest of three routes by 4–400× and larger than the `row_to_entity` array it emulates, because entity ids are assigned in permission-signature order and a cell's entities scatter (the controller's earlier wording said entity space and is corrected here). The boundary test makes the count **exact** for the drawn shape, which the client's cell cover cannot be; past a decomposition cap it falls back to the cover and marks the answer inexact. Touches the filter contract (§8.2), so it wants its own design and review. **Designed and reviewed 2026-08-26** — [`design/selection-operand.md`](design/selection-operand.md), Provisional, one adversarial review dispositioned in its Appendix R. The decomposition, the depth-16 floor the grid imposes, the cover fallback past a published perimeter budget, the cache key, and the argument that **no leak-register row follows**. It leaves three rulings, the first being that the design specifies the result in **row space** rather than entity space: a per-Morton-cell entity set is scattered in entity space and was measured and refuted in `probes/2026-08-11-viewport-crossing/`, which would invert the O(containers touched) interior this ruling asked for. No code **Built 2026-08-29** as the shape work's stage 4 (`artifacts/shape-region`; `artifact-delivery.md` row 10): the operand and *filter to this*, with *outside this* beside it; `selection-operand.md` promoted to Normative r2. The export verb and the runtime-artifact path stay unbuilt. |
 | S7 | D14 — a verified-assertion auth plugin | C1's production token story | **not pursued** (owner, 2026-08-26). The C1 example keeps the paragraph describing what `builtin:passthrough` makes the host's server; it no longer points at an unplanned plugin |
 | S8 | membership by predicate — a k-means layer whose membership is *nearest model centroid*, so every point is a member and colour covers the corpus (artifact-system §10's specified-not-built path) | k-means colouring beyond the sampled members | **deferred** by the owner 2026-08-25; a client-side Voronoi over served centroids was declined the same day — it would bake a classification into our client that the wire does not carry, so a C2/C3 client would draw a different map; decision 0099 stands |
 **The notebook corpus is the demo's fifth dataset** (2026-08-26, track `corpus`): `data/notebook/`'s
@@ -149,6 +149,29 @@ covered against those same real bytes, and the ring decode against bodies
 `core/test/hull.test.ts` builds — two levels, the degenerate one- and two-vertex rings, a null
 hull, and the four disagreements the axes can carry. `clients/ts/README.md`'s fixture rule is
 outside the track's allowlist and was not amended; it should say the artifact goldens are pre-r40.
+
+**The shape-wire track** (2026-08-29; `polygon-membership.md` §7, stage 3 of the shape work,
+whose status record is [`artifact-delivery.md`](artifact-delivery.md) row 10). The client side of
+the owner's one-drawn-geometry ruling: `Artifact.shape` and `ArtifactDetail.shape` are parts of
+rings of vertices, decoded from `shape_x`/`shape_y` three levels deep with the axes checked at
+every level and a body carrying `hull_x`/`hull_y` refused by name; `Meta.layers[].shape` carries
+the kind; `TesseraStore.needShape` replaces `needHull`, asks at the view's zoom, and keeps a
+predicate or an authored shape across a change of principal while dropping a derived one;
+`outlineOf` returns parts and `focusOutlines` hands each part to the `PolygonLayer` as a polygon
+with holes, smoothing the derived kind only; `contourShapes`/`shapeContains` pick by even-odd over
+each part so a pointer in a hole is outside; the card shows the kind and *Filter to this* greyed
+until the region leaf; `insidePolygon` states the lasso's tie-rule obligation. The `hull.test.ts`
+decoder tests became `shape.test.ts`. **The golden captures are still the r44 ones** — the
+`ringsclient` note above stands, one revision on: `viewport-artifacts.bin` and
+`viewport-membership.bin` carry `hull_x`/`hull_y` as a list of rings, the decoder now refuses those
+names outright, and the tests strip the old columns (`core/test/old-shape-columns.ts`) to keep
+the row-set and membership claims against real bytes; the two captured-body geometry claims are
+made against hand-assembled r45 bodies instead. A recapture against a served corpus
+(`scripts/capture-golden.mjs --artifacts-only`) restores them — the Overture one-part server the
+evidence was shot against would do, and was not used for it because the notebook corpus's
+`clusters/hdbscan` is what the capture and its worked decodes are documented against. Evidence:
+`clients/ts/viewer/smoke-shapes.mjs`, shots and note under
+[`evidence/screenshots/2026-08-29-shape-wire/`](evidence/screenshots/2026-08-29-shape-wire/README.md).
 
 **Step 4's notes** (2026-08-25). The plain-HTML example's app server is the claim-minting proxy
 under `builtin:passthrough` and its README says so where a C1 developer reads it (design §5.3);

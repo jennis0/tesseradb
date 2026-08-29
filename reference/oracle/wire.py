@@ -9,9 +9,9 @@ every payload a complete Arrow IPC stream (JSON for the trailer):
     kind 5  artifacts  (layer dict<u16,utf8>, tessera_id,  at most one, after tiles and before
                         key, masked_count, the derived           any points; absent when none served
                         geometry, content, parent_id,
-                        rung, matched — then hull_x/hull_y,
+                        rung, matched — then shape_x/shape_y,
                         in the schema only when a served
-                        layer declares a hull; §3.2 r44)
+                        row carries a drawn geometry; §3.2 r45)
 
 Mirrors `crates/tessera-server/tests/common/mod.rs`'s `decode_viewport_frames` byte-for-byte,
 independently implemented in Python (this is the client-side decode any real SDK would need, not
@@ -50,9 +50,13 @@ class Artifact(NamedTuple):
     masked_count: int
     centroid: tuple[float, float] | None
     box: tuple[int, int, int, int] | None
-    #: One entry per ring — a membership that is several separated clouds is several rings
-    #: (`artifact-shapes.md`; the wire's `hull_x`/`hull_y` are `list<list<uint32>>`).
-    hull: list[list[tuple[int, int]]] | None
+    #: The artifact's one drawn geometry, of the kind its layer declared (contracts §3.2 r45,
+    #: `polygon-membership.md` §7.1): parts, then rings, then `(x, y)` vertices. A part's first
+    #: ring is its outer and the rest are holes; two parts are two shapes, never a shape with a
+    #: gap. A derived hull is one part per α-group with no holes, so a membership that is several
+    #: separated clouds is several parts. The wire's `shape_x`/`shape_y` are
+    #: `list<list<list<uint32>>>`, one column per axis, and the two agree at every level.
+    shape: list[list[list[tuple[int, int]]]] | None
     #: One content, entire, positional to the layer's declared kinds. Empty means the layer
     #: declares no supplied content — never that content was withheld.
     content: list[str]
@@ -105,6 +109,27 @@ def split_frames(data: bytes) -> list[tuple[int, bytes]]:
         frames.append((kind, data[start:end]))
         at = end
     return frames
+
+
+def _zip_shape(sx, sy):
+    """Parts → rings → `(x, y)`, refusing the two axes disagreeing at any level.
+
+    Contracts §3.2 r45: the axes carry the same structure by construction and a decoder checks
+    it rather than assumes it — `zip` would silently truncate to the shorter side.
+    """
+    if len(sx) != len(sy):
+        raise ValueError("shape axes disagree on the number of parts")
+    parts = []
+    for px, py in zip(sx, sy):
+        if px is None or py is None or len(px) != len(py):
+            raise ValueError("shape axes disagree on the number of rings in a part")
+        rings = []
+        for rx, ry in zip(px, py):
+            if rx is None or ry is None or len(rx) != len(ry):
+                raise ValueError("shape axes disagree on the number of vertices in a ring")
+            rings.append(list(zip(rx, ry)))
+        parts.append(rings)
+    return parts
 
 
 def _batches(payload: bytes):
@@ -180,18 +205,20 @@ def decode_frames(data: bytes):
                 # design, so there is nothing here to reconcile against a corpus-wide figure.
                 #
                 # The geometry columns carry the same warning in a shape that hides it better: a
-                # centroid or a hull is computed over `membership ∩ M_auth`, so two principals
-                # legitimately disagree about the same `tessera_id` here too, and neither shape is
-                # the artifact's. A `None` is *this layer declares no such property* — never
-                # *withheld*, since an artifact whose content could not be served is absent whole.
-                # `layer` is dictionary-encoded (contracts §3.2 r44); `to_pylist` resolves the
-                # keys to their utf8 values, so the encoding is invisible from here on. The two
-                # hull columns TRAIL the fixed columns and are absent from the schema entirely
-                # when no served layer declares a hull — an absent column is distinguishable from
-                # a null one, so 0076's null rule gains no third reading.
+                # centroid or a derived hull is computed over `membership ∩ M_auth`, so two
+                # principals legitimately disagree about the same `tessera_id` here too, and
+                # neither shape is the artifact's (a predicate or authored shape agrees across
+                # principals, but this reader does not know the kind and must not assume it). A
+                # `None` is *this layer declares no such property* — never *withheld*, since an
+                # artifact whose content could not be served is absent whole. `layer` is
+                # dictionary-encoded (contracts §3.2 r44); `to_pylist` resolves the keys to their
+                # utf8 values, so the encoding is invisible from here on. The two shape columns
+                # TRAIL the fixed columns and are absent from the schema entirely when no served
+                # row carries a drawn geometry (§3.2 r45) — an absent column is distinguishable
+                # from a null one, so 0076's null rule gains no third reading.
                 names = set(batch.schema.names)
-                if ("hull_x" in names) != ("hull_y" in names):
-                    raise ValueError("a hull with one axis column and not the other")
+                if ("shape_x" in names) != ("shape_y" in names):
+                    raise ValueError("a shape with one axis column and not the other")
                 columns = {
                     name: batch.column(name).to_pylist()
                     for name in (
@@ -209,16 +236,16 @@ def decode_frames(data: bytes):
                         "rung",
                     )
                 }
-                hulls = "hull_x" in names
-                hull_x = batch.column("hull_x").to_pylist() if hulls else None
-                hull_y = batch.column("hull_y").to_pylist() if hulls else None
+                shapes = "shape_x" in names
+                shape_x = batch.column("shape_x").to_pylist() if shapes else None
+                shape_y = batch.column("shape_y").to_pylist() if shapes else None
                 for row in range(batch.num_rows):
                     cx = columns["centroid_x"][row]
                     bx = columns["box_min_x"][row]
-                    hx = hull_x[row] if hulls else None
-                    hy = hull_y[row] if hulls else None
-                    if (hx is None) != (hy is None):
-                        raise ValueError("a hull with one axis and not the other")
+                    sx = shape_x[row] if shapes else None
+                    sy = shape_y[row] if shapes else None
+                    if (sx is None) != (sy is None):
+                        raise ValueError("a shape with one axis and not the other")
                     artifacts.append(
                         Artifact(
                             layer=columns["layer"][row],
@@ -238,9 +265,7 @@ def decode_frames(data: bytes):
                                     columns["box_max_y"][row],
                                 )
                             ),
-                            hull=None
-                            if hx is None
-                            else [list(zip(rx, ry)) for rx, ry in zip(hx, hy)],
+                            shape=None if sx is None else _zip_shape(sx, sy),
                             content=list(columns["content"][row] or []),
                             rung=columns["rung"][row],
                         )

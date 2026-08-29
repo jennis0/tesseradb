@@ -558,7 +558,7 @@ fn a_drill_down_agrees_with_the_viewport_under_either_layout() {
                 // ⊘ A cold drill-down on a row-major level pays the level's whole histogram; this
                 // is where that is exercised as well as asserted.
                 let alone = engine
-                    .artifact(&session, artifact.tessera_id, Some(idset), "s0")
+                    .artifact(&session, artifact.tessera_id, Some(idset), "s0", None)
                     .expect("the identifier resolves")
                     .expect("and the artifact is served to the viewer the viewport served it to");
                 assert_eq!(

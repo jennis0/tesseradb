@@ -75,14 +75,22 @@ enough for seven rungs and not for two.
 fault is a network round trip). Nor can `/mnt/d` or `/mnt/e`: they are **9p** filesystems, and a
 build or a serve over 9p measures 9p.
 
-**Create a second ext4 volume on the D: drive, which has 745 GB free**, as a VHDX attached to WSL
-with `wsl --mount --vhd`. That gives a real block device with real `mmap` and real page-cache
-behaviour — the properties every measurement in this corpus depends on — on spare capacity that is
-already there. A 400 GB volume clears both 10⁹ rungs with room for the transient.
+**Create a second ext4 volume**, as a VHDX attached to WSL with `wsl --mount --vhd`. That gives a
+real block device with real `mmap` and real page-cache behaviour — the properties every measurement
+in this corpus depends on. A 400 GB volume clears both 10⁹ rungs with room for the transient.
 
-⊘ **Unverified:** that `wsl --mount --vhd` on this Windows build attaches a VHDX stored on D: and
-that the resulting device sustains local-NVMe-like throughput. Measure it exactly as the share was
-measured before any figure is taken against it, and record the medium in every figure after.
+⚠ **Corrected 2026-08-29: not on D:, and the drive this memo named cannot carry it.** The media
+were read after rung 2 and they are not interchangeable. D: is a **WDC WD20EZRX, a spinning disk**,
+with 744 GB free; C: is a Samsung 980 PRO NVMe with 29 GB free; E: is a WD_BLACK SN850X NVMe with
+115 GB free. A bundle served from a VHDX on D: would answer every page fault with a seek, which is
+the same class of error as serving from the share and for the same reason — the medium, not the
+filesystem. **The capacity is on the HDD and the speed is on E:, and no volume on this box has
+both**; 115 GB does not reach a 10⁹ rung. This is an open constraint on the ladder rather than a
+choice this memo can make, and it is the owner's.
+
+⊘ **Still unverified:** that `wsl --mount --vhd` on this Windows build attaches a VHDX at all, and
+what the resulting device sustains. Measure it exactly as the share was measured before any figure
+is taken against it, and record the medium in every figure after.
 
 ## 5. Cleanup — what may go, what may not
 

@@ -693,7 +693,7 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     // The layer declares `centroid` and `hull`, so both arrive and `box` does not.
     let (b, n) = (&broad[0], &narrow[0]);
     let (bc, nc) = (b.centroid.expect("declared"), n.centroid.expect("declared"));
-    assert!(b.hull.is_some() && n.hull.is_some(), "hull is declared");
+    assert!(b.shape.is_some() && n.shape.is_some(), "hull is declared");
     assert!(b.bbox.is_none() && n.bbox.is_none(), "box is not");
 
     assert!(
@@ -703,11 +703,11 @@ async fn the_artifacts_frame_carries_geometry_computed_for_the_asking_principal(
     );
     // The narrow principal's hull is inside the broad one's bounds: they see a subset of the
     // members, so their hull cannot reach further out than the full one.
-    let broad_hull = b.hull.as_ref().unwrap();
-    let narrow_hull = n.hull.as_ref().unwrap();
-    // Over every ring, because a hull is a list of them.
-    let bounds = |h: &Vec<Vec<[u32; 2]>>| {
-        let v = || h.iter().flatten();
+    let broad_hull = b.shape.as_ref().unwrap();
+    let narrow_hull = n.shape.as_ref().unwrap();
+    // Over every ring of every part, because a hull is a list of them.
+    let bounds = |h: &Vec<Vec<Vec<[u32; 2]>>>| {
+        let v = || h.iter().flatten().flatten();
         [
             v().map(|p| p[0]).min().unwrap(),
             v().map(|p| p[1]).min().unwrap(),
@@ -907,13 +907,13 @@ async fn a_named_computed_set_narrows_what_the_frame_carries() {
 
     let all = computed_row(&server, json!({})).await;
     assert!(
-        all.centroid.is_some() && all.hull.is_some(),
+        all.centroid.is_some() && all.shape.is_some(),
         "absent is the declaration's own set"
     );
 
     let narrowed = computed_row(&server, json!({ "computed": ["centroid"] })).await;
     assert!(narrowed.centroid.is_some(), "asked for");
-    assert!(narrowed.hull.is_none(), "not asked for");
+    assert!(narrowed.shape.is_none(), "not asked for");
     assert_eq!(
         narrowed.tessera_id, all.tessera_id,
         "the same artifact is served either way — only what is said about it moved"
@@ -938,7 +938,7 @@ async fn naming_an_undeclared_property_serves_it_no_more_than_omitting_it() {
         "the layer declares no box; naming it adds none"
     );
     assert!(row.centroid.is_some());
-    assert!(row.hull.is_none());
+    assert!(row.shape.is_none());
 }
 
 /// **The empty list is none** — counts and no geometry, and the frame is still served, because a
@@ -950,7 +950,7 @@ async fn an_empty_computed_list_is_counts_and_no_geometry() {
     one_cluster(&server).await;
 
     let row = computed_row(&server, json!({ "computed": [] })).await;
-    assert!(row.centroid.is_none() && row.bbox.is_none() && row.hull.is_none());
+    assert!(row.centroid.is_none() && row.bbox.is_none() && row.shape.is_none());
     assert!(
         row.masked_count > 0,
         "the artifact is still served, and counted"
@@ -996,13 +996,13 @@ async fn the_drill_down_still_carries_the_hull_the_viewport_was_not_asked_for() 
     one_cluster(&server).await;
 
     let row = computed_row(&server, json!({ "computed": ["centroid"] })).await;
-    assert!(row.hull.is_none());
+    assert!(row.shape.is_none());
 
     let (status, body) = drill(&server, &["0"], &row.tessera_id.to_string()).await;
     assert_eq!(status, 200, "{body}");
-    let rings = body["hull"]
+    let rings = body["shape"]
         .as_array()
-        .expect("the drill-down serves the hull");
+        .expect("the drill-down serves the shape");
     assert!(!rings.is_empty());
 }
 
@@ -1109,7 +1109,7 @@ async fn identity_rows_are_the_full_rows_with_the_payload_columns_absent() {
 /// **The hull columns trail, and only when a served layer declares a hull** — an absent column is
 /// distinguishable from a null one, so decision 0076's null rule gains no third reading.
 #[tokio::test]
-async fn the_hull_columns_trail_and_are_absent_when_no_served_layer_declares_one() {
+async fn the_shape_columns_trail_and_are_absent_when_no_served_layer_declares_one() {
     let tmp = TempDir::new().unwrap();
     let server = serve(&tmp).await;
     // `plant_three_levels`' layer declares `centroid` alone: no hull columns at all.
@@ -1125,7 +1125,7 @@ async fn the_hull_columns_trail_and_are_absent_when_no_served_layer_declares_one
         Some("matched"),
         "no served layer declares a hull, so the schema ends at the fixed prefix: {names:?}"
     );
-    assert!(!names.iter().any(|n| n.starts_with("hull_")));
+    assert!(!names.iter().any(|n| n.starts_with("shape_")));
 
     // The default `declaration` computes a hull, so serving it puts the two columns at the tail.
     let mut d = declaration("clusters/hulled", None);
@@ -1149,11 +1149,11 @@ async fn the_hull_columns_trail_and_are_absent_when_no_served_layer_declares_one
     let names = artifact_schema_names(&with).unwrap();
     assert_eq!(
         &names[names.len() - 2..],
-        ["hull_x".to_string(), "hull_y".to_string()],
+        ["shape_x".to_string(), "shape_y".to_string()],
         "a served hull-declaring layer puts the two columns at the tail: {names:?}"
     );
     let rows = decode_viewport_frames(&with).artifacts.unwrap();
-    assert!(rows[0].hull.is_some(), "and the row carries its rings");
+    assert!(rows[0].shape.is_some(), "and the row carries its rings");
 }
 
 /// **Any other `artifact_rows` spelling is a 422**, the shape `levels` and `layers` take: a stray
@@ -1164,4 +1164,197 @@ async fn an_artifact_rows_value_that_is_neither_full_nor_identity_is_refused() {
     let server = serve(&tmp).await;
     let resp = viewport_response(&server, &["0"], json!({ "artifact_rows": "bits" })).await;
     assert_eq!(resp.status().as_u16(), 422);
+}
+
+// ---------------------------------------------------------------------------------------------
+// One drawn geometry per artifact, of a declared kind (`polygon-membership.md` §7.1, 2026-08-29).
+// ---------------------------------------------------------------------------------------------
+
+/// A polygon layer over the fixture's points: a square over the south-west quarter.
+fn spatial_declaration(name: &str) -> serde_json::Value {
+    json!({
+        "name": name,
+        "title": "boundaries",
+        "views": ["s0"],
+        "membership": "spatial",
+        "visibility": null,
+        "artifact_visibility": { "field": null, "default": "inherited" },
+        "require_member_visibility": null,
+        "hierarchy": { "kind": "flat", "prune_children": false },
+        "content": { "computed": ["centroid", "box"], "supplied": [], "withdraw_on_member_deletion": true },
+        "depends_on": [],
+        "levels": [],
+        "shape": { "kind": "polygon" }
+    })
+}
+
+const SQUARE: &str = "POLYGON ((100 100, 500 100, 500 500, 100 500, 100 100), (200 200, 300 200, 300 300, 200 300, 200 200))";
+
+/// **A predicate shape is served through `shape_x`/`shape_y` only when asked, at the request's
+/// depth, holes kept, identical for every principal** — and `/v1/meta` says the kind.
+#[tokio::test]
+async fn a_predicate_shape_is_served_when_asked_and_is_the_same_for_every_principal() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    assert_eq!(register(&server, spatial_declaration("boundaries/b")).await.0, 201);
+    let (status, body) = publish(
+        &server,
+        "boundaries/b",
+        json!({ "addressing": "external", "artifacts": [{ "key": "sw", "members": [], "wkt": SQUARE }] }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+
+    let kinds: Vec<(String, serde_json::Value)> = meta_layers(&server, &["0"])
+        .await
+        .iter()
+        .map(|l| (l["name"].as_str().unwrap().to_string(), l["shape"].clone()))
+        .collect();
+    assert_eq!(kinds, vec![("boundaries/b".to_string(), json!("predicate"))]);
+
+    // Narrowed away: a request naming `centroid` and `box` is not served the shape, and the
+    // columns are absent from the schema. An absent `computed` is the declaration's own set, and
+    // a layer's drawn geometry is part of what it declared, whatever its kind.
+    let quiet = viewport_artifacts(&server, &["0"], json!({ "computed": ["centroid", "box"] }))
+        .await
+        .expect("served");
+    assert!(quiet[0].shape.is_none() && quiet[0].centroid.is_some() && quiet[0].bbox.is_some());
+    let declared = viewport_artifacts(&server, &["0"], json!({})).await.expect("served");
+    assert!(declared[0].shape.is_some(), "absent is the declaration, shape included");
+
+    let asked = viewport_artifacts(&server, &["0"], json!({ "computed": ["shape", "centroid"] }))
+        .await
+        .expect("served");
+    let shape = asked[0].shape.as_ref().expect("the shape was asked for");
+    assert_eq!(shape.len(), 1, "one part");
+    assert_eq!(shape[0].len(), 2, "its outer and its hole, the role kept: {shape:?}");
+    assert_eq!(shape[0][0].len(), 4);
+    assert_eq!(shape[0][1].len(), 4);
+    assert!(asked[0].bbox.is_none(), "narrowed away");
+
+    // The narrow principal sees fewer members and the same drawing.
+    let narrow = viewport_artifacts(&server, &["1"], json!({ "computed": ["shape"] }))
+        .await
+        .expect("served");
+    assert!(narrow[0].masked_count < asked[0].masked_count);
+    assert_eq!(narrow[0].shape, asked[0].shape, "a predicate shape does not move with the principal");
+
+    // The drill-down carries the same nesting under the same name, at the depth it is asked at.
+    let (status, body) = drill(&server, &["0"], &asked[0].tessera_id.to_string()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["shape"][0].as_array().map(Vec::len), Some(2));
+    assert_eq!(body["shape"][0][1][0], json!([
+        asked[0].shape.as_ref().unwrap()[0][1][0][0],
+        asked[0].shape.as_ref().unwrap()[0][1][0][1]
+    ]));
+}
+
+/// **`hull` is not an ask word**: the vocabulary is `centroid`, `box`, `shape`, and a name outside
+/// it is the 422 the vocabulary has always been.
+#[tokio::test]
+async fn asking_for_a_hull_by_that_word_is_refused_and_shape_names_the_derived_one() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    one_cluster(&server).await;
+    let auth = authorise(&server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+    let resp = server
+        .client
+        .post(server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": "s0", "zoom": 0, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 0,
+            "layers": "all", "computed": ["hull"]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 422);
+    let detail = resp.text().await.unwrap();
+    assert!(detail.contains("centroid, box, shape"), "{detail}");
+
+    // `shape` on a layer whose drawn geometry is the hull is the hull, one part per group.
+    let row = computed_row(&server, json!({ "computed": ["shape"] })).await;
+    let shape = row.shape.expect("the derived shape");
+    assert!(shape.iter().all(|part| part.len() == 1), "a hull has no holes: {shape:?}");
+    let kinds: Vec<serde_json::Value> = meta_layers(&server, &["0"]).await.iter().map(|l| l["shape"].clone()).collect();
+    assert_eq!(kinds, vec![json!("derived")]);
+}
+
+/// **An authored shape content is read at publication as a membership shape is, and served
+/// through the same columns** — the content slot on the wire is blank, the geometry travels as
+/// rings, and it is gated as the content is.
+#[tokio::test]
+async fn an_authored_polygon_content_is_canonicalised_at_publication_and_served_as_rings() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut d = declaration("clusters/drawn", None);
+    d["require_member_visibility"] = serde_json::Value::Null;
+    d["hierarchy"] = json!({ "kind": "flat", "prune_children": false });
+    d["content"] = json!({
+        "computed": ["centroid", "box"],
+        "supplied": [
+            { "name": "label", "type": "text", "require_member_visibility": "inherited" },
+            { "name": "outline", "type": "polygon", "require_member_visibility": "inherited" }
+        ],
+        "withdraw_on_member_deletion": true
+    });
+    assert_eq!(register(&server, d).await.0, 201);
+    let kinds: Vec<serde_json::Value> = meta_layers(&server, &["0"]).await.iter().map(|l| l["shape"].clone()).collect();
+    assert_eq!(kinds, vec![json!("authored")]);
+
+    let members: Vec<String> = (0..30u64).map(member).collect();
+    // A polygon that is not WKT is refused naming the row and the content, and nothing lands.
+    let (status, body) = publish(
+        &server,
+        "clusters/drawn",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", "not a polygon"] }] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body.to_string().contains("authored polygon content"), "{body}");
+
+    let (status, body) = publish(
+        &server,
+        "clusters/drawn",
+        json!({
+            "addressing": "external",
+            "artifacts": [{ "key": "c0", "members": members, "content": [{ "values": ["a name", SQUARE] }] }]
+        }),
+    )
+    .await;
+    assert_eq!(status, 201, "{body}");
+    assert!(body["shapes"].is_array() || body.get("shapes").is_none(), "{body}");
+
+    let rows = viewport_artifacts(&server, &["0"], json!({ "computed": ["shape"] }))
+        .await
+        .expect("served");
+    let shape = rows[0].shape.as_ref().expect("the authored shape");
+    assert_eq!(shape[0].len(), 2, "outer and hole: {shape:?}");
+    // Without the ask there is no shape column at all.
+    let quiet = viewport_artifacts(&server, &["0"], json!({ "computed": ["centroid"] })).await.expect("served");
+    assert!(quiet[0].shape.is_none());
+
+    // The drill-down: the text in its slot, the shape's slot blank — the geometry travels as
+    // rings under `shape` and never as the string.
+    let (status, body) = drill(&server, &["0"], &rows[0].tessera_id.to_string()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["content"], json!(["a name", ""]));
+    assert_eq!(body["shape"][0].as_array().map(Vec::len), Some(2));
+}
+
+/// **A layer declares at most one drawn geometry**: a hull beside an authored polygon is refused
+/// at registration naming both.
+#[tokio::test]
+async fn a_hull_beside_an_authored_shape_is_refused_at_registration() {
+    let tmp = TempDir::new().unwrap();
+    let server = serve(&tmp).await;
+    let mut d = declaration("clusters/two", None);
+    d["content"]["supplied"] = json!([{ "name": "outline", "type": "polygon", "require_member_visibility": "inherited" }]);
+    let (status, body) = register(&server, d).await;
+    assert_eq!(status, 422, "{body}");
+    assert!(body.to_string().contains("one drawn geometry"), "{body}");
 }

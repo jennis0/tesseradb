@@ -102,7 +102,30 @@ export type FilterExpr =
   | {all_of: FilterExpr[]}
   | {any_of: FilterExpr[]}
   | {none_of: FilterExpr[]}
+  | {region: RegionOperand}
   | {[column: string]: FilterOperator};
+
+/**
+ * The `region` leaf (`selection-operand.md` §2; `polygon-membership.md` §8): exactly one of a
+ * shape in the view's own data space — `polygon` (at least three vertices, implicitly closed),
+ * `bbox` (`[x0, y0, x1, y1]`), `circle` (`[cx, cy, r]`), `ellipse` (`[cx, cy, a, b,
+ * angle_degrees]`) — with `space` (`view`, the only value a view honours today), or `artifact`, a
+ * published shape's `tessera_id` as a decimal string. `region` is a reserved column name.
+ */
+export type RegionOperand =
+  | {polygon: [number, number][]; space?: 'view'}
+  | {bbox: [number, number, number, number]; space?: 'view'}
+  | {circle: [number, number, number]; space?: 'view'}
+  | {ellipse: [number, number, number, number, number]; space?: 'view'}
+  | {artifact: string};
+
+/**
+ * `x-tessera-region` (`selection-operand.md` §6): whether every region leaf's answer is exact for
+ * the shape against each point's stored position, or exact for a **cover** of it — a superset —
+ * taken at `depth` because the shape's perimeter exceeded `max_region_cells`. A function of the
+ * shape and the grid alone, never of the rows.
+ */
+export type RegionVerdict = {exact: true; depth: null} | {exact: false; depth: number};
 
 /** One column's predicate. Exactly one key — the server refuses a leaf carrying two. */
 export type FilterOperator =
@@ -158,12 +181,19 @@ export type Layer = {
    * property of any one artifact: a layer that declares `hull` serves one for every artifact that
    * exists for this principal, though the viewport asks for centroids and boxes and a client
    * fetches a shape by identifier when it needs one.
-   *
-   * A client draws from this. A box drawn for an artifact whose layer declares a hull is a
-   * placeholder for a shape that is on its way, and the map draws nothing rather than a rectangle
-   * that becomes a hull a moment later.
    */
   computedContent: string[];
+  /**
+   * **Which kind the layer's one drawn geometry is** (`polygon-membership.md` §7.1), or `null`
+   * where it draws none: `derived` — the hull over the members this principal can see, which
+   * moves with the principal; `predicate` — the membership shape of a spatial layer, the same for
+   * every principal served the artifact; `authored` — a supplied drawing, likewise. A client
+   * draws from this — a box drawn for an artifact whose layer declares a shape is a placeholder
+   * for one on its way, and the map draws nothing rather than a rectangle that becomes the shape
+   * a moment later — and it decides what may be held across principals: a derived shape is never
+   * kept against a `tesseraId` across a change of principal, and the other two may be.
+   */
+  shape: ShapeKind | null;
   /** The kinds of supplied content its artifacts carry. */
   suppliedContent: string[];
   depsOn: string[];
@@ -194,6 +224,13 @@ export type Meta = {
      * page that means "the set ended" from one that means "the deployment truncated".
      */
     maxCategoryValues: number;
+    /** The most vertices a `region` leaf's polygon may carry; over it the request is a `422`. */
+    maxRegionVertices: number;
+    /**
+     * The most boundary cells a `region` leaf's descent may hold at one depth. Not a refusal:
+     * over it the answer is a cover, said on `x-tessera-region` ({@link RegionVerdict}).
+     */
+    maxRegionCells: number;
   };
   /** `serve.max_tiles_per_request` — the client's own bound when it chooses a request depth. */
   maxTilesPerRequest: number;
@@ -301,14 +338,14 @@ export type ViewportRequest = {
    */
   artifactBudget?: number;
   /**
-   * Which of each layer's **declared** computed properties — `'centroid'`, `'box'`, `'hull'` — the
+   * Which of each layer's **declared** computed properties — `'centroid'`, `'box'`, `'shape'` — the
    * response should carry.
    *
    * **Omitted is the layer's own declaration**, so a client that never thinks about geometry is
    * answered exactly as it was before this field existed. An array answers for those, intersected
    * with what each layer declared; the empty array is counts and no geometry.
    *
-   * **It narrows and never widens.** Naming `'hull'` on a layer that declares none serves none.
+   * **It narrows and never widens.** Naming `'shape'` on a layer that draws none serves none.
    *
    * The reason to narrow is cost, and it is large: a hull is derived per artifact per request from
    * the members this principal can see, and a viewport carrying 197 clusters derives 197 of them
@@ -327,8 +364,28 @@ export type ViewportRequest = {
   artifactRows?: 'full' | 'identity';
 };
 
-/** The three derived geometries a layer may declare, and a request may ask for. */
-export type ComputedProperty = 'centroid' | 'box' | 'hull';
+/**
+ * The three geometries a request may ask for. `shape` is the layer's one drawn geometry of
+ * whichever kind {@link Meta} publishes for it — a hull, a membership shape or an authored one —
+ * so a request asks for the drawing without knowing its derivation; `hull` is the declaration's
+ * word (`computedContent`) and not an ask word.
+ */
+export type ComputedProperty = 'centroid' | 'box' | 'shape';
+
+/** The three kinds of a layer's one drawn geometry (`polygon-membership.md` §7.1). */
+export type ShapeKind = 'derived' | 'predicate' | 'authored';
+
+/**
+ * A served shape: **parts, then rings, then vertices**, in grid units. A part's first ring is
+ * its outer and the rest are holes — the nesting deck's `PolygonLayer` takes — and two parts are
+ * two shapes, never a shape with a gap. A derived hull is one part per α-group, with no holes.
+ *
+ * **A served shape is a drawing and never the predicate.** It is generalised to the pixel at the
+ * zoom it was asked at and may differ from the membership by up to a cell, so a client must never
+ * test a point against these rings to decide whether the point is a member: the wire's
+ * `membership:<layer>` column is that answer, and the only one (`polygon-membership.md` §7.1).
+ */
+export type Shape = [number, number][][][];
 
 /**
  * One tile's exact masked counts.
@@ -380,21 +437,15 @@ export type Artifact = {
   /** `[minX, minY, maxX, maxY]`, grid units. */
   box: [number, number, number, number] | null;
   /**
-   * The hull's **rings** — one per separated group of the visible members, each closed,
-   * counter-clockwise from its lowest vertex, in grid units (`artifact-shapes.md` §1, contracts
-   * §3.2 item 4).
-   *
-   * A membership that is two separated clouds is two rings, never one polygon over the gap
-   * between them. No ring encloses another and there are no holes, so an annulus of members is
-   * drawn as a disk. A ring of one or two vertices is a degenerate group drawn as its own
-   * members: rounding one up to a triangle would claim an area no member occupies.
-   *
-   * Two rings of one artifact may overlap, and a member may lie inside a second ring of its own
-   * artifact — measured on one of four layers, so it is not a state to code against either way.
-   * It costs nothing: both rings are this artifact, so anything keyed by `tesseraId` answers the
-   * same whichever one it came from.
+   * The artifact's one drawn geometry ({@link Shape}), of the kind its layer's {@link Meta}
+   * `shape` names, or `null` where the layer draws none or the request did not ask (contracts
+   * §3.2 item 4). For a derived hull, each α-group of the visible members is its own part: a
+   * membership that is two separated clouds is two parts, never one polygon over the gap between
+   * them, and a group of one or two members is a ring of one or two vertices — rounding one up to
+   * a triangle would claim an area no member occupies. Two parts of one artifact may overlap,
+   * which costs nothing: both are this artifact.
    */
-  hull: [number, number][][] | null;
+  shape: Shape | null;
   /**
    * The publisher's supplied content — label text, an authored name, a polygon — as **one
    * entry of the artifact's ranked contents, entire**, positional to the layer's `suppliedContent`
@@ -649,6 +700,11 @@ export type ViewportResponse = {
    * Nothing expires and no response is withheld while it is `true`.
    */
   stale: boolean;
+  /**
+   * The region leaves' verdict — `null` when the request carried none. `exact: false` sets
+   * `Masked.exact` false on every number the region produced.
+   */
+  region: RegionVerdict | null;
   bytes: number;
 };
 
@@ -677,11 +733,11 @@ export type ArtifactDetail = {
    * grid units the viewport's artifacts frame carries, from the same predicate. `null` where the
    * layer declares none.
    *
-   * **This route is where a hull is now fetched from.** The viewport asks for centroids and boxes
+   * **This route is where a shape is fetched from.** The viewport asks for centroids and boxes
    * and this asks for the one shape that draws, which is what the drawing has always needed and
    * what the viewport was paying 197× over to supply (see {@link ViewportRequest.computed}).
    */
   centroid: [number, number] | null;
   box: [number, number, number, number] | null;
-  hull: [number, number][][] | null;
+  shape: Shape | null;
 };

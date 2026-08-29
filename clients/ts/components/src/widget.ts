@@ -341,8 +341,7 @@ export function initialize({model, storeFactory = createStore}: {model: WidgetMo
               visible: region.visible,
               matched: region.matched,
               served: region.served,
-              depth: region.depth,
-              tiles: region.tiles,
+              verdict: region.verdict,
               refusal: region.refusal
             }
           : null;

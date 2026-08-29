@@ -29,10 +29,11 @@ function frame(parts: {kind: number; payload: Uint8Array}[]): Uint8Array {
 
 const u64 = (values: bigint[]) => makeVector(makeData({type: new Uint64(), data: BigUint64Array.from(values)}));
 const RINGS = new List(new Field('item', new List(new Field('item', new Uint32(), false)), true));
+const PARTS = new List(new Field('item', RINGS, true));
 const TEXTS = new List(new Field('item', new Utf8(), true));
 const LAYER = new Dictionary(new Utf8(), new Uint16());
 
-type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; parentId?: bigint | null; hull?: number[][] | null};
+type Row = {layer: string; id: bigint; rung: number; matched: boolean | null; parentId?: bigint | null; shape?: number[][][] | null};
 
 const TILES = tableToIPC(new Table({tile: u64([0n]), visible: u64([1n]), matched: u64([1n]), served: u64([0n])}), 'stream');
 const TRAILER = new TextEncoder().encode(JSON.stringify({arrow_serialise_ns: 0, flushes: 0, points: 0, stream_us: 0}));
@@ -57,16 +58,17 @@ function fixedColumns(rows: Row[], layerType: unknown = LAYER) {
   };
 }
 
-/** A full-projection body; the hull columns trail, and only when `hulls` says a layer declares one. */
-function fullBody(rows: Row[], opts: {hulls?: boolean; layerType?: unknown; oneAxis?: boolean; renameRung?: string} = {}): Uint8Array {
+/** A full-projection body; the shape columns trail, and only when `shapes` says a layer draws one. */
+function fullBody(rows: Row[], opts: {shapes?: boolean; layerType?: unknown; oneAxis?: boolean; renameRung?: string; oldNames?: boolean} = {}): Uint8Array {
   const columns: Record<string, unknown> = fixedColumns(rows, opts.layerType);
   if (opts.renameRung) {
     columns[opts.renameRung] = columns['rung'];
     delete columns['rung'];
   }
-  if (opts.hulls) {
-    columns['hull_x'] = vectorFromArray(rows.map((r) => (r.hull ? r.hull.map((ring) => ring.map((v) => v)) : null)), RINGS);
-    if (!opts.oneAxis) columns['hull_y'] = vectorFromArray(rows.map((r) => (r.hull ? r.hull.map((ring) => ring.map((v) => v + 1)) : null)), RINGS);
+  if (opts.shapes) {
+    const [x, y] = opts.oldNames ? ['hull_x', 'hull_y'] : ['shape_x', 'shape_y'];
+    columns[x] = vectorFromArray(rows.map((r) => (r.shape ? r.shape.map((part) => part.map((ring) => ring.map((v) => v))) : null)), PARTS);
+    if (!opts.oneAxis) columns[y] = vectorFromArray(rows.map((r) => (r.shape ? r.shape.map((part) => part.map((ring) => ring.map((v) => v + 1))) : null)), PARTS);
   }
   const artifacts = tableToIPC(new Table(columns as never), 'stream');
   return frame([{kind: 1, payload: TILES}, {kind: 5, payload: artifacts}, {kind: 4, payload: TRAILER}]);
@@ -115,11 +117,11 @@ describe('the dictionary-encoded layer column', () => {
   });
 });
 
-describe('the hull columns trail, and are absent when no served layer declares a hull', () => {
-  it('reads an absent pair as no artifact carrying a hull, with every other column intact', () => {
+describe('the shape columns trail, and are absent when no served layer draws a shape', () => {
+  it('reads an absent pair as no artifact carrying a shape, with every other column intact', () => {
     const r = decodeViewport(fullBody(ROWS));
     expect(r.artifacts.length).toBe(3);
-    expect(r.artifacts.every((a) => a.hull === null)).toBe(true);
+    expect(r.artifacts.every((a) => a.shape === null)).toBe(true);
     // The rest of the row is untouched by the absence: the box is still the box.
     expect(r.artifacts[0]!.box).toEqual([0, 0, 9, 9]);
     expect(r.artifacts[0]!.centroid).toEqual([4, 4]);
@@ -128,40 +130,52 @@ describe('the hull columns trail, and are absent when no served layer declares a
 
   it('reads a present pair after the fixed prefix — per-row null still meaning the layer declares none', () => {
     const rows: Row[] = [
-      {...ROWS[0]!, hull: [[0, 3, 3], [6, 9, 9]]},
-      {...ROWS[1]!, hull: [[1, 2]]},
-      {...ROWS[2]!, hull: null}
+      {...ROWS[0]!, shape: [[[0, 3, 3]], [[6, 9, 9]]]},
+      {...ROWS[1]!, shape: [[[1, 2]]]},
+      {...ROWS[2]!, shape: null}
     ];
-    const body = fullBody(rows, {hulls: true});
+    const body = fullBody(rows, {shapes: true});
     const fields = tableFromIPC(splitFramedStreams(body).artifacts!).schema.fields.map((f) => f.name);
-    // The layout the body carries is the contract's: fourteen fixed, then the two hull columns.
+    // The layout the body carries is the contract's: fourteen fixed, then the two shape columns.
     expect(fields.slice(0, 14)).toEqual(['layer', 'tessera_id', 'key', 'masked_count', 'centroid_x', 'centroid_y', 'box_min_x', 'box_min_y', 'box_max_x', 'box_max_y', 'content', 'parent_id', 'rung', 'matched']);
-    expect(fields.slice(14)).toEqual(['hull_x', 'hull_y']);
+    expect(fields.slice(14)).toEqual(['shape_x', 'shape_y']);
 
     const r = decodeViewport(body);
-    expect(r.artifacts[0]!.hull).toEqual([
+    expect(r.artifacts[0]!.shape).toEqual([
       [
-        [0, 1],
-        [3, 4],
-        [3, 4]
+        [
+          [0, 1],
+          [3, 4],
+          [3, 4]
+        ]
       ],
       [
-        [6, 7],
-        [9, 10],
-        [9, 10]
+        [
+          [6, 7],
+          [9, 10],
+          [9, 10]
+        ]
       ]
     ]);
-    expect(r.artifacts[1]!.hull).toEqual([
+    expect(r.artifacts[1]!.shape).toEqual([
       [
-        [1, 2],
-        [2, 3]
+        [
+          [1, 2],
+          [2, 3]
+        ]
       ]
     ]);
-    expect(r.artifacts[2]!.hull).toBeNull();
+    expect(r.artifacts[2]!.shape).toBeNull();
   });
 
-  it('refuses one hull column without the other — the pair travels together by contract', () => {
-    expect(() => decodeViewport(fullBody([{...ROWS[0]!, hull: [[0, 1]]}], {hulls: true, oneAxis: true}))).toThrow(/one hull column and not the other/);
+  it('refuses one shape column without the other — the pair travels together by contract', () => {
+    expect(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1]]]}], {shapes: true, oneAxis: true}))).toThrow(/one shape column and not the other/);
+  });
+
+  it('refuses the columns under their old names — a server older than the shape columns', () => {
+    // Read as *no drawn geometry*, a `hull_x` body would draw every cluster as its box and look
+    // like a layer that declares none; there is no compatibility to keep (decision 0048).
+    expect(() => decodeViewport(fullBody([{...ROWS[0]!, shape: [[[0, 1, 2]]]}], {shapes: true, oldNames: true}))).toThrow(/hull_x.*shape_x/s);
   });
 });
 

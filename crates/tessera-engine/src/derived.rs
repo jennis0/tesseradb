@@ -73,20 +73,38 @@ pub struct DerivedContent {
     pub centroid: Option<[f64; 2]>,
     /// `[qx_min, qy_min, qx_max, qy_max]`, grid units.
     pub bbox: Option<[u32; 4]>,
-    /// The hull's rings, each counter-clockwise from its lowest vertex, in grid units — a
-    /// **concave (alpha) shape** over the visible members, not their convex wrap, and **one ring per
-    /// α-group of those members** rather than one ring per artifact ([`concave_rings`]).
+    /// **The artifact's one drawn geometry**, in the wire's nesting — parts, then rings, then
+    /// vertices in grid units (`polygon-membership.md` §7.1) — of whichever kind its layer
+    /// declared: the **derived** hull this module computes, or the **predicate** or **authored**
+    /// shape the serving pass fills in from the held shapes and the content blob
+    /// (`crate::shapes::served_rings`).
     ///
-    /// Rings are ordered by their first vertex, so the value is a function of the member positions
-    /// and not of the order they were gathered in. A membership of one visible member gives one ring
-    /// of one vertex, of two gives one ring of two: the hull of a point set is that point set when
-    /// it is degenerate, and rounding it up to a triangle would draw an area no member occupies.
-    pub hull: Option<Vec<Vec<[u32; 2]>>>,
+    /// A derived hull is a **concave (alpha) shape** over the visible members, not their convex
+    /// wrap, with **one ring per α-group of those members** ([`concave_rings`]) — and every
+    /// α-group is its own **part**, one outer ring and no holes, because a second ring in one
+    /// part is a hole to a renderer and two groups are two shapes, not a shape with a gap. Rings
+    /// are counter-clockwise from their lowest vertex and parts are ordered by their first
+    /// vertex, so the value is a function of the member positions and not of the order they were
+    /// gathered in. A membership of one visible member gives one ring of one vertex, of two gives
+    /// one ring of two: the hull of a point set is that point set when it is degenerate, and
+    /// rounding it up to a triangle would draw an area no member occupies.
+    pub shape: Option<Vec<Vec<Vec<[u32; 2]>>>>,
 }
 
 impl DerivedContent {
     pub fn is_empty(&self) -> bool {
-        self.centroid.is_none() && self.bbox.is_none() && self.hull.is_none()
+        self.centroid.is_none() && self.bbox.is_none() && self.shape.is_none()
+    }
+
+    /// How many vertices the drawn geometry carries, across every part and ring.
+    pub fn shape_vertices(&self) -> u64 {
+        self.shape.as_ref().map_or(0, |parts| {
+            parts
+                .iter()
+                .flat_map(|rings| rings.iter())
+                .map(|r| r.len() as u64)
+                .sum()
+        })
     }
 }
 
@@ -268,7 +286,14 @@ pub fn compute(
         out.bbox = Some(b);
     }
     if want_hull {
-        out.hull = Some(concave_rings(&positions, Some(b)));
+        // Each α-group is its own part: a hull has no holes, and a second ring of one part
+        // would be read as one (see [`DerivedContent::shape`]).
+        out.shape = Some(
+            concave_rings(&positions, Some(b))
+                .into_iter()
+                .map(|ring| vec![ring])
+                .collect(),
+        );
     }
     out
 }
@@ -280,7 +305,7 @@ pub fn compute(
 /// a visible member's position and each ring contains every member of its own group, so the groups'
 /// wrap vertex counts are a floor: reducing them means either dropping a member outside every ring
 /// or inventing a vertex no member occupies, and both are worse than a wide polygon. What digging
-/// adds is what a cap can bound, and this bounds it at 2,048 vertices — 16 KB of `hull_x`/`hull_y`
+/// adds is what a cap can bound, and this bounds it at 2,048 vertices — 16 KB of `shape_x`/`shape_y`
 /// per artifact at the worst case, on top of the wraps' own count, which is what already rode on
 /// every response.
 ///
@@ -296,7 +321,7 @@ pub fn compute(
 /// than these three still gets the shape its members ask for rather than the shape the cap allows.
 ///
 /// **What it costs**, over `clusters/hdbscan` at full membership: 12,497 → 28,459 hull vertices,
-/// 100,836 → 228,532 bytes of `hull_x`/`hull_y` for the whole layer, and 0.89 → 1.89 s of
+/// 100,836 → 228,532 bytes of `shape_x`/`shape_y` for the whole layer, and 0.89 → 1.89 s of
 /// derivation for all 197 artifacts. The shapes come in from 0.870 to 0.803 of the area of the
 /// rings the grouping alone would have drawn, and the tightest from 0.290 to 0.255.
 ///

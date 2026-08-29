@@ -265,10 +265,13 @@ pub struct ArtifactRow<'a> {
     pub centroid: Option<[f64; 2]>,
     /// `[qx_min, qy_min, qx_max, qy_max]`.
     pub bbox: Option<[u32; 4]>,
-    /// The hull's rings, each a closed ring of vertices in grid units. **Several rings, one per
-    /// separated group of the visible members** — a membership that is two clouds is drawn as two
-    /// shapes rather than as one polygon over the gap between them.
-    pub hull: Option<&'a [Vec<[u32; 2]>]>,
+    /// **The artifact's one drawn geometry** (`polygon-membership.md` §7.1) — parts, then rings,
+    /// then vertices in grid units — of whichever kind its layer declared and `/v1/meta`
+    /// publishes: the derived hull (every α-group its own part, no holes), the predicate shape or
+    /// the authored one. A part's first ring is its outer and the rest are holes, which is
+    /// exactly the nesting a renderer's polygon-with-holes takes; two parts are two shapes, never
+    /// a shape with a gap.
+    pub shape: Option<&'a [Vec<Vec<[u32; 2]>>]>,
     /// The publisher's supplied content — **one entry of the ranked `contents`, entire**, one value per kind the layer
     /// declares, in declaration order. Empty where the layer declares none.
     ///
@@ -365,12 +368,12 @@ fn layer_field() -> Field {
 ///
 /// **Column positions are contract for the fixed prefix; optional columns trail.** Decoders that
 /// index this batch positionally exist, so the fourteen fixed columns — `layer` through `matched`
-/// — sit at fixed positions, and the only columns whose presence varies, `hull_x`/`hull_y`, come
+/// — sit at fixed positions, and the only columns whose presence varies, `shape_x`/`shape_y`, come
 /// after all of them (`artifact-fetch-protocol.md` §8; this superseded the earlier
-/// appended-last-per-revision rule when the hull columns moved to the tail). The frame kinds are
+/// appended-last-per-revision rule when the shape columns moved to the tail). The frame kinds are
 /// unchanged and `api_version` stays at 1 (contracts §3.2: no published deployment exists and
 /// every in-repo reader moves in lockstep, decision 0048) — the reordering is the loud break, a
-/// positional decoder finding `content` where `hull_x` sat rather than one column's values under
+/// positional decoder finding `content` where `shape_x` sat rather than one column's values under
 /// another's meaning of the same type.
 ///
 /// **`layer` is dictionary-encoded** — see [`layer_dictionary`].
@@ -380,36 +383,38 @@ fn layer_field() -> Field {
 /// centroid*; it is never *withheld*, since an artifact whose content could not be served is
 /// absent entirely (decision 0076).
 ///
-/// **The hull columns are present exactly when some row carries a hull** — i.e. when a served
-/// layer declares one — **and absent from the schema otherwise.** An absent column is
-/// distinguishable from a null one, so decision 0076's rule (a null means *this layer declares no
-/// such property*, never *withheld*) gains no third reading: when the columns are present, a
-/// per-row null keeps exactly its 0076 meaning. When present they travel as two
-/// `List<List<UInt32>>` columns — one per axis so that a client reads an axis without a stride,
-/// and nested so that the ring boundaries are in the type rather than in a convention. A reader
-/// written against the single-ring shape descends one level, finds a list where it expected a
-/// `UInt32`, and fails; a flat encoding with a separate offsets column would let the same reader
-/// concatenate every ring into one polygon and draw a chord between them, silently. The two axes
-/// carry the same ring structure by construction, and a decoder that zips them should check the
-/// lengths agree rather than assume it (`contracts.md` §3.2).
+/// **The shape columns are present exactly when some row carries a drawn geometry** — i.e. when a
+/// served layer declares one of the three kinds and the request asked for it — **and absent from
+/// the schema otherwise.** An absent column is distinguishable from a null one, so decision 0076's
+/// rule (a null means *this layer declares no such property*, never *withheld*) gains no third
+/// reading: when the columns are present, a per-row null keeps exactly its 0076 meaning. When
+/// present they travel as two `List<List<List<UInt32>>>` columns — one per axis so that a client
+/// reads an axis without a stride, and nested three deep so that **parts, rings and vertices are
+/// in the type rather than in a convention** (`polygon-membership.md` §7.1): a hole and a second
+/// part are different things to a renderer, and one flat ring list would have a client draw a
+/// second part as a hole of the first. A reader written against the two-level hull shape descends
+/// to what it takes for a vertex, finds a list, and fails, which is the loud break rather than a
+/// silent misdraw. The two axes carry the same structure by construction, and a decoder that zips
+/// them should check the lengths agree at every level rather than assume it (`contracts.md` §3.2).
 ///
 /// # Panics
 ///
 /// Panics on Arrow construction failure.
 pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
-    // One definition of each of the hull's two nested element fields, used by the schema and by the
-    // builders below: a `ListBuilder` builds a **nullable** item field by default, and neither a
-    // vertex nor a ring is ever null — a hull is a list of rings of positions, or it is absent
-    // entirely. Declaring them twice is how the two drift into the mismatch Arrow then refuses at
-    // batch construction.
+    // One definition of each of the shape's three nested element fields, used by the schema and by
+    // the builders below: a `ListBuilder` builds a **nullable** item field by default, and neither
+    // a vertex, a ring nor a part is ever null — a shape is a list of parts of rings of positions,
+    // or it is absent entirely. Declaring them twice is how the two drift into the mismatch Arrow
+    // then refuses at batch construction.
     let vertex = || Arc::new(Field::new("item", DataType::UInt32, false));
     let ring = || Arc::new(Field::new("item", DataType::List(vertex()), false));
+    let part = || Arc::new(Field::new("item", DataType::List(ring()), false));
 
-    // A row carries a hull exactly when its layer declares one (a declared hull over a served
-    // artifact always computes — a served artifact has a visible member), so *any row carries one*
-    // and *a served layer declares one* are the same test, and it is decidable here from the rows
-    // alone.
-    let hulls = rows.iter().any(|r| r.hull.is_some());
+    // A row carries a shape exactly when its layer declares a drawn geometry and the request asked
+    // for it (a declared hull over a served artifact always computes — a served artifact has a
+    // visible member), so *any row carries one* and *a served layer declares one* are the same
+    // test, and it is decidable here from the rows alone.
+    let shapes = rows.iter().any(|r| r.shape.is_some());
 
     let mut fields = vec![
         layer_field(),
@@ -442,9 +447,9 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         // every response that carried no `filter`, rather than absent (decision 0104).
         Field::new("matched", DataType::Boolean, true),
     ];
-    if hulls {
-        fields.push(Field::new("hull_x", DataType::List(ring()), true));
-        fields.push(Field::new("hull_y", DataType::List(ring()), true));
+    if shapes {
+        fields.push(Field::new("shape_x", DataType::List(part()), true));
+        fields.push(Field::new("shape_y", DataType::List(part()), true));
     }
     let schema = Arc::new(Schema::new(fields));
 
@@ -494,35 +499,41 @@ pub fn artifacts_frame(rows: &[ArtifactRow<'_>]) -> Vec<u8> {
         Arc::new(UInt32Array::from_iter_values(rows.iter().map(|r| r.rung))),
         Arc::new(BooleanArray::from_iter(rows.iter().map(|r| r.matched))),
     ];
-    if hulls {
-        let mut hull_x =
-            ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
-                .with_field(ring());
-        let mut hull_y =
-            ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
-                .with_field(ring());
+    if shapes {
+        let builder = || {
+            ListBuilder::new(
+                ListBuilder::new(ListBuilder::new(UInt32Builder::new()).with_field(vertex()))
+                    .with_field(ring()),
+            )
+            .with_field(part())
+        };
+        let (mut shape_x, mut shape_y) = (builder(), builder());
         for row in rows {
-            match row.hull {
-                Some(rings) => {
-                    for r in rings {
-                        for v in r {
-                            hull_x.values().values().append_value(v[0]);
-                            hull_y.values().values().append_value(v[1]);
+            match row.shape {
+                Some(parts) => {
+                    for rings in parts {
+                        for r in rings {
+                            for v in r {
+                                shape_x.values().values().values().append_value(v[0]);
+                                shape_y.values().values().values().append_value(v[1]);
+                            }
+                            shape_x.values().values().append(true);
+                            shape_y.values().values().append(true);
                         }
-                        hull_x.values().append(true);
-                        hull_y.values().append(true);
+                        shape_x.values().append(true);
+                        shape_y.values().append(true);
                     }
-                    hull_x.append(true);
-                    hull_y.append(true);
+                    shape_x.append(true);
+                    shape_y.append(true);
                 }
                 None => {
-                    hull_x.append_null();
-                    hull_y.append_null();
+                    shape_x.append_null();
+                    shape_y.append_null();
                 }
             }
         }
-        columns.push(Arc::new(hull_x.finish()));
-        columns.push(Arc::new(hull_y.finish()));
+        columns.push(Arc::new(shape_x.finish()));
+        columns.push(Arc::new(shape_y.finish()));
     }
     let batch =
         RecordBatch::try_new(schema.clone(), columns).expect("artifacts frame batch construction");
