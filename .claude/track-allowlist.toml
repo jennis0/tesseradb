@@ -409,4 +409,5 @@ paths = [
   "docs/artifact-delivery.md",
   "docs/client-delivery.md",
   "docs/evidence/*",
+  "reference/oracle/*",
 ]
