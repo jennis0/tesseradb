@@ -348,3 +348,38 @@ paths = [
   "crates/tessera-engine/tests/common/*",
   "docs/design/artifact-shapes.md",
 ]
+
+# The shape-membership work (docs/design/polygon-membership.md §12), stage 1: the geometry core.
+# Branches from main at 8ad499e2.
+[track.shape-core]
+paths = [
+  "crates/tessera-spatial/*",
+  "docs/design/polygon-membership.md",
+  "docs/artifact-delivery.md",
+]
+
+# Stage 2 of the shape work (polygon-membership.md §12): the artifact type. Branches from
+# artifacts/shape-core; carries the core uncommitted until stage 1 is committed.
+[track.shape-type]
+paths = [
+  "crates/tessera-spatial/*",
+  "crates/tessera-types/src/layer.rs",
+  "crates/tessera-build/*",
+  "crates/tessera-lifecycle/src/membership.rs",
+  "crates/tessera-lifecycle/src/wal.rs",
+  "crates/tessera-lifecycle/src/registry.rs",
+  "crates/tessera-engine/*",
+  "crates/tessera-store/src/derived.rs",
+  "crates/tessera-store/src/manifest.rs",
+  "crates/tessera-server/*",
+  "crates/tessera-cli/*",
+  "clients/py/*",
+  "conformance/*",
+  "test_corpora/overture/*",
+  "docs/design/polygon-membership.md",
+  "docs/design/configuration.md",
+  "docs/design/annotations.md",
+  "docs/design/annotation-representation.md",
+  "docs/artifact-delivery.md",
+  "docs/openapi/*",
+]
