@@ -22,12 +22,23 @@ is the owner's to settle.
 | — | arXiv | 2,422,486 | **Have, and now on the campaign's convention.** The pipeline that produces it was a notebook outside `test_corpora/`; ported to [`../test_corpora/arxiv/`](../test_corpora/arxiv/README.md) on 2026-08-28 as `prepare.py` plus an optional `toponymy.py`, and the notebook deleted. It is the ladder's only embedding corpus and the only one whose source is derived rather than staged |
 | 0 | Re-run the 5×10⁷ artifact tier | — | **Deferred, deliberately.** It confirms W1 and W2, which bite at rung 2 and not at rung 1, and it costs a ~45 GB build. Take it before rung 2, not before rung 1 |
 | **1** | **GeoNames** | **13,463,857** | **Built, verified and served.** Not done against §7.1's bar — see §2 |
-| 2 | Overture places + divisions | 7.4×10⁷ | Not started. Staged |
+| **2** | **Overture places + divisions** | **7.4×10⁷** | **Prepared, not built.** [`../test_corpora/overture/`](../test_corpora/overture/README.md) carries the declaration and the pipeline, written against a survey of the staged bytes taken 2026-08-28 — which corrected four things the plan had wrong — see §3 |
 | 3 | MedCPT / PubMed | 3.6×10⁷ | Not started. Staged; MeSH is **not** staged and is a prerequisite |
 | 4 | PaperSeek + OpenAlex | 1.02×10⁸ | Not started. Staged |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
 | 6 | GBIF | 3.50×10⁹ | Not started. Staged; needs a second local volume |
 | 7 | Overture buildings | 2.53×10⁹ | Not started. Staged; needs a second local volume |
+
+**Disk, and a trap in clearing it.** `/` had **23 GB free** on 2026-08-28, not the 117 GB recorded
+above at rung 1 — rung 2's ~20 GB transient did not fit. Clearing `data/scaled` (31 GB, regenerates
+from `probes/build_scaled_corpus.py` at seed 0) and `target/debug` (53 GB) took it to 104 GB.
+⊘ **`target/debug` came back within four minutes**, rebuilt by the IDE's rust-analyzer with no
+cargo invocation of ours: it is not durable free space while an editor is attached to this
+checkout. `data/scaled` is, and it is the fixture rung 0 and the p99 measurement both read, so
+either must rebuild it. ⊘ **Deleting it also breaks the doc-link gate**: three documents cite
+`data/scaled/attrs/schema.toml` and `schema-wide.toml`, and `check-doc-links.py` fails on a cited
+path that does not exist. Those two files and `scales.json` were kept back and restored — 7 KB, and
+the citations are about the schema's shape rather than the 31 GB beside it.
 
 **All eight datasets are staged** at `/mnt/nas/joe/tessera/datasets/<name>/<vintage>/`, 2.5 TB, each
 with a README stating what was verified at acquisition and what is the publisher's claim.
@@ -67,7 +78,216 @@ its budget — is near being reached at this scale.
 which carries the preprocessing, the declaration and the full account of what the source turned out
 to be.
 
-## 3. The machinery this campaign built
+## 3. Rung 2 — Overture, built
+
+[`../test_corpora/overture/`](../test_corpora/overture/README.md) carries the declaration, the
+pipeline and the full survey. **The whole corpus is built and verified**, 73,631,092 places.
+
+**Built, verified, and built again to prove the optimisation below changed nothing.**
+
+```
+prepare.py    divisions 36 s · join 1,811 s · entity ids 394 s · outputs 46 s
+              points.parquet 3.09 GB · members-divisions 2.23 GB · members-taxonomy 293 MB
+tessera build 23:16–26:12 wall · 18.9 GB peak RSS · exit 0
+bundle        7,900,567,451 bytes — 107.3 B/point
+verify        OK in 6.6 s — 1 partition, 1 view, 1 segment, high-water 73,631,092
+artifacts     625,821 divisions · 2,097 taxonomy across 6 levels · 9 predicate
+no artifact   3,285,234 taxonomy (4.5%) · 46,844 divisions (0.06%)
+resolution    12.1% — 8,895,005 distinct cells
+```
+
+**Both walls the plan expected here did not fire.**
+
+**W1 was never approached**, and that follows from the declaration rather than from luck. It needs a
+whole-corpus root cluster over 5×10⁷ members; `boundaries/divisions` is a `nested` tree whose roots
+are countries, so its largest membership is the US at ~16×10⁶, and `places/taxonomy` splits 73.6M
+across 14 roots. **The wall is still there and this corpus does not ask the question** — it wants a
+layer that declares one root over everything.
+
+**W2 did not fire either**: 18.9 GB peak against the 47.3 GB the artifact campaign was killed at,
+with no `--memory-budget` set. Part of that is this rung's own work (§3.3): consuming `resolved`
+rather than borrowing it took a whole copy of the memberships out of the peak.
+
+⊘ **Resolution is 12.1% against GeoNames' 85.7%**, and it is the data rather than the frame — the
+frame is full-world and the points span it. Places cluster into cities, so 73.6M of them land in
+8.9×10⁶ distinct cells at zoom 16. State it beside any density figure from this rung.
+
+### 3.0 Where the build's time goes, at last
+
+`tessera build --stage-timings` was added for this (§4) and this is its first use. Twelve stages,
+73,631,092 points, one 23:16 run:
+
+| stage | wall | share | peak RSS at end |
+|---|---|---|---|
+| `filter_postings` | **615.0 s** | **44%** | 18,896 MiB |
+| `layers` | 274.5 s | 20% | **18,896 MiB** — the peak arrives here |
+| `attribute_tail` | 232.5 s | 17% | 12,621 MiB |
+| `geometry_read` | 47.1 s | 3% | 3,211 MiB |
+| `assignment` | 47.1 s | 3% | 3,415 MiB |
+| `dictionary` | 32.5 s | 2% | 1,625 MiB |
+| `manifests` | 25.0 s | 2% | 18,896 MiB |
+| the artifact pass | 23.1 s | 2% | — |
+| `segment_write` | 14.4 s | 1% | 18,896 MiB |
+| `signature_sort`, `postings_write`, `source_ids`, `tiler_sort`, `pairs_pack` | 14.7 s total | 1% | — |
+
+**`filter_postings` is the largest stage and nothing has ever looked at it.** It is stage 8b — one
+entity-space postings file per `index = true` column — and this declaration indexes **eight**.
+GeoNames indexed nine over 13.5×10⁶ points inside a 6:05 whole build, so this is not simply 5.5×
+bigger; ⊘ whether it is superlinear is not measured.
+
+**Two days of optimisation went into `layers`, which is 20%**, because that was the stage visible
+through `ps` while the build sat in it. That is the failure mode `--stage-timings` exists to end,
+and it is worth stating plainly rather than filing as a lesson.
+
+**The peak arrives in `layers`** and does not move afterwards. That is the first per-stage
+attribution W2 has ever had: if `--memory-budget` is to bound peak RSS, `layers` is the stage it
+must bound, and `attribute_tail` is what it climbs through to reach it.
+
+**The join is the rung's one engineering result, and it is a 300x one.** The plan's shape — one
+`ST_Within` against all 1.07M `division_area` polygons — ran for **over 50 minutes on 500,000
+places** before it was killed, which is 29 hours for the corpus. The cost is not the polygon count;
+it is that a handful of enormous polygons are tested against nearly every point. Summed bounding-box
+area, measured over the release: **country, region and dependency cover 148,532 deg2 against the
+world's 64,800**, at up to 255,252 vertices apiece, while the five fine subtypes that answer almost
+every place cover 16,652.
+
+Only the *deepest* containing area is wanted — the ancestry comes from the division hierarchy, not
+from a second polygon — so the join runs **finest tier first and each tier sees only what the last
+left unplaced**. The same 4.6M places, all 1.07M polygons, **45 seconds**:
+
+| tier | polygons | time | placed | left |
+|---|---|---|---|---|
+| fine — locality, neighborhood, microhood, macrohood, localadmin | 1,029,095 | 9 s | 2,170,224 | 2,429,062 |
+| county | 38,908 | 13 s | 2,410,516 | 18,546 |
+| coarse — region, dependency, country | 4,191 | 11 s | 13,484 | 5,062 |
+
+5,062 places (0.11%) fall in no polygon at all and are in no artifact, counted rather than refused.
+**County places more than half**, which is Overture's own coverage rather than a choice: 553,493
+localities have a polygon against 3,481,755 that exist only as points.
+
+Two false economies were paid for on the way, and both are recorded in `prepare.py` so they are not
+rediscovered. `CREATE INDEX ... USING RTREE` on the polygon table costs **over an hour and the join
+never reads it** — `SPATIAL_JOIN` plans as a sequential scan of both sides and builds its own index.
+And materialising the polygons whole beside their own partition doubles a ~11 GB resident table for
+nothing.
+
+### 3.1 Four things the survey corrected in the plan
+
+Measured over the staged bytes on 2026-08-28, before anything was written.
+
+**`hierarchies` is on `type=division`, not on `division_area`.** The plan and the staging README
+both put the explicit hierarchy array on the polygons. The polygons carry `division_id` and
+`subtype`; the ancestry is on the point form, so the pipeline joins the two once.
+
+**The division subtypes are not levels, so the boundary layer is `nested` and not `tiered`.** A
+division's path runs 1 to 9 entries deep and `locality` occurs at every path position from 1 to 8 —
+a locality contains a locality, which is a same-level edge no ladder holds. The plan's "one tiered
+layer over twelve subtype columns" is refuted by the data it names. There are also **nine subtypes
+in `division_area`, not twelve**: no macroregion, macrocounty or borough polygon exists.
+
+**Three of the plan's seven columns are not columns.** `country` is `addresses[1].country`;
+`source_dataset` and `update_time` are on the one `sources` entry whose `property` is empty. The
+rest of `sources` is property-level provenance, and counting it makes `Overture` look like the
+dataset every place came from.
+
+**`basic_category` is a rollup, not the leaf** — 278 values against 1,847, an ancestor inside the
+same path. So the rung declares three category columns over one tree rather than one.
+
+**And one thing the survey confirmed rather than corrected: there is no polyhierarchy.** All
+4,658,700 divisions carry exactly one hierarchy path, asserted at every run. The polyhierarchy the
+campaign expects to force a ruling is still MeSH at rung 3.
+
+### 3.2 The predicate layer works, and the build's report said it did not
+
+Recorded because the report cost an hour, not because anything was broken. `programmes/source` is
+`membership = { attribute = "source_dataset" }`, the tagged-programme case the plan asks for. The
+build's artifact-pass report printed
+
+```
+programmes/source level 0 [world]: 0 artifact(s), 0.000 everywhere, 0.0 blocks/artifact
+```
+
+and it read as a layer that is declared, reachable and serving nothing. **It is not.** The manifest
+carries eight artifacts for it and a served viewport returns all eight with masked counts, beside
+13 taxonomy and 8,448 division artifacts, over a three-country principal at zoom 0.
+
+**Why the zeros are honest and the line was not.** The pass observes a level by walking its
+*stored* Roaring memberships. An attribute predicate has none — its members are the value column,
+evaluated per request — so the walk finds no rows and every figure in `LevelShape` comes back zero
+for a level that holds its artifacts and serves them. `artifact_pass.rs` already says as much where
+it declines to write such a level a row-major column; the report a line above did not.
+
+**Fixed** — the report now prints the registry's count and says the shape is not observed:
+
+```
+programmes/source level 0 [world]: 8 artifact(s) from its column — served column; no spread to
+observe, the membership being the column rather than a stored bitmap
+```
+
+and `a_predicate_over_a_category_column_mints_its_values` covers the case. The existing test for
+this path, `a_build_mints_an_attribute_predicates_artifacts_from_its_column`, reads a bare indexed
+`u32` and asserts the level's *version* rather than its count — so it would have passed whether or
+not any artifact existed. The new one asserts the count.
+
+⊘ **`test_corpora/overture/corpus.toml` is still the only declaration in the repository that uses
+an attribute membership**, and this is what that costs: the kind's only end-to-end exercise is the
+one a rung brought.
+
+### 3.3 What the rung cost the build's own code
+
+Eight changes, all behaviour-neutral and all proved so on the corpus itself: the rebuild's
+`SEGMENTS-0.json` digest is **identical** and its `MANIFEST.json` differs in `created_at` and
+nothing else. Wall time **52:01 → 23:16–26:12**.
+
+The two that mattered were quadratics, and both were invisible to every existing test:
+
+- **`detect_cycles` recomputed a loop-invariant bound by scanning the whole artifact map per
+  artifact** (`layers.rs`). A `nested` layer puts every artifact at level 0, so that scan is the
+  whole level every time — 3.6×10¹¹ key visits at 600,000 divisions. **A `tiered` corpus skips the
+  function entirely**, which is why GeoNames never showed it and why nothing caught it.
+- **`prepare_publish`'s `batch_ordinal` linear-scanned the batch per parent lookup**
+  (`registry.rs`), and `parent_ref` asks it before the store. Now indexed once. The same quadratic
+  is on the ingest and control planes, which share the function.
+
+The rest: the ancestor walk replaced with a colour-marking pass (one visit per artifact, and it
+removes a latent hang — a corpus that genuinely held a cycle ran the bound's full length for every
+artifact whose lineage reached it); `verify_hierarchies` hoisted above the publish loop so
+`resolved` is consumed rather than borrowed; **text member keys interned** into a plan arena, which
+turned three `BTreeMap<(String,u32,String)>` probes and two `String` allocations per member entry
+into one hash probe over 3×10⁸ entries; the containment pass's two `HashSet<u64>` replaced by a
+sorted array and a coverage bitset walked with a galloping cursor — 2.5 MB where a country-sized
+parent needed two ~300 MB tables; `Permutation::project`'s 512 KB scratch hoisted out of a
+per-artifact call (the artifact pass 84.9 s → 23.1 s); the `resolve_artifact` map parallelised; and
+the `keys` and `shapes` indexes nested so their lookups borrow.
+
+⊘ **Peak RSS rose slightly**, 18.83 → 19.37 GB. The parallel map holds several resolutions in
+flight where the serial loop held one, and the containment pass's saving did not quite offset it.
+
+⊘ **A report defect, found the slow way.** The artifact pass printed `0 artifact(s), 0.000
+everywhere` for `programmes/source` — a layer holding 8 artifacts and serving all 8. The walk
+observes *stored* memberships and an attribute predicate has none, its members being the value
+column. An hour went into looking for a defect in a working layer. The report now prints the
+registry's count and says the shape is not observed.
+
+### 3.4 What is still open at this rung
+
+- The whole corpus has not been run, so **W1 and W2 have not been met**. They are expected here.
+- **A `nested` layer has no levels, so it has no zoom bound** — the other half of §5's first
+  finding, at roughly 600,000 artifacts and with no zoom-to-level map to offer. Named in the
+  declaration at the layer it applies to.
+- The rung declares both a `nested` boundary layer and three indexed division columns, so the
+  attribute-membership comparison the plan asks for is one declaration away. It has not been run.
+- **`filter_postings`, 44% of the build, has never been investigated** (§3.0). It is the obvious
+  next optimisation and `layers` is no longer where the effort belongs.
+- §7.1's bar: the 0091 build-vs-ingest test, the oracle census, the write cycle, ingest rows/s, p99
+  at three zooms and a screenshot. None attempted.
+- One part of sixteen built: **55 s wall, 1.33 GB peak RSS, 484,326,539 bytes** (105 B/point),
+  1,955 taxonomy artifacts minted beside 17,544 declared division artifacts. ⊘ Its
+  `RESOLUTION LOST — only 6.5%` warning is the slice and not the corpus: `part-00000` is Latin
+  America alone, 47 countries, inside a whole-world frame. The figure to hold against GeoNames'
+  85.7% is the one the full run gives.
+
+## 4. The machinery this campaign built
 
 - **[`../test_corpora/`](../test_corpora/README.md)** — one directory per rung, in git: `prepare.py`,
   `corpus.toml`, `README.md`. Derived files go to `$TESSERA_LADDER/<rung>` (default
@@ -77,10 +297,11 @@ to be.
   **y south**. Checked against published values, against XYZ tile addresses (the only real test of
   the y direction), and against DuckDB, which agrees bit-for-bit. Its `TEST_VECTORS` are written as
   data so the eventual Rust can be checked against them.
-- **`~/venvs/ingest`** — DuckDB and PyArrow. `spatial` waits until rung 2's point-in-polygon join.
-- **`run_demo.sh --terms / --ranks / --label`**, and `custom` on ports of its own — see §5.
+- **`~/venvs/ingest`** — DuckDB and PyArrow, with `spatial` installed for rung 2's point-in-polygon
+  join (§3). ⊘ Its Python is 3.10, so it has no `tomllib`; `~/venvs/projection` does.
+- **`run_demo.sh --terms / --ranks / --label`**, and `custom` on ports of its own — see §6.
 
-## 4. Cross-cutting findings
+## 5. Cross-cutting findings
 
 Ordered by how much they matter beyond this rung.
 
@@ -122,7 +343,7 @@ is not in doubt. GeoNames is the first corpus where the two come apart, and the 
 spelling for both. Routed around here by materialising the hole as an explicit artifact (1,373 of
 them, against 464,000 real); **not raised as an issue and not designed**.
 
-## 5. Problems found in tooling, and what was done
+## 6. Problems found in tooling, and what was done
 
 **`run_demo.sh` reported a scale ready when another process held the port.** The readiness poll asks
 the *port*, not the process it started, so a stale server answered, the script declared success, and
@@ -140,11 +361,11 @@ into `dd195c9`, a commit about the rings track. Content intact, provenance misle
 
 **`test_corpora/` is untracked** and needs its own commit.
 
-## 6. Open, and what is next
+## 7. Open, and what is next
 
 **Owner calls outstanding**
 
-- The design pass on artifact response volume (§4, and the memo it points at).
+- The design pass on artifact response volume (§5, and the memo it points at).
 - Whether `parent_edges`' two nulls need separating, and whether that is worth an issue.
 - Whether this tracker is the campaign's status record or the campaign moves to issues.
 
