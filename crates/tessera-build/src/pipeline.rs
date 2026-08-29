@@ -731,22 +731,39 @@ fn plan_build(
 
     // Disk pre-flight (fail-closed): the build's transient spills and its outputs coexist in
     // phases; refuse up front, with the arithmetic, rather than dying on ENOSPC hours in. The
-    // three phase peaks, all conservative: buckets full beside the first batch's bands;
-    // bands full beside the postings spool; the spool becoming postings.arrow beside the
-    // segment. (P here is pre-dedup pairs; band/spool bytes-per-pair are stated ceilings for
-    // the varint codec and Roaring postings, not measurements of this corpus.)
+    // four phase peaks, all conservative: buckets full beside the first batch's bands; bands
+    // full beside the postings spool; the declared columns beside the text index's runs; the
+    // spool becoming postings.arrow beside the segment. (P here is pre-dedup pairs; band/spool
+    // bytes-per-pair are stated ceilings for the varint codec and Roaring postings, not
+    // measurements of this corpus.)
+    //
+    // **The column phase is a whole window, not a moment.** Every declared column in entity
+    // order is a mapped file from the attribute join to the release five stages later
+    // (`column.rs`), and the text index spills its runs inside that window — so those bytes are
+    // on the disk together, and they are on it while the geometry maps still are. The other three
+    // phases all end before the attribute join opens it. The column figure is `residency.rs`'s
+    // own, reused rather than re-derived: a second copy of that arithmetic is how this stops
+    // being true again.
     let p = pair_rows as u64;
     let phase_spill = if bucket_in_ram { 0 } else { 8 * p } + (6 * p) / batches.max(1);
     let phase_bands = 6 * p + 4 * p;
+    // 8 B/item of `x-of-entity`/`y-of-entity`, which outlive the release; 4 B/item of pairs
+    // already written as postings.arrow before the window opened.
+    let phase_columns = tail.mapped() + 8 * n + 4 * p;
     let phase_assemble = 4 * p + 26 * n;
-    let disk_need = phase_spill.max(phase_bands).max(phase_assemble);
+    let disk_need = phase_spill
+        .max(phase_bands)
+        .max(phase_columns)
+        .max(phase_assemble);
     if let Some(free) = available_disk(&args.out) {
         if free < disk_need {
             return Err(BuildError::Invalid(format!(
                 "insufficient disk for this build: ~{disk_need} bytes needed at peak \
-                 (spill phase {phase_spill}, band phase {phase_bands}, assembly phase \
-                 {phase_assemble}; n = {n}, pairs = {p}, batches = {batches}), {free} \
-                 available at the output path; free disk and retry"
+                 (spill phase {phase_spill}, band phase {phase_bands}, column phase \
+                 {phase_columns}, assembly phase {phase_assemble}; n = {n}, pairs = {p}, \
+                 batches = {batches}), {free} available at the output path; free disk and \
+                 retry. Where the column phase's bytes are:{}",
+                tail.describe()
             )));
         }
     }
@@ -3331,7 +3348,10 @@ struct WrittenTextIndex {
 /// postings stop being an optional accelerator: everywhere else a deployment that builds them and one
 /// that does not answer identically and differ only in latency, but here a disclosure control depends
 /// on them existing.
-fn postings_are_owed(schema: &crate::config::Schema, attribute: &crate::config::Attribute) -> bool {
+pub(crate) fn postings_are_owed(
+    schema: &crate::config::Schema,
+    attribute: &crate::config::Attribute,
+) -> bool {
     if attribute.index {
         return true;
     }

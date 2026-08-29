@@ -41,6 +41,11 @@
 //! model that kept charging them would refuse builds that now fit, which is the failure mode of
 //! carrying a cost model past the thing it modelled.
 //!
+//! **[`Residency::mapped`] is the other half, and the disk pre-flight is its reader.** Those files
+//! are on the disk from the attribute join to the column release, and the text index spills its
+//! runs into the same window — a stretch the pre-flight's three original phase peaks all end
+//! before. Its column phase is this figure, taken from here rather than derived a second time.
+//!
 //! # What the numbers are, and what they are not
 //!
 //! Every term below is arithmetic over things known before the first pass: the item count, the
@@ -101,6 +106,19 @@ impl Residency {
             .sum()
     }
 
+    /// What the build asks the **disk** for: the mapped terms only — the declared columns, their
+    /// arenas and the text index's runs, all files under the build's own scratch. The counterpart
+    /// of [`Self::total`], and the term the disk pre-flight's column phase is built from
+    /// (`pipeline::plan_build`): those files stand from the attribute join to the column release,
+    /// which is a window none of the three phases that pre-flight modelled before touches.
+    pub fn mapped(&self) -> u64 {
+        self.terms
+            .iter()
+            .filter(|t| t.mapped)
+            .map(|t| t.bytes)
+            .sum()
+    }
+
     /// The terms as one line each — the form a refusal prints. **Charged first, largest first
     /// within each half**, because the operator's next move is to drop or narrow whatever is at the
     /// top of what they are being refused for; the mapped terms follow, marked, because they are
@@ -130,6 +148,9 @@ impl Residency {
 pub(crate) struct ColumnCost {
     pub ty: ScalarType,
     pub payload_bytes: u64,
+    /// Whether this column is the one a text index is built over — which costs the build a second
+    /// set of files beside the column itself, and costs it them at the same time.
+    pub text_index: bool,
 }
 
 /// Whether one entity's value lives in [`crate::column::EntityColumn`]'s arena — which is what
@@ -213,6 +234,27 @@ pub(crate) fn entity_order_residency(
             bytes,
             mapped: true,
         });
+        // The text index's sorted runs, **charged at the column they are tokenised from** rather
+        // than at a constant of their own. The runs spill while the column is resident, so the two
+        // stand on the disk together; and a run spends one varint on a `(term, entity)` pair where
+        // the prose spent the term's whole characters on every occurrence of it, so the column is
+        // a ceiling over them. Charging them the column's arithmetic rather than a second copy of
+        // it is also what keeps the two from drifting apart.
+        //
+        // ⊘ The ceiling is modelled, not measured, and it is loose: the one corpus with a run
+        // figure — 7.4×10⁷ Overture names — spilled 555 MB against the 2.58 GB this charges. The
+        // slack is the payload figure's own, being Parquet's encoded page size for the column
+        // rather than its characters.
+        if column.text_index {
+            terms.push(Term {
+                what: format!(
+                    "the text index's sorted runs over column {index}, charged at the column they \
+                     are tokenised from"
+                ),
+                bytes,
+                mapped: true,
+            });
+        }
     }
     if member_rows > 0 {
         terms.push(Term {
@@ -263,6 +305,10 @@ pub(crate) fn model(args: &crate::BuildArgs, n: u64) -> Residency {
         .map(|(attribute, payload_bytes)| ColumnCost {
             ty: attribute.ty,
             payload_bytes,
+            // The same test the emit itself makes, called rather than restated: a text column
+            // earns an index exactly where it is owed postings.
+            text_index: attribute.ty == ScalarType::Text
+                && crate::pipeline::postings_are_owed(&args.schema, attribute),
         })
         .collect();
     let member_rows = args
@@ -309,6 +355,7 @@ mod tests {
         ColumnCost {
             ty,
             payload_bytes: payload,
+            text_index: false,
         }
     }
 
@@ -363,6 +410,40 @@ mod tests {
             with_text.describe().contains("(mapped)"),
             "the breakdown must say which terms are files: {}",
             with_text.describe()
+        );
+    }
+
+    /// **A text index costs a second set of files, at the same time as the first.** The runs spill
+    /// while the column they are tokenised from is still resident, so the disk pre-flight's column
+    /// phase has to see both — and neither may reach the memory figure.
+    #[test]
+    fn a_text_index_carries_its_runs_beside_the_column() {
+        let n = 10_000_000;
+        let plain = ColumnCost {
+            ty: ScalarType::Text,
+            payload_bytes: 400 * n,
+            text_index: false,
+        };
+        let indexed = ColumnCost {
+            text_index: true,
+            ..plain
+        };
+        let column_bytes = 8 * n + n.div_ceil(8) + 400 * n;
+
+        let without = entity_order_residency(n, &[plain], 0);
+        assert_eq!(without.mapped(), column_bytes);
+
+        let with = entity_order_residency(n, &[indexed], 0);
+        assert_eq!(with.mapped(), 2 * column_bytes);
+        assert_eq!(
+            with.total(),
+            without.total(),
+            "neither is charged to memory"
+        );
+        assert!(
+            with.describe().contains("sorted runs"),
+            "the runs must be a named term of their own: {}",
+            with.describe()
         );
     }
 
