@@ -105,7 +105,7 @@ across 14 roots. **The wall is still there and this corpus does not ask the ques
 layer that declares one root over everything.
 
 **W2 did not fire either**: 18.9 GB peak against the 47.3 GB the artifact campaign was killed at,
-with no `--memory-budget` set. Part of that is this rung's own work (§3.3): consuming `resolved`
+with no `--memory-budget` set. Part of that is this rung's own work (§3.4): consuming `resolved`
 rather than borrowing it took a whole copy of the memberships out of the peak.
 
 ⊘ **Resolution is 12.1% against GeoNames' 85.7%**, and it is the data rather than the frame — the
@@ -157,7 +157,51 @@ and the shape-membership merge; this one carries both. The perf work between the
 the merge added — so the bundle is unchanged, but the 61 s `layers` rose and the 45 s the filter
 block fell are not separated from run variance and are not attributed.
 
-### 3.1 Four things the survey corrected in the plan
+### 3.1 What the text index and the mapped columns bought
+
+Two changes followed from §3.0 and were measured **as a matched pair on an idle box, minutes apart,
+against the same corpus and the same identity key**. Both bundles are 7,900,567,451 bytes: the pair
+is byte-neutral at full scale, not merely at the corpus a unit test can hold.
+
+| | baseline | merged | |
+|---|---|---|---|
+| wall | 21:52.36 | **15:12.08** | −30.5% |
+| max RSS | 18.52 GB | **15.41 GB** | −3.11 GB |
+| `text_index` | 384.5 s | **108.8 s** | **3.54×** |
+| `attribute_tail` | 240.9 s | 267.7 s | +26.8 s |
+| `column_release` | 28.0 s | **0.4 s** | −27.6 s |
+| `attribute_tail` peak | 8,438 MiB | **5,409 MiB** | −3.0 GB |
+| global peak | 18,964 MiB | **15,784 MiB** | −3.1 GB |
+
+**Mapping the columns is free in wall-clock and worth 3.1 GB.** The cost is +26.8 s at
+`attribute_tail`, where a column is filled by random scatter; the saving is −27.6 s at
+`column_release`, where unlinking a file replaces dropping five gigabytes of heap. They cancel. On
+the read side `filter_postings` moved +3.4% and `record_blob` −5.9%, both inside the noise below.
+The 3.1 GB is anonymous memory becoming page cache the kernel may evict, which is the property that
+matters: it is the difference between a smaller machine building slowly and a smaller machine being
+OOM-killed.
+
+**The text index is chunk → spill sorted runs → k-way merge**, parallel over contiguous ascending
+entity ranges. Its peak is `clamp(--memory-budget/16, 128 MiB, 2 GiB)` across all workers, plus at
+most 128 run readers and one merged term's list; **no term of it is a function of corpus size**, and
+above 128 runs the runs merge in passes rather than exhausting file descriptors.
+
+⊘ **A quarter of the 30.5% is not attributable.** The stages neither change went near moved by
+about 115 s between the two runs — `dictionary` 63.2 → 30.8 s, `layers` 310.6 → 266.3 s,
+`assignment` 43.1 → 31.0 s. That is run-to-run variance on an idle box, and it is larger than it
+looks like it should be. The attributable gain is ~285 s against ~400 s observed. The 3.54× and the
+3.1 GB are far outside that band; the wall figure is not, and a later run quoting 15:12 as
+reproducible would be overclaiming.
+
+**The order has changed.** `attribute_tail` (267.7 s) and `layers` (266.3 s) are now the two largest
+stages and together 59% of the build; `text_index` has gone from first to fourth. **`layers` is the
+whole of the peak** and is the one structure left that is unbounded by construction: about
+5.07×10⁸ membership entries — six taxonomy levels at ~98% coverage plus one division level — held
+twice over, once as `Vec<u64>` source ids and again as resolved entity ids, all anonymous. It is the
+same postings shape the text index now solves, so the banding-and-merge machinery to bound it
+exists rather than needing inventing.
+
+### 3.2 Four things the survey corrected in the plan
 
 Measured over the staged bytes on 2026-08-28, before anything was written.
 
@@ -183,7 +227,7 @@ same path. So the rung declares three category columns over one tree rather than
 4,658,700 divisions carry exactly one hierarchy path, asserted at every run. The polyhierarchy the
 campaign expects to force a ruling is still MeSH at rung 3.
 
-### 3.2 The predicate layer works, and the build's report said it did not
+### 3.3 The predicate layer works, and the build's report said it did not
 
 Recorded because the report cost an hour, not because anything was broken. `programmes/source` is
 `membership = { attribute = "source_dataset" }`, the tagged-programme case the plan asks for. The
@@ -219,7 +263,7 @@ not any artifact existed. The new one asserts the count.
 an attribute membership**, and this is what that costs: the kind's only end-to-end exercise is the
 one a rung brought.
 
-### 3.3 What the rung cost the build's own code
+### 3.4 What the rung cost the build's own code
 
 Eight changes, all behaviour-neutral and all proved so on the corpus itself: the rebuild's
 `SEGMENTS-0.json` digest is **identical** and its `MANIFEST.json` differs in `created_at` and
@@ -255,7 +299,7 @@ observes *stored* memberships and an attribute predicate has none, its members b
 column. An hour went into looking for a defect in a working layer. The report now prints the
 registry's count and says the shape is not observed.
 
-### 3.4 What is still open at this rung
+### 3.5 What is still open at this rung
 
 - The whole corpus has not been run, so **W1 and W2 have not been met**. They are expected here.
 - **A `nested` layer has no levels, so it has no zoom bound** — the other half of §5's first
@@ -263,8 +307,10 @@ registry's count and says the shape is not observed.
   declaration at the layer it applies to.
 - The rung declares both a `nested` boundary layer and three indexed division columns, so the
   attribute-membership comparison the plan asks for is one declaration away. It has not been run.
-- **`filter_postings`, 44% of the build, has never been investigated** (§3.0). It is the obvious
-  next optimisation and `layers` is no longer where the effort belongs.
+- **`layers` is now the largest structure and the whole of the peak** (§3.1). It holds about
+  5.07×10⁸ membership entries twice over, all anonymous and all a function of corpus size, so it is
+  the one part of the build that fails the ingest-beyond-memory test outright. The text index's
+  banding-and-merge machinery is the shape that answers it.
 - §7.1's bar: the 0091 build-vs-ingest test, the oracle census, the write cycle, ingest rows/s, p99
   at three zooms and a screenshot. None attempted.
 - One part of sixteen built: **55 s wall, 1.33 GB peak RSS, 484,326,539 bytes** (105 B/point),
