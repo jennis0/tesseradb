@@ -25,7 +25,7 @@ pub mod histogram;
 pub mod layout;
 pub mod membership_column;
 mod merge;
-pub mod ranges;
+pub mod shapes;
 mod refresh;
 pub mod row_column;
 pub mod select;
@@ -290,6 +290,8 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
         containment_extents: Vec::new(),
         tile_index_extents: Vec::new(),
         row_column_extents: Vec::new(),
+        shape_rows_extents: Vec::new(),
+        shape_held_extents: Vec::new(),
         artifact_record_extents: Vec::new(),
         segments: Vec::new(),
         deltas: Vec::new(),

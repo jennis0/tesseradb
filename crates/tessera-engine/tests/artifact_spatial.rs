@@ -1,27 +1,30 @@
-//! **A boundary is the points inside it, decided at request time and never stale.**
+//! **A boundary is the points inside it, exactly, resolved when a segment is published and never
+//! stale.**
 //!
-//! A `membership = "spatial"` layer stores no membership at all. Each artifact declares a box; its
-//! members are the depth-`d` Morton tiles that cover that box, resolved against whatever segments
-//! the generation happens to hold. Ruling R3 makes that exact rather than approximate — **the
-//! ranges are the membership and the polygon is content** — so a point inside a covering tile is a
-//! member whether or not it is inside the box, and the answer is a set rather than an estimate.
+//! A `membership = "spatial"` layer stores no membership at all. Each artifact declares a shape;
+//! its members are the rows whose stored position is inside that shape — closed on every side for
+//! a box, even-odd with an edge inside for a polygon (`polygon-membership.md` §4.1) — resolved
+//! against each segment when the segment is published (§6.3) and joined per generation.
 //!
-//! **The oracle is the corpus generator, not this file.** Every count asserted below is computed by
-//! quantising the generator's own points to depth-`d` tiles and masking by the principal's grant —
-//! the same two operations the engine performs through entirely different code, over segments on
-//! disk instead of over a closed form. A defect in either shows up as a disagreement.
+//! **The oracle is the corpus generator and the shape's own direct test**: every count asserted
+//! below is computed by quantising the generator's points to the grid — the same `fixed32` the
+//! build applies — testing each against the canonical shape's direct predicate, and masking by
+//! the principal's grant. The engine reaches the same answer through the descent, the per-segment
+//! resolution, the row bases and the layout machinery, none of which the oracle touches; a defect
+//! in the bookkeeping — a segment resolved twice or not at all, a row-base slip, a form built
+//! under one generation and read under another — shows up as a disagreement.
 //!
 //! **The boxes are the fixture's**, not the generator's: `tessera-corpus`'s boundary arm carries a
-//! roster of authored tile prefixes and no geometry, because it was written while the machinery
-//! that would read one did not exist. So this file builds a box per chosen tile — the middle half
-//! of it, asserted to cover exactly that tile and no other — and uses the generator only for the
-//! points, the access relation and the membership oracle.
+//! roster of authored tile prefixes and no geometry. So this file builds a box per chosen tile —
+//! the middle half of it — and two polygons over the map, and uses the generator only for the
+//! points, the access relation and the visibility oracle.
 //!
-//! What is checked, in order: the counts against the oracle over several principals and viewports;
-//! that a point ingested inside a box counts on the next request with nothing rebuilt; that a
-//! suppressed member leaves the count and a suppressed artifact leaves the map; that a fold leaves
-//! every answer where it was, ranges being row-space-independent; and that an absolute criterion
-//! fires on such a layer exactly as it does on a stored one.
+//! What is checked, in order: the counts against the oracle over several principals and viewports,
+//! for a box layer and a polygon layer; that a point ingested inside a shape counts on the next
+//! request with nothing rebuilt; that a suppressed member leaves the count and a suppressed
+//! artifact leaves the map; that a fold leaves every answer where it was; that an absolute
+//! criterion fires on such a layer exactly as it does on a stored one; and that the shapes survive
+//! a restart.
 
 mod common;
 
@@ -37,12 +40,22 @@ use tessera_types::EntityId;
 
 const N: u64 = 3_000;
 const SEED: u64 = 0x5EED;
-/// The depth the fixture's boxes are covered at. **Part of the membership** — the same boxes at a
-/// different depth are a different member set — so it is written once here and read by the oracle
-/// and the declaration alike.
+/// The depth of the tiles the fixture draws its boxes over — a fixture choice, not a membership
+/// one: every shape is exact whatever tile it was drawn from.
 const DEPTH: u8 = 3;
 const LAYER: &str = "regions/boxes";
+const POLYGONS: &str = "regions/polygons";
+/// The polygon layer's two shapes, in extent coordinates: a diamond over the middle of the map and
+/// a square with a square hole in the north-west, so the oracle exercises holes and edges alike.
+const DIAMOND: &str = "POLYGON ((500 100, 900 500, 500 900, 100 500, 500 100))";
+const FRAME: &str =
+    "POLYGON ((50 50, 350 50, 350 350, 50 350, 50 50), (150 150, 250 150, 250 250, 150 250, 150 150))";
 const WHOLE_MAP: [f64; 4] = [0.0, 0.0, 1000.0, 1000.0];
+/// A polygon smaller than one depth-16 cell, drawn around one generator point: the shape a
+/// neighbourhood-sized division is at a world extent, which has no interior tile and one
+/// boundary cell. Overture's part 0 has three whose one place the build found no row for
+/// (2026-08-29), and this is the fixture that says whether the resolution or the data is why.
+const SPECK_HALF: f64 = 0.001;
 /// How many tiles the fixture draws boxes over. Enough that the layer is a real minority of the
 /// grid — the shape a boundary set actually has — and few enough to stay a fast test.
 const BOXES: usize = 8;
@@ -78,9 +91,10 @@ fn tile_of(x: f64, y: f64) -> u64 {
 
 /// The middle half of tile `prefix`, as a box in extent coordinates.
 ///
-/// **The middle half rather than the whole tile**, so the box cannot touch a neighbour: a tile's
-/// bounds are half-open and a box that reached them would quantise into the tile beyond. The
-/// assertion beside every use is what makes that a fact rather than an intention.
+/// **The middle half rather than the whole tile**, so two boxes never touch: the fixture's oracle
+/// is per shape and a shared edge would put one point in two artifacts, which is legal but is not
+/// what the counts below are asserting. The assertion beside every use is what makes that a fact
+/// rather than an intention.
 fn box_of(prefix: u64, tx: u32, ty: u32) -> [f64; 4] {
     let e = extent();
     let span = 65536u32 >> DEPTH;
@@ -137,7 +151,40 @@ fn chosen_tiles(c: &Corpus) -> Vec<(u64, u32, u32)> {
         .collect()
 }
 
-/// The declaration: one spatial layer, its boxes written into the document itself.
+/// The canonical shape one declaration produces — what the oracle tests a quantised point against.
+fn canonical(shape: tessera_spatial::shape::ShapeF64) -> tessera_spatial::shape::Shape {
+    shape
+        .canonical(&extent())
+        .expect("the fixture's shapes canonicalise")
+        .0
+}
+
+fn canonical_box(bbox: [f64; 4]) -> tessera_spatial::shape::Shape {
+    canonical(tessera_spatial::shape::ShapeF64::Bbox {
+        min_x: bbox[0],
+        min_y: bbox[1],
+        max_x: bbox[2],
+        max_y: bbox[3],
+    })
+}
+
+fn canonical_wkt(wkt: &str) -> tessera_spatial::shape::Shape {
+    canonical(tessera_spatial::shape::ShapeF64::Polygon(
+        tessera_spatial::shape::read_wkt(wkt).expect("the fixture's WKT reads"),
+    ))
+}
+
+/// A point's grid position — **the build's own quantisation**, `fixed32` over the same extent,
+/// so the oracle and the engine cannot disagree about where a point is.
+fn grid_of(x: f64, y: f64) -> (u32, u32) {
+    let e = extent();
+    (
+        tessera_spatial::fixed32(x, e.x_min, e.x_max),
+        tessera_spatial::fixed32(y, e.y_min, e.y_max),
+    )
+}
+
+/// The declaration: a box layer and a polygon layer, their shapes written into the document.
 fn config_toml(c: &Corpus, criterion: &str) -> String {
     let artifacts: Vec<String> = chosen_tiles(c)
         .into_iter()
@@ -173,10 +220,38 @@ artifacts = [
 ]
 
   [layer.shape]
-  kind  = "bbox"
-  depth = {DEPTH}
+  kind = "bbox"
+
+[[layer]]
+name                      = "{POLYGONS}"
+views                     = ["s0"]
+membership                = "spatial"
+hierarchy                 = {{ kind = "flat" }}
+visibility                = "public"
+artifact_visibility       = {{ default = "inherited" }}
+require_member_visibility = {criterion}
+artifacts = [
+  {{ key = "diamond", wkt = "{DIAMOND}" }},
+  {{ key = "frame", wkt = "{FRAME}" }},
+  {{ key = "speck", wkt = "{}" }},
+]
+
+  [layer.shape]
+  kind = "polygon"
 "#,
-        artifacts.join("\n")
+        artifacts.join("\n"),
+        speck_wkt(c)
+    )
+}
+
+/// The speck: a diamond of half-width [`SPECK_HALF`] around the corpus's first point.
+fn speck_wkt(c: &Corpus) -> String {
+    let item = c.item(0);
+    let (x, y) = (f64::from(item.x), f64::from(item.y));
+    let h = SPECK_HALF;
+    format!(
+        "POLYGON (({} {}, {} {}, {} {}, {} {}, {} {}))",
+        x - h, y, x, y - h, x + h, y, x, y + h, x - h, y
     )
 }
 
@@ -189,6 +264,11 @@ struct Fixture {
 }
 
 fn fixture(criterion: &str) -> Fixture {
+    fixture_with(criterion, |toml| toml)
+}
+
+/// As [`fixture`], with the declaration edited on its way to the build — a pin, say.
+fn fixture_with(criterion: &str, edit: impl FnOnce(String) -> String) -> Fixture {
     let corpus = corpus();
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("bundle");
@@ -197,7 +277,7 @@ fn fixture(criterion: &str) -> Fixture {
     corpus.write_points_parquet(&points).expect("points");
     corpus.write_pairs_parquet(&pairs).expect("pairs");
     let config_path = tmp.path().join("spatial-config.toml");
-    std::fs::write(&config_path, config_toml(&corpus, criterion)).unwrap();
+    std::fs::write(&config_path, edit(config_toml(&corpus, criterion))).unwrap();
     let config = tessera_build::config::Config::parse(&config_path, &Default::default())
         .expect("the spatial fixture's declaration parses");
     build_with_layers(&root, &points, &pairs, &corpus, config);
@@ -219,28 +299,44 @@ impl Fixture {
         engine
     }
 
-    /// The oracle: every box's masked count, computed from the generator alone.
-    ///
-    /// `deleted` is the entities a change has taken away — the same adjustment the artifact census
-    /// makes, so the expectation tracks the write cycle rather than only the build.
-    fn expected(&self, grant: &str, deleted: &[u64]) -> BTreeMap<String, u64> {
-        let g = Grant::parse(grant).unwrap();
-        let chosen: Vec<u64> = chosen_tiles(&self.corpus)
+    /// The shapes, canonical, keyed as the layers key them — both layers in one map, the keys
+    /// being disjoint.
+    fn shapes(&self) -> Vec<(String, tessera_spatial::shape::Shape)> {
+        let mut out: Vec<(String, tessera_spatial::shape::Shape)> = chosen_tiles(&self.corpus)
             .into_iter()
-            .map(|(prefix, _, _)| prefix)
+            .map(|(prefix, tx, ty)| (format!("t{prefix}"), canonical_box(box_of(prefix, tx, ty))))
             .collect();
+        out.push(("diamond".to_string(), canonical_wkt(DIAMOND)));
+        out.push(("frame".to_string(), canonical_wkt(FRAME)));
+        out.push(("speck".to_string(), canonical_wkt(&speck_wkt(&self.corpus))));
+        out
+    }
+
+    /// The oracle: every shape's masked count, computed from the generator and the shape's direct
+    /// test alone. `extra` is points ingested since the build, in extent coordinates and visible to
+    /// `grant`; `deleted` is the entities a change has taken away — the same adjustments the
+    /// artifact census makes, so the expectation tracks the write cycle rather than only the build.
+    fn expected(&self, grant: &str, deleted: &[u64], extra: &[(f64, f64)]) -> BTreeMap<String, u64> {
+        let g = Grant::parse(grant).unwrap();
+        let shapes = self.shapes();
         let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+        let mut positions: Vec<(u32, u32)> = Vec::new();
         for e in 0..self.corpus.n() {
             if deleted.contains(&e) || !self.corpus.visible(e, &g) {
                 continue;
             }
             let item = self.corpus.item(e);
-            let tile = tile_of(f64::from(item.x), f64::from(item.y));
-            if chosen.contains(&tile) {
-                *counts.entry(format!("t{tile}")).or_default() += 1;
+            positions.push(grid_of(f64::from(item.x), f64::from(item.y)));
+        }
+        for (x, y) in extra {
+            positions.push(grid_of(*x, *y));
+        }
+        for (key, shape) in &shapes {
+            let count = positions.iter().filter(|p| shape.contains(**p)).count() as u64;
+            if count > 0 {
+                counts.insert(key.clone(), count);
             }
         }
-        counts.retain(|_, count| *count > 0);
         counts
     }
 }
@@ -253,7 +349,7 @@ impl Fixture {
 /// the box means something.
 fn served(engine: &Engine, grant: &str, zoom: u8, bbox: [f64; 4]) -> BTreeMap<String, u64> {
     let session = engine.authorise(&credential(grant)).unwrap();
-    let names = [LAYER];
+    let names = [LAYER, POLYGONS];
     let mut request = ViewportRequest::new("s0", zoom, bbox, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     engine
@@ -342,15 +438,15 @@ fn a_boundarys_masked_count_is_the_one_the_generator_computes() {
     let engine = fx.open();
 
     for grant in ["0", "0,1", "1,2,3", "5,6,7,8"] {
-        let expected = fx.expected(grant, &[]);
+        let expected = fx.expected(grant, &[], &[]);
         assert_eq!(
             served(&engine, grant, 0, WHOLE_MAP),
             expected,
             "the served counts differ from the generator's for grant {grant}"
         );
         assert!(
-            !expected.is_empty(),
-            "grant {grant} sees nothing at all, so nothing is under test"
+            expected.contains_key("diamond") && expected.contains_key("frame"),
+            "grant {grant} sees no polygon member at all, so the polygon layer is untested"
         );
 
         // Every narrower viewport serves a subset, at the *same* counts.
@@ -371,58 +467,67 @@ fn a_boundarys_masked_count_is_the_one_the_generator_computes() {
         }
     }
 
-    // A viewport in a corner serves strictly fewer boxes than the whole map, or the candidacy
+    // A viewport in a corner serves strictly fewer shapes than the whole map, or the candidacy
     // arithmetic is not being exercised at all.
     let whole = served(&engine, "0,1", 0, WHOLE_MAP);
     let corner = served(&engine, "0,1", VIEWPORT_ZOOM, [0.0, 0.0, 125.0, 125.0]);
     assert!(
         corner.len() < whole.len(),
-        "every box is a candidate in a corner viewport, so the ranges decide nothing"
+        "every shape is a candidate in a corner viewport, so candidacy decides nothing"
     );
 }
 
 /// **A point ingested inside a boundary is a member on the next request, with nothing rebuilt.**
 ///
 /// Nothing rebuilt is stated as what did not happen: no fold, and no write to the layer at all —
-/// the ranges are a function of the shapes and the segments, and a flush publishes a segment. That
-/// is the property a stored membership cannot have, and it is why the source exists.
+/// the flush resolved its own segment against the shapes before it published
+/// (`polygon-membership.md` §6.3), and the next request joined a segment list that includes it.
+/// That is the property a stored membership cannot have, and it is why the source exists. Two
+/// points, so the polygon layer's boundary test is exercised as well as the box's: one at the
+/// centre of a box, one just inside the diamond's edge — and one just outside it, which must
+/// count nowhere.
 #[test]
 fn a_point_ingested_inside_a_boundary_counts_on_the_next_request() {
     let fx = fixture("\"none\"");
     let engine = fx.open();
-    let target = chosen_tiles(&fx.corpus)[0];
-    let key = format!("t{}", target.0);
-    let bbox = box_of(target.0, target.1, target.2);
     let before = served(&engine, "0", 0, WHOLE_MAP);
-    let was = *before.get(&key).expect("the busiest tile has members");
+    // The box this principal sees most of — the tile with the most points is not necessarily
+    // the box with the most visible ones, the box being the tile's middle half.
+    let (key, bbox) = chosen_tiles(&fx.corpus)
+        .into_iter()
+        .map(|(prefix, tx, ty)| (format!("t{prefix}"), box_of(prefix, tx, ty)))
+        .max_by_key(|(key, _)| before.get(key).copied().unwrap_or(0))
+        .expect("the fixture draws boxes");
+    assert!(before.contains_key(&key), "no box has a visible member");
     let folds = engine.write_executor_stats().folds;
 
-    // The centre of the box, which is inside the tile by construction.
-    ingest_point(
-        &engine,
-        "inside-1",
-        0,
-        ((bbox[0] + bbox[2]) / 2.0) as f32,
-        ((bbox[1] + bbox[3]) / 2.0) as f32,
-    );
+    // The centre of the box; a point 2 units inside the diamond's north-east edge, on which
+    // `x + y = 1400` lies; and one 2 units outside it.
+    let inside = [
+        ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0),
+        (700.0, 698.0),
+    ];
+    let outside = (700.0, 702.0);
+    ingest_point(&engine, "inside-1", 0, inside[0].0 as f32, inside[0].1 as f32);
+    ingest_point(&engine, "inside-2", 0, inside[1].0 as f32, inside[1].1 as f32);
+    ingest_point(&engine, "outside-1", 0, outside.0 as f32, outside.1 as f32);
     flush(&engine);
 
     let after = served(&engine, "0", 0, WHOLE_MAP);
+    let mut extra: Vec<(f64, f64)> = inside.to_vec();
+    extra.push(outside);
     assert_eq!(
-        after.get(&key),
-        Some(&(was + 1)),
-        "the ingested point did not reach the boundary it landed in"
+        after,
+        fx.expected("0", &[], &extra),
+        "the ingested points did not reach exactly the shapes they landed in"
     );
+    assert_eq!(after[&key], before[&key] + 1);
+    assert_eq!(after["diamond"], before["diamond"] + 1);
     assert_eq!(
         engine.write_executor_stats().folds,
         folds,
         "the count moved because of a fold rather than because of the geometry"
     );
-    for (other, count) in &after {
-        if other != &key {
-            assert_eq!(before.get(other), Some(count), "{other} moved too");
-        }
-    }
 }
 
 /// **A fold leaves every answer where it was.** A fold renumbers the base row space wholesale,
@@ -465,19 +570,24 @@ fn a_deny_reaches_a_boundary_and_its_members() {
     let fx = fixture("\"none\"");
     let engine = fx.open();
     let grant = "0,1";
-    let target = chosen_tiles(&fx.corpus)[0].0;
-    let key = format!("t{target}");
     let before = served(&engine, grant, 0, WHOLE_MAP);
+    // The shape this principal sees most of, from either layer — the boxes are small and a
+    // narrow principal may see one or two members of each; the diamond covers a third of the map.
+    let (key, shape) = fx
+        .shapes()
+        .into_iter()
+        .max_by_key(|(key, _)| before.get(key).copied().unwrap_or(0))
+        .expect("the fixture draws shapes");
     let was = before[&key];
-    assert!(was > 2, "the busiest box has too few members to test with");
+    assert!(was > 2, "the fullest shape has too few members to test with");
 
-    // One visible member of that box, suppressed.
+    // One visible member of that shape, suppressed.
     let by_source = source_to_new_map(&fx.root, "v00000");
     let g = Grant::parse(grant).unwrap();
     let victim = (0..fx.corpus.n())
         .find(|e| {
             let item = fx.corpus.item(*e);
-            fx.corpus.visible(*e, &g) && tile_of(f64::from(item.x), f64::from(item.y)) == target
+            fx.corpus.visible(*e, &g) && shape.contains(grid_of(f64::from(item.x), f64::from(item.y)))
         })
         .expect("the box has a visible member");
     engine
@@ -505,7 +615,7 @@ fn a_deny_reaches_a_boundary_and_its_members() {
 /// viewport handed out — the same address a suppression names.
 fn served_id(engine: &Engine, grant: &str, key: &str) -> EntityId {
     let session = engine.authorise(&credential(grant)).unwrap();
-    let names = [LAYER];
+    let names = [LAYER, POLYGONS];
     let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
     request.layers = tessera_engine::LayerSelection::Named(&names);
     let row = engine
@@ -544,7 +654,7 @@ fn an_absolute_criterion_fires_on_a_boundary() {
     let engine = gated.open();
     let served_gated = served(&engine, "0,1", 0, WHOLE_MAP);
     let expected: BTreeMap<String, u64> = gated
-        .expected("0,1", &[])
+        .expected("0,1", &[], &[])
         .into_iter()
         .filter(|(_, count)| *count >= bar)
         .collect();
@@ -558,15 +668,16 @@ fn an_absolute_criterion_fires_on_a_boundary() {
     );
 }
 
-/// **A box survives a restart**, which is the one thing about a spatial layer that is durable.
+/// **A shape survives a restart**, which is the one thing about a spatial layer that is durable.
 ///
-/// The ranges are not stored — they are re-derived from the shapes and the segments, so there is
-/// nothing about them a restart could lose. What *is* stored is the box itself, in the artifact's
-/// own record blob, and an artifact restored without one has no membership rule at all: it would
-/// count zero for every viewer and be absent under any criterion, which no client can tell from an
-/// artifact whose members are simply invisible to them. So the decoder refuses such a blob, and
-/// this asserts the whole path — encode at publication, map at open, decode, re-derive — by asking
-/// for the same answers twice across a reopen.
+/// The memberships are not stored — every segment is resolved again at open against the shapes
+/// the records carry — so there is nothing about them a restart could lose. What *is* stored is
+/// the canonical shape itself, in the artifact's own record blob, and an artifact restored without
+/// one has no membership rule at all: it would count zero for every viewer and be absent under any
+/// criterion, which no client can tell from an artifact whose members are simply invisible to
+/// them. So the decoder refuses such a blob, and this asserts the whole path — canonicalise and
+/// encode at publication, map at open, decode, decompose, resolve — by asking for the same answers
+/// twice across a reopen.
 #[test]
 fn a_boundarys_box_survives_a_restart() {
     let fx = fixture("\"none\"");
@@ -583,7 +694,7 @@ fn a_boundarys_box_survives_a_restart() {
     assert_eq!(
         served(&engine, "0,1", 0, WHOLE_MAP),
         before,
-        "a boundary's box did not come back from the extent it was written into"
+        "a boundary's shape did not come back from the extent it was written into"
     );
     assert_eq!(
         served(&engine, "0,1", VIEWPORT_ZOOM, [0.0, 0.0, 500.0, 500.0]),
@@ -602,7 +713,7 @@ fn a_boundarys_box_survives_a_restart() {
     assert_eq!(
         after.len(),
         before.len(),
-        "a box was lost by the fold's rewrite"
+        "a shape was lost by the fold's rewrite"
     );
     for (key, count) in &before {
         assert!(
@@ -610,4 +721,116 @@ fn a_boundarys_box_survives_a_restart() {
             "{key} lost members across a fold and a restart"
         );
     }
+}
+
+/// **An open claims what the build and the fold persisted, and resolves only the segments no
+/// persisted form covers** (`polygon-membership.md` §6.3; owner ruling 2026-08-29).
+///
+/// The build writes each spatial level's resolved rows in its layout's form — the row-major column
+/// under a `column` pin, the `shape-rows` row form otherwise — and every fold writes them again.
+/// An open reads those rather than resolving the base segment; a flushed segment has no form and
+/// is resolved. Both the cadence and the answers are asserted: the counts against the generator's
+/// oracle at every stage, so a claimed piece is the same membership the resolution would have
+/// produced.
+#[test]
+fn an_open_claims_the_persisted_pieces_and_resolves_only_the_flushed_segments() {
+    // The boxes pinned `column` so one level is claimed from its column and the other from its
+    // row form; the boxes never touch, so the column composes.
+    let fx = fixture_with("\"none\"", |toml| {
+        toml.replacen(
+            "membership                = \"spatial\"\n",
+            "membership                = \"spatial\"\nlayout                    = \"column\"\n",
+            1,
+        )
+    });
+    let engine = fx.open();
+    assert_eq!(served(&engine, "0,1", 0, WHOLE_MAP), fx.expected("0,1", &[], &[]));
+    let warm = engine.shape_warm_report();
+    assert_eq!(warm.levels, 2, "two spatial layers, one level each, one view");
+    assert_eq!(
+        (warm.pieces_claimed, warm.pieces_resolved),
+        (2, 0),
+        "a fresh open of a built bundle claims both levels' persisted forms: {warm:?}"
+    );
+    assert_eq!(
+        (warm.held_claimed, warm.held_decomposed),
+        (warm.artifacts, 0),
+        "every decomposition is claimed from the build's file, none descended: {warm:?}"
+    );
+
+    // A flush adds a segment nothing persisted covers: claimed 2, resolved 2, and the ingested
+    // point counts.
+    ingest_point(&engine, "flushed", 0, 3.0, 3.0);
+    flush(&engine);
+    drop(engine);
+    let engine = fx.open();
+    let warm = engine.shape_warm_report();
+    assert_eq!(
+        (warm.pieces_claimed, warm.pieces_resolved),
+        (2, 2),
+        "the base is claimed and the flushed segment resolved: {warm:?}"
+    );
+    assert_eq!(
+        served(&engine, "0,1", 0, WHOLE_MAP),
+        fx.expected("0,1", &[], &[(3.0, 3.0)])
+    );
+
+    // A fold renumbers every row and writes the forms again under the new prefix: claimed 2,
+    // resolved 0.
+    fold(&engine);
+    drop(engine);
+    let engine = fx.open();
+    let warm = engine.shape_warm_report();
+    assert_eq!(
+        (warm.pieces_claimed, warm.pieces_resolved),
+        (2, 0),
+        "a fresh open after a fold claims the fold's forms: {warm:?}"
+    );
+    assert_eq!(
+        (warm.held_claimed, warm.held_decomposed),
+        (warm.artifacts, 0),
+        "the fold wrote the decompositions again: {warm:?}"
+    );
+    assert_eq!(
+        served(&engine, "0,1", 0, WHOLE_MAP),
+        fx.expected("0,1", &[], &[(3.0, 3.0)])
+    );
+    drop(engine);
+
+    // A stale or torn file is refused and the segment resolved again — loudly, never served
+    // short. Truncate the fold's row form and reopen: one level claimed (the column), one
+    // resolved, every answer unchanged.
+    let forms: Vec<std::path::PathBuf> = walk(&fx.root)
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "tssr"))
+        .collect();
+    assert_eq!(forms.len(), 1, "one row form for the polygon level: {forms:?}");
+    let bytes = std::fs::read(&forms[0]).unwrap();
+    std::fs::write(&forms[0], &bytes[..bytes.len() / 2]).unwrap();
+    let engine = fx.open();
+    let warm = engine.shape_warm_report();
+    assert_eq!(
+        (warm.pieces_claimed, warm.pieces_resolved),
+        (1, 1),
+        "a torn form is refused and its segment resolved: {warm:?}"
+    );
+    assert_eq!(
+        served(&engine, "0,1", 0, WHOLE_MAP),
+        fx.expected("0,1", &[], &[(3.0, 3.0)])
+    );
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
 }

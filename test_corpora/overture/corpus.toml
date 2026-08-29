@@ -27,7 +27,6 @@ division_country   = "vocab-division-country.parquet"
 division_region    = "vocab-division-region.parquet"
 division_county    = "vocab-division-county.parquet"
 members_taxonomy   = "members-taxonomy.parquet"
-members_divisions  = "members-divisions.parquet"
 artifacts_divisions = "artifacts-divisions.parquet"
 
 [defaults]
@@ -298,10 +297,18 @@ source = "members_taxonomy"
 # (configuration.md, the four hierarchy kinds: every artifact at level 0, `[[layer.levels]]`
 # refused).
 #
-# The lineage is the divisions' own `hierarchies[1]`, taken from the deepest polygon containing the
-# place — not from stacking the containing polygons by subtype. `division_area` polygons are
-# generalised for cartography and do not nest reliably, so a stacked chain would assert
-# containments the publisher does not.
+# **The membership is the polygon** (`polygon-membership.md` §6.1): `membership = "spatial"` with
+# `shape.kind = "polygon"`, each artifact row carrying `division_area`'s own geometry as WKB in
+# the `geometry` column, projected by `prepare.py` into this view's frame. The service resolves
+# which places each division holds from the geometry — at the build over its one segment, at
+# every flush over the segment it publishes — so `members-divisions.parquet` is no longer what
+# the layer reads. The offline join stays for the three lifted attribute columns and for the
+# roster.
+#
+# **The edges are declared**, from each division's own `hierarchies[1]` — the `parent` column —
+# and never derived from containment: `division_area` polygons are generalised for cartography
+# and do not nest reliably, so a tree derived from the geometry would differ from the
+# publisher's. The build reports the children whose bounds escape their parent's and proceeds.
 #
 # ⊘ **A nested layer has no levels, so it has no zoom bound**, and the artifact-response-volume
 # finding at rung 1 (`docs/ingest-campaign.md` §4) was precisely that a tiered layer returns every
@@ -313,12 +320,14 @@ name                      = "boundaries/divisions"
 title                     = "Administrative divisions"
 source                    = "artifacts_divisions"
 views                     = ["world"]
-membership                = "enumerated"
-value_set                 = "open"
+membership                = "spatial"
 hierarchy                 = { kind = "nested", prune_children = true }
 visibility                = "public"
 artifact_visibility       = { default = "inherited" }
 require_member_visibility = { count = 1 }
+
+[layer.shape]
+kind = "polygon"
 
 # Recomputed per viewer from `membership ∩ M_auth`, so they are contained by construction and take
 # no visibility declaration. Without them a boundary layer cannot answer "zoom to this region" for
@@ -334,9 +343,6 @@ computed = ["centroid", "box"]
 name                      = "name"
 type                      = "text"
 require_member_visibility = "inherited"
-
-[layer.members]
-source = "members_divisions"
 
 # The tagged-programme case the campaign plan asks this rung for: an attribute predicate, whose
 # artifacts are the eight distinct values of an indexed column and whose membership is evaluated

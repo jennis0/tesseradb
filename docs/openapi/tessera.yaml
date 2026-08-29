@@ -731,7 +731,7 @@ components:
       type: object
       additionalProperties: false
       description: Design §7.2's clause parameters and the request-shape ceilings. All deployment constants, identical for every principal; a client cannot read a mark count as a density without them.
-      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values]
+      required: [k_min, k_max_marks, max_k, theta_target_marks, max_underlay_offset, max_tiles_per_request, max_category_values, max_shape_vertices]
       properties:
         k_min:
           type: integer
@@ -758,6 +758,10 @@ components:
           type: integer
           minimum: 0
           description: "`/v1/categories`' page ceiling and default."
+        max_shape_vertices:
+          type: integer
+          minimum: 0
+          description: The most vertices a published shape may carry after canonicalisation (`polygon-membership.md` §9). Over it, `PUT /control/layers/{name}/artifacts` is a `422` naming the count and the cap; the held decomposition is reported and never capped.
 
     Layer:
       type: object

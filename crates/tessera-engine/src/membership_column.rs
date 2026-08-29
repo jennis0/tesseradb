@@ -24,8 +24,8 @@
 //! - **Row-major** ([`crate::row_column`]): the column holds each row's leaf label (or list of
 //!   labels), so a served point's leaf is one read, and the walk up the lineage stops at the
 //!   first served ancestor — a few steps per point.
-//! - **Artifact-major** and **spatial** ([`crate::artifacts::MembershipRows`],
-//!   [`crate::ranges`]): only artifact→rows exists. The inversion is done **by bitmap
+//! - **Artifact-major** ([`crate::artifacts::MembershipRows`] — a spatial level's resolved
+//!   membership arrives in the same form): only artifact→rows exists. The inversion is done **by bitmap
 //!   intersection, never by testing points against artifacts**: the response's gathered rows
 //!   become one bitmap, each served artifact's rows are intersected with it — O(containers
 //!   touched), not O(points × artifacts) — and every row hit takes the ordinal if it is deeper
@@ -171,16 +171,12 @@ fn resolve_layer(rows: &[u32], bitmap: &Bitmap, layer: &ServedLayer) -> Vec<Opti
                     });
                 }
             }
-            // Artifact-major or spatial: each served artifact's rows against the response's,
-            // one intersection per served artifact.
+            // Artifact-major: each served artifact's rows against the response's, one
+            // intersection per served artifact.
             None => {
                 for (&ordinal, &id) in &level.served {
-                    let members = match level.rows.ranges() {
-                        Some(ranges) => ranges.rows(ordinal),
-                        None => match level.rows.get(ordinal) {
-                            Some(members) => members.clone(),
-                            None => continue,
-                        },
+                    let Some(members) = level.rows.get(ordinal) else {
+                        continue;
                     };
                     let rank = (level.level, depth(ordinal));
                     for row in members.and(bitmap).iter() {

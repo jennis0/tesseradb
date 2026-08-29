@@ -3353,11 +3353,21 @@ fn predicate_vocabulary<'a>(
 /// — a column this generation does not hold, or a spatial layer that declares no shape. Both are
 /// the fail-closed answer: such a level is served with no membership, so none of its artifacts is a
 /// candidate anywhere, rather than every artifact being one.
+///
+/// A spatial level's source is its held structures (`crate::shapes`), taken at the store's current
+/// level version — built at open and at every publication into the level, so a request finds them
+/// held; the join over the segments is the request's own O(containers) step.
+#[allow(clippy::too_many_arguments)]
 fn predicate_source<'a>(
     declaration: &tessera_types::layer::LayerDeclaration,
     generation: &'a crate::Generation,
+    view: &str,
+    view_data: &tessera_store::read::ViewData,
     segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
     code_of_key: &'a dyn Fn(&str) -> Option<u32>,
+    shapes: &crate::shapes::ShapeStore,
+    store: &tessera_lifecycle::membership::ArtifactStore,
+    level: u32,
 ) -> Option<crate::artifacts::PredicateSource<'a>> {
     match &declaration.membership {
         tessera_types::layer::MembershipSource::Enumerated => None,
@@ -3370,25 +3380,24 @@ fn predicate_source<'a>(
                 },
             ))
         }
-        // ⊘ A spatial layer with no `shape` holds no artifacts and has no ranges to serve — the
+        // ⊘ A spatial layer with no `shape` holds no artifacts and has nothing to resolve — the
         // state this surface has always had, and the one the generator's boundary fixture is in.
         tessera_types::layer::MembershipSource::Spatial => {
-            let shape = declaration.shape?;
-            // **The build's own quantisation frame, not the request's.** A box covered against a
-            // different extent quantises to different cells and so to different tiles — a different
-            // membership — which is why this comes from the manifest that the geometry was written
-            // under rather than from anything a viewer sends.
-            let q = &generation.bundle.manifest.quantisation;
+            declaration.shape?;
+            // On the request path only where a publication route missed the level; nothing
+            // persisted is claimable here, and the fallback is loud (`crate::shapes`).
+            let held = shapes.level(
+                view,
+                &declaration.name,
+                level,
+                store,
+                &crate::shapes::PersistedPieces::none(),
+            );
             Some(crate::artifacts::PredicateSource::Spatial(
                 crate::artifacts::SpatialSource {
-                    depth: shape.depth,
-                    extent: Bounds {
-                        x_min: q.x_min,
-                        x_max: q.x_max,
-                        y_min: q.y_min,
-                        y_max: q.y_max,
-                    },
+                    level: held,
                     segments,
+                    total_rows: u32::try_from(view_data.row_space.total_rows()).unwrap_or(u32::MAX),
                 },
             ))
         }
@@ -3554,8 +3563,18 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let predicate = predicate_source(&layer.declaration, &generation, &segments, &code_of_key);
         let (rows, level_version) = self.write.with_artifacts(|store| {
+            let predicate = predicate_source(
+                &layer.declaration,
+                &generation,
+                view,
+                view_data,
+                &segments,
+                &code_of_key,
+                &self.shapes,
+                store,
+                level,
+            );
             (
                 self.artifact_projections.get_or_build(
                     &generation.prefix,
@@ -3911,9 +3930,18 @@ impl Engine {
             Some(vocabulary) => vocabulary.code_of(key),
             None => key.parse::<u32>().ok(),
         };
-        let predicate =
-            predicate_source(&layer.declaration, ctx.generation, &segments, &code_of_key);
         let (rows, level_version) = self.write.with_artifacts(|store| {
+            let predicate = predicate_source(
+                &layer.declaration,
+                ctx.generation,
+                ctx.view,
+                ctx.view_data,
+                &segments,
+                &code_of_key,
+                &self.shapes,
+                store,
+                attachment.level,
+            );
             (
                 self.artifact_projections.get_or_build(
                     &ctx.generation.prefix,
@@ -4147,20 +4175,14 @@ impl Engine {
                 .filter(|property| computed.selects(*property))
                 .collect();
 
-            // **The predicate's inputs, resolved once per layer rather than per level**: the
-            // membership is the layer's, and every level of a predicate layer reads the same
-            // column or the same declared depth. A layer with a stored membership resolves nothing.
+            // **The predicate's inputs, resolved per level.** An attribute layer's every level
+            // reads the same column; a spatial layer's held structures are per level, because
+            // each level holds its own shapes. A layer with a stored membership resolves nothing.
             let vocabulary = predicate_vocabulary(generation, &layer.declaration);
             let code_of_key = |key: &str| match vocabulary {
                 Some(vocabulary) => vocabulary.code_of(key),
                 None => key.parse::<u32>().ok(),
             };
-            let predicate = predicate_source(
-                &layer.declaration,
-                generation,
-                &segments_for_shapes,
-                &code_of_key,
-            );
 
             let mut served_levels: Vec<ServedLevel> = Vec::new();
             for (level, runs) in layer.runs.iter().enumerate() {
@@ -4176,6 +4198,17 @@ impl Engine {
                 }
                 let recorded = layer.layout_of(level);
                 let (rows, level_version) = self.write.with_artifacts(|store| {
+                    let predicate = predicate_source(
+                        &layer.declaration,
+                        generation,
+                        view,
+                        view_data,
+                        &segments_for_shapes,
+                        &code_of_key,
+                        &self.shapes,
+                        store,
+                        level,
+                    );
                     (
                         self.artifact_projections.get_or_build(
                             &generation.prefix,
@@ -5259,7 +5292,7 @@ struct TileSweepOut<'a> {
 /// and `Engine::item` resolves a single row to its owner; when `item` had its own version — take
 /// `segments.first()` and index it with a *view*-space row — a drill-down on any flushed item
 /// read past the build segment's end and panicked. A second copy is how the two come to disagree.
-fn segments_with_row_bases<'a>(
+pub(crate) fn segments_with_row_bases<'a>(
     view: &str,
     view_data: &'a tessera_store::read::ViewData,
 ) -> Result<Vec<(&'a SegmentData, u32)>> {

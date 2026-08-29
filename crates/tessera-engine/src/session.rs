@@ -611,6 +611,10 @@ pub struct Engine {
     /// keyed per *session* (a principal's own visible set), this one per *deployment* (what a layer
     /// published), and they move on different events.
     pub(crate) artifact_projections: Arc<crate::artifacts::ArtifactProjections>,
+    /// The spatial levels' held shapes, index and per-segment resolved pieces
+    /// (`crate::shapes`) — built at open and at every publication into a shape layer, filled by
+    /// every flush before its publication, and joined per generation into the row form above.
+    pub(crate) shapes: Arc<crate::shapes::ShapeStore>,
     /// The masked-count histograms of the levels served **row-major**, per `(session, layer,
     /// level)` — [decision 0093](../../../docs/decisions/0093-nothing-is-materialised-per-token-over-the-artifact-population.md)'s
     /// one named exception, byte-budgeted exactly as the row-projection cache is.
@@ -1039,6 +1043,16 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.row_column_extents.iter().cloned())
             .collect();
+        let manifest_shape_rows_extents: Vec<tessera_store::manifest::ShapeRowsExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.shape_rows_extents.iter().cloned())
+            .collect();
+        let manifest_shape_held_extents: Vec<tessera_store::manifest::ShapeHeldExtent> = bundle
+            .partitions
+            .values()
+            .flat_map(|partition| partition.manifest.shape_held_extents.iter().cloned())
+            .collect();
         let (overlay, buffer, write_state) = WritePath::reconstruct(
             wal_path,
             crate::write::ManifestSeed {
@@ -1232,6 +1246,49 @@ impl Engine {
             "the engine adopted the prefix's derived artifact structures"
         );
 
+        // **Every spatial level's shapes are decoded and decomposed, and every segment's piece
+        // claimed or resolved, before this engine serves a request** (`polygon-membership.md`
+        // §6.3). The store holds what the manifests seeded plus what the WAL replayed, so the
+        // shapes built here are the ones a publication would have built. The pieces the build or
+        // the last fold persisted — the row-major column, or the `shape-rows` row form — are
+        // claimed under the same coordinate rule as the structures adopted above; what is
+        // resolved is the segments no persisted form covers, the flushed ones. The cost is
+        // reported: it is the open's, and it is the figure stage 2 measures.
+        let shapes = Arc::new(crate::shapes::ShapeStore::new());
+        {
+            let (layers, _) = write_state.registry.snapshot();
+            let warmed = shapes.warm(
+                &generation.load().bundle,
+                &layers,
+                &write_state.artifacts,
+                None,
+                &crate::shapes::PersistedPieces {
+                    prefix_dir: Some(&prefix_dir),
+                    shape_rows: &manifest_shape_rows_extents,
+                    row_columns: &manifest_row_column_extents,
+                    shape_held: &manifest_shape_held_extents,
+                },
+            );
+            if warmed.levels > 0 {
+                tracing::info!(
+                    levels = warmed.levels,
+                    artifacts = warmed.artifacts,
+                    pieces_claimed = warmed.pieces_claimed,
+                    pieces_resolved = warmed.pieces_resolved,
+                    held_claimed = warmed.held_claimed,
+                    held_decomposed = warmed.held_decomposed,
+                    rows_tested = warmed.rows_tested,
+                    build_ms = warmed.build_ms,
+                    claim_ms = warmed.claim_ms,
+                    resolve_ms = warmed.resolve_ms,
+                    held_bytes = warmed.held_bytes,
+                    elapsed_ms = warmed.elapsed_ms,
+                    "the engine built every spatial level's shapes and claimed or resolved every \
+                     segment's piece"
+                );
+            }
+        }
+
         let row_projection_cache = Arc::new(RowProjectionCache::new(u64::MAX));
         let refresh_in_flight = Arc::new(AtomicU64::new(crate::refresh::NO_REFRESH));
         let refresh_enabled = Arc::new(AtomicBool::new(true));
@@ -1250,6 +1307,7 @@ impl Engine {
             // examples) gets unbounded caches, which is what a read-only embedder wants.
             row_projection_cache: Arc::clone(&row_projection_cache),
             artifact_projections: Arc::clone(&artifact_projections),
+            shapes: Arc::clone(&shapes),
             masked_counts: Arc::new(crate::histogram::MaskedCountCache::default()),
             derived_geometry: Arc::new(crate::derived_cache::DerivedCache::default()),
             lineages: Arc::new(crate::cut::Lineages::new()),
@@ -2404,6 +2462,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                shapes: Arc::clone(&self.shapes),
                 lineages: Arc::clone(&self.lineages),
                 level_contents: Arc::clone(&self.level_contents),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
@@ -2462,6 +2521,7 @@ impl Engine {
                 coalesce: coalesce_policy(&self.config),
                 merge: merge_policy(&self.config),
                 artifact_projections: Arc::clone(&self.artifact_projections),
+                shapes: Arc::clone(&self.shapes),
                 lineages: Arc::clone(&self.lineages),
                 level_contents: Arc::clone(&self.level_contents),
                 // The **configured** value, not the resolved policy's: compaction §4 step 3
@@ -2516,6 +2576,15 @@ impl Engine {
     /// unauthenticated surface).
     pub fn write_executor_stats(&self) -> crate::write::ExecutorStats {
         self.write.health().stats()
+    }
+
+    /// What the last shape warm pass did — the open's, until a publication into a shape layer
+    /// runs another: how many segment pieces were claimed from the prefix's persisted forms and
+    /// how many resolved from the geometry (`crate::shapes`). Operator plane only, beside
+    /// [`Engine::write_executor_stats`]: counts of structures, naming no artifact and no
+    /// principal.
+    pub fn shape_warm_report(&self) -> crate::shapes::WarmReport {
+        self.shapes.last_warm()
     }
 
     /// How many artifact row forms, and how many lineages, this engine has built since it opened.

@@ -181,13 +181,6 @@ pub struct ArtifactRows {
     /// present.
     layout: ServingLayout,
     column: Option<Arc<RowColumn>>,
-    /// **A spatial level's membership**, where this level has one: the declared shapes decomposed
-    /// into row ranges against this generation's segments (`crate::ranges`).
-    ///
-    /// `None` on every other layout, and its presence is what makes a level's answers come from the
-    /// ranges rather than from the row form — which for such a level holds nothing, its artifacts
-    /// carrying a box instead of a stored membership.
-    ranges: Option<Arc<crate::ranges::RangeSets>>,
 }
 
 /// What one viewport's narrowing produced, on whichever route the level's layout takes.
@@ -204,11 +197,6 @@ pub enum Candidacy {
     /// visible rows: a row in `viewport ∩ M_auth` is visible by construction, so the artifact
     /// labelling it has a visible member in view. That is the same question the artifact-major
     /// route reaches through the walk and a per-candidate probe, answered once for the whole level.
-    ///
-    /// **A spatial level's ranges arrive here too**, and for the identical reason: `candidates`
-    /// asks each range whether `viewport ∩ M_auth` holds anything in it, so an ordinal that comes
-    /// back has a visible member in view by construction. What differs is only what was walked —
-    /// labels per row against ranges per artifact — never the question or the answer.
     Scanned(Bitmap),
 }
 
@@ -364,14 +352,28 @@ impl MembershipRows {
             .collect();
     }
 
+    /// One artifact whose membership rows were resolved elsewhere — a shape's — with the
+    /// generating sets projected exactly as [`Self::put`] projects them.
+    fn put_resolved(&mut self, idx: usize, record: &ArtifactRecord, rows: Bitmap, space: &RowSpace) {
+        if self.rows.len() <= idx {
+            self.rows.resize_with(idx + 1, || None);
+            self.generating.resize_with(idx + 1, Vec::new);
+        }
+        self.rows[idx] = Some(rows);
+        self.generating[idx] = record
+            .contents
+            .iter()
+            .map(|v| space.project_base(&v.generated_from))
+            .collect();
+    }
+
     pub fn get(&self, ordinal: u32) -> Option<&Bitmap> {
         self.rows.get(ordinal as usize).and_then(Option::as_ref)
     }
 
-    /// A row form given directly — **test-only**, so that no release build can put a membership
-    /// where a projection belongs. [`crate::tile_index`]'s own cases are about the hierarchy over a
-    /// row form, and projecting through a permutation would test the projection instead.
-    #[cfg(test)]
+    /// A row form given directly — a spatial level's resolved rows at the fold, and the tests
+    /// whose subject is the hierarchy over a row form rather than the projection into one. Not a
+    /// route a stored membership takes: that goes through [`Self::put`] and the permutation.
     pub(crate) fn of_rows(rows: Vec<Option<Bitmap>>) -> Self {
         MembershipRows {
             generating: vec![Vec::new(); rows.len()],
@@ -501,7 +503,41 @@ impl ArtifactRows {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
-            ranges: None,
+        }
+    }
+
+    /// The same family over a membership **resolved elsewhere** — a spatial level's, joined from
+    /// the per-segment pieces the flush resolved (`crate::shapes`), in this generation's whole row
+    /// space rather than its base.
+    ///
+    /// `rows` is parallel to the level's ordinals and is the per-row source; the records supply
+    /// everything else, exactly as [`Self::build_over`] reads them. `row_count` is the generation's
+    /// total row count — base and every extent — because a shape's membership covers a flushed
+    /// row the moment its segment publishes, which is what the tile index and the column below
+    /// must be sized to.
+    pub fn build_resolved<'a>(
+        artifacts: impl Iterator<Item = (u32, &'a ArtifactRecord)>,
+        rows: Vec<Option<Bitmap>>,
+        row_count: u32,
+        space: &RowSpace,
+    ) -> Self {
+        let mut records = ArtifactRecords::default();
+        let mut membership = MembershipRows::default();
+        let mut rows = rows;
+        for (ordinal, record) in artifacts {
+            let idx = ordinal as usize;
+            records.put(idx, record);
+            let resolved = rows.get_mut(idx).and_then(Option::take).unwrap_or_default();
+            membership.put_resolved(idx, record, resolved, space);
+        }
+        let index = TileIndex::build(&membership, row_count);
+        ArtifactRows {
+            records,
+            membership,
+            index,
+            partition: None,
+            layout: ServingLayout::ArtifactMajor,
+            column: None,
         }
     }
 
@@ -519,26 +555,6 @@ impl ArtifactRows {
             .unwrap_or(ServingLayout::ArtifactMajor);
         self.column = column;
         self
-    }
-
-    /// Serve this level from `ranges` — a spatial level's membership, re-derived per generation.
-    ///
-    /// **`None` leaves the level on the artifact-major route over an empty row form**, which serves
-    /// nothing: a shape layer stores no membership, so a level whose ranges could not be built has
-    /// no members anywhere. That is the fail-closed direction and the same one a row-major level's
-    /// missing column takes.
-    pub fn with_ranges(mut self, ranges: Option<Arc<crate::ranges::RangeSets>>) -> Self {
-        self.layout = match &ranges {
-            Some(_) => ServingLayout::SpatialRanges,
-            None => ServingLayout::ArtifactMajor,
-        };
-        self.ranges = ranges;
-        self
-    }
-
-    /// This level's row ranges, where its membership is a shape.
-    pub fn ranges(&self) -> Option<&crate::ranges::RangeSets> {
-        self.ranges.as_deref()
     }
 
     /// Which form this level is **served** in — see [`ArtifactRows::with_column`] on why that is not
@@ -559,12 +575,9 @@ impl ArtifactRows {
     /// `tests/artifact_row_major.rs` asserts the two agree ordinal for ordinal over a generated
     /// corpus, which is this stage's spine.
     pub fn candidacy(&self, viewport: &crate::tile_index::Viewport<'_>) -> Candidacy {
-        // **Three routes and one question.** The ranges arm and the column arm both answer against
-        // `viewport ∩ M_auth` and are therefore exact for the masked question as well; the indexed
-        // arm is a candidate generator and every ordinal it returns still pays a probe.
-        if let Some(ranges) = &self.ranges {
-            return Candidacy::Scanned(ranges.candidates(viewport.here()));
-        }
+        // **Two routes and one question.** The column arm answers against `viewport ∩ M_auth` and
+        // is therefore exact for the masked question as well; the indexed arm is a candidate
+        // generator and every ordinal it returns still pays a probe.
         match &self.column {
             Some(column) => Candidacy::Scanned(column.candidates(viewport.here())),
             None => Candidacy::Indexed(self.index.candidates(viewport.rows())),
@@ -575,18 +588,15 @@ impl ArtifactRows {
     /// hoisted `viewport ∩ M_auth ∩ M_sel` — [decision 0104](../../../docs/decisions/0104-a-filter-answers-a-boolean-per-served-artifact.md)'s
     /// bit, in whichever shape the level's layout makes cheapest.
     ///
-    /// **The same three routes as [`Self::candidacy`], asked of a narrower set**, and deliberately
+    /// **The same two routes as [`Self::candidacy`], asked of a narrower set**, and deliberately
     /// so: the question is candidacy's own — *has this artifact a visible member in view* — with
-    /// the filter's rows removed from the input first. So the row-major and spatial arms answer for
-    /// the whole level in one pass, as they do there, and the artifact-major arm defers to a probe
-    /// per artifact, which the caller pays only for the artifacts it actually serves.
+    /// the filter's rows removed from the input first. So the row-major arm answers for the whole
+    /// level in one pass, as it does there, and the artifact-major arm defers to a probe per
+    /// artifact, which the caller pays only for the artifacts it actually serves.
     ///
     /// The set handed in must come from [`crate::compose::EffectiveMask::matched_rows`] and from
     /// nothing else, which is what keeps the answer inside `M_auth`.
     pub fn matched<'a>(&self, here_matched: &'a Bitmap) -> Matched<'a> {
-        if let Some(ranges) = &self.ranges {
-            return Matched::Scanned(ranges.candidates(here_matched));
-        }
         match &self.column {
             Some(column) => Matched::Scanned(column.candidates(here_matched)),
             None => Matched::PerArtifact(here_matched),
@@ -924,7 +934,8 @@ impl ArtifactRows {
 pub enum PredicateSource<'a> {
     /// `membership = { attribute = f }` — the indexed column `f`, addressed by entity.
     Attribute(AttributeSource<'a>),
-    /// `membership = "spatial"` — the declared boxes, and the geometry they are covered against.
+    /// `membership = "spatial"` — the level's held shapes and the segments whose pieces join into
+    /// this generation's membership (`crate::shapes`).
     Spatial(SpatialSource<'a>),
 }
 
@@ -944,18 +955,16 @@ pub struct AttributeSource<'a> {
     pub code_of_key: &'a dyn Fn(&str) -> Option<u32>,
 }
 
-/// The declared shapes a spatial layer's membership is drawn from, and what they are drawn against.
+/// The held structures a spatial level's membership is joined from, and what it is joined over.
 pub struct SpatialSource<'a> {
-    /// The Morton depth the layer declares. **Part of the membership**, not a tuning key.
-    pub depth: u8,
-    /// The view's extent — the frame the boxes are quantised in. A box quantised against a
-    /// different extent covers different tiles, which is why this comes from the view rather than
-    /// from the request.
-    pub extent: tessera_spatial::Bounds,
-    /// This generation's segments and their row bases, base first. **Every segment**, which is what
-    /// makes the ranges fresh by construction: a flush publishes one, the next request resolves the
-    /// same box against a list that now includes it, and the points in it count.
+    /// The level's shapes, index and per-segment pieces, at this generation's level version.
+    pub level: Arc<crate::shapes::ShapeLevel>,
+    /// This generation's segments and their row bases, base first. **Every segment**, which is
+    /// what makes the membership fresh by construction: a flush resolves the segment it publishes
+    /// and the next request joins a list that now includes it, so the points in it count.
     pub segments: &'a [(&'a tessera_store::read::SegmentData, u32)],
+    /// The generation's whole row count, base and extents — what the joined form is sized to.
+    pub total_rows: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1520,39 +1529,67 @@ impl ArtifactProjections {
         let partition = source
             .filter(|source| source.signature_shaped())
             .and_then(|source| self.partition_for(prefix, layer, level, store, source));
-        let adopted = self.claim_index(prefix, view, layer, level, key.level_version);
-        let from_prefix = adopted.is_some();
-        let built = ArtifactRows::build_over(store.level(layer, level), space, adopted)
-            .with_partition(partition);
-        // **The column, claimed from the prefix or composed from the form just built** — and the
-        // one place the recorded layout and the served one may differ. A level recorded row-major
-        // whose memberships turn out to overlap has no label column to compose, and the fallback is
-        // the artifact-major route, which is correct and merely slower than the record asked for.
-        // **A spatial level's membership is not a column and not a bitmap** — it is the declared
-        // boxes, covered at the declared depth, resolved against this generation's segments. Built
-        // here rather than claimed from the prefix because there is nothing durable to claim: the
-        // ranges are a function of the geometry, so a fold-written copy would be stale at the first
-        // flush and the derivation is what makes the membership never stale.
+        // **A spatial level's membership is the join of its segments' resolved pieces**
+        // (`crate::shapes`), in this generation's whole row space: every segment was resolved
+        // against the level's shapes when it was published, so what happens here is an
+        // O(containers) union per segment and never a per-point test. The result is a per-row
+        // source and takes the same road an enumerated level's takes from here — the tile index,
+        // the column where the layout is row-major, the histogram — which is what lets the
+        // layout be chosen for it rather than fixed.
+        //
+        // **The fold-written column is claimed only while the generation has no extents.** That
+        // column is over the base rows; a flushed segment's rows lie above them, and a column
+        // that does not label them would count every point ingested since the fold as in no
+        // shape — the staleness a spatial membership must not have. With extents the column is
+        // composed over the joined form instead.
         if let Some(PredicateSource::Spatial(spatial)) = predicate {
-            let ordinals = store.level(layer, level).map(|(o, _)| o).max();
-            let count = ordinals.map_or(0, |max| max + 1);
-            let ranges = crate::ranges::RangeSets::build(
-                (0..count).map(|ordinal| store.shape_of(layer, level, ordinal)),
-                spatial.depth,
-                &spatial.extent,
-                spatial.segments,
-            );
+            let joined = spatial.level.joined(spatial.segments);
+            let built = ArtifactRows::build_resolved(
+                store.level(layer, level),
+                joined,
+                spatial.total_rows,
+                space,
+            )
+            .with_partition(partition);
+            let column = if !layout.is_row_major() {
+                None
+            } else if space.extent_count() == 0 {
+                self.column_for(prefix, view, layer, level, key.level_version, layout, &built)
+            } else {
+                let composed =
+                    RowColumn::compose(built.membership(), built.index().row_count(), layout)
+                        .map(Arc::new);
+                if composed.is_some() {
+                    self.columns_composed
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                composed
+            };
+            let from_column = column.is_some();
+            let rows = Arc::new(built.with_column(column));
+            if layout.is_row_major() && !from_column {
+                self.fallbacks
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    layer = %layer,
+                    level,
+                    view = %view,
+                    recorded = ?layout,
+                    "this spatial level is recorded row-major and its resolved memberships do \
+                     not partition, so it is served artifact-major. Every answer is unchanged; \
+                     the layout is not"
+                );
+            }
             tracing::info!(
                 layer = %layer,
                 level,
                 view = %view,
-                ordinals = ranges.len(),
-                ranges_per_artifact = ranges.ranges_per_artifact(),
-                depth = spatial.depth,
-                layout = ?ServingLayout::SpatialRanges,
-                "a spatial level's ranges are derived from its declared shapes"
+                ordinals = rows.index().len(),
+                segments = spatial.segments.len(),
+                pieces_held = spatial.level.pieces_held(),
+                layout = ?rows.layout(),
+                "a spatial level's row form is joined from its segments' resolved pieces"
             );
-            let rows = Arc::new(built.with_ranges(Some(Arc::new(ranges))));
             self.builds
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             self.cached
@@ -1561,6 +1598,14 @@ impl ArtifactProjections {
                 .insert(map_key, (key, Arc::clone(&rows)));
             return rows;
         }
+        let adopted = self.claim_index(prefix, view, layer, level, key.level_version);
+        let from_prefix = adopted.is_some();
+        let built = ArtifactRows::build_over(store.level(layer, level), space, adopted)
+            .with_partition(partition);
+        // **The column, claimed from the prefix or composed from the form just built** — and the
+        // one place the recorded layout and the served one may differ. A level recorded row-major
+        // whose memberships turn out to overlap has no label column to compose, and the fallback is
+        // the artifact-major route, which is correct and merely slower than the record asked for.
         let column = match predicate {
             // **The membership *is* the column** (§5.1): the labels come from the value column the
             // predicate names rather than from any stored membership, and the level's own records
@@ -2136,12 +2181,6 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     /// per-`(session, layer)` histogram — the same walk of the same mask, done once for the level
     /// rather than once per artifact. `tests/artifact_row_major.rs` asserts they agree.
     fn masked_count(&self, ordinal: u32) -> u64 {
-        // **A spatial level has no membership to intersect and no histogram to read**: its members
-        // are contiguous row ranges, so the count is a sum of masked range cardinalities — the same
-        // quantity, from the structure that holds it.
-        if let Some(ranges) = self.rows.ranges() {
-            return ranges.masked_count(ordinal, self.mask);
-        }
         if self.rows.layout().is_row_major() {
             if let Some(counts) = &self.counts {
                 return counts.get(ordinal);
@@ -2163,9 +2202,6 @@ impl<M: MaskedSet> ArtifactView<'_, M> {
     /// label. The two are equal by construction — both count the artifact's projected rows — which
     /// is what lets the criterion behave identically under either layout.
     fn declared_size(&self, ordinal: u32) -> u64 {
-        if let Some(ranges) = self.rows.ranges() {
-            return ranges.declared_size(ordinal);
-        }
         if let Some(column) = self.rows.column() {
             return column.declared_size(ordinal);
         }
@@ -2237,7 +2273,6 @@ mod tests {
             partition: None,
             layout: ServingLayout::ArtifactMajor,
             column: None,
-            ranges: None,
         }
     }
 

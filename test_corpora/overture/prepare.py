@@ -441,16 +441,55 @@ def main() -> None:
             ) TO '{out / "members-divisions.parquet"}' (FORMAT parquet, COMPRESSION zstd)"""
         )
 
-    # --- the divisions layer's names ----------------------------------------------------------
-    # One row per artifact the member file names, carrying the division's own name — the layer
-    # declares a supplied `name` and the build refuses an artifact that carries none. `nested` puts
-    # every artifact at level 0, so unlike the GeoNames admin layer there is no `level` column.
+    # --- the divisions layer: names, declared edges and geometry ------------------------------
+    # One row per artifact a place's lineage names, carrying the division's own name — the layer
+    # declares a supplied `name` and the build refuses an artifact that carries none — its
+    # **parent** as the division's own hierarchy declares it, and its **polygon** as WKB in a
+    # `geometry` column, GeoParquet's name and the one `[layer.shape]` reads by default.
+    #
+    # **The membership is the polygon now, and the lineage is the tree** (`polygon-membership.md`
+    # §6.1, §6.2): the layer is declared `membership = "spatial"`, so the service resolves which
+    # places each division holds from the geometry, and `members-divisions.parquet` is no longer
+    # what the layer reads. The offline join above stays: it lifts `division_country`,
+    # `division_region` and `division_county` into indexed columns, and its lineage is what names
+    # the roster. The edges are **declared**, from each division's own path, never derived from
+    # containment — the polygons are generalised for cartography and do not nest reliably, and
+    # the build reports the children whose bounds escape their parent's rather than checking them.
+    #
+    # The geometry is projected into the frame the points are in — Web Mercator, normalised, y
+    # south, exactly `projection.project` — so the shape is written in the view's own space
+    # (`space = "view"`), which is the only space the build honours. Latitude is clipped first, as
+    # the points' is: a vertex beyond ±MAX_LATITUDE would project outside the plane.
     with steps.step("artifacts"):
+        roster = "(SELECT DISTINCT unnest(lineage) AS key FROM points WHERE lineage IS NOT NULL)"
+        w = projection.WORLD_HALF_M
+        clip = (
+            f"ST_Intersection(a.geom, ST_MakeEnvelope(-180.0, -{projection.MAX_LATITUDE!r}, "
+            f"180.0, {projection.MAX_LATITUDE!r}))"
+        )
+        mercator = f"ST_Transform({clip}, 'EPSG:4326', 'EPSG:3857', true)"
+        projected = (
+            f"ST_Affine({mercator}, {1.0 / (2.0 * w)!r}, 0.0, 0.0, {-1.0 / (2.0 * w)!r}, 0.5, 0.5)"
+            if args.frame == "unit"
+            else f"ST_Affine({mercator}, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0)"
+        )
         con.execute(
             f"""COPY (
-                SELECT k.key, [[coalesce(d.name, k.key)]] AS contents
-                FROM (SELECT DISTINCT unnest(lineage) AS key FROM points WHERE lineage IS NOT NULL) k
+                SELECT k.key,
+                       [[coalesce(d.name, k.key)]] AS contents,
+                       CASE WHEN len(l.lineage) >= 2 AND l.lineage[-2] IN (SELECT key FROM {roster})
+                            THEN l.lineage[-2] END                       AS parent,
+                       ({projected})::WKB_BLOB                            AS geometry
+                FROM {roster} k
                 LEFT JOIN divisions d ON d.division_id = k.key
+                LEFT JOIN (
+                    SELECT division_id, any_value(lineage) AS lineage
+                    FROM read_parquet('{out / "areas.parquet"}') GROUP BY division_id
+                ) l ON l.division_id = k.key
+                LEFT JOIN (
+                    SELECT division_id, ST_Union_Agg(geom) AS geom
+                    FROM read_parquet('{out / "areas.parquet"}') GROUP BY division_id
+                ) a ON a.division_id = k.key
                 ORDER BY k.key
             ) TO '{out / "artifacts-divisions.parquet"}' (FORMAT parquet, COMPRESSION zstd)"""
         )
@@ -458,6 +497,11 @@ def main() -> None:
             f"""SELECT count(*), count(*) FILTER (contents[1][1] <> key)
                 FROM '{out / "artifacts-divisions.parquet"}'"""
         ).fetchone()
+        with_geometry, with_parent = con.execute(
+            f"""SELECT count(*) FILTER (geometry IS NOT NULL), count(*) FILTER (parent IS NOT NULL)
+                FROM '{out / "artifacts-divisions.parquet"}'"""
+        ).fetchone()
+        print(f"  artifacts {artifacts:,}: {with_geometry:,} with a polygon, {with_parent:,} with a parent")
 
     # --- the frame report ---------------------------------------------------------------------
     bounds = con.execute("SELECT min(x), max(x), min(y), max(y) FROM points").fetchone()

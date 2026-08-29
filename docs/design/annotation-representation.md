@@ -120,7 +120,7 @@ declared and frozen, which is true of a clustering and false of everything geome
 | Source | Changes when | Stored as | Masked count |
 |---|---|---|---|
 | **Enumerated** — the caller declares the members | the layer is **refreshed** (⊘ by replacement today, by edit once that pass lands — [decision 0081](../decisions/0081-a-replacement-mints-identities-an-edit-keeps-them.md)) | a row-space bitmap, ~1 B/member (§2) | one `and_cardinality` |
-| **Spatial predicate** — *"the points inside this shape"* | **a point is written** | the **geometry only**; row ranges derived | `range_cardinality` over its ranges |
+| **Spatial predicate** — *"the points inside this shape"* | **a point is written** | the **geometry only**; each segment's rows are resolved against it when the segment is published, and the per-row source that produces takes the enumerated layer's serving layouts ([`polygon-membership.md`](polygon-membership.md) §6.3) | the layout's own — one `and_cardinality` under `rows`, the histogram under `column`/`list` |
 | **Attribute predicate** — *"the points carrying this value"* | **a point is written** | nothing new — the existing value column and postings | the existing filter machinery |
 
 **A density cell is the spatial row at its cheapest, not a fourth source** *(owner, 2026-08-15)*. A
@@ -130,10 +130,11 @@ aligned cell is one contiguous range rather than a decomposition, and the shape 
 cell's own identity so nothing is stored. That is a property of *this* shape, not a different kind
 of membership.
 
-**A spatial predicate needs no membership storage at all.** A tile is a contiguous row range, so a
-bounding box is a small set of row ranges and a polygon decomposes into Morton cells the same way —
-which is §10's density-level shortcut arriving for a second kind of artifact. The count is
-`range_cardinality`, the cheapest operation in the system, and it touches no point data.
+**A spatial predicate stores no membership; it holds one, resolved per segment.** A tile is a
+contiguous row range, so the tiles wholly inside a shape are whole row ranges, and the rows of the
+cells the boundary crosses are tested one by one against the stored position — once, when the
+segment is published — so the count touches no point data at request time
+([`polygon-membership.md`](polygon-membership.md) §6.3, built 2026-08-29).
 
 **And it never goes stale.** This is the asymmetry that matters and it corrects a claim made
 elsewhere in this document: a newly ingested point inside a boundary is a member **immediately**,
@@ -142,12 +143,14 @@ where a newly ingested point near a cluster is in no cluster until the layer is 
 age differently and should not be surprised by it.
 
 **The perimeter cost of §2.6 is intrinsic to the shape and merely moves.** An enumerated corridor pays
-it in bytes — 0.061 B/member, 1.9× the compact case. The same corridor as a predicate pays nothing in
-bytes and pays instead in *ranges per query*, which is the same perimeter-driven number — ~10³ ranges
-for a 40 000-member corridor, so **~0.3–1.2 ms per artifact per request** (*modelled* on the measured
-`range_cardinality` unit). ⊘ **A predicate level therefore needs a per-request bound**, which this
-document does not specify: a nationwide boundary level evaluated per query is seconds. Neither
-representation escapes the geometry; they differ in whether the cost is paid at rest or at read.
+it in bytes — 0.061 B/member, 1.9× the compact case. The same corridor as a shape pays it at the
+publication of each segment — the boundary cells its perimeter crosses, ~5 B held per cell, and a
+test per row that lands in one — and nothing per request beyond what the enumerated layout it is
+served in costs. The per-request bound is therefore the layout's, O(artifacts near the viewport ×
+containers per artifact) ([`polygon-membership.md`](polygon-membership.md) §6.3, §9); the
+earlier reading of this paragraph, under which a level of nationwide boundaries evaluated its
+ranges per query, is superseded by that design. ⊘ The held size at world scale is *modelled*
+there and measured only on one Overture part (its §9).
 
 **Nothing above changes the model.** The own-terms flag, the existence criterion, the containment
 test and the count rule are indifferent to where membership came from (model §3–§5) — ⊘ except
@@ -731,7 +734,10 @@ every nightly fold.
 permutation.** Old rows never enter it: the durable membership form is entity space (§2.4) and the
 row form is derived from it, so what the pass performs is `ArtifactRows::build` against the
 `permutation.bin` pass 1 has just written — the same construction the open path runs, on the same
-mapped file, member-wise as §3.1's rule requires.
+mapped file, member-wise as §3.1's rule requires. A spatial level has no entity-space form to
+project; the same pass **re-resolves every row of the segments the fold wrote** against the
+level's shapes ([`polygon-membership.md`](polygon-membership.md) §6.3), inline, and observes the
+layout it picks over those resolved rows.
 
 An earlier revision posed this as a choice between that and **riding pass 1** — appending to every
 builder as `(entity, new_row)` goes past, which needs the **inverted** relation resident for the

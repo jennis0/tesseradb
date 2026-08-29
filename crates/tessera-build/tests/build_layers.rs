@@ -2475,14 +2475,14 @@ artifacts = [
 ]
 
   [layer.shape]
-  kind  = "bbox"
-  depth = 4
+  kind = "bbox"
 "#;
 
-/// **A shape layer publishes boxes and stores no membership**, and the report says which shape at
-/// which depth — because a box covered at another depth holds other points.
+/// **A shape layer publishes its shapes, stores no membership, and is picked a layout like any
+/// other** — and the report names the kind, which since every kind is exact is the whole of who
+/// belongs.
 #[test]
-fn a_build_publishes_a_shape_layers_boxes_and_discloses_the_depth() {
+fn a_build_publishes_a_shape_layers_shapes_and_discloses_the_kind() {
     let inputs = predicate_inputs(SHAPE_LAYER);
     let out = inputs.at("bundle");
     run(&inputs, &out).expect("a shape layer builds");
@@ -2493,33 +2493,82 @@ fn a_build_publishes_a_shape_layers_boxes_and_discloses_the_depth() {
         .iter()
         .find(|l| l.declaration.name == "regions/boxes")
         .expect("the shape layer is registered");
-    assert_eq!(
-        layer.layout_of(0),
-        tessera_types::layer::ServingLayout::SpatialRanges
+    assert!(
+        matches!(
+            layer.layout_of(0),
+            tessera_types::layer::ServingLayout::ArtifactMajor
+                | tessera_types::layer::ServingLayout::RowMajorLabel
+        ),
+        "a shape level is picked one of the same forms an enumerated one is, not a form of its own"
     );
 
     assert_eq!(
         disclosed_membership(&inputs.config, "regions/boxes"),
-        "spatial:bbox:depth=4",
-        "a report naming the kind alone would say less than the declaration does"
+        "spatial:bbox"
     );
 }
 
-/// **An artifact's box and its layer's shape are one statement**, so each half without the other is
-/// a refusal: a box on a layer that declares no shape is a region nothing evaluates, and an
-/// artifact with no box on a layer that does has no membership rule at all.
+/// **A polygon layer builds from inline WKT**, and a circle and an ellipse from their parameters —
+/// the four kinds through one reader. The `depth` an earlier surface took is refused naming where
+/// it went.
 #[test]
-fn a_box_and_a_shape_declaration_are_refused_apart() {
+fn every_shape_kind_builds_and_a_depth_is_refused() {
+    let polygon = SHAPE_LAYER
+        .replace("kind = \"bbox\"", "kind = \"polygon\"")
+        .replace(
+            "  { key = \"west\", bbox = [0.0, 0.0, 400.0, 1000.0] },\n  { key = \"east\", bbox = [600.0, 0.0, 1000.0, 1000.0] },",
+            "  { key = \"west\", wkt = \"POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0))\" },\n  { key = \"east\", wkt = \"MULTIPOLYGON (((600 0, 1000 0, 1000 1000, 600 1000, 600 0)))\" },",
+        );
+    let inputs = predicate_inputs(&polygon);
+    run(&inputs, &inputs.at("bundle")).expect("a polygon layer builds");
+    assert_eq!(
+        disclosed_membership(&inputs.config, "regions/boxes"),
+        "spatial:polygon"
+    );
+
+    let circle = SHAPE_LAYER
+        .replace("kind = \"bbox\"", "kind = \"circle\"")
+        .replace("bbox = [0.0, 0.0, 400.0, 1000.0]", "circle = [200.0, 500.0, 150.0]")
+        .replace("bbox = [600.0, 0.0, 1000.0, 1000.0]", "circle = [800.0, 500.0, 150.0]");
+    let inputs = predicate_inputs(&circle);
+    run(&inputs, &inputs.at("bundle")).expect("a circle layer builds");
+
+    let ellipse = SHAPE_LAYER
+        .replace("kind = \"bbox\"", "kind = \"ellipse\"")
+        .replace(
+            "bbox = [0.0, 0.0, 400.0, 1000.0]",
+            "ellipse = [200.0, 500.0, 150.0, 300.0, 30.0]",
+        )
+        .replace(
+            "bbox = [600.0, 0.0, 1000.0, 1000.0]",
+            "ellipse = [800.0, 500.0, 150.0, 300.0, 0.0]",
+        );
+    let inputs = predicate_inputs(&ellipse);
+    run(&inputs, &inputs.at("bundle")).expect("an ellipse layer builds");
+
+    let depth = SHAPE_LAYER.replace("  kind = \"bbox\"\n", "  kind = \"bbox\"\n  depth = 4\n");
+    let inputs = predicate_inputs(&depth);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("a depth is refused")
+        .to_string();
+    assert!(message.contains("polygon-membership.md") && message.contains("depth"), "{message}");
+}
+
+/// **An artifact's shape and its layer's kind are one statement**, so each half without the other
+/// is a refusal: a shape on a layer that declares no kind is a region nothing evaluates, an artifact
+/// with no shape on a layer that does has no membership rule at all, and a shape of another kind is
+/// in a field the layer never declared.
+#[test]
+fn a_shape_and_a_shape_declaration_are_refused_apart() {
     let missing = SHAPE_LAYER.replace(
         "  { key = \"west\", bbox = [0.0, 0.0, 400.0, 1000.0] },",
         "  { key = \"west\" },",
     );
     let inputs = predicate_inputs(&missing);
     let out = inputs.at("bundle");
-    let message = run(&inputs, &out)
-        .expect_err("an artifact with no box is refused")
-        .to_string();
-    assert!(message.contains("carries no bounding box"), "{message}");
+    // A row with no geometry is published with an empty shape and reported, not refused
+    // (`polygon-membership.md` §6.1): an artifact with no members is a state the service has.
+    run(&inputs, &out).expect("a row with no geometry is published with none");
 
     let stray = LAYERS_TOML.replace(
         "name = \"clusters/a\"",
@@ -2529,7 +2578,7 @@ fn a_box_and_a_shape_declaration_are_refused_apart() {
     let out = inputs.at("bundle");
     assert!(
         run(&inputs, &out).is_err(),
-        "a box on a layer that declares no shape was accepted"
+        "a shape on a layer that declares no kind was accepted"
     );
 
     // A transposed box is refused rather than swapped: correcting it would publish a membership
@@ -2540,10 +2589,29 @@ fn a_box_and_a_shape_declaration_are_refused_apart() {
     let message = run(&inputs, &out)
         .expect_err("an inverted box is refused")
         .to_string();
-    assert!(
-        message.contains("not a box this build will store"),
-        "{message}"
+    assert!(message.contains("below its min"), "{message}");
+
+    // A circle in a box layer is a field the layer never declared.
+    let wrong_kind = SHAPE_LAYER.replace(
+        "bbox = [0.0, 0.0, 400.0, 1000.0]",
+        "circle = [200.0, 500.0, 100.0]",
     );
+    let inputs = predicate_inputs(&wrong_kind);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("a circle on a box layer is refused")
+        .to_string();
+    assert!(message.contains("`shape.kind`"), "{message}");
+
+    // `wgs84` is refused naming the document that would let a view honour it.
+    let wgs84 = SHAPE_LAYER.replace(
+        "bbox = [0.0, 0.0, 400.0, 1000.0] }",
+        "bbox = [0.0, 0.0, 400.0, 1000.0], space = \"wgs84\" }",
+    );
+    let inputs = predicate_inputs(&wgs84);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("wgs84 is refused")
+        .to_string();
+    assert!(message.contains("projections.md"), "{message}");
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -833,6 +833,62 @@ pub struct RowColumnExtent {
     pub layout: ServingLayout,
 }
 
+/// One entry of `shape_rows_extents`: one `(view, layer, level)`'s membership of **one segment**,
+/// resolved against the level's shapes and written as the row form (`membership.rs`'s
+/// `pack_shape_rows`) by the build and by every fold, so an open claims it instead of resolving
+/// the segment again (`polygon-membership.md` §6.3).
+///
+/// **[`RowColumnExtent`]'s coordinate with the segment beside it**, and the segment is the whole
+/// of the difference: a piece is rows of one segment, keyed by a `seg_id` that is never reused,
+/// so the same file answers for that segment in every generation that carries it and for no
+/// other. The level version is the other half of the key — a publication into the level moves it
+/// and the piece then describes shapes the level no longer holds — and both are equality tests.
+/// A piece that fails either is resolved again from the geometry, never adapted (I11).
+///
+/// Written for a spatial level whose serving layout is artifact-major; a row-major level's
+/// persisted form is its column, which the open inverts into the same piece.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShapeRowsExtent {
+    /// Prefix-relative path of the packed row form.
+    pub path: String,
+    /// The view whose segment the rows are of.
+    pub view: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when the segment was resolved. **Also the adoption test.**
+    pub level_version: u64,
+    /// The segment the rows are of, and the other adoption test.
+    pub seg_id: String,
+    /// The segment's row count when it was resolved — a segment is immutable, so a mismatch is a
+    /// file written for another segment under a reused name, which contracts §2.1 forbids.
+    pub row_count: u32,
+}
+
+/// One entry of `shape_held_extents`: one `(view, layer, level)`'s **decompositions** — every
+/// artifact's interior tiles, boundary cells and bounds (`polygon-membership.md` §6.3), written
+/// by the build and by every fold so an open assembles the held form from the file instead of
+/// descending every shape again, which on Overture's part 0 was 8.9 of a 9.3 s open.
+///
+/// **[`TileIndexExtent`]'s coordinate**, and the same equality rule: the level version is the
+/// adoption test, and inside the file each entry also carries the length and a digest of the
+/// canonical bytes it was decomposed from, so an entry is used only for the shape that produced
+/// it. A decomposition is a pure function of the canonical shape, so a mismatch is not a
+/// disclosure, but it is refused all the same and the shape decomposed again — a form written by
+/// a different descent would place rows in the wrong cells.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ShapeHeldExtent {
+    /// Prefix-relative path of the packed decompositions.
+    pub path: String,
+    /// The view the shapes were canonicalised for.
+    pub view: String,
+    pub layer: String,
+    pub level: u32,
+    /// The level's version when the decompositions were written. **Also the adoption test.**
+    pub level_version: u64,
+}
+
 /// One entry of `locator_extents`: the **reverse** external-id direction for one flush segment's
 /// entity range (§3.6).
 ///
@@ -947,6 +1003,16 @@ pub struct SegmentsManifest {
     /// a list that silently emptied itself would turn a fold's consolidation into a stall on
     /// whichever request arrived first, with nothing reporting a fault.
     pub row_column_extents: Vec<RowColumnExtent>,
+    /// Every persisted shape row form this partition holds — see [`ShapeRowsExtent`]. Empty in a
+    /// bundle with no spatial layer, and in one whose spatial levels are all served row-major.
+    ///
+    /// No `serde(default)`, on `row_column_extents`' argument: an unclaimed piece is resolved again
+    /// on open and the answer is the same, but a list that silently emptied itself would put the
+    /// whole re-resolution back into every open with nothing reporting a fault.
+    pub shape_rows_extents: Vec<ShapeRowsExtent>,
+    /// Every persisted decomposition this partition holds — see [`ShapeHeldExtent`]. Empty in a
+    /// bundle with no spatial layer. No `serde(default)`, on `shape_rows_extents`' argument.
+    pub shape_held_extents: Vec<ShapeHeldExtent>,
     /// Every record-blob extent holding **artifact supplied content** — the same format, reader and
     /// store as [`SegmentsManifest::record_extents`], listed separately.
     ///
@@ -1298,6 +1364,8 @@ mod tests {
             containment_extents: Vec::new(),
             tile_index_extents: Vec::new(),
             row_column_extents: Vec::new(),
+            shape_rows_extents: Vec::new(),
+            shape_held_extents: Vec::new(),
             artifact_record_extents: Vec::new(),
             segments: Vec::new(),
             deltas: Vec::new(),

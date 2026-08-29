@@ -29,6 +29,7 @@ pub mod input;
 pub mod layers;
 pub mod observer;
 mod pipeline;
+pub mod shapes;
 mod residency;
 pub(crate) mod spill;
 
@@ -72,6 +73,20 @@ const PREFIX: &str = "v00000";
 const PHASH: &str = "default";
 /// One segment per (partition, view) at build (contracts §2.1).
 const SEG_ID: &str = "seg-0";
+/// The same, for the artifact pass, which reopens the segment the build wrote.
+pub(crate) const BUILD_SEG_ID: &str = SEG_ID;
+
+/// The shape layers' geometry report (`polygon-membership.md` §6.5), printed where the build's
+/// other reports are — on stderr, before the artifact pass adds the resolution's cost.
+pub(crate) fn report_shapes(reports: &[crate::shapes::ShapeLayerReport]) {
+    if reports.is_empty() {
+        return;
+    }
+    eprintln!("shape layers, from the geometry alone:");
+    for report in reports {
+        report.print();
+    }
+}
 
 /// Arguments to [`build`].
 #[derive(Clone)]
@@ -1110,7 +1125,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(&args.layers, &args.layer_inputs)?;
+            let plan = crate::layers::read(
+                &args.layers,
+                &args.layer_inputs,
+                &args.extent,
+                tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+            )?;
+            report_shapes(&plan.shape_reports);
             let by_source: HashMap<u64, u64> = staged
                 .iter()
                 .enumerate()
@@ -1169,6 +1190,12 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     published_layers
         .containment_extents
         .clone_from(&artifact_pass.containment_extents);
+    published_layers
+        .shape_rows_extents
+        .clone_from(&artifact_pass.shape_rows_extents);
+    published_layers
+        .shape_held_extents
+        .clone_from(&artifact_pass.shape_held_extents);
 
     // ---- 9. manifests ------------------------------------------------------------------
     other_paths.extend([
@@ -1300,6 +1327,8 @@ fn write_manifests(
         containment_extents: published_layers.containment_extents.clone(),
         tile_index_extents: published_layers.tile_index_extents.clone(),
         row_column_extents: published_layers.row_column_extents.clone(),
+        shape_rows_extents: published_layers.shape_rows_extents.clone(),
+        shape_held_extents: published_layers.shape_held_extents.clone(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
         segments: vec![SegmentDescriptor {
             view: args.view_id.clone(),

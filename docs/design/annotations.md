@@ -358,7 +358,11 @@ client's obligations rather than the server's.
 A layer declares which derived properties its artifacts expose, from a closed vocabulary the engine
 implements — **`centroid`, `box` and `hull` as built** (Stage 3), each computed from the visible
 rows and served in the grid units the point path already uses, so a client needs no quantisation
-extent to draw one. **`hull` is a concave (alpha) shape over the visible members, not their convex
+extent to draw one. A `membership = "spatial"` layer may declare them too: its artifacts are
+published rows and its membership is resolved into a per-row source when a segment is published
+([`polygon-membership.md`](polygon-membership.md) §6.2, §6.3), so a computed property costs it what
+it costs an enumerated layer. An attribute layer may not — reaching one artifact's membership there
+is a scan of the whole column. **`hull` is a concave (alpha) shape over the visible members, not their convex
 wrap, and it carries one ring per separated group of them rather than one ring per artifact** — see
 below. A name outside the vocabulary is **refused at registration** rather than
 accepted and quietly omitted: an artifact served without content its layer declared cannot be told
@@ -930,6 +934,16 @@ entire — existence, masked count, derived centroid — to everyone the gate ad
 The general lesson the layer exists to record: **the axis is where the geometry came from, never
 whether the object is called a cluster, a polygon or a circle.** A supplied hull over an HDBSCAN
 cluster is this same case wearing a shape that looks like the engine's own output.
+
+The same circle may instead be declared as the layer's **membership** — `membership = "spatial"`
+with `shape.kind = "circle"` — and then it says *every point within r of the centre*, which is not
+k-means: which field the row puts the shape in decides the gate, and a membership shape is served
+under the artifact's own verdict alone, so declaring one is declaring it corpus-independent
+([`polygon-membership.md`](polygon-membership.md) §4.1, ruling (h)). ⊘ **Specified, not
+implemented:** `[[layer.content.supplied]]` does not yet take `type = "circle" | "ellipse"`, and a
+supplied `polygon` is still carried as an opaque string rather than read, canonicalised and served
+as a membership shape is — the design's stage 2 lists the three content kinds and this half of it
+is not built. A circle as *content* is today a string the client interprets.
 
 ### 8.7 Terms as artifacts — a case the model was not designed for
 

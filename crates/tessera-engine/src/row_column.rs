@@ -202,7 +202,7 @@ impl RowColumn {
         let pack = match expected {
             ServingLayout::RowMajorLabel => Pack::Label(LabelColumnPack::open(path)?),
             ServingLayout::RowMajorList => Pack::List(ListColumnPack::open(path)?),
-            ServingLayout::ArtifactMajor | ServingLayout::SpatialRanges => {
+            ServingLayout::ArtifactMajor => {
                 return Err(tessera_store::StoreError::MalformedBundle {
                     detail: format!(
                         "row-major column {}: the manifest tags it {}, which has no column — the \

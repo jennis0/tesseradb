@@ -274,6 +274,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "members",
             "labels",
             "shape",
+            "default_space",
         ],
     );
     expect_keys(
@@ -285,6 +286,10 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "members",
             "excluding",
             "bbox",
+            "circle",
+            "ellipse",
+            "wkt",
+            "space",
             "contents",
             "parent",
             "attached_layer",
@@ -1458,8 +1463,9 @@ fn a_layer_may_pin_its_serving_layout() {
     assert!(message.contains("is not a layout"), "{message}");
     assert!(message.contains("column"), "{message}");
 
-    // **A predicate layer's form follows from its membership, so every pin is refused** — refused
-    // here, by the same `validate` the online registration calls.
+    // **An attribute layer's form follows from its membership, so every pin is refused** —
+    // refused here, by the same `validate` the online registration calls. A spatial layer's
+    // membership is a per-row source once the flush resolves it, so a pin on it holds.
     for word in ServingLayout::PIN_VOCABULARY {
         let spatial = predicate_fixture().replace(
             "membership                = \"enumerated\"\n",
@@ -1467,10 +1473,10 @@ fn a_layer_may_pin_its_serving_layout() {
                 "membership                = \"spatial\"\nlayout                    = \"{word}\"\n"
             ),
         );
-        assert!(
-            err(&spatial).contains("per-row source"),
-            "{}",
-            err(&spatial)
+        assert_eq!(
+            parse_str(&spatial).unwrap().layers[0].layout,
+            ServingLayout::parse_pin(word),
+            "layout = \"{word}\" on a spatial layer"
         );
         let attribute = predicate_fixture().replace(
             "membership                = \"enumerated\"\n",
@@ -1486,13 +1492,9 @@ fn a_layer_may_pin_its_serving_layout() {
     }
 }
 
-/// `[layer.shape]` — what a spatial layer's artifacts are shaped like, and how deep they are drawn.
-///
-/// **The depth is the membership rather than a tuning key**, so there is no value for it to default
-/// to and none outside the Morton code space to accept — a box covered at depth 4 and the same box
-/// at depth 8 hold different points.
+/// `[layer.shape]` — what kind of shape a spatial layer's artifacts carry, and nothing else.
 #[test]
-fn a_spatial_layer_declares_its_shape_and_its_depth() {
+fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     // The block is appended, because `[layer.shape]` is a sub-table of the `[[layer]]` above it and
     // a TOML sub-table header ends the key section it follows.
     let spatial = |body: &str| {
@@ -1505,52 +1507,58 @@ fn a_spatial_layer_declares_its_shape_and_its_depth() {
         )
     };
 
-    let declared = spatial("\n  [layer.shape]\n  kind = \"bbox\"\n  depth = 6\n");
-    assert_eq!(
-        parse_str(&declared).unwrap().layers[0].shape,
-        Some(ShapeDeclaration {
-            kind: ShapeKind::Bbox,
-            depth: 6
-        })
-    );
-    // One kind, so spelling it is a courtesy rather than a choice.
-    let implied = spatial("\n  [layer.shape]\n  depth = 6\n");
-    assert_eq!(
-        parse_str(&implied).unwrap().layers[0].shape,
-        Some(ShapeDeclaration {
-            kind: ShapeKind::Bbox,
-            depth: 6
-        })
-    );
-
-    for body in [
-        "\n  [layer.shape]\n  kind = \"bbox\"\n",
-        "\n  [layer.shape]\n  depth = 0\n",
-        "\n  [layer.shape]\n  depth = 17\n",
+    for (word, kind) in [
+        ("bbox", ShapeKind::Bbox),
+        ("circle", ShapeKind::Circle),
+        ("ellipse", ShapeKind::Ellipse),
+        ("polygon", ShapeKind::Polygon),
     ] {
-        let text = spatial(body);
-        assert!(
-            err(&text).contains("must be an integer between 1 and 16"),
-            "{}",
-            err(&text)
+        let declared = spatial(&format!("\n  [layer.shape]\n  kind = \"{word}\"\n"));
+        assert_eq!(
+            parse_str(&declared).unwrap().layers[0].shape,
+            Some(ShapeDeclaration { kind })
         );
     }
 
-    // ⊘ A polygon is refused rather than covered approximately: the tiles that cover a shape *are*
-    // its membership, so an approximate cover is a membership wider than the declaration.
-    let polygon = spatial("\n  [layer.shape]\n  kind = \"polygon\"\n  depth = 6\n");
+    // **`depth` is deleted** (`polygon-membership.md` §6.1, ruling (g)): every kind is exact, so
+    // one written is refused naming where it went rather than as an unknown key.
+    let depth = spatial("\n  [layer.shape]\n  kind = \"bbox\"\n  depth = 6\n");
     assert!(
-        err(&polygon).contains("is not \"bbox\""),
+        err(&depth).contains("polygon-membership.md") && err(&depth).contains("depth"),
         "{}",
-        err(&polygon)
+        err(&depth)
     );
+    // Four kinds, so the word is a choice and not a courtesy: absent is refused naming them.
+    let absent = spatial("\n  [layer.shape]\n");
+    assert!(err(&absent).contains("bbox, circle, ellipse, polygon"), "{}", err(&absent));
+    let unknown = spatial("\n  [layer.shape]\n  kind = \"radius\"\n");
+    assert!(err(&unknown).contains("is not a shape kind"), "{}", err(&unknown));
 
     // A shape beside a membership that reads none is a rule nothing evaluates.
-    let enumerated = format!("{}\n  [layer.shape]\n  depth = 6\n", predicate_fixture());
+    let enumerated = format!("{}\n  [layer.shape]\n  kind = \"bbox\"\n", predicate_fixture());
     assert!(
         err(&enumerated).contains("is a rule nothing evaluates"),
         "{}",
         err(&enumerated)
+    );
+
+    // **The space lives with the submission** (§4.3): `default_space` on the layer and `space` on
+    // a row, `view` the one value a view can honour, `wgs84` refused naming `projections.md`.
+    let with_space = |word: &str, body: &str| {
+        spatial(body).replace(
+            "membership                = \"spatial\"",
+            &format!("default_space             = \"{word}\"\nmembership                = \"spatial\""),
+        )
+    };
+    let view = with_space("view", "\n  [layer.shape]\n  kind = \"bbox\"\n");
+    assert!(parse_str(&view).is_ok(), "{}", err(&view));
+    let wgs84 = with_space("wgs84", "\n  [layer.shape]\n  kind = \"bbox\"\n");
+    assert!(err(&wgs84).contains("projections.md"), "{}", err(&wgs84));
+    let spaceless = with_space("view", "");
+    assert!(
+        err(&spaceless).contains("no `[layer.shape]`"),
+        "{}",
+        err(&spaceless)
     );
 }
 

@@ -434,25 +434,29 @@ struct LayerBlock {
     levels: Vec<LevelBlock>,
     #[serde(default)]
     content: Option<ContentBlock>,
-    /// `[layer.shape]` — what a `membership = "spatial"` layer's artifacts are shaped like, and
-    /// how deep the tiles that cover them are drawn ([`compile_shape`]).
+    /// `[layer.shape]` — what kind of shape a `membership = "spatial"` layer's artifacts carry
+    /// ([`compile_shape`]).
     #[serde(default)]
     shape: Option<ShapeBlock>,
+    /// The space the layer's artifact table writes its shapes in, where a row carries no `space`
+    /// of its own (`polygon-membership.md` §4.3) — `"view"` if absent. On the layer beside
+    /// `source` and `fields` because it is an acquisition-side fact about the file, on the same
+    /// register those two are.
+    #[serde(default)]
+    default_space: Option<String>,
 }
 
-/// `[layer.shape]` as written. Both keys are optional *here* and neither is optional in the
-/// compiled form: absence is what makes the message name the key rather than reporting *no variant
-/// matched*, which is the same reason `membership` is held as a `toml::Value`.
+/// `[layer.shape]` as written. `kind` is optional *here* and not in the compiled form: absence is
+/// what makes the message name the key rather than reporting *no variant matched*, which is the
+/// same reason `membership` is held as a `toml::Value`. `depth` is held so that one written is
+/// refused naming where it went (`polygon-membership.md` §6.1) rather than as an unknown key.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShapeBlock {
-    /// ⊘ `"bbox"`, and absent means `"bbox"` — one kind, so a spelling is a courtesy rather than a
-    /// choice, and any other word is refused.
     #[serde(default)]
     kind: Option<String>,
-    /// The Morton depth the shape is covered at. **Required**, because it is the membership.
     #[serde(default)]
-    depth: Option<i64>,
+    depth: Option<toml::Value>,
 }
 
 /// One artifact written into the document itself — `artifacts = [{ key = …, contents = [ … ] }]`.
@@ -480,10 +484,22 @@ pub struct InlineArtifact {
     /// The ranked contents, best first: one entry per rank, each a value per supplied kind.
     #[serde(default)]
     pub contents: Vec<Vec<String>>,
-    /// The artifact's bounding box, `[min_x, min_y, max_x, max_y]` — the shape a
-    /// `membership = "spatial"` layer's membership is drawn from, and refused on every other kind.
+    /// The artifact's shape, in its layer's kind's field and no other (`polygon-membership.md`
+    /// §6.1): `bbox = [min_x, min_y, max_x, max_y]`, `circle = [cx, cy, r]`,
+    /// `ellipse = [cx, cy, a, b, angle]` or `wkt = "POLYGON ((…))"`. Refused on a layer whose
+    /// membership is not `spatial`.
     #[serde(default)]
     pub bbox: Option<Vec<f64>>,
+    #[serde(default)]
+    pub circle: Option<Vec<f64>>,
+    #[serde(default)]
+    pub ellipse: Option<Vec<f64>>,
+    #[serde(default)]
+    pub wkt: Option<String>,
+    /// The space the shape is written in — `"view"` if absent, the only value a view can honour
+    /// today (`polygon-membership.md` §4.3).
+    #[serde(default)]
+    pub space: Option<String>,
     /// The parent artifact in a hierarchy, by its key.
     #[serde(default)]
     pub parent: Option<String>,
@@ -714,7 +730,12 @@ pub struct LayerSources {
 #[derive(Debug, Clone)]
 pub enum ArtifactSource {
     /// `[[layer]].source` — one row per artifact, read under the names `fields` resolved.
-    File { path: PathBuf, fields: Fields },
+    /// `default_space` is the space a row's shape is in where the row names none.
+    File {
+        path: PathBuf,
+        fields: Fields,
+        default_space: tessera_store::derived::ShapeSpace,
+    },
     /// `[[layer]].artifacts` — the rows themselves, on the canonical names.
     Inline(Vec<InlineArtifact>),
 }
@@ -1985,6 +2006,7 @@ fn expand_labels(blocks: &[LayerBlock]) -> Result<(Vec<LayerBlock>, BTreeMap<Str
             levels: Vec::new(),
             // A label layer's members are its own rows; there is no shape in the sugar's key set.
             shape: None,
+            default_space: None,
             content: Some(ContentBlock {
                 computed: Vec::new(),
                 supplied: vec![SuppliedBlock {
@@ -3148,11 +3170,102 @@ fn compile_layers(
                 )));
             }
         }
+        let shape = compile_shape(block, &membership)?;
+        let shape_kind = shape.map(|s| s.kind);
+        let kind_is = |kind: ShapeKind| shape_kind == Some(kind);
+        // **A row's geometry sits in its layer's kind's fields and no other** — the box's four
+        // bounds, the circle's three, the ellipse's five, the polygon's WKB `geometry` column
+        // (GeoParquet's own name) — so naming a field of another kind is refused as a field the
+        // layer never declared.
+        let default_space = match block.default_space.as_deref() {
+            None => tessera_store::derived::ShapeSpace::View,
+            Some(word) => {
+                if shape.is_none() {
+                    return Err(declaration_error(format!(
+                        "{object}: `default_space` is declared and the layer declares no \
+                         `[layer.shape]`, so there is no geometry for it to be the space of"
+                    )));
+                }
+                tessera_store::derived::ShapeSpace::parse(word)
+                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?
+            }
+        };
+        for artifact in block.artifacts.iter().flatten() {
+            if let Some(word) = artifact.space.as_deref() {
+                tessera_store::derived::ShapeSpace::parse(word).map_err(|e| {
+                    declaration_error(format!(
+                        "{object}: artifact '{}': `space`: {e}",
+                        artifact.key
+                    ))
+                })?;
+            }
+        }
         let artifact_fields = check_fields(
             &object,
             source.as_ref(),
             &[
                 KnownField::always("key"),
+                KnownField::asserted_by(
+                    "min_x",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "min_y",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "max_x",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "max_y",
+                    kind_is(ShapeKind::Bbox),
+                    "`[layer.shape].kind` is not \"bbox\"",
+                ),
+                KnownField::asserted_by(
+                    "cx",
+                    kind_is(ShapeKind::Circle) || kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is neither \"circle\" nor \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "cy",
+                    kind_is(ShapeKind::Circle) || kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is neither \"circle\" nor \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "r",
+                    kind_is(ShapeKind::Circle),
+                    "`[layer.shape].kind` is not \"circle\"",
+                ),
+                KnownField::asserted_by(
+                    "a",
+                    kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is not \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "b",
+                    kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is not \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "angle",
+                    kind_is(ShapeKind::Ellipse),
+                    "`[layer.shape].kind` is not \"ellipse\"",
+                ),
+                KnownField::asserted_by(
+                    "geometry",
+                    kind_is(ShapeKind::Polygon),
+                    "`[layer.shape].kind` is not \"polygon\"",
+                ),
+                KnownField::asserted_by(
+                    "space",
+                    shape.is_some(),
+                    "the layer declares no `[layer.shape]`, so its rows carry no geometry to be \
+                     in a space",
+                ),
                 KnownField::asserted_by(
                     "contents",
                     !content.supplied.is_empty(),
@@ -3254,6 +3367,7 @@ fn compile_layers(
                 (Some(path), _) => Some(ArtifactSource::File {
                     path,
                     fields: artifact_fields,
+                    default_space,
                 }),
                 (None, Some(rows)) => Some(ArtifactSource::Inline(rows)),
                 // Legal, and the object declared and empty (`configuration.md` §2): a layer with
@@ -3284,7 +3398,6 @@ fn compile_layers(
             })?),
         };
 
-        let shape = compile_shape(block, &membership)?;
         let declaration = LayerDeclaration {
             name: block.name.clone(),
             title: block.title.clone(),
@@ -3441,17 +3554,13 @@ fn compile_membership(block: &LayerBlock, attributes: &[Attribute]) -> Result<Me
     }
 }
 
-/// `[layer.shape]` — what a spatial layer's artifacts are shaped like, and how deep the tiles that
-/// cover them are drawn.
+/// `[layer.shape]` — what kind of shape a spatial layer's artifacts carry
+/// (`polygon-membership.md` §6.1): `bbox`, `circle`, `ellipse` or `polygon`, and nothing else.
 ///
-/// **The depth is the membership rather than a tuning key** (ruling R3: the ranges *are* the
-/// membership, and the polygon is content). A box covered by depth-4 tiles and the same box covered
-/// at depth 8 hold different points, so there is no value for it to default to and none outside the
-/// code space to accept.
-///
-/// ⊘ **`kind = "bbox"` is the whole vocabulary.** Each artifact carries `min_x`, `min_y`, `max_x`,
-/// `max_y` on its own row; a polygon, a radius or a multi-part shape is refused here rather than
-/// covered approximately, an approximate cover being a membership *wider* than the declaration.
+/// **No depth.** Every kind is exact — the members are the rows whose stored position is inside
+/// the shape — so there is nothing for a depth to hold, and one written is refused naming where it
+/// went rather than as an unknown key: a declaration carrying the cover-at-depth form of an
+/// earlier surface should be told what replaced it.
 ///
 /// A layer with no block at all is the state this surface has always had — declared for a shape it
 /// does not yet carry, holding nothing, because publication into it is refused. That stays
@@ -3468,43 +3577,38 @@ fn compile_shape(
         return Err(declaration_error(format!(
             "layer '{}': `[layer.shape]` is declared and `membership` is not \"spatial\", so the \
              shape is a rule nothing evaluates — the members come from the stored set or the \
-             predicate the membership names, and the box beside them would decide nothing",
+             predicate the membership names, and the shape beside them would decide nothing",
+            block.name
+        )));
+    }
+    if declared.depth.is_some() {
+        return Err(declaration_error(format!(
+            "layer '{}': `shape.depth` is not a key. Every shape kind is exact — the members are \
+             the rows inside the shape, tested one by one at the boundary — so there is no depth \
+             to declare and no cover to be drawn at one (`polygon-membership.md` §6.1). Remove \
+             the key",
             block.name
         )));
     }
     let kind = match declared.kind.as_deref() {
-        None | Some("bbox") => ShapeKind::Bbox,
-        Some(other) => {
+        Some(word) => ShapeKind::parse(word).ok_or_else(|| {
+            declaration_error(format!(
+                "layer '{}': `shape.kind = \"{word}\"` is not a shape kind; the kinds are {}. Each \
+                 artifact then carries its geometry in that kind's fields — `bbox`, `circle`, \
+                 `ellipse`, or `wkt` inline and a WKB `geometry` column in a table",
+                block.name,
+                ShapeKind::VOCABULARY.join(", ")
+            ))
+        })?,
+        None => {
             return Err(declaration_error(format!(
-                "layer '{}': `shape.kind = \"{other}\"` is not \"bbox\", which is the only shape \
-                 decoded. ⊘ A polygon or a radius is refused here rather than covered \
-                 approximately: the tiles that cover a shape *are* its membership, so an \
-                 approximate cover is a membership wider than the declaration",
-                block.name
+                "layer '{}': `[layer.shape]` declares no `kind`; the kinds are {}",
+                block.name,
+                ShapeKind::VOCABULARY.join(", ")
             )))
         }
     };
-    let depth = declared
-        .depth
-        .filter(|d| *d > 0 && *d <= i64::from(tessera_types::layer::MAX_SHAPE_DEPTH))
-        .ok_or_else(|| {
-            declaration_error(format!(
-                "layer '{}': `shape.depth` is {}, and it must be an integer between 1 and {}. It \
-                 is the membership rather than a tuning key — a box covered by depth-`d` tiles \
-                 holds different points at a different `d` — so there is no value for it to \
-                 default to",
-                block.name,
-                match declared.depth {
-                    Some(d) => d.to_string(),
-                    None => "absent".to_string(),
-                },
-                tessera_types::layer::MAX_SHAPE_DEPTH
-            ))
-        })?;
-    Ok(Some(ShapeDeclaration {
-        kind,
-        depth: depth as u8,
-    }))
+    Ok(Some(ShapeDeclaration { kind }))
 }
 
 fn compile_hierarchy(block: &LayerBlock) -> Result<Hierarchy> {
