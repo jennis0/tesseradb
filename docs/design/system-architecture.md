@@ -544,6 +544,12 @@ theta_target_marks = 16
 max_underlay_offset = 4
 max_underlay_cells  = 8192
 max_tiles_per_request = 262_144
+# shapes and the region leaf (polygon-membership.md §9, selection-operand.md §2) — all four
+# published on /v1/meta; the first two refuse, the third stops shallower and says so
+max_shape_vertices  = 1_000_000       # a published shape over it is 422 at the build and at PUT
+max_region_vertices = 10_000          # a region leaf's polygon over it is 422 naming the cap
+max_region_cells    = 262_144         # crossing tiles at one depth; over it the answer is a cover
+region_cache_bytes  = 268_435_456     # decompositions, shared across principals, pruned per generation
 # admission and parallelism (§6.3)
 compute_threads = 8
 compute_admission = 32

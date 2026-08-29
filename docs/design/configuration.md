@@ -787,7 +787,18 @@ a browser that cannot read them is a browser that cannot cache, not one that is 
 from something. The control plane is never wrapped by either list.
 
 The rest of `[serve]` and all of `[ingest]` are tuning, documented at SA §7 under its own rule —
-performance knobs default, disclosure controls do not.
+performance knobs default, disclosure controls do not. Four of them are the shape work's and are
+named here because a reader of `[layer.shape]` will look for them: `max_shape_vertices` (default
+10⁶ — a published shape over it is refused at the build and at `PUT /control/layers`, the one
+input a caller can simplify; the held decomposition is reported and never capped),
+`max_region_vertices` (10,000 — a `region` leaf's polygon over it is `422` naming the cap),
+`max_region_cells` (262,144 — the crossing tiles a region leaf's descent may hold at one depth;
+**not a refusal**: over it the descent stops at the deepest depth that fits and the answer is a
+cover, said on `x-tessera-region`), and `region_cache_bytes` (256 MiB — the decomposition cache,
+shared across principals, pruned per generation; eviction costs latency and nothing else). The
+first three are published on `/v1/meta` so a client can predict a refusal rather than discover it
+([`polygon-membership.md`](polygon-membership.md) §9, [`selection-operand.md`](selection-operand.md)
+§2).
 
 **Every path in it resolves against its own directory**, on the same rule a `source` follows — a
 relative `bundle.path` that moved with the shell's working directory would make `cd crates &&
