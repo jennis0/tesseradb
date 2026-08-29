@@ -211,7 +211,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
 
     let narrow = artifacts_of(&engine, &subset_credential());
     let bbox = narrow[0].derived.bbox.expect("declared");
-    let hull = narrow[0].derived.hull.clone().expect("declared");
+    let hull = narrow[0].derived.shape.clone().expect("declared");
 
     let visible: Vec<[u32; 2]> = visible_to_subset(sources.iter().copied())
         .into_iter()
@@ -227,7 +227,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
 
     // Every hull vertex, in every ring, is a visible member's position. A vertex that is not is a
     // position this principal was never entitled to, arriving as geometry.
-    for vertex in hull.iter().flatten() {
+    for vertex in hull.iter().flatten().flatten() {
         assert!(
             visible.contains(vertex),
             "{vertex:?} is not the position of any member this principal can see"
@@ -235,7 +235,7 @@ fn the_box_and_the_hull_are_drawn_from_visible_members_alone() {
     }
     // A hull with a vertex outside the box would be incoherent; a hull *inside* the box's corners
     // is ordinary, since the corners need not be occupied.
-    for vertex in hull.iter().flatten() {
+    for vertex in hull.iter().flatten().flatten() {
         assert!(vertex[0] >= want[0] && vertex[0] <= want[2]);
         assert!(vertex[1] >= want[1] && vertex[1] <= want[3]);
     }
@@ -270,7 +270,7 @@ fn the_served_hull_is_tighter_than_its_wrap_and_holds_every_visible_member() {
 
     for credential in [subset_credential(), full_coverage_credential()] {
         let served = artifacts_of(&engine, &credential);
-        let hull = served[0].derived.hull.clone().expect("declared");
+        let hull = served[0].derived.shape.clone().expect("declared");
         let visible: Vec<[u32; 2]> = if credential == subset_credential() {
             visible_to_subset(sources.iter().copied())
                 .into_iter()
@@ -282,13 +282,13 @@ fn the_served_hull_is_tighter_than_its_wrap_and_holds_every_visible_member() {
 
         for member in &visible {
             assert!(
-                hull.iter().any(|r| ring::contains(r, *member)),
+                hull.iter().flatten().any(|r| ring::contains(r, *member)),
                 "{member:?} is a member this principal sees and it fell outside every ring of its hull"
             );
         }
         let wrap = ring::convex_hull(&visible);
         assert!(
-            hull.iter().map(|r| ring::double_area(r)).sum::<i128>() < ring::double_area(&wrap),
+            hull.iter().flatten().map(|r| ring::double_area(r)).sum::<i128>() < ring::double_area(&wrap),
             "the served hull is the convex wrap, not a shape that follows the members"
         );
     }
@@ -324,7 +324,7 @@ fn only_the_declared_properties_are_computed() {
     let served = artifacts_of(&engine, &full_coverage_credential());
     assert!(served[0].derived.centroid.is_some());
     assert!(served[0].derived.bbox.is_none(), "not declared");
-    assert!(served[0].derived.hull.is_none(), "not declared");
+    assert!(served[0].derived.shape.is_none(), "not declared");
 }
 
 /// **The drill-down computes the same geometry as the viewport**, because both call the same code
@@ -343,7 +343,7 @@ fn the_drill_down_agrees_with_the_viewport_on_derived_content() {
     let from_viewport = artifacts_of(&engine, &subset_credential());
     let idset = engine.generation().bundle.manifest.identity.idset;
     let drilled = engine
-        .artifact(&session, from_viewport[0].tessera_id, Some(idset), "s0")
+        .artifact(&session, from_viewport[0].tessera_id, Some(idset), "s0", None)
         .unwrap()
         .expect("the identifier the viewport just issued");
 
@@ -767,7 +767,7 @@ fn every_artifact_keeps_its_own_content_when_the_level_is_read_from_the_blob() {
     let idset = engine.generation().bundle.manifest.identity.idset;
     for artifact in &served {
         let drilled = engine
-            .artifact(&session, artifact.tessera_id, Some(idset), "s0")
+            .artifact(&session, artifact.tessera_id, Some(idset), "s0", None)
             .unwrap()
             .expect("the identifier the viewport just issued");
         assert_eq!(drilled.content, artifact.content);

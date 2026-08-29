@@ -579,7 +579,7 @@ fn a_write_re_derives_the_shape_it_moved() {
     publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..200)]);
 
     let session = engine.authorise(&full_coverage_credential()).unwrap();
-    let hull_of = |engine: &Engine| -> Vec<Vec<[u32; 2]>> {
+    let hull_of = |engine: &Engine| -> Vec<Vec<Vec<[u32; 2]>>> {
         engine
             .viewport(
                 &session,
@@ -591,7 +591,7 @@ fn a_write_re_derives_the_shape_it_moved() {
             .find(|a| a.layer == "clusters/a")
             .expect("the artifact is served")
             .derived
-            .hull
+            .shape
             .expect("a declared hull")
     };
     let before = hull_of(&engine);
@@ -626,7 +626,7 @@ fn two_principals_over_one_artifact_get_two_shapes() {
     engine.register_layer(hulled("clusters/a")).unwrap();
     publish(&engine, "clusters/a", vec![node(&fx, "c0", None, 0..600)]);
 
-    let hull_for = |credential: &[u8]| -> Vec<Vec<[u32; 2]>> {
+    let hull_for = |credential: &[u8]| -> Vec<Vec<Vec<[u32; 2]>>> {
         let session = engine.authorise(credential).unwrap();
         engine
             .viewport(
@@ -639,7 +639,7 @@ fn two_principals_over_one_artifact_get_two_shapes() {
             .find(|a| a.layer == "clusters/a")
             .expect("the artifact is served")
             .derived
-            .hull
+            .shape
             .expect("a declared hull")
     };
     let broad = hull_for(&full_coverage_credential());

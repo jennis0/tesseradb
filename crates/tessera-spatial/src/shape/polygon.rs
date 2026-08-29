@@ -113,6 +113,11 @@ impl Polygon {
     /// vertices, it is served as those, as a degenerate hull is. A hole filtered below three
     /// vertices is dropped rather than served degenerate.
     pub fn rings(&self, min_weight: u32, budget: usize) -> Vec<Vec<Vec<GridPoint>>> {
+        self.rings_guarded(min_weight, budget).0
+    }
+
+    /// [`Polygon::rings`], and whether the budget cut vertices the depth alone would have kept.
+    pub fn rings_guarded(&self, min_weight: u32, budget: usize) -> (Vec<Vec<Vec<GridPoint>>>, bool) {
         // The budget is spent by weight across the whole shape, so a many-ringed shape does not
         // multiply the wire: find the weight threshold at which `budget` vertices survive.
         let mut weights: Vec<u32> = self
@@ -125,7 +130,8 @@ impl Polygon {
             .collect();
         // Everything strictly heavier than the budget-th weight survives; ties at it are taken
         // in ring order until the budget is met.
-        let (threshold, mut left) = if weights.len() > budget {
+        let guarded = weights.len() > budget;
+        let (threshold, mut left) = if guarded {
             weights.sort_unstable_by(|a, b| b.cmp(a));
             let t = weights[budget.max(1) - 1];
             let heavier = weights.iter().filter(|&&w| w > t).count();
@@ -134,7 +140,7 @@ impl Polygon {
             (min_weight, usize::MAX)
         };
         if budget == 0 {
-            return Vec::new();
+            return (Vec::new(), guarded);
         }
         let mut out = Vec::new();
         for part in &self.parts {
@@ -167,7 +173,7 @@ impl Polygon {
                 out.push(rings);
             }
         }
-        out
+        (out, guarded)
     }
 }
 

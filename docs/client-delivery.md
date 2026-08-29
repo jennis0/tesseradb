@@ -150,6 +150,29 @@ covered against those same real bytes, and the ring decode against bodies
 hull, and the four disagreements the axes can carry. `clients/ts/README.md`'s fixture rule is
 outside the track's allowlist and was not amended; it should say the artifact goldens are pre-r40.
 
+**The shape-wire track** (2026-08-29; `polygon-membership.md` §7, stage 3 of the shape work,
+whose status record is [`artifact-delivery.md`](artifact-delivery.md) row 10). The client side of
+the owner's one-drawn-geometry ruling: `Artifact.shape` and `ArtifactDetail.shape` are parts of
+rings of vertices, decoded from `shape_x`/`shape_y` three levels deep with the axes checked at
+every level and a body carrying `hull_x`/`hull_y` refused by name; `Meta.layers[].shape` carries
+the kind; `TesseraStore.needShape` replaces `needHull`, asks at the view's zoom, and keeps a
+predicate or an authored shape across a change of principal while dropping a derived one;
+`outlineOf` returns parts and `focusOutlines` hands each part to the `PolygonLayer` as a polygon
+with holes, smoothing the derived kind only; `contourShapes`/`shapeContains` pick by even-odd over
+each part so a pointer in a hole is outside; the card shows the kind and *Filter to this* greyed
+until the region leaf; `insidePolygon` states the lasso's tie-rule obligation. The `hull.test.ts`
+decoder tests became `shape.test.ts`. **The golden captures are still the r44 ones** — the
+`ringsclient` note above stands, one revision on: `viewport-artifacts.bin` and
+`viewport-membership.bin` carry `hull_x`/`hull_y` as a list of rings, the decoder now refuses those
+names outright, and the tests strip the old columns (`core/test/old-shape-columns.ts`) to keep
+the row-set and membership claims against real bytes; the two captured-body geometry claims are
+made against hand-assembled r45 bodies instead. A recapture against a served corpus
+(`scripts/capture-golden.mjs --artifacts-only`) restores them — the Overture one-part server the
+evidence was shot against would do, and was not used for it because the notebook corpus's
+`clusters/hdbscan` is what the capture and its worked decodes are documented against. Evidence:
+`clients/ts/viewer/smoke-shapes.mjs`, shots and note under
+[`evidence/screenshots/2026-08-29-shape-wire/`](evidence/screenshots/2026-08-29-shape-wire/README.md).
+
 **Step 4's notes** (2026-08-25). The plain-HTML example's app server is the claim-minting proxy
 under `builtin:passthrough` and its README says so where a C1 developer reads it (design §5.3);
 its production-topology paragraph is the same-origin proxy of `/v1/*`, with D10's `cors_origins`

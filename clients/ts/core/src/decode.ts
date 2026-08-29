@@ -1,7 +1,7 @@
 import {tableFromIPC, Type, type DataType, type Table, type Vector} from 'apache-arrow';
 import {CELLS_PER_WORLD_UNIT} from './coords.js';
 import {splitFramedStreams} from './frame.js';
-import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, SubCell, TileCounts, ViewportResult} from './types.js';
+import type {Artifact, ArtifactIdentity, MembershipColumn, ScalarColumn, Shape, SubCell, TileCounts, ViewportResult} from './types.js';
 
 function u64Column(table: Table, name: string): BigUint64Array {
   const col = table.getChild(name);
@@ -9,39 +9,44 @@ function u64Column(table: Table, name: string): BigUint64Array {
   return col.toArray() as BigUint64Array;
 }
 
-/** One ring of a hull on one axis: `uint32` vertex coordinates in grid units. */
+/** One ring of a shape on one axis: `uint32` vertex coordinates in grid units. */
 type Ring = {length: number; get(v: number): number | null};
-/** One artifact's rings on one axis — the outer list of `list<list<uint32>>`. */
+/** One part's rings on one axis. */
 type Rings = {length: number; get(r: number): Ring | null};
+/** One artifact's parts on one axis — the outer list of `list<list<list<uint32>>>`. */
+type Parts = {length: number; get(p: number): Rings | null};
 
 /**
- * A hull axis column, checked to be `list<list<uint32>>` before a row is read — or `null` where
- * the schema carries no such column at all.
+ * A shape axis column, checked to be `list<list<list<uint32>>>` before a row is read — or `null`
+ * where the schema carries no such column at all.
  *
- * **Absence is a schema fact, not a version skew** (contracts §3.2 r44): the two hull columns
- * trail the fixed prefix and are omitted entirely when no served layer declares a hull, an absent
+ * **Absence is a schema fact, not a version skew** (contracts §3.2 r44): the two shape columns
+ * trail the fixed prefix and are omitted entirely when no served layer draws a shape, an absent
  * column being distinguishable from a null one so decision 0076's rule — a null means *this
  * layer declares no such property*, never *withheld* — gains no third reading.
  *
  * **Where the column is present, the nesting is the contract, and it is verified at the schema
- * rather than discovered at the first row** (contracts §3.2 item 4). A pre-r40 server sends one
- * flat `list<uint32>` per artifact; read two levels deep that column yields a number where a ring
- * is expected, and the ring would come out as a single vertex on a shape with none of the
- * artifact's ground. That mismatch is a version skew between this client and the service it is
- * talking to, so it is a refusal with the two types named and not a shape to accommodate.
+ * rather than discovered at the first row** (contracts §3.2 item 4, `polygon-membership.md`
+ * §7.1): parts, then rings, then vertices. A server from before the shape columns sends two
+ * levels — rings of vertices — and read three levels deep that column yields a number where a
+ * ring is expected; a hole and a second part are different things to a renderer, and the flatter
+ * shape read as this one would draw a second group as a hole of the first. That mismatch is a
+ * version skew between this client and the service it is talking to, so it is a refusal with the
+ * two types named and not a shape to accommodate.
  */
-function ringColumn(table: Table, name: string): {get(i: number): Rings | null} | null {
+function partsColumn(table: Table, name: string): {get(i: number): Parts | null} | null {
   const col = table.getChild(name);
   if (!col) return null;
   const inner = (col.type as {children?: {type: DataType}[]}).children?.[0]?.type;
-  if (col.type.typeId !== Type.List || inner?.typeId !== Type.List) {
+  const innermost = (inner as {children?: {type: DataType}[]} | undefined)?.children?.[0]?.type;
+  if (col.type.typeId !== Type.List || inner?.typeId !== Type.List || innermost?.typeId !== Type.List) {
     throw new Error(
-      `viewport payload column "${name}" is ${col.type} — a served hull is a list of rings, ` +
-        'so the column is list<list<uint32>> (contracts §3.2 item 4). A flat list is a server ' +
-        'older than the rings change.'
+      `viewport payload column "${name}" is ${col.type} — a served shape is parts of rings of ` +
+        'vertices, so the column is list<list<list<uint32>>> (contracts §3.2 item 4). Two levels ' +
+        'is a server older than the shape columns.'
     );
   }
-  return col as unknown as {get(i: number): Rings | null};
+  return col as unknown as {get(i: number): Parts | null};
 }
 
 /**
@@ -402,7 +407,7 @@ export function decodeSubCells(payload: Uint8Array): SubCell[] {
  *
  * The projection is read off the frame's own schema, never off the request: the identity frame is
  * exactly the four columns `(layer, tessera_id, rung, matched)` (contracts §3.2 r44), the full
- * frame's fixed prefix is fourteen with the two hull columns trailing.
+ * frame's fixed prefix is fourteen with the two shape columns trailing.
  */
 export function decodeArtifactsFrame(payload: Uint8Array): {
   artifacts: Artifact[];
@@ -447,19 +452,26 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   const boxMinY = t.getChild('box_min_y')!;
   const boxMaxX = t.getChild('box_max_x')!;
   const boxMaxY = t.getChild('box_max_y')!;
-  // `hull_x` and `hull_y` are `list<list<uint32>>` — **one entry per ring** (contracts §3.2
-  // item 4, `artifact-shapes.md` §9) — and **trail the fixed prefix, absent from the schema
-  // entirely when no served layer declares a hull** (r44). Read by name, tolerating absence:
-  // an absent pair reads as no artifact carrying a hull, and a per-row null in a present pair
-  // keeps its one meaning (the layer declares none). Where a column is present, the nesting is
-  // checked at the schema, so a body from a server that still sends one flat ring per artifact
-  // is refused rather than misread: the downcast is what a single-ring reader fails on, and the
-  // same downcast in reverse is what this decoder must not paper over.
-  const hullX = ringColumn(t, 'hull_x');
-  const hullY = ringColumn(t, 'hull_y');
+  // `shape_x` and `shape_y` are `list<list<list<uint32>>>` — parts, rings, vertices (contracts
+  // §3.2 item 4, `polygon-membership.md` §7.1) — and **trail the fixed prefix, absent from the
+  // schema entirely when no served layer draws a shape** (r44). Read by name, tolerating absence:
+  // an absent pair reads as no artifact carrying a shape, and a per-row null in a present pair
+  // keeps its one meaning (the layer draws none). Where a column is present, the nesting is
+  // checked at the schema, so a body from a server that still sends rings of vertices is refused
+  // rather than misread.
+  // **A body carrying the columns' old names is refused, not read as shapeless.** There is no
+  // compatibility to keep (decision 0048), and reading `hull_x`/`hull_y` as *no drawn geometry*
+  // would draw every cluster as its box and look like a layer that declares none.
+  if (t.getChild('hull_x') || t.getChild('hull_y')) {
+    throw new Error(
+      'viewport artifacts frame carries `hull_x`/`hull_y`: this client requires a server that serves `shape_x`/`shape_y` (contracts §3.2 r45 renamed the pair and deepened it to parts of rings)'
+    );
+  }
+  const shapeX = partsColumn(t, 'shape_x');
+  const shapeY = partsColumn(t, 'shape_y');
   // The two travel together by contract; one without the other has no reading.
-  if ((hullX === null) !== (hullY === null)) {
-    throw new Error('viewport artifacts frame carries one hull column and not the other');
+  if ((shapeX === null) !== (shapeY === null)) {
+    throw new Error('viewport artifacts frame carries one shape column and not the other');
   }
   // One content, entire, positional to the layer's declared kinds. Empty means the layer
   // declares no supplied content — never that content was withheld, because an artifact whose
@@ -495,33 +507,45 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
   for (let i = 0; i < tesseraId.length; i++) {
     const cx = centroidX.get(i);
     const bx = boxMinX.get(i);
-    const hx = hullX === null ? null : hullX.get(i);
-    const hy = hullY === null ? null : hullY.get(i);
-    // The two axes carry the same ring structure by construction. **Checked, not assumed** — a
-    // decoder that assumes it misdraws silently on the day something else does not, and a ring
-    // whose axes disagree has no reading at all: a shorter x than y would draw a ring that
-    // closes early, in the shape of a real boundary.
-    if ((hx === null) !== (hy === null)) {
-      throw new Error(`viewport artifact row ${i}: one hull axis is null and the other is not`);
+    const sx = shapeX === null ? null : shapeX.get(i);
+    const sy = shapeY === null ? null : shapeY.get(i);
+    // The two axes carry the same structure by construction. **Checked at every level, not
+    // assumed** — a decoder that assumes it misdraws silently on the day something else does not,
+    // and a ring whose axes disagree has no reading at all: a shorter x than y would draw a ring
+    // that closes early, in the shape of a real boundary.
+    if ((sx === null) !== (sy === null)) {
+      throw new Error(`viewport artifact row ${i}: one shape axis is null and the other is not`);
     }
-    let hull: [number, number][][] | null = null;
-    if (hx !== null && hy !== null) {
-      if (hx.length !== hy.length) {
-        throw new Error(`viewport artifact row ${i}: hull axes disagree on ring count (${hx.length} and ${hy.length})`);
+    let shape: Shape | null = null;
+    if (sx !== null && sy !== null) {
+      if (sx.length !== sy.length) {
+        throw new Error(`viewport artifact row ${i}: shape axes disagree on part count (${sx.length} and ${sy.length})`);
       }
-      hull = [];
-      for (let r = 0; r < hx.length; r++) {
-        const rx = hx.get(r);
-        const ry = hy.get(r);
-        if (rx === null || ry === null) {
-          throw new Error(`viewport artifact row ${i}: hull ring ${r} is null on one axis`);
+      shape = [];
+      for (let p = 0; p < sx.length; p++) {
+        const px = sx.get(p);
+        const py = sy.get(p);
+        if (px === null || py === null) {
+          throw new Error(`viewport artifact row ${i}: shape part ${p} is null on one axis`);
         }
-        if (rx.length !== ry.length) {
-          throw new Error(`viewport artifact row ${i}: hull axes disagree on the length of ring ${r} (${rx.length} and ${ry.length})`);
+        if (px.length !== py.length) {
+          throw new Error(`viewport artifact row ${i}: shape axes disagree on the ring count of part ${p} (${px.length} and ${py.length})`);
         }
-        const ring: [number, number][] = [];
-        for (let v = 0; v < rx.length; v++) ring.push([Number(rx.get(v)), Number(ry.get(v))]);
-        hull.push(ring);
+        const rings: [number, number][][] = [];
+        for (let r = 0; r < px.length; r++) {
+          const rx = px.get(r);
+          const ry = py.get(r);
+          if (rx === null || ry === null) {
+            throw new Error(`viewport artifact row ${i}: shape ring ${r} of part ${p} is null on one axis`);
+          }
+          if (rx.length !== ry.length) {
+            throw new Error(`viewport artifact row ${i}: shape axes disagree on the length of ring ${r} of part ${p} (${rx.length} and ${ry.length})`);
+          }
+          const ring: [number, number][] = [];
+          for (let v = 0; v < rx.length; v++) ring.push([Number(rx.get(v)), Number(ry.get(v))]);
+          rings.push(ring);
+        }
+        shape.push(rings);
       }
     }
     artifacts.push({
@@ -535,7 +559,7 @@ export function decodeArtifactsFrame(payload: Uint8Array): {
         bx === null
           ? null
           : [Number(bx), Number(boxMinY.get(i)), Number(boxMaxX.get(i)), Number(boxMaxY.get(i))],
-      hull,
+      shape,
       content: Array.from(content.get(i) ?? [], (v) => String(v)),
       // Absent on a server older than the field, which reads the same as a root — the
       // fail-closed direction, and the only one available without inventing a parent.

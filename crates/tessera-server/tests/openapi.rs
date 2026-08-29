@@ -858,7 +858,7 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
     assert_eq!(artifact["layer"], LAYER);
     assert_eq!(artifact["key"], "c0");
     assert_eq!(artifact["masked_count"], json!(12));
-    assert!(artifact["centroid"].is_array() && artifact["box"].is_array() && artifact["hull"].is_array());
+    assert!(artifact["centroid"].is_array() && artifact["box"].is_array() && artifact["shape"].is_array());
     assert!(artifact.get("content").is_none(), "no supplied content declared, so absent");
 
     // The masked count is the asking principal's: the narrow one sees c0 whole (its members all

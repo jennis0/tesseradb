@@ -299,7 +299,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     let served = artifacts_of(&engine, &full_coverage_credential());
     let id = served[0].tessera_id;
     let drilled = engine
-        .artifact(&broad_session, id, None, "s0")
+        .artifact(&broad_session, id, None, "s0", None)
         .unwrap()
         .expect("the identifier this session was just served");
     assert_eq!(drilled, served[0], "one predicate, one answer");
@@ -308,7 +308,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
     // not a way round the criterion.
     let narrow_session = engine.authorise(&subset_credential()).unwrap();
     assert!(engine
-        .artifact(&narrow_session, id, None, "s0")
+        .artifact(&narrow_session, id, None, "s0", None)
         .unwrap()
         .is_none());
 
@@ -326,7 +326,7 @@ fn a_drill_down_agrees_with_the_viewport_that_served_the_identifier() {
             .tessera_ids[0],
     );
     assert!(engine
-        .artifact(&broad_session, point_id, None, "s0")
+        .artifact(&broad_session, point_id, None, "s0", None)
         .unwrap()
         .is_none());
 }
@@ -362,7 +362,7 @@ fn suppressing_an_artifact_removes_it_from_the_viewport_and_from_drill_down_at_t
     assert_eq!(after.len(), 1, "suppression takes effect at the ack");
     assert_eq!(after[0].key.as_deref(), Some("c1"));
     assert!(engine
-        .artifact(&session, served[0].tessera_id, None, "s0")
+        .artifact(&session, served[0].tessera_id, None, "s0", None)
         .unwrap()
         .is_none());
 

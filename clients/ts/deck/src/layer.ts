@@ -13,12 +13,14 @@ import {
   type Meta,
   type PresentedStatus,
   type Rgba,
+  type Shape,
+  type ShapeKind,
   type Store,
   type TilesProjection
 } from '@tesseradb/client';
 import {materialiseStandIn, type StandInBuffers} from './assemble.js';
 import {buildColourAttribute, type Encoding} from './colour.js';
-import {shapeBbox, smoothRing, type ContourShape} from './contours.js';
+import {shapeBbox, smoothRing, type ContourShape, type Part} from './contours.js';
 import {binDensity, filterDensity} from './density.js';
 import {LABEL_LINE_HEIGHT, labelSize, placeLabels, wrapLabel, type LabelCandidate, type PlacedLabel} from './labels.js';
 import {LookupTexture} from './lut.js';
@@ -49,8 +51,9 @@ import {MarkSlab, type GpuSlab} from './slab.js';
  * `marks` object. The stand-in pieces are materialised once per `standIn` array, memoised on
  * its identity, since the pieces survive most frames by reference.
  *
- * The drawing, in order (§5.10): the hovered and the opened artifact's served `hull` rings, or
- * its `box` where its layer declares no hull — **and nothing else**, since only those two draw
+ * The drawing, in order (§5.10): the hovered and the opened artifact's served `shape` — a hull,
+ * a membership shape or an authored one, drawn through one path as parts with holes — or its
+ * `box` where its layer draws no shape — **and nothing else**, since only those two draw
  * ({@link focusOutlines}); the single-hue
  * density wash from the exact tiles' counts,
  * filtered so the tile grid never shows (decision 0097); the marks — one `MarksLayer` per
@@ -118,11 +121,11 @@ export type LayerTimings = {
   layersMs: number;
   lutWrites: number;
   /**
-   * The **rings** the outline layer holds and the **artifacts** they belong to; two units on
-   * purpose, because a hull is a list of rings. Both count what draws — the hovered and the
+   * The **parts** the outline layer holds and the **artifacts** they belong to; two units on
+   * purpose, because a shape is a list of parts. Both count what draws — the hovered and the
    * opened artifact, so `outlinesDrawn` is 0, 1 or 2 — and neither counts what may be hovered,
    * which is the frontier and is no longer the layer's to hold ({@link contourShapes}). The two
-   * differ where the drawn artifact's members are two separated clouds: two rings, one hull.
+   * differ where the drawn artifact is several pieces: two parts, one shape.
    */
   outlines: number;
   outlinesDrawn: number;
@@ -282,8 +285,8 @@ const NO_POINTS: [number, number][] = [];
 const heldColumnEncoding = new WeakMap<MarkSlab, {encoding: Encoding; colourBy: string | null}>();
 /** A lookup texture per slab, for a host that handed none in. */
 const ownLut = new WeakMap<MarkSlab, LookupTexture>();
-/** The drawn outlines, once per served set, fetched hulls, opened artifact and hovered artifact. */
-const heldOutlines = new WeakMap<object, {key: string; hulls: object; data: OutlineDatum[]}>();
+/** The drawn outlines, once per served set, fetched shapes, opened artifact and hovered artifact. */
+const heldOutlines = new WeakMap<object, {key: string; shapes: object; data: OutlineDatum[]}>();
 /** The label placement, once per served set and zoom bucket. */
 const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders: LeaderDatum[]; placed: number}>();
 /**
@@ -294,13 +297,14 @@ const heldLabels = new WeakMap<object, {key: string; data: LabelDatum[]; leaders
 const heldCandidates = new WeakMap<object, {key: string; candidates: LabelCandidate[]; byId: Map<bigint, LabelText>}>();
 
 /**
- * One drawn ring. **A datum is a ring, not an artifact** — a hull is a list of rings
- * (`artifact-shapes.md` §1), and every ring of one artifact carries that artifact's `id`, so an
- * artifact whose members are two separated clouds is two rows here that draw alike.
+ * One drawn part — its outer ring and its holes, the nesting deck's `PolygonLayer` takes. **A
+ * datum is a part, not an artifact** — a shape is a list of parts (`polygon-membership.md` §7.1),
+ * and every part of one artifact carries that artifact's `id`, so an artifact whose members are
+ * two separated clouds is two rows here that draw alike.
  */
 export type OutlineDatum = {
   id: bigint;
-  polygon: [number, number][];
+  polygon: [number, number][][];
   colour: Rgba;
   opened: boolean;
   hovered: boolean;
@@ -374,13 +378,12 @@ function dependentLayers(meta: Meta | null | undefined): Set<string> {
 }
 
 /**
- * Whether a layer declares `hull` in its computed set — `/v1/meta`'s `computed_content`
- * (contracts §3.2 r42), which is the layer's own declaration and not a property of any one
- * artifact. With no roster in hand this is false, and the box draws.
+ * Which kind of shape a layer draws — `/v1/meta`'s `shape` (`polygon-membership.md` §7.1), the
+ * layer's own declaration and not a property of any one artifact. With no roster in hand this is
+ * null, and the box draws.
  */
-function declaresHull(meta: Meta | null | undefined, layer: string): boolean {
-  const declared = meta?.layers.find((l) => l.name === layer)?.computedContent;
-  return (declared ?? []).includes('hull');
+function shapeKindOf(meta: Meta | null | undefined, layer: string): ShapeKind | null {
+  return meta?.layers.find((l) => l.name === layer)?.shape ?? null;
 }
 
 /**
@@ -399,13 +402,15 @@ function declaresHull(meta: Meta | null | undefined, layer: string): boolean {
  * attach to and they have no shape of their own, so their `box` fallback would put a rectangle
  * over the map with nothing drawn on it.
  *
- * **A shape is the artifact's `box` until its hull arrives.** The viewport is asked for centroids
- * and boxes, so at rest every entry here is a rectangle; the hull for whatever the pointer lands
- * on is fetched by identifier (`TesseraStore.needHull`) and this is rebuilt around it when it
- * lands. A layer that declares no hull draws its box and this is the shape for good.
+ * **A shape is the artifact's `box` until its served shape arrives.** The viewport is asked for
+ * centroids and boxes, so at rest every entry here is a rectangle; the shape for whatever the
+ * pointer lands on is fetched by identifier (`TesseraStore.needShape`) and this is rebuilt
+ * around it when it lands. A layer that draws no shape draws its box and this is the shape for
+ * good.
  *
- * A hull's rings are separated groups of the visible members (`artifact-shapes.md` §1), so one
- * entry holds several rings and a pointer between two of them is inside neither.
+ * A shape's parts are separate pieces — a hull's α-groups (`artifact-shapes.md` §1), a
+ * boundary's exclaves — so one entry holds several parts and a pointer between two of them is
+ * inside neither, and a pointer in a hole is outside.
  */
 export function contourShapes(a: ArtifactsProjection, o: ContourOptions): ContourShape[] {
   const dependent = dependentLayers(o.meta);
@@ -414,9 +419,9 @@ export function contourShapes(a: ArtifactsProjection, o: ContourOptions): Contou
   for (const artifact of a.served) {
     if (!front.has(artifact.tesseraId)) continue;
     if (dependent.has(artifact.layer)) continue;
-    const outline = outlineOf(artifact, a.hulls?.get(artifact.tesseraId));
+    const outline = outlineOf(artifact, a.shapes?.get(artifact.tesseraId));
     if (!outline) continue;
-    shapes.push({id: artifact.tesseraId, rung: artifact.rung, rings: outline.rings, bbox: shapeBbox(outline.rings)});
+    shapes.push({id: artifact.tesseraId, rung: artifact.rung, parts: outline.parts, bbox: shapeBbox(outline.parts)});
   }
   return shapes;
 }
@@ -440,17 +445,23 @@ export function contourShapes(a: ArtifactsProjection, o: ContourOptions): Contou
  * is 0.01 ms at that count, and the pick those rows answered is resolved against
  * {@link contourShapes} instead — 17 ms once per served set, then 0.75 ms per pointer move.
  *
- * **A box is not smoothed, and where a hull is coming it is not drawn at all.** {@link smoothRing}
+ * **A box is not smoothed, and where a shape is coming it is not drawn at all.** {@link smoothRing}
  * is a periodic cubic B-spline, and four corners through it is an oval: the rectangle a viewer
- * hovers must be the rectangle the wire sent. Where the layer declares `hull` the box is a
- * placeholder for a shape that is on its way by identifier, so nothing draws until it lands —
- * a rectangle that becomes a hull a moment later reads as the shape changing under the pointer.
- * The hover still resolves against the box meanwhile ({@link contourShapes}), which is what asks
- * for the hull in the first place.
+ * hovers must be the rectangle the wire sent. Where the layer draws a shape the box is a
+ * placeholder for one that is on its way by identifier, so nothing draws until it lands —
+ * a rectangle that becomes the shape a moment later reads as the shape changing under the
+ * pointer. The hover still resolves against the box meanwhile ({@link contourShapes}), which is
+ * what asks for the shape in the first place.
  *
- * **A served artifact contributes one row per ring of its hull**, so the length of the result is
- * the ring count and not the artifact count. Every row of one artifact draws alike, because the
- * rings are one shape in several pieces and highlighting half of a cluster would be a lie about
+ * **Only a derived shape is smoothed.** A hull's vertices are member positions and the spline is
+ * the summary `artifact-shapes.md` §4 argues for; a predicate or an authored shape is a boundary
+ * somebody drew, already generalised to the pixel by the server's vertex rule, and a curve
+ * through its vertices would move a border and could cross its own holes. Both draw in the same
+ * style — the opened artifact strong with a faint fill, the hovered one lighter.
+ *
+ * **A served artifact contributes one row per part of its shape**, so the length of the result is
+ * the part count and not the artifact count. Every row of one artifact draws alike, because the
+ * parts are one shape in several pieces and highlighting half of a cluster would be a lie about
  * where its members are. Parents are ordered first so an opened child sits over an opened parent.
  */
 export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): OutlineDatum[] {
@@ -465,20 +476,23 @@ export function focusOutlines(a: ArtifactsProjection, o: OutlineOptions): Outlin
     if (!artifact) continue;
     if (dependent.has(artifact.layer)) continue;
     if (!onFrontier(a, artifact, o.level)) continue;
-    const outline = outlineOf(artifact, a.hulls?.get(id));
+    const outline = outlineOf(artifact, a.shapes?.get(id));
     if (!outline) continue;
     const box = outline.source === 'box';
-    if (box && declaresHull(o.meta, artifact.layer)) continue;
+    const kind = shapeKindOf(o.meta, artifact.layer);
+    if (box && kind !== null) continue;
+    // With no roster in hand a served shape is smoothed as a hull always was.
+    const smooth = !box && (kind === null || kind === 'derived');
     const opened = id === o.opened;
     const ordinal = a.table.ordinalOf(artifact.layer, artifact.tesseraId);
     const colour = a.colours.get(ordinal) ?? NEUTRAL;
     const fill = box ? 0 : opened ? OPENED_FILL : HOVER_FILL[o.scheme];
     const line = opened ? OPENED_LINE : HOVER_LINE;
     const width = box ? BOX_LINE_WIDTH : opened ? 1.2 : 1;
-    for (const ring of outline.rings) {
+    for (const part of outline.parts) {
       data.push({
         id: artifact.tesseraId,
-        polygon: box ? ring : smoothRing(ring),
+        polygon: smooth ? part.map((ring) => smoothRing(ring)) : part.map((ring) => [...ring]),
         colour,
         opened,
         hovered: !opened,
@@ -647,50 +661,57 @@ export function artifactName(a: Artifact): string | null {
   return text !== undefined && text.length > 0 ? text : null;
 }
 
-/** Which of the two shapes the wire answered an artifact's outline with. */
-export type OutlineSource = 'hull' | 'box';
+/** Which of the two the wire answered an artifact's outline with: its served shape, or its box. */
+export type OutlineSource = 'shape' | 'box';
 
-/** A served artifact's outline in world space, and which of the two shapes it is. */
-export type Outline = {rings: [number, number][][]; source: OutlineSource};
+/** A served artifact's outline in world space — parts of rings — and which of the two it is. */
+export type Outline = {parts: Part[]; source: OutlineSource};
 
 /**
- * A served artifact's outline in world space: **its hull's rings**, else its box, else nothing —
- * the wire's own vertices, in the wire's own order, and nothing else.
+ * A served artifact's outline in world space: **its served shape's parts**, else its box, else
+ * nothing — the wire's own vertices, in the wire's own order, and nothing else.
  *
  * **It says which of the two it returned**, because the two are drawn differently and a caller
- * cannot tell them apart by counting vertices: a box is four corners and so is a square hull.
- * A hull is smoothed and a box never is ({@link focusOutlines}), and four corners through a
- * periodic cubic B-spline is an oval.
+ * cannot tell them apart by counting vertices: a box is four corners and so is a square shape.
+ * A derived shape is smoothed and a box never is ({@link focusOutlines}), and four corners
+ * through a periodic cubic B-spline is an oval.
  *
- * A hull is a list of rings, one per separated group of the visible members (`artifact-shapes.md`
- * §1), so this returns a list of rings and each one is drawn as its own polygon carrying the
- * artifact's identifier. A ring of one or two vertices is a degenerate group — its own members,
- * with no area to draw or to pick — and is left out; where that leaves no ring at all the box
- * answers instead, which is the rule a degenerate single hull already met.
+ * A shape is parts of rings (`polygon-membership.md` §7.1) — a hull's α-groups one part each, a
+ * boundary's exclaves as parts and its enclaves as holes — so this returns a list of parts and
+ * each one is drawn as its own polygon with holes carrying the artifact's identifier. A ring of
+ * one or two vertices is degenerate — a hull's group of one or two members, with no area to draw
+ * or to pick — and is left out; a part whose outer ring is degenerate goes whole, holes and all,
+ * since a surviving hole drawn first would be the polygon; where that leaves no part at all the
+ * box answers instead, which is the rule a degenerate single hull already met.
  *
- * **`fetched` is the hull the drill-down route answered with**, and it wins over the artifact's
+ * **`fetched` is the shape the drill-down route answered with**, and it wins over the artifact's
  * own where both exist. The viewport is asked for centroids and boxes, so a served row carries no
- * hull and the shape for the one artifact that draws arrives by identifier
- * (`TesseraStore.needHull`); until it does, the box is what is drawn, which is the same fallback a
- * layer declaring no hull has always taken.
+ * shape and the shape for the one artifact that draws arrives by identifier
+ * (`TesseraStore.needShape`); until it does, the box is what is drawn, which is the same fallback
+ * a layer drawing no shape has always taken.
  *
  * **This returns the wire's vertices and does not smooth them.** The smoothing is
- * {@link smoothRing}, applied by {@link focusOutlines} to the hull rings that draw. It is a **periodic
- * cubic B-spline** through the served ring rather than a containment-preserving corner cut: the
- * curve may sit a little outside the served ring at a reflex corner, bounded by a sixth of the
- * second difference there, which is a less precise summary of where the cluster is and not a
- * claim about ground the members do not occupy (`artifact-shapes.md` §4, the owner's ruling of
+ * {@link smoothRing}, applied by {@link focusOutlines} to a derived shape's rings. It is a
+ * **periodic cubic B-spline** through the served ring rather than a containment-preserving corner
+ * cut: the curve may sit a little outside the served ring at a reflex corner, bounded by a sixth
+ * of the second difference there, which is a less precise summary of where the cluster is and not
+ * a claim about ground the members do not occupy (`artifact-shapes.md` §4, the owner's ruling of
  * 2026-08-28). Every vertex the engine sends is still a visible member's own position, and the
- * served ring — not the drawn curve — is what a pick and any containment reasoning read.
+ * served ring — not the drawn curve — is what a pick reads. **Neither is a membership test**: a
+ * served shape is a drawing, and whether a point belongs to the artifact is the wire's
+ * `membership:<layer>` column's answer (`polygon-membership.md` §7.1).
  */
-export function outlineOf(a: Artifact, fetched?: readonly (readonly [number, number][])[] | null): Outline | null {
+export function outlineOf(a: Artifact, fetched?: Shape | null): Outline | null {
   const w = gridToWorld;
-  const rings = ((fetched ?? a.hull ?? []) as readonly (readonly [number, number][])[])
-    .filter((ring) => ring.length >= 3)
-    .map((ring) => ring.map(gridToWorldXY));
-  if (rings.length > 0) return {rings, source: 'hull'};
+  const parts: Part[] = [];
+  for (const rings of fetched ?? a.shape ?? []) {
+    const outer = rings[0];
+    if (!outer || outer.length < 3) continue;
+    parts.push(rings.filter((ring) => ring.length >= 3).map((ring) => ring.map(gridToWorldXY)));
+  }
+  if (parts.length > 0) return {parts, source: 'shape'};
   if (a.box) {
-    return {rings: [[[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]]], source: 'box'};
+    return {parts: [[[[w(a.box[0]), w(a.box[1])], [w(a.box[2]), w(a.box[1])], [w(a.box[2]), w(a.box[3])], [w(a.box[0]), w(a.box[3])]]]], source: 'box'};
   }
   return null;
 }
@@ -1156,10 +1177,11 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
   }
 
   /**
-   * The served `hull` rings — or the `box`, where the layer declares no hull — for the hovered and
+   * The served shape's parts — or the `box`, where the layer draws no shape — for the hovered and
    * the opened artifact, in its own colour, the opened one strong with a faint fill
-   * ({@link focusOutlines}). Derived per principal (contracts §3.2), so a shape is exact for this
-   * viewer; nothing is contoured from held marks (decision 0099).
+   * ({@link focusOutlines}), every kind through this one path. A derived shape is per principal
+   * (contracts §3.2), so it is exact for this viewer; nothing is contoured from held marks
+   * (decision 0099).
    *
    * **Nothing else is in this layer.** The rest of the frontier used to sit here at zero alpha to
    * answer deck's pick, which put every served ring through the tessellator on every hover change;
@@ -1169,7 +1191,7 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
    * now the only route by which `resolvePick` reports one.
    *
    * The shapes do not depend on the zoom, so the memo survives a zoom that re-places the labels.
-   * It is keyed on the fetched hulls as well as the served set, because a hull arriving by
+   * It is keyed on the fetched shapes as well as the served set, because a shape arriving by
    * identifier changes neither the served array nor the projection's version.
    */
   private outlineLayers(r: Resolved, timings: {outlinesMs: number; outlines: number; outlinesDrawn: number}): Layer[] {
@@ -1180,8 +1202,8 @@ export class TesseraLayer extends CompositeLayer<TesseraLayerProps> {
     const scheme = this.props.scheme ?? 'dark';
     const key = a ? `${a.version}|${a.palette}|${opened ?? ''}|${hovered ?? ''}|${scheme}|${this.props.clusterLevel ?? ''}` : '';
     let held = a ? heldOutlines.get(a.served) : undefined;
-    if (a && (!held || held.key !== key || held.hulls !== a.hulls)) {
-      held = {key, hulls: a.hulls, data: focusOutlines(a, {opened, hovered, level: this.props.clusterLevel, scheme, meta: r.meta})};
+    if (a && (!held || held.key !== key || held.shapes !== a.shapes)) {
+      held = {key, shapes: a.shapes, data: focusOutlines(a, {opened, hovered, level: this.props.clusterLevel, scheme, meta: r.meta})};
       heldOutlines.set(a.served, held);
     }
     const data = held?.data ?? NO_OUTLINES;

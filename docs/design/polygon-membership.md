@@ -8,9 +8,11 @@ one mechanism asked at two times (R13). The eight rulings of §13 are taken and 
 review's seventeen findings are dispositioned in Appendix R — four of them changed what is held
 and when it is built (§6.3). **Stages 1 and 2 are built** (2026-08-29): the core, and the artifact
 type — the four kinds, the blob, the held structures, the flush's resolution, the build's and the
-check's reports, `PUT /control/layers`. Stages 3 and 4 — the wire and the region leaf — are not,
-and the three supplied content kinds of §6.1 are not (⊘ at the claim). It amends `configuration.md`
-§1 and `annotations.md` §4.2 at the sites §12 names; `contracts.md` §3.2 waits on stage 3.
+check's reports, `PUT /control/layers`. **Stage 3 is built** (2026-08-29): the wire's one drawn
+geometry per artifact, `shape_x`/`shape_y`, the `shape` ask, the vertex rule at serve, the three
+authored content kinds, `/v1/meta`'s kind, and the client drawing every kind through one path.
+Stage 4 — the region leaf — is not. It amends `configuration.md` §1 and `annotations.md` §4.2 at
+the sites §12 names, and `contracts.md` §3.2 at r45.
 
 The document is named for the polygon because that is the consumer that forced it; the design is
 for **shapes** — box, circle, ellipse and polygon — with one semantics (§4.1).
@@ -347,13 +349,15 @@ geometry, or with one that canonicalises to nothing, is **published and reported
 artifact with no members, which is a state the service already has (a spatial layer with no shape)
 and not one that leaks.
 
-A shape is also a **supplied content type** (ruling (h)): `[[layer.content.supplied]]` gains
-`type = "circle" | "ellipse"` beside the existing `polygon`, and all three stop being opaque
-strings — they are read, canonicalised, stored and served exactly as a membership shape is, and
-drawn through the same client path; what differs is that they select nothing. `polygon` content's
-opaque-string reading is deleted rather than kept beside the new one. ⊘ **Specified, not
-implemented** (stage 2 left it): the two new kinds are refused at the content declaration as any
-unknown type is, and a supplied `polygon` is still an opaque string the client interprets.
+A shape is also a **supplied content type** (ruling (h)): `[[layer.content.supplied]]` takes
+`type = "polygon" | "circle" | "ellipse"`, and all three are read, canonicalised, stored and served
+exactly as a membership shape is, and drawn through the same client path; what differs is that they
+select nothing. The value in the content slot is WKT for a polygon and the numbers of the kind's row
+field for a circle (`cx, cy, r`) or an ellipse (`cx, cy, a, b, angle`); at publication it goes
+through the same reader, report and vertex cap as a membership shape, and the slot then holds the
+canonical per-view bytes (§6.6). A `polygon` content is never an opaque string: the wire serves
+its rings and the slot itself is served blank. A layer declares at most one authored shape, and
+none beside a `hull` or a membership shape (§7.1).
 
 ### 6.2 What a spatial layer may now declare
 
@@ -555,10 +559,11 @@ refusal.
 
 ### 7.1 Columns
 
-The artifacts frame (`contracts.md` §3.2 item 4) gains **`shape_x` / `shape_y`** as
-`list<list<list<uint32>>>` — parts, then rings, then vertices — at the tail beside `hull_x`/`hull_y`,
-on the hull's own rules: **omitted from the schema when no served layer declares a shape**, null on
-an artifact whose layer does not, never null otherwise. **Every kind is served as rings** — a box as
+The artifacts frame (`contracts.md` §3.2 item 4, r45) carries **`shape_x` / `shape_y`** as
+`list<list<list<uint32>>>` — parts, then rings, then vertices — at the tail, where `hull_x`/`hull_y`
+stood, on the hull's own rules: **omitted from the schema when no served layer declares a drawn
+geometry or the request narrowed it away**, null on an artifact whose layer declares none, never
+null otherwise. **Every kind is served as rings** — a box as
 its four corners, a circle or an ellipse densified to the request's depth so that no chord departs
 from the curve by more than a cell — so the client has one drawing path and no parametric branch;
 the parametric form is storage's, where exactness matters, and not the wire's, where a pixel is
@@ -576,7 +581,8 @@ enumerated or attribute membership, a fitted circle over a k-means cluster being
 (`annotations.md` §8.6). The membership and the outline are distinct questions, but the answer to
 *what is drawn* is always one shape, so there is one column pair: **`shape_x` / `shape_y`** carry
 whichever kind the layer declared, and `hull_x`/`hull_y` become that pair with the derived kind —
-a hull being one part with no holes, the nesting has one entry at the top. `/v1/meta` publishes the
+each α-group of a hull its own part with no holes, since a second ring in one part is a hole to a
+renderer and two groups are two shapes. `/v1/meta` publishes the
 kind per layer so a client knows whether the outline moves with the principal, which decides
 whether it may cache the geometry against a `tessera_id`. The gate differs by kind and each is
 already specified: derived is over `membership ∩ M_auth` by construction; predicate is served under
@@ -588,9 +594,9 @@ one layer is refused. `/v1/artifacts/{id}`'s JSON carries the same nesting under
 two because a hole and a second part are different things to a renderer, and flattening them into
 one ring list would have a client draw a second part as a hole of the first.
 
-It is **not** `hull_x`/`hull_y` (ruling (d)). The hull is derived from `membership ∩ M_auth` and differs per
-principal; a polygon is supplied, corpus-independent content, identical for every principal who is
-served the artifact. `annotations.md` §8.2 already governs the pairing — *supplied shape, masked
+It is **not** the hull (ruling (d), as ruling (i) re-cut it: one column pair, three kinds). The hull
+is derived from `membership ∩ M_auth` and differs per principal; a polygon is supplied,
+corpus-independent content, identical for every principal who is served the artifact. `annotations.md` §8.2 already governs the pairing — *supplied shape, masked
 number* — and its rule that a boundary is served whole or absent whole is what makes the shape safe
 to serve at all: a viewer below the artifact's criterion is not served the artifact, so there is no
 state in which the shape is served and the number withheld, or the reverse. A shape layer does not
@@ -617,8 +623,12 @@ weights computed once:
   removal order (a vertex's weight is at least the weight of every vertex removed before it). This
   is the `topojson` *presimplify* construction and costs one pass with a heap at publication.
 - At serve, a shape is filtered to the vertices whose weight is at least **one cell at the
-  request's depth, squared** — the request already carries the depth — so a vertex that would move
-  the drawn edge by less than a cell at that zoom is not sent. A ring reduced below three vertices is
+  request's depth** — the request already carries the depth; `/v1/artifacts/{id}` takes it as an
+  optional `zoom`, and without one serves the whole presimplified shape under the guard — so a
+  vertex that would move the drawn edge by less than a cell at that zoom is not sent. The cell is
+  the one a screen pixel covers: a depth-`z` tile is 512 pixels wide on the client, so the
+  tolerance is the depth-`z + 9` cell's side, `2^(23 − z)` grid units
+  (`tessera_engine::shapes::served_tolerance`). A ring reduced below three vertices is
   sent as its two extreme vertices or one, exactly as a degenerate hull is; a shape reduced to
   nothing is a shape the client draws as a point at the centroid.
 - A **per-artifact vertex budget of 2,048** — the hull's, for the hull's reason — applies after the
@@ -850,7 +860,15 @@ Each stage in its own worktree, on the artifact convention; the status record is
    even-odd walk because shapely is not in the reference venv.
 3. **The wire and the client** — `shape_x`/`shape_y`, the `shape` ask, presimplification and
    densification at serve, `/v1/meta`'s kind, deck drawing, the pick. *Amends:* `contracts.md`
-   §3.2, `artifact-shapes.md` §8, `client-components.md`.
+   §3.2, `artifact-shapes.md` §8, `client-components.md`. **Built 2026-08-29**
+   (`artifacts/shape-wire`), with the three authored content kinds stage 2 had left: the derived
+   hull, the membership shape and an authored shape are one column pair of three declared kinds,
+   served at the request's depth under the 2,048 guard, drawn by `@tesseradb/deck` through one
+   polygon-with-holes path, picked by even-odd over each part, the kind on the card. ⊘ Two things
+   are not this stage's: the client's golden captures still carry the r44 columns and are refused
+   by name until recaptured against a served corpus (`client-delivery.md`), and the reference
+   oracle's wire reader (`reference/oracle/wire.py`) still reads `hull_x` — outside this track's
+   allowlist, reported rather than edited.
 4. **The region leaf**, both spellings, on the core — selection-operand promoted with its three
    rulings, `region.ts`'s raster path retired. *Amends:* `architecture.md` §8.2 as that document
    already requires.

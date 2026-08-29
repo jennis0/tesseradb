@@ -113,7 +113,7 @@ function fakeClient(reply: () => ViewportResponse) {
     meta: async () => META,
     viewport,
     item: async () => ({fields: {archive: 'cs'}, externalId: null}),
-    artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, hull: null}),
+    artifact: async () => ({layer: 'l', key: 'k', maskedCount: 42n, centroid: null, box: null, shape: null}),
     categories: async () => [{code: 5, key: 'cs', title: 'CS'}],
     close: () => {}
   } as unknown as TesseraClient;
@@ -336,8 +336,8 @@ describe('the colours are rebuilt when the table moves and not per response', ()
     // Two artifacts, served identically on every request — the shape of a layer whose artifacts
     // are scattered through row space and so are served in full whatever the viewport.
     const served = [
-      {layer: 'clusters/a', tesseraId: 1n, key: 'c1', maskedCount: 5n, centroid: [1, 2] as [number, number], box: null, hull: null, content: [], parentId: null, rung: 0, matched: null},
-      {layer: 'clusters/a', tesseraId: 2n, key: 'c2', maskedCount: 7n, centroid: [3, 4] as [number, number], box: null, hull: null, content: [], parentId: null, rung: 0, matched: null}
+      {layer: 'clusters/a', tesseraId: 1n, key: 'c1', maskedCount: 5n, centroid: [1, 2] as [number, number], box: null, shape: null, content: [], parentId: null, rung: 0, matched: null},
+      {layer: 'clusters/a', tesseraId: 2n, key: 'c2', maskedCount: 7n, centroid: [3, 4] as [number, number], box: null, shape: null, content: [], parentId: null, rung: 0, matched: null}
     ];
     const {client} = fakeClient(() => {
       const r = response('ck');
@@ -381,7 +381,7 @@ describe('the colours are rebuilt when the table moves and not per response', ()
       maskedCount: 5n,
       centroid,
       box: null,
-      hull: null,
+      shape: null,
       content: [],
       parentId: null,
       rung: 0,
@@ -514,15 +514,15 @@ describe('select(box) — one counting request in the tiles form (§5.11)', () =
 });
 
 
-describe('needHull fetches the drawn shape by identifier', () => {
+describe('needShape fetches the drawn shape by identifier', () => {
   /**
    * The viewport is asked for centroids and boxes (`artifactChannel.ts`), so the shape a map draws
    * comes from `/v1/artifacts/{id}`. What matters here is the *asking*: on a pointer move this is
    * called every frame, so a second request for a shape already held — or already in flight — is
    * the defect the two maps behind it exist to prevent.
    */
-  function hullClient(hull: [number, number][][] | null) {
-    const artifact = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 7n, centroid: null, box: null, hull}));
+  function shapeClient(shape: [number, number][][][] | null) {
+    const artifact = vi.fn(async () => ({layer: 'l', key: null, maskedCount: 7n, centroid: null, box: null, shape}));
     const client = {
       meta: async () => META,
       viewport: async () => response('k'),
@@ -534,9 +534,9 @@ describe('needHull fetches the drawn shape by identifier', () => {
     return {client, artifact};
   }
 
-  async function storeWith(hull: [number, number][][] | null) {
+  async function storeWith(shape: [number, number][][][] | null) {
     const clock = fakeClock();
-    const {client, artifact} = hullClient(hull);
+    const {client, artifact} = shapeClient(shape);
     const store = createStore({
       viewerUrl: 'http://viewer',
       token: 'tok',
@@ -550,40 +550,40 @@ describe('needHull fetches the drawn shape by identifier', () => {
     return {store, artifact, clock};
   }
 
-  it('asks once per artifact and publishes the rings it gets back', async () => {
-    const rings: [number, number][][] = [[[0, 0], [10, 0], [10, 10]]];
-    const {store, artifact, clock} = await storeWith(rings);
-    store.needHull(5n);
-    store.needHull(5n);
+  it('asks once per artifact and publishes the parts it gets back', async () => {
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const {store, artifact, clock} = await storeWith(parts);
+    store.needShape(5n);
+    store.needShape(5n);
     await clock.advance(1);
     expect(artifact).toHaveBeenCalledTimes(1);
-    expect(store.get('artifacts').hulls.get(5n)).toEqual(rings);
+    expect(store.get('artifacts').shapes.get(5n)).toEqual(parts);
     // Held, so a later ask is free.
-    store.needHull(5n);
+    store.needShape(5n);
     await clock.advance(1);
     expect(artifact).toHaveBeenCalledTimes(1);
   });
 
-  it('holds nothing for an artifact whose layer declares no hull, and does not ask again', async () => {
+  it('holds nothing for an artifact whose layer draws no shape, and does not ask again', async () => {
     const {store, artifact, clock} = await storeWith(null);
-    store.needHull(9n);
+    store.needShape(9n);
     await clock.advance(1);
-    expect(store.get('artifacts').hulls.has(9n)).toBe(false);
-    store.needHull(9n);
+    expect(store.get('artifacts').shapes.has(9n)).toBe(false);
+    store.needShape(9n);
     await clock.advance(1);
     expect(artifact).toHaveBeenCalledTimes(1);
   });
 
-  it('forgets every held shape on clear — a hull is derived per principal', async () => {
-    const rings: [number, number][][] = [[[0, 0], [10, 0], [10, 10]]];
-    const {store, artifact, clock} = await storeWith(rings);
-    store.needHull(5n);
+  it('forgets every held shape on clear — a derived shape is this principal’s', async () => {
+    const parts: [number, number][][][] = [[[[0, 0], [10, 0], [10, 10]]]];
+    const {store, artifact, clock} = await storeWith(parts);
+    store.needShape(5n);
     await clock.advance(1);
-    expect(store.get('artifacts').hulls.size).toBe(1);
+    expect(store.get('artifacts').shapes.size).toBe(1);
     store.clear();
-    expect(store.get('artifacts').hulls.size).toBe(0);
+    expect(store.get('artifacts').shapes.size).toBe(0);
     // And the identifier is askable again, because nothing is held for it now.
-    store.needHull(5n);
+    store.needShape(5n);
     await clock.advance(1);
     expect(artifact).toHaveBeenCalledTimes(2);
   });

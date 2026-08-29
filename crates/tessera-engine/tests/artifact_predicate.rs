@@ -586,7 +586,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let session = fx.engine.authorise(&credential(grant)).unwrap();
     let row = fx
         .engine
-        .artifact(&session, id, Some(idset), "s0")
+        .artifact(&session, id, Some(idset), "s0", None)
         .expect("the identifier route answers")
         .expect("the artifact the viewport just served is reachable by its identifier");
     assert_eq!(row.key.as_deref(), Some(key.as_str()));
@@ -599,7 +599,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     let blind = fx.engine.authorise(b"{\"terms\": []}").unwrap();
     assert_eq!(
         fx.engine
-            .artifact(&blind, id, Some(idset), "s0")
+            .artifact(&blind, id, Some(idset), "s0", None)
             .expect("the identifier route answers")
             .map(|row| row.masked_count),
         Some(0)
@@ -618,7 +618,7 @@ fn a_predicate_artifact_answers_by_identifier_as_it_does_by_viewport() {
     assert!(
         gated
             .engine
-            .artifact(&blind, id, Some(idset), "s0")
+            .artifact(&blind, id, Some(idset), "s0", None)
             .expect("the identifier route answers")
             .is_none(),
         "a band below its own bar is reachable by identifier"

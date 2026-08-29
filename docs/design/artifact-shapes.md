@@ -1,6 +1,8 @@
 # The shape of a served artifact
 
-**Status:** Normative — 2026-08-28 (r7). It governs what the `hull` vocabulary word means, and
+**Status:** Normative — 2026-08-28 (r7); r8 (2026-08-29) follows `polygon-membership.md` §7.1's
+wire: the derived hull is one of three kinds of an artifact's one drawn geometry and travels as
+`shape_x`/`shape_y`, asked for by the word `shape`. It governs what the `hull` declaration word means, and
 `annotations.md` §4.2 and `contracts.md` §3.2 defer to it on the shape's geometry. The rulings that
 closed it are in Appendix R.
 
@@ -32,14 +34,16 @@ column compares implementations rather than algorithms. Both read `notebook-2m4`
 
 ## 1. What a viewer receives
 
-For each served artifact whose layer declares `hull` **and whose request asked for it** (§8 C),
-over `membership ∩ M_auth` and nothing else:
+For each served artifact whose layer declares `hull` **and whose request asked for the shape**
+(§8 C), over `membership ∩ M_auth` and nothing else:
 
 - The visible members are partitioned into **α-groups** (§5).
 - Each group is drawn as **one simple ring**, counter-clockwise from its lowest vertex, dug inward
   from that group's convex wrap (§4).
-- The rings are ordered by their first vertex, and travel as two `list<list<uint32>>` columns, one
-  per axis (`contracts.md` §3.2 item 4).
+- The rings are ordered by their first vertex, and travel as the layer's **drawn geometry** —
+  `shape_x`/`shape_y`, `list<list<list<uint32>>>`, each group its own part with no holes
+  (`contracts.md` §3.2 item 4; `polygon-membership.md` §7.1). The hull is the **derived** kind of
+  the three a layer may declare, and `/v1/meta` says so.
 
 Two parameters, and **neither is a caller's to set**. **α** is three times the median edge of the
 visible members' own convex wrap — a length in the cloud's own units, robust because a single long
@@ -789,7 +793,7 @@ what it found, in the way [decision 0092](../decisions/0092-the-build-reports-a-
 has the build report a layer's shape without binding anything to it. It must not flip one at a fold:
 [decision 0094](../decisions/0094-the-serving-layout-is-chosen-at-build-and-re-evaluated-at-the-fold.md)'s
 automatic-with-override shape does not transfer, because a serving layout puts nothing on the wire
-and both layouts answer identically, where a shape family *is* the bytes of `hull_x` and `hull_y`.
+and both layouts answer identically, where a shape family *is* the bytes of `shape_x` and `shape_y`.
 
 **The vertex budget is 2,048, and it is a wire-size guard.** It was 64, and at 64 it was choosing
 the shape rather than bounding it: 108 of 197 artifacts on `clusters/hdbscan` ran out of budget with
@@ -825,7 +829,9 @@ artifact actually wanted. **2,048 is 2.5× that**, which is what leaves a corpus
 three still getting the shape its members ask for; 1,024 would sit 1.23× above it, close enough that
 the cap could start deciding shapes again on a layer nobody has measured. Past 2,048 nothing is
 bought on any measured layer, and the worst case a pathological membership can put on the wire —
-16 KB of `hull_x`/`hull_y` for one artifact — is what the guard is for.
+16 KB of `shape_x`/`shape_y` for one artifact — is what the guard is for. The same 2,048 is the
+guard a predicate or an authored shape is served under at every depth (`polygon-membership.md`
+§7.2), for the same reason.
 
 **What a request costs, before and after `computed`** (§8 C, 2026-08-28). A `k = 0` artifacts
 request over the whole extent, as the principal holding this bundle's 176 terms, against the same
@@ -869,7 +875,7 @@ they are pointed at, and pointing at one twice costs nothing the second time.
 
 **What it cost on the wire before any of this**, kept because §8 B's ruling rests on it. The same
 `clusters/hdbscan` request went from **130,471 to 262,055 bytes** when the budget moved 64 → 2,048,
-of which `hull_x` and `hull_y` are **103,288 → 230,984** — 79% of that response before, 88% after. The same request at `k = 5,000` over a zoom-4 viewport, which also carries tiles
+of which the shape columns (then `hull_x`/`hull_y`) are **103,288 → 230,984** — 79% of that response before, 88% after. The same request at `k = 5,000` over a zoom-4 viewport, which also carries tiles
 and 5,000 points, goes from **287,223 to 418,807 bytes**: the layer's shapes are 46% on top of a
 response that was 124 KB of points and tiles without them. The derivation cost is the other half of
 the price and is in §7 — 0.91 → 1.91 s for all 197 artifacts at full membership. The largest
@@ -888,16 +894,18 @@ buys is the work not done.
 a hull for the artifact under the pointer and centroids for the rest, so with only a layer-level
 declaration it was served 197 shapes to draw one: 92% of the request's time (§7). The client now
 asks the viewport for `centroid` and `box` and asks `/v1/artifacts/{id}` for the one shape it
-draws.
+draws. **The ask word is `shape`, not `hull`** (`polygon-membership.md` §7.1): a request names the
+layer's one drawn geometry without knowing whether it is derived, a membership shape or authored,
+and `hull` stays the declaration's word for the derived kind.
 
 **It is not the dialable family this section refuses, and the difference is not a matter of
 degree.** A family or an α would let a caller ask the same members a *different question* and read
 the answer against the first; `computed` asks strictly fewer of the same questions. There is one
 value of each property for a given membership, every request that receives it receives the same
-one, and a request that asks for less is served less. A name outside the three-word vocabulary is a
-`422` rather than an absence — the vocabulary is deployment schema, fixed and published in
-`/v1/meta`, so refusing discloses nothing, where an unreachable *layer* name is viewer data and is
-absent instead.
+one, and a request that asks for less is served less. A name outside the three-word vocabulary —
+`centroid`, `box`, `shape` — is a `422` rather than an absence — the vocabulary is deployment
+schema, fixed and published in `/v1/meta`, so refusing discloses nothing, where an unreachable
+*layer* name is viewer data and is absent instead.
 
 **A dialable α is the one that must not exist**, and for a sharper reason than a dialable family. A
 family is a function of `membership ∩ M_auth` like everything else here, and five families over one
@@ -912,8 +920,11 @@ principal's own wrap is what closes that, and it is why α is not a declared per
 **Asking for the shape.** The viewport request carries `computed: ["centroid", "box"]` (§8 C) and
 the shape for the artifact that draws is fetched from `POST /v1/artifacts/{id}`, which has always
 served the same geometry from the same predicate. The client asks when the pointer lands on a shape
-and when one is opened; the answer is held per identifier, and **dropped whenever the principal
-could have changed**, because a hull is derived from that principal's own visible members.
+and when one is opened; the answer is held per identifier, and — for the derived kind — **dropped
+whenever the principal could have changed**, because a hull is derived from that principal's own
+visible members. `/v1/meta`'s `shape` says which kind a layer draws, and a predicate or an authored
+shape, being the same for every principal served the artifact, is kept across the change
+(`polygon-membership.md` §7.1).
 
 **Until the shape arrives, the artifact's `box` is drawn and answers the hover.** That is the same
 fallback a layer declaring no hull has always taken, and it is a real change to what a hover feels
@@ -922,13 +933,18 @@ depth, by the smaller box, and by the artifact the mark under the pointer belong
 wire's own membership column and a better answer than geometry gave. The index is rebuilt around
 the true shape when it lands.
 
-**Drawing.** One outline datum per ring, all of them carrying the artifact's `tessera_id`.
-`outlineOf` maps a ring's vertices through `gridToWorld` and hands them to a `PolygonLayer`. Vertex
-counts changed with the budget (§8 B) and the client's work did not: the largest shape on
-`clusters/hdbscan` is **757 vertices** across at most 10 rings, against 144 before, and a
+**Drawing.** One outline datum per **part** — its outer ring and its holes, the nesting a
+`PolygonLayer` takes — all of them carrying the artifact's `tessera_id`; a hull's parts are its
+α-groups, one ring each. `outlineOf` maps a part's vertices through `gridToWorld` and hands them
+to the `PolygonLayer`, and every kind of drawn geometry goes through that one path in the hull's
+style. Vertex counts changed with the budget (§8 B) and the client's work did not: the largest
+shape on `clusters/hdbscan` is **757 vertices** across at most 10 rings, against 144 before, and a
 `PolygonLayer` ring of 757 vertices is the same call as one of 144.
 
-**Smoothing, and where it belongs.** The drawn ring is a **periodic uniform cubic B-spline** through
+**Smoothing, and where it belongs.** A **derived** ring — and only that kind: a predicate or an
+authored shape is a boundary somebody drew, already generalised to the pixel by the server's vertex
+rule, and a curve through it would move a border and could cross its own holes — is drawn as a
+**periodic uniform cubic B-spline** through
 the served vertices, sampled four times per span — DataMapPlot's construction (`alpha_shapes.py`
 fits `splprep(..., s=spline_coeff, per=True)` and evaluates it with `splev` at a multiple of the
 vertex density; the α shape underneath is as angular as ours), in its closed knot-free form. It
@@ -956,20 +972,23 @@ is an imprecise summary of where the cluster is, not a claim about ground the me
 occupy. **Anything that reasons about containment reads the served ring**: the pick, the hover
 index, and the containment oracle the client's own tests use.
 
-**Picking.** The outline polygon is what answers a pick, filled at zero alpha so the pick pass sees
-it, and the parallel `artifactIds` array assumes one polygon per artifact. That assumption is what
-breaks, and it is the only thing that does: the fix is a map from row to artifact rather than an
-index match. Two rings of one artifact may overlap (§1), and it costs nothing — both carry the same
-identifier, so the pick answers the same artifact either way.
+**Picking.** A hover and a click are resolved in the client against the served parts of the
+frontier's artifacts (`contourShapes`, `hoverAt`), the even-odd rule over each part's rings so a
+pointer in a hole is outside — deepest drawn shape first, the one already hovered held, the mark
+under the pointer preferred. Two parts of one artifact may overlap (§1), and it costs nothing —
+both carry the same identifier, so the pick answers the same artifact either way. **The pick answers
+which artifact, never whether a point is a member**: a served shape is a drawing, and membership is
+the wire's `membership:<layer>` column.
 
 **`extentOf` and fit.** Unaffected. It reads the served `box`, which is the members' bounding box
 whatever the hull is, and a hull is never the right thing to fit a viewport to — the box is a
 superset of every ring.
 
-**Decoding.** `hull_x` and `hull_y` are `list<list<uint32>>`: descend two levels, and **check that
-the two axes agree on the ring count and on each ring's length** rather than assuming it. They agree
-by construction, and a decoder that assumes it will misdraw silently on the day something else does
-not. A single-level decode fails its downcast, which is the point of the nesting.
+**Decoding.** `shape_x` and `shape_y` are `list<list<list<uint32>>>`: descend three levels — parts,
+rings, vertices — and **check that the two axes agree at every level** rather than assuming it. They
+agree by construction, and a decoder that assumes it will misdraw silently on the day something
+else does not. A shallower decode fails its downcast, which is the point of the nesting; a body
+carrying the columns' old names is refused outright rather than read as shapeless.
 
 **The truthfulness rules do not move.** A hull is a display of where the visible members are; it is
 never evidence of membership, and no client tests a point against it (decision 0099). A shape that is

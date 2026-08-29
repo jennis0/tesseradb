@@ -1,6 +1,7 @@
 import {describe, expect, it} from 'vitest';
 import {makeData, makeVector, tableToIPC, Table, Uint64, vectorFromArray} from 'apache-arrow';
 import {decodeViewport} from '../src/decode.js';
+import {stripOldShapeColumns} from './old-shape-columns.js';
 import {bandsOfResult, BandCache, distinctOrdinals} from '../src/bands.js';
 import {NO_ORDINAL, SessionArtifactTable} from '../src/artifactTable.js';
 import {GRID32_CENTRE, artifactColours} from '../src/palette.js';
@@ -119,7 +120,7 @@ const artifact = (id: bigint, parentId: bigint | null = null, layer = 'l', rung 
   maskedCount: 1n,
   centroid: null,
   box: null,
-  hull: null,
+  shape: null,
   content: [],
   parentId,
   rung
@@ -226,7 +227,9 @@ describe('the membership golden (captured against the notebook layer, the layer 
   it('names members in the same response’s artifacts frame, and several artifacts with different geometry', () => {
     const {readFileSync} = require('node:fs') as typeof import('node:fs');
     const {join} = require('node:path') as typeof import('node:path');
-    const r = decodeViewport(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin'))));
+    // The capture carries the shape under its r44 names, which the decoder refuses outright; the
+    // column and the frame agreeing is what this checks, and that is read with those stripped.
+    const r = decodeViewport(stripOldShapeColumns(new Uint8Array(readFileSync(join(import.meta.dirname, 'fixtures', 'viewport-membership.bin')))));
     expect(r.artifacts.length).toBeGreaterThanOrEqual(3);
     const centroids = new Set(r.artifacts.map((a) => a.centroid?.join(',')));
     expect(centroids.size).toBe(r.artifacts.length);

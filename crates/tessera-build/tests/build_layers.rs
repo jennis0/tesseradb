@@ -2762,3 +2762,66 @@ fn a_predicate_over_a_category_column_mints_its_values() {
     // level that holds five artifacts and serves them. `LevelLayoutReport::observed` is what keeps
     // that from being printed as an empty layer.
 }
+
+/// An enumerated layer whose supplied content authors a polygon over each artifact.
+const AUTHORED_LAYER: &str = r#"
+[[layer]]
+name                      = "clusters/drawn"
+views                     = ["s0"]
+membership                = "enumerated"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "none"
+artifacts = [
+  { key = "west", members = [0, 1, 2], contents = [["West", "POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0), (100 100, 200 100, 200 200, 100 200, 100 100))"]] },
+]
+
+  [[layer.content.supplied]]
+  name = "name"
+  type = "text"
+  require_member_visibility = "inherited"
+
+  [[layer.content.supplied]]
+  name = "outline"
+  type = "polygon"
+  require_member_visibility = "inherited"
+"#;
+
+/// **An authored shape content is read at the build as a membership shape is** — canonicalised
+/// for every view, reported, capped — and the disclosure records the kind. A value that is not
+/// the kind's spelling refuses naming the row and the content.
+#[test]
+fn a_build_reads_an_authored_shape_content_and_discloses_the_kind() {
+    let inputs = predicate_inputs(AUTHORED_LAYER);
+    run(&inputs, &inputs.at("bundle")).expect("an authored polygon builds");
+    let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
+    let disclosure = serde_json::to_value(tessera_build::disclosure::Disclosure::of(&config)).unwrap();
+    let layer = disclosure["layers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| l["name"] == "clusters/drawn")
+        .expect("in the report");
+    assert_eq!(layer["shape"], serde_json::json!("authored"));
+    assert_eq!(layer["content"]["supplied"][1]["type"], serde_json::json!("polygon"));
+
+    let bad = AUTHORED_LAYER.replace("\"POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0), (100 100, 200 100, 200 200, 100 200, 100 100))\"", "\"a polygon, in words\"");
+    let inputs = predicate_inputs(&bad);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("a value that is not WKT is refused")
+        .to_string();
+    assert!(message.contains("west") && message.contains("outline"), "{message}");
+
+    // A hull beside it is two drawn geometries, refused at the declaration.
+    let two = AUTHORED_LAYER.replace(
+        "  [[layer.content.supplied]]\n  name = \"name\"",
+        "  [layer.content]\n  computed = [\"hull\"]\n\n  [[layer.content.supplied]]\n  name = \"name\"",
+    );
+    assert_ne!(two, AUTHORED_LAYER);
+    let inputs = predicate_inputs(&two);
+    let message = run(&inputs, &inputs.at("bundle"))
+        .expect_err("two drawn geometries are refused")
+        .to_string();
+    assert!(message.contains("one drawn geometry"), "{message}");
+}

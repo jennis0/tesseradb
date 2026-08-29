@@ -7,21 +7,7 @@ import {
 } from './decode.js';
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import type {
-  ArrowType,
-  ArtifactDetail,
-  CategoryValue,
-  FilterOperandSet,
-  ItemDetail,
-  Layer,
-  Meta,
-  Session,
-  TileCounts,
-  ViewportPart,
-  ViewportRequest,
-  ViewportResponse,
-  ViewportResult
-} from './types.js';
+import type {ArrowType, ArtifactDetail, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, Session, Shape, ShapeKind, TileCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /** Where a streamed response's points go, one frame's worth at a time. */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
@@ -238,6 +224,9 @@ export class TesseraClient {
         hierarchy: {kind: l.hierarchy.kind, pruneChildren: l.hierarchy.prune_children},
         levels: l.levels.map((v) => ({level: v.level, title: v.title, zoom: v.zoom ?? null})),
         computedContent: l.computed_content,
+        // The kind of the layer's one drawn geometry, or null; a server that publishes none is
+        // a server older than the shape columns, and the map then draws boxes for good.
+        shape: l.shape ?? null,
         suppliedContent: l.supplied_content,
         depsOn: l.depends_on,
         version: l.version
@@ -641,10 +630,14 @@ export class TesseraClient {
   async artifact(
     token: string,
     tesseraId: bigint,
-    opts: {view: string; idset?: number}
+    opts: {view: string; idset?: number; zoom?: number}
   ): Promise<ArtifactDetail> {
     const body: Record<string, unknown> = {view: opts.view};
     if (opts.idset !== undefined) body.idset = opts.idset;
+    // The depth the shape is drawn at, for the server's vertex rule (`polygon-membership.md`
+    // §7.2): a predicate or an authored shape is generalised to the pixel at this zoom. Omitted,
+    // the whole presimplified shape is served under the vertex guard alone.
+    if (opts.zoom !== undefined) body.zoom = Math.max(0, Math.min(16, Math.floor(opts.zoom)));
     const response = await fetch(`${this.opts.viewerUrl}/v1/artifacts/${tesseraId.toString()}`, {
       method: 'POST',
       headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},
@@ -657,7 +650,7 @@ export class TesseraClient {
       masked_count: number;
       centroid?: [number, number];
       box?: [number, number, number, number];
-      hull?: [number, number][][];
+      shape?: Shape;
     };
     return {
       layer: served.layer,
@@ -667,7 +660,7 @@ export class TesseraClient {
       // withheld from an artifact that is served at all, so an absence is a fact about the layer.
       centroid: served.centroid ?? null,
       box: served.box ?? null,
-      hull: served.hull ?? null,
+      shape: served.shape ?? null,
       // JSON carries it as a number, and a count is not an identifier: it is bounded by the
       // corpus, so nothing here can reach 2^53. Widened to `bigint` anyway, because it is the same
       // quantity the wire delivers as `u64` and a panel must be able to print the two the same way.
@@ -699,6 +692,7 @@ type RawMeta = {
     hierarchy: {kind: Layer['hierarchy']['kind']; prune_children: boolean};
     levels: {level: number; title: string; zoom: [number, number] | null}[];
     computed_content: string[];
+    shape?: ShapeKind | null;
     supplied_content: string[];
     depends_on: string[];
     version: number;

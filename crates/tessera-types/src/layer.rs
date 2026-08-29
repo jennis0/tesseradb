@@ -345,9 +345,10 @@ pub struct SuppliedContent {
     /// Distinguishes two contents of one type on one layer — a curated boundary and a statistical
     /// label may both be `polygon`.
     pub name: String,
-    /// What it is — `text`, `polygon`, `extent`, `point`. Published in `/v1/meta` so a client knows
-    /// what to draw; publishing the *types* is safe because an artifact failing containment is
-    /// absent whole, so no served artifact ever lacks a content its layer declares.
+    /// What it is — `text`, `extent`, `point`, or one of the three **authored shape** kinds
+    /// `polygon`, `circle`, `ellipse` ([`Self::authored_shape_kind`]). Published in `/v1/meta` so
+    /// a client knows what to draw; publishing the *types* is safe because an artifact failing
+    /// containment is absent whole, so no served artifact ever lacks a content its layer declares.
     #[serde(rename = "type")]
     pub ty: String,
     /// How much of the generating set a viewer must already see. **The register watches this
@@ -368,6 +369,22 @@ pub enum SuppliedRequirement {
     /// it serves on the container's own gate alone. Such content must **not** declare a generating
     /// set: a set that is never tested is a claim the service would carry without meaning (C28).
     Inherited,
+}
+
+impl SuppliedContent {
+    /// The shape kind this content authors, where its `type` is one of the three shape words —
+    /// `polygon`, `circle`, `ellipse` (`polygon-membership.md` §6.1, ruling (h)). Such a content
+    /// is read at publication as a membership shape is, stored canonical beside the artifact's
+    /// other content, and served as the layer's **authored** drawn geometry through `shape_x` /
+    /// `shape_y`; it selects nothing. `None` for every other type, which is carried as text.
+    pub fn authored_shape_kind(&self) -> Option<ShapeKind> {
+        match self.ty.as_str() {
+            "polygon" => Some(ShapeKind::Polygon),
+            "circle" => Some(ShapeKind::Circle),
+            "ellipse" => Some(ShapeKind::Ellipse),
+            _ => None,
+        }
+    }
 }
 
 impl SuppliedRequirement {
@@ -423,6 +440,56 @@ impl ComputedProperty {
 
     /// Every name a declaration may carry.
     pub const VOCABULARY: [&'static str; 3] = ["centroid", "box", "hull"];
+
+    /// **The ask vocabulary** — what a `/v1/viewport` request's `computed` may name
+    /// (`polygon-membership.md` §7.1): the same three words with `shape` in place of `hull`. A
+    /// layer has one drawn geometry of a declared kind — derived (the hull), predicate (the
+    /// membership shape) or authored (a supplied drawing) — and a request asks for *the shape*
+    /// without knowing which; the declaration keeps the word `hull` because that is what an
+    /// enumerated layer computes. The narrowing rule is unchanged: a layer with no drawn geometry
+    /// serves none however it is asked.
+    pub const ASK_VOCABULARY: [&'static str; 3] = ["centroid", "box", "shape"];
+
+    /// Parse a request's `computed` word: `shape` selects the layer's drawn geometry, which for
+    /// a derived layer is the [`ComputedProperty::Hull`] it declared. `hull` is **not** an ask
+    /// word — the request names the drawing, not its derivation.
+    pub fn parse_ask(name: &str) -> Option<Self> {
+        match name {
+            "centroid" => Some(ComputedProperty::Centroid),
+            "box" => Some(ComputedProperty::Box),
+            "shape" => Some(ComputedProperty::Hull),
+            _ => None,
+        }
+    }
+}
+
+/// Which of the three kinds a layer's **one drawn geometry** is (`polygon-membership.md` §7.1,
+/// owner ruling 2026-08-29). Published per layer in `/v1/meta` as `shape`, so a client knows
+/// whether the outline moves with the principal — which decides whether it may hold the geometry
+/// against a `tessera_id` across principals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrawnShape {
+    /// The hull over the visible members — `content.computed` names `hull` — recomputed per
+    /// principal from `membership ∩ M_auth`, so two principals receive two drawings.
+    Derived,
+    /// The membership shape of a `spatial` layer, served under the artifact's own verdict and
+    /// identical for every principal served the artifact.
+    Predicate,
+    /// A supplied `polygon`, `circle` or `ellipse` content over an enumerated or attribute
+    /// membership — a fitted circle over a k-means cluster (`annotations.md` §8.6) — gated by
+    /// that content's own `require_member_visibility`, identical for every principal served it.
+    Authored,
+}
+
+impl DrawnShape {
+    pub fn name(self) -> &'static str {
+        match self {
+            DrawnShape::Derived => "derived",
+            DrawnShape::Predicate => "predicate",
+            DrawnShape::Authored => "authored",
+        }
+    }
 }
 
 /// What a layer's artifacts carry.
@@ -904,6 +971,10 @@ pub enum DeclarationError {
     ZoomRangeEmpty { level: u32, lo: u32, hi: u32 },
     /// A layer declares a `shape` and its membership is not `spatial`, so nothing would read it.
     ShapeWithoutSpatialMembership,
+    /// A layer declares two drawn geometries — a derived hull, a membership shape and an authored
+    /// shape content are the three kinds, and an artifact has one (`polygon-membership.md` §7.1).
+    /// Carries the two spellings, so the message names what to remove.
+    TwoDrawnGeometries(String),
     /// An attribute layer declares something its derived artifacts cannot carry — content, a
     /// dependency, levels, its own access labels, or a layout pin — or a spatial layer names its
     /// own access-label field. Carries the spelling, so the message names the key an operator has
@@ -971,6 +1042,12 @@ impl std::fmt::Display for DeclarationError {
                  a rule nothing evaluates — the members come from the stored set or the predicate \
                  the membership names, and the box beside them would decide nothing"
             ),
+            DeclarationError::TwoDrawnGeometries(what) => write!(
+                f,
+                "a layer declares {what}; an artifact has one drawn geometry, served through one \
+                 `shape_x`/`shape_y` column pair, so a layer declares at most one of a derived \
+                 hull, a membership shape and an authored shape content"
+            ),
             DeclarationError::PredicateDeclares(what) => write!(
                 f,
                 "a layer whose membership is a predicate declares {what}, which its artifacts \
@@ -1006,6 +1083,31 @@ impl LayerDeclaration {
     /// Checks the declaration is internally coherent. **Everything here is a refusal a caller can
     /// fix**, checked once at registration rather than at every request — the request-time
     /// invariants (containment, the criterion) are evaluated per request and live elsewhere.
+    /// The authored shape content, where the layer declares one: its position among the supplied
+    /// kinds — the slot its value occupies in every ranked content and in the wire's `content`
+    /// list — and the kind it authors. [`Self::validate`] refuses a second.
+    pub fn authored_shape(&self) -> Option<(usize, ShapeKind)> {
+        self.content
+            .supplied
+            .iter()
+            .enumerate()
+            .find_map(|(k, s)| s.authored_shape_kind().map(|kind| (k, kind)))
+    }
+
+    /// Which kind the layer's one drawn geometry is, or `None` where it draws nothing but its
+    /// centroid and box. Well-defined because [`Self::validate`] refuses two.
+    pub fn drawn_shape(&self) -> Option<DrawnShape> {
+        if self.content.computed.iter().any(|c| c == "hull") {
+            Some(DrawnShape::Derived)
+        } else if self.membership == MembershipSource::Spatial && self.shape.is_some() {
+            Some(DrawnShape::Predicate)
+        } else if self.authored_shape().is_some() {
+            Some(DrawnShape::Authored)
+        } else {
+            None
+        }
+    }
+
     pub fn validate(&self) -> Result<(), DeclarationError> {
         if self.name.trim().is_empty() {
             return Err(DeclarationError::EmptyName);
@@ -1093,6 +1195,30 @@ impl LayerDeclaration {
         // beside the artifacts it would have had.
         if self.shape.is_some() && self.membership != MembershipSource::Spatial {
             return Err(DeclarationError::ShapeWithoutSpatialMembership);
+        }
+
+        // **One drawn geometry per layer** (`polygon-membership.md` §7.1, owner ruling
+        // 2026-08-29): the wire carries one `shape_x`/`shape_y` pair per artifact and `/v1/meta`
+        // publishes one kind per layer, so a layer that could draw two — a hull beside a
+        // membership shape, an authored polygon beside either, two authored kinds — has no
+        // column for the second and is refused naming both.
+        let mut drawn: Vec<String> = Vec::new();
+        if self.content.computed.iter().any(|c| c == "hull") {
+            drawn.push("a derived `hull`".to_string());
+        }
+        if self.membership == MembershipSource::Spatial && self.shape.is_some() {
+            drawn.push("the membership shape of a `spatial` layer".to_string());
+        }
+        for supplied in &self.content.supplied {
+            if supplied.authored_shape_kind().is_some() {
+                drawn.push(format!(
+                    "the authored `{}` content '{}'",
+                    supplied.ty, supplied.name
+                ));
+            }
+        }
+        if drawn.len() > 1 {
+            return Err(DeclarationError::TwoDrawnGeometries(drawn.join(" and ")));
         }
 
         // **What an attribute layer may not declare, and why each one is a refusal rather than a
@@ -1340,6 +1466,80 @@ mod tests {
     /// `all` is the viewport request's word for every reachable layer, so no layer may carry it
     /// — in any case, since a request's spelling is checked exactly and a layer named `All`
     /// would read as the same word to a person.
+    /// **One drawn geometry per layer** (`polygon-membership.md` §7.1): the kind follows the
+    /// declaration, and any two of the three are refused naming both.
+    #[test]
+    fn a_layer_draws_one_shape_of_a_declared_kind_and_two_are_refused() {
+        let authored = |ty: &str| SuppliedContent {
+            name: "outline".into(),
+            ty: ty.into(),
+            require_member_visibility: SuppliedRequirement::Inherited,
+        };
+        let mut d = decl(HierarchyKind::Flat, vec![]);
+        assert_eq!(d.drawn_shape(), None);
+        d.content.computed = vec!["centroid".into(), "hull".into()];
+        assert_eq!(d.drawn_shape(), Some(DrawnShape::Derived));
+        assert!(d.validate().is_ok());
+
+        let mut predicate = decl(HierarchyKind::Flat, vec![]);
+        predicate.membership = MembershipSource::Spatial;
+        predicate.shape = Some(ShapeDeclaration {
+            kind: ShapeKind::Polygon,
+        });
+        assert_eq!(predicate.drawn_shape(), Some(DrawnShape::Predicate));
+        assert!(predicate.validate().is_ok());
+
+        for ty in ["polygon", "circle", "ellipse"] {
+            let mut a = decl(HierarchyKind::Flat, vec![]);
+            a.content.supplied = vec![authored(ty)];
+            assert_eq!(a.drawn_shape(), Some(DrawnShape::Authored), "{ty}");
+            assert_eq!(a.authored_shape().map(|(slot, _)| slot), Some(0));
+            assert!(a.validate().is_ok(), "{ty}");
+        }
+        let mut text = decl(HierarchyKind::Flat, vec![]);
+        text.content.supplied = vec![authored("text")];
+        assert_eq!(text.drawn_shape(), None);
+        assert_eq!(text.authored_shape(), None);
+
+        // Each pair of the three, refused naming both.
+        let mut hull_and_authored = d.clone();
+        hull_and_authored.content.supplied = vec![authored("circle")];
+        assert!(matches!(
+            hull_and_authored.validate(),
+            Err(DeclarationError::TwoDrawnGeometries(what)) if what.contains("hull") && what.contains("circle")
+        ));
+        let mut predicate_and_hull = predicate.clone();
+        predicate_and_hull.content.computed = vec!["hull".into()];
+        assert!(matches!(
+            predicate_and_hull.validate(),
+            Err(DeclarationError::TwoDrawnGeometries(_))
+        ));
+        let mut predicate_and_authored = predicate.clone();
+        predicate_and_authored.content.supplied = vec![authored("polygon")];
+        assert!(matches!(
+            predicate_and_authored.validate(),
+            Err(DeclarationError::TwoDrawnGeometries(_))
+        ));
+        let mut two_authored = decl(HierarchyKind::Flat, vec![]);
+        two_authored.content.supplied = vec![authored("polygon"), authored("ellipse")];
+        assert!(matches!(
+            two_authored.validate(),
+            Err(DeclarationError::TwoDrawnGeometries(_))
+        ));
+    }
+
+    /// The ask vocabulary names the drawing, not its derivation: `shape` selects the hull a
+    /// derived layer declared, and `hull` is not an ask word.
+    #[test]
+    fn the_ask_vocabulary_says_shape_where_the_declaration_says_hull() {
+        assert_eq!(ComputedProperty::parse_ask("shape"), Some(ComputedProperty::Hull));
+        assert_eq!(ComputedProperty::parse_ask("hull"), None);
+        assert_eq!(ComputedProperty::parse_ask("centroid"), Some(ComputedProperty::Centroid));
+        assert_eq!(ComputedProperty::parse_ask("box"), Some(ComputedProperty::Box));
+        assert_eq!(ComputedProperty::parse("shape"), None);
+        assert_eq!(ComputedProperty::ASK_VOCABULARY, ["centroid", "box", "shape"]);
+    }
+
     #[test]
     fn the_reserved_layer_selection_is_refused_as_a_name() {
         for name in ["all", "All", " all "] {

@@ -27,7 +27,7 @@ const artifact = (id: bigint, parentId: bigint | null, rung: number, box: [numbe
   maskedCount: 10n,
   centroid: [box[0], box[1]],
   box,
-  hull: null,
+  shape: null,
   content: [],
   parentId,
   rung,
@@ -48,7 +48,7 @@ function artifactsProjection(served: Artifact[]): ArtifactsProjection {
     held: 0,
     table,
     servedOrdinals: new Set(ordinals),
-    hulls: new Map(),
+    shapes: new Map(),
     colours: new Map(),
     palette: 'positional',
     coverage: {current: 0, stale: 0}
@@ -87,7 +87,7 @@ describe('a click on a contour', () => {
     // the deeper wins — the most specific thing under the cursor.
     el.onClick({index: -1, x: 50, y: 50});
     expect(opened(store)).toEqual(['3']);
-    expect(store.calls.filter((c) => c.name === 'needHull').map((c) => String(c.args[0]))).toEqual(['3']);
+    expect(store.calls.filter((c) => c.name === 'needShape').map((c) => String(c.args[0]))).toEqual(['3']);
     expect((el as unknown as {lastPick: unknown}).lastPick).toBeNull();
   });
 

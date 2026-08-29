@@ -11,7 +11,7 @@ const artifact = (id: bigint, x: number, parentId: bigint | null = null): Artifa
   maskedCount: 10n,
   centroid: [x, 2 ** 31],
   box: null,
-  hull: null,
+  shape: null,
   content: [],
   parentId,
   rung: 0,

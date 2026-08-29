@@ -69,9 +69,48 @@ use crate::row_column::RowColumn;
 pub use tessera_spatial::shape::CanonReport;
 pub use tessera_spatial::Bounds;
 pub use tessera_store::derived::{
-    canonical_shapes, shape_input, CanonicalShapes, ShapeInput, ShapeRefusal, ShapeSpace,
-    ShapeStats,
+    authored_shape_input, canonical_shapes, shape_input, CanonicalShapes, ShapeInput,
+    ShapeRefusal, ShapeSpace, ShapeStats,
 };
+pub use tessera_types::layer::DrawnShape;
+
+/// The per-artifact vertex budget a served shape is guarded by — the hull's 2,048, for the
+/// hull's reason (`artifact-shapes.md` §8 B): a guard on the wire, not a control on the shape.
+pub const SERVED_VERTEX_BUDGET: usize = 2_048;
+
+/// The vertex rule's tolerance at a request depth, in grid units (`polygon-membership.md` §7.2):
+/// the side of the cell a screen pixel covers at that zoom. A depth-`z` tile is 512 pixels wide
+/// on the client (`clients/ts/core/src/coords.ts`, measured), so a pixel is the depth-`z + 9`
+/// cell — `2^(32 − z − 9)` grid units on the 32-bit-per-axis grid — and a vertex that would move
+/// the drawn edge by less than that is not sent. `None` — the identifier route, which carries no
+/// depth — is the finest cell, so the whole presimplified shape under the budget alone.
+pub fn served_tolerance(zoom: Option<u8>) -> u32 {
+    match zoom {
+        Some(z) => 1u32 << (32u32.saturating_sub(u32::from(z) + 9)).min(31),
+        None => 1,
+    }
+}
+
+/// A held shape as the wire carries it — parts, rings, vertices in grid units — at a request's
+/// depth, under the vertex budget, and whether the budget cut what the depth alone would have
+/// kept (§7.2). One function for the predicate and the authored kind, so the two cannot be
+/// simplified differently; the derived kind is the hull and is digested at derivation.
+pub fn served_rings(
+    shape: &tessera_spatial::shape::Shape,
+    zoom: Option<u8>,
+) -> (Vec<Vec<Vec<[u32; 2]>>>, bool) {
+    let (parts, guarded) = shape.rings_guarded(served_tolerance(zoom), SERVED_VERTEX_BUDGET);
+    let parts = parts
+        .into_iter()
+        .map(|rings| {
+            rings
+                .into_iter()
+                .map(|ring| ring.into_iter().map(|(x, y)| [x, y]).collect())
+                .collect()
+        })
+        .collect();
+    (parts, guarded)
+}
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())

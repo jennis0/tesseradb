@@ -283,8 +283,10 @@ paths:
         is **dictionary-encoded** (u16 keys over utf8 values); its `rung` column is the number a
         client draws by — the declared level on a levelled layer, the response-local parent-chain
         depth on a treed one (the depth in the forest this response's own `parent_id` links form,
-        after the budget cut), `0` on a flat one; and its two hull columns **trail the fixed
-        columns and are absent from the schema entirely when no served layer declares a hull** —
+        after the budget cut), `0` on a flat one; and its two shape columns `shape_x`/`shape_y` —
+        `list<list<list<uint32>>>`, parts then rings then vertices, one drawn geometry per artifact
+        of the kind its layer's `shape` names — **trail the fixed columns and are absent from the
+        schema entirely when no served layer draws a shape or the request did not ask for one** —
         an absent column is distinguishable from a null one, so a per-row null keeps its one
         meaning: *this layer declares no such property*, never *withheld* (decision 0076).
         `artifact_rows: "identity"` answers with the **same rows** in a fixed four-column schema —
@@ -766,7 +768,7 @@ components:
     Layer:
       type: object
       additionalProperties: false
-      required: [name, title, views, membership, hierarchy, levels, computed_content, supplied_content, depends_on, version]
+      required: [name, title, views, membership, hierarchy, levels, computed_content, shape, supplied_content, depends_on, version]
       properties:
         name:
           type: string
@@ -814,6 +816,22 @@ components:
           type: array
           description: Properties recomputed per viewer from `membership ∩ M_auth` — `centroid`, `hull`, `box`.
           items: { type: string }
+        shape:
+          description: |
+            **Which kind the layer's one drawn geometry is** (`polygon-membership.md` §7.1), or
+            null where it draws none: `derived` — the hull over the members this principal can
+            see, recomputed per principal; `predicate` — the membership shape of a `spatial`
+            layer, identical for every principal served the artifact; `authored` — a supplied
+            `polygon`, `circle` or `ellipse` content, gated by that content's own requirement and
+            likewise identical. A client reads from it whether the outline moves with the
+            principal, which decides whether it may hold one against a `tessera_id` across
+            principals: a derived shape never, the other two may be. The geometry itself travels
+            in the artifacts frame's `shape_x`/`shape_y` and in `ArtifactResponse.shape`, the same
+            nesting for every kind.
+          oneOf:
+            - type: "null"
+            - type: string
+              enum: [derived, predicate, authored]
         supplied_content:
           type: array
           description: The **types** of publisher-supplied content, positional to the artifacts frame's `content` column. Safe to publish because an artifact failing containment is absent whole.
@@ -978,15 +996,22 @@ components:
             name, which is absent: the three words are deployment schema and each layer's own set
             is published in `/v1/meta`, so refusing discloses nothing.
 
-            **A cost control, not a disclosure one.** A hull is derived per artifact per request
-            from `membership ∩ M_auth`, and a client draws one while a settled view carries
-            hundreds; measured at 2,032 ms and 263 KB against 164 ms and 26 KB on a 2.42M-member
-            corpus. Fetch the one shape that draws from `POST /v1/artifacts/{tessera_id}`, which
-            serves the same geometry and is unaffected by this field.
+            **A cost control, not a disclosure one.** A derived shape is computed per artifact
+            per request from `membership ∩ M_auth`, and a client draws one while a settled view
+            carries hundreds; measured at 2,032 ms and 263 KB against 164 ms and 26 KB on a
+            2.42M-member corpus. Fetch the one shape that draws from `POST /v1/artifacts/{tessera_id}`,
+            which serves the same geometry and is unaffected by this field.
+
+            `shape` names the layer's **one drawn geometry** of whichever kind `/v1/meta`'s
+            `shape` publishes for it — the derived hull, the membership shape, or the authored
+            one (`polygon-membership.md` §7.1); `hull` is the declaration's word and not an ask
+            word. A predicate or an authored shape is served at this request's `zoom` under the
+            vertex rule (§7.2): vertices that would move the drawn edge by less than a pixel at
+            that depth are not sent, and at most 2,048 are.
           type: array
           items:
             type: string
-            enum: [centroid, box, hull]
+            enum: [centroid, box, shape]
         artifact_rows:
           description: |
             Which columns each served artifact row answers with. **Absent or `"full"`: every
@@ -1107,6 +1132,11 @@ components:
         idset:
           type: integer
           minimum: 0
+        zoom:
+          type: integer
+          minimum: 0
+          maximum: 16
+          description: The depth the caller draws at, for the vertex rule a predicate or an authored shape is served under (`polygon-membership.md` §7.2). Absent serves the whole presimplified shape under the 2,048-vertex guard. A derived hull is unaffected.
 
     ArtifactResponse:
       type: object
@@ -1134,17 +1164,20 @@ components:
           maxItems: 4
           items: { type: integer, minimum: 0 }
           description: "`[min_x, min_y, max_x, max_y]`, grid units."
-        hull:
+        shape:
           type: array
-          description: "The hull's **rings**, one per separated group of the visible members — a membership that is two clouds is two rings, never one polygon over the gap between them. Never nested: no ring encloses another."
+          description: "**The artifact's one drawn geometry** — parts, then rings, then vertices — of the kind `/v1/meta`'s `shape` names for its layer (`polygon-membership.md` §7.1): the derived hull, every α-group its own part; the predicate shape; or the authored one. A part's first ring is its outer and the rest are holes. Absent where the layer draws none."
           items:
             type: array
-            description: One closed ring, counter-clockwise from its lowest vertex, in grid units.
+            description: One part — its outer ring, then its holes.
             items:
               type: array
-              minItems: 2
-              maxItems: 2
-              items: { type: integer, minimum: 0 }
+              description: One closed ring in grid units; a derived hull's counter-clockwise from its lowest vertex.
+              items:
+                type: array
+                minItems: 2
+                maxItems: 2
+                items: { type: integer, minimum: 0 }
         content:
           type: array
           items: { type: string }

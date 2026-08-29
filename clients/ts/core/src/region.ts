@@ -85,6 +85,20 @@ export type WorldPolygon = readonly (readonly [number, number])[];
  * Whether a world-space point falls inside a polygon — the even-odd rule over its edges, so a
  * self-crossing lasso still answers, and the same rule for every point so the held sample and
  * the count agree on what *inside* means.
+ *
+ * **The lasso's live highlight, and the predicate the server applies to a published polygon**
+ * (`polygon-membership.md` §7.3, selection-operand §8's obligation): the same rule, so a drawn
+ * lasso and a published boundary are one question asked at two times. The obligation has a
+ * fourth part — **ties**. At a tie — a point on the ray through a vertex, an edge through a grid
+ * position — the server's answer is its symbolic perturbation (`tessera_spatial::shape`,
+ * `polygon.rs`: on an edge is inside; a ray through a vertex counts the edge whose other end is
+ * above it), stated there once and not re-derived here. This half-open crossing test agrees with
+ * it off the boundary and is not exact on it: a mark exactly on the lasso's edge may highlight
+ * either way, and the count the server returns for the region is the one to believe.
+ *
+ * **Never a membership test against a served shape.** A served `shape` is a drawing generalised
+ * to the pixel (`polygon-membership.md` §7.1); the wire's `membership:<layer>` column says which
+ * artifact a point belongs to, and this function is not asked that question.
  */
 export function insidePolygon(x: number, y: number, polygon: WorldPolygon): boolean {
   let inside = false;

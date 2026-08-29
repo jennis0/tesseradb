@@ -196,7 +196,7 @@ describe('ringWithin', () => {
 
 // ---- the hover resolution ---------------------------------------------------------------------
 
-const shape = (id: bigint, rung: number, rings: Ring[]): ContourShape => ({id, rung, rings, bbox: shapeBbox(rings)});
+const shape = (id: bigint, rung: number, rings: Ring[]): ContourShape => ({id, rung, parts: rings.map((r) => [r]), bbox: shapeBbox(rings.map((r) => [r]))});
 const box = (x0: number, y0: number, x1: number, y1: number): Ring => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
 
 describe('hoverAt', () => {

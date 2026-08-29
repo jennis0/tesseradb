@@ -828,6 +828,11 @@ pub struct ArtifactOut {
     ///
     /// On a **flat** layer it is 0.
     pub rung: u32,
+    /// Whether the served shape's vertex budget cut vertices the request's depth alone would have
+    /// kept (`polygon-membership.md` §7.2) — a predicate or an authored shape still above 2,048
+    /// vertices at that depth. Counted into the trailer's `stage_ns` companion; never a
+    /// disclosure, being a fact about a drawing every principal served the artifact receives alike.
+    pub shape_guard_fired: bool,
     /// **Whether any member of this artifact that the principal may see, and that lies inside the
     /// request's tiles, matches the request's filter** — `None` where the request carried no
     /// filter, which is *there was no question* rather than *no matches*
@@ -3477,12 +3482,17 @@ impl Engine {
     /// membership's row form from the per-deployment cache. The one expensive path — building a
     /// projection — is deployment-wide state keyed on what was published, not on who is asking, so
     /// its timing carries nothing about a principal.
+    ///
+    /// `zoom` is the depth the caller draws at, for the vertex rule a predicate or an authored
+    /// shape is served under (`polygon-membership.md` §7.2); `None` serves the whole presimplified
+    /// shape under the budget alone. The derived kind — the hull — is unaffected by it.
     pub fn artifact(
         &self,
         session: &Session,
         id: TesseraId,
         idset: Option<u32>,
         view: &str,
+        zoom: Option<u8>,
     ) -> Result<Option<ArtifactOut>> {
         let generation = self.generation.load_full();
         if let Some(e) = idset {
@@ -3706,6 +3716,20 @@ impl Engine {
             });
             (*content).clone()
         };
+        // The one drawn geometry of the other two kinds (`polygon-membership.md` §7.1): this
+        // route is asked for the one shape a client draws, so it always answers.
+        let mut content = content;
+        let mut derived = derived;
+        let shape_guard_fired = self.drawn_shape(
+            &layer.declaration,
+            view,
+            &name,
+            level,
+            ordinal,
+            &mut content,
+            &mut derived,
+            zoom,
+        );
         Ok(Some(ArtifactOut {
             content,
             layer: name.clone(),
@@ -3727,7 +3751,89 @@ impl Engine {
             // The identifier route carries no filter to answer about (decision 0104), and there is
             // no viewport for the answer to be scoped to either.
             matched: None,
+            shape_guard_fired,
         }))
+    }
+
+    /// **The predicate and the authored kind of an artifact's one drawn geometry**
+    /// (`polygon-membership.md` §7.1), filled into `derived.shape` beside the count — the derived
+    /// kind, the hull, is already there from [`crate::derived::compute`]. Returns whether the
+    /// vertex budget fired.
+    ///
+    /// A **predicate** shape is the level's held canonical shape at this ordinal
+    /// (`crate::shapes`), served at the request's depth (`crate::shapes::served_rings`) — the
+    /// same bytes for every principal, which is what `/v1/meta`'s kind tells a client. It is
+    /// served under the artifact's own verdict and nothing else: this is reached only for an
+    /// artifact that verdict admitted.
+    ///
+    /// An **authored** shape is the supplied content at the layer's shape slot, which
+    /// `supplied_content` already gated by that content's own `require_member_visibility`: the
+    /// canonical per-view bytes are read back out of the slot, the request's view's shape is
+    /// served at the same rule, and **the slot is blanked** — the wire's `content` carries the
+    /// layer's texts, and the geometry travels as rings in `shape_x`/`shape_y`. A slot that does
+    /// not read as a shape draws nothing rather than a guess.
+    ///
+    /// **Never on a request that did not ask**: the caller passes `derived` only where the
+    /// request's `computed` selected the shape, and passes the content list only where it was
+    /// materialised.
+    #[allow(clippy::too_many_arguments)]
+    fn drawn_shape(
+        &self,
+        declaration: &tessera_types::layer::LayerDeclaration,
+        view: &str,
+        layer: &str,
+        level: u32,
+        ordinal: u32,
+        content: &mut [String],
+        derived: &mut crate::derived::DerivedContent,
+        zoom: Option<u8>,
+    ) -> bool {
+        match declaration.drawn_shape() {
+            None | Some(crate::shapes::DrawnShape::Derived) => false,
+            Some(crate::shapes::DrawnShape::Predicate) => {
+                let held = match self.shapes.get(view, layer, level) {
+                    Some(held) => held,
+                    // Not yet held for this view — a publication route this module was not
+                    // wired into; the fallback is the loud one every other reader takes.
+                    None => self.write.with_artifacts(|store| {
+                        self.shapes.level(
+                            view,
+                            layer,
+                            level,
+                            store,
+                            &crate::shapes::PersistedPieces::none(),
+                        )
+                    }),
+                };
+                let Some(shape) = held.shapes.get(ordinal as usize).and_then(|s| s.as_ref())
+                else {
+                    return false;
+                };
+                let (parts, guarded) = crate::shapes::served_rings(&shape.shape, zoom);
+                derived.shape = Some(parts);
+                guarded
+            }
+            Some(crate::shapes::DrawnShape::Authored) => {
+                let Some((slot, _)) = declaration.authored_shape() else {
+                    return false;
+                };
+                let Some(text) = content.get_mut(slot) else {
+                    return false;
+                };
+                let shapes = tessera_lifecycle::membership::ArtifactShapes::from_content_text(text);
+                text.clear();
+                let Some(shape) = shapes
+                    .as_ref()
+                    .and_then(|s| s.for_view(view))
+                    .and_then(|bytes| tessera_spatial::shape::Shape::decode(bytes).ok())
+                else {
+                    return false;
+                };
+                let (parts, guarded) = crate::shapes::served_rings(&shape, zoom);
+                derived.shape = Some(parts);
+                guarded
+            }
+        }
     }
 
     /// The artifacts of this viewport: every one the request asked for, that this principal
@@ -4466,6 +4572,27 @@ impl Engine {
                         }))
                         .clone()
                     };
+                    // The predicate or the authored shape, **only where the request asked for the
+                    // shape** (`polygon-membership.md` §7.1) and the row is materialised — the
+                    // identity projection carries no geometry and no content at all.
+                    let mut content = content;
+                    let mut derived = derived;
+                    let shape_guard_fired = if artifact_rows == ArtifactRows::Full
+                        && computed.selects(crate::derived::ComputedProperty::Hull)
+                    {
+                        self.drawn_shape(
+                            &layer.declaration,
+                            view_name,
+                            &name,
+                            level,
+                            ordinal,
+                            &mut content,
+                            &mut derived,
+                            Some(zoom),
+                        )
+                    } else {
+                        false
+                    };
                     // **The parent comes from the level's own records and the key from the store.**
                     // Both are per-ordinal facts of one generation, but only one of them is held
                     // in the row form: a key is a caller's string, one per artifact, and copying
@@ -4506,6 +4633,7 @@ impl Engine {
                         // Asked only of the artifacts that survived the cut: the bit describes what
                         // is served, and an artifact the response drops has no row to carry one.
                         matched: matched.as_ref().map(|m| rows.matches(m, ordinal)),
+                        shape_guard_fired,
                     });
                 }
             }

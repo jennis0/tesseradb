@@ -76,6 +76,7 @@ use rayon::prelude::*;
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
 use crate::error::{BuildError, Result};
 use crate::shapes::{inline_shape, shape_declared, ShapeColumns, ShapeContext, ShapeLayerReport, ShapeReader};
+use tessera_store::derived::authored_shape_input;
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
 #[derive(Debug, Default)]
@@ -434,6 +435,57 @@ pub fn read(
                 })
                 .collect();
             plan.shape_reports.push(reader.finish(parents));
+        }
+        // **The authored shape content is read as a membership shape is** (`polygon-membership.md`
+        // §6.1, ruling (h)): where the declaration's supplied content names a `polygon`, `circle`
+        // or `ellipse` kind, that slot of every ranked content — WKT, or the numbers of the kind's
+        // row field — goes through the same reader, the same canonicalisation for every view, the
+        // same report and the same vertex cap, and the slot then carries the canonical bytes in
+        // their content spelling for the blob. The serve reads them back into `shape_x`/`shape_y`;
+        // the client is never handed the string.
+        if let Some((slot, kind)) = declaration.authored_shape() {
+            let content_name = declaration.content.supplied[slot].name.clone();
+            let mut reader = ShapeReader::new(
+                &format!("{} (authored `{}` content '{content_name}')", input.name, kind.as_str()),
+                kind,
+                ShapeContext {
+                    extent: *extent,
+                    views: declaration.views.clone(),
+                    max_vertices: max_shape_vertices,
+                },
+                tessera_store::derived::ShapeSpace::View,
+            );
+            let mine: Vec<(String, usize)> = plan
+                .artifacts
+                .iter()
+                .filter(|((layer, _, _), _)| layer == &input.name)
+                .map(|((_, _, key), index)| (key.clone(), *index))
+                .collect();
+            for (key, index) in mine {
+                for content in &mut plan.bodies[index].contents {
+                    let Some(text) = content.values.get_mut(slot) else {
+                        // Short of a value: refused where every content is checked for width.
+                        continue;
+                    };
+                    let shape = authored_shape_input(kind, text).map_err(|e| {
+                        BuildError::Invalid(format!(
+                            "layer '{}': artifact {key}: the authored `{}` content '{content_name}': {e}",
+                            input.name,
+                            kind.as_str()
+                        ))
+                    })?;
+                    let Some(canonical) = reader.row(&key, Some(shape), None)? else {
+                        return Err(BuildError::Invalid(format!(
+                            "layer '{}': artifact {key}: the authored `{}` content '{content_name}' \
+                             canonicalised to no view",
+                            input.name,
+                            kind.as_str()
+                        )));
+                    };
+                    *text = canonical.content_text();
+                }
+            }
+            plan.shape_reports.push(reader.finish(Vec::new()));
         }
         if let Some(members) = &input.members {
             let before = plan.artifacts.len();

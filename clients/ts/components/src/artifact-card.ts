@@ -12,7 +12,8 @@ import './count.js';
 /**
  * `<tessera-artifact-card>` — the selected artifact (design §5.3 tier 2, §6), as the boards draw
  * it: the name, its `Masked` count as *members visible to you*, its supplied description, layer
- * and key, *Children in this view* from the served set, and *Fit to cluster*. **Steady during a
+ * and key, the kind of shape its layer draws, *Children in this view* from the served set, *Fit to
+ * cluster*, and *Filter to this* greyed until the region leaf is built. **Steady during a
  * pan by construction**: the count is the drill-down's, over the whole membership as this
  * principal sees it, and moves with the mask and never with the viewport. The children are a live
  * read of the served set — whatever the channel has answered for the view now.
@@ -22,6 +23,13 @@ import './count.js';
  *
  * One refusal covers every withheld case and nothing here tells them apart.
  */
+/** What each kind of drawn shape says on the card. */
+const SHAPE_TEXT: Record<'derived' | 'predicate' | 'authored', string> = {
+  derived: 'derived — the hull of the members you can see',
+  predicate: 'boundary — the same for every viewer',
+  authored: 'authored — the same for every viewer'
+};
+
 export class TesseraArtifactCard extends TesseraElement {
   static override styles = [
     tokens,
@@ -74,6 +82,11 @@ export class TesseraArtifactCard extends TesseraElement {
       [part='fit'] {
         margin-top: 12px;
       }
+      [part='filter'] {
+        margin-top: 8px;
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
       [part='close'] {
         display: inline-flex;
         color: var(--tessera-ink-3);
@@ -118,6 +131,10 @@ export class TesseraArtifactCard extends TesseraElement {
     const stale = s?.get('status').stale ?? false;
     const count: Masked = {value: Number(artifact.detail.maskedCount), exact: true};
     const id = idString(artifact.id);
+    // Which kind the layer's drawn shape is (`polygon-membership.md` §7.1), so a reader knows
+    // whether the outline they see moves with the principal. `decl` is the served row's layer;
+    // an artifact opened with no served row (a host feeding the card directly) shows none.
+    const shape = decl?.shape ? {kind: decl.shape, text: SHAPE_TEXT[decl.shape]} : null;
     return html`<div class="panel">${heading}
       <span part="state" data-state="shown"></span>
       <div part="headline" class="card-title">${(here ? displayName(here, topics) : null) ?? UNNAMED}</div>
@@ -126,6 +143,7 @@ export class TesseraArtifactCard extends TesseraElement {
       <div class="field">
         <div class="k">layer</div><div part="value" class="v">${artifact.detail.layer}</div>
         ${artifact.detail.key ? html`<div class="k">key</div><div part="value" class="v">${artifact.detail.key}</div>` : nothing}
+        ${shape ? html`<div class="k">shape</div><div part="shape" class="v" data-kind=${shape.kind}>${shape.text}</div>` : nothing}
       </div>
       ${children.length > 0
         ? html`<div part="label" class="xs muted children-label">Children in this view</div>
@@ -139,6 +157,7 @@ export class TesseraArtifactCard extends TesseraElement {
             </ul>`
         : nothing}
       <button part="fit" class="btn" type="button" @click=${() => emit(this, 'tessera-artifactfit', {id})}>${icon('fit', 14)}Fit to cluster</button>
+      <button part="filter" class="btn" type="button" disabled aria-disabled="true" title="Filtering to an artifact is the region leaf, not yet built (polygon-membership §8, stage 4)">Filter to this</button>
     </div>`;
   }
 }

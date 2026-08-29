@@ -126,6 +126,56 @@ impl ArtifactShapes {
         self.by_view.iter().map(|(v, b)| v.len() + b.len()).sum()
     }
 
+    /// The per-view bytes as an **authored content** carries them (`polygon-membership.md` §6.1,
+    /// §6.6): the same per-view wrapper the record's shape tail holds, hex-spelled so that it
+    /// fits the utf8 content slot every supplied kind occupies. A content value is text by the
+    /// record blob's construction, and the shape's canonical bytes are not, so the spelling is
+    /// the whole of what this adds; nothing about the geometry changes. Read back by
+    /// [`Self::from_content_text`], and never served — the wire carries the rings.
+    pub fn content_text(&self) -> String {
+        let mut bytes = Vec::with_capacity(self.byte_len() + 8);
+        self.encode_into(&mut bytes);
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write;
+            let _ = write!(out, "{b:02x}");
+        }
+        out
+    }
+
+    /// The inverse of [`Self::content_text`]; `None` for anything that is not one — a supplied
+    /// `polygon` that reached the store as an opaque string under the earlier reading, or a
+    /// truncated value — which withholds the shape rather than drawing a guess.
+    pub fn from_content_text(text: &str) -> Option<Self> {
+        if !text.len().is_multiple_of(2) || !text.is_ascii() {
+            return None;
+        }
+        let bytes: Option<Vec<u8>> = (0..text.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&text[i..i + 2], 16).ok())
+            .collect();
+        let bytes = bytes?;
+        let mut at = 0usize;
+        let mut take = |n: usize| -> Option<&[u8]> {
+            let end = at.checked_add(n)?;
+            let view = bytes.get(at..end)?;
+            at = end;
+            Some(view)
+        };
+        let views = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+        let mut by_view = Vec::with_capacity(views);
+        for _ in 0..views {
+            let view_len = u16::from_le_bytes(take(2)?.try_into().ok()?) as usize;
+            let view = std::str::from_utf8(take(view_len)?).ok()?.to_string();
+            let shape_len = u32::from_le_bytes(take(4)?.try_into().ok()?) as usize;
+            by_view.push((view, take(shape_len)?.to_vec()));
+        }
+        if at != bytes.len() {
+            return None;
+        }
+        ArtifactShapes::new(by_view)
+    }
+
     fn encode_into(&self, out: &mut Vec<u8>) {
         out.extend_from_slice(&(self.by_view.len() as u16).to_le_bytes());
         for (view, bytes) in &self.by_view {

@@ -1,0 +1,42 @@
+--- principals: narrow — term MQ | sparse — 1.6% (2 terms) | medium — 12% (3 terms) | heavy — 41% (46 terms) | full — top 47 terms ---
+--- the kinds /v1/meta published ---
+  boundaries/divisions         shape=predicate  computed=centroid,box
+  places/taxonomy              shape=derived    computed=centroid,box,hull
+  programmes/source            shape=null       computed=
+--- what drew, per principal and kind ---
+  full — top 47 terms        predicate at the overview, zoom 1.1 served=   26 drawn=1 parts=609 holes=  0 vertices= 1914  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+  full — top 47 terms        predicate at a city zoom, zoom 9.7 served=  938 drawn=1 parts=  1 holes=  0 vertices=   55  /tmp/claude-1000/-home-joe-code-tessera/65adb25
+  full — top 47 terms        derived   at the overview, zoom 1.6 served=   13 drawn=1 parts= 12 holes=  0 vertices=  205  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+  heavy — 41% (46 terms)     predicate at the overview, zoom 1.1 served=   26 drawn=1 parts=609 holes=  0 vertices= 1914  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+  heavy — 41% (46 terms)     predicate at a city zoom, zoom 9.7 served=    2 drawn=1 parts=  1 holes=  0 vertices=   71  /tmp/claude-1000/-home-joe-code-tessera/65adb25
+  heavy — 41% (46 terms)     derived   at the overview, zoom 1.6 served=   13 drawn=1 parts= 18 holes=  0 vertices=  210  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+--- the same shape, across principals ---
+  predicate overview         #733089: identical
+  predicate city             #057810: identical
+  derived   hull             #312641: different
+--- console errors (a superseded request’s abort excepted) ---
+  pageerror: decoder closed
+  pageerror: decoder closed
+  pageerror: decoder closed
+SHAPE SMOKE OK
+HEADLESS-DONE
+--- principals: narrow — term MQ | sparse — 1.6% (2 terms) | medium — 12% (3 terms) | heavy — 41% (46 terms) | full — top 47 terms ---
+--- the kinds /v1/meta published ---
+  boundaries/divisions         shape=predicate  computed=centroid,box
+  places/taxonomy              shape=derived    computed=centroid,box,hull
+  programmes/source            shape=null       computed=
+--- what drew, per principal and kind ---
+  full — top 47 terms        predicate at the overview, zoom 1.1 served=   26 drawn=1 parts=609 holes=  0 vertices= 1914  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+  full — top 47 terms        predicate at a city zoom, zoom 9.7 served=  938 drawn=1 parts=  1 holes=  0 vertices=   55  /tmp/claude-1000/-home-joe-code-tessera/65adb25
+  full — top 47 terms        derived   at the overview, zoom 1.6 served=   13 drawn=1 parts= 12 holes=  0 vertices=  205  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+  heavy — 41% (46 terms)     predicate at the overview, zoom 1.1 served=   26 drawn=1 parts=609 holes=  0 vertices= 1914  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+  heavy — 41% (46 terms)     predicate at a city zoom, zoom 9.7 served=    2 drawn=1 parts=  1 holes=  0 vertices=   71  /tmp/claude-1000/-home-joe-code-tessera/65adb25
+  heavy — 41% (46 terms)     derived   at the overview, zoom 1.6 served=   13 drawn=1 parts= 18 holes=  0 vertices=  210  /tmp/claude-1000/-home-joe-code-tessera/65adb2
+--- the same shape, across principals ---
+  predicate overview         #733089: identical
+  predicate city             #057810: identical
+  derived   hull             #312641: different
+--- console errors (a superseded request’s abort excepted) ---
+  none
+SHAPE SMOKE OK
+HEADED2-DONE

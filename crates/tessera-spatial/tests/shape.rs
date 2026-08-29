@@ -285,7 +285,32 @@ proptest! {
         }
         let capped = shape.rings(0, 8);
         prop_assert!(capped.iter().flatten().map(Vec::len).sum::<usize>() <= 8);
+        // The guard says when it cut what the resolution alone would have kept
+        // (`polygon-membership.md` §7.2), and only then.
+        let (_, fired) = shape.rings_guarded(0, 8);
+        prop_assert_eq!(fired, poly.vertex_count() > 8);
+        let (_, unfired) = shape.rings_guarded(0, usize::MAX);
+        prop_assert!(!unfired);
     }
+}
+
+/// A curve's guard fires when the chord tolerance asks for more vertices than the budget holds —
+/// a large circle at a fine tolerance — and not when the budget is generous or the circle small.
+#[test]
+fn a_conics_guard_fires_only_when_the_budget_binds_its_densification() {
+    let circle = ShapeF64::Circle {
+        cx: 500.0,
+        cy: 500.0,
+        r: 400.0,
+    };
+    let (shape, _) = circle.canonical(&E).unwrap();
+    let (ring, fired) = shape.rings_guarded(1, 64);
+    assert_eq!(ring[0][0].len(), 64);
+    assert!(fired, "a 400-unit radius at a one-grid-unit tolerance wants far more than 64 chords");
+    let (ring, fired) = shape.rings_guarded(1, 1 << 20);
+    assert!(ring[0][0].len() > 64 && !fired);
+    let (_, fired) = shape.rings_guarded(u32::MAX, 8);
+    assert!(!fired, "at a tolerance wider than the circle, eight chords are all it asks for");
 }
 
 proptest! {

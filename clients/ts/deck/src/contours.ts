@@ -178,7 +178,7 @@ export function smoothRing(ring: readonly [number, number][], samplesPerSpan = S
  * than a reflex corner takes.
  */
 export function ringWithin(inner: readonly [number, number][], outer: readonly [number, number][]): boolean {
-  const box = shapeBbox([outer]);
+  const box = shapeBbox([[outer]]);
   const eps = Math.max(Math.hypot(box[2] - box[0], box[3] - box[1]), 1) * 1e-9;
   const on = (p: [number, number]) => pointInRing(p, outer) || distanceToRing(p, outer) <= eps;
   for (let i = 0; i < inner.length; i++) {
@@ -195,23 +195,31 @@ export function ringWithin(inner: readonly [number, number][], outer: readonly [
 
 // ---- what answers a hover ---------------------------------------------------------------------
 
+/** One part of a drawn shape: its outer ring first, then its holes. */
+export type Part = readonly (readonly [number, number][])[];
+
 /**
- * One artifact's drawn shape, as the hover reads it: every ring it draws, the wire's `rung` it is
- * drawn at (contracts §3.2 r44), and the bounding box of the lot for a cheap rejection.
+ * One artifact's drawn shape, as the hover reads it: every part it draws — outer ring first,
+ * then holes (`polygon-membership.md` §7.1) — the wire's `rung` it is drawn at (contracts §3.2
+ * r44), and the bounding box of the lot for a cheap rejection.
+ *
+ * **This answers a hover and a click, and nothing else.** A served shape is a drawing generalised
+ * to the pixel, and whether a *point* is a member is the wire's `membership:<layer>` column's to
+ * say, never a test against these rings.
  */
 export type ContourShape = {
   id: bigint;
   rung: number;
-  rings: readonly (readonly [number, number][])[];
+  parts: readonly Part[];
   bbox: [number, number, number, number];
 };
 
-export function shapeBbox(rings: readonly (readonly [number, number][])[]): [number, number, number, number] {
+export function shapeBbox(parts: readonly Part[]): [number, number, number, number] {
   let x0 = Number.POSITIVE_INFINITY;
   let y0 = Number.POSITIVE_INFINITY;
   let x1 = Number.NEGATIVE_INFINITY;
   let y1 = Number.NEGATIVE_INFINITY;
-  for (const ring of rings) {
+  for (const ring of parts.flat()) {
     for (const [x, y] of ring) {
       if (x < x0) x0 = x;
       if (y < y0) y0 = y;
@@ -222,17 +230,25 @@ export function shapeBbox(rings: readonly (readonly [number, number][])[]): [num
   return [x0, y0, x1, y1];
 }
 
-/** Whether a point is in any of a shape's rings. A hull's rings are separated groups (§1). */
+/**
+ * Whether a point is in any part of a shape — the even-odd rule over each part's rings, so a
+ * point inside a hole is outside the part. A hull's parts are separated groups (§1), one ring
+ * each, for which this is the plain ring test.
+ */
 export function shapeContains(shape: ContourShape, p: readonly [number, number]): boolean {
   if (p[0] < shape.bbox[0] || p[0] > shape.bbox[2] || p[1] < shape.bbox[1] || p[1] > shape.bbox[3]) return false;
-  for (const ring of shape.rings) if (pointInRing(p, ring)) return true;
+  for (const part of shape.parts) {
+    let odd = false;
+    for (const ring of part) if (pointInRing(p, ring)) odd = !odd;
+    if (odd) return true;
+  }
   return false;
 }
 
-/** The distance from a point to a shape's nearest boundary. */
+/** The distance from a point to a shape's nearest boundary, holes included. */
 export function shapeDistance(shape: ContourShape, p: readonly [number, number]): number {
   let best = Number.POSITIVE_INFINITY;
-  for (const ring of shape.rings) {
+  for (const ring of shape.parts.flat()) {
     const d = distanceToRing(p, ring);
     if (d < best) best = d;
   }
