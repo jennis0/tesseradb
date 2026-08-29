@@ -131,7 +131,7 @@ pub fn unsplit32(cell: MortonCode, residual: u32) -> (u32, u32) {
 
 /// Gather the even bit positions of a 32-bit value back into the low 16 bits — the inverse of
 /// [`spread`].
-fn compact(v: u32) -> u32 {
+pub(crate) fn compact(v: u32) -> u32 {
     let mut x = v & 0x5555_5555;
     x = (x | (x >> 1)) & 0x3333_3333;
     x = (x | (x >> 2)) & 0x0F0F_0F0F;

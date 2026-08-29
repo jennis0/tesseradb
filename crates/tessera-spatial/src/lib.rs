@@ -1,6 +1,8 @@
-//! Quantisation, Morton codes, and tile addressing (contracts §2.5).
+//! Quantisation, Morton codes, tile addressing (contracts §2.5) — and shapes over the grid
+//! (`polygon-membership.md`).
 
 pub mod morton;
+pub mod shape;
 pub mod tiler;
 
 pub use morton::{
