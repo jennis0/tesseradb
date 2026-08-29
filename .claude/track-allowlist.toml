@@ -382,3 +382,31 @@ paths = [
   "docs/artifact-delivery.md",
   "docs/openapi/*",
 ]
+
+# Stage 3 of the shape work (polygon-membership.md §12): the wire and the client. Branches from
+# campaign/rung-2-overture at 16c9db4e.
+[track.shape-wire]
+paths = [
+  "crates/tessera-wire/*",
+  "crates/tessera-server/*",
+  "crates/tessera-engine/*",
+  "crates/tessera-types/src/layer.rs",
+  "crates/tessera-build/*",
+  "crates/tessera-lifecycle/src/membership.rs",
+  "crates/tessera-lifecycle/src/registry.rs",
+  "crates/tessera-store/*",
+  "crates/tessera-spatial/*",
+  "clients/ts/*",
+  "clients/py/*",
+  "conformance/*",
+  "docs/design/contracts.md",
+  "docs/design/artifact-shapes.md",
+  "docs/design/client-components.md",
+  "docs/design/client-interaction.md",
+  "docs/design/polygon-membership.md",
+  "docs/design/annotations.md",
+  "docs/openapi/*",
+  "docs/artifact-delivery.md",
+  "docs/client-delivery.md",
+  "docs/evidence/*",
+]
