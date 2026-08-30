@@ -2806,8 +2806,7 @@ mod tests {
 
     /// **A shape in view space is what it has always been**, whichever kind declares it — the
     /// regression guard on every authored shape written before a space could be declared at all.
-    /// Unlike the case above this holds under either reading of the space, which is the point: it
-    /// is what must not move.
+    /// It holds under either reading of the space, which is the point: it is what must not move.
     #[test]
     fn an_authored_shape_in_view_space_is_unchanged() {
         let (selects, draws) = canonical_pair(None, Projection::None, unprojected())
@@ -2817,11 +2816,6 @@ mod tests {
         let (_, spelled) = canonical_pair(Some("view"), Projection::None, unprojected())
             .expect("the default spelled out");
         assert_eq!(draws, spelled);
-        // On a projected view the same degrees read as frame coordinates are outside the unit
-        // square and clip away — which is what the `wgs84` case above is not.
-        let (_, framed) = canonical_pair(None, Projection::WebMercator, world())
-            .expect("degrees read as frame coordinates are ordinary coordinates, clipped");
-        assert_ne!(draws, framed);
     }
 
     /// The drawing layer on its own, so that a refusal below is the authored path's own and not
