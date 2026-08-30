@@ -8,7 +8,7 @@ import {
 import {createDecoder, type Decoder, type HeadFrames} from './decoder.js';
 import {parseRegionVerdict} from './region.js';
 import {FRAME_ARTIFACTS, FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER, FrameReader} from './frame.js';
-import type {ArrowType, ArtifactDetail, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, Session, Shape, ShapeKind, TileCounts, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
+import type {ArrowType, ArtifactDetail, CategoryValue, FilterOperandSet, ItemDetail, Layer, Meta, ProjectionName, Session, Shape, ShapeKind, TileCounts, TileScheme, ViewportPart, ViewportRequest, ViewportResponse, ViewportResult} from './types.js';
 
 /** Where a streamed response's points go, one frame's worth at a time. */
 export type PartSink = (part: ViewportPart) => void | Promise<void>;
@@ -178,7 +178,17 @@ export class TesseraClient {
     return {
       apiVersion: m.api_version,
       idset: m.idset,
-      views: m.views.map((s) => ({id: s.id, displayName: s.display_name})),
+      // The four projection fields ride with the view they describe, because that is where the
+      // server declares them: a projection belongs to a view and the quantisation below is
+      // bundle-wide. `projection.ts` is what a client does with them.
+      views: m.views.map((s) => ({
+        id: s.id,
+        displayName: s.display_name,
+        projection: s.projection,
+        worldAspect: s.world_aspect,
+        tileScheme: s.tile_scheme,
+        tile: s.tile
+      })),
       quantisation: {
         xMin: m.quantisation.x_min,
         xMax: m.quantisation.x_max,
@@ -679,7 +689,14 @@ export class TesseraClient {
 type RawMeta = {
   api_version: number;
   idset: number;
-  views: {id: string; display_name: string}[];
+  views: {
+    id: string;
+    display_name: string;
+    projection: ProjectionName;
+    world_aspect: number | null;
+    tile_scheme: TileScheme | null;
+    tile: {z: number; x: number; y: number} | null;
+  }[];
   quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
   declared_scalars: {
     name: string;

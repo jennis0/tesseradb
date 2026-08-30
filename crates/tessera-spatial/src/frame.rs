@@ -20,6 +20,7 @@
 //! corpus does not get, which is why [`Snap`] carries enough to print it rather than absorbing it.
 
 use crate::morton::Bounds;
+use crate::projection::Projection;
 
 /// The finest offset a frame may be taken at (§4.1).
 ///
@@ -59,6 +60,73 @@ impl AlignedSquare {
             y_min: f64::from(self.y) * side,
             y_max: f64::from(self.y + 1) * side,
         }
+    }
+
+    /// The square a frame **is**, or `None` where the frame is not one of these at all.
+    ///
+    /// The exact inverse of [`AlignedSquare::bounds`], and exact is the word: every edge must be
+    /// the `f64` the square's own arithmetic produces, with no tolerance. A frame an ulp off an
+    /// aligned square is a frame whose cell grid is an ulp off the tile grid, and a basemap drawn
+    /// under it would be wrong by a whole cell somewhere across 65,536 of them — so *nearly
+    /// aligned* is a case to answer `None` to rather than to round into alignment. The comparison
+    /// is affordable because `bounds` produces only dyadic rationals, which are exact in `f64`.
+    ///
+    /// Every frame a projected build writes is one of these ([`snap_outward`] returns nothing
+    /// else), so the interesting inputs here are the frames a `none` view may declare — an
+    /// arbitrary box — and a manifest written by hand.
+    pub fn of_bounds(b: &Bounds) -> Option<AlignedSquare> {
+        if !(b.x_min.is_finite() && b.x_max.is_finite() && b.y_min.is_finite() && b.y_max.is_finite())
+        {
+            return None;
+        }
+        // The side length fixes the offset, so at most one square can match; the walk is over
+        // seventeen offsets and reconstructs the candidate rather than solving for it, which
+        // keeps this obviously the inverse of the four multiplications above.
+        for z in 0..=MAX_ZOOM_OFFSET {
+            let n = f64::from(1u32 << z);
+            let (x, y) = ((b.x_min * n).round(), (b.y_min * n).round());
+            if !(0.0..n).contains(&x) || !(0.0..n).contains(&y) {
+                continue;
+            }
+            let square = AlignedSquare {
+                z,
+                x: x as u32,
+                y: y as u32,
+            };
+            if square.bounds() == *b {
+                return Some(square);
+            }
+        }
+        None
+    }
+}
+
+/// The name of the tile scheme an aligned Web Mercator frame addresses: the slippy-map `z/x/y`
+/// every basemap server publishes.
+///
+/// It is the only scheme this system can name, and it is spelled rather than implied — see
+/// [`tile_scheme`] for why a client is told a scheme's name and not a boolean.
+pub const XYZ: &str = "xyz";
+
+/// The tile scheme a view's frame addresses, and the tile the frame **is** under it
+/// (`projections.md` §9) — or `None` where no published scheme addresses this frame.
+///
+/// **Grid alignment alone is not enough, and this is the whole reason the answer is a scheme's
+/// name rather than a boolean.** An equirectangular frame is a square of a square tiling, so
+/// [`AlignedSquare::of_bounds`] answers for it exactly as it does for a Web Mercator one — but the
+/// published longitude/latitude schemes are 2:1 at their top level and no server serves the square
+/// tiling that frame is aligned to. A caller reading alignment as availability would draw a
+/// Mercator basemap under a corpus that cannot line up with one, which is a wrong map rather than a
+/// missing one. So the question this answers is *which* scheme, and the absence of an answer is
+/// what says: draw the points, draw no basemap.
+///
+/// [`Projection::None`] has no world, no north and no tiles, and a Web Mercator view whose frame is
+/// not an aligned square — a frame a `none` view's spelling could still declare — addresses nothing
+/// either.
+pub fn tile_scheme(projection: Projection, frame: &Bounds) -> Option<(&'static str, AlignedSquare)> {
+    match projection {
+        Projection::WebMercator => AlignedSquare::of_bounds(frame).map(|square| (XYZ, square)),
+        Projection::Equirectangular { .. } | Projection::None => None,
     }
 }
 
@@ -323,6 +391,128 @@ mod tests {
         let snap = snap_outward(&tall);
         assert_eq!(snap.square, AlignedSquare::WORLD);
         assert!(!snap.floored);
+    }
+
+    /// [`AlignedSquare::of_bounds`] recovers every square [`AlignedSquare::bounds`] can write, and
+    /// refuses everything else — including a frame an ulp away from one.
+    #[test]
+    fn a_frame_is_read_back_as_the_square_that_wrote_it() {
+        for z in 0..=MAX_ZOOM_OFFSET {
+            let last = (1u32 << z) - 1;
+            for (x, y) in [(0, 0), (last, last), (last / 3, last / 7), (last / 2, 0)] {
+                let square = AlignedSquare { z, x, y };
+                assert_eq!(AlignedSquare::of_bounds(&square.bounds()), Some(square));
+            }
+        }
+
+        // A tight bounding box — what a `none` view's `auto` fits — is not a square of any tiling,
+        // and neither is a rectangle, a square of the wrong side, or one offset from the grid.
+        for b in [
+            Bounds {
+                x_min: 0.1,
+                x_max: 0.8,
+                y_min: 0.2,
+                y_max: 0.4,
+            },
+            Bounds {
+                x_min: 0.0,
+                x_max: 0.5,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            Bounds {
+                x_min: 0.0,
+                x_max: 0.3,
+                y_min: 0.0,
+                y_max: 0.3,
+            },
+            Bounds {
+                x_min: 0.125,
+                x_max: 0.625,
+                y_min: 0.0,
+                y_max: 0.5,
+            },
+            Bounds {
+                x_min: -1.0,
+                x_max: 1.0,
+                y_min: -1.0,
+                y_max: 1.0,
+            },
+            Bounds {
+                x_min: f64::NAN,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+        ] {
+            assert_eq!(AlignedSquare::of_bounds(&b), None, "{b:?}");
+        }
+
+        // **Nearly aligned is not aligned.** One ulp on one edge is a frame whose grid is off the
+        // tile grid, and reading it as the square would put a basemap a cell out somewhere.
+        let mut nudged = AlignedSquare { z: 3, x: 2, y: 5 }.bounds();
+        nudged.x_max = f64::from_bits(nudged.x_max.to_bits() + 1);
+        assert_eq!(AlignedSquare::of_bounds(&nudged), None);
+    }
+
+    /// **The case a boolean gets wrong** (`projections.md` §9): an equirectangular frame is as
+    /// aligned as a Web Mercator one and addresses no published scheme, so it publishes none.
+    ///
+    /// The addresses are hand-computed. `[0, 0.5] x [0, 0.5]` is the z1 tile (0, 0) — the world's
+    /// north-west quarter, which under Web Mercator is XYZ `1/0/0`; `[0.75, 1] x [0.5, 0.75]` is
+    /// z2 (3, 2), the tile three east and two south of the north-west corner at four per axis.
+    #[test]
+    fn only_an_aligned_web_mercator_frame_addresses_a_scheme() {
+        let world = AlignedSquare::WORLD.bounds();
+        let quarter = AlignedSquare { z: 1, x: 0, y: 0 }.bounds();
+        let sixteenth = AlignedSquare { z: 2, x: 3, y: 2 }.bounds();
+
+        assert_eq!(
+            tile_scheme(Projection::WebMercator, &world),
+            Some((XYZ, AlignedSquare { z: 0, x: 0, y: 0 }))
+        );
+        assert_eq!(
+            tile_scheme(Projection::WebMercator, &quarter),
+            Some((XYZ, AlignedSquare { z: 1, x: 0, y: 0 }))
+        );
+        assert_eq!(
+            tile_scheme(Projection::WebMercator, &sixteenth),
+            Some((XYZ, AlignedSquare { z: 2, x: 3, y: 2 }))
+        );
+
+        // Aligned, and addressing nothing: the frames are the same three squares.
+        for projection in [
+            Projection::PLATE_CARREE,
+            Projection::GALL_ISOGRAPHIC,
+            Projection::None,
+        ] {
+            for frame in [world, quarter, sixteenth] {
+                assert!(
+                    AlignedSquare::of_bounds(&frame).is_some(),
+                    "the frame is aligned, which is the premise"
+                );
+                assert_eq!(
+                    tile_scheme(projection, &frame),
+                    None,
+                    "{} published a scheme for an aligned frame",
+                    projection.name()
+                );
+            }
+        }
+
+        // A Web Mercator view whose frame is not a square addresses nothing either.
+        assert_eq!(
+            tile_scheme(
+                Projection::WebMercator,
+                &Bounds {
+                    x_min: 0.1,
+                    x_max: 0.8,
+                    y_min: 0.2,
+                    y_max: 0.4
+                }
+            ),
+            None
+        );
     }
 
     /// Containment is monotone in the offset, which is what lets the search walk down and stop.

@@ -1,6 +1,8 @@
 import '@tesseradb/components';
 import type {TesseraExplorer, MapProbe} from '@tesseradb/components';
 import {TesseraClient, createStore, type Store as DataStore} from '@tesseradb/client';
+import type {ViewInfo} from '@tesseradb/client';
+import {basemapLayer} from './basemap.js';
 import {loadDatasets, readConfig, type Dataset} from './config.js';
 import {esc} from './html.js';
 import {renderErrors} from './panels/errors.js';
@@ -80,6 +82,27 @@ const instrumentsEl = document.getElementById('instruments')!;
 declare global {
   interface Window {
     __tesseraProbe?: MapProbe & {lanes: Lanes};
+  }
+}
+
+/**
+ * Draw a basemap under the points where `/v1/meta` says one lines up, and none where it does not.
+ *
+ * The decision is `tile_scheme`'s and the demo does not second-guess it: no dataset entry says
+ * whether its corpus is geographic, and nothing here reads the extent. A tile that will not load —
+ * no network, a refused request — leaves the map exactly as it was, a basemap being an underlay
+ * and not the picture.
+ */
+async function installBasemap(view: ViewInfo): Promise<void> {
+  await explorer.updateComplete;
+  const map = explorer.map;
+  if (!map) return;
+  try {
+    map.basemap = await basemapLayer(view);
+  } catch (error) {
+    store.update((s) => {
+      s.failures = [...s.failures.slice(-19), {code: 'basemap', detail: String(error), at: Date.now()}];
+    });
   }
 }
 
@@ -424,6 +447,7 @@ async function activate(dataset: Dataset): Promise<void> {
           : (rendered.find((c) => c.category)?.name ?? rendered[0]?.name ?? null);
       s.switching = false;
     });
+    void installBasemap(meta.views[0]!);
     trace.event('session', {
       dataset: dataset.id,
       kMaxMarks: meta.selection.kMaxMarks,
