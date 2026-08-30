@@ -1122,7 +1122,7 @@ The governing statement is architecture §9: the term index, node memberships an
 shared across views in entity space (**I4**), while each view stores its own permutation and derives its
 own tile ranges. per-point-attributes §3.9 draws the same line for attributes — `render` is row-space and
 therefore per-view; `filter` and `inspect` are entity-space, declared once, and apply everywhere.
-`views-and-multi-table.md` reaches the same conclusion in more detail, but it is provisional and
+`views.md` reaches the same conclusion in more detail, but it is provisional and
 explicitly not approved, so it corroborates this section rather than grounding it.
 
 - **One entity ID globally**, never one per `(view, entity)`. An entity appearing in several views has one

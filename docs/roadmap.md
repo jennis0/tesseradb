@@ -94,7 +94,7 @@ question of when.** Three reasons to take it early:
   of this rework is now owed rather than avoidable. It is rework of machinery that carries
   invariants, in the one part of the system where a conflation has already been caught fail-open
   twice — which raises the cost of taking the fold-in later still, not lowers it.
-- **A window closes when the clients ship.** `views-and-multi-table.md` §12 lists six things
+- **A window closes when the clients ship.** `views.md` §12 lists six things
   cheap now and expensive later — container-aligned table base offsets, the manifest `group` key,
   prefix-qualified table references, the `{view → (x, y)}` ingest map, resolving contracts §2.6's
   *"row IDs are segment-local"* to the view-global reading, and keeping the permutation behind
