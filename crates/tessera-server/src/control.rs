@@ -2341,8 +2341,10 @@ struct PublishBody {
     #[serde(default)]
     idset: Option<u32>,
     /// The space every row's shape is in where the row names none (`polygon-membership.md`
-    /// §4.3) — `"view"` if absent, and the one value a view can honour: `"wgs84"` is a `422`
-    /// naming `projections.md`, the whole batch without effect.
+    /// §4.3) — `"view"` if absent, or `"wgs84"`, which asks the view to project the coordinates
+    /// with the same function it projected its points with. A view whose `projection` is `none`
+    /// has one space and refuses the second; so does a coordinate outside ±180 × ±90 — each a
+    /// `422` naming the row, the whole batch without effect.
     #[serde(default)]
     default_space: Option<String>,
     artifacts: Vec<IncomingArtifactBody>,
@@ -2414,7 +2416,8 @@ fn canonical_authored_content(
     };
     let input = authored_shape_input(kind, text).map_err(|e| refuse(e.to_string()))?;
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
-    let q = state.engine.meta().quantisation;
+    let meta = state.engine.meta();
+    let q = meta.quantisation;
     let extent = tessera_engine::shapes::Bounds {
         x_min: q.x_min,
         x_max: q.x_max,
@@ -2422,8 +2425,17 @@ fn canonical_authored_content(
         y_max: q.y_max,
     };
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-    let canonical = canonical_shapes(&shape, &views, &extent, state.max_shape_vertices)
-        .map_err(|e| refuse(e.to_string()))?;
+    // Authored content carries no `space` of its own — it is the drawing a declaration wrote in
+    // the view's coordinates, exactly as the build reads it (`layers.rs`).
+    let canonical = canonical_shapes(
+        &shape,
+        &views,
+        tessera_engine::shapes::ShapeSpace::View,
+        meta.projection,
+        &extent,
+        state.max_shape_vertices,
+    )
+    .map_err(|e| refuse(e.to_string()))?;
     let report: Vec<serde_json::Value> = canonical
         .reports
         .iter()
@@ -2505,7 +2517,7 @@ fn canonical_row_shape(
         }
         return Ok(None);
     };
-    let _space = match artifact.space.as_deref() {
+    let space = match artifact.space.as_deref() {
         None => default_space,
         Some(word) => ShapeSpace::parse(word).map_err(|e| refuse(format!("`space`: {e}")))?,
     };
@@ -2531,7 +2543,8 @@ fn canonical_row_shape(
         }
     };
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
-    let q = state.engine.meta().quantisation;
+    let meta = state.engine.meta();
+    let q = meta.quantisation;
     let extent = tessera_engine::shapes::Bounds {
         x_min: q.x_min,
         x_max: q.x_max,
@@ -2539,8 +2552,15 @@ fn canonical_row_shape(
         y_max: q.y_max,
     };
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-    let canonical = canonical_shapes(&shape, &views, &extent, state.max_shape_vertices)
-        .map_err(|e| refuse(e.to_string()))?;
+    let canonical = canonical_shapes(
+        &shape,
+        &views,
+        space,
+        meta.projection,
+        &extent,
+        state.max_shape_vertices,
+    )
+    .map_err(|e| refuse(e.to_string()))?;
     let report: Vec<serde_json::Value> = canonical
         .reports
         .iter()

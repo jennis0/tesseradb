@@ -341,6 +341,7 @@ impl Default for PublishedLayers {
 pub fn read(
     declarations: &[LayerDeclaration],
     inputs: &[LayerSources],
+    projection: tessera_spatial::Projection,
     extent: &tessera_spatial::Bounds,
     max_shape_vertices: u64,
 ) -> Result<LayerPlan> {
@@ -380,6 +381,7 @@ pub fn read(
                 kind,
                 ShapeContext {
                     extent: *extent,
+                    projection,
                     views: declaration.views.clone(),
                     max_vertices: max_shape_vertices,
                 },
@@ -450,6 +452,7 @@ pub fn read(
                 kind,
                 ShapeContext {
                     extent: *extent,
+                    projection,
                     views: declaration.views.clone(),
                     max_vertices: max_shape_vertices,
                 },

@@ -55,7 +55,7 @@ use sha2::{Digest, Sha256};
 use tessera_authz::FrozenFragment;
 use tessera_spatial::projection::Projection;
 use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
+use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Projection, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
@@ -1105,6 +1105,15 @@ pub struct EngineMeta {
     /// The declared views, in manifest order.
     pub views: Vec<MetaView>,
     pub quantisation: Quantisation,
+    /// **What placed every position in this bundle before the frame did** (`projections.md` §3),
+    /// read from the view the build materialised — a build materialises exactly one coordinate
+    /// system, so the manifest carries one view and there is one answer.
+    ///
+    /// Here because a `region` leaf and a published shape declared in longitude and latitude are
+    /// put through *this* function and no other (`polygon-membership.md` §4.3, R12). ⊘ It is not
+    /// yet published on `/v1/meta`, which carries the frame alone, so a client still cannot tell
+    /// a geographic corpus from an embedding (`projections.md` §9).
+    pub projection: Projection,
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
     ///
@@ -1159,6 +1168,11 @@ impl Engine {
                 })
                 .collect(),
             quantisation: manifest.quantisation,
+            projection: manifest
+                .views
+                .first()
+                .map(|v| v.projection)
+                .unwrap_or(Projection::None),
             // The **full** compiled schema, including `filter`-only columns: `/v1/meta` describes
             // what a caller may declare and supply on the ingest plane, not what occupies a row.
             // The segment-facing readers narrow to `render_scalars` at their own sites.

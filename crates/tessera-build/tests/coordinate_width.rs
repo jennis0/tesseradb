@@ -25,7 +25,10 @@ use arrow::record_batch::RecordBatch;
 use parquet::arrow::ArrowWriter;
 
 use tessera_build::input::read_points;
-use tessera_spatial::{shape::ShapeF64, Bounds};
+use tessera_spatial::{
+    shape::{ShapeF64, Space},
+    Bounds,
+};
 
 /// A frame 16 units wide out of a 65,536-unit coordinate range — 1/4096 of it, zoom offset 12 —
 /// placed at the far end of the range, where an `f32`'s exponent is largest and its step coarsest.
@@ -185,7 +188,7 @@ fn a_point_inside_a_small_polygon_is_inside_it_at_its_stored_position() {
         (cx - lo, cy + hi),
         (cx - lo, cy - lo),
     ]]]);
-    let (shape, report) = square.canonical(&extent).expect("the fixture square canonicalises");
+    let (shape, report) = square.canonical(Space::View, &extent).expect("the fixture square canonicalises");
     assert_eq!(
         report.rings_dropped, 0,
         "the square must survive quantisation, or nothing below is being tested"

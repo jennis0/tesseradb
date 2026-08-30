@@ -52,8 +52,9 @@ use croaring::Bitmap;
 
 use tessera_spatial::shape::{
     contexts_at, read_wkb, read_wkt, CanonReport, DecodeError, PolyCtx, Rect, Shape, ShapeF64,
+    Space,
 };
-use tessera_spatial::{unsplit32, Bounds, Tile};
+use tessera_spatial::{unsplit32, Bounds, Projection, Tile};
 use tessera_types::layer::{LayerDeclaration, MembershipSource, ServingLayout, ShapeKind};
 use tessera_types::MortonCode;
 
@@ -1249,30 +1250,49 @@ impl ShapeInput {
 /// The space a shape's coordinates are written in (`polygon-membership.md` §4.3).
 ///
 /// A property of the submission, never of the layer. `view` is the space the points are stored in
-/// and the only value that works. ⊘ `wgs84` is specified and blocked rather than deferred (ruling
-/// (f)): no view projects anything until `projections.md` is built, and a shape projected by one
-/// function and points by another is the mismatch R12 exists to forbid — so it is refused at
-/// parse naming that document, by [`ShapeSpace::parse`].
+/// — the quantisation frame, whatever produced it. `wgs84` says the coordinates are longitude and
+/// latitude and asks the view to project them **with the same function it projects points
+/// through**, which [`ShapeSpace::resolve`] is: it takes the view's own declared projection and
+/// nothing else, so a shape placed by a function the corpus was not placed by is not a thing a
+/// caller can write (R12).
+///
+/// **A view with `projection = "none"` still refuses `wgs84`**: it has one space, `view` is the
+/// right word for it, and there is nothing to convert a degree from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShapeSpace {
     #[default]
     View,
+    Wgs84,
 }
 
 impl ShapeSpace {
     pub fn parse(word: &str) -> Result<Self, ShapeRefusal> {
         match word {
             "view" => Ok(ShapeSpace::View),
-            "wgs84" => Err(ShapeRefusal(
-                "`space = \"wgs84\"` is refused: no view projects anything yet (`projections.md` is \
-                 provisional), and a shape projected by a function other than the one the points \
-                 went through would select the wrong rows. Write the shape in the view's own \
-                 coordinates with `space = \"view\"`, or omit `space`"
-                    .to_string(),
-            )),
+            "wgs84" => Ok(ShapeSpace::Wgs84),
             other => Err(ShapeRefusal(format!(
                 "`space = \"{other}\"` is not a space; the values are \"view\" and \"wgs84\""
             ))),
+        }
+    }
+
+    /// The space with the view's own transform in it — what canonicalisation takes.
+    ///
+    /// Refuses here rather than at [`ShapeSpace::parse`] because the word is a fact about the
+    /// submission and the projection is a fact about the view: which of the two makes the pair
+    /// impossible is what the caller needs told.
+    pub fn resolve(self, projection: Projection) -> Result<Space, ShapeRefusal> {
+        match self {
+            ShapeSpace::View => Ok(Space::View),
+            ShapeSpace::Wgs84 if projection == Projection::None => Err(ShapeRefusal(
+                "`space = \"wgs84\"` is refused on a view whose `projection` is `none`: such a \
+                 view has one space and nothing to convert a degree from, so a longitude and a \
+                 latitude would be quantised as though they were frame coordinates. Write the \
+                 shape in the view's own coordinates with `space = \"view\"`, or declare a \
+                 projection on the view (`projections.md` §5.3)"
+                    .to_string(),
+            )),
+            ShapeSpace::Wgs84 => Ok(Space::Wgs84(projection)),
         }
     }
 }
@@ -1399,19 +1419,29 @@ pub fn shape_input(kind: ShapeKind, input: ShapeInput) -> Result<ShapeF64, Shape
 ///
 /// **Reported, never refused**, for everything the [`CanonReport`] carries — clipped, outside,
 /// rings dropped, degrees-looking — on the rule that bounds warn and never exclude. What refuses is
-/// a [`tessera_spatial::shape::CanonError`] (a coordinate that is not one) and a polygon over
-/// `max_vertices`, naming the count and the cap (ruling (e)).
+/// a [`tessera_spatial::shape::CanonError`] (a coordinate that is not one, and a `wgs84` one
+/// outside ±180 × ±90 with it) and a polygon over `max_vertices`, naming the count and the cap
+/// (ruling (e)).
 ///
-/// ⊘ Every view shares one frame today — a bundle has one quantisation — so the per-view loop
-/// canonicalises against the same extent for each and the design's "per view, in its own frame"
-/// reduces to one form stored under each view's name. The loop is kept because the storage is
-/// keyed by view and the frame is a property of the view rather than of the bundle in the design.
+/// **`space` and `projection` are taken together and here**, at the one place every publication
+/// route passes through: a `wgs84` shape is densified and put through the view's own transform
+/// before it is quantised (`polygon-membership.md` §4.3, R10), and a caller cannot canonicalise
+/// one without naming the function that placed the points.
+///
+/// ⊘ Every view shares one frame today — a bundle has one quantisation, and a build materialises
+/// one view — so the per-view loop canonicalises against the same extent and the same projection
+/// for each, and the design's "per view, in its own frame" reduces to one form stored under each
+/// view's name. The loop is kept because the storage is keyed by view and the frame is a property
+/// of the view rather than of the bundle in the design.
 pub fn canonical_shapes(
     shape: &ShapeF64,
     views: &[&str],
+    space: ShapeSpace,
+    projection: Projection,
     extent: &Bounds,
     max_vertices: u64,
 ) -> Result<CanonicalShapes, ShapeRefusal> {
+    let space = space.resolve(projection)?;
     let mut out = CanonicalShapes {
         by_view: Vec::with_capacity(views.len()),
         reports: Vec::with_capacity(views.len()),
@@ -1419,7 +1449,7 @@ pub fn canonical_shapes(
     };
     for view in views {
         let (canonical, report) = shape
-            .canonical(extent)
+            .canonical(space, extent)
             .map_err(|e| ShapeRefusal(e.to_string()))?;
         let vertices = canonical.vertex_count();
         if vertices > max_vertices {
@@ -1802,7 +1832,7 @@ mod derived_tests {
         let polygon = ShapeF64::Polygon(
             read_wkt("POLYGON ((100 100, 900 150, 850 900, 120 800, 100 100))").unwrap(),
         );
-        let canonical = polygon.canonical(&extent).unwrap().0;
+        let canonical = polygon.canonical(Space::View, &extent).unwrap().0;
         let bytes = canonical.encode();
         let held = HeldShape::new(canonical);
         assert!(!held.interior.is_empty() && !held.boundary.is_empty());

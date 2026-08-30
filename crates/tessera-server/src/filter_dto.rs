@@ -33,7 +33,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, RegionLeaf, Scalar};
-use tessera_engine::shapes::{Bounds, CanonError, ShapeF64};
+use tessera_engine::shapes::{Bounds, CanonError, Projection, ShapeF64, ShapeSpace};
 use tessera_types::{AttrLocalId, TesseraId};
 
 use crate::error::ApiError;
@@ -45,9 +45,13 @@ use tessera_engine::filter::UNRESOLVABLE_VALUE as UNRESOLVABLE_ID;
 const UNRESOLVABLE: u32 = UNRESOLVABLE_ID.raw();
 
 /// What a `region` leaf is canonicalised against (selection-operand §2, `polygon-membership.md`
-/// §4.3–§4.4): the request's view's extent, and the deployment's vertex cap.
+/// §4.3–§4.4): the request's view's extent, the transform that placed its points there, and the
+/// deployment's vertex cap.
 pub struct RegionContext {
     pub extent: Bounds,
+    /// **The view's own declared projection** — what a `space = "wgs84"` leaf is put through, and
+    /// the same function every point in the view went through (`projections.md` §10).
+    pub projection: Projection,
     pub max_vertices: u64,
 }
 
@@ -136,9 +140,15 @@ fn parse_node(
 /// same `fixed32` the tiler applies to a point, so what the engine holds is the grid-unit form
 /// and two callers drawing one shape send one value. What refuses: a coordinate that is not one,
 /// an inverted box, a non-positive radius or axis, too few vertices, too many (`422` naming the
-/// count and the cap), an unknown key, and `wgs84` — refused naming `projections.md`, no view
-/// projecting anything yet (§4.3, ruling (f)). A shape wholly outside the extent is not refused:
-/// it holds no rows, and a request may ask that.
+/// count and the cap), an unknown key, a `wgs84` coordinate outside ±180 × ±90 — which is not a
+/// coordinate — and `wgs84` at all on a view whose `projection` is `none`, which has one space
+/// and nothing to convert from (§4.3). A shape wholly outside the extent is not refused: it holds
+/// no rows, and a request may ask that.
+///
+/// **A `wgs84` leaf is put through the view's own transform**, each edge densified first, on the
+/// rule that the space a shape is declared in defines the plane its edges are straight in
+/// (R10, `projections.md` §10). The vertex cap is therefore checked twice: on what the caller
+/// sent, and on what densification produced.
 fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiError> {
     let obj = body
         .as_object()
@@ -169,25 +179,17 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
         }
     }
     let kind = named[0];
-    match obj.get("space").and_then(Value::as_str) {
-        None => {}
-        Some("view") => {}
-        Some("wgs84") => {
-            return Err(bad(
-                "`region.space = \"wgs84\"` is refused: no view projects anything yet \
-                 (`projections.md` is provisional), so a shape in degrees cannot be quantised \
-                 into the view's grid — send the shape in the view's own space (`view`)",
-            ))
-        }
-        Some(other) => {
-            return Err(bad(format!(
-                "`region.space` is `view` or `wgs84`, not '{other}'"
-            )))
-        }
-    }
     if obj.contains_key("space") && obj.get("space").and_then(Value::as_str).is_none() {
         return Err(bad("`region.space` is a string"));
     }
+    let space = match obj.get("space").and_then(Value::as_str) {
+        None => ShapeSpace::View,
+        Some(word) => ShapeSpace::parse(word)
+            .map_err(|_| bad(format!("`region.space` is `view` or `wgs84`, not '{word}'")))?,
+    };
+    let space = space
+        .resolve(ctx.projection)
+        .map_err(|e| bad(format!("`region.space`: {e}")))?;
     if kind == "artifact" {
         if obj.contains_key("space") {
             return Err(bad("`region.artifact` names a published shape and carries no `space`"));
@@ -275,7 +277,7 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
         }
         _ => unreachable!("the kind was checked against the five"),
     };
-    let (canonical, _report) = shape.canonical(&ctx.extent).map_err(|e| match e {
+    let (canonical, _report) = shape.canonical(space, &ctx.extent).map_err(|e| match e {
         CanonError::NotFinite => bad(format!("`region.{kind}`: a coordinate is not finite")),
         CanonError::InvertedBox => bad(
             "`region.bbox` is [x0, y0, x1, y1] with x0 <= x1 and y0 <= y1",
@@ -283,7 +285,26 @@ fn parse_region(body: &Value, ctx: &RegionContext) -> Result<RegionLeaf, ApiErro
         CanonError::NonPositiveAxis => bad(format!(
             "`region.{kind}`: the radius and the axes must be positive"
         )),
+        CanonError::NotACoordinate => bad(format!(
+            "`region.{kind}` is `space = \"wgs84\"` and carries a coordinate outside ±180 \
+             longitude or ±90 latitude; a value outside that is not a coordinate \
+             (`projections.md` §2)"
+        )),
+        // Unreachable: `ShapeSpace::resolve` refuses the pair above, naming the view.
+        CanonError::NoProjection => bad(format!("`region.{kind}`: {e}")),
     })?;
+    // **The cap again, on what densification produced** (R5): a `wgs84` polygon whose edges curve
+    // in the frame leaves this line with more vertices than the caller sent, and a bound checked
+    // only on the submission would not be a bound on the evaluation.
+    let vertices = canonical.vertex_count();
+    if vertices > ctx.max_vertices {
+        return Err(bad(format!(
+            "`region.{kind}` is {vertices} vertices once its edges are densified for \
+             `space = \"wgs84\"`, and the deployment's `max_region_vertices` is {}. Simplify the \
+             shape, or send it in the view's own space",
+            ctx.max_vertices
+        )));
+    }
     Ok(RegionLeaf::Shape(Arc::new(canonical)))
 }
 
@@ -589,6 +610,7 @@ mod tests {
         }
     }
 
+    /// An unprojected view: its own coordinates are the only space it has.
     fn region_ctx() -> RegionContext {
         RegionContext {
             extent: Bounds {
@@ -597,13 +619,33 @@ mod tests {
                 y_min: 0.0,
                 y_max: 1000.0,
             },
+            projection: Projection::None,
             max_vertices: 8,
+        }
+    }
+
+    /// A Web Mercator view over the whole world — the frame the United Kingdom takes.
+    fn projected_ctx() -> RegionContext {
+        RegionContext {
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1.0,
+                y_min: 0.0,
+                y_max: 1.0,
+            },
+            projection: Projection::WebMercator,
+            max_vertices: 2_048,
         }
     }
 
     fn parse_str(text: &str) -> Result<FilterExpr, ApiError> {
         let v: Value = serde_json::from_str(text).unwrap();
         parse(&v, &schema("department"), &codes, &region_ctx())
+    }
+
+    fn parse_projected(text: &str) -> Result<FilterExpr, ApiError> {
+        let v: Value = serde_json::from_str(text).unwrap();
+        parse(&v, &schema("department"), &codes, &projected_ctx())
     }
 
     #[test]
@@ -637,6 +679,57 @@ mod tests {
     }
 
     #[test]
+    fn a_wgs84_region_goes_through_the_views_own_transform() {
+        // The United Kingdom's diagonal, in degrees, on a Web Mercator view.
+        let expr = parse_projected(
+            r#"{"region": {"polygon": [[-8, 50], [2, 58], [2, 50]], "space": "wgs84"}}"#,
+        )
+        .unwrap();
+        let FilterExpr::Region(RegionLeaf::Shape(shape)) = expr else {
+            panic!("a region leaf");
+        };
+        // Densified: the diagonal edge is a curve in the frame, so more than three vertices
+        // survive canonicalisation.
+        assert!(
+            shape.vertex_count() > 3,
+            "the diagonal was joined by a chord: {} vertices",
+            shape.vertex_count()
+        );
+        // The same numbers read as view coordinates land nowhere near — they are degrees on a
+        // unit-square frame, so they clamp to a corner and canonicalise away.
+        let as_view =
+            parse_projected(r#"{"region": {"polygon": [[-8, 50], [2, 58], [2, 50]]}}"#).unwrap();
+        assert_ne!(as_view, FilterExpr::Region(RegionLeaf::Shape(shape)));
+    }
+
+    #[test]
+    fn a_wgs84_region_refuses_what_is_not_a_coordinate() {
+        let err = parse_projected(
+            r#"{"region": {"bbox": [-8, 50, 2, 91], "space": "wgs84"}}"#,
+        )
+        .unwrap_err();
+        let ApiError::Contract(detail) = err else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("not a coordinate"), "{detail}");
+    }
+
+    #[test]
+    fn a_wgs84_region_is_capped_on_what_densification_produced() {
+        let mut small = projected_ctx();
+        small.max_vertices = 8;
+        let v: Value = serde_json::from_str(
+            r#"{"region": {"polygon": [[-30, -30], [30, 30], [30, -30]], "space": "wgs84"}}"#,
+        )
+        .unwrap();
+        let err = parse(&v, &schema("department"), &codes, &small).unwrap_err();
+        let ApiError::Contract(detail) = err else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("once its edges are densified"), "{detail}");
+    }
+
+    #[test]
     fn a_region_by_artifact_takes_an_integer_or_its_decimal_string() {
         for text in [r#"{"region": {"artifact": 42}}"#, r#"{"region": {"artifact": "42"}}"#] {
             assert_eq!(
@@ -659,7 +752,7 @@ mod tests {
             // Two kinds, or none.
             (r#"{"region": {"bbox": [0,0,1,1], "circle": [0,0,1]}}"#, "exactly one of"),
             (r#"{"region": {}}"#, "exactly one of"),
-            // `wgs84` names the design that would admit it.
+            // A view with no projection has one space, and says so.
             (r#"{"region": {"bbox": [0,0,1,1], "space": "wgs84"}}"#, "projections.md"),
             (r#"{"region": {"bbox": [0,0,1,1], "space": "utm"}}"#, "`view` or `wgs84`"),
             // The canonical form's own refusals.

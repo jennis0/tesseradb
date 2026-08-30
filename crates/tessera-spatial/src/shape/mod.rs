@@ -14,6 +14,12 @@
 //! context (the edges crossing the tile and the parity of one corner) that the descent refines
 //! down the tree; the three closed forms need no context at all.
 //!
+//! **A shape and the points are placed by one function.** A shape declared in longitude and
+//! latitude is put through the *view's own* projection before it is canonicalised ([`project`],
+//! [`Space`]), each edge densified first because the space a shape is declared in defines the
+//! plane its edges are straight in (`polygon-membership.md` R10). A view that projects nothing
+//! has one space and refuses the second.
+//!
 //! **Exact where it can be, deterministic everywhere.** A polygon is tested in integer arithmetic
 //! over the 32-bit grid with one symbolic perturbation rule for ties (`polygon.rs`); a circle or an
 //! ellipse is a general conic once the extent's two axes scale differently, so its test is
@@ -34,6 +40,7 @@ mod conic;
 mod decompose;
 mod encode;
 mod polygon;
+mod project;
 mod simplify;
 mod wkb;
 mod wkt;
@@ -43,6 +50,7 @@ pub use conic::Conic;
 pub use decompose::{contexts_at, decompose, BoundaryCell, Class, Decomposition, Rect, Region};
 pub use encode::DecodeError;
 pub use polygon::{Part, PolyCtx, Polygon, PolygonRegion, Ring, Vertex};
+pub use project::{Space, DENSIFY_TOLERANCE_CELLS};
 pub use wkb::{read_wkb, WkbError};
 pub use wkt::{read_wkt, WktError};
 

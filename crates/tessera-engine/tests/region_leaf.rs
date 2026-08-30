@@ -22,7 +22,7 @@ use tessera_engine::shapes::ShapeF64;
 use tessera_engine::{Engine, LayerSelection, RegionVerdict, ViewportOut, ViewportRequest};
 use tessera_lifecycle::{wal::ChangeOp, IncomingArtifact};
 use tessera_spatial::fixed32;
-use tessera_spatial::shape::Shape;
+use tessera_spatial::shape::{Shape, Space};
 use tessera_types::layer::{
     ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind, LayerDeclaration,
     MembershipSource,
@@ -47,7 +47,7 @@ fn quantised(e: u64) -> (u32, u32) {
 }
 
 fn canonical(shape: ShapeF64) -> Arc<Shape> {
-    Arc::new(shape.canonical(&extent()).expect("a well-formed shape").0)
+    Arc::new(shape.canonical(Space::View, &extent()).expect("a well-formed shape").0)
 }
 
 fn region(shape: &Arc<Shape>) -> FilterExpr {

@@ -10,7 +10,7 @@
 use proptest::prelude::*;
 use tessera_spatial::morton::{split32, Bounds, Tile};
 use tessera_spatial::shape::{
-    read_wkt, Decomposition, PolyCtx, PreparedShape, Rect, Shape, ShapeF64,
+    read_wkt, Decomposition, PolyCtx, PreparedShape, Rect, Shape, ShapeF64, Space,
 };
 
 const E: Bounds = Bounds {
@@ -223,7 +223,7 @@ proptest! {
 
     #[test]
     fn a_conic_decomposes_to_its_direct_test_away_from_rounding(shape in conic_strategy(), seed in any::<u64>()) {
-        let (shape, _) = shape.canonical(&E).unwrap();
+        let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let prepared = shape.prepared();
         let d = prepared.decompose(None);
         let Shape::Conic(c) = &shape else { unreachable!() };
@@ -243,7 +243,7 @@ proptest! {
 
     #[test]
     fn a_box_decomposes_to_its_direct_test(shape in bbox_strategy(), seed in any::<u64>()) {
-        let (shape, _) = shape.canonical(&E).unwrap();
+        let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let prepared = shape.prepared();
         let d = prepared.decompose(None);
         let look = Lookup::new(&d);
@@ -254,7 +254,7 @@ proptest! {
 
     #[test]
     fn a_budget_yields_a_cover_that_is_a_superset(shape in rings_strategy(), seed in any::<u64>()) {
-        let (shape, _) = shape.canonical(&E).unwrap();
+        let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let prepared = shape.prepared();
         let d = prepared.decompose(Some(64));
         let look = Lookup::new(&d);
@@ -272,7 +272,7 @@ proptest! {
 
     #[test]
     fn the_served_rings_are_a_subsequence_at_every_resolution(shape in rings_strategy()) {
-        let (shape, _) = shape.canonical(&E).unwrap();
+        let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let Shape::Polygon(poly) = &shape else { unreachable!() };
         let full = shape.rings(0, usize::MAX);
         prop_assert_eq!(full.iter().flatten().map(Vec::len).sum::<usize>() as u64, poly.vertex_count());
@@ -303,7 +303,7 @@ fn a_conics_guard_fires_only_when_the_budget_binds_its_densification() {
         cy: 500.0,
         r: 400.0,
     };
-    let (shape, _) = circle.canonical(&E).unwrap();
+    let (shape, _) = circle.canonical(Space::View, &E).unwrap();
     let (ring, fired) = shape.rings_guarded(1, 64);
     assert_eq!(ring[0][0].len(), 64);
     assert!(fired, "a 400-unit radius at a one-grid-unit tolerance wants far more than 64 chords");
@@ -321,7 +321,7 @@ proptest! {
 
     #[test]
     fn a_polygon_decomposes_to_exactly_its_direct_test(shape in rings_strategy(), seed in any::<u64>()) {
-        let (shape, _) = shape.canonical(&E).unwrap();
+        let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let prepared = shape.prepared();
         let d = prepared.decompose(None);
         prop_assert!(!d.is_cover());
@@ -333,7 +333,7 @@ proptest! {
 
     #[test]
     fn every_boundary_cells_corner_parity_is_the_full_ray_cast(shape in rings_strategy()) {
-        let (shape, _) = shape.canonical(&E).unwrap();
+        let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let prepared = shape.prepared();
         let region = prepared.region().unwrap();
         let d = prepared.decompose(None);
@@ -353,7 +353,7 @@ fn a_wkt_polygon_with_a_hole_excludes_the_hole_through_the_descent() {
                   (400000 400000, 600000 400000, 600000 600000, 400000 600000, 400000 400000))",
     )
     .unwrap();
-    let (shape, report) = ShapeF64::Polygon(rings).canonical(&E).unwrap();
+    let (shape, report) = ShapeF64::Polygon(rings).canonical(Space::View, &E).unwrap();
     assert_eq!(report.vertices_out, 8);
     let prepared = shape.prepared();
     let d = prepared.decompose(None);
@@ -393,8 +393,8 @@ fn the_descent_is_linear_in_the_perimeter_not_the_area() {
             (c - h, c + h),
         ]]])
     };
-    let small = square(62_500.0).canonical(&E).unwrap().0.decompose(None);
-    let large = square(375_000.0).canonical(&E).unwrap().0.decompose(None);
+    let small = square(62_500.0).canonical(Space::View, &E).unwrap().0.decompose(None);
+    let large = square(375_000.0).canonical(Space::View, &E).unwrap().0.decompose(None);
     let ratio = large.boundary.len() as f64 / small.boundary.len() as f64;
     assert!(
         (5.0..7.0).contains(&ratio),

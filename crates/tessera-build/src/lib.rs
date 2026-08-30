@@ -1161,6 +1161,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                args.projection,
                 &args.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
             )?;
