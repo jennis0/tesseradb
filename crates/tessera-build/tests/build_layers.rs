@@ -2603,7 +2603,8 @@ fn a_shape_and_a_shape_declaration_are_refused_apart() {
         .to_string();
     assert!(message.contains("`shape.kind`"), "{message}");
 
-    // `wgs84` is refused naming the document that would let a view honour it.
+    // `wgs84` asks the view to project and this fixture's view declares no projection, so it is
+    // refused naming the view's own declaration (`projections.md` §5.3).
     let wgs84 = SHAPE_LAYER.replace(
         "bbox = [0.0, 0.0, 400.0, 1000.0] }",
         "bbox = [0.0, 0.0, 400.0, 1000.0], space = \"wgs84\" }",

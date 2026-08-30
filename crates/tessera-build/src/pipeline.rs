@@ -1415,6 +1415,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             let plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                args.projection,
                 &args.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
             )?;

@@ -514,8 +514,9 @@ pub struct InlineArtifact {
     pub ellipse: Option<Vec<f64>>,
     #[serde(default)]
     pub wkt: Option<String>,
-    /// The space the shape is written in — `"view"` if absent, the only value a view can honour
-    /// today (`polygon-membership.md` §4.3).
+    /// The space the shape is written in — `"view"` if absent, or `"wgs84"`, which a view
+    /// declaring a projection honours by putting the coordinates through it
+    /// (`polygon-membership.md` §4.3).
     #[serde(default)]
     pub space: Option<String>,
     /// The parent artifact in a hierarchy, by its key.
@@ -3575,6 +3576,51 @@ fn compile_layers(
         // bounds, the circle's three, the ellipse's five, the polygon's WKB `geometry` column
         // (GeoParquet's own name) — so naming a field of another kind is refused as a field the
         // layer never declared.
+        // **A shape layer's views must share a coordinate system** (`polygon-membership.md` §4.3):
+        // the geometry is declared once and resolved per view, so two views placing their points
+        // by different functions cannot share it. Two views both declaring `projection = "none"`
+        // are warned rather than refused, at the build's shape report — nothing then says whether
+        // they share a space, and a warning is the right weight for a thing that might be true.
+        if shape.is_some() {
+            let mut named: Vec<(&str, Projection)> = Vec::new();
+            for name in declared_views {
+                if let Some(view) = views.iter().find(|v| &v.name == name) {
+                    named.push((name.as_str(), view.projection));
+                }
+            }
+            if let Some((first, projection)) = named.first().copied() {
+                if let Some((other, differs)) =
+                    named.iter().find(|(_, p)| *p != projection).copied()
+                {
+                    return Err(declaration_error(format!(
+                        "{object}: view '{first}' declares `projection = \"{}\"` and view \
+                         '{other}' declares `projection = \"{}\"`. A shape layer's geometry is \
+                         declared once and resolved in every view it is drawn in, so the views \
+                         must place their points by the same function; draw the layer in one of \
+                         them, or declare the same projection on both \
+                         (polygon-membership.md §4.3)",
+                        projection.name(),
+                        differs.name()
+                    )));
+                }
+            }
+        }
+
+        // **A space is honourable only if the views the layer is drawn in can honour it**
+        // (`polygon-membership.md` §4.3): `wgs84` asks the view to project, and a view declaring
+        // `projection = "none"` has one space and nothing to convert a degree from. Refused here,
+        // where the declaration can be pointed at, rather than at the first row read.
+        let honourable = |space: tessera_store::derived::ShapeSpace| -> std::result::Result<(), String> {
+            for name in declared_views {
+                let Some(view) = views.iter().find(|v| &v.name == name) else {
+                    continue;
+                };
+                space.resolve(view.projection).map_err(|e| {
+                    format!("view '{name}' declares `projection = \"{}\"`: {e}", view.projection.name())
+                })?;
+            }
+            Ok(())
+        };
         let default_space = match block.default_space.as_deref() {
             None => tessera_store::derived::ShapeSpace::View,
             Some(word) => {
@@ -3584,13 +3630,22 @@ fn compile_layers(
                          `[layer.shape]`, so there is no geometry for it to be the space of"
                     )));
                 }
-                tessera_store::derived::ShapeSpace::parse(word)
-                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?
+                let space = tessera_store::derived::ShapeSpace::parse(word)
+                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
+                honourable(space)
+                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
+                space
             }
         };
         for artifact in block.artifacts.iter().flatten() {
             if let Some(word) = artifact.space.as_deref() {
-                tessera_store::derived::ShapeSpace::parse(word).map_err(|e| {
+                let space = tessera_store::derived::ShapeSpace::parse(word).map_err(|e| {
+                    declaration_error(format!(
+                        "{object}: artifact '{}': `space`: {e}",
+                        artifact.key
+                    ))
+                })?;
+                honourable(space).map_err(|e| {
                     declaration_error(format!(
                         "{object}: artifact '{}': `space`: {e}",
                         artifact.key

@@ -995,6 +995,7 @@ fn run_viewport_stream(
                     y_min: meta.quantisation.y_min,
                     y_max: meta.quantisation.y_max,
                 },
+                projection: meta.projection,
                 max_vertices: state.max_region_vertices,
             };
             match crate::filter_dto::parse(

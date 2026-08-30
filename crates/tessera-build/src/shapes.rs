@@ -23,7 +23,7 @@ use std::path::Path;
 use arrow::array::{Array, BinaryArray, Float64Array, LargeBinaryArray, StringArray};
 use arrow::record_batch::RecordBatch;
 use tessera_lifecycle::membership::ArtifactShapes;
-use tessera_spatial::Bounds;
+use tessera_spatial::{Bounds, Projection};
 use tessera_store::derived::{
     canonical_shapes, shape_input, ShapeInput, ShapeSpace, ShapeStats,
 };
@@ -35,10 +35,14 @@ use crate::config::{ArtifactSource, Config, Extent, Fields, InlineArtifact};
 use crate::error::{BuildError, Result};
 
 /// The frame a layer's shapes are canonicalised in: the extent the points are quantised against,
-/// and the views the layer is drawn in.
+/// the transform that placed them there, and the views the layer is drawn in.
 #[derive(Debug, Clone)]
 pub struct ShapeContext {
     pub extent: Bounds,
+    /// **The view's own declared projection** (`projections.md` §10) — what a `wgs84` shape is
+    /// put through, and the same function the points went through, which is what makes the two
+    /// spaces comparable at all.
+    pub projection: Projection,
     pub views: Vec<String>,
     /// The publication vertex cap (`polygon-membership.md` §9, ruling (e)).
     pub max_vertices: u64,
@@ -335,7 +339,11 @@ impl ShapeReader {
         ctx: ShapeContext,
         default_space: ShapeSpace,
     ) -> Self {
-        let several_views = ctx.views.len() > 1;
+        // Warned only where nothing says whether the views share a space: two views that both
+        // declare `projection = "none"` (`polygon-membership.md` §4.3). Two views declaring
+        // *different* projections are refused at the declaration, and two declaring the same one
+        // do share a space and have nothing to warn about.
+        let several_views = ctx.views.len() > 1 && ctx.projection == Projection::None;
         ShapeReader {
             kind,
             report: ShapeLayerReport {
@@ -359,14 +367,15 @@ impl ShapeReader {
     ///
     /// A row with no geometry is **published with an empty shape** — an artifact with no members,
     /// a state the service already has — and counted; a row whose `space` the view cannot honour
-    /// is refused naming the row.
+    /// is refused naming the row. A `wgs84` row is densified and put through the view's own
+    /// projection before it is quantised (`polygon-membership.md` §4.3, R10).
     pub fn row(
         &mut self,
         key: &str,
         input: Option<ShapeInput>,
         space: Option<&str>,
     ) -> Result<Option<ArtifactShapes>> {
-        let _space = match space {
+        let space = match space {
             None => self.default_space,
             Some(word) => ShapeSpace::parse(word).map_err(|e| {
                 BuildError::Invalid(format!(
@@ -388,8 +397,15 @@ impl ShapeReader {
             })?,
         };
         let views: Vec<&str> = self.ctx.views.iter().map(String::as_str).collect();
-        let canonical = canonical_shapes(&shape, &views, &self.ctx.extent, self.ctx.max_vertices)
-            .map_err(|e| {
+        let canonical = canonical_shapes(
+            &shape,
+            &views,
+            space,
+            self.ctx.projection,
+            &self.ctx.extent,
+            self.ctx.max_vertices,
+        )
+        .map_err(|e| {
                 BuildError::Invalid(format!(
                     "layer '{}': artifact {key}: {e}",
                     self.report.layer
@@ -472,20 +488,21 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
         let Some(kind) = shape_declared(declaration) else {
             continue;
         };
-        let extent = declaration
+        let frame = declaration
             .views
             .first()
             .and_then(|name| config.views.iter().find(|v| &v.name == name))
             .map(|view| match &view.extent {
-                Extent::Fixed(bounds) => Ok(*bounds),
+                Extent::Fixed(bounds) => Ok((*bounds, view.projection)),
                 // A stated longitude/latitude box is a frame without reading anything: the
                 // projection and the snap are both functions of the declaration alone
                 // (`projections.md` §4.2).
-                Extent::LonLat(asked) => {
-                    Ok(crate::config::snap_lon_lat(view.projection, asked)
+                Extent::LonLat(asked) => Ok((
+                    crate::config::snap_lon_lat(view.projection, asked)
                         .square
-                        .bounds())
-                }
+                        .bounds(),
+                    view.projection,
+                )),
                 Extent::Auto { .. } | Extent::AutoLonLat => Err(format!(
                     "layer '{}': its view's extent is `auto`, which is fitted to the points at the \
                      build; the shapes cannot be sized before then. Declare the extent to size \
@@ -493,8 +510,8 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
                     declaration.name
                 )),
             });
-        let extent = match extent {
-            Some(Ok(extent)) => extent,
+        let (extent, projection) = match frame {
+            Some(Ok(frame)) => frame,
             Some(Err(why)) => {
                 out.push(Err(why));
                 continue;
@@ -503,6 +520,7 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
         };
         let ctx = ShapeContext {
             extent,
+            projection,
             views: declaration.views.clone(),
             max_vertices: DEFAULT_MAX_SHAPE_VERTICES,
         };

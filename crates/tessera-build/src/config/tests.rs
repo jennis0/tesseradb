@@ -1837,7 +1837,9 @@ fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     );
 
     // **The space lives with the submission** (§4.3): `default_space` on the layer and `space` on
-    // a row, `view` the one value a view can honour, `wgs84` refused naming `projections.md`.
+    // a row. `wgs84` asks the view to project, so it is honourable only where the view declares a
+    // projection — and this fixture's view declares none, which is a refusal naming that
+    // (`projections.md` §5.3).
     let with_space = |word: &str, body: &str| {
         spatial(body).replace(
             "membership                = \"spatial\"",

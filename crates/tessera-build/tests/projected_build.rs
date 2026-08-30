@@ -605,3 +605,183 @@ fn a_morton_points_file_under_a_projected_view_is_refused_by_the_survey() {
     .expect("an unprojected view reads codes against the grid's own frame");
     assert_eq!(frame.survey, PointSurvey::Quantised);
 }
+
+/// **A shape declared in longitude and latitude holds the rows its curved projected image holds**
+/// (`polygon-membership.md` §4.3, R10; `projections.md` §10) — through the build's own reader, and
+/// against the build's own placement of the points.
+///
+/// The triangle is 8°W 50°N → 2°E 58°N → 8°W 58°N: two of its edges are a meridian and a parallel,
+/// straight in both planes, so the diagonal is the only edge whose two readings can differ — and
+/// they differ by 60 depth-16 cells at the midpoint, 21.5 km on the ground. Four of the ten places
+/// below sit in the band between the diagonal's own image and the straight chord between its
+/// projected endpoints. **They are the discriminating rows**: seven places are inside the shape as
+/// declared, three inside the chord's, and a build that joined the projected vertices with straight
+/// lines would count three.
+///
+/// The shape comes from `ShapeReader`, which is the build's own path from a declared `space` to
+/// canonical bytes, and the positions from `read_points`, which is the build's own path from the
+/// file to a stored position. That the two are the same function is R12, and it is what this
+/// asserts rather than assumes.
+#[test]
+fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
+    use tessera_build::shapes::{ShapeContext, ShapeReader};
+    use tessera_spatial::shape::{Shape, ShapeF64, Space};
+    use tessera_store::derived::{ShapeInput, ShapeSpace};
+    use tessera_types::layer::ShapeKind;
+
+    // (place, lon, lat, inside the shape as declared, inside the chord reading)
+    const PLACES: &[(&str, f64, f64, bool, bool)] = &[
+        // North of both boundaries: the two readings agree.
+        ("well inside", -3.0, 55.5, true, true),
+        ("north-west", -6.0, 56.0, true, true),
+        ("north-east", 0.0, 57.5, true, true),
+        // In the band between the edge's own image and its chord — inside as declared, outside
+        // under the chord, which has drawn its boundary tens of cells too far north.
+        ("band at 3°W, low", -3.0, 54.05, true, false),
+        ("band at 3°W, high", -3.0, 54.15, true, false),
+        ("band at 1°W", -1.0, 55.68, true, false),
+        ("band at 6°W", -6.0, 51.66, true, false),
+        // South of both: the two readings agree again.
+        ("south", -3.0, 52.0, false, false),
+        ("south-west", -6.0, 50.5, false, false),
+        ("south-east", 0.0, 54.0, false, false),
+    ];
+    const UK: &str = "POLYGON ((-8 50, 2 58, -8 58, -8 50))";
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let points = tmp.path().join("points.parquet");
+    write_points(
+        &points,
+        ("lon", "lat"),
+        &PLACES.iter().map(|p| p.1).collect::<Vec<_>>(),
+        &PLACES.iter().map(|p| p.2).collect::<Vec<_>>(),
+    );
+
+    let extent = AlignedSquare::WORLD.bounds();
+    let ctx = ShapeContext {
+        extent,
+        projection: Projection::WebMercator,
+        views: vec!["world".to_string()],
+        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+    };
+    let mut reader = ShapeReader::new("regions/uk", ShapeKind::Polygon, ctx, ShapeSpace::View);
+    let shapes = reader
+        .row("uk", Some(ShapeInput::Wkt(UK.to_string())), Some("wgs84"))
+        .expect("a `wgs84` polygon canonicalises on a projected view")
+        .expect("the row carries a shape");
+    let declared = Shape::decode(shapes.for_view("world").expect("the one view")).unwrap();
+
+    // The reading the owner ruled against: the three vertices projected, joined with straight
+    // lines. Built here so that a reader which did that would produce this exact shape.
+    let chorded = ShapeF64::Polygon(vec![vec![[(-8.0, 50.0), (2.0, 58.0), (-8.0, 58.0)]
+        .iter()
+        .map(|&(lon, lat)| Projection::WebMercator.forward(lon, lat))
+        .collect()]])
+        .canonical(Space::View, &extent)
+        .expect("a well-formed triangle in frame coordinates")
+        .0;
+    assert!(
+        declared.vertex_count() > chorded.vertex_count(),
+        "the declared shape was not densified: {} vertices against the chord's {}",
+        declared.vertex_count(),
+        chorded.vertex_count()
+    );
+
+    let mut rows = read_points(
+        &points,
+        &Fields::moved("view 'world'", [("x", "lon"), ("y", "lat")]),
+        Projection::WebMercator,
+        &extent,
+        None,
+    )
+    .expect("the places read");
+    rows.sort_by_key(|r| r.source_id);
+    assert_eq!(rows.len(), PLACES.len());
+
+    let mut held = 0;
+    let mut held_by_the_chord = 0;
+    for (row, &(place, _, _, inside, chord_inside)) in rows.iter().zip(PLACES) {
+        assert_eq!(
+            declared.contains((row.qx, row.qy)),
+            inside,
+            "'{place}' is on the wrong side of the shape as declared"
+        );
+        assert_eq!(
+            chorded.contains((row.qx, row.qy)),
+            chord_inside,
+            "'{place}' is on the wrong side of the chord reading — the fixture has drifted"
+        );
+        held += u32::from(inside);
+        held_by_the_chord += u32::from(chord_inside);
+    }
+    assert_eq!((held, held_by_the_chord), (7, 3));
+}
+
+/// A `wgs84` shape on a view with no projection is refused, and the refusal names the view: such a
+/// view has one space and nothing to convert a degree from (`polygon-membership.md` §4.3;
+/// `projections.md` §5.3). This does not change with projections built.
+#[test]
+fn a_wgs84_shape_on_an_unprojected_view_is_refused() {
+    use tessera_build::shapes::{ShapeContext, ShapeReader};
+    use tessera_store::derived::{ShapeInput, ShapeSpace};
+    use tessera_types::layer::ShapeKind;
+
+    let ctx = ShapeContext {
+        extent: Bounds {
+            x_min: 0.0,
+            x_max: 1000.0,
+            y_min: 0.0,
+            y_max: 1000.0,
+        },
+        projection: Projection::None,
+        views: vec!["s0".to_string()],
+        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+    };
+    let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx, ShapeSpace::View);
+    let err = reader
+        .row("uk", Some(ShapeInput::Bbox([-8.0, 50.0, 2.0, 58.0])), Some("wgs84"))
+        .expect_err("an unprojected view cannot honour `wgs84`");
+    let message = err.to_string();
+    assert!(message.contains("`projection` is `none`"), "{message}");
+    assert!(message.contains("projections.md"), "{message}");
+}
+
+/// A `wgs84` coordinate outside ±180 × ±90 is not a coordinate, and is refused where the shape is
+/// read rather than reported (`projections.md` §2).
+#[test]
+fn a_wgs84_shape_coordinate_outside_the_range_is_refused() {
+    use tessera_build::shapes::{ShapeContext, ShapeReader};
+    use tessera_store::derived::{ShapeInput, ShapeSpace};
+    use tessera_types::layer::ShapeKind;
+
+    let ctx = ShapeContext {
+        extent: AlignedSquare::WORLD.bounds(),
+        projection: Projection::WebMercator,
+        views: vec!["world".to_string()],
+        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+    };
+    let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx, ShapeSpace::Wgs84);
+    let err = reader
+        .row("uk", Some(ShapeInput::Bbox([-8.0, 50.0, 2.0, 91.0])), None)
+        .expect_err("91° is not a latitude");
+    assert!(err.to_string().contains("not a coordinate"), "{err}");
+    // The same numbers under `space = "view"` are ordinary frame coordinates, clamped and reported.
+    let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx_view(), ShapeSpace::View);
+    assert!(reader
+        .row("uk", Some(ShapeInput::Bbox([-8.0, 50.0, 2.0, 91.0])), None)
+        .is_ok());
+}
+
+fn ctx_view() -> tessera_build::shapes::ShapeContext {
+    tessera_build::shapes::ShapeContext {
+        extent: Bounds {
+            x_min: 0.0,
+            x_max: 1000.0,
+            y_min: 0.0,
+            y_max: 1000.0,
+        },
+        projection: Projection::None,
+        views: vec!["s0".to_string()],
+        max_vertices: tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+    }
+}

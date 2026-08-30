@@ -36,6 +36,7 @@ use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::ChangeOp;
+use tessera_spatial::shape::Space;
 use tessera_types::EntityId;
 
 const N: u64 = 3_000;
@@ -154,7 +155,7 @@ fn chosen_tiles(c: &Corpus) -> Vec<(u64, u32, u32)> {
 /// The canonical shape one declaration produces — what the oracle tests a quantised point against.
 fn canonical(shape: tessera_spatial::shape::ShapeF64) -> tessera_spatial::shape::Shape {
     shape
-        .canonical(&extent())
+        .canonical(Space::View, &extent())
         .expect("the fixture's shapes canonicalise")
         .0
 }
