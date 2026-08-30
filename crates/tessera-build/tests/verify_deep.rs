@@ -109,6 +109,7 @@ fn flushed_bundle(root: &Path) {
             extent: extent(),
             points,
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,

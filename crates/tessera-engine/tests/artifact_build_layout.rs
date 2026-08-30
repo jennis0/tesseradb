@@ -189,6 +189,7 @@ fn fixture() -> Fixture {
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,

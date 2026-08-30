@@ -123,6 +123,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs 
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,

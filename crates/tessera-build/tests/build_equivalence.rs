@@ -363,6 +363,7 @@ fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         }],
         anchor: 0,
@@ -1029,6 +1030,7 @@ fn reference_build_at_scale() {
             },
             points: PathBuf::from("data/scaled/geometry.parquet"),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(PathBuf::from(
                 "data/scaled/pairs/categories-subclass.pairs.parquet",
             )),

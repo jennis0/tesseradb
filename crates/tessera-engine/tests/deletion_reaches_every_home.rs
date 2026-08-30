@@ -252,6 +252,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,

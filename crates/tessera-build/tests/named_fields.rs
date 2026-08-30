@@ -129,6 +129,7 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
             extent: extent(),
             points: acquired_view.points,
             point_fields: acquired_view.point_fields,
+            select: None,
             access: acquired_view.access,
         }],
         anchor: 0,
@@ -252,7 +253,8 @@ fn a_moved_geometry_name_does_not_fall_through_to_the_other_shape() {
             tessera_spatial::Projection::None,
             &extent(),
             None,
-        )
+                None,
+    )
         .expect_err("expected a refusal")
     );
     assert!(message.contains("field `x`"), "{message}");

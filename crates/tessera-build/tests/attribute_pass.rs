@@ -235,6 +235,7 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
             },
             points: points.clone(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(dir.join("pairs.parquet")),
         }],
         anchor: 0,

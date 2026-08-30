@@ -1477,21 +1477,64 @@ fn main() -> ExitCode {
             // what establishes how much of the corpus that frame clamps. Printed for every view,
             // because the extent is the view's (decision 0040) and four plausible-looking numbers
             // are only checkable beside the data's own box.
-            let mut view_args: Vec<tessera_build::ViewArgs> = Vec::with_capacity(registry.len());
+            let mut acquired_views = Vec::with_capacity(registry.len());
             for view in &registry {
-                let acquired_view = match tessera_build::config::acquire_view(view) {
-                    Ok(acquired) => acquired,
+                match tessera_build::config::acquire_view(view) {
+                    Ok(acquired) => acquired_views.push(acquired),
                     Err(e) => {
                         eprintln!("build refused: {e}");
                         return ExitCode::FAILURE;
                     }
+                }
+            }
+            // **One frame per view, except on a group, where one frame covers every view of it**
+            // (`views.md` §3.1): a group's views differ by a key and by per-view metadata and by
+            // nothing else, so `auto` is fitted over the union of their sources and a stated
+            // extent is surveyed against every one of them. The views of a group are contiguous
+            // in the registry, so the fold is a scan.
+            let mut frames: Vec<usize> = Vec::with_capacity(registry.len());
+            let mut extents: Vec<tessera_spatial::Bounds> = Vec::with_capacity(registry.len());
+            let mut frame_of: std::collections::BTreeMap<&str, usize> =
+                std::collections::BTreeMap::new();
+            for (index, view) in registry.iter().enumerate() {
+                let owner = match &view.group {
+                    Some(membership) => membership.group.as_str(),
+                    None => view.id.as_str(),
                 };
-                let frame = match tessera_build::config::frame_view(
-                    &view.id,
+                match frame_of.get(owner) {
+                    Some(&first) => {
+                        frames.push(first);
+                        extents.push(extents[first]);
+                        continue;
+                    }
+                    None => frame_of.insert(owner, index),
+                };
+                let members: Vec<usize> = registry
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| match (&v.group, &view.group) {
+                        (Some(a), Some(b)) => a.group == b.group,
+                        _ => v.id == view.id,
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let sources: Vec<tessera_build::config::FrameSource> = members
+                    .iter()
+                    .map(|&i| tessera_build::config::FrameSource {
+                        points: &acquired_views[i].points,
+                        fields: &acquired_views[i].point_fields,
+                        select: acquired_views[i].select.as_ref(),
+                    })
+                    .collect();
+                let subject = match &view.group {
+                    Some(membership) => format!("view group '{}'", membership.group),
+                    None => format!("view '{}'", view.id),
+                };
+                let frame = match tessera_build::config::frame_of(
+                    &subject,
                     view.projection,
                     &view.extent,
-                    &acquired_view.points,
-                    &acquired_view.point_fields,
+                    &sources,
                     limit,
                 ) {
                     Ok(frame) => frame,
@@ -1505,15 +1548,23 @@ fn main() -> ExitCode {
                     eprintln!("build refused: {detail}");
                     return ExitCode::FAILURE;
                 }
-                view_args.push(tessera_build::ViewArgs {
+                frames.push(index);
+                extents.push(frame.extent);
+            }
+            let view_args: Vec<tessera_build::ViewArgs> = registry
+                .iter()
+                .zip(acquired_views)
+                .zip(&extents)
+                .map(|((view, acquired_view), extent)| tessera_build::ViewArgs {
                     view_id: view.id.clone(),
                     projection: view.projection,
-                    extent: frame.extent,
+                    extent: *extent,
                     points: acquired_view.points,
                     point_fields: acquired_view.point_fields,
+                    select: acquired_view.select,
                     access: acquired_view.access,
-                });
-            }
+                })
+                .collect();
             // Read out before the declaration is broken up into build arguments: it is a
             // property of the declaration, and every value in it exists by now.
             let disclosure = tessera_build::disclosure::Disclosure::of(&config);

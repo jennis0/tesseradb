@@ -128,6 +128,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
             },
             points: points.clone(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,

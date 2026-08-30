@@ -107,6 +107,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
             extent: extent(),
             points: points.to_path_buf(),
             point_fields: Default::default(),
+            select: None,
             access: AccessInput {
                 source: AccessSource::Field("categories".to_string()),
                 default: default.to_string(),

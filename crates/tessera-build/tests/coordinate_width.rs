@@ -88,6 +88,7 @@ fn positions(path: &Path, extent: &Bounds) -> Vec<(u32, u32)> {
         tessera_spatial::Projection::None,
         extent,
         None,
+            None,
     ).expect("the points read");
     rows.sort_by_key(|r| r.source_id);
     rows.iter().map(|r| (r.qx, r.qy)).collect()

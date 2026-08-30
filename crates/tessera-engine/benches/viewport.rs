@@ -76,6 +76,7 @@ fn ensure_bundle() -> PathBuf {
                 extent: extent(),
                 points: root.join("data/scaled/geometry.parquet"),
                 point_fields: Default::default(),
+                select: None,
                 access: tessera_build::config::AccessInput::relation(
                     root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
                 ),

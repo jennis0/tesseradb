@@ -63,7 +63,7 @@ fn whole_world() -> Extent {
 
 /// The cells a file's rows land in, by source id.
 fn cells(path: &Path, projection: Projection, extent: &Bounds) -> Vec<(u16, u16)> {
-    let mut rows = read_points(path, &geographic(), projection, extent, None).expect("points read");
+    let mut rows = read_points(path, &geographic(), projection, extent, None, None).expect("points read");
     rows.sort_by_key(|r| r.source_id);
     rows.iter()
         .map(|r| ((r.qx >> 16) as u16, (r.qy >> 16) as u16))
@@ -337,6 +337,7 @@ fn an_unprojected_view_stores_the_files_own_coordinates() {
         Projection::None,
         &extent,
         None,
+            None,
     )
     .expect("points read");
     rows.sort_by_key(|r| r.source_id);
@@ -412,6 +413,7 @@ fn build_bundle(
             extent,
             points: points.to_path_buf(),
             point_fields: fields,
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,
@@ -921,6 +923,7 @@ fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
         Projection::WebMercator,
         &extent,
         None,
+            None,
     )
     .expect("the places read");
     rows.sort_by_key(|r| r.source_id);

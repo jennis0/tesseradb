@@ -125,6 +125,7 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
             extent: world_frame(),
             points: points_path,
             point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs_path),
         }],
         anchor: 0,

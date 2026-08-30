@@ -116,6 +116,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
             extent: extent(),
             points: points_path.to_path_buf(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         }],
         anchor: 0,

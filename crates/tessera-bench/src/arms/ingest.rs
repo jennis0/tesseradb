@@ -241,6 +241,7 @@ pub fn run_build(
                     },
                     points: geometry.clone(),
                     point_fields: Default::default(),
+                    select: None,
                     access: tessera_build::config::AccessInput::relation(pairs.clone()),
                 }],
                 anchor: 0,

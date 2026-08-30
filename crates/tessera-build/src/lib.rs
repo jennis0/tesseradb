@@ -116,6 +116,14 @@ pub struct ViewArgs {
     /// Where the view's identity and geometry fields sit in that file — the view's `fields` map,
     /// resolved. [`config::Fields::default`] is canonical names throughout.
     pub point_fields: crate::config::Fields,
+    /// Which of that file's rows are this view's, where a group's views share one points file
+    /// (`views.md` §3.1's form B). `None` where the file *is* the view — every plain view, and
+    /// every view of a form A group.
+    ///
+    /// **Every pass over the file applies it**: the id union, the label vocabulary and its scan,
+    /// the geometry read, the frame survey and a group-scoped attribute's own column. A pass that
+    /// forgot it would read another view's rows into this view's row space.
+    pub select: Option<crate::config::ViewSelector>,
     /// Where each of this view's points gets its access terms, and what a point carrying none
     /// gets — the view's `point_visibility`, resolved.
     ///
@@ -580,6 +588,7 @@ pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
             field,
             &view.access.default,
             args.limit,
+            view.select.as_ref(),
         )?);
     }
     vocabulary.sort_unstable();
@@ -635,6 +644,7 @@ pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>
             vocabulary,
             plan.default_term[index],
             args.limit,
+            view.select.as_ref(),
             |id, term| visit(index, id, term),
         )?;
         fill.carried += one.carried;
@@ -934,6 +944,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         view.projection,
         &view.extent,
         args.limit,
+        view.select.as_ref(),
     )?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
@@ -2352,6 +2363,7 @@ mod tests {
                 },
                 points: PathBuf::from("points.parquet"),
                 point_fields: Default::default(),
+                select: None,
                 access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
             }],
             anchor: 0,

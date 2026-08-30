@@ -147,6 +147,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,

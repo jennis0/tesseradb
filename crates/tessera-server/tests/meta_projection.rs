@@ -80,6 +80,7 @@ fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds
                 "points",
                 [("x", "lon"), ("y", "lat")],
             ),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs.clone()),
         }],
         anchor: 0,

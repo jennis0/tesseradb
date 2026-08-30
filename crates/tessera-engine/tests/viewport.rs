@@ -794,6 +794,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
             extent: extent(),
             points: tmp.path().join("points.parquet"),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
         }],
         anchor: 0,
@@ -1314,6 +1315,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
                 },
                 points: PathBuf::from("data/scaled/geometry.parquet"),
                 point_fields: Default::default(),
+                select: None,
                 access: tessera_build::config::AccessInput::relation(PathBuf::from(
                     "data/scaled/pairs/categories-subclass.pairs.parquet",
                 )),

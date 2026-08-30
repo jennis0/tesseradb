@@ -1030,6 +1030,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 view.projection,
                 &view.extent,
                 args.limit,
+                view.select.as_ref(),
                 |point| {
                     chunk.push((point.source_id, (point.qx, point.qy)));
                     if chunk.len() == JOIN_CHUNK_ROWS {
@@ -3669,10 +3670,11 @@ pub(crate) fn render_presence_of(
 /// build exists to avoid.
 fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>> {
     let count = match args.limit {
-        // No limit ⇒ every row is selected ⇒ the metadata row count is exact and the counting
-        // decode is a whole pass over the file for nothing.
-        None => input::count_point_rows(&view.points)? as usize,
-        Some(_) => {
+        // No limit and no selection ⇒ every row is selected ⇒ the metadata row count is exact and
+        // the counting decode is a whole pass over the file for nothing. A form B source's rows
+        // are several views', so the count there is data-dependent like a limit's.
+        None if view.select.is_none() => input::count_point_rows(&view.points)? as usize,
+        _ => {
             let mut count = 0usize;
             input::scan_points(
                 &view.points,
@@ -3680,6 +3682,7 @@ fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>>
                 view.projection,
                 &view.extent,
                 args.limit,
+                view.select.as_ref(),
                 |_| {
                     count += 1;
                     ControlFlow::Continue(())
@@ -3695,6 +3698,7 @@ fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>>
         view.projection,
         &view.extent,
         args.limit,
+        view.select.as_ref(),
         |point| {
             ids.push(point.source_id);
             ControlFlow::Continue(())

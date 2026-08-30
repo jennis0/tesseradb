@@ -166,6 +166,7 @@ fn args(config: &Config, out: PathBuf) -> BuildArgs {
             },
             points: acquired_view.points,
             point_fields: acquired_view.point_fields,
+            select: None,
             access: acquired_view.access,
         }],
         anchor: 0,

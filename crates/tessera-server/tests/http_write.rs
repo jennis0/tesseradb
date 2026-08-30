@@ -4565,6 +4565,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
             extent: extent(),
             points: points.clone(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(pairs),
         }],
         anchor: 0,

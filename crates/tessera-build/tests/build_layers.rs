@@ -300,6 +300,7 @@ fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
             extent: extent(),
             points: inputs.points.clone(),
             point_fields: Default::default(),
+            select: None,
             access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
         }],
         anchor: 0,

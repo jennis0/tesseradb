@@ -729,6 +729,7 @@ require_member_visibility = "none"
                 },
                 points: points.clone(),
                 point_fields: parsed.views[0].fields.clone(),
+                select: None,
                 access: crate::config::AccessInput::relation(pairs.clone()),
             }],
             anchor: 0,
