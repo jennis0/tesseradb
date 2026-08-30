@@ -29,8 +29,8 @@ use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
 use tessera_engine::{
-    AcceptError, DeclaredScalar, MetaView, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE,
-    DENY_WINDOW_MAX_ENTRIES,
+    AcceptError, DeclaredScalar, MetaView, Projection, ScalarType, Vocabularies, VocabularyKind,
+    ABSENT_CODE, DENY_WINDOW_MAX_ENTRIES,
 };
 use tessera_lifecycle::{
     BatchArtifacts, BatchEdge, BatchMembership, ChangeOp, UnallocatedRow, WalScalar,
@@ -431,20 +431,46 @@ struct RawIngestItem {
     /// gets no sidecar entry and is addressable only by its `tessera_id` (returned per row in
     /// [`IngestResp`]).
     external_id: Option<Vec<u8>>,
+    /// **The view's frame, never longitude and latitude** — the transform has already run
+    /// (`projections.md` §3). Everything downstream of the decode reads a frame coordinate: the
+    /// engine's out-of-frame check, the WAL record, the buffer and the flush's quantiser.
     x: f64,
     y: f64,
     access: Vec<u8>,
     scalars: Vec<WalScalar>,
 }
 
-/// The column names this schema gives a meaning of their own; everything else in a batch is a
+/// The column names this schema gives a meaning of their own whatever the view, plus the
+/// coordinate pair [`coordinate_columns`] resolves; everything else in a batch is a
 /// caller-declared scalar **or a declared layer's name** (see [`parse_ingest_batch`]).
-const RESERVED_COLUMNS: [&str; 5] = ["external_id", "x", "y", "access", "node_id"];
+const RESERVED_COLUMNS: [&str; 3] = ["external_id", "access", "node_id"];
 
-/// One ingest batch, decoded: its rows, and what its membership columns said.
+/// What this view's coordinate columns are called, and what the wrong spelling would have meant.
+///
+/// **A projected view spells them `lon` and `lat`; a view with no projection spells them `x` and
+/// `y`** (`projections.md` §2). Longitude-then-latitude is the order GeoJSON and WKT use and the
+/// opposite of the order many sources publish, and a corpus written with the two exchanged is
+/// silently mirrored about the diagonal — so the axes are named for what they hold rather than
+/// documented. The build applies the same rule to a points file's columns
+/// (`tessera_build::config`'s `compile_projected_fields`), and it has to exist on both paths or a
+/// projected view is something that can be built correctly and ingested into wrongly
+/// (decision 0091).
+fn coordinate_columns(projection: Projection) -> (&'static str, &'static str) {
+    match projection {
+        Projection::None => ("x", "y"),
+        _ => ("lon", "lat"),
+    }
+}
+
+/// One ingest batch, decoded: its rows, what its membership columns said, and how many of those
+/// rows the view's projection clipped.
 struct ParsedBatch {
     items: Vec<RawIngestItem>,
     artifacts: BatchArtifacts,
+    /// Rows whose latitude fell outside the projection's own domain and were moved onto the
+    /// frame's edge (`projections.md` §7). Always `0` under `projection = "none"`, which has no
+    /// domain.
+    clipped: u64,
 }
 
 /// A column named for a declared layer, and what its cells mean.
@@ -941,6 +967,7 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 /// either is read as the other — a layer called `x` cannot make the geometry column mean a cluster.
 fn parse_ingest_batch(
     body: &[u8],
+    projection: Projection,
     declared: &[DeclaredScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
@@ -950,8 +977,10 @@ fn parse_ingest_batch(
         ApiError::Contract(format!("ingest body is not a valid Arrow IPC stream: {e}"))
     })?;
 
+    let (x_name, y_name) = coordinate_columns(projection);
     let mut items = Vec::new();
     let mut tally = MembershipTally::default();
+    let mut clipped = 0u64;
     for batch in reader {
         let batch = batch
             .map_err(|e| ApiError::Contract(format!("ingest body: arrow decode error: {e}")))?;
@@ -961,8 +990,33 @@ fn parse_ingest_batch(
         let offset = items.len();
 
         let ext = optional_binary_col(&batch, "external_id")?;
-        let x = coordinate_col(&batch, "x")?;
-        let y = coordinate_col(&batch, "y")?;
+        // **The spelling is checked before the columns are read**, so a batch that used the other
+        // one meets a refusal naming what this view calls its axes rather than a bare "column 'x'
+        // missing". Only fired where the right column is absent, so a `projection = "none"` view
+        // whose declared scalars happen to include a `lon` is unaffected: this is the surface
+        // every existing ingest uses.
+        for (wrong, right) in wrong_spellings(projection) {
+            if batch.column_by_name(wrong).is_some() && batch.column_by_name(right).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: {}, so its coordinate columns are '{x_name}' and '{y_name}', \
+                     not '{wrong}' (projections.md §2, §3). The axes are named for what they hold \
+                     because a corpus written with longitude and latitude exchanged is mirrored \
+                     about the diagonal and malformed in no other way; rename '{wrong}' to \
+                     '{right}'",
+                    match projection {
+                        Projection::None =>
+                            "this view declares no projection, so it has no longitude".to_string(),
+                        _ => format!("this view is projected `{}`", projection.name()),
+                    }
+                )));
+            }
+        }
+        let mut x = coordinate_col(&batch, x_name)?;
+        let mut y = coordinate_col(&batch, y_name)?;
+        // **The transform runs here, at the boundary, before anything else looks at the numbers**
+        // (`projections.md` §3) — the same place `tessera_build::input` runs it, which is what
+        // makes a projected view ingestable rather than only buildable (decision 0091).
+        clipped += project_columns(projection, &mut x, &mut y)?;
         let access = utf8_col(&batch, "access")?;
 
         // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
@@ -971,7 +1025,11 @@ fn parse_ingest_batch(
         let mut declarations = Vec::new();
         for field in schema.fields() {
             let name = field.name().as_str();
-            if RESERVED_COLUMNS.contains(&name) || declared.iter().any(|d| d.name == name) {
+            if RESERVED_COLUMNS.contains(&name)
+                || name == x_name
+                || name == y_name
+                || declared.iter().any(|d| d.name == name)
+            {
                 continue;
             }
             let Some(declaration) = layer_of(name) else {
@@ -1086,7 +1144,69 @@ fn parse_ingest_batch(
     Ok(ParsedBatch {
         items,
         artifacts: tally.into_artifacts(),
+        clipped,
     })
+}
+
+/// The coordinate columns a batch for this view must *not* carry, each paired with what it should
+/// have been called.
+///
+/// `x`/`y` and `lon`/`lat` are the only two spellings, so each view refuses exactly the other one
+/// and the pair is total rather than a list that could be empty.
+fn wrong_spellings(projection: Projection) -> [(&'static str, &'static str); 2] {
+    match projection {
+        Projection::None => [("lon", "x"), ("lat", "y")],
+        _ => [("x", "lon"), ("y", "lat")],
+    }
+}
+
+/// Project a batch's coordinate columns in place, returning how many rows the projection
+/// **clipped** (`projections.md` §3, §7).
+///
+/// # Two things go wrong here and they are not the same thing
+///
+/// A coordinate outside WGS84's own range is **not a coordinate** and is refused, exactly as the
+/// build refuses it (`projections.md` §2): the accepted input coordinate system is longitude
+/// within ±180 and latitude within ±90, and a caller holding anything else converts before
+/// arriving.
+///
+/// A latitude inside that range but outside the *projection's* domain — beyond ±85.0511287798066°
+/// for `web_mercator` — is **clipped onto the frame's edge, counted, and never refused** (§7). The
+/// same row builds, and a row a build accepts and an ingest rejects is a defect rather than a
+/// policy. Clipping never earns a refusal at any proportion: a clipped point's position is the
+/// projection's own domain boundary, which no choice of frame moves.
+///
+/// # Why the count is taken here and not downstream
+///
+/// The engine's out-of-frame check runs on what this function returns, and the frame's edge is
+/// exactly where the quantisation rule says a point is *not* out of frame — so at the whole-world
+/// frame that check structurally cannot see a single clipped row, however many there are. At a
+/// sub-square frame the two do overlap, a clipped point landing on the *world's* edge and so
+/// outside a frame that does not reach it; such a row is both clipped here and refused there,
+/// which §7 states as correct rather than as an exception to carve out.
+///
+/// `Projection::None` returns without touching either column — the identity, bit for bit, which is
+/// what keeps every existing ingest exactly as it was.
+fn project_columns(projection: Projection, x: &mut [f64], y: &mut [f64]) -> Result<u64, ApiError> {
+    if projection == Projection::None {
+        return Ok(0);
+    }
+    let mut clipped = 0u64;
+    for (row, (lon, lat)) in x.iter_mut().zip(y.iter_mut()).enumerate() {
+        if !lon.is_finite() || !lat.is_finite() || lon.abs() > 180.0 || lat.abs() > 90.0 {
+            return Err(ApiError::Contract(format!(
+                "ingest body: row {row} is at lon {lon}, lat {lat}, which is not a place. This \
+                 view is projected ({}), and the accepted input coordinate system is WGS84 \
+                 degrees — longitude within ±180, latitude within ±90 (projections.md §2). The \
+                 whole batch is refused, so nothing was queued or appended",
+                projection.name()
+            )));
+        }
+        clipped += u64::from(projection.is_clipped(*lat));
+        let (px, py) = projection.forward(*lon, *lat);
+        (*lon, *lat) = (px, py);
+    }
+    Ok(clipped)
 }
 
 /// `x-tessera-view` (contracts §3.4): optional when the bundle has one view, `422` if ambiguous.
@@ -1114,7 +1234,7 @@ fn parse_ingest_batch(
 /// No build path emits a multi-view bundle (`tessera-build` writes exactly one `ViewDescriptor`),
 /// so the second row is unreachable. It is implemented rather than asserted-away because it is a
 /// contract clause and it costs one comparison.
-fn resolve_view(view: Option<&str>, views: &[MetaView]) -> Result<String, ApiError> {
+fn resolve_view<'a>(view: Option<&str>, views: &'a [MetaView]) -> Result<&'a MetaView, ApiError> {
     match view {
         None if views.len() > 1 => Err(ApiError::Contract(format!(
             "this bundle has {} views ({}), so x-tessera-view is required — which one a batch \
@@ -1126,11 +1246,13 @@ fn resolve_view(view: Option<&str>, views: &[MetaView]) -> Result<String, ApiErr
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => views.first().map(|v| v.id.clone()).ok_or_else(|| {
-            ApiError::Contract("this bundle declares no view to ingest into".into())
-        }),
-        Some(id) if views.iter().any(|v| v.id == id) => Ok(id.to_string()),
-        Some(id) => Err(ApiError::Unknown(format!("unknown view '{id}'"))),
+        None => views
+            .first()
+            .ok_or_else(|| ApiError::Contract("this bundle declares no view to ingest into".into())),
+        Some(id) => views
+            .iter()
+            .find(|v| v.id == id)
+            .ok_or_else(|| ApiError::Unknown(format!("unknown view '{id}'"))),
     }
 }
 
@@ -1203,6 +1325,14 @@ struct IngestResp {
     accepted: u64,
     over_bound: u64,
     over_bound_ids: Vec<String>,
+    /// Rows this view's projection **clipped** — a latitude outside its domain, stored on the
+    /// frame's edge rather than where it was written (`projections.md` §7, §8).
+    ///
+    /// **Reported rather than refused, and reported here because nothing else would mention it.**
+    /// The build prints a clip count in its frame report; a projected view fed polar rows one
+    /// batch at a time has no build to print anything, so this is the only report those rows get.
+    /// Always `0` under `projection = "none"`, which has no domain to leave.
+    clipped: u64,
     /// Contracts §3.4: `external_id` is optional, so an accepted item may be addressable
     /// only by its `tessera_id` -- returned here per accepted row, in the same order as the
     /// request batch, so a caller can correlate. Present for every accepted row, whether or not
@@ -1240,13 +1370,24 @@ fn run_ingest(
     // `/v1/meta` publishes, and a second accessor is a second definition that can drift from it.
     let meta = state.engine.meta();
     let view = resolve_view(view, &meta.views)?;
+    // **The projection is the view's, read from the bundle manifest, and it decides both what the
+    // coordinate columns are called and what the numbers in them mean** (`projections.md` §3).
+    // Read once per batch beside the scalar tail, from the same `meta()` snapshot, so the two
+    // cannot come from different generations.
+    let projection = view.projection;
+    let view = view.id.clone();
 
     // **The layer lookup is the engine's registry, per column, not per row.** A registration is a
     // WAL append on the executor, so a column naming a layer registered a moment ago resolves here
     // exactly as the publication that created its artifacts did — and a name nothing registered is
     // refused with the undeclared-column message rather than accepted into nothing.
-    let ParsedBatch { items, artifacts } = parse_ingest_batch(
+    let ParsedBatch {
+        items,
+        artifacts,
+        clipped,
+    } = parse_ingest_batch(
         body,
+        projection,
         &meta.declared_scalars,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
@@ -1326,6 +1467,11 @@ fn run_ingest(
                 accepted: items.len() as u64,
                 over_bound,
                 over_bound_ids,
+                // Clipping is a property of the rows, not an effect of accepting them, so a
+                // replay reports the same count its first acceptance did — recomputed from the
+                // identical body, which is what makes the two agree. `minted` is 0 beside it
+                // because minting *is* an effect and this submission had none.
+                clipped,
                 tessera_ids,
                 // A replay creates nothing: the artifacts this batch's keys named were minted when
                 // it was first accepted, and this submission had no effect at all.
@@ -1474,6 +1620,7 @@ fn run_ingest(
         accepted,
         over_bound,
         over_bound_ids,
+        clipped,
         tessera_ids,
         minted,
     })
@@ -3199,6 +3346,7 @@ mod tests {
         ) -> Result<Vec<RawIngestItem>, ApiError> {
             parse_ingest_batch(
                 &body(column, nullable),
+                Projection::None,
                 &declared(),
                 &vocabularies(),
                 &no_layers,
@@ -3289,6 +3437,7 @@ mod tests {
         fn a_novel_key_under_a_discovered_vocabulary_travels_unresolved() {
             let items = parse_ingest_batch(
                 &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
+                Projection::None,
                 &declared(),
                 &vocabularies_of(VocabularyKind::Discovered),
                 &no_layers,
@@ -3308,6 +3457,7 @@ mod tests {
         fn a_bound_key_under_a_discovered_vocabulary_still_resolves_here() {
             let items = parse_ingest_batch(
                 &body(Arc::new(StringArray::from(vec!["ops"])), false),
+                Projection::None,
                 &declared(),
                 &vocabularies_of(VocabularyKind::Discovered),
                 &no_layers,

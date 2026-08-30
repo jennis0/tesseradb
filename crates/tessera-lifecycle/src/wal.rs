@@ -173,6 +173,14 @@ pub enum WalScalar {
 /// declared width, so the width is on-disk format: this field's change from `f32` is what
 /// `WAL_VERSION` 16 exists for, and a log at 15 is refused rather than read eight bytes at a time
 /// out of four.
+///
+/// **They are the view's frame coordinates, never longitude and latitude** (`projections.md` §3).
+/// A projected view's transform runs once, at the wire boundary, before the record is framed — so
+/// **replay reproduces the positions the original write produced rather than re-running the
+/// transform**. Nothing in recovery calls `Projection::forward`, and a platform's `log` and `tan`
+/// are therefore not part of it: Web Mercator is not bit-exact across C libraries (§11), and a log
+/// holding degrees would let a node come back up with points in different cells from the ones it
+/// acked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
     pub external_id: Option<Vec<u8>>,

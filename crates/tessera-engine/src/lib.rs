@@ -99,6 +99,10 @@ pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE}
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
 // its column's storage width, and reaches it here rather than transcribing the table again.
 pub use tessera_spatial::tiler::ScalarType;
+// `MetaView::projection`'s type. `/control/ingest` reads it to decide what a batch's coordinate
+// columns are called and what the numbers in them mean (`projections.md` §3), so the type has to
+// be nameable from the crate that decodes the batch — the same reason `ScalarType` is here.
+pub use tessera_spatial::Projection;
 // `EngineMeta::quantisation`'s type, re-exported for the same layering reason `DeclaredScalar` is:
 // `check-layers.sh` denies a `tessera-server → tessera-store` edge (SA §3), and `/control/ingest`
 // validates an ingested coordinate against this declaration (§6), so the type needs to be nameable
