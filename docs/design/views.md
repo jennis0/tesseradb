@@ -118,7 +118,7 @@ views it has — in one of two forms.
 [[view_group]]                      # form A: one view per block, one file per view
 name             = "quarter"
 title            = "By quarter"
-extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
 visibility       = "public"                        # the group's own gate
 point_visibility = { field = "access", default = "public" }
 metadata         = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }
@@ -142,7 +142,7 @@ ends   = 2026-10-01T00:00:00Z
 ```toml
 [[view_group]]                      # form B: the roster is a table, the points one file
 name             = "quarter"
-extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
 source           = "quarter_papers" # one row per (entity, view): entity_id, quarter, x, y, access, …
 fields           = { view = "quarter" }
 visibility       = "public"
@@ -248,11 +248,10 @@ point_visibility = { field = "access", default = "public" }
 ```
 
 Keys, ordinals, metadata and each view's own gate belong to the group that owns them, and a
-group naming `members` declares none of those: `metadata` and a roster are refused on it, and
-its own `visibility` is the one gate it may still declare, because a second
-layout may be narrower than the first. Its points come from its own `source` in form B's shape
-(a discriminator column), or per view under `[[view_group.view]]` blocks carrying only `key` and
-`source`. Creating `quarter:2026-Q3` creates `quarter_map:2026-Q3` at the same moment, empty, so
+group naming `members` declares none of those: `metadata` and both roster forms are refused on
+it, and its own `visibility` is the one gate it may still declare, because a second layout may
+be narrower than the first. Its points come from its own `source` in form B's shape — a
+discriminator column against the owning group's keys. Creating `quarter:2026-Q3` creates `quarter_map:2026-Q3` at the same moment, empty, so
 a request naming it is answered rather than 404ed; dropping the key drops both. Chains are
 refused — `members` must name a group that declares none — so the owner of a key set is always
 one hop away.
@@ -649,7 +648,7 @@ point_visibility = { field = "access", default = "public" }
 [[view_group]]                                                 # new block
 name             = "quarter"
 title            = "By quarter"
-extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
 visibility       = "public"
 point_visibility = { field = "access", default = "public" }
 metadata         = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }

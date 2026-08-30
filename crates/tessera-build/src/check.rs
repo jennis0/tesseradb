@@ -30,7 +30,9 @@ use std::path::Path;
 use arrow::datatypes::{DataType, Schema as ArrowSchema};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
-use crate::config::{ArtifactSource, Config, Extent, Fields, ENTITY_ID};
+use crate::config::{
+    ArtifactSource, Config, Extent, Fields, PointVisibility, Roster, ViewGroup, ENTITY_ID,
+};
 use crate::input::{column_carries, TERM_ID};
 
 /// One thing wrong, named the way the reader that would have refused it names it.
@@ -227,6 +229,9 @@ pub fn check(config: &Config) -> CheckReport {
     for view in &config.views {
         check_view(view, &mut report);
     }
+    for group in &config.view_groups {
+        check_view_group(config, group, &mut report);
+    }
     check_layers(config, &mut report);
     // **The shape report is the one part of a check that reads rows**, deliberately: the
     // decomposition's size is what an operator sizing a world-scale boundary set needs, and it is
@@ -236,6 +241,16 @@ pub fn check(config: &Config) -> CheckReport {
         report.shapes = crate::shapes::check_reports(config);
     }
     report
+}
+
+/// Whether the attribute at `index` was grouped against a file of its own — `false` means the
+/// declaration named no `source` and took no default, which is a refusal for an entity-scoped
+/// column and the ordinary case for a group-scoped one.
+fn attribute_source_absent(config: &Config, index: usize) -> bool {
+    !config
+        .attribute_sources
+        .iter()
+        .any(|group| group.attributes.contains(&index))
 }
 
 /// Every attribute source, and the declared columns each one carries.
@@ -255,6 +270,14 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
         .collect();
     carried.sort_unstable();
     for (index, attribute) in config.schema.attributes.iter().enumerate() {
+        // **A group-scoped attribute with no source of its own is read from the group's views'
+        // points files** (`views.md` §5), which [`check_view_group`] checks column by column — so
+        // it has a file, and it is not this pass's.
+        if config.scopes.attribute(&attribute.name).is_some()
+            && attribute_source_absent(config, index)
+        {
+            continue;
+        }
         if carried.binary_search(&index).is_err() {
             report.note(
                 format!("attribute '{}'", attribute.name),
@@ -363,6 +386,185 @@ fn check_view(view: &crate::config::View, report: &mut CheckReport) {
         require(report, &object, &schema, &view.fields, "y");
     }
     check_point_visibility(view, Some(&schema), report);
+}
+
+/// A view group's files: each view's points under form A, the group's own under form B, and the
+/// roster table where one is declared (`views.md` §3.1).
+///
+/// **Every view of a group is checked as a view**, because that is what it is below the
+/// declaration: the same identity column, the same geometry pair, the same access column. What is
+/// added is the discriminator — a form B source with no `view` column lands every row in a view
+/// nobody named — and the group-scoped attribute columns, which live in the views' own files where
+/// the attribute declares no source of its own (`views.md` §5).
+fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport) {
+    let object = format!("view group '{}'", group.name);
+    if group.projection != tessera_spatial::Projection::None {
+        report.frames.push(FramePreview {
+            view: group.name.clone(),
+            projection: group.projection.name(),
+            snapped: match &group.extent {
+                Extent::LonLat(asked) => {
+                    Some((*asked, crate::config::snap_lon_lat(group.projection, asked)))
+                }
+                _ => None,
+            },
+        });
+    }
+    // The columns a scoped attribute reads out of this group's points files, where it declares no
+    // source of its own — Appendix A's `sentiment`, read from each quarter's own file.
+    let scoped: Vec<&str> = config
+        .schema
+        .attributes
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| config.scopes.attribute(&a.name) == Some(group.name.as_str()))
+        .filter(|(index, _)| attribute_source_absent(config, *index))
+        .map(|(_, a)| a.column())
+        .collect();
+
+    match &group.roster {
+        Roster::Inline(views) => {
+            for view in views {
+                let object = format!("{object}, view '{}'", view.key);
+                let Some(path) = &view.source else {
+                    report.sources.push(SourceChecked {
+                        object,
+                        path: None,
+                    });
+                    continue;
+                };
+                let Some(schema) = open(report, &object, path) else {
+                    continue;
+                };
+                check_points(&object, &schema, &group.fields, false, report);
+                check_group_labels(&object, &group.point_visibility, &schema, report);
+                for column in &scoped {
+                    if schema.column_with_name(column).is_none() {
+                        report.note(
+                            &object,
+                            format!(
+                                "the group-scoped attribute column '{column}' is read from each \
+                                 view's own points file, and this one does not carry it. Its \
+                                 columns are: {}. Declare the attribute's own `source` if the \
+                                 values live elsewhere (views §5)",
+                                columns(&schema)
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        Roster::Table(_) | Roster::Discriminator => {
+            let Some(path) = &group.source else {
+                report.sources.push(SourceChecked {
+                    object,
+                    path: None,
+                });
+                return;
+            };
+            let Some(schema) = open(report, &object, path) else {
+                return;
+            };
+            check_points(&object, &schema, &group.fields, true, report);
+            check_group_labels(&object, &group.point_visibility, &schema, report);
+            for column in &scoped {
+                if schema.column_with_name(column).is_none() {
+                    report.note(
+                        &object,
+                        format!(
+                            "the group-scoped attribute column '{column}' is read from this \
+                             group's points, and the source does not carry it. Its columns are: \
+                             {}. Declare the attribute's own `source` if the values live elsewhere \
+                             (views §5)",
+                            columns(&schema)
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    if let Roster::Table(table) = &group.roster {
+        let object = format!("{object} `[view_group.views]`");
+        let Some(schema) = open(report, &object, &table.source) else {
+            return;
+        };
+        require(report, &object, &schema, &table.fields, "key");
+        // `visibility` and the metadata names are located by the same map and required by the
+        // group's own declaration: a metadata name declared is a column every view carries, and a
+        // roster with the column missing serves the field absent for the life of every view.
+        require_named(report, &object, &schema, &table.fields, &["visibility"]);
+        for declared in &group.metadata {
+            require(report, &object, &schema, &table.fields, &declared.name);
+        }
+    }
+}
+
+/// One points file's identity and geometry, and — where the group carries one — its discriminator.
+fn check_points(
+    object: &str,
+    schema: &ArrowSchema,
+    fields: &Fields,
+    discriminator: bool,
+    report: &mut CheckReport,
+) {
+    require(report, object, schema, fields, ENTITY_ID);
+    let names_morton = fields.names("morton") || fields.names("residual");
+    let names_xy = fields.names("x") || fields.names("y");
+    let has_morton = column_type(schema, fields, "morton").is_some();
+    if names_morton || (!names_xy && has_morton) {
+        require(report, object, schema, fields, "morton");
+        if fields.names("residual") {
+            require(report, object, schema, fields, "residual");
+        }
+    } else {
+        require(report, object, schema, fields, "x");
+        require(report, object, schema, fields, "y");
+    }
+    if discriminator {
+        require(report, object, schema, fields, "view");
+    }
+}
+
+/// A group's `point_visibility` against one of its views' files — [`check_point_visibility`]'s
+/// rule, over a group's shared declaration rather than a view's own.
+fn check_group_labels(
+    object: &str,
+    point_visibility: &PointVisibility,
+    schema: &ArrowSchema,
+    report: &mut CheckReport,
+) {
+    let Some(field) = &point_visibility.field else {
+        return;
+    };
+    match schema.column_with_name(field) {
+        None => report.note(
+            object,
+            format!(
+                "`point_visibility.field = \"{field}\"` names a column this view's source does not \
+                 carry. Its columns are: {}",
+                columns(schema)
+            ),
+        ),
+        Some((_, found)) => {
+            let ok = match found.data_type() {
+                DataType::Utf8 => true,
+                DataType::List(inner) | DataType::LargeList(inner) => {
+                    matches!(inner.data_type(), DataType::Utf8)
+                }
+                _ => false,
+            };
+            if !ok {
+                report.note(
+                    object,
+                    format!(
+                        "the access column '{field}' holds {:?}. A point's access terms are \
+                         strings — one, or a list of them",
+                        found.data_type()
+                    ),
+                );
+            }
+        }
+    }
 }
 
 /// Where each point's access terms come from: a column of the view's own source, or an exploded

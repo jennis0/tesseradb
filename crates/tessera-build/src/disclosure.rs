@@ -48,6 +48,10 @@ pub struct Disclosure {
 /// diff (`configuration.md` §2).
 #[derive(Debug, Clone, Serialize)]
 pub struct ViewDisclosure {
+    /// A `[[view]]`'s name, or a `[[view_group]]`'s — the two share one namespace, so this is
+    /// unambiguous, and a group's point-label rule is one decision shared by every view of it
+    /// (`views.md` §3.1). A reviewer diffing two declarations would otherwise see a group's
+    /// default change with nothing to show for it.
     pub name: String,
     /// `field`, `relation`, or `default_only` — which of the three shapes `point_visibility`
     /// declares.
@@ -162,17 +166,27 @@ pub struct SuppliedDisclosure {
 impl Disclosure {
     /// Read every disclosure decision out of a parsed declaration.
     pub fn of(config: &Config) -> Disclosure {
+        // Every view and every group, in declaration order: a group's `point_visibility` is one
+        // decision governing every view of it, and it is as much a disclosure decision as a plain
+        // view's.
         let views = config
             .views
             .iter()
-            .map(|view| ViewDisclosure {
-                name: view.name.clone(),
-                labels_from: match (&view.point_visibility.field, &view.point_visibility.source) {
+            .map(|view| (&view.name, &view.point_visibility))
+            .chain(
+                config
+                    .view_groups
+                    .iter()
+                    .map(|group| (&group.name, &group.point_visibility)),
+            )
+            .map(|(name, point_visibility)| ViewDisclosure {
+                name: name.clone(),
+                labels_from: match (&point_visibility.field, &point_visibility.source) {
                     (_, Some(_)) => "relation",
                     (Some(_), None) => "field",
                     (None, None) => "default_only",
                 },
-                default: view.point_visibility.default.clone(),
+                default: point_visibility.default.clone(),
             })
             .collect();
 

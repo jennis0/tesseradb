@@ -1759,6 +1759,39 @@ fn main() -> ExitCode {
                     frame.print();
                 }
             }
+            // **The declaration's view groups, and what is scoped to them** (`views.md` §3, §5)
+            // — the shape of a declaration nothing yet builds, so that `tessera check` is where
+            // an author reads back what they wrote. Reported, never a finding.
+            if !config.view_groups.is_empty() {
+                eprintln!("view groups, from the declaration alone:");
+                for group in &config.view_groups {
+                    let keys = group.declared_keys();
+                    let roster = match (&group.members, keys.len()) {
+                        (Some(owner), _) => format!("the views of '{owner}'"),
+                        (None, 0) => group.form().to_string(),
+                        (None, n) => format!("{}, {n} view(s): {}", group.form(), keys.join(", ")),
+                    };
+                    eprintln!("  {:<20} {roster}", group.name);
+                    if !group.metadata.is_empty() {
+                        eprintln!(
+                            "  {:<20} metadata: {}",
+                            "",
+                            group
+                                .metadata
+                                .iter()
+                                .map(|m| format!("{} ({})", m.name, m.ty.arrow_type_name()))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+                for (attribute, group) in &config.scopes.attributes {
+                    eprintln!("  {:<20} attribute '{attribute}'", format!("scope {group}"));
+                }
+                for (layer, group) in &config.scopes.layers {
+                    eprintln!("  {:<20} layer '{layer}'", format!("scope {group}"));
+                }
+            }
             // **The shape layers, sized from the geometry alone** (`polygon-membership.md` §6.5)
             // — the decomposition an operator sizing a boundary set reads before a build commits
             // memory to it. Reported, never a finding: nothing here refuses.
@@ -1798,10 +1831,16 @@ fn main() -> ExitCode {
                 print_disclosure(&tessera_build::disclosure::Disclosure::of(&config));
             }
             eprintln!(
-                "check OK: {} source(s), {} view(s), {} vocabulary(ies), {} attribute(s), {} \
-                 layer(s)",
+                "check OK: {} source(s), {} view(s), {} view group(s) over {} declared view(s), \
+                 {} vocabulary(ies), {} attribute(s), {} layer(s)",
                 report.sources.len(),
                 config.views.len(),
+                config.view_groups.len(),
+                config
+                    .view_groups
+                    .iter()
+                    .map(|g| g.declared_keys().len())
+                    .sum::<usize>(),
                 config.schema.vocabularies.len(),
                 config.schema.attributes.len(),
                 config.layers.len()
