@@ -4,9 +4,9 @@
 # convention every rung in this tree follows: `[sources]` is relative to the declaring document,
 # configuration.md §3, so the copy beside the data is what `tessera build` would read).
 #
-# **This fixture leads the implementation.** `tessera build` does not parse `[[view_group]]` yet
-# (views.md §7's ⊘), so `tessera check` and `tessera build` against this file will refuse it —
-# that is expected and this file is not meant to pass either today.
+# **`tessera check` passes against this file; `tessera build` refuses it.** The declaration
+# surface is parsed and validated; ⊘ the multi-view build is specified and not implemented
+# (views.md §7), so a build against a declaration carrying a `[[view_group]]` refuses naming that.
 #
 # Positions: `world` and `quarter_alt` are real-derived (a seeded sample of the GeoNames rung's own
 # built points, its Web Mercator [0,1] coordinates un-projected back to WGS84 degrees — see
@@ -61,7 +61,7 @@ point_visibility = { field = "access", default = "public" }
 name             = "quarter"
 title            = "By quarter"
 projection       = "none"
-extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
 visibility       = "public"
 point_visibility = { field = "access", default = "public" }
 metadata         = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }

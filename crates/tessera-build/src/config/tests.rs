@@ -184,6 +184,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "sources",
             "defaults",
             "view",
+            "view_group",
             "vocabulary",
             "attribute",
             "layer",
@@ -219,6 +220,29 @@ fn the_accepted_key_set_is_configuration_ms_table() {
         &["field", "source", "default"],
     );
     expect_keys(
+        "[[view_group]]\nname = \"g\"\nnonesuch = 1\n",
+        "[[view_group]]",
+        &[
+            "name",
+            "title",
+            "projection",
+            "source",
+            "fields",
+            "extent",
+            "point_visibility",
+            "visibility",
+            "members",
+            "metadata",
+            "view",
+            "views",
+        ],
+    );
+    expect_keys(
+        "[[view_group]]\nname = \"g\"\n[view_group.views]\nnonesuch = 1\n",
+        "[view_group.views]",
+        &["source", "fields"],
+    );
+    expect_keys(
         "[[vocabulary]]\nname = \"v\"\nnonesuch = 1\n",
         "[[vocabulary]]",
         &[
@@ -249,6 +273,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "multi",
             "render_in",
             "analyser",
+            "scope",
         ],
     );
     expect_keys(
@@ -258,6 +283,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
             "name",
             "title",
             "views",
+            "scope",
             "source",
             "fields",
             "artifacts",
@@ -890,7 +916,19 @@ fn a_views_own_visibility_is_refused_as_unbuilt() {
     );
     let message = err(&text);
     assert!(message.contains("specified and not built"), "{message}");
-    assert!(message.contains("views §3"), "{message}");
+    assert!(message.contains("views §6"), "{message}");
+}
+
+/// `public` is the documented default and the current behaviour, so writing it records nothing
+/// that is not already true — and the fixture corpora write it for clarity.
+#[test]
+fn a_view_may_declare_the_public_gate_it_already_has() {
+    let text = with_line(SEVERITY, "").replace(
+        "name             = \"s0\"",
+        "name             = \"s0\"\nvisibility       = \"public\"",
+    );
+    let config = parse_str(&text).expect("`public` is the default, written out");
+    assert_eq!(config.views[0].visibility, None);
 }
 
 /// **The extent belongs to the view, not to the invocation** (§1). Four spellings, and each one
@@ -2976,4 +3014,529 @@ fn layers_keep_their_declaration_order() {
             .collect::<Vec<_>>(),
         ["clusters/a", "topics/x"]
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// View groups (`views.md` §3), their rosters, their metadata and the scopes that name them
+// ---------------------------------------------------------------------------------------------
+
+/// One group over [`SEVERITY`]'s sources, form A: two views, one file each, two typed metadata
+/// names. Appended to `SEVERITY`, which declares the plain view `s0` beside it.
+const GROUP: &str = r#"
+[[view_group]]
+name             = "quarter"
+title            = "By quarter"
+extent           = { min = -40.0, max = 40.0 }
+visibility       = "public"
+point_visibility = { field = "categories", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[[view_group.view]]
+key    = "2026-Q2"
+source = "topics"
+label  = "Q2 2026"
+starts = 2026-04-01T00:00:00Z
+
+[[view_group.view]]
+key    = "2026-Q3"
+source = "other"
+label  = "Q3 2026"
+starts = 2026-07-01T00:00:00Z
+"#;
+
+/// The same group written in form B: one points file behind a discriminator, and the roster as a
+/// table of its own.
+const GROUP_B: &str = r#"
+[[view_group]]
+name             = "quarter"
+extent           = { min = -40.0, max = 40.0 }
+source           = "topics"
+fields           = { view = "quarter" }
+point_visibility = { field = "categories", default = "public" }
+metadata         = { label = "text" }
+
+[view_group.views]
+source = "other"
+fields = { key = "quarter" }
+"#;
+
+fn with_group(extra: &str) -> String {
+    format!("{SEVERITY}{GROUP}{extra}")
+}
+
+#[test]
+fn a_group_compiles_its_roster_its_metadata_and_its_shared_settings() {
+    let config = parse_str(&with_group("")).expect("the group parses");
+    assert_eq!(config.views.len(), 1, "a group is not a view");
+    let group = &config.view_groups[0];
+    assert_eq!(group.name, "quarter");
+    assert_eq!(group.source, None, "form A declares no group-level source");
+    assert_eq!(group.point_visibility.default, "public");
+    assert_eq!(
+        group
+            .metadata
+            .iter()
+            .map(|m| (m.name.as_str(), m.ty.arrow_type_name()))
+            .collect::<Vec<_>>(),
+        [("label", "text"), ("starts", "timestamp_us")]
+    );
+    assert_eq!(group.declared_keys(), ["2026-Q2", "2026-Q3"]);
+    let Roster::Inline(views) = &group.roster else {
+        panic!("form A compiles to an inline roster");
+    };
+    assert_eq!(
+        views[0].metadata.get("label"),
+        Some(&MetadataValue::Text("Q2 2026".to_string()))
+    );
+    // 2026-04-01T00:00:00Z, in the one unit a `timestamp_us` may hold.
+    assert_eq!(
+        views[0].metadata.get("starts"),
+        Some(&MetadataValue::TimestampUs(1_775_001_600_000_000))
+    );
+    assert!(views[0].source.is_some(), "each view names its own points");
+}
+
+#[test]
+fn a_group_compiles_the_roster_table_form() {
+    let config = parse_str(&format!("{SEVERITY}{GROUP_B}")).expect("form B parses");
+    let group = &config.view_groups[0];
+    assert!(group.source.is_some(), "form B's points are the group's");
+    assert_eq!(group.fields.of("view"), "quarter", "the discriminator");
+    let Roster::Table(table) = &group.roster else {
+        panic!("form B compiles to a roster table");
+    };
+    assert_eq!(table.fields.of("key"), "quarter");
+    assert!(group.declared_keys().is_empty(), "the keys are in the file");
+}
+
+/// **The roster is declared once.** The two forms say different things about where the points
+/// are, so a group writing both has said they are in two places.
+#[test]
+fn declaring_both_roster_forms_is_refused() {
+    let text = format!("{SEVERITY}{GROUP}\n[view_group.views]\nsource = \"other\"\n");
+    let message = err(&text);
+    assert!(message.contains("both roster forms"), "{message}");
+    assert!(message.contains("Write one of them"), "{message}");
+}
+
+/// Neither form and no `source`: the group's points come from nowhere, and `[defaults].source`
+/// deliberately does not reach a group.
+#[test]
+fn a_group_with_no_roster_and_no_source_is_refused() {
+    let text = format!(
+        "{SEVERITY}\n[[view_group]]\nname = \"quarter\"\nextent = \"auto\"\n\
+         point_visibility = {{ default = \"public\" }}\n"
+    );
+    let message = err(&text);
+    assert!(message.contains("come from nowhere"), "{message}");
+    assert!(message.contains("`[defaults].source`"), "{message}");
+}
+
+/// Form B is two files, and the group needs both: the roster lists the views, and the group's own
+/// `source` holds their points behind the discriminator.
+#[test]
+fn a_roster_table_without_the_groups_points_is_refused() {
+    let text = format!("{SEVERITY}{GROUP_B}").replace("source           = \"topics\"\n", "");
+    let message = err(&text);
+    assert!(
+        message.contains("a `[view_group.views]` roster and no `source`"),
+        "{message}"
+    );
+
+    // And the roster table's own file, which is not the group's.
+    let text = format!("{SEVERITY}{GROUP_B}")
+        .replace("[view_group.views]\nsource = \"other\"\n", "[view_group.views]\n");
+    assert!(err(&text).contains("`source` is required"), "{}", err(&text));
+}
+
+/// **Under form A the file is the view**, so a group-level `source` beside inline blocks is a
+/// second place the points could be.
+#[test]
+fn a_group_level_source_beside_inline_views_is_refused() {
+    let text = with_group("").replace(
+        "name             = \"quarter\"",
+        "name             = \"quarter\"\nsource           = \"topics\"",
+    );
+    let message = err(&text);
+    assert!(
+        message.contains("`source` beside `[[view_group.view]]` blocks"),
+        "{message}"
+    );
+}
+
+/// A group declaring neither roster form mints its views from the discriminator, and there is no
+/// roster record for a metadata value to sit on.
+#[test]
+fn metadata_with_no_roster_is_refused() {
+    let text = format!(
+        "{SEVERITY}\n[[view_group]]\nname = \"quarter\"\nextent = \"auto\"\nsource = \"topics\"\n\
+         metadata = {{ label = \"text\" }}\npoint_visibility = {{ default = \"public\" }}\n"
+    );
+    let message = err(&text);
+    assert!(message.contains("`metadata` with no roster"), "{message}");
+}
+
+/// **Chains are refused, so the owner of a key set is always one hop away** (§3.3).
+#[test]
+fn a_members_chain_is_refused() {
+    let text = with_group(
+        "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\nextent = \"auto\"\n\
+         source = \"other\"\npoint_visibility = { default = \"public\" }\n\
+         \n[[view_group]]\nname = \"quarter_third\"\nmembers = \"quarter_map\"\nextent = \"auto\"\n\
+         source = \"topics\"\npoint_visibility = { default = \"public\" }\n",
+    );
+    let message = err(&text);
+    assert!(message.contains("chains are refused"), "{message}");
+    assert!(
+        message.contains("Name 'quarter' here instead"),
+        "the refusal must name the owner: {message}"
+    );
+}
+
+#[test]
+fn a_members_group_takes_the_owners_views_and_declares_no_roster() {
+    let sharing = "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\n\
+                   extent = \"auto\"\nsource = \"other\"\nfields = { view = \"quarter\" }\n\
+                   point_visibility = { default = \"public\" }\n";
+    let config = parse_str(&with_group(sharing)).expect("a members group parses");
+    let shared = &config.view_groups[1];
+    assert_eq!(shared.members.as_deref(), Some("quarter"));
+    assert!(matches!(shared.roster, Roster::Discriminator));
+    assert!(shared.metadata.is_empty());
+
+    // Keys, ordinals and metadata belong to the group that owns the views.
+    let message = err(&with_group(&sharing.replace(
+        "extent = \"auto\"",
+        "extent = \"auto\"\nmetadata = { label = \"text\" }",
+    )));
+    assert!(message.contains("`metadata` on a group"), "{message}");
+    assert!(message.contains("Declare it on 'quarter'"), "{message}");
+
+    let message = err(&with_group(&format!(
+        "{sharing}\n[[view_group.view]]\nkey = \"2026-Q2\"\nsource = \"topics\"\n"
+    )));
+    assert!(message.contains("a roster on a group"), "{message}");
+}
+
+#[test]
+fn members_naming_no_group_is_refused() {
+    let text = with_group(
+        "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarterly\"\nextent = \"auto\"\n\
+         source = \"other\"\npoint_visibility = { default = \"public\" }\n",
+    );
+    let message = err(&text);
+    assert!(message.contains("names no `[[view_group]]` block"), "{message}");
+    assert!(message.contains("quarter"), "{message}");
+}
+
+/// `:`, `#` and `@` are reserved out of a view name and a key, because each is what makes an id or
+/// a pinned filter leaf unambiguous (`views.md` §3.2).
+#[test]
+fn the_reserved_characters_are_refused_in_a_name_and_in_a_key() {
+    let message = err(&with_group("").replace("\"quarter\"", "\"quarter:one\""));
+    assert!(message.contains("reserved out of a view name"), "{message}");
+
+    let message = err(&with_group("").replace("\"2026-Q2\"", "\"2026#Q2\""));
+    assert!(message.contains("reserved out of a view name"), "{message}");
+
+    let message = err(&with_group("").replace("\"2026-Q2\"", "\"2026.Q2\""));
+    assert!(message.contains("column-name charset"), "{message}");
+
+    let message = err(&SEVERITY.replace("name             = \"s0\"", "name             = \"s@0\""));
+    assert!(message.contains("reserved out of a view name"), "{message}");
+}
+
+#[test]
+fn two_views_of_one_group_may_not_share_a_key() {
+    let message = err(&with_group("").replace("\"2026-Q3\"", "\"2026-Q2\""));
+    assert!(message.contains("declared twice"), "{message}");
+}
+
+/// A layer's `views` and a scope's `group` name either kind, so one word for both is ambiguous
+/// wherever they meet.
+#[test]
+fn a_group_and_a_view_may_not_share_a_name() {
+    let message = err(&with_group("")
+        .replace("name             = \"quarter\"", "name             = \"s0\""));
+    assert!(message.contains("has the name of a `[[view]]` block"), "{message}");
+
+    // And two groups of one name, on the same argument the duplicate-view rule rests on.
+    let message = err(&with_group(GROUP));
+    assert!(message.contains("is declared twice"), "{message}");
+}
+
+/// **Metadata names are bounded by the roster's own keys** (§3.2): the inline block mixes them
+/// with the closed set, so a name in both is a key with two readings.
+#[test]
+fn a_metadata_name_may_not_take_a_roster_key() {
+    for reserved in ["key", "source", "visibility"] {
+        let text = with_group("").replace("label = \"text\"", &format!("{reserved} = \"text\""));
+        let message = err(&text);
+        assert!(
+            message.contains("a name the roster already uses"),
+            "{reserved}: {message}"
+        );
+    }
+    // And the discriminator, where the group carries one.
+    let text = format!("{SEVERITY}{GROUP_B}").replace("label = \"text\"", "quarter = \"text\"");
+    let message = err(&text);
+    assert!(message.contains("discriminator column"), "{message}");
+}
+
+/// The three settings a group's views share by definition, refused on a view of it — and named as
+/// group-level keys rather than reported as unknown ones.
+#[test]
+fn a_roster_entry_may_not_declare_a_group_level_key() {
+    for (key, value) in [
+        ("extent", "\"auto\""),
+        ("projection", "\"web_mercator\""),
+        ("point_visibility", "{ default = \"public\" }"),
+    ] {
+        let text = with_group("").replace(
+            "key    = \"2026-Q2\"",
+            &format!("key    = \"2026-Q2\"\n{key} = {value}"),
+        );
+        let message = err(&text);
+        assert!(message.contains("is a group-level key"), "{key}: {message}");
+        assert!(message.contains("Write `"), "{key}: {message}");
+    }
+}
+
+/// The block cannot be a `deny_unknown_fields` struct — it mixes a closed set with the declared
+/// metadata names — so the closure is kept by hand, and this is the assertion that it is kept.
+#[test]
+fn an_unknown_key_in_a_roster_entry_is_refused_against_the_declared_names() {
+    let text = with_group("").replace(
+        "key    = \"2026-Q2\"",
+        "key    = \"2026-Q2\"\nnonesuch = 1",
+    );
+    let message = err(&text);
+    assert!(
+        message.contains("is not a key of a `[[view_group.view]]` block"),
+        "{message}"
+    );
+    assert!(message.contains("label, starts"), "{message}");
+}
+
+/// A roster record is immutable (decision 0108), so a metadata value left out is a view served
+/// with that field missing for the whole of its life.
+#[test]
+fn a_roster_entry_carries_every_declared_metadata_name() {
+    let text = with_group("").replace("label  = \"Q2 2026\"\n", "");
+    let message = err(&text);
+    assert!(message.contains("no `label`"), "{message}");
+    assert!(message.contains("immutable"), "{message}");
+}
+
+#[test]
+fn a_metadata_value_is_typed_against_its_declaration() {
+    let text = with_group("").replace("starts = 2026-04-01T00:00:00Z", "starts = \"April\"");
+    let message = err(&text);
+    assert!(message.contains("timestamp_us"), "{message}");
+
+    let text = with_group("").replace("label = \"text\"", "label = \"u8\"");
+    let message = err(&text);
+    assert!(message.contains("write an integer"), "{message}");
+
+    let text = with_group("")
+        .replace("label = \"text\"", "label = \"u8\"")
+        .replace("label  = \"Q2 2026\"", "label  = 900");
+    let message = err(&text);
+    assert!(message.contains("0 to 255"), "{message}");
+
+    let text = with_group("").replace("starts = \"timestamp_us\"", "starts = \"nonesuch\"");
+    let message = err(&text);
+    assert!(message.contains("unknown type 'nonesuch'"), "{message}");
+}
+
+/// A local date-time names an instant only against a time zone nobody declared.
+#[test]
+fn a_metadata_timestamp_needs_an_offset() {
+    let text = with_group("").replace("2026-04-01T00:00:00Z", "2026-04-01T00:00:00");
+    let message = err(&text);
+    assert!(message.contains("needs a date, a time and an offset"), "{message}");
+}
+
+/// A group's own gate takes the same two readings a view's does.
+#[test]
+fn a_groups_gate_and_a_roster_records_gate_are_refused_as_unbuilt() {
+    let text = with_group("")
+        .replace("visibility       = \"public\"", "visibility       = \"ir:analyst\"");
+    let message = err(&text);
+    assert!(message.contains("specified and not built"), "{message}");
+
+    let text = with_group("").replace(
+        "key    = \"2026-Q2\"",
+        "key    = \"2026-Q2\"\nvisibility = \"ir:analyst\"",
+    );
+    assert!(err(&text).contains("specified and not built"), "{}", err(&text));
+}
+
+#[test]
+fn an_attribute_scopes_to_a_group_that_owns_its_views() {
+    let scoped = with_group("").replace(
+        "[[attribute]]\nname       = \"severity\"",
+        "[[attribute]]\nscope      = { group = \"quarter\" }\nname       = \"severity\"",
+    );
+    let config = parse_str(&scoped).expect("a scoped attribute parses");
+    assert_eq!(config.scopes.attribute("severity"), Some("quarter"));
+
+    let message = err(&scoped.replace("group = \"quarter\"", "group = \"quarterly\""));
+    assert!(message.contains("names no `[[view_group]]` block"), "{message}");
+
+    let message =
+        err(&scoped.replace("scope      = { group = \"quarter\" }", "scope      = \"quarterly\""));
+    assert!(message.contains("not a value this key takes"), "{message}");
+}
+
+/// **The group named is the one that owns the members** (§5): a scope on a `members` group would
+/// be a second name for one column family.
+#[test]
+fn a_scope_naming_a_members_group_points_at_the_owner() {
+    let text = with_group(
+        "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\nextent = \"auto\"\n\
+         source = \"other\"\nfields = { view = \"quarter\" }\n\
+         point_visibility = { default = \"public\" }\n",
+    )
+    .replace(
+        "[[attribute]]\nname       = \"severity\"",
+        "[[attribute]]\nscope      = { group = \"quarter_map\" }\nname       = \"severity\"",
+    );
+    let message = err(&text);
+    assert!(message.contains("declares `members = \"quarter\"`"), "{message}");
+    assert!(
+        message.contains("scope = { group = \"quarter\" }"),
+        "the refusal must point at the owner: {message}"
+    );
+}
+
+/// A layer may be drawn on a whole group, and a **scoped** layer only on that group's views.
+#[test]
+fn a_layer_may_name_a_group_and_a_scoped_one_may_name_only_its_own() {
+    let over_group = with_group(&LAYER.replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"quarter\"]",
+    ));
+    let config = parse_str(&over_group).expect("a layer over a group parses");
+    assert_eq!(config.layers[0].views, ["quarter"]);
+    assert_eq!(config.scopes.layer("clusters/a"), None);
+
+    let scoped = over_group.replace(
+        "views                     = [\"quarter\"]",
+        "views                     = [\"quarter\"]\nscope                     = { group = \"quarter\" }",
+    );
+    let config = parse_str(&scoped).expect("a scoped layer parses");
+    assert_eq!(config.scopes.layer("clusters/a"), Some("quarter"));
+
+    let message = err(&scoped.replace(
+        "views                     = [\"quarter\"]\nscope",
+        "views                     = [\"quarter\", \"s0\"]\nscope",
+    ));
+    assert!(message.contains("Nameable here: quarter"), "{message}");
+
+    let message = err(&over_group.replace(
+        "views                     = [\"quarter\"]",
+        "views                     = [\"nonesuch\"]",
+    ));
+    assert!(
+        message.contains("no `[[view]]` or `[[view_group]]` block declares"),
+        "{message}"
+    );
+    assert!(message.contains("quarter"), "{message}");
+}
+
+/// `fields.view` says where a scoped layer's discriminator is, and an unscoped layer has none —
+/// the map says *where*, never *whether* (`configuration.md` §8).
+#[test]
+fn fields_view_on_an_unscoped_layer_is_refused() {
+    let text = with_group(&LAYER.replace(
+        "views                     = [\"s0\"]",
+        "views                     = [\"s0\"]\nsource                    = \"hdbscan\"\n\
+         fields                    = { view = \"quarter\" }",
+    ));
+    let message = err(&text);
+    assert!(message.contains("names a field this object never declared"), "{message}");
+    assert!(message.contains("entity-scoped"), "{message}");
+}
+
+/// ⊘ The multi-view build is specified and not implemented (`views.md` §7), so a declaration
+/// carrying a group refuses at the build rather than materialising its plain views alone.
+#[test]
+fn a_declaration_with_a_group_has_no_sole_view() {
+    let config = parse_str(&with_group("")).expect("the group parses");
+    let message = format!("{}", config.sole_view().expect_err("a group has no sole view"));
+    assert!(message.contains("view group(s)"), "{message}");
+    assert!(message.contains("views §7"), "{message}");
+    // Without one, the plain view is still the answer.
+    assert_eq!(parse_str(SEVERITY).unwrap().sole_view().unwrap(), "s0");
+}
+
+/// **The fixture is the acceptance case**, read from the repository rather than copied: it is
+/// `test_corpora/multiview/`'s own `corpus.toml`, written against `views.md` r6 before any of this
+/// existed, and its README's feature table is the checklist this stage is measured against.
+#[test]
+fn the_multiview_fixture_parses() {
+    let declared = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../test_corpora/multiview/corpus.toml");
+    let text = std::fs::read_to_string(&declared).expect("the fixture is in the repository");
+    // **Written beside a vocabulary file rather than parsed in place.** A closed `[[vocabulary]]`
+    // naming a source is *read* at parse — the values are part of the declaration — and the
+    // fixture's parquets are derived data `prepare.py` writes, not committed beside it. So the
+    // declaration is the repository's, byte for byte, and the one file this parse opens is a
+    // minimal stand-in for `kind`'s nine keys.
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_keys(&dir.path().join("vocab-kind.parquet"), &["A", "P"]);
+    let path = dir.path().join("corpus.toml");
+    std::fs::write(&path, text).expect("write the fixture's declaration");
+    let config = Config::parse(&path, &HashMap::new()).expect("the multiview fixture parses");
+    assert_eq!(
+        config.views.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        ["world"]
+    );
+    assert_eq!(
+        config
+            .view_groups
+            .iter()
+            .map(|g| g.name.as_str())
+            .collect::<Vec<_>>(),
+        ["quarter", "quarter_alt"]
+    );
+    assert_eq!(
+        config.view_groups[0].declared_keys(),
+        ["2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"]
+    );
+    assert_eq!(config.view_groups[1].members.as_deref(), Some("quarter"));
+    assert_eq!(config.view_groups[1].fields.of("view"), "quarter");
+    assert_eq!(config.scopes.attribute("sentiment"), Some("quarter"));
+    assert_eq!(config.scopes.layer("quarter_clusters"), Some("quarter"));
+    assert_eq!(config.scopes.layer("collections"), None);
+    // The group-scoped attribute names no source of its own, so it is read from each view's own
+    // points file rather than from `[defaults].source` (`views.md` §5).
+    assert!(
+        !config
+            .attribute_sources
+            .iter()
+            .flat_map(|s| s.attributes.iter())
+            .any(|&i| config.schema.attributes[i].name == "sentiment"),
+        "a scoped attribute with no source does not take `[defaults].source`"
+    );
+}
+
+/// A one-column vocabulary file: `key`, and the codes assigned in the order given.
+fn write_keys(path: &Path, keys: &[&str]) {
+    let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("key", arrow::datatypes::DataType::Utf8, false),
+    ]));
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![std::sync::Arc::new(arrow::array::StringArray::from(
+            keys.to_vec(),
+        ))],
+    )
+    .expect("one column");
+    let file = std::fs::File::create(path).expect("create the vocabulary file");
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(file, schema, None).expect("open the writer");
+    writer.write(&batch).expect("write");
+    writer.close().expect("close");
 }

@@ -31,8 +31,15 @@ by the source's own name. `--extent`, `--id-key`, `--id-key-file`, `--points`, `
 each naming what is absent per
 [decision 0013](../decisions/0013-mark-specified-vs-implemented.md):
 
-- **A view's own `visibility`**, and `withdraw_on_member_deletion = true` on a **layer** (not on
-  its content, which needs a fold path) — each refused at parse rather than accepted and ignored.
+- **A view's or a view group's own `visibility` where it names a label** (`views.md` §6), and
+  `withdraw_on_member_deletion = true` on a **layer** (not on its content, which needs a fold
+  path) — each refused at parse rather than accepted and ignored. `visibility = "public"` compiles:
+  it is the default and the current behaviour, so writing it records nothing that is not already
+  true.
+- **A `[[view_group]]`, at the *build*** (`views.md` §7): the whole declaration parses, is checked
+  and is reported by `tessera check`, and `tessera build` against a declaration carrying one
+  refuses — there is no multi-view build, so a group is a set of coordinate systems with nothing
+  to materialise them.
 
 ⊘ A `title` on a view, an attribute or a vocabulary is compiled and **not yet published** — the
 manifest carries no slot for one, and adding three is a contracts change; a level's title and a
@@ -47,7 +54,7 @@ value it does not list is refused. That closure is what the leak register rests 
 exhaustive *because* the surface is enumerable, and a key added without an entry here is a control
 nobody has reasoned about.
 
-Eleven blocks. `R` = required, `D` = defaulted, `O` = optional with no default and no fallback.
+Fourteen blocks. `R` = required, `D` = defaulted, `O` = optional with no default and no fallback.
 **`source`, `fields` and inline data are acquisition keys** — a build reads them and a deployment
 writing through the service omits them entirely (§2), so an `R` on one of those means *required to
 build from a file*, never *required to declare*.
@@ -118,7 +125,45 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
 | `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }` — and under a projection, `"auto"` or `{ lon = [a,b], lat = [c,d] }`. See below |
 | `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
-| `visibility` | ⊘ | the view's own gate; specified, not implemented (views §3) |
+| `visibility` | D `public` | the view's own gate — an access label, or `public` ([`views.md`](views.md) §6). ⊘ No gate is evaluated, so a label is refused at parse and `public` is the only value that compiles |
+
+**`[[view_group]]`** — a set of views sharing every setting, differing by a key and per-view
+metadata ([`views.md`](views.md) §3,
+[decision 0108](../decisions/0108-a-view-group-grows-by-its-roster.md)). Repeatable. **It takes
+every `[[view]]` key above, with the same meaning**, and adds the four below. A group is not a
+view: it cannot be named on a viewer verb and has no row space of its own; its views are, each
+addressed `<group>:<key>` or `<group>:#<ordinal>`.
+
+| Key | | Value |
+|---|---|---|
+| `members` | O | another `[[view_group]]`'s name: this group's views are that group's (views §3.3). Chains are refused, and a group naming it declares no `metadata` and no roster — those belong to the group that owns the keys |
+| `metadata` | O | the per-view values a view carries, `name = type` over the `[[attribute]]` types; a category is `{ type = "category", vocabulary = … }`. A name the roster already uses — `key`, `source`, `visibility`, or the discriminator's own column — is refused |
+| `[[view_group.view]]` | O, repeatable | **form A**: one view per block — `key`, `source`, `visibility`, and one key per declared metadata name. The file *is* the view, so the group declares no `source` of its own |
+| `[view_group.views]` | O | **form B**: the roster as a table — `source` and `fields` over the canonical `key`, `visibility` and the metadata names — beside the group's own `source`, whose `fields.view` says which view each row of points lands in |
+
+**The roster decides where the points come from**, and declaring both forms is refused, as `source`
+beside inline `artifacts` is. A group declaring **neither** has its views minted from the
+discriminator's distinct values and carries no metadata; it needs the group-level `source` that the
+other two spellings of that arrangement need. **`[defaults].source` does not reach a group**: which
+of those arrangements a defaulted file meant is not something a default can decide.
+
+A view's `name` and a group's `name` and keys take the **column-name charset**, and `:`, `#` and
+`@` are reserved out of them (views §3.2): the first two build a view id and the third pins a
+group-scoped attribute to a view, so a name carrying one would make a request mean two things.
+
+```toml
+[[view_group]]
+name             = "quarter"
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
+point_visibility = { field = "access", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[[view_group.view]]
+key    = "2026-Q2"
+source = "q2"
+label  = "Q2 2026"
+starts = 2026-04-01T00:00:00Z
+```
 
 **`[[vocabulary]]`** — a named value set. Repeatable.
 
@@ -150,6 +195,7 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 | `analyser` | D | `text` only; `unicode` is the default and, today, the only one — see below |
 | `multi` | ⊘ | refused at parse (`per-point-attributes.md` §3.7, records §6) |
 | `render_in` | ⊘ | refused at parse (`per-point-attributes.md` §3.9) |
+| `scope` | D `entity` | `"entity"` — one value per entity, under every view — or `{ group = "<view_group>" }`, one per view of that group ([`views.md`](views.md) §5, [decision 0109](../decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md)). A scope naming a group that declares `members` is refused, pointing at the owner. A scoped attribute that names no `source` of its own is read from each of the group's views' own points files, so `[defaults].source` does not reach it. ⊘ The column family, the pinned leaf and the ingest rule are specified and not built |
 
 **The extent is the frame every stored position is relative to**, and it belongs to the view rather
 than to the invocation that built it. A coordinate is quantised across it into 32 bits — the top 16
@@ -401,7 +447,8 @@ the mis-split word does not find the document. `lindera` is the design's named e
 |---|---|---|
 | `name` | R | identity; tombstoned on drop |
 | `title` | O | human-readable; absent is served as absent |
-| `views` | R | the views this layer's artifacts are drawn on |
+| `views` | R | the views this layer's artifacts are drawn on. A name here is a `[[view]]` or a whole `[[view_group]]`, and naming a group draws the layer on every view of it, present and future ([`views.md`](views.md) §3.5) |
+| `scope` | D `entity` | `"entity"` — one artifact set, drawn on every view the layer names — or `{ group = "<view_group>" }`, a different set per view of that group (views §3.5, decision 0109). A scoped layer's rows carry a `view` column (`fields.view`), its artifacts are keyed per `(layer, view)`, and its `views` may name only that group and groups sharing its views |
 | `source` | R unless inline | a `[sources]` key: one file per layer, so no discriminator field exists. Declaring it beside `artifacts` is refused. **`[defaults].source` does not reach here** — a layer with no source is declared and empty (§8) |
 | `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, the shape kind's own columns (`min_x`, `min_y`, `max_x`, `max_y`; `cx`, `cy`, `r`; `cx`, `cy`, `a`, `b`, `angle`; `geometry`) and `space` on a layer declaring `shape`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
 | `default_space` | D `view` | the space the artifact table's shapes are written in where a row carries no `space` of its own ([`polygon-membership.md`](polygon-membership.md) §4.3). `view` is the space the points are stored in; `wgs84` is longitude and latitude, honoured on a view that declares a projection and refused on one that does not, and the shape goes through that view's own transform — the same function the points went through, which is what stops it selecting the wrong rows ([`projections.md`](projections.md) §10). Only on a layer declaring `shape` |
@@ -1171,6 +1218,13 @@ turns a silent empty column into a build failure. Silence is the whole reason it
 geometry column puts every point at the origin, and an absent access column puts every point in no
 principal's mask. A map with no `source` is refused too: it locates fields in a file the object
 never names.
+
+**`fields.view` is a discriminator, and it exists only where something declares one.** On a
+`[[view_group]]` it is form B's own key — the column saying which view a row of points lands in —
+and on a `[[layer]]` it is `scope = { group = … }` that asserts it, a layer with one artifact set
+having no row that could say which view an artifact belongs to. Named on either without that
+declaration, it is refused as a field the object never declared, which is this section's rule and
+not a new one.
 
 **`level` and `attached_level` are read under their own names.** A layer's `fields` map is closed
 to the names §1's tables give it, and a level is an address rather than a value — it is what makes

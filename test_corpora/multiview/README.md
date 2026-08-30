@@ -2,10 +2,13 @@
 
 **Status:** Working code, never normative, like every other directory in `test_corpora/` (see the
 parent README). Not a rung on the dataset ladder — it measures nothing and is outside the ingest
-campaign. Its only job is to be a `corpus.toml` a two-view build can be pointed at, once one
-exists: `tessera build` does not parse `[[view_group]]` yet (views.md §7's ⊘), so `tessera check`
-and `tessera build` against this fixture will refuse it today, and that is expected — this fixture
-deliberately leads the implementation rather than following it.
+campaign. Its job is to be a `corpus.toml` a two-view build can be pointed at, once one exists.
+
+**`tessera check` passes against it; `tessera build` refuses it.** The declaration surface —
+`[[view_group]]`, both roster forms, `members`, typed metadata, `scope` on an attribute and on a
+layer — parses and validates as of the build-surface stage, and `check` reports the group shape
+beside the views. ⊘ The multi-view build is still specified and not implemented (views.md §7), so
+a build against this file refuses naming that, which is expected.
 
 ## What is real-derived and what is synthetic
 
@@ -119,13 +122,22 @@ validating data/ladder/multiview
 
 ## A finding for `views.md`, not a fixture defect
 
-**Appendix A's worked declaration parses, and nothing in it had to be adapted.** Writing this
-corpus.toml against the r6 spellings — one `visibility` key, `[[view_group.view]]` vs.
-`[view_group.views]`, typed `metadata`, `scope` on an attribute and on a layer, `fields.view` on a
-group source and on a scoped layer — turned up no gap between the appendix and spec §3's key
-table; the one place this fixture departs from Appendix A's shape at all is giving the constant
-attributes their own explicit `source` (`attrs_constant`) rather than defaulting to
+**One spelling in `views.md`'s examples is not a spelling the surface has.** Spec §3.1's form A
+example and Appendix A both write a group's frame as
+`extent = { min = [-40.0, -40.0], max = [40.0, 40.0] }` — `min` and `max` as two-element arrays.
+`configuration.md` §1, which owns the *spelling* of every key (see its preamble), gives `extent`
+four forms, and `{ min, max }` is the **scalar** one — one range applied to both axes, preserving
+aspect ratio — with `{ x = [a, b], y = [c, d] }` the per-axis form. A group takes every `[[view]]`
+key with the same meaning, so a group's `extent` has a view's four spellings and no fifth. This
+file was written from views.md's example and now carries the surface's own spelling,
+`{ x = [-40.0, 40.0], y = [-40.0, 40.0] }`, which is the same box. **The example is what needs
+correcting, or `configuration.md` needs the array form; neither is decided here.**
+
+Otherwise **Appendix A's worked declaration parses, and nothing else in it had to be adapted.**
+Writing this corpus.toml against the r6 spellings — one `visibility` key, `[[view_group.view]]`
+vs. `[view_group.views]`, typed `metadata`, `scope` on an attribute and on a layer, `fields.view`
+on a group source and on a scoped layer — turned up no other gap between the appendix and spec
+§3's key table; the one place this fixture departs from Appendix A's shape at all is giving the
+constant attributes their own explicit `source` (`attrs_constant`) rather than defaulting to
 `[defaults].source`, which spec §5 already allows and Appendix A simply didn't need because its
-`year`/`venue` attributes only ever needed values for `papers`-view entities. `tessera check`
-against `[[view_group]]` is still unimplemented, so this is a read of the spec's own internal
-consistency rather than a build's.
+`year`/`venue` attributes only ever needed values for `papers`-view entities.
