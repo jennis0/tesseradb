@@ -1,10 +1,10 @@
 # Projections
 
-**Status:** **Provisional — reviewed, built, and awaiting promotion.** The adversarial review is
-done and dispositioned, and the four normative amendments this design forces have landed:
-[`configuration.md`](configuration.md) §1 (the `[[view]]` block), [`contracts.md`](contracts.md) §2.2
-(the bundle's recorded projection), §3.2 (the `/v1/meta` fields) and §3.4 (the ingest schema's
-coordinate columns). What remains is the owner's ruling on promotion.
+**Status:** **Normative (r8)** — promoted 2026-08-30. The rulings it rests on are
+[decision 0105](../decisions/0105-a-view-declares-a-projection-from-a-closed-set.md) (the closed
+set, the frame in degrees, the filled grid) and
+[decision 0106](../decisions/0106-the-coordinate-path-is-f64.md) (the coordinate path). It amends
+[`configuration.md`](configuration.md) §1 and [`contracts.md`](contracts.md) §2.2, §3.2 and §3.4.
 
 **Built, and the ladder is on it.** The transform, the declaration, the frame and its snap, the
 build- and write-path projections, the report, the `/v1/meta` fields and shapes declared in
@@ -435,6 +435,14 @@ affected and a sparse hand-written polygon is.
   geographic test fixture.
 
 ## Appendix R — review trail
+
+**r8 (2026-08-30).** Promoted. Built in eight phases and reviewed twice more during the build — at
+the configuration surface and at the shapes — beyond the design review at r5. Both later reviews
+found defects in *this document* rather than in the code it had produced, which is recorded in r6
+and r7 and is the reason the build was allowed to amend it: the degenerate-box rule, the
+build-versus-ingest asymmetry, the example report, and a `tessera check` behaviour it described and
+nothing implemented. Every stored position in both geographic corpora — 87,094,949 across GeoNames
+and Overture — agrees with an independent recomputation through the module that placed them before.
 
 **r7.** Four corrections the build found, each at a claim the implementation could check and the
 design could not. §3 had the write path's out-of-frame check *warning*; it refuses, where the build's
