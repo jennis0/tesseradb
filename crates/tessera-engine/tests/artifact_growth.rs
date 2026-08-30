@@ -22,6 +22,7 @@ mod common;
 use common::*;
 use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::{ArtifactOut, Engine};
+use tessera_lifecycle::membership::IncomingContent;
 use tessera_lifecycle::wal::ChangeOp;
 use tessera_lifecycle::{IncomingArtifact, IncomingGrowth};
 use tessera_types::layer::{
@@ -93,6 +94,12 @@ impl Fixture {
     /// The corpus entities behind a run of source ids — what a clustering pipeline, or an ingest
     /// carrying a cluster id, would resolve its members to.
     fn members(&self, source_ids: std::ops::Range<u64>) -> Vec<EntityId> {
+        self.members_of(source_ids)
+    }
+
+    /// The same, over any run of source ids — what a generating set is drawn from, which is a
+    /// selection of the corpus rather than a contiguous range.
+    fn members_of(&self, source_ids: impl Iterator<Item = u64>) -> Vec<EntityId> {
         let map = source_to_new_map(&self.root, "v00000");
         source_ids.map(|s| EntityId::new(map[&s])).collect()
     }
@@ -284,6 +291,113 @@ fn rotate(engine: &Engine) {
 fn artifact_entity(engine: &Engine, id: tessera_types::TesseraId) -> EntityId {
     let idset = engine.generation().bundle.manifest.identity.idset;
     engine.resolve_tessera_ids(&[id], idset).unwrap()[0].expect("it names what was issued")
+}
+
+// ---- I8: what a growth may not touch ------------------------------------------------------------
+
+/// `clusters/a`, declaring corpus-derived supplied content — the declaration that gives an artifact
+/// a generating set at all, and therefore the only one under which I8 has anything to say.
+fn described_declaration() -> LayerDeclaration {
+    let mut d = declaration("clusters/a");
+    d.content.supplied = vec![tessera_types::layer::SuppliedContent {
+        name: "topic".into(),
+        ty: "text".into(),
+        require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+    }];
+    d
+}
+
+/// The artifacts one credential is served over the whole map — [`artifacts_of`] is the
+/// full-coverage case of this, and a full-coverage mask contains every generating set, an empty or
+/// a widened one included.
+fn artifacts_for(engine: &Engine, credential: &[u8]) -> Vec<ArtifactOut> {
+    let session = engine.authorise(credential).unwrap();
+    engine
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, WHOLE_MAP, N_ITEMS as usize),
+        )
+        .expect("a viewport over the whole map")
+        .artifacts
+}
+
+/// **I8's headline arm.** A generating set is immutable once supplied: documents arriving later are
+/// members of the artifact and are **not** part of what its description was generated from.
+///
+/// The case is put to a principal that can tell the two apart. The generating set is drawn inside
+/// the subset term, so a principal holding that term contains it entire and reads the description;
+/// the joiners are the next thirty source ids, twenty of which that principal cannot see. If a
+/// growth added the joiners to the set, the description would stop being readable by the one
+/// principal it was published for — while every full-coverage assertion beside it went on holding.
+///
+/// **Mutations this kills:** any line beside `ArtifactStore::grow`'s
+/// `record.members.or_inplace(joining)` that keeps a description's provenance "in sync" with the
+/// membership it describes — `content.generated_from.or_inplace(joining)`. It fails conservatively
+/// at first, which is why nothing else here would notice.
+#[test]
+fn a_growth_does_not_enter_the_generating_set() {
+    let fx = fixture();
+    let engine = fx.open();
+    engine.register_layer(described_declaration()).unwrap();
+
+    let covered = |s: &u64| terms_of(*s).contains(&SUBSET_TERM);
+    assert!(
+        (300..330).any(|s| !covered(&s)),
+        "the joiners must include documents the narrow principal cannot see, or this test proves \
+         nothing"
+    );
+
+    engine
+        .publish_artifacts(
+            "clusters/a".into(),
+            0,
+            vec![IncomingArtifact::with_content(
+                Some("c0".into()),
+                fx.members(0..300),
+                vec![IncomingContent::new(
+                    vec!["shipping and logistics".into()],
+                    fx.members_of((0..300).filter(covered)),
+                )],
+            )],
+        )
+        .expect("a described artifact publishes");
+    wait_for_publication(&fx, &engine, 1);
+
+    let before = artifacts_for(&engine, &subset_credential());
+    assert_eq!(
+        before.len(),
+        1,
+        "the narrow principal contains the generating set entire, so it is served the artifact"
+    );
+    assert_eq!(before[0].content, vec!["shipping and logistics"]);
+    let narrow_count_before = before[0].masked_count;
+
+    grow(&fx, &engine, 300..330);
+
+    assert_eq!(
+        count(&engine),
+        330,
+        "the membership grew — without which the assertion below is about an artifact nothing \
+         happened to"
+    );
+
+    let after = artifacts_for(&engine, &subset_credential());
+    assert_eq!(
+        after.len(),
+        1,
+        "the generating set is what it was published as, so the principal that contained it \
+         contains it still: a joiner it cannot see must not have entered the set"
+    );
+    assert_eq!(
+        after[0].content,
+        vec!["shipping and logistics"],
+        "and the description is still readable, which is the whole of what containment decides"
+    );
+    assert!(
+        after[0].masked_count > narrow_count_before,
+        "the narrow principal's own count did move, so the growth reached this viewer's answer \
+         and left only the generating set alone"
+    );
 }
 
 /// **The assertion the mechanism exists for.** A point joins a cluster that was already durable in

@@ -581,6 +581,57 @@ fn a_pairs_file_missing_a_base_pair_is_refused() {
     expect_refusal(&root, "pairs.parquet");
 }
 
+/// §11's other half — **the permutation covers exactly the rows the segments claim** — in its
+/// refusal direction. One entity's slot in `permutation.bin` is overwritten with the row-absent
+/// sentinel, so its row in `columns.arrow` is addressable by no entity at all.
+///
+/// The damage is deliberately the *surjective* one, because it is the only half nothing else
+/// holds: the mapping stays injective and in range, so `Permutation::load`'s header and length
+/// checks and `validate_rows`' aliasing sweep on the read path both still accept the bundle, and
+/// `open_bundle` hands the verifier a row space it is happy with. What is left is a row the
+/// segments count and the row space does not claim.
+///
+/// **The needle is the count check specifically**, and not merely any refusal. The identity
+/// sweep's per-row companion (*"no entity claims this row"*) also meets this damage, so a test
+/// content with an error of any kind would pass with the count check deleted; pinning the message
+/// keeps §11's own clause — the row space claims exactly the rows the segments hold — the thing
+/// under test.
+///
+/// Mutations this kills: dropping or weakening the `claimed != total_rows` refusal — under
+/// `let _ = claimed;` the count check is silent and the refusal comes from the companion instead.
+#[test]
+fn a_permutation_leaving_a_row_unclaimed_is_refused() {
+    let temp = tempfile::TempDir::new().unwrap();
+    flushed_bundle(temp.path());
+    let root = bundle_root(&temp);
+    let rel = "partitions/default/views/s0/permutation.bin";
+    let path = root.join("v00000").join(rel);
+
+    // `permutation.bin` is a 16-byte header (magic, version, reserved, bound) then one
+    // little-endian `u32` slot per entity (contracts R4).
+    const HEADER: usize = 16;
+    const ROW_ABSENT: [u8; 4] = [0xff; 4];
+    const ORPHANED: usize = 3;
+    let mut bytes = fs::read(&path).unwrap();
+    let slot = HEADER + ORPHANED * 4;
+    assert_eq!(
+        u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+        N_ITEMS,
+        "the fixture's base permutation must cover the built entities"
+    );
+    assert_ne!(
+        bytes[slot..slot + 4],
+        ROW_ABSENT,
+        "entity {ORPHANED} must hold a row before this test takes it away, or the damage is no \
+         damage"
+    );
+    bytes[slot..slot + 4].copy_from_slice(&ROW_ABSENT);
+    fs::write(&path, &bytes).unwrap();
+    refresh_digest(&root, rel);
+
+    expect_refusal(&root, "the row space claims");
+}
+
 /// The source binding is specified (correctness-suite §11.1) but its manifest field is not: a
 /// request to check it must refuse loudly, never pretend the binding was checked.
 #[test]

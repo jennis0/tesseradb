@@ -2643,6 +2643,7 @@ dependencies = [
  "icu_properties",
  "icu_segmenter",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -2919,6 +2920,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tessera-types",
  "trybuild",
 ]
 

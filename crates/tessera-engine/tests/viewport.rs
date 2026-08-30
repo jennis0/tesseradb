@@ -681,15 +681,20 @@ fn engine_open_seeds_the_allocator_from_the_manifest_high_water() {
     assert_eq!(engine.allocator_high_water(), N_ITEMS);
 }
 
-/// `Engine::item` inverts the wire `tessera_id` and locates its row via
-/// `Permutation::row_of` — an O(1) bijection lookup, never a linear scan of an identity column
-/// (contracts r6 replaced that column's contents with the opaque `tessera_id`, so a scan of it
-/// would search the wrong space entirely). Asserted against a source item whose signature-sorted
-/// entity id (and therefore its row) is not the first one built — a truncated or
-/// first-rows-only lookup would miss it, while the permutation's O(1) `row_of` does not care
-/// where the row sits.
+/// `Engine::item` resolves a row wherever it sits: the item asserted here is a source item whose
+/// signature-sorted entity id — and therefore its row — is not among the first built, and it comes
+/// back with the right external id. `Permutation::row_of` is an O(1) bijection lookup and does not
+/// care where the row sits; contracts r6 replaced the identity column's contents with the opaque
+/// `tessera_id`, so a scan of *that* column would search the wrong space entirely.
+///
+/// **What this pins is the reach of the lookup, not its mechanism.** An implementation that walked
+/// the entity-id column top to bottom would find the same row and pass, so the name says "far from
+/// the segment's start" rather than claiming to discriminate a scan.
+///
+/// Mutations this kills: a lookup truncated to a prefix of the rows, or one that searches only the
+/// first segment.
 #[test]
-fn item_lookup_goes_through_the_permutation_not_a_column_scan() {
+fn item_lookup_resolves_a_row_far_from_the_segments_start() {
     let tmp = TempDir::new().unwrap();
     let bundle_root = tmp.path().join("bundle");
     build_fixture(
@@ -1281,7 +1286,7 @@ fn engine_open_does_not_touch_the_sidecar() {
 /// fast unit test — run explicitly with `cargo test --release -p tessera-engine --test viewport \
 /// -- --ignored latency_sanity_at_2_4m_p99_under_50ms`.
 #[test]
-#[ignore]
+#[ignore = "measurement: builds /tmp/tessera-2m4 from the real corpus and times it — release only, see the doc above"]
 fn latency_sanity_at_2_4m_p99_under_50ms() {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};

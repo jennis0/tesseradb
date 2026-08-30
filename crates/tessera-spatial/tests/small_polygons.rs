@@ -7,7 +7,7 @@
 //! holding a shape and no row (2026-08-29), and this test is half of why that is right: both
 //! routes agree the source coordinates are inside. The other half is that a point's **stored**
 //! position is its `f32` coordinates quantised, which at this extent moves it by up to ~128 grid
-//! units, and for these three that is across the edge — the membership is of the stored
+//! units, and for both of these that is across the edge — the membership is of the stored
 //! position, exactly, as the design says (`polygon-membership.md` §4.1).
 
 use tessera_spatial::morton::{fixed32, split32, Bounds};
@@ -33,12 +33,31 @@ const CASES: &[(&str, f64, f64)] = &[
     ),
 ];
 
+/// The two routes agree **and both say inside**, over a shape canonicalisation kept whole.
+///
+/// The agreement alone is not the claim: two routes answering *outside* agree too, and a
+/// canonicalisation that dropped a sub-cell ring is exactly what makes them both say it. So the
+/// survival of the ring, the containment itself and the route the boundary answer took are each
+/// asserted here rather than printed.
+///
+/// Mutations this kill: a canonicalisation that drops a ring smaller than one depth-16 cell (the
+/// report's `rings_dropped`, and the emptied shape's `contains`); a decomposition that offers a
+/// sub-cell shape no boundary cell, leaving the resolution's route with nothing to descend into.
 #[test]
-fn a_polygon_smaller_than_a_cell_agrees_with_itself_about_its_one_point() {
+fn a_polygon_smaller_than_a_cell_holds_its_one_point_by_both_routes() {
     for (wkt, x, y) in CASES {
         let shape = ShapeF64::Polygon(read_wkt(wkt).unwrap());
         let (canonical, report) = shape.canonical(Space::View, &E).unwrap();
         eprintln!("{report:?} vertices {}", canonical.vertex_count());
+        assert!(
+            !report.outside && report.rings_dropped == 0,
+            "the polygon must survive quantisation whole, or nothing below is being tested: \
+             {report:?} for {wkt}"
+        );
+        assert!(
+            canonical.vertex_count() >= 3,
+            "a surviving ring keeps at least three vertices: {wkt}"
+        );
         let p = (fixed32(*x, E.x_min, E.x_max), fixed32(*y, E.y_min, E.y_max));
         let direct = canonical.contains(p);
         let decomposition = canonical.decompose(None);
@@ -63,6 +82,18 @@ fn a_polygon_smaller_than_a_cell_agrees_with_itself_about_its_one_point() {
             decomposition.interior.len(),
             decomposition.boundary.len()
         );
-        assert_eq!(direct, via_cell, "{wkt}");
+        assert!(
+            in_interior || boundary.is_some(),
+            "the point's cell is neither interior nor boundary, so the resolution's route never \
+             descends into the shape at all: {wkt}"
+        );
+        assert!(
+            direct,
+            "the direct test must hold the point its source coordinates are inside: {wkt}"
+        );
+        assert_eq!(
+            direct, via_cell,
+            "the boundary-cell route the resolution takes disagrees with the direct test: {wkt}"
+        );
     }
 }

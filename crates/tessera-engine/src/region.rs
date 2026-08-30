@@ -35,8 +35,8 @@ use sha2::{Digest, Sha256};
 
 use tessera_spatial::shape::{BoundaryCell, PolyCtx, Rect, Shape};
 use tessera_spatial::{unsplit32, Tile};
-use tessera_types::MortonCode;
 use tessera_store::read::{tile_ranges_all, SegmentData};
+use tessera_types::MortonCode;
 
 use crate::compose::EffectiveMask;
 use crate::single_flight::CacheWeight;
@@ -261,19 +261,98 @@ impl RegionDecomposition {
                 for row in visible.iter() {
                     let local = (row - base) as usize;
                     let cell = MortonCode::new(codes[local]);
-                    let Ok(at) = self.boundary.binary_search_by_key(&cell.raw(), |b| b.cell.raw())
+                    let Ok(at) = self
+                        .boundary
+                        .binary_search_by_key(&cell.raw(), |b| b.cell.raw())
                     else {
                         // A run spans only boundary cells' ranges, which abut; a row between two
                         // that do not is unreachable, and a miss is answered as outside.
                         continue;
                     };
                     let position = unsplit32(cell, residuals[local]);
-                    if prepared.contains_in_cell(position, Rect::of_cell(cell), &self.boundary[at].ctx) {
+                    if prepared.contains_in_cell(
+                        position,
+                        Rect::of_cell(cell),
+                        &self.boundary[at].ctx,
+                    ) {
                         rows.add(row);
                     }
                 }
             }
         }
         rows
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tessera_spatial::shape::{ShapeF64, Space};
+    use tessera_spatial::Bounds;
+
+    fn extent() -> Bounds {
+        Bounds {
+            x_min: 0.0,
+            x_max: 1000.0,
+            y_min: 0.0,
+            y_max: 1000.0,
+        }
+    }
+
+    fn canonical_of(shape: ShapeF64) -> Arc<Shape> {
+        Arc::new(
+            shape
+                .canonical(Space::View, &extent())
+                .expect("a well-formed shape")
+                .0,
+        )
+    }
+
+    fn box_at(max_x: f64) -> Arc<Shape> {
+        canonical_of(ShapeF64::Bbox {
+            min_x: 100.0,
+            min_y: 100.0,
+            max_x,
+            max_y: 800.0,
+        })
+    }
+
+    /// **A cached decomposition answers for the bytes it was built from and for no others.**
+    ///
+    /// The region cache is keyed on a *truncated* digest — the first 128 bits of SHA-256
+    /// ([`digest_of`]) — so the key alone cannot decide that an entry is the shape being asked
+    /// for. What decides it is [`RegionDecomposition::is_of`], compared on every hit
+    /// (`selection-operand.md` §5): a collision is detected and answered from a fresh
+    /// decomposition rather than argued away. A collision cannot be forced in a test, so what is
+    /// asserted here is the contract the guard rests on — the comparison is on content.
+    ///
+    /// Mutations this kills: `is_of` returning `true` unconditionally, or comparing anything
+    /// derived from the bytes (a length, a digest) rather than the bytes, which is exactly the
+    /// "the digest is the key, so the entry is the shape" simplification that would delete the
+    /// guard.
+    #[test]
+    fn a_decomposition_is_of_its_own_canonical_bytes_and_of_no_others() {
+        let shape = box_at(800.0);
+        let other = box_at(801.0);
+        let bytes = shape.encode();
+        let other_bytes = other.encode();
+        assert_ne!(
+            bytes, other_bytes,
+            "two shapes, or this test proves nothing"
+        );
+
+        let held = RegionDecomposition::build(Arc::clone(&shape), DEFAULT_MAX_REGION_CELLS, &[]);
+        assert!(
+            held.is_of(&bytes),
+            "an entry is of the shape it was built from"
+        );
+        assert!(
+            !held.is_of(&other_bytes),
+            "another shape's bytes are another shape, whatever digest they hash to"
+        );
+        assert!(
+            !held.is_of(&bytes[..bytes.len() - 1]),
+            "a prefix of the bytes is not the shape either"
+        );
     }
 }

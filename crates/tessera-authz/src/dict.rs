@@ -540,4 +540,92 @@ mod tests {
         assert_eq!(extended.lookup(b"d"), Some(TermId::new(3)));
         assert_eq!(extended.len(), 4);
     }
+
+    /// **A coalesce moves no ordinal.** [`coalesce_dict_extents`] writes the same records in the
+    /// same order under one name, and its own doc calls that "the whole of its correctness
+    /// argument": a dictionary ordinal is a position in the concatenation of the extents in listed
+    /// order, so replacing a *contiguous* range in place must leave every descriptor resolving to
+    /// the ordinal it already had.
+    ///
+    /// The failure this forbids is a renumbering rather than a wrong count. A session's granted
+    /// terms are resolved once at authorise and never re-resolved, so a descriptor whose ordinal
+    /// moved evaluates against a different term than the one it was granted — silently, with no
+    /// error at any layer, and permanently, because the coalesced extent replaces its inputs in the
+    /// manifest. That is the same cross-compartment disclosure
+    /// `reload_equals_in_memory_extension_even_when_an_extent_repeats_a_descriptor` above pins for
+    /// the reader.
+    ///
+    /// Mutations this kills: walking the inputs in any other order (`for path in inputs.iter()
+    /// .rev()`, exactly the reordering the doc names); dropping an input, a trailing record, or an
+    /// empty extent; and any re-encoding of a record, since the coalesced bytes are asserted to be
+    /// the concatenation of the inputs' bytes.
+    #[test]
+    fn coalescing_a_contiguous_range_moves_no_ordinal() {
+        let tmp = TempDir::new().unwrap();
+        // Five extents, of which the middle three are coalesced. The prefix and the suffix are
+        // held fixed, which is what makes the replacement contiguous and in place; the empty
+        // extent is in the range because an implementation that skipped it would still have to
+        // preserve the ordinals either side of it.
+        let e0 = extent_of(&tmp.path().join("e0"), &[b"a"]);
+        let e1 = extent_of(&tmp.path().join("e1"), &[b"b", b"c"]);
+        let e2 = extent_of(&tmp.path().join("e2"), &[]);
+        let e3 = extent_of(&tmp.path().join("e3"), &[b"d", b"e"]);
+        let e4 = extent_of(&tmp.path().join("e4"), &[b"f"]);
+        let range: Vec<PathBuf> = e1.iter().chain(&e2).chain(&e3).cloned().collect();
+        assert!(
+            range.len() > 1 && fs::read(&range[0]).unwrap() != fs::read(&range[2]).unwrap(),
+            "the coalesced range must hold several distinct extents, or a reordering could not \
+             be observed and this test proves nothing"
+        );
+
+        let merged = tmp.path().join("merged.dict");
+        let records = coalesce_dict_extents(&range, &merged).unwrap();
+        assert_eq!(records, 4, "every record of every input is carried through");
+
+        // The bytes are the concatenation of the inputs' bytes, in listed order. This is the
+        // property the ordinals rest on, stated where a reordering or a dropped record cannot
+        // hide behind a lookup that happens to agree.
+        let expected: Vec<u8> = range.iter().flat_map(|p| fs::read(p).unwrap()).collect();
+        assert_eq!(
+            fs::read(&merged).unwrap(),
+            expected,
+            "the coalesced extent must be its inputs concatenated in listed order"
+        );
+
+        // The coalesced extent read on its own: the range's own descriptors keep their relative
+        // order, which is where a reversal shows up first.
+        let just_merged = Dict::load(std::slice::from_ref(&merged)).unwrap();
+        for (i, d) in [b"b".as_slice(), b"c", b"d", b"e"].iter().enumerate() {
+            assert_eq!(
+                just_merged.lookup(d),
+                Some(TermId::new(i as u32)),
+                "{d:?} must keep its position within the coalesced range"
+            );
+        }
+
+        // And in place: every descriptor of the whole dictionary resolves to the ordinal it had
+        // before, named exactly so the equality cannot be satisfied by moving all of them.
+        let before: Vec<PathBuf> = e0.iter().chain(&range).chain(&e4).cloned().collect();
+        let after: Vec<PathBuf> = e0
+            .iter()
+            .cloned()
+            .chain(std::iter::once(merged))
+            .chain(e4.iter().cloned())
+            .collect();
+        let before = Dict::load(&before).unwrap();
+        let after = Dict::load(&after).unwrap();
+        assert_eq!(before.len(), 6);
+        assert_eq!(after.len(), before.len());
+        for (i, d) in [b"a".as_slice(), b"b", b"c", b"d", b"e", b"f"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(before.lookup(d), Some(TermId::new(i as u32)), "{d:?}");
+            assert_eq!(
+                after.lookup(d),
+                before.lookup(d),
+                "{d:?} must resolve to the same ordinal after the coalesce as before it"
+            );
+        }
+    }
 }

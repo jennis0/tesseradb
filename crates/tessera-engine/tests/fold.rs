@@ -166,6 +166,14 @@ fn engine_over_fixture_with_sparse_term(tmp: &Path, root: &Path, config: EngineC
 fn fold(engine: &Engine) {
     let before = engine.write_executor_stats();
     engine.request_fold();
+    wait_for_fold_publication(engine, &before);
+}
+
+/// Block until a fold requested against `before` has published, asserting it was not discarded.
+///
+/// **Its own deadline**, per [`wait_for`]'s rule: this is the last wait of every paused-fold case,
+/// so a deadline shared with the waits before it would expire here whatever step actually stalled.
+fn wait_for_fold_publication(engine: &Engine, before: &tessera_engine::ExecutorStats) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         let now = engine.write_executor_stats();
@@ -1263,24 +1271,15 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64,
 
     // Wait until the fold's passes are done and it is holding: from here everything published is
     // post-snapshot and must be carried forward rather than folded.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !engine.fold_is_holding_for_test() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never reached its hold"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for("the fold to reach its hold", || {
+        engine.fold_is_holding_for_test()
+    });
 
     let entity = ingest(engine, key, "mid-flight").expect("ingest is accepted during a fold");
     engine.request_flush();
-    while engine.write_executor_stats().flushes == before.flushes {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the mid-flight flush never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for("the mid-flight flush to publish", || {
+        engine.write_executor_stats().flushes > before.flushes
+    });
 
     // The flush has published into the still-live (pre-flip) generation: this is "live", as
     // `publish_fold` will read it moments later, and it is the last point at which reading it is
@@ -1293,21 +1292,8 @@ fn fold_with_a_flush_in_flight(engine: &Engine, key: Vec<u8>) -> (EntityId, u64,
         .entity_id_high_water;
 
     engine.set_fold_paused_for_test(false);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded"
-        );
-        if now.folds > before.folds {
-            return (entity, mid_flight_watermark, mid_flight_high_water);
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_fold_publication(engine, &before);
+    (entity, mid_flight_watermark, mid_flight_high_water)
 }
 
 /// **Obligation 8: a flush published during the fold's flight is carried forward**, and its items
@@ -1407,14 +1393,9 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     engine.set_fold_paused_for_test(true);
     let before = engine.write_executor_stats();
     engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !engine.fold_is_holding_for_test() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never reached its hold"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for("the fold to reach its hold", || {
+        engine.fold_is_holding_for_test()
+    });
 
     let mid_flight = entity_of_source(&root, "v00000", 9);
     engine
@@ -1430,29 +1411,12 @@ fn a_delete_accepted_after_the_snapshot_survives_the_fold() {
     }
 
     engine.set_fold_paused_for_test(false);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded"
-        );
-        if now.folds > before.folds {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_fold_publication(&engine, &before);
 
     let bundle = open_bundle(&root).expect("the folded bundle opens");
     let partition = &bundle.partitions["default"];
     assert!(
-        partition.views["s0"]
-            .row_space
-            .row_of(mid_flight)
-            .is_some(),
+        partition.views["s0"].row_space.row_of(mid_flight).is_some(),
         "the post-snapshot deletion keeps its row: the fold's passes ran over `D₀`, which did not \
          name it"
     );
@@ -1568,32 +1532,11 @@ fn a_deletion_a_carried_forward_segment_still_names_does_not_retire() {
     engine.set_fold_paused_for_test(true);
     let before = engine.write_executor_stats();
     engine.request_fold();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    while !engine.fold_is_holding_for_test()
-        || engine.write_executor_stats().flushes == before.flushes
-    {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold and the flush never overlapped"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_for("the fold and the flush to overlap", || {
+        engine.fold_is_holding_for_test() && engine.write_executor_stats().flushes > before.flushes
+    });
     engine.set_fold_paused_for_test(false);
-    loop {
-        let now = engine.write_executor_stats();
-        assert_eq!(
-            now.fold_failures, before.fold_failures,
-            "the fold was discarded"
-        );
-        if now.folds > before.folds {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the fold never published"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
+    wait_for_fold_publication(&engine, &before);
 
     assert_eq!(
         engine.overlay_depth(),

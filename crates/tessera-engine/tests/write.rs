@@ -37,7 +37,9 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use tessera_engine::viewport::ViewportRequest;
-use tessera_engine::{AcceptError, Engine, ExecutorPosture, DENY_DURABILITY_ATTEMPTS};
+use tessera_engine::{
+    AcceptError, Engine, ExecutorPosture, DENY_DURABILITY_ATTEMPTS, DENY_WINDOW_MAX_ENTRIES,
+};
 use tessera_lifecycle::command::{SubmitError, UnallocatedRow};
 use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite, Step};
 use tessera_lifecycle::ChangeOp;
@@ -2399,4 +2401,138 @@ fn a_poisoned_node_writes_no_side_manifest_for_its_denies() {
         0,
         "and the gauge agrees it published nothing"
     );
+}
+
+// =================================================================================================
+// The deny-publication liveness floor
+// =================================================================================================
+
+/// `OVERLAY_PUBLICATION_MAX_WINDOWS`, restated here because it is private to `crate::write`. The
+/// figure is the subject of the case below, so a change to it must change this line — that is the
+/// coupling, not an accident of it.
+const PUBLICATION_FLOOR_WINDOWS: usize = 64;
+
+/// Park the executor inside a new deny window, at `AfterFsync` — the entry is durable and not yet
+/// applied.
+///
+/// This is also the **barrier** every count below is read behind. The drain-close publication runs
+/// after the drain empties and before the loop takes its next deny, so an executor parked in a new
+/// window is proof that the previous burst's close publication has already landed. Reading the
+/// gauge without one races it.
+fn park_on_a_new_deny_window(
+    engine: &Engine,
+    faults: &FaultSwitchboard,
+    entity: EntityId,
+) -> tessera_engine::PendingChange {
+    faults.arm_pause(PauseSite::AfterFsync, PauseAction::Stall);
+    let pending = engine
+        .submit_change(entity, ChangeOp::Suppress)
+        .expect("the deny lane accepts");
+    faults.await_arrivals(PauseSite::AfterFsync, 1, WAIT);
+    pending
+}
+
+/// Drive exactly `windows` deny windows through **one drain that never closes**, the first of them
+/// the window `parked` is held in.
+///
+/// The whole burst is in the queue before any of it is drained, which is what makes the window
+/// count exact and the drain uninterrupted: the parked window releases into a lane holding
+/// `windows - 1` full windows' worth, and `run_deny_pass` takes `DENY_WINDOW_MAX_ENTRIES` per pass
+/// without ever observing the lane empty. A trickle of denies would instead close the drain between
+/// windows and publish by the other route entirely, which is the state the floor does *not* address.
+fn drain_deny_windows(
+    engine: &Engine,
+    faults: &FaultSwitchboard,
+    entities: &[EntityId],
+    windows: usize,
+    parked: tessera_engine::PendingChange,
+) {
+    let fsyncs_before = engine.write_executor_stats().wal_fsyncs;
+    let mut pending = vec![parked];
+    for i in 0..((windows - 1) * DENY_WINDOW_MAX_ENTRIES) {
+        pending.push(
+            engine
+                .submit_change(entities[i % entities.len()], ChangeOp::Suppress)
+                .expect("the deny lane accepts"),
+        );
+    }
+    faults.release();
+    for p in pending {
+        p.wait().expect("every deny in the burst takes hold");
+    }
+    assert_eq!(
+        engine.write_executor_stats().wal_fsyncs - fsyncs_before,
+        (windows - 1) as u64,
+        "the burst must be exactly {windows} windows — one fsync per window, the parked window's \
+         own already paid before this count was taken — or the floor is being asserted against \
+         the wrong number of them"
+    );
+}
+
+/// **A drain that never closes still publishes** — write-path §5.6's liveness floor.
+///
+/// The executor's other publication site sits after `while self.run_deny_pass() {}`, so under
+/// arrival faster than application the drain loop does not exit and that site is never reached. The
+/// floor is then the only route by which the dispositions reach a side-manifest: without it a node
+/// under sustained revocation serves them, and logs them, indefinitely without any manifest
+/// carrying them. Nothing here is a disclosure and nothing is irreversible — the denies are in
+/// force and WAL-durable throughout — what degrades is the restore path and the log's ability to
+/// shed the records behind them.
+///
+/// The boundary is pinned from both sides, because a floor asserted from one side cannot tell an
+/// off-by-one from a working floor. One window short of the floor publishes exactly once, at the
+/// drain's close; a burst one window past it publishes twice, at the floor and then at the close.
+///
+/// **One window past, not exactly at it**, and the difference is the whole discrimination. The
+/// floor's publication clears `deny_dirty`, so a burst ending exactly at the floor publishes once
+/// whichever route did it and the gauge cannot tell the two apart. The extra window re-dirties the
+/// overlay, which is what makes the floor's publication visible as a second one.
+///
+/// Mutations this kills: raising the constant above the burst, deleting the `>=` branch, inverting
+/// the comparison, and moving the `windows_since_publication` reset off the publication.
+#[test]
+fn a_deny_drain_that_never_closes_publishes_at_the_liveness_floor() {
+    let tmp = TempDir::new().unwrap();
+    let (engine, faults) = engine_with_faults(&tmp, 64);
+    let entities: Vec<EntityId> = (0..64).map(|i| entity_of(&engine, i)).collect();
+    assert_eq!(
+        engine.write_executor_stats().overlay_publications,
+        0,
+        "the fixture publishes nothing before the burst, or the counts below mean nothing"
+    );
+
+    let parked = park_on_a_new_deny_window(&engine, &faults, entities[0]);
+    drain_deny_windows(
+        &engine,
+        &faults,
+        &entities,
+        PUBLICATION_FLOOR_WINDOWS - 1,
+        parked,
+    );
+
+    // Behind the barrier — see `park_on_a_new_deny_window`.
+    let parked = park_on_a_new_deny_window(&engine, &faults, entities[0]);
+    assert_eq!(
+        engine.write_executor_stats().overlay_publications,
+        1,
+        "a burst one window short of the floor publishes only where every burst does, at the \
+         drain's close"
+    );
+
+    drain_deny_windows(
+        &engine,
+        &faults,
+        &entities,
+        PUBLICATION_FLOOR_WINDOWS + 1,
+        parked,
+    );
+
+    let parked = park_on_a_new_deny_window(&engine, &faults, entities[0]);
+    assert_eq!(
+        engine.write_executor_stats().overlay_publications,
+        3,
+        "a burst that passes the floor publishes inside the drain as well as at its close"
+    );
+    faults.release();
+    parked.wait().expect("the barrier's own deny takes hold");
 }
