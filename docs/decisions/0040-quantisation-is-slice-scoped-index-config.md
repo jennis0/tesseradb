@@ -66,6 +66,10 @@ What the slice scoping buys is that a per-slice reindex needs no model change wh
 
 ## ⊘ Not implemented: the extent still lives on the bundle
 
+**Discharged 2026-08-30** — `ViewDescriptor.quantisation` is the extent's home, the bundle-level
+field is deleted, and `/v1/meta` publishes it per view (`views.md` §2, contracts r52). The
+section below records what was true when this decision was made.
+
 `Manifest.quantisation` is a single bundle-level extent and `SliceDescriptor` carries only
 `{ id, display_name }`. Every consumer reads `bundle.manifest.quantisation`. Moving it is a
 contracts §2.2/§2.5 change and a `/v1/meta` wire change, tracked separately.
