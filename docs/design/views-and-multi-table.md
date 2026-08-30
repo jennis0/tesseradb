@@ -1,317 +1,442 @@
-# Views and multi-table shards — design
+# Views and view groups — design
 
-**Date:** 2026-08-01
-**Status:** Provisional r4 — under review and **not approved**. Nothing in it is settled, and the rest of the corpus governs where they disagree. **To become normative:** the amendments in its §11 folded into `architecture.md` and `contracts.md` by owner decision. Decisions applied: [0007](../decisions/0007-k-max-marks-500.md) (*K*<sub>max</sub> = 500; the spec §9 arithmetic is recomputed against it), [0008](../decisions/0008-candidate-list-route-declined.md) (the candidate-list route is declined; the assumption is removed, not preserved as an option), [0013](../decisions/0013-mark-specified-vs-implemented.md) (specified-but-unbuilt machinery marked per claim), [0015](../decisions/0015-plans-retired-for-epics.md) (plan citations repointed), [0026](../decisions/0026-idset-stamp-version.md) (idset / stamp / version), [0041](../decisions/0041-pins-become-a-staleness-stamp.md) (pins deleted; a stamp is advisory) and [0047](../decisions/0047-edit-is-delete-plus-reingest.md) (the `predicate` op is withdrawn). r3 restates the retirement position as **Rule S / Rule F** (write-path §5.4) wherever this document named the deleted stamp ledger, and re-points its flush, merge and compaction claims at [`write-path.md`](write-path.md); no rule of this document's own changed. r4 renames the concept from *slice* to *view* throughout, this document's filename included; nothing else changed.
-**Reads against:** architecture design §5.1, §7.2, §7.3, §9, §10.2–§10.4, §11–§13, §16, Appendix A, Appendix C; contracts §2.1–§2.3, §2.6, §3.2, §3.4; write-path §4, §5.3–§5.4, §7–§8; lifecycle §5.3; system architecture §3, §7; [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) and [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) — the two sketches this design supersedes and extends, **both explicitly not approved**; probes/optimisations §4; design memo 2026-07-30 (viewport hot path, B9 tiered decode).
-**Citation convention:** unprefixed §n is the architecture design, per CLAUDE.md; this document's own sections are cited as **spec §n**.
+**Date:** 2026-08-30
+**Status:** Provisional r5 — under review and **not approved**. The rest of the corpus governs
+where they disagree. **To become normative:** one independent review on two lenses (security and
+implementability), the rulings in §12 made by the owner, and the amendments in §11 folded into
+`architecture.md`, `contracts.md` and `configuration.md`.
+**Reads against:** architecture §5.1, §9, §11; contracts §2.1–§2.3, §2.6, §3.2, §3.4;
+[`configuration.md`](configuration.md) §1, §8; [`projections.md`](projections.md);
+[`filter-index.md`](filter-index.md) §7; [`per-point-attributes.md`](per-point-attributes.md)
+§3.9; [`write-path.md`](write-path.md) §2, §4; [`compaction.md`](compaction.md).
+**Citation convention:** unprefixed §n is the architecture design, per CLAUDE.md; this document's
+own sections are cited as **spec §n**.
+
+> **r5 is a rewrite, and it is narrower than r4.** r4 designed views and signature grouping
+> together as one `(view, group, flush)` table addressing. The two are separated here: this
+> document is views alone, and grouping — a performance layout with its own adoption gates and
+> no dependency on anything below — returns to
+> [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md), which now points at
+> r4 (git `ead7e906`) for the multi-table elaboration. r4's identity-stability tiers and its
+> roll-mode rotation are dropped from this document for the same reason: they are partition and
+> rotation questions, recoverable from git, and nothing here depends on them.
 
 ---
 
 ## 1. Summary
 
-Two capabilities fall in the same place and are designed together:
+A **view** is a named coordinate system over the shared entity space. The same point may sit in
+several views with a different position in each; it has one identity, one label, one set of
+attributes and one mask wherever it appears. A viewer switches between views; nothing about their
+authorisation changes when they do.
 
-- **Views** — named, orthogonal coordinate systems over the shared entity space: disjoint temporal sets, multiple embedding spaces, multiple datasets. A point may belong to several views with independent coordinates, one identity, one set of metadata and labels. This generalises §9's temporal views; the engine does not distinguish the three flavours.
-- **Multi-table layout** — within a shard, points with identical term signatures grouped into physically separate row tables, chosen at build/compaction time from the current signature histogram. This is [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md)'s row-space signature-major layout taken to physically separate tables, and it is explicitly a **shard-implementation decision** — unlike §12 partitions, which are a security boundary.
+A **view group** is a set of views that share every setting — projection, extent, point
+visibility, gate — and differ only by a member key and per-member metadata. Its members need not
+be enumerated when the corpus is built: a new member is created by the first ingest batch naming
+it. Time slices are the motivating case: a corpus re-embedded each quarter, where each quarter is
+its own layout and the next quarter arrives while the service is running. Groups complement
+plain views; a corpus may carry both.
 
-> **⊘ Specified, not implemented — both capabilities, and everything downstream of them in this document.** There are no views and no tables. A bundle has one coordinate system; flush gives it further segments and merge bounds their count (write-path §4, §7), but a segment is not a group table, and compaction — where this design puts grouping — does not exist. §12's partitions, which spec §4, §5 and §8 read against, are equally unbuilt — one partition, fixed at build. Nothing here describes behaviour a reader can rely on today; individual claims are marked again where the distinction bears on a security property rather than on performance.
+The rule the whole design rests on is §5.1's factoring, stated as a rule:
 
-**What the layout is for, with its measured anchor.** The B9 tiered decode (design memo 2026-07-30, landed) routes a read to run-decode when visible density in the read range is ≥ 95% — the measured crossover sits in (0.90, 0.95) at cap 500, and at 100% density the contiguous route is roughly twice the sparse gather. That threshold is a **per-read property**: a grant-aligned viewer reading a promoted group's table sees near-total density and rides the fast route. Promoted-group *coverage* (top 500 groups = 82.4% on the synthetic corpus, 88% at 1,000) therefore determines what **fraction of reads** are route-eligible — it is not itself the 95%, and the two must not be conflated.
+> **Entity space is the invariant plane; a view owns everything downstream of the permutation
+> and nothing upstream of it.**
 
-The unification both rest on: **a *table* is the one physical unit of row space** — its own Morton ranking and its own tile-range lookup, occupying a reserved sub-range of its view's row-ID space. Ingest segments are tables keyed by flush generation; signature-group tables are tables keyed by group. A view is a named coordinate system plus a set of tables. A tile is a set of ranges, one per table it intersects — already the type the engine uses. §7.2 (r22)'s cross-segment merge is the cross-table merge, unchanged. The mask never learns tables exist; it meets them only at the permutation.
+Shared, in entity space: identity, the term index and the mask, labels and generating sets,
+attributes and their filter index, artifact membership. Per view, in row space: positions, the
+Morton order, the permutation and its inverse, the segments, the tile ranges, the render columns
+and θ. One token authorises across every view; membership of a view is the permutation's
+non-sentinel, never a stored set.
 
-> **⊘ The tile table is specified and has never been built.** A tile's `[lo, hi)` is derived per request by binary search over the sorted `morton.u32` column — two searches, no stored artifact, nothing for compaction to rewrite (§5.2). Per-table binary search is the same operation over a shorter column, so nothing in this design needs a table; whether a precomputed lookup pays at all is unmeasured (issue #56). Wherever this document says "tile table" it means the per-table range lookup, in whichever form, and no sizing or compaction-cost figure here counts a stored one.
+> **⊘ Partially implemented.** Everything is keyed per view — the manifest's `views` registry,
+> `partitions/<p>/views/<view>/` with its own permutation and segments, `WalRow.view`, one flush
+> segment and one fold plan per view, `view` on every viewer verb, `(view, layer, level)` on every
+> artifact extent, a per-view projection. What has never existed is a bundle with **two** views:
+> `tessera build` materialises exactly one and refuses a declaration with several, so nothing
+> downstream has been run against more than one. The build (spec §7), the second-view join
+> (spec §4), the per-view extent (spec §2), groups and scoped attributes (spec §3, §5) and the
+> gate (spec §6) are what remain, and each is marked where it is claimed.
 
-There is **one selection route — direct evaluation of the definition from the mask, at every coverage** (decision [0008](../decisions/0008-candidate-list-route-declined.md)). Per-node precomputed candidate lists are declined and will not be built: filtering a precomputed unmasked list at query time lets a sparse principal see an empty tile where items exist, which is I7 — *sampling happens after masking* — inverted, and the failure is silent. This design assumes no such structure anywhere, and an implementation of it that reintroduces one is not implementing this design. `scripts/check-layers.sh` fails if the marker recording the refusal is removed from `crates/tessera-engine/src/select.rs`.
+## 2. A view
 
-## 2. The table
+**Declaration.** `[[view]]` in the configuration surface (`configuration.md` §1): `name`,
+`title`, `projection`, `extent`, `source` and `fields`, `point_visibility`, and `visibility` (spec
+§6). A plain view is declared when the corpus is built and is constant for the life of the
+deployment: adding one is a build, not an operation. That is deliberate — a view carries a frame
+and a gate, and the design has one place where those are reviewed. Growth at ingest is what
+groups are for (spec §3).
 
-A **table** is keyed `(view, group, flush)`:
+**The extent belongs to the view** (decision 0040): the frame every position in that view is
+quantised against, immutable for the view's life, so a Morton prefix is a permanent address in
+that view. An embedding and a map cannot share a frame without one of them wasting most of the
+grid, which is why the extent is per view and not per bundle.
 
-- `view` — which coordinate system its rows belong to;
-- `group` — a promoted signature-group ID, or `residual`;
-- `flush` — the flush generation (what the corpus today calls a segment), or `base` for compacted tables.
+> **⊘ Specified, not implemented.** `Manifest.quantisation` and `/v1/meta`'s `quantisation` are
+> bundle-wide, and every consumer reads them there. With one view per bundle the bundle's extent
+> *is* the view's, so nothing is wrong today; two views with different extents cannot coexist
+> until the extent moves onto `ViewDescriptor` and the `views` entries of `/v1/meta` — a
+> `bundle_format` bump (contracts §2.2, §2.5) and a wire change (§3.2). A group's members all
+> share one extent by construction, so groups do not wait on this move; a second plain view does.
 
-**The valid population is constrained; the key is not a free cross product.** At any moment a view's tables are exactly: `(view, residual, flush_i)` for each live pending flush, plus `(view, g, base)` for each promoted group `g`, plus `(view, residual, base)` — where `base` names the current compacted generation. **`group ≠ residual ⇒ flush = base`** is a structural invariant: promoted tables exist only in the compacted base (spec §5), and a manifest schema admitting per-flush group tables would be the flushes × groups explosion spec §5 exists to prevent. Births and deaths: pending tables are born at flush and die at their minor merge or fold; base tables are born at a compaction and die at the next compaction that touches their group.
+**Addressing.** Every viewer verb names its view in the request body (contracts §3.2); an ingest
+batch names it in `x-tessera-view`, optional only while the bundle has one view (write-path
+§2.1). An unknown view is a 404 on both planes, and after spec §6 a gate-failed one is the same
+404. There is no coordinate map on an ingest row: a batch belongs to one view, and a point that
+belongs to several is several batches. r4's `{view → (x, y)}` map is withdrawn — it was free only
+while no client existed, and two do.
 
-**Terminology note — the third component is `flush`, never "epoch".** The corpus once used "epoch" for three unrelated things, and decision [0026](../decisions/0026-idset-stamp-version.md) gave each its own word: **idset** for the identifier set a key rotation replaces (contracts §2.2), **stamp** for the advisory geometry marker a response carries and a request may present back (decision [0041](../decisions/0041-pins-become-a-staleness-stamp.md) — the deny-retirement stamps 0026 named went with the stamp ledger, write-path §5.4), and **version** for a table's generation in this design. `flush` and `base` are this key's two forms of that version, and "pending table" is the noun for `(view, residual, flush_i)`.
+**Layers declare the views they are drawn on** (`configuration.md` §1, `[[layer]].views`),
+because an artifact's extents are per row space. A layer may name a group, meaning every member
+present and future (spec §3.5).
 
-**Group identity** is a canonical hash of the sorted term signature — the same construction §12.4 uses for partition identity, for the same reason: groups are discovered, not declared, and the ID must be stable across compactions (hysteresis compares this generation's groups with the last's; the manifest's `group` key and the spec §6 dirty bit both need a durable key). `residual` is a reserved value.
+**What a view does not do.** Positions are not updated in place — a re-placed corpus is a new
+view or, for a group, a new member. Nothing removes one entity from one view short of deleting
+the entity; dropping a member removes every entity from it at once (spec §3.4). Both are the
+same class of rarity as a re-label, which is delete plus re-ingest (decision 0047).
 
-What the corpus calls a *segment* becomes the table `(view, residual, flush)` — the degenerate case with an empty promotion set. A deployment whose histogram promotes nothing (the author-like policy: 1.54M signatures over 2.42M items) stays in that case forever, running today's code path. The walking skeleton is the single-table special case, not a casualty.
+## 3. View groups
 
-**Row-ID space.** One `u32` space per view per bundle generation. Each table receives a base offset at build/compaction, **aligned to a multiple of 2¹⁶** so Roaring containers never straddle tables — per-table operations stay O(containers touched) with no boundary case. Offsets are generation-scoped; this is free because row IDs already renumber at compaction and mask caches are already generation-keyed (r19). Alignment waste is bounded by `tables × 2¹⁶` IDs, ≤ 65M at 1,000 tables against 2³² headroom. This deliberately supersedes contracts §2.6's "row IDs are segment-local": row IDs become view-global with tables at base offsets, and that contradiction is resolved at the first multi-segment implementation, not discovered later (spec §11, §12).
+### 3.1 Declaration
 
-**The mask is table-blind.** Entity→row remains one permutation array per view; a row-space mask fragment is one bitmap per view covering all its tables; counts are range cardinalities summed across tables; marks are the global bottom-*m* by `tessera_id` across tables — §7.2 (r22)'s merge, which is exact, verbatim.
-
-## 3. Views
-
-**Definition.** A view is `{name, optional gate label, projection provenance, table set}`. The manifest carries a view registry. §9's temporal views become the first instances rather than a special case; r17 (current credentials govern every view) and §9's rejection of time-in-the-Morton-code both stand unchanged.
-
-**What is shared, what is per-view.** Shared, in entity space: identity, the term index, labels and generating sets, metadata, the mask. Per-view, in row space: coordinates, the permutation array, the table set and its tile-range lookups, θ (r24 already gives one θ per view). This is §5.1's factoring stated as a rule: *entity space is the invariant plane; a view owns everything downstream of the permutation and nothing upstream of it.* One token authorises across all views; view membership is implicit — the permutation's sentinel — never a stored bitmap.
-
-**Per-view hot-column schemas.** The mandatory hot-column core (§5.3: `tessera_id`, x, y, priority) is uniform, but a view's table set may declare **additional per-view scalar columns** in the manifest — an embedding-space view can carry a confidence scalar the temporal views do not. These are render-plane projections like every hot column (the routing principle's per-mark class, §10.3), surfaced to clients through the view's entry in `/v1/meta`; they widen no query surface and carry no filter semantics — filtering stays in entity space under §8.2. A modest manifest extension (contracts §2.3 enumerates columns per view rather than once), paid at the schema level now so it is not a format break later.
-
-**A relational reading, for orientation.** In SQL vocabulary the design is: **one logical table** — entity space, owning identity, labels and metadata — and **N clustered covering indexes**, the views, each a physical ordering of a subset of rows carrying copies of the columns its access pattern needs; secondary predicates are §8.2's filter bitmaps, never row gathers. A view is *not* a table: views **cache render-critical scalars and never own metadata**, so there is nothing to keep consistent between views — the single source of truth is entity space and the view-invariant `tessera_id` is its wire name. The off-hot-path attribute store this implies is already surveyed (design memo 2026-07-29, secondary attribute indexing) and reaches the viewport only as entity-space bitmap intersections, which is what keeps I2/I3 intact.
-
-**View-count budget** *(review finding, accepted)*. The permutation array is sized by **maximum live entity ID**, not by view population: a flat `u32` array is ~4 GB at 10⁹, *per view*, sentinel-dominated when the view is sparse — D dataset-views of 10⁸ each over a shared 10⁹ entity space would cost ~4·D GB flat. The spec therefore permits, behind the contracts reader interface that [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) insists stays abstract for the same reason, a **two-level paged permutation representation** for sparse views: a page directory over 2¹⁶-entry pages with absent pages meaning all-sentinel, chosen per view at build. Two further per-view multipliers are named rather than hidden: the projected-fragment cache is per `(token, view, segments_version)`, so a session touching S views multiplies projection cost and cache footprint by S; and flush emits one pending table per view *touched*, so a row carried in k views generates k tables' worth of segments and compaction debt system-wide. §16's open question — how many views must be simultaneously browsable — remains open and now has a price list attached.
-
-**Addressing.** The viewer verbs already carry `view` in the request body (contracts §3.2 — viewport and region both name it); no amendment is needed there, and the design's §7.2 (r24) citation of an `x-tessera-view` header against contracts §3.1 is stale. The one real header use is `/control/ingest` (contracts §3.4), which the coordinate-map contract below supersedes. The genuine contracts changes are in §3.2: the `views` array in `/v1/meta` becomes gate-filtered (below), making meta per-principal in a second field alongside the C11-gated vocabulary — the same precedent, cited rather than rediscovered — and the discovery response keeps its shape, filtered.
-
-**Gating.** A view's gate is a **label**, evaluated by the plugin exactly as an item's label is. Satisfaction is the **item-visibility predicate verbatim** (§6.1): the gate label resolves to its term set, and the gate is satisfied iff that set intersects the principal's satisfied set. *This sentence is normative and deliberately worded* — an earlier draft said "conservative label join, yielding a required term set", which names §12.2's subset machinery, under which a disjunctive gate (`finance | legal`) yields an empty required set and every principal passes: a fail-open on exactly what the gate protects. Intersection semantics give a disjunctive gate its intended meaning (either grant reveals the view). Review finding, accepted; the required-set vocabulary is struck.
-
-- **Evaluation point:** the principal's **visible-view set is resolved once per session** — at authorise, the gate evaluated for every registered view regardless of outcome — so the request-time check is a single set-membership lookup, identical in work for a gate-failed name and a never-registered name. This is the same structural closure C4's annotation records for `/v1/items`, and it is what makes the claim below meet r23's **work**-indistinguishability standard rather than only outcome-indistinguishability.
-- If the gate is unsatisfied: the view is absent from discovery, and a request naming it is indistinguishable — in outcome and in work — from naming a view that never existed. Fail-closed.
-- **The gate governs every view-valued response surface**, not only discovery: any endpoint that would return per-view coordinates, a view-membership list, or any other view-keyed field omits gate-failed views. Item visibility through the mask covers the items; this rule covers *reachability*, and both are needed.
-- The gate is **conjunctive with item labels**, never substitutive: items inside a gated view remain individually governed by their own labels. A gate can only narrow, never widen — the I12 direction.
-
-> **⊘ Specified, not implemented.** No gate is evaluated and no visible-view set is resolved, because there are no views to gate: a bundle has one coordinate system, reachable by every principal that authorises at all. The fail-closed claims above describe a mechanism, not a property the system has; a reader must not count view gating as an available means of restricting reachability.
-
-**Ingest contract.** An ingest row carries a `{view → (x, y)}` map instead of a single coordinate pair; membership in a view is presence in that map. Adding an existing entity to a further view is ordinary ingest resolved by `external_id` — which **amends contracts §3.4's duplicate rule** (today: duplicate `external_id` → 409, batch has no effect). The amended semantics, each arm ruled explicitly *(review finding, accepted)*:
-
-- **Label must byte-match** the entity's current label. A row carrying a different label is refused: a re-label is a delete plus a re-ingest under the same `external_id` (decision [0047](../decisions/0047-edit-is-delete-plus-reingest.md)), never a field smuggled in on a view-attach row — the alternative is a widening with no overlay entry, or a revocation that bypasses the deny lanes. *(Unreconciled with the amended duplicate rule below: under 0047 a delete-then-re-ingest of a multi-view entity is not the same operation as attaching a view to a live one, and which of the two a re-labelled row is has not been decided.)*
-- A row naming a view the entity already occupies is a **409, loudly**: coordinate updates are explicitly deferred (below), and this arm must not become an accidental update path — the single-valued permutation cannot represent two rows for one entity in one view.
-- A row naming only new views is accepted and lands in each named view's current pending table.
-- **Identifier forms.** A row names its entity by `external_id` (canonical, durable across every break event) **or** by `tessera_id` — in which case the `idset` is **mandatory alongside it, with no optional form**: a retained (rolled) idset translates exactly via its key; a revoked or unknown idset is a 409. Contracts §2.2's argument for optional-idset reads (stale identifiers fire approximately never; a misresolved read is bounded) does not transfer to writes: a stale `tessera_id` does not fail, it silently names a different entity, and a write against it is cross-entity corruption through the trusted plane. Mandatory-on-write, optional-on-read is the same identifier with the risk priced per path. Spec §8's Tier 1 is what makes the `tessera_id` form worth offering at all — after it, the idset advances only on key rotation — and the acked identifiers a pipeline already holds make it the convenient form for "ingest, then attach to a second view".
-- **Trust assumption, stated:** entity resolution by `external_id` across views is sound only under a single, mutually-trusting ingest authority — the accepted/created distinction lets an ingest caller probe which `external_id`s exist corpus-wide. The admin plane is single-authority today (SA §2); if that ever changes, this is the sentence to revisit.
-
-**Lifecycle: create, populate, drop.**
-
-*Create* is a control-plane operation: `{name, gate label, projection provenance}`. Validation at accept: name unused (including tombstoned names — below), gate label evaluable by the plugin. The record is WAL'd; the *served* registry is the manifest's registry plus WAL-overlay additions, materialised into the manifest at the next flush — the overlay-then-fold shape the write path already uses everywhere. Ordering rule: **a view must be acknowledged before any ingest row referencing it is accepted** — no same-batch creation, no auto-create on first reference; views are deliberate objects that carry gates. An empty created view is visible in discovery (gate permitting) with zero counts; creation is deliberate, so there is nothing to hide. Entity space is untouched; the cost is row-space artifacts, which the budget paragraph above prices rather than waves at.
-
-*Populate* has two routes:
-
-1. **Incremental** — the ingest map, exactly as above. New points carry coordinates for whichever views they join; existing points join a new view via the amended duplicate rule. Lands in the view's pending tables; seconds-to-minutes visibility; group-commit untouched.
-2. **Bulk backfill is a build-plane operation, not a stream of ingests.** Creating an embedding-space view over an existing 10⁹-item corpus means 10⁹ coordinate rows — a batch job that must not ride the trickle path. `tessera build --attach-view` consumes a Parquet of `(external_id, x, y)`, resolves IDs, builds the new view's row-space artifacts *only* — Morton sort, tables, permutation — and flips the generation pointer. Entity space is untouched by construction, and spec §7's prefix-qualified manifest references pay off a second time: the new manifest **references every other view's tables verbatim** — a view attach copies nothing it did not build. Rows for the new view arriving during the attach build land in pending tables against the old generation and survive the flip as pending tables, exactly like any build-concurrent ingest.
-
-*Drop* is the inverse control operation: a WAL'd registry tombstone. The view vanishes from discovery on ack — acknowledgement coupled to application, deny-style; its row-space artifacts are garbage, collected at the next compaction; no entity is deleted by dropping a coordinate system it appeared in. A dropped view's **name stays tombstoned against reuse** — a recreated "2024-Q1" with different membership would silently repoint every bookmark and cached θ that named it; a fresh name costs nothing. Dropped-versus-never-existed is indistinguishable by construction: both are simply absent from the session's visible-view set.
-
-*A consequence worth owning:* `--attach-view` is also the **coordinate-migration escape hatch** — re-attach the view under a new name (new projection fit, same members), then drop the old one. Callers get projection migration without in-place coordinate-update machinery, at the cost of the view name changing — which is honest, since the geometry did too.
-
-**Caller obligations (extends §2.4).** Projection stability within a view; entity identity *across* views is by `external_id` — "the same point in two embedding spaces" is exactly the caller saying so at ingest.
-
-**Deliberately out of scope.** In-place coordinate updates within a view (a row move; same rarity class as predicate changes, deferred to the same compaction machinery — and the attach-under-new-name path above covers whole-view migration meanwhile). Removing an entity from a single view is a caller-facing API question deferred with it.
-
-## 4. Promotion policy
-
-**Scope of the histogram:** signature groups are entity-space, so the histogram is taken **per partition over live entities**; `corpus_size` below is the partition's live count. A promoted group yields one base table per view in which its members hold coordinates.
-
-> **⊘ Specified, not implemented.** Nothing computes a signature histogram, promotes a group, or holds a promotion set: there is no compaction, which is where this section says grouping happens, and no second table for a group to be promoted into. The per-partition scoping is likewise notional — there is one partition, fixed at build (§12). The measured figures below are histogram measurements over the synthetic corpus, not measurements of this policy running.
-
-A signature group is promoted iff
-
-```
-count(group) ≥ max(abs_min, p × corpus_size)      — promote
-count(group) < max(abs_min, (p/2) × corpus_size)  — demote
+```toml
+[[view_group]]
+name             = "quarter"
+projection       = "none"
+extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
+point_visibility = { field = "access", default = "public" }
+source           = "embeddings"
+member_field     = "quarter"            # build only: which member each source row joins
+metadata         = ["label", "starts", "ends"]
 ```
 
-The demotion form is deliberate *(review finding, accepted)*: halving the *whole* promote threshold would keep sub-`abs_min` groups promoted, contradicting `abs_min`'s purpose; only the proportional term is halved.
+A group takes every key a `[[view]]` takes, with the same meanings, plus three of its own:
 
-- The **proportion floor `p`** bounds the promoted count at ⌊1/p⌋ — but on the measured histogram this bound is a **guard-rail, not the operative control**: promoting 256 groups needs p ≈ 0.04%, whose ⌊1/p⌋ ≈ 2,400 constrains nothing real. The **hard cap does the operative work** and the spec says so plainly.
-- The **hard cap** on promoted-table count is independent config. When qualifying groups exceed it, rank by count descending with the group ID as a stable tie-break.
-- **Dwell:** the promotion set is re-evaluated only at major compactions, and a group's status changes at most once per **D consecutive major compactions** (config, default small). Dwell, not hysteresis, is what governs churn at the cap boundary — the cap reintroduces at its edge exactly the thrash the threshold's hysteresis kills, and needs its own brake. The previous promotion set is an input to compaction and persists in the prior manifest.
-- All parameters (`p`, `abs_min`, cap, D) are **config with measured defaults, never constants in code** — spec §9's sweep sets them. Their home is the system architecture's §7 config schema; promotion-set evaluation is assigned to the build/compaction crate in SA §3's decomposition (spec §11).
+| Key | | Value |
+|---|---|---|
+| `member_field` | O, build only | the source column whose value is each row's member key; absent, the build creates no members and the group starts empty |
+| `metadata` | O | the names of the per-member values a member carries; every member carries every name, as a string |
+| `index` | O | a declared `[[index]]` (spec §3.3); absent, the group's index is implicit and named after the group |
 
-On the synthetic corpus the rank-size figures (4,213 items at rank 100 → 444 at rank 500) put top-100 coverage near 60% — a modest cap captures the head, not "most of the coverage"; the knee lives at 250–1,000 groups (optimisations §4), which is why the sweep must reach past it (spec §9). On the author-like histogram nothing promotes and the layout degrades to today's, which is the correct behaviour for that shape.
+A group is not a view: it cannot be named on a viewer verb, has no row space and no permutation.
+Its members are views in every respect below the declaration — each with its own Morton order,
+permutation, segments, extents and θ — and they are what a request names.
 
-## 5. Lifecycle
+### 3.2 Members
 
-**Grouping is a property of the compacted base, not of the write path.** A flush emits one pending table per view touched — a new flush generation — Morton-sorted, group-**agnostic**, tiny. The write path (WAL, group-commit allocation, ack contract) is untouched by this design. Live tables per view are bounded by `N_promoted (hard-capped) + live flushes (bounded by merge, as today) + 1 residual`.
+A member is identified as **`<group>@<key>`**, the key being a caller-chosen string under the
+column-name charset (ASCII letters, digits, `_`, `-`, contracts §2.2). The joined form is a view
+id wherever a view id goes: the request body, `x-tessera-view`, `/v1/meta`, the manifest and the
+`views/<view>/` directory, which accepts it as one path component. `@` is what makes a member
+unmistakable for a plain view, and it is reserved out of plain view names for that reason.
 
-**Compaction is where grouping happens.** At each major compaction: re-evaluate the promotion set (spec §4's thresholds and dwell); merge pending flushes into per-`(view, group)` base tables; carve newly-promoted groups out of the residual; fold demoted groups back in. Minor merges (flush-into-flush, never touching the base) stay under §11.3's existing bound.
+Each member carries an **ordinal**, assigned monotonically at creation and never reused, and the
+group's `metadata` values. Members are served in ordinal order: `/v1/meta` lists a group with its
+members, each `{ key, ordinal, metadata }`, so a client can offer previous-and-next without
+interpreting keys. The ordinal is creation order and nothing else — a caller ingesting quarters
+out of order gets them in arrival order and sorts by its own `starts` metadata if it wants time
+order. Keys and ordinals are tombstoned on drop and never reused (spec §3.4).
 
-**Carve and fold are priced, not waved at** *(review finding, accepted)*. A promotion or demotion **rewrites the residual**, which at 10⁹ with heavy promotion is still ~176M rows — ~3.2 GB of hot columns before the permutation — an order of magnitude above §11.3's maximum merged size (256 MiB as built, write-path §7), and paid as a single unit rather than spread over tiers. Therefore: promotion-set changes are **forced-compaction-only events with operator-visible cost** (surfaced on `/control/status` alongside the fragmentation metric), dwell bounds their frequency, and the residual rewrite participates in §11.3's merge budgeting rather than sneaking past it. A group oscillating across the hysteresis band cannot force more than one residual-scale rewrite per D major compactions by construction.
+**Creation is a side-effect of ingest.** The first batch naming `quarter@2026-Q3` creates the
+member; the batch's metadata travels in `x-tessera-view-metadata`, a JSON object carrying exactly
+the declared names, required on the creating batch and refused on any later one — a member's
+metadata is set once. The creation is a WAL record ahead of the batch, so replay recreates the
+member before the rows that need it, and the served member set is the manifest's registry plus
+the WAL overlay, materialised at the next flush — the overlay-then-fold shape the write path has
+everywhere.
 
-**Rapid ingest fragments at today's rate, by construction.** Group-agnostic flushes mean sustained ingest adds tables exactly as it adds segments today — not flushes × groups. What is new: **the contiguity win lives only in the base**, so under rapid ingest with lagging compaction the route-eligible fraction of reads (spec §1) degrades gracefully toward the unpromoted state — a performance decay, never a correctness or disclosure event. The knob is compaction cadence; `/control/status`'s fragmentation metric is the observability hook.
+This is the one place a view is created without an operator declaring it, and it is safe for a
+reason r4 spelled out when refusing auto-creation for plain views: a member has nothing of its own
+to review. Its frame, projection, visibility default and gate are the group's, already declared;
+the only things the batch supplies are a key and metadata, and metadata gates nothing.
 
-**A re-label leaves an item in the wrong group table until a compaction moves it.** The `predicate` op is withdrawn — an edit is a delete plus a re-ingest (decision [0047](../decisions/0047-edit-is-delete-plus-reingest.md)) — and its evaluate machinery is deleted (decision [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)), so the re-ingested item simply arrives in the buffer and lands wherever the next flush puts it. That is safe, not merely tolerable, because of this design's load-bearing invariant:
+> **⊘ Specified, not implemented — the whole of this section.** There is no group object, no
+> member, no ordinal, no metadata header and no creation record. Every view that exists was
+> declared and built.
 
-> **Tables are performance layout, never an authorisation boundary.** Visibility is decided entirely by the entity-space mask meeting the permutation; the table a row physically occupies has zero authority. An item in the wrong table is a contiguity regression, never a disclosure.
+### 3.3 The index
 
-This is the property that distinguishes tables from §12 partitions, which *are* an isolation boundary with the overlay covering moves. The two deny-retirement rules (Rule S and Rule F, write-path §5.4) gain no further case **for tables**: deletes and suppressions are entity-space mechanisms and do not know tables exist.
+An **index** is the key space a group's members are drawn from, and it exists so that two groups
+can share one: a quarterly embedding and a quarterly map are different layouts over the same
+quarters, and an attribute that varies by quarter (spec §5) should apply to both without saying so
+twice. A group that declares no `index` has an implicit one of its own name; a group that names a
+declared `[[index]]` shares that index's members with every other group on it.
 
-The partition-*move* deny is a different story, and it is the one thing in this document that would change the retirement rules. **Spec §8 Tier 1 proposes a further rule for it. That proposal is unreviewed, and it is not carried by anything in this section** — nothing about tables, views or the layout depends on it, and it must not travel with them.
+```toml
+[[index]]
+name     = "quarter"
+metadata = ["label", "starts", "ends"]
+```
 
-## 6. Whole-table shortcuts: excluded, with the safe half specified for later
+Keys, ordinals and metadata belong to the index, not to the group: creating `quarter@2026-Q3` in
+one group creates the key for every group on the index, and the second group's member is
+materialised, empty, at the same moment, so a request naming it is answered rather than 404ed.
+Under the implicit index there is one group, and the distinction is invisible. `metadata` on a
+group that names an index is refused: the index owns it.
 
-Two directions, sharply different:
+### 3.4 Drop
 
-- **Rule-in** (group signature satisfied → serve the whole table, skip mask intersection) is the whole-group visibility shortcut [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) flags as its invariant-bearing input: **fail-open** under suppression and deletion overlays, and it buys little — visible rows in a promoted group are dense for the B9 route whether or not the intersection ran, and bitmap ops over a contiguous group are already cheap. **Excluded outright.**
-- **Rule-out** (signature unsatisfied → skip the table) is fail-closed by direction, but not unconditionally safe: something can make an item visible while it still sits in a group whose signature the principal fails; skipping that table hides an acknowledged change and breaks the caller-observes-own-write rule.
+Dropping a member is a control operation: a WAL'd tombstone on the key. The member leaves
+`/v1/meta` on acknowledgement, a request naming it is a 404 from then on, and its row-space
+artifacts are reclaimed at the next fold. No entity is deleted — an entity that was only in that
+member still exists, with its attributes, and is simply in no view. Under a shared index the drop
+is of the key, and takes the member out of every group on it. A dropped key is never reused,
+because a recreated `2026-Q3` with different contents would silently repoint every bookmark, every
+cached θ and every client cache keyed on the view (decision 0029).
 
-> **⊘ This section's dirty-bit argument needs re-deriving, and is not re-derived here.** It was written against evaluate entries — the one overlay fact that could make an item *visible* rather than less so — and that store is deleted (decision 0048). Deletions and suppressions only ever remove, so the widening case must now come from the **ingest buffer** instead, whose entries retire at a *flush* rather than at a fold; "fold status, not acceptance time" is therefore no longer obviously the right definition of the bit. Rule-out is unbuilt and optional, so nothing depends on this today — but the argument below must not be adopted as-is. Re-deriving it is design work for whoever builds rule-out, and is deliberately left open rather than guessed at here.
+### 3.5 Layers over a group
 
-**The dirty bit is defined by fold status, not by acceptance time** *(review finding, accepted — this is the load-bearing sentence)*:
+A layer naming a group in `views` is drawn on every member, present and future. A member created
+at ingest has no artifact extents for that layer until the fold that writes them — the same
+window a new flush's artifacts have today (annotation-representation, the fold's artifact pass) —
+and the layer answers empty on the new member until then, which is the ordinary state of a
+layer over a segment the fold has not seen.
 
-> A group is **dirty** iff any **live (unretired) overlay entry**'s entity has its row in the group's table.
+## 4. One entity in several views
 
-Acceptance-time readings ("touched since base") are wrong: lifecycle §5.3 carries post-snapshot entries forward across compaction *unfolded*, and those entries pre-date the new base — a time-based bit goes clean while an unfolded entry still sits in the group, hiding an acked change. Fold status was exact for evaluate entries because they retired precisely at the fold that makes the base honest; **that exactness went with them** (see the ⊘ above). One consequence survives unchanged and is worth keeping: a group holding any **suppressed** entity stays dirty for the suppression's whole lifetime (suppressions never fold; conservative and correct). So does the discipline on the per-session **table visibility vector** (one gate-style signature evaluation per promoted group → satisfied / unsatisfied / dirty), which is **keyed by `overlay_version`** per r19's discipline, so any mid-session overlay change invalidates it rather than bypassing its own guard.
+Identity is entity-space, so the same point in two views is the caller saying so at ingest: two
+batches, two views, one `external_id`. The second batch is the operation contracts §3.4 currently
+refuses as a duplicate, and its rule is amended:
 
-Rule-out remains **specified, optional, and unbuilt**: adoptable only after the conformance suite grows a canary for it (spec §12). The layout earns its keep through contiguity alone.
+- **Unknown `external_id`**: allocate an entity, as today.
+- **Known, and not in the named view**: accept. The row's position lands in the named view's
+  pending segment; the entity, its label and its entity-scoped attributes are untouched.
+- **Known, and already in the named view**: 409. Positions are not updated in place, and this arm
+  must not become an update path by accident — the single-valued permutation cannot hold two rows
+  for one entity in one view.
+- **A different label**, on a known id: 409. A re-label is a delete plus a re-ingest (decision
+  0047), never a field carried in on a second-view row, because the alternative is a widening
+  with no overlay entry or a narrowing that bypasses the deny lanes.
+- **An entity-scoped attribute** (spec §5) on a known id must byte-match the stored value or be
+  absent from the batch; a differing value is a 409 naming the column. An index-scoped attribute
+  is expected, because that is the value this member carries.
+- **A deleted holder is not a duplicate**, as today: the re-ingest allocates fresh.
 
-> **⊘ Specified, not implemented — the dirty bit and the table visibility vector alike.** Neither exists, and neither can: there are no group tables to mark dirty and no shortcut consulting them. Every read intersects the mask, at every coverage, which is what rule-out would optimise away and is the safe behaviour. The definition above is stated so that a future implementation starts from the fold-status reading rather than rediscovering that the acceptance-time one is fail-open.
+The identifier forms are r4's, kept: `external_id` is canonical; `tessera_id` is accepted with a
+**mandatory** idset beside it, a retained idset translating exactly and a revoked or unknown one a
+409. Contracts §2.2's argument for an optional idset on reads does not transfer to a write — a
+stale identifier on a read misresolves one bounded answer; on a write it silently names another
+entity.
 
-## 7. On-disk layout, mmap and the write path
+Which views an entity is in is not stored anywhere but the permutations, and is not served:
+`/v1/items` answers for the view it was asked about, and a point's absence from a view is
+indistinguishable from its invisibility there (C4's closure).
 
-The corpus's storage model (§10.3: one file per column per segment, raw fixed-width Arrow IPC buffers, page-aligned, mmap'd zero-copy; §10.2: immutable versioned prefixes, NVMe sync at boot) survives intact; multi-table forces exactly one decision inside it.
+> **⊘ Specified, not implemented.** A known `external_id` is a 409 whatever view the batch
+> names (`/control/ingest`'s duplicate check consults every run). With one view per bundle the
+> two rules agree, so nothing is wrong today; the amendment is what makes a second view
+> populatable at all.
 
-**Per-table column files, not view-wide files.** Two candidate serialisations of a view's row space:
+## 5. Attribute scope
 
-- *View-wide*: one file per column per view, tables as extents at their base offsets, alignment gaps as sparse-file holes. Preserves today's mmap count and pure-arithmetic gather (`row × width`), but carving one group out of the residual at compaction rewrites the whole view's columns — ~8 GB per column at 10⁹ — a write-amplification cliff attached to the most routine compaction event.
-- *Per-table*: one file per column per table. Compaction rewrites only the tables it touches, and — the substantive win — **an untouched table is carried into the next generation by manifest reference, not by copy**. A stable promoted group is precisely what compaction rarely touches, so the tables that pay the layout's rent are the ones that stop costing anything to carry. Costs: the gather goes through a table directory (row ID → (file, local offset), a small sorted lookup over base offsets — cacheable, and the fan-out cost is priced in spec §9); and mmap count rises to tables × columns × views — thousands at the hard-capped counts, well inside VMA and fd limits.
+An attribute today is one value per entity, evaluated in entity space, and therefore visible under
+every view with no declaration saying so (`filter-index.md` §7). That stays the default and needs
+no key: a **constant** attribute is not declared against views, because there is nothing a
+declaration could add.
 
-Per-table files are the recommendation. Page alignment and container alignment both hold trivially per file, since each file starts a table.
+The case that needs declaring is a value that differs by member — a sentiment score recomputed
+each quarter. It is declared as a **scope**:
 
-**Pre-compaction tables: no change from today.** The corpus's model is already one file per column per *segment* (§10.3), and a pending table is a segment — flush writes exactly the files it writes now, and minor merges are the file-count consolidator, exactly as they bound segment count today. One refinement: **pending tables use a single combined file per table** (all columns, one small Arrow IPC file) rather than per-column files — they are tiny, short-lived and rewritten at the next minor merge, so per-column granularity buys nothing there. Per-column files are the *base* layout, where selective column reads at 10⁹ are the point. This cuts the flush-cadence file spray by the column count at zero read-path cost.
+```toml
+[[attribute]]
+name  = "sentiment"
+type  = "f32"
+scope = { index = "quarter" }      # default: scope = "entity"
+```
 
-**File-count bound.** Live files ≈ views × columns × (N_promoted + live flushes + 1), plus at most one small metadata sidecar per table. **No sidecar is required by anything in this design**: tile ranges come from binary search over the table's own `morton.u32`, and there are no candidate lists. The term is carried only so the bound does not have to be reopened if a table ever acquires stored metadata. At 4 views × 6 columns × (64 promoted + 8 flushes + 1 residual) ≈ 1,800 column files per generation — trivial for the object store, NVMe sync, file descriptors and VMAs alike. Both terms are bounded by existing knobs: the hard cap bounds promoted tables, compaction cadence bounds flushes.
+**Storage.** An index-scoped attribute is a family of entity-space columns, one per member of the
+index, each with its own presence bitmap (decision 0064 — an absent number is presence beside the
+column) and, for a category, its own postings. Nothing is materialised per row space, which is
+what keeps the attribute inside I2's argument: every value is indexed by entity, every predicate
+answers a bitmap in entity space, and the mask meets it there before any permutation is applied.
+The family grows by one column when a member is created, empty; the fold's attribute pass
+(`filter-index.md` §6.2) runs per column and needs no new case.
 
-**The write path, itemised:**
+**Evaluation.** A filter leaf names the attribute, and the member whose column is read is decided
+one of two ways:
 
-- **WAL: untouched.** Entity-space; tables are row-space artifacts downstream of flush.
-- **Flush: untouched in shape.** Spec §5's group-agnostic pending tables mean flush writes one small table per touched view — no per-group file spray at the flush cadence.
-- **New, priced:** a point belonging to *k* views writes coordinates into *k* pending tables — write amplification proportional to view membership. Inherent to independent coordinates, bounded by the ingest map, and visible at flush rather than on the request path.
-- **Compaction:** carve/fold writes only the residual and the promoted tables whose membership changed (priced in spec §5); untouched tables carry by reference.
+- **Under a member of the index**, the request's own view decides: `sentiment` under
+  `quarter@2026-Q3` reads that quarter's column. Nothing is added to the wire.
+- **Under any other view** — a plain view, or a member of a different index — the leaf must
+  **pin** a member: `sentiment@2026-Q3`. That is an ordinary entity-space bitmap and it composes
+  with everything else, so "the documents that were negative in Q3, on the whole-corpus map" is a
+  filter like any other. An unpinned leaf there is a 422 naming the index, not an empty answer,
+  because a leaf with no column to read is a malformed request rather than a constraint.
 
-**Manifest references are a format decision paid early, and the earlier "no format change" claim was wrong** *(review finding, accepted)*. Contracts §1 makes all manifest paths prefix-relative and §2.1 says the prefix grows only by whole new files named in a newer side-manifest — a table carried by reference from an *older* prefix violates both unless table references are **prefix-qualified from day one**. That is exactly the class of thing the corpus says must be paid before a format is published, so it goes on spec §12's foreclosure list, not in a footnote.
+A pinned leaf under a member of the same index is allowed too — Q4's map filtered by Q3's
+sentiment — and means what it says.
 
-**The honest price: generation GC.** Manifest-reference sharing breaks "delete the old prefix" — unreferenced table files need refcounted or mark-sweep collection across manifests. This is deferrable: below ~10⁸ items, strict prefix-copy (rewrite everything, delete old prefix) remains simple and affordable, and the switch to reference-sharing is a serving-node and build concern invisible to the wire. The trigger for adopting it is compaction write volume, observable operationally.
+**Ingest.** A batch into a member carries that member's values for every index-scoped attribute
+on its index, under the attribute's plain name; the member is known from the header, so the
+column is not qualified. A batch into a plain view may not carry an index-scoped attribute at
+all: there is no member for the value to belong to.
 
-## 8. Identity stability
+**Render.** A `render = true` index-scoped attribute is rendered in the members of its index and
+in no other view, which is the rule `per-point-attributes.md` §3.9 already has for `render_in`
+with the view set decided by the scope instead of listed.
 
-Views sharpen the value of stable identity: the entity is the join key across coordinate systems, and `tessera_id` is already identical for an entity in every view (the view is not an input to the keyed bijection) — cross-view join on the wire works today. The remaining instabilities are the three break events, and the honest position is tiered, because stability, dense machinery and placement freedom cannot all live in one integer — *permanent identity, dense machinery, placement freedom: pick two per integer* — which is precisely what the ι-ordinal split of [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md) answers with two. That sketch is **explicitly not approved**, and its own central safety argument does not close: overlay entries keyed by a renumberable ordinal would re-point every deny at a different entity across a compaction. Nothing below assumes it lands.
+**Member metadata is not an attribute.** A member's `label` or `starts` is one value per member,
+lives on the registry entry, filters nothing and is served on `/v1/meta`. A per-(entity, member)
+value is an attribute. The two are kept apart so that neither grows the other's surface.
 
-**Tier 1 — proposed ruling: repartitioning preserves identity by default.** §12.5's reindex breaks `tessera_id` only because the rebuild takes the opportunity to reallocate entity IDs, not because moving an item between partitions requires it — there is a single global allocator across partitions (§16, r21), and contracts §2.2's own stated reason ("the permutation's input encodes placement") does not hold for partitions, which never enter the input. Identity-breaking reallocation is demoted to an escape hatch, never the default. Contracts §2.2's "must advance the idset on any partitioning change" relaxes to "on any build that *reallocates*, and on key rotation". Three obligations attach:
+> **⊘ Specified, not implemented — scope, the column family, the pinned leaf and the ingest
+> rule.** `scope` is not a key the parser knows and would be refused under `deny_unknown_fields`,
+> which is the right behaviour meanwhile.
 
-- **A further deny-retirement rule is proposed here — read the boxed warning below before doing anything with it.**
-- **The builder must prove non-reallocation.** "Advance on reallocation" replaces a syntactic check (partitioning differs) with a semantic one; the build records and verifies an identity-preservation attestation, or advances the idset.
-- **C17's row is amended alongside**: its acceptance cites the idset as a time-bound on existence probing, and Tier 1 deliberately extends that window across repartitions. The trade is the point, and the register owns it.
+## 6. The gate
 
-> ### ⚠ Invariant-bearing and unreviewed: a proposed **further deny-retirement rule**
->
-> **There are two deny-retirement rules, and conflating them is fail-open** (write-path §5.4). **Rule S** — an entry leaves `suppressed` only by its unsuppress, and a suppression never touches postings. **Rule F** — a deletion leaves the overlay only at the compaction fold that *executes* it, the safety property being an identity match rather than a stamp ordering. The stamp ledger earlier revisions specified is **deleted from the spec, not deferred**. The project has caught a conflation of the rules twice.
->
-> **The proposal.** §12.5's partition-move protocol denies an item in the source until it lands in the destination. That deny is caused by neither a deletion, nor a suppression, nor a plain predicate change. Classifying it as a deletion deny let it retire by the stamp ledger **while the source partition's postings still index the entity** — fail-open across an isolation boundary, in bulk, once identity-preserving repartitions make moves routine. The proposed rule: **a move's source-side deny retires only at the source compaction that removes the entity from the source's postings** — Rule F's shape.
->
-> **The argument above was made against the stamp ledger, which is deleted.** Whether Rule F already closes the hole — a deletion now retires only at the compaction fold that executes it — and therefore whether this proposal survives at all, has **not** been re-argued. It is not settled here, in either direction.
->
-> **Its status.** This is the only proposal in this document that would change an invariant-bearing mechanism, and it is the only one whose failure mode is a disclosure rather than a latency regression. It has **not** had the independent review the two standing rules had, and it does **not** rest on anything else here: no view, table, promotion or layout decision depends on it, and none of them justifies it.
->
-> **What must not happen.** It must not land as part of a layout change, be folded in alongside the spec §11 amendments, or be treated as settled because it appears in a document that has been reviewed for other things. It travels **only** as its own amendment proposal, against write-path §5.4, with its own review trail. It stays recorded here until this document is folded into the corpus, and nowhere else.
->
-> ⊘ *Specified, not implemented — as is everything it touches. There is one partition and no move protocol; of the two standing rules only Rule S has a route that runs, Rule F's fold not existing, so nothing but an unsuppress retires anything.*
+A view or a group may declare `visibility`, a label evaluated by the plugin exactly as an item's
+label is; a group's gate is inherited by every member. Satisfaction is the item-visibility
+predicate verbatim (§6.1): the label resolves to its term set, and the gate is satisfied iff that
+set intersects the principal's satisfied set. Not the conservative label join — under §12.2's
+required-set reading a disjunctive gate (`finance | legal`) yields an empty required set and
+every principal passes, which is a fail-open on exactly what the gate protects. Intersection
+gives a disjunctive gate its intended meaning.
 
-*Fold-in note:* Tier 1 as a whole is a contracts §2.2 semantic change whose coupling to this spec is motivational, not mechanical. At fold-in time it travels as **its own amendment proposal with its own review trail**; it is retained here as design context so the view/table decisions that motivated it stay legible.
+- The principal's **visible-view set is resolved once at authorise**, every view and every member
+  evaluated whatever the outcome, so the request-time check is one set-membership lookup and a
+  gate-failed name costs the same work as a never-registered one — r23's
+  work-indistinguishability standard, the closure C4 records for `/v1/items`.
+- A gate-failed view is absent from `/v1/meta` and its members with it; a request naming one is a
+  404 indistinguishable from an unknown name.
+- The gate governs every view-valued surface, not only discovery: a layer's `views` list as
+  served, a member list, anything else keyed by view omits gate-failed entries.
+- The gate is conjunctive with item labels, never substitutive: an item inside a gated view is
+  still governed by its own label. A gate narrows and never widens — the I12 direction.
+- A member created at ingest is born under its group's gate; there is no per-member gate.
 
-**Tier 2 — kept open at zero cost:** the 64-bit identity input is *reinterpretable* as **birth-block** rather than placement — the prefix records where an ID was born, never where the item lives. Today the prefix is 0 either way; no allocation policy is pinned. Recorded consequences of the birth-block reading, for when the reshard design is written: allocation stays trivial and uncoordinated (each shard mints from blocks it owns), with per-shard u32 headroom — the same exhaustion arithmetic as §16's shard-local sketch, so the exhaustion objection to "global allocation" does not apply; migration in **either direction** never renumbers — a retired shard's blocks freeze, never re-issued, never minted from again, so shrinking a deployment is symmetric with growing it and advances no idset (placement-coupled schemes fail exactly this scale-down question); the cost is scatter — a shard's population comes to span multiple birth prefixes, its local bitmap universe goes sparse in the upper bits, and §11.1's signature-sorted contiguity does not survive assembly from foreign-born IDs. Roaring absorbs the sparsity; the contiguity loss is the real price and is what Tier 3 exists for. Drift is observable via `/control/status`'s fragmentation metric. The birth-block prefix opens no wire channel: it is an input to the keyed bijection, and nothing of it survives to the `tessera_id`.
+> **⊘ Specified, not implemented.** `visibility` on a view is parsed and refused; no gate is
+> evaluated and no visible-view set exists. Every declared view is reachable by every principal
+> that authorises at all, and a reader must not count gating as an available means of
+> restricting reachability.
 
-**Tier 3 — recorded as contingent:** wire-identity stability across *resharding* is achievable **iff the ι-ordinal split lands** — the only structure in which scattered permanent IDs are livable, because postings, masks and the permutation index the dense renumberable ι and never the scattered layer. The split's two named safety holes (overlay keying is fail-open under renumbering; WAL replay) are **prerequisites, not footnotes**; nothing in this design depends on them closing, and the decision point is the reshard design at §13.4's own trigger, not now.
+## 7. Build and populate
 
-**Key rotation splits into two operations, and only one breaks references** *(ruled 2026-08-01, prompted by the 10⁹-references question)*. Retaining rotation at all is deliberate: it is the sole remediation for deployment-key compromise, which would otherwise permanently open I10's inversion channel (gaps count allocations; proximity discloses shared signatures) for every identifier ever issued, and forbidding it deletes nothing — the idset machinery exists anyway for the escape-hatch reallocation. But the compromise disclosure is *already complete* the moment the key leaks, for every identifier issued under it; continuing to **honour** those identifiers afterwards discloses nothing further, while all new allocation is protected by the new key. Hence:
+**A build materialises every declared view and every member `member_field` names.** The
+`--view` flag and the refusal of a declaration with several views are withdrawn (decision 0091:
+a build is ingest into an empty database, and an ingest can populate any view). Per view the
+build is what it is today — read the source, transform, quantise, Morton-sort, write the segment
+and the permutation; for a group it is that once per distinct `member_field` value, with the
+members created in the order their keys first appear and the metadata read from the source's
+metadata columns, which must agree for every row of a member. Entity space is built once, from
+every source's rows unioned by `external_id`; an entity appears in as many row spaces as sources
+placed it in.
 
-- **Roll** — the routine form. Mint a new key, advance the idset, **retain the old key server-side**. Responses carry current-idset identifiers; an identifier presented with a retained old idset is resolved by inverting with that idset's key and re-emitting the current form — two pure functions, no translation table, nothing rewritten at 10⁹, **no reference breaks**. Forgery under a stolen retained key buys nothing: the mask gates every response and C4 keeps invisible indistinguishable from nonexistent.
-- **Revoke** — the deliberate break. Drop a retained idset's key; identifiers naming it get today's semantics — 409, re-resolve by `external_id`. Reserved for when circulating identifiers must actually die, which the mask makes nearly never.
+**Populate at ingest** is spec §2's addressing and spec §4's join rule, for a plain view and a
+member alike; a member that does not exist yet is created (spec §3.2).
 
-> **Unresolved against a settled decision.** [Decision 0025](../decisions/0025-rotation-is-a-session-invalidation-event.md) rules that a rotation is a **session-invalidation** event and that there is **no per-request idset**: a caller able to vary one learns how the mapping moved across a rotation, which is a fact about the corpus rather than about any item they hold. Roll's translation path is exactly such a parameter. The corpus governs, so roll mode is not available; it is retained here because the compromise-remediation argument above survives the conflict and a reconciliation would have to answer it. Reconciling the two is out of this document's scope and has not been reviewed.
+**Bulk backfill of a plain view over an existing corpus** — a new embedding over 10⁹ items —
+is r4's `tessera build --attach-view`: a build-plane operation that reads `(external_id, x, y)`,
+builds the one view's row-space artifacts, references every other view's artifacts from the new
+manifest verbatim, and flips `CURRENT`. It is kept as the design's answer to "add a view without
+rebuilding the others" and is not scheduled: it needs manifest references that may name an older
+prefix, which contracts §2.1 forbids today.
 
-Multi-idset acceptance is why the idset must accompany the identifier (two bijections both "succeed" on 64 bits): untagged identifiers resolve as current-idset; tagged ones translate if retained, 409 if revoked. Consumers who followed the contract — persist `external_id` — were never at risk on either path. C17's time-bound weakens correspondingly (a rolled identifier lives across rotations); that is the point, and the register entry owns it alongside Tier 1's extension. `external_id` remains the durable key throughout.
+> **⊘ Specified, not implemented — all three.** The build takes `--view` and materialises one;
+> a second view cannot be populated (spec §4); there is no attach.
 
-## 9. Performance analysis and the fan-out sweep
+## 8. Cost
 
-**Where the win actually comes from** *(rewritten after review — an earlier draft quoted the ~7,500× container figure here, which is an entity-space postings-union win belonging to §11.1's allocation ordering; this layout is a row-space permutation and does not touch postings. Optimisations §2.3 documents exactly that double-count; the corrected legs follow.)*
+The costs a second view adds are the r4 figures, kept because they decide the representation
+choices below.
 
-1. **Projected-mask collapse** — the strongest measured leg (optimisations §4.1): the row-space projection of a high-coverage mask measured at 8.8 s at 10⁹, and a signature-major layout collapses the scattered gather that dominates it. The sweep below instruments it directly.
-2. **Read-route eligibility** — the B9 tiered decode's run-decode route engages at ≥ 95% visible density in the read range (measured crossover ∈ (0.90, 0.95), ~2× the sparse gather at full density; spec §1). Grant-aligned reads inside promoted tables sit near 100%; promoted coverage sets the eligible fraction.
-3. **Priority-read contiguity under direct evaluation** — the read that touches every visible row in a tile range rather than *k*. Direct evaluation is the only selection route, so this is the read that matters and not a fallback's. **Unmeasured**: Phase 0 measured no column read at all, and the gather probe [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) names as one of its three missing inputs is inherited by the sweep below.
-4. **Permutation encodability** — `entity_to_row` near-monotone within groups, opening Elias-Fano-class encoding behind the reader interface — **with the sketch's own qualifier kept attached**: near-monotonicity is only as good as the batch granularity (r23: nothing repairs per-batch fragmentation short of the ι split), so under continuous small-batch ingest this leg decays and must not be priced at its bulk-build ceiling.
+- **The permutation is sized by the maximum entity id, not by the view's population**: a flat
+  `u32` array per view, ~4 GB at 10⁹, sentinel-dominated when the view is sparse. A group of
+  forty quarters over one entity space is forty of them. The contracts reader interface keeps the
+  representation abstract for this reason, and a **paged permutation** — a directory over
+  2¹⁶-entry pages, an absent page meaning all-sentinel — is the representation for a member,
+  chosen at the view's creation. Whether it should be every view's default is spec §12's
+  question.
+- **The projected mask is per `(token, view, segments version)`**, so a session scrubbing through
+  members holds one projection per member touched. The filter-result cache
+  (`filter-result-cache.md`) is view-independent by construction and is unaffected.
+- **A flush writes one pending segment per view touched**; a point in k views is k rows, k
+  segments' worth of merge and fold debt. That is the price of independent coordinates and is
+  visible at flush, never on the request path.
+- **An index-scoped attribute costs one entity-space column per member**, each the size the
+  attribute would cost alone.
+- **Files**: views × columns × (segments + 1), plus the attribute families — thousands at the
+  counts above, inside every limit that matters.
 
-**Who pays: the high-coverage principal** — already the system's worst retrieve-side path (the 8.8 s projection; the 2,885 ms hash-flat head-principal authorise case — an earlier draft mislabelled the 588 ms figure, which is the random-w=10⁴ scenario, as "head-principal"). For them the layout is a transfer, not a free win, and the costs below are multiplied out rather than gestured at.
+None of these is measured against a multi-view bundle, because none exists; every figure is the
+single-view cost multiplied. The first two-view build is where they become measurements.
 
-**The unit cost they are priced in.** §7.3 measures ~300 whole-viewport `range_cardinality` calls at ~0.1–0.3 ms, i.e. **~0.3–1.0 µs per call**. That, and §10.4's measured viewport of 135–164 ms p50 / 158–191 ms p99 at 10⁹, are the only budgets below. The figures do not use Appendix A's former 10 ms p99 count path or §10.4's former low-single-digit-ms viewport: both were written against a cost model the implemented route does not have and are withdrawn (§10.4, Appendix A).
+## 9. Leak analysis
 
-- **Count pyramid:** ~300 viewport tiles × (N+1) ranges. At N = 256: 300 × 257 ≈ **77k calls ≈ 25–77 ms** at the unit cost above, against a viewport whose whole measured p50 is 135–164 ms — a 15–55% addition to the request for counting alone, where today's N = 1 costs 600 calls ≈ 0.2–0.6 ms. The conclusion the passage drew survives the change of budget: this alone bounds N well below 256 for count-heavy deployments unless the sweep proves otherwise.
-- **The §7.3 underlay multiplies it by 4^s:** 300 tiles × 4⁴ ≈ 77k sub-cells at s = 4, × 257 ranges ≈ **20M calls ≈ 6–20 s** — an unusable underlay at high N, by two orders of magnitude, under any budget anyone would argue for. The underlay is a load-bearing §7.3 mechanism and was **absent from this spec's first sweep design; it is now a required measured quantity.**
-- **Bottom-*m* merge:** §7.2 (r22) has each table offer its own bottom-*K*<sub>max</sub>, so a tile's merge becomes (N+1) × *K*<sub>max</sub> candidates. At N = 256 and ***K*<sub>max</sub> = 500** that is 257 × 500 = **128,500 candidates per tile**, ~38M across a 300-tile viewport. **This figure is a direct multiple of *K*<sub>max</sub>** — the per-tile mark ceiling `k_max_marks`, fixed at 500 by decision [0007](../decisions/0007-k-max-marks-500.md) and recorded at the constant in `crates/tessera-server/src/config.rs`. A deployment that lowers it, or a future decision that changes it, scales every merge-width figure here proportionally and nothing else. *(An earlier draft priced this at ~33k per tile, which is 257 × 128 against the retired ceiling of 128 — low by a factor of 3.9.)*
+Row-space layout is already a full-corpus function — Morton rank depends on every item's
+position — and has never been a leak because row ids never cross the trust boundary. Views add
+row spaces, not channels. What has to be checked is what a viewer learns *from* the set of views.
 
-  The correction sharpens rather than reverses the passage's conclusion — merge width is the fastest-growing of the three costs in N — but it removes half of the original argument: the second leg was that per-table **candidate lists** multiply in storage toward ×N. There are no candidate lists (decision [0008](../decisions/0008-candidate-list-route-declined.md)) and no storage term. The merge width now carries this bullet alone.
-- **Gather locality inverts:** one nearly-contiguous span per tile becomes up to N+1 ranges in N+1 files.
+- **View and member existence** is governed by the gate (spec §6), and a gate-failed view is
+  indistinguishable in outcome and in work from an absent one. An ungated group's member list —
+  keys, ordinals, metadata — is public to every principal that authorises, by declaration; a
+  deployment whose member keys are themselves sensitive gates the group.
+- **Cross-view linkage.** `tessera_id` is the same for an entity in every view — the view is not
+  an input to the keyed bijection — so a viewer can join a visible item to itself across views.
+  That is the point, and C17's acceptance of the identifier as a stable handle covers it.
+- **An item's presence in a view** is disclosed only through the mask: an entity the viewer
+  cannot see is served in no view, and an entity absent from a view is indistinguishable from
+  one invisible there.
+- **Index-scoped filters** are entity-space bitmaps intersected with the mask before any count,
+  so the I2 argument for filters (`filter-surface.md`) applies unchanged; a pinned leaf under
+  another view is the same operand with the column chosen by the request rather than by the
+  view, and discloses nothing a filter under the member would not.
+- **`/v1/meta` becomes per-principal** in its `views` entry, under the gate — the second such
+  field beside the C11-gated vocabulary, the same precedent.
+- **Timing.** A member's row space is smaller than a plain view's, and a request against it is
+  correspondingly faster; the size of a member is a fact about the corpus a viewer could estimate
+  from response times. It is the same class as C15 (tile-level timing over the corpus) and is
+  noted there rather than given a new row.
 
-**The fan-out sweep** (extends the gather probe [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) owes). Synthetic corpus; **N ∈ {1, 8, 32, 64, 128, 256, 512, 1024}** — the top end must clear the documented knee at 250–1,000 groups (optimisations §4); three principal shapes — grant-aligned narrow, mixed, full-coverage; measured quantities: **count pyramid, §7.3 underlay at s=3 and s=4, bottom-*m* merge width, column gather (priority column under direct evaluation), mask projection build time, and projected-fragment cache footprint**.
+No new verb, no new leak-register row, one register note.
 
-**What the sweep reports against.** Not a latency target — the system has none at 10⁹, and the two this document previously named are withdrawn. Each quantity is reported **as a fraction of the measured single-table position** at the same N=1 configuration and the same principal shape: the 135–164 ms p50 / 158–191 ms p99 viewport, of which selection is 83–89%, and the 8.8 s high-coverage mask projection. The layout is a transfer, so the only figure that decides anything is the **net** one — projection collapse won against count, merge and gather lost — and a per-quantity budget cannot express that. Two acceptance conditions this document does argue for on its own evidence, both relative: **no principal shape may regress on total viewport latency** (a layout whose whole case is contiguity has no claim on a slower request), and **no configuration may make the §7.3 underlay cost more than the viewport it annotates**, which the 20M-call figure above already violates at N = 256. The full-coverage knee sets the hard cap; the grant-aligned crossover sets default `p`; the dwell default follows from measured carve/fold cost (spec §5).
+## 10. What this design deliberately does not do
 
-## 10. Leak analysis
+- **Signature grouping.** A performance layout, off by default, with its own gates; see
+  [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md).
+- **In-place position updates**, and removing one entity from one view.
+- **Runtime creation of plain views.** A plain view is a build; a member is an ingest.
+- **Per-member gates.** A member inherits its group's.
+- **Time in the Morton code** (§9): views are discrete and a viewer looks at one at a time.
+- **Historical authorisation.** Current credentials govern every view, historical ones included
+  (§9, r17).
 
-**The framing precedent: row-space layout is already a full-corpus function.** Morton rank depends on every item's geometry, and it has never been a leak because row IDs never cross the trust boundary. The promotion set is the same class of artifact — derived from the full histogram, invisible from outside. What needs checking is whether tables *escape* row space. Three channels:
-
-**Value channels — closed by an indistinguishability property**, stated in conformance-checkable form:
-
-> **Single-table indistinguishability:** for any principal, any request, the response under a multi-table layout must be **byte-identical** to the response the single-table layout produces for the same bundle content and generation. Layout is a physical decision with no representational residue on the wire.
-
-**Ordering resolved itself in the strong direction** *(review finding — both reviews converged on it — accepted)*. Contracts §3.2 (r7) already fixes point batches "ordered ascending by `tessera_id` within each tile"; ordering was contract all along, and §7.2's exact bottom-*m* merge across tables produces exactly that order at no cost. So the existing contract **stands** — this spec changes nothing about it and the amendments table now says so — the ordering half of the side channel closes at the wire, and the differential above is **byte-level with no order canonicalisation**, which is strictly stronger than the canonicalised form this spec first proposed (the suite's canonicaliser sorts rows and is structurally blind to ordering regressions; a byte-level diff is not). An implementation that concatenates per-table runs now fails the suite's strongest test instead of passing it.
-
-**Timing — one accepted register candidate, owning both its edges** *(revised per review)*. Per-tile work varies with the viewer's visible-table count — a function of their mask **and the global promotion set**, and the entry does not pretend otherwise. What an observer can resolve: that some group is promoted, i.e. holds ≥ `max(abs_min, p × corpus_size)` live items — via timing (an invisible table costs an absent-container check, sub-microsecond against tens-of-ms responses). **Hysteresis sharpens the fact**: watching a group's promotion status flip across compactions brackets its size within the promote/demote band — a two-sided estimate, C15-adjacent, and the entry owns it explicitly. **Proposed as a new Appendix C entry, argued accepted on magnitude** — listed because the register's rule is that anything not in the table is a bug. Bundle-internal artifacts (file names and sizes in the bucket and on NVMe encode the promotion set and group sizes) sit inside the trust boundary with the postings themselves and are noted in the entry's text, not separately accepted.
-
-**View channels — settled in spec §3:** gated-view existence closes by the session-resolved visible-view set, meeting r23's work-indistinguishability standard, and the gate governs every view-valued response surface; cross-view `tessera_id` stability is deliberate linkage of an item to itself (C17's argument extends); view membership of a visible item is caller-supplied data shown only through the mask; `/v1/meta` becomes per-principal in its `views` array, the C11 precedent cited.
-
-Net: no change to the five-verb surface; one new accepted register entry; one strengthened conformance property — a byte-level differential build that is among the strongest tests in the suite.
-
-## 11. Proposed corpus amendments (on fold-in, owner decision each)
+## 11. Corpus amendments on fold-in
 
 | Document | Change |
 |---|---|
-| Architecture design §5.1, §9 | View generalised to named coordinate system with gate label (intersection semantics); temporal views become instances; runtime view creation; sparse permutation representation permitted behind the reader interface; stale `x-tessera-view` citation in §7.2 (r24) corrected |
-| Architecture design §11.2/§13 | Segment → table `(view, group, flush)` with the valid-population invariant (spec §2); container-aligned generation-scoped base offsets; group ID = canonical hash of sorted signature (§12.4's construction) |
-| Architecture design §12.5, §16 | Tier 1 ruling (identity-preserving repartition; reallocation demoted to escape hatch; builder attestation) — **travels as its own amendment proposal**; Tier 2 birth-block note against the exhaustion entry |
-| Architecture design §10.2/§10.3 | Per-table column files; combined-file pending tables; prefix-qualified manifest table references; generation GC note (strict prefix-copy until compaction write volume triggers reference-sharing) |
-| Appendix C | New accepted entry: promotion-set threshold facts via timing, including the hysteresis two-sided bracket. **C17 amended**: the idset's time-bound weakened by Tier 1 and by roll-mode rotation, accepted as the point of both changes. View-existence disclosure noted under C4's closure with the work-indistinguishability mechanism |
-| Contracts §2.1 | "One segment per (partition, view) at build" relaxed to the table population of spec §2; prefix-growth rule extended for prefix-qualified references |
-| Contracts §2.2 | Idset-advance rule relaxes to "reallocation or rotation" (with Tier 1's own proposal); identity-preservation attestation; **rotation split into roll (multi-idset key retention, idset-tagged identifiers translate, no break) and revoke (today's 409 semantics)** — roll is **blocked** by decision 0025 (no per-request idset) and cannot be proposed until that conflict is reconciled |
-| Contracts §2.3 | `segments` array gains `group` and base-offset fields (`group` always `residual` until promotion exists); hot-column enumeration becomes per-view (mandatory core + optional per-view scalars) |
-| Contracts §2.6 | "Row IDs are segment-local" → view-global row IDs with container-aligned table base offsets |
-| Contracts §3.2 | **Ordering rule explicitly unchanged** (affirmed against the multi-table merge); `views` array in `/v1/meta` gate-filtered — meta becomes per-principal in a second field, C11 precedent; discovery shape stated |
-| Contracts §3.4 | Coordinate map `{view → (x, y)}`; duplicate-`external_id` rule amended per spec §3 (byte-match labels, same-view 409, new-view accept); ingest identifier forms (`external_id` canonical; `tessera_id` + **mandatory** idset, 409 on mismatch); view create and drop control operations (create-before-reference ordering, tombstoned names, ack coupled to application); header addressing retired with it |
-| Write-path §8; lifecycle §5.3 | Compaction gains promotion-set evaluation, dwell, and group carve/fold with its cost participating in §11.3's budgeting; note that tables themselves add no further deny-retirement case |
-| Write-path §5.4 — **separate proposal, not part of this fold-in** | The §12.5 move deny's proposed **further retirement rule** (source-compaction-coupled, Rule F's shape). **Invariant-bearing and unreviewed**, and its motivating fail-open was argued against the deleted stamp ledger — see the boxed warning in spec §8. It travels alone, against write-path §5.4, with its own independent review; folding it in with any row above is the error the warning exists to prevent |
-| System architecture §3, §7 | Promotion-set evaluation assigned in the crate decomposition (build/compaction side); `p`, `abs_min`, cap, dwell in the §7 config schema; per-deployment layout switch; `tessera build --attach-view` as a build mode (view-scoped row-space build, generation flip by reference) |
-| Conformance design | Byte-level single-vs-multi-table differential build (no order canonicalisation); later, the rule-out canary and the fold-status dirty-bit checks |
-| [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md) | Superseded by this design (physical tables, threshold promotion); its gather probe extended to the spec §9 sweep. That sketch is itself unapproved, so this supersedes an option rather than a decision |
+| Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and indexes; the paged permutation admitted behind the reader interface |
+| Contracts §2.1 | A bundle carries several views, each `views/<view>/`; the `@` id form; the member registry and index registry in the manifest |
+| Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor; `bundle_format` bump |
+| Contracts §2.3 | Attribute `scope` in `declared_scalars`; index-scoped column families under `attrs/<column>@<key>/` |
+| Contracts §3.2 | `/v1/meta`: per-view `extent`, groups with members and metadata, gate-filtered; `filter_operands` carries the scope; the pinned leaf `name@key` in the filter grammar |
+| Contracts §3.4 | The duplicate rule amended per spec §4; `x-tessera-view-metadata`; member creation; identifier forms with mandatory idset on the `tessera_id` form |
+| Configuration §1 | `[[view_group]]`, `[[index]]`, `scope` on `[[attribute]]`, `visibility` on a view or group; `--view` withdrawn |
+| Write-path §2, §4 | Member creation record; the join rule at admission; one pending segment per view touched restated for several views |
+| Compaction | Reclamation of a dropped member; the attribute pass over a family |
+| Appendix C | C17 note (cross-view linkage), C15 note (member size via timing), the `views` field of `/v1/meta` under C11's precedent |
+| Conformance | A two-view differential: the oracle answers per view and per member; the pinned-leaf and unpinned-leaf cases; the gate's work-indistinguishability |
 
-## 12. Adoption gates
+## 12. Rulings sought
 
-The layout is a per-deployment build decision, **off by default** (empty promotion set = today's layout, same code path). Gates for turning it on:
+1. **Member id syntax.** `<group>@<key>` as one path component, `@` reserved from plain names.
+2. **Ordinal is creation order.** Alternatively the key could be required to sort, which would
+   let the service order time slices without metadata and would refuse an out-of-order arrival.
+3. **The paged permutation as every view's default**, rather than the member's representation
+   only — it costs a page-directory lookup per permutation read and saves the sentinel-dominated
+   4 GB for every sparse view.
+4. **Whether a plain view may be attached after the build at all** (`--attach-view`, spec §7),
+   or whether "a plain view is a build" is the whole rule and a new embedding is a rebuild.
+5. **The pinned leaf** under a view outside the index — kept (the recommendation) or refused.
+6. **The extent move** (spec §2) — taken with the first two-view build, or taken first as its own
+   `bundle_format` bump so that the manifest shape is settled before members exist.
 
-1. A working conformance suite, including the byte-level single-vs-multi-table differential build.
-2. The fan-out sweep (spec §9) run to N=1024 with the underlay and mask projection included, and the knee found; `p`, `abs_min`, hard cap and dwell set from it as config defaults, reported against the measured single-table position and meeting spec §9's two relative acceptance conditions.
-3. A real signature histogram showing the knee — per design r18, deployment guidance, not producible by this project.
-4. Rule-out skipping stays out until the suite has its canary; rule-in stays out, full stop.
+## Appendix R — review trail
 
-**What must not be foreclosed before the bundle format acquires a published reader (payable now, all cheap):**
-
-- Tile lookups typed against a set of tables (already true via segments).
-- The permutation's representation stays behind the contracts reader interface (flat and two-level paged both admissible).
-- Table base offsets container-aligned from the first multi-segment implementation — **and contracts §2.6's "row IDs are segment-local" is resolved to the view-global reading at that same moment**; the contradiction is named here so it is resolved deliberately, not discovered.
-- The manifest's segment entry gains a `group` key (always `residual` until promotion exists) — encoded as the canonical signature hash with a reserved residual value.
-- **Manifest table references prefix-qualified from day one** (spec §7): the reference scheme is a format decision, and paying it early is what keeps reference-sharing a build-flag rather than a bundle-format break.
-- **Ingest accepts the `{view → (x, y)}` map form from the start** (single-entry maps initially): the request-schema break is free only while `api_version = 1` has no published reader (contracts deviation 10's argument), which is now.
-
-## 13. Open questions
-
-- Removing an entity from a single view: API shape and whether it is a deletion variant or an ingest-map update. Deferred with coordinate updates.
-- Whether the view gate label participates in `V_total`/θ anchoring in any way beyond membership (believed no: the gate only decides reachability, and θ is per-view over rows already).
-- The fan-out sweep may show the count pyramid, the underlay and the merge kneeing at different N; if so, whether the cap should differ per verb, and whether the underlay needs its own lower cap.
-- How many views must be simultaneously browsable (§16's open question, now with spec §3's price list); whether the paged permutation should be the default rather than the sparse-view option.
-- The generation-GC scheme once manifest-reference sharing is adopted (refcount vs mark-sweep across manifests), and its interaction with generations still held by in-flight requests (lifecycle §2.1) — deferred with the reference-sharing switch itself (spec §7).
-- Tier 3's ι-split holes (overlay keying, WAL replay) — owned by [`deferred-index-ordinal-split.md`](deferred-index-ordinal-split.md), tracked here only as prerequisites.
-- Whether a **stored** per-table tile lookup pays at all, against the binary search over `morton.u32` that replaces it (issue #56). Unmeasured either way, and this design needs no answer to it: shorter columns make the search cheaper, not dearer.
-- Reconciling spec §8's roll-mode rotation with decision 0025's no-per-request-idset ruling, or abandoning it. Neither has been attempted.
-
----
-
-## Provenance
-
-**2026-08-18 — *slice* renamed to *view* (this revision, r4).** A view is a named coordinate system over the shared entity space — disjoint time ranges, several embedding spaces, several datasets — and *slice* read as the temporal case that was only the first instance. The rename is mechanical and reaches the whole repository: this document's filename and title, its §3, every citation of it, the `ViewDescriptor`/`view_id` types, the `--view` flag, the `views/` path segment in the on-disk layout, and the `view`/`views` fields on the wire and in the manifest. Pre-release there is nothing to migrate and no alias was added ([decision 0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)): the artifacts are recreated. **No rule, invariant, leak-register row, format field order or behaviour changed** — only the word. Ruled by the owner alongside `docs/evidence/memos/2026-08-18-configuration-surface.md` §7. Two places keep the old word deliberately: `docs/decisions/`, which is immutable, and the revision-history sections of the other corpus documents, which record what each revision said at the time. Where those read *slice*, read *view*.
-
-**2026-08-04 — corrections against the promoted write path (r3).** `write-path.md` became normative and absorbed `flush-and-merge.md`, so the claims this document made about machinery it does not own were re-checked. Corrected: the specified-but-unbuilt marker in spec §1, which said a second segment is refused and that flush does not exist — flush publishes segments and merge bounds their count (write-path §4, §7), while compaction, where this design puts grouping, still does not exist; the **retirement position**, restated as Rule S / Rule F throughout (spec §5, §6, §8, §11), the stamp ledger being deleted from the spec rather than deferred; the `predicate` op, withdrawn by decision 0047, so spec §3's label arm and spec §5–§6's entries are legacy evaluate entries rather than a live client operation; and the pin references in spec §3 and §13, pins being deleted (decision 0041). The boxed proposal in spec §8 is **not** resolved: its motivating fail-open was argued against the stamp ledger, and whether Rule F already closes it is recorded there as unanswered.
-
-**2026-08-01 — corrections against the current corpus (revision r2).** The document was graduated from a memo on 2026-08-01 after three independent reviews (performance, security/invariants, maintainability), and rested in several places on machinery the corpus has since retired. Corrected: the spec §9 merge arithmetic, recomputed against *K*<sub>max</sub> = 500 (decision 0007) and now naming the constant it depends on; the candidate-list assumption, removed rather than kept as an option (decision 0008); the tile table, marked as specified-and-never-built; the sweep's reporting target, rebuilt on the measured position after the 10 ms count-path and low-single-digit-ms viewport budgets were withdrawn; citations to the retired implementation plan, repointed at the two deferred sketches that carry its surviving content (decision 0015); and specified-but-unbuilt machinery marked per claim (decision 0013). The proposed further deny-retirement rule in spec §8 was neither removed nor promoted: it is boxed, and separated in the spec §11 amendments table so it cannot travel with a layout change.
+- **r5 (2026-08-30)** — rewritten against the built system. Views separated from signature
+  grouping; view groups, indexes and attribute scope added; the ingest map withdrawn in favour of
+  per-batch addressing; runtime creation of plain views withdrawn; identity tiers and roll-mode
+  rotation moved out. Not yet reviewed.
+- **r1–r4 (2026-08-01 → 2026-08-18)** — three independent reviews (performance, security,
+  maintainability) of the joint views-and-tables design; the accepted findings are carried where
+  they survive (the gate's intersection semantics, the mandatory idset on writes, the permutation
+  budget) and the rest is in git at `ead7e906`. r4 was the slice→view rename.

@@ -6,6 +6,8 @@
 
 ---
 
+**The multi-table elaboration of this sketch** — physical `(view, group, flush)` tables, the promotion policy with its hysteresis and dwell, carve and fold at compaction, the fan-out sweep and the byte-level single-vs-multi-table differential — is r4 of `views-and-multi-table.md` (git `ead7e906`, §2 and §4–§9). Its r5 is views alone, and this sketch is again where grouping lives.
+
 **Row-space signature-major layout (probes, optimisations §4) — needs deciding, not before Phase 2.** Sorting rows by (signature, morton) for the largest signature groups with a Morton-only residual. It is a *per-deployment build decision*, but it is listed here because two of its consequences reach the core and one of them is a format change.
 
 *What is settled.* The key is the signature, never a single term — items carry ~130 terms each, so term-major would duplicate geometry rows and cost I2 the property that a masked count is a bitmap cardinality. Priority cannot be promoted above the Morton prefix to recover contiguity: that buys one tile depth at the cost of every depth below it. Build-time hierarchical LOD levels are closed by invariant, not cost — the top-*k* would be computed unmasked, which is the I2 shape §7.2 opens by rejecting.
