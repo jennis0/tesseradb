@@ -1,10 +1,11 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Provisional r5 — under review and **not approved**. The rest of the corpus governs
-where they disagree. **To become normative:** one independent review on two lenses (security and
-implementability), the rulings in §12 made by the owner, and the amendments in §11 folded into
-`architecture.md`, `contracts.md` and `configuration.md`.
+**Status:** Normative (r6) — promoted 2026-08-30 after the two-lens review (security,
+implementability); the findings and their dispositions are Appendix R's r6 entry. §11's
+amendments to the wider corpus are scheduled work, and the ⊘ markers say what exists meanwhile.
+One proposal is **not** ruled: the allocation key over several sources (spec §7), which extends
+decision 0073 and travels as its own decision at fold-in.
 **Reads against:** architecture §5.1, §9, §11; contracts §2.1–§2.3, §2.6, §3.2, §3.4;
 [`configuration.md`](configuration.md) §1, §8; [`projections.md`](projections.md);
 [`filter-index.md`](filter-index.md) §7; [`per-point-attributes.md`](per-point-attributes.md)
@@ -172,31 +173,48 @@ permutation, segments, extents and θ — and they are what a request names.
 
 ### 3.2 Keys and ordinals
 
-A view of a group is addressed as **`<group>:<key>`**, or **`<group>:#<ordinal>`**. The ordinal
-is assigned monotonically at creation, always exists, and is the service's own handle; the key
-is the caller's syntax over it, optional, under the column-name charset (ASCII letters, digits,
-`_`, `-`). `#` is what keeps a numeric-looking key from being read as an ordinal, so keys are
-unrestricted. Either form is a view id wherever a view id goes: the request body,
-`x-tessera-view`, `/v1/meta`, the manifest. On disc the view lives at `views/<group>/<key>/` —
-nested rather than the joined id, because `:` is not a path character everywhere. `:` and `#`
-are reserved out of plain view names.
+A view of a group is addressed as **`<group>:<key>`**, or **`<group>:#<ordinal>`**. The key is
+the caller's, **required at creation**, under the column-name charset (ASCII letters, digits,
+`_`, `-`); the ordinal is assigned monotonically at creation, never reused, and is an alias —
+`#` is what keeps a numeric-looking key from being read as one. Either form is a view id
+wherever a view id goes: the request body, `x-tessera-view`, `/v1/meta`, the manifest. On disc
+the view lives at `views/<group>/<key>/`, nested rather than the joined id because `:` is not a
+path character everywhere; `SegmentDescriptor.view` and `WalRow.view` hold the joined
+`group:key` form, one named function derives the two-component path from it, and the manifest's
+`files` map is keyed by the derived path. `:`, `#` and `@` are reserved out of plain view names
+and keys, refused at the configuration parser and again at manifest load.
 
 Views are served in ordinal order: `/v1/meta` lists a group with its views, each
 `{ key, ordinal, metadata }`, so a client can offer previous-and-next without interpreting keys.
 The ordinal is creation order and nothing else; a caller ingesting quarters out of order gets
-them in arrival order and sorts by `starts` if it wants time order. Keys and ordinals are
-tombstoned on drop and never reused (spec §3.4).
+them in arrival order and sorts by `starts` if it wants time order.
 
 **A view is created ahead of the rows that name it**, by `PUT /control/views/{group}/{key}`
 carrying the roster record — `visibility` and the metadata — which is the inline
-`[[view_group.view]]` block as a request. The record is a WAL entry; the served roster is the
-manifest's plus the WAL overlay, materialised at the next flush, the overlay-then-fold shape
-the write path has everywhere. A batch naming a view that does not exist is a 404, as for any
+`[[view_group.view]]` block as a request. **A roster record is immutable**: a wrong gate or
+wrong metadata is a drop and a recreate under a new key, never an update — the alternative is a
+narrowed gate that does not bite live sessions, a staleness the deny lane is not allowed and
+the roster is not either. A batch naming a view that does not exist is a 404, as for any
 unknown view — with one exception: a group whose views carry nothing (no metadata, no roster
-`visibility` field) has nothing to put in the record, and there the first batch
-naming a new key creates it. That is the one place a view comes into being without a
-declaration, and it is safe because the view has nothing of its own to declare: its frame,
-projection, visibility default and gate are the group's, already reviewed.
+`visibility` field) has nothing to put in the record, and there the first batch naming a new
+key creates it. That is the one place a view comes into being without a declaration, and it is
+safe because the view has nothing of its own to declare: its frame, projection, visibility
+default and gate are the group's, already reviewed.
+
+**The roster's durable home is the segments manifest, not the WAL.** The create and drop
+records are WAL entries for replay, and the served roster is the manifest's plus the WAL
+overlay — but WAL rotation reclaims records, so the roster, the ordinal high-water and the
+tombstoned keys are published into the segments manifest at every flush and carried forward
+for ever, exactly as `entity_id_low_water` and `layer_tombstones` are and for the same reason:
+a mark that lives only in the log is lost at the first rotation, and a reused ordinal or key
+silently repoints every client cache keyed on the view (decision 0029).
+
+**Metadata names are bounded by the roster's own keys**: `key`, `source`, `visibility` and, on
+a form B group, the discriminator's field name are refused as metadata names — the inline block
+and the roster table would otherwise be ambiguous. The form A block mixes closed keys with the
+declared metadata names, so it is parsed by the manual route the `extent` spellings already
+take rather than by `deny_unknown_fields` alone; the discipline's guarantee — an unknown key is
+refused — is preserved by checking against the declared set.
 
 > **⊘ Specified, not implemented — the whole of this section.** There is no group object, no
 > roster, no ordinal, no create operation and no creation record. Every view that exists was
@@ -287,9 +305,17 @@ refuses as a duplicate, and its rule is amended:
 - **Unknown `external_id`**: allocate an entity, as today.
 - **Known, and not in the named view**: accept. The row's position lands in the named view's
   pending segment; the entity, its label and its entity-scoped attributes are untouched.
-- **Known, and already in the named view**: 409. Positions are not updated in place, and this arm
-  must not become an update path by accident — the single-valued permutation cannot hold two rows
-  for one entity in one view.
+- **Known, and already in the named view**: 409. "In the view" is the view's permutation **and
+  the commit window's buffer** — a row accepted but not yet flushed is in no permutation, and a
+  check that misses it lets two batches in one window hand flush two rows for one entity in one
+  view. Positions are not updated in place, and this arm must not become an update path by
+  accident — the single-valued permutation cannot hold two rows for one entity in one view.
+- **A suppressed holder** takes the same arms as a live one, and stays hidden: the new row lands
+  on the *same* entity, suppression composes in entity space, and the entity is invisible in the
+  new view as in every other from the moment the row exists. What write-path §2.1 refuses is a
+  byte-identical *re-ingest past* a suppression — a second copy under a fresh entity — and
+  attaching a view to the suppressed entity creates no copy. Stated because the two removal
+  rules have been conflated twice, and this is the rule's edge.
 - **A different label**, on a known id: 409. A re-label is a delete plus a re-ingest (decision
   0047), never a field carried in on a second-view row, because the alternative is a widening
   with no overlay entry or a narrowing that bypasses the deny lanes.
@@ -356,6 +382,15 @@ one of two ways:
 A pinned leaf under a view of the same group is allowed too — Q4's map filtered by Q3's
 sentiment — and means what it says.
 
+**The scoped surface is inside the gate** (review finding, accepted). A group-scoped attribute
+exists, for a principal, only where the group's gate passes: `/v1/meta`'s `filter_operands`
+omits it otherwise, a pin resolves the named view through the session's visible-view set — a
+gate-failed pin is indistinguishable from an attribute that was never declared — and the
+unpinned 422 names the group only where the principal can reach it. Without this the pinned
+leaf is a route around spec §6: a principal failing `quarter`'s gate could filter their visible
+entities by a Q3 value, which is per-entity membership of a gated view. Decision 0090's
+argument — a gate at some surfaces and not others is fail-open — is the rule applied here.
+
 **Ingest.** A batch into a group's view carries that view's values for every attribute scoped to
 the group, under the attribute's plain name; the view is known from the header, so the column
 is not qualified. At a build the attribute's own `source` carries the value and, unless that
@@ -399,10 +434,16 @@ conservative label join — under §12.2's required-set reading a disjunctive ga
 (`finance | legal`) yields an empty required set and every principal passes, which is a fail-open
 on exactly what the gate protects. Intersection gives a disjunctive gate its intended meaning.
 
-- The principal's **visible-view set is resolved once at authorise**, every view of every group
-  evaluated whatever the outcome, so the request-time check is one set-membership lookup and a
-  gate-failed name costs the same work as a never-registered one — r23's
-  work-indistinguishability standard, the closure C4 records for `/v1/items`.
+- The principal's **visible-view set is resolved once at authorise and is fixed for the
+  session's life**, every view of every group evaluated whatever the outcome, so the
+  request-time check is one set-membership lookup and a gate-failed name costs the same work as
+  a never-registered one — r23's work-indistinguishability standard, the closure C4 records for
+  `/v1/items`. **A view created after a session authorised is a 404 to that session until it
+  re-authorises** (owner ruling 2026-08-30): creation is rare, tokens expire, and the
+  alternatives — per-request gate evaluation, or a lazily-evaluated miss — cost the
+  work-indistinguishability this bullet exists to hold. Roster immutability (spec §3.2) is the
+  other half: a gate, once written, never changes, so a fixed set can never hold a stale
+  *widening*.
 - A gate-failed view is absent from `/v1/meta`; a request naming one is a 404
   indistinguishable from an unknown name. A gate-failed group takes its roster with it.
 - The gate governs every view-valued surface, not only discovery: a layer's `views` list as
@@ -432,6 +473,16 @@ that disagrees between appearances (it is the entity's label, not the row's), an
 **pass two** builds each view's row space against those ids. A row is unique per
 `(external_id, view)`, and the same entity in two views is the ordinary case rather than a
 duplicate.
+
+**The allocation key over several sources is a proposal, not a ruling.** Decision 0073 orders
+entity ties by `(signature, morton, source ordinal)`; with several point sources the Morton
+code is per view and the source ordinal is no longer unique, so the key must be re-grounded
+before the first two-view build — the ids it assigns are permanent (I9) and the choice is
+irreversible. Proposed: `(signature, morton in the first-declared view that holds the entity,
+external_id bytes)` — the first-declared view plays the role the single source played, an
+entity in no declared plain view takes its first group's first view, and the external id is the
+tie-break that needs no ordinal. It travels as its own decision extending 0073 at fold-in, and
+nothing else here depends on which key is chosen.
 
 **Populate at ingest** is spec §2's addressing and spec §4's join rule, for a plain view and a
 group's view alike, after the create operation of spec §3.2 where the view is new.
@@ -476,9 +527,17 @@ position — and has never been a leak because row ids never cross the trust bou
 row spaces, not channels. What has to be checked is what a viewer learns *from* the set of views.
 
 - **View existence** is governed by the gate (spec §6), and a gate-failed view is
-  indistinguishable in outcome and in work from an absent one. An ungated group's roster —
-  keys, ordinals, metadata — is public to every principal that authorises, by declaration; a
-  deployment whose keys are themselves sensitive gates the group or the view.
+  indistinguishable in outcome and in work from an absent one — by name. **Ordinals are the
+  exception, and it is accepted** (owner ruling 2026-08-30, a new Appendix C row): ordinals are
+  monotone per group and a gate-failed view is omitted from the roster, so a principal seeing
+  ordinals 0, 1, 3 learns *a* view exists at #2, and a moving high-water counts hidden
+  creations. The row's argument is C15's — knowing something was created is not knowing whose
+  or what; a gap and a dropped key are indistinguishable; and a deployment whose roster shape
+  is itself sensitive gates the *group*, which hides the whole roster, gaps included. The
+  alternatives — per-principal-dense ordinals, or none — re-open the per-session handle
+  machinery decision 0006 retired, for a channel of one bit per creation.
+- An ungated group's roster — keys, ordinals, metadata — is public to every principal that
+  authorises, by declaration.
 - **Cross-view linkage.** `tessera_id` is the same for an entity in every view — the view is not
   an input to the keyed bijection — so a viewer can join a visible item to itself across views.
   That is the point, and C17's acceptance of the identifier as a stable handle covers it.
@@ -488,7 +547,8 @@ row spaces, not channels. What has to be checked is what a viewer learns *from* 
 - **Group-scoped filters** are entity-space bitmaps intersected with the mask before any count,
   so the I2 argument for filters (`filter-surface.md`) applies unchanged; a pinned leaf under
   another view is the same operand with the column chosen by the request rather than by the
-  view, and discloses nothing a filter under the view would not.
+  view, and — *for a principal who passes the group's gate, which spec §5 requires* — discloses
+  nothing a filter under the view would not.
 - **`/v1/meta` becomes per-principal** in its `views` entry, under the gate — the second such
   field beside the C11-gated vocabulary, the same precedent.
 - **Timing.** A group's view is smaller than a plain view, and a request against it is
@@ -496,7 +556,7 @@ row spaces, not channels. What has to be checked is what a viewer learns *from* 
   from response times. It is the same class as C15 (tile-level timing over the corpus) and is
   noted there rather than given a new row.
 
-No new verb, no new leak-register row, one register note.
+No new verb; one new accepted register row (the ordinal gap), and the C15/C17 notes.
 
 ## 10. What this design deliberately does not do
 
@@ -513,7 +573,7 @@ No new verb, no new leak-register row, one register note.
 | Document | Change |
 |---|---|
 | Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and shared views; the paged permutation as the representation |
-| Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` and `group:#n` id forms; the roster in the manifest |
+| Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` and `group:#n` id forms; the roster, ordinal high-water and key tombstones in the segments manifest, carried for ever |
 | Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor — first, ahead of any multi-view build |
 | Contracts §2.3 | Attribute `scope` and layer `scope` in the manifest; group-scoped column families under `attrs/<column>/<group>/<key>/` |
 | Contracts §3.2 | `/v1/meta`: per-view `extent`, groups with their rosters and typed metadata, gate-filtered; `filter_operands` carries the scope; the pinned leaf `name@key` / `name@#n` in the filter grammar |
@@ -521,20 +581,24 @@ No new verb, no new leak-register row, one register note.
 | Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata` and per-view `visibility` on the roster; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]` |
 | Write-path §2, §4, §5 | The create record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
 | Compaction | Reclamation of a dropped view; the attribute pass over a family |
-| Appendix C | C17 note (cross-view linkage), C15 note (a group's view's size via timing), the `views` field of `/v1/meta` under C11's precedent |
-| Conformance | A two-view differential: the oracle answers per view; the pinned-leaf and unpinned-leaf cases; the gate's work-indistinguishability |
+| Appendix C | **New accepted row: the ordinal gap** (spec §9); C17 note (cross-view linkage), C15 note (a group's view's size via timing); the `views` field and the scoped `filter_operands` entries of `/v1/meta` gate-filtered under C11's precedent |
+| Conformance | A two-view differential: the oracle answers per view; the pinned-leaf cases, the gate-failed pin among them; the gate's work-indistinguishability |
+| Decisions | The allocation key over several sources (spec §7) — its own decision, extending 0073 |
 
 ## 12. Rulings
 
-Made 2026-08-30 (owner): the `group:key` and `group:#ordinal` forms, with the ordinal always
-present and the key optional; the paged permutation as every view's representation; no plain
-view after the build; the pinned leaf kept; `visibility` as the one gate key on a view and a
-group alike, defaulting to `public`, with a group's per-view gate on the roster;
-`delete_dangling` kept; typed metadata over the attribute types; the create operation ahead of
-the first batch; the two roster forms, `[[view_group.view]]` and `[view_group.views]`; the
-extent move taken first, ahead of any multi-view build.
+Made 2026-08-30 (owner), first pass: the `group:key` and `group:#ordinal` forms; the paged
+permutation as every view's representation; no plain view after the build; `visibility` as the
+one gate key, defaulting to `public`, the per-view gate on the roster; `delete_dangling` kept;
+typed metadata; the create operation ahead of the first batch; the two roster forms; the extent
+move taken first.
 
-None open.
+Made 2026-08-30 (owner), dispositioning the review: the scoped-attribute surface is inside the
+gate (spec §5); the ordinal gap is accepted as an Appendix C row (spec §9); the visible-view
+set is fixed for the session's life and a new view waits for re-authorisation (spec §6); the
+key is required and the ordinal is an alias; roster records are immutable.
+
+Open: the allocation key over several sources (spec §7) — proposed, decided at fold-in.
 
 ## Appendix A — a declaration, written out
 
@@ -672,6 +736,17 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r6 (2026-08-30)** — the two-lens review. Security found one fail-open (the pinned leaf and
+  `filter_operands` escaping the gate — closed, spec §5), one disclosure (the ordinal gap —
+  accepted as a register row, spec §9), and the session/creation contradiction (ruled:
+  re-authorisation, spec §6, with roster immutability); it confirmed the intersection-semantics
+  gate, the join rule's byte-match arms, I7/0008 and I10 under attack. Implementability found
+  the join rule missing the commit window (fixed, spec §4), the allocation key ungrounded over
+  several sources (now a boxed proposal, spec §7), the roster with no durable home (fixed —
+  segments manifest, spec §3.2), the id↔path mapping unspecified (fixed, spec §3.2), the
+  keyless view (removed: key required), the metadata-name collision (reserved names, spec §3.2)
+  and the unassigned charset refusal (assigned, spec §3.2). Promoted to Normative on
+  disposition.
 - **r5 (2026-08-30)** — rewritten against the built system. Views separated from signature
   grouping; view groups with two roster forms, shared views, attribute and layer scope added; the ingest map withdrawn in favour of
   per-batch addressing; runtime creation of plain views withdrawn; identity tiers and roll-mode

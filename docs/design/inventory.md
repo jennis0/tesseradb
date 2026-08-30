@@ -112,5 +112,5 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `views.md` | Provisional — under review | 7 |
+| `views.md` | Normative — r6 | 8 |
 | `write-path.md` | Normative for the write path. Owner sign | 20 |
