@@ -54,7 +54,7 @@ use sha2::{Digest, Sha256};
 
 use tessera_authz::FrozenFragment;
 use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
+use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Projection, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
 use tessera_store::read::{ScalarSlice, SegmentData};
 use tessera_store::vocabulary::Vocabularies;
@@ -1060,14 +1060,30 @@ pub struct ItemField {
     pub value: ScalarOut,
 }
 
+/// One declared view, as the request paths need it.
+///
+/// **The projection is here rather than beside `quantisation`**, for the reason
+/// `ViewDescriptor::projection` gives: a projection is declared per view and the frame is not, so
+/// a bundle-wide field would have to pick one of two views' answers. It is carried on this struct
+/// rather than looked up per row because `/control/ingest` reads it once per batch, to decide what
+/// a coordinate column is called and what the numbers in it mean (`projections.md` §3).
+#[derive(Debug, Clone)]
+pub struct ViewMeta {
+    pub id: String,
+    pub display_name: String,
+    /// What placed every position in this view before the frame did — the manifest's own field,
+    /// which is required rather than defaulted, so this is never a guess.
+    pub projection: Projection,
+}
+
 /// `GET /v1/meta`'s payload (R5) — the bundle-level facts a viewer client needs before it can
 /// issue a sensible `/v1/viewport` call.
 #[derive(Debug, Clone)]
 pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
-    /// `(id, display_name)` pairs, in manifest order.
-    pub views: Vec<(String, String)>,
+    /// The declared views, in manifest order.
+    pub views: Vec<ViewMeta>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
@@ -1096,7 +1112,11 @@ impl Engine {
             views: manifest
                 .views
                 .iter()
-                .map(|s| (s.id.clone(), s.display_name.clone()))
+                .map(|s| ViewMeta {
+                    id: s.id.clone(),
+                    display_name: s.display_name.clone(),
+                    projection: s.projection,
+                })
                 .collect(),
             quantisation: manifest.quantisation,
             // The **full** compiled schema, including `filter`-only columns: `/v1/meta` describes

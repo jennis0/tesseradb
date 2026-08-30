@@ -161,7 +161,11 @@ async fn meta(
         // in any response, log line or metric label (I10, Appendix C C17) -- this is the idset
         // only, which is meaningless without the key and is what `POST /v1/items` checks against.
         "idset": meta.idset,
-        "views": meta.views.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
+        // The projection each view was placed under is deliberately **not** published here yet:
+        // `projections.md` §9 specifies `projection`, `world_aspect`, `tile_scheme` and `tile`
+        // together, and a client that learned the name without the tile scheme would read grid
+        // alignment as basemap availability — the exact misread that section exists to stop.
+        "views": meta.views.iter().map(|v| serde_json::json!({"id": v.id, "display_name": v.display_name})).collect::<Vec<_>>(),
         "quantisation": {
             "x_min": meta.quantisation.x_min,
             "x_max": meta.quantisation.x_max,

@@ -45,6 +45,11 @@ use crate::wal::{ChangeOp, WalError, WalRow, WalScalar};
 ///
 /// `view` is resolved by the handler against the bundle's declared views — never defaulted here
 /// — for the reason given at [`WalRow`]'s own field.
+///
+/// `x`/`y` are **frame coordinates**, on the same rule and for the same reason as [`WalRow`]'s: a
+/// projected view's transform has already run at the wire boundary (`projections.md` §3), so every
+/// reader below this type — the engine's out-of-frame check, the WAL record, the buffer, the
+/// flush's quantiser — sees a position in the frame and none of them projects anything.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnallocatedRow {
     pub external_id: Option<Vec<u8>>,
