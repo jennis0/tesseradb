@@ -206,10 +206,21 @@ name their projection and a longitude/latitude extent; both rungs are rebuilt.
 `test_corpora/common/projection.py` becomes the oracle's cross-check rather than the pipeline's
 transform.
 
-**Tested.** The rebuilt bundles are equivalent to the ones they replace: the same entity count, the
-same artifact counts, and every position agreeing to the cell. A geographic corpus is reproducible —
-a projection is a pure function — so this is a rerun and a comparison rather than a migration. The
-0091 build-versus-ingest test runs here on real data, which is the campaign's own outstanding bar.
+**Tested, and the bar is not equivalence.** Two things make a byte-for-byte comparison the wrong
+test, and both are consequences of this delivery rather than surprises: phase A removed the `f32`
+narrowing, so a point within half an `f32` step of a cell boundary now lands in the *other* cell —
+about one in three hundred, bounded to one cell on one axis; and a rung's artifact counts move
+whenever its declaration has moved since it was last built.
+
+So the comparison is two questions, and only the first admits a defect. **Is the transform right?**
+Recompute each position independently — source degrees through the frozen transform, quantised
+against the declared frame — and compare to what the bundle stores. Exact, no tolerance. **What did
+the precision change cost?** Model the old `f32` path, confirm the model reproduces the old bundle
+exactly, and only then measure the row-aligned difference, which must be bounded by one `f32` step
+and one cell.
+
+The 0091 build-versus-ingest test on real data remains the campaign's own outstanding bar and is not
+this phase's.
 
 ## 10. What this plan does not build
 
