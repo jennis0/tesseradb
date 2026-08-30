@@ -360,12 +360,6 @@
       "version": 1
     }
   ],
-  "quantisation": {
-    "x_max": 65536,
-    "x_min": 0,
-    "y_max": 65536,
-    "y_min": 0
-  },
   "selection": {
     "k_max_marks": 500,
     "k_min": 2,
@@ -378,7 +372,13 @@
   "views": [
     {
       "display_name": "s0",
-      "id": "s0"
+      "id": "s0",
+      "quantisation": {
+        "x_max": 65536,
+        "x_min": 0,
+        "y_max": 65536,
+        "y_min": 0
+      }
     }
   ]
 }

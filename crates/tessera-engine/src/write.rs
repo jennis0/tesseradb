@@ -1887,6 +1887,15 @@ pub enum AcceptError {
         y: f64,
         quantisation: tessera_store::manifest::Quantisation,
     },
+    /// A row names a view this bundle does not declare, so there is no frame to quantise it
+    /// against and no row space for it to land in.
+    ///
+    /// Checked here, beside [`Self::OutsideExtent`] and for the same more-than-one-caller reason:
+    /// since the extent became the view's (decision 0040), resolving a row's frame *is* resolving
+    /// its view, and a row whose view cannot be resolved has nothing to be checked against. The
+    /// HTTP handler refuses an unknown `x-tessera-view` with its own 404 and is only one of the
+    /// buffer's writers.
+    UnknownView { index: usize, view: String },
     /// A row carries a number of scalars other than one per declared column.
     ///
     /// **The commit window indexes `row.scalars` positionally against `MANIFEST.declared_scalars`**
@@ -1945,6 +1954,12 @@ impl std::fmt::Display for AcceptError {
                  cannot be told from one that belongs there. The remedy is to rebuild the view \
                  under a corrected extent, which is a migration",
                 q.x_min, q.x_max, q.y_min, q.y_max
+            ),
+            AcceptError::UnknownView { index, view } => write!(
+                f,
+                "ingest row {index} names view '{view}', which this bundle does not declare. A \
+                 view carries its own frame and its own row space (decision 0040), so a row \
+                 naming none of them has no cell to occupy and no order to be placed in"
             ),
             AcceptError::SteppedDown => write!(
                 f,
@@ -3816,12 +3831,6 @@ mod segment_schema_tests {
             declared_bounds: serde_json::json!({}),
             vocabularies: vec![],
             small_term_threshold: 32,
-            quantisation: tessera_store::manifest::Quantisation {
-                x_min: 0.0,
-                x_max: 1.0,
-                y_min: 0.0,
-                y_max: 1.0,
-            },
             entity_id_high_water: 0,
             identity: tessera_store::manifest::IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),
@@ -7038,6 +7047,20 @@ impl Executor {
             let Some(view_data) = partition_data.views.get(&view) else {
                 return;
             };
+            // **This view's frame** (decision 0040): the flush quantises against the extent the
+            // view's own positions were placed in, and a bundle-wide one would put a second
+            // view's rows on the first's grid. The manifest is the authority for both — a plan
+            // naming a view the manifest does not declare is dropped here rather than flushed
+            // against a guessed frame, which is the same refusal `accept_ingest` makes upstream.
+            let Some(quantisation) = manifest.quantisation_of(&view) else {
+                tracing::error!(
+                    view = %view,
+                    "a flush plan names a view this bundle's manifest does not declare, so \
+                     there is no frame to quantise its rows against; the plan is dropped \
+                     and the buffer is retained"
+                );
+                return;
+            };
             let Ok(row_base) = u32::try_from(view_data.row_space.total_rows()) else {
                 // Row ids are `u32` (bundle_format 1). A view that has crossed 2^32 rows cannot
                 // take another segment, and saying so is better than wrapping into row 0.
@@ -7090,7 +7113,7 @@ impl Executor {
                     row_base,
                     identity_key: self.identity_key,
                     shard_id: manifest.identity.shard_id,
-                    quantisation: manifest.quantisation,
+                    quantisation,
                     scalar_schema: scalar_schema.clone(),
                     render_indices: render_indices.clone(),
                     filter_schema: filter_schema.clone(),

@@ -61,7 +61,7 @@ const metaResp = await fetch(`${viewer}/v1/meta`, {
 });
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
-const q = meta.quantisation;
+const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
 const view = meta.views[0].id;
 
 /** The `visible` total from a zoom-0, full-extent call: this principal's visible-set size. */

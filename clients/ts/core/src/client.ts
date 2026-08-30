@@ -178,23 +178,24 @@ export class TesseraClient {
     return {
       apiVersion: m.api_version,
       idset: m.idset,
-      // The four projection fields ride with the view they describe, because that is where the
-      // server declares them: a projection belongs to a view and the quantisation below is
-      // bundle-wide. `projection.ts` is what a client does with them.
+      // The frame and the four projection fields ride with the view they describe, because that
+      // is where the server declares them: both belong to a view, and two views of one bundle may
+      // quantise and project differently (decision 0040). `projection.ts` is what a client does
+      // with them.
       views: m.views.map((s) => ({
         id: s.id,
         displayName: s.display_name,
+        quantisation: {
+          xMin: s.quantisation.x_min,
+          xMax: s.quantisation.x_max,
+          yMin: s.quantisation.y_min,
+          yMax: s.quantisation.y_max
+        },
         projection: s.projection,
         worldAspect: s.world_aspect,
         tileScheme: s.tile_scheme,
         tile: s.tile
       })),
-      quantisation: {
-        xMin: m.quantisation.x_min,
-        xMax: m.quantisation.x_max,
-        yMin: m.quantisation.y_min,
-        yMax: m.quantisation.y_max
-      },
       declaredScalars: m.declared_scalars.map((s) => ({
         name: s.name,
         arrowType: s.arrow_type,
@@ -692,12 +693,12 @@ type RawMeta = {
   views: {
     id: string;
     display_name: string;
+    quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
     projection: ProjectionName;
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;
   }[];
-  quantisation: {x_min: number; x_max: number; y_min: number; y_max: number};
   declared_scalars: {
     name: string;
     arrow_type: ArrowType;

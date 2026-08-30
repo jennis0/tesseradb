@@ -113,7 +113,14 @@ pub fn run(
         let stats = TermStats::compute(&postings)?;
         let dictionary = Dictionary::open(&fixture.root, &fixture.prefix)?;
         let bundle = open_bundle(&fixture.root)?;
-        let q = bundle.manifest.quantisation;
+        // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+        // measures against it.
+        let q = bundle
+            .manifest
+            .views
+            .first()
+            .expect("a built bundle declares a view")
+            .quantisation;
         let extent_span = q.x_max - q.x_min;
         let view_id = bundle
             .partitions

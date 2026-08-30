@@ -1,6 +1,6 @@
 # Shape membership — requirements and design
 
-**Status:** **Normative — 2026-08-30 (r8).** Designed, taken through one adversarial review
+**Status:** **Normative — 2026-08-30 (r9).** Designed, taken through one adversarial review
 (Appendix R, r4), owner-ruled (§13), and **built in four stages on 2026-08-29** (§12), each in its
 own worktree and gate-green: the core, the artifact type, the wire and client, the region leaf.
 **`wgs84` shapes are built** (§4.3): a view now declares a projection, and a shape declared in
@@ -210,14 +210,26 @@ default_space = "view"            # the fallback for rows carrying no `space`; "
 - an **inline** artifact row (`[[layer.artifact]]`, which has no table to carry a default) may
   carry `space`, `view` if absent.
 
-**A shape layer may span several views, and its geometry is declared once** (owner, 2026-08-29).
+**A shape layer may span several views, and its geometry is declared once** (owner, 2026-08-29;
+widened 2026-08-30, [decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)).
 The membership is resolved **per view**, because each view has its own row space: a view's rows
 are tested against the shape in that view's frame, so a point carried in two views is in
-whichever shape contains it *there*, independently. What the views must share is the coordinate
-system — the same `projection` — and not the extent: a shape in a zoomed view is clipped to that
-view's extent and quantised in that view's frame, which is the clipping above, reported per view.
-Views with different projections cannot share a shape and are refused; two views both declaring
-`projection = "none"` are *warned*, since nothing then says whether they share a space.
+whichever shape contains it *there*, independently. The views need share **neither the extent
+nor the projection**: a `wgs84` shape is densified, projected, clipped and decomposed through
+each view's own declaration — the same function that placed that view's points, run once per
+view — so a Mercator view and an equirectangular one hold the same boundary, each in its own
+frame. What cannot span is a `view`-space shape over unequal frames: its coordinates are one
+specific frame's, so on a layer whose views do not share projection *and* frame it is refused
+naming the reason, and `wgs84` is the spelling that spans. A layer's views are **all projected
+or all `none`** — `wgs84` means nothing in an embedding, so no geometry spans the two kinds of
+space, and the mix is refused at the layer declaration. Two `none` views sharing a layer are the
+caller's own assertion that their spaces agree — spanning is opt-in, and no warning second-guesses
+it; a layer scoped to a view group spans frames identical by construction. **A shape wholly
+outside a view's extent is a warning, never a refusal**: its membership there is empty, the count
+is reported beside the clip counts, and the operator decides — a wrong extent costs a rerun, not
+a mission. One consequence owned rather than hidden: two projected views of one geography can
+disagree about a boundary point, each testing the shape against its own quantised stored
+position; that is the semantics — exact per view — and the divergence is bounded by quantisation.
 
 On `PUT /control/layers` a row whose `space` the view cannot honour is `422` naming the row,
 **whole batch without effect**, on the contracts convention.
@@ -948,6 +960,12 @@ differently from the recommendation:
   paragraph.
 
 ## Appendix R — review trail
+
+- **r9 (2026-08-30)** — cross-projection spanning (decision 0111): a `wgs84` shape spans any
+  projected views through each view's own transform; `view`-space geometry spans only equal
+  frames; all-projected or all-`none` per layer; the two-`none` warning removed (opt-in needs no
+  second-guess); wholly-out-of-extent shapes warn and never block. Owner-ruled; the mechanism
+  review folds into the shape stage.
 
 **r1 (2026-08-27).** Written from the owner's ruling that three consumers needing one operation
 makes it a first-class capability rather than a per-consumer workaround. Requirements only, by owner

@@ -59,7 +59,7 @@ describe('decodeViewport', () => {
     // wire and the position. Scaling cell space back through it must land inside the extent
     // `/v1/meta` publishes, or the client and the server disagree about the grid.
     const r = decodeViewport(fixture('viewport-plain.bin'));
-    const q = meta.quantisation;
+    const q = meta.views[0].quantisation;
     for (let i = 0; i < r.ids.length; i++) {
       const x = q.x_min + (r.positions[i * 2]! / CELL_GRID) * (q.x_max - q.x_min);
       const y = q.y_min + (r.positions[i * 2 + 1]! / CELL_GRID) * (q.y_max - q.y_min);

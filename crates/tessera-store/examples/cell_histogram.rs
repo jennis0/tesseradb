@@ -171,7 +171,14 @@ fn run(args: &Args) -> Result<(), String> {
     );
 
     let region = match &args.region {
-        Some(region_args) => analyse_region(&bundle.manifest.quantisation, seg, region_args)?,
+        // The frame is the *view's* (decision 0040), and this example reads one view.
+        Some(region_args) => {
+            let quantisation = bundle
+                .manifest
+                .quantisation_of(view_id)
+                .ok_or_else(|| format!("the manifest declares no view '{view_id}'"))?;
+            analyse_region(&quantisation, seg, region_args)?
+        }
         None => serde_json::Value::Null,
     };
 
@@ -204,7 +211,7 @@ fn analyse_region(
     };
     extent
         .validate()
-        .map_err(|e| format!("bundle quantisation extent: {e}"))?;
+        .map_err(|e| format!("view quantisation extent: {e}"))?;
 
     let tile_count = tiles_for_bbox_count(region.bbox, region.zoom, &extent);
     if tile_count > TILE_BUDGET {

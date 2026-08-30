@@ -284,7 +284,8 @@ pub struct ManifestVocabularyValue {
     pub title: Option<String>,
 }
 
-/// `quantisation`: the extent Morton codes are computed against (contracts §2.5).
+/// `views[..].quantisation`: the extent Morton codes are computed against (contracts §2.5), and
+/// a property of the **view** rather than the bundle (decision 0040).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Quantisation {
     pub x_min: f64,
@@ -426,11 +427,24 @@ impl IdentityDescriptor {
 pub struct ViewDescriptor {
     pub id: String,
     pub display_name: String,
+    /// The frame every position in this view is quantised against (contracts §2.5), immutable
+    /// for the view's life — which is what makes a Morton prefix a permanent address in this view
+    /// (decision 0040).
+    ///
+    /// **Here rather than on the bundle, because the frame is declared per view**: two views of
+    /// one bundle may quantise differently, and an embedding and a map cannot share a frame
+    /// without one of them wasting most of the grid (`views.md` §2). A single bundle-wide key
+    /// would have to pick one of them.
+    ///
+    /// **Required, not `default`, and there is no bundle-level fallback** — the same rule as
+    /// `projection` below, for the same reason: a view whose frame went missing is malformed, not
+    /// unframed, and every position it holds decodes against whatever a reader guessed. A
+    /// manifest omitting it refuses at open, loudly. No bundle predates the move (decision 0048).
+    pub quantisation: Quantisation,
     /// What placed every position in this view before the frame did (`projections.md` §3).
     ///
-    /// **Here rather than beside `quantisation`, because a projection is declared per view** and
-    /// the frame is not: two views of one bundle may be projected differently, and a single
-    /// bundle-wide key would have to pick one of them.
+    /// **Here rather than on the bundle, because a projection is declared per view**, exactly as
+    /// the frame above it is: two views of one bundle may be projected differently.
     ///
     /// **Required, not `default`.** The frame alone does not imply a projection — a `[0, 1]`
     /// extent is a legal frame for a view with no projection at all — so a bundle that carries
@@ -504,9 +518,11 @@ pub struct Manifest {
     /// its absence buys a reader that does not exist and costs the check that does.
     pub vocabularies: Vec<ManifestVocabulary>,
     pub small_term_threshold: u32,
-    pub quantisation: Quantisation,
     pub entity_id_high_water: u64,
     pub identity: IdentityDescriptor,
+    /// The declared views, each carrying its own frame (decision 0040). There is no bundle-level
+    /// extent: [`Manifest::quantisation_of`] is how a caller that has a view id gets one, and a
+    /// caller that has no view id is asking a question the bundle cannot answer.
     pub views: Vec<ViewDescriptor>,
     pub partitions: Vec<PartitionDescriptor>,
     #[serde(default)]
@@ -515,6 +531,24 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// The frame a named view's positions are quantised against, or `None` for a view this bundle
+    /// does not declare.
+    ///
+    /// **Keyed by view, never bundle-wide** (decision 0040): the extent is the view's, so a single
+    /// answer would have to pick one of two differently framed views. Reading the *first* declared
+    /// view instead is correct only while a bundle carries one and fails silently rather than
+    /// loudly on the day one carries two — every position decoded against the wrong frame, with
+    /// nothing to notice afterwards.
+    ///
+    /// An unknown name is `None` and the caller refuses; there is no default frame to fall back
+    /// on, for the reason [`ViewDescriptor::quantisation`] gives.
+    pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.quantisation)
+    }
+
     /// The declared scalars that occupy a slot in every row — `columns.arrow`'s tail, in order.
     ///
     /// **Every segment-facing consumer must use this rather than `declared_scalars` directly.** The

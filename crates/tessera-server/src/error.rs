@@ -551,6 +551,12 @@ pub fn map_accept_error(e: tessera_engine::AcceptError) -> ApiError {
         AcceptError::Exec(ExecError::LayerRefused { detail }) => ApiError::Contract(detail.clone()),
         // Both are the caller's row, malformed in a way the engine refused before anything was
         // acked or WAL-durable — a contract answer, not a fault.
+        // 404 and not 422, because that is what an unknown view id is on both planes
+        // (contracts §3.4): `resolve_view` answers `x-tessera-view` the same way, and two planes
+        // disagreeing about what an unknown view is would be a distinction with no meaning.
+        AcceptError::UnknownView { view, .. } => {
+            ApiError::Unknown(format!("unknown view '{view}'"))
+        }
         e @ (AcceptError::OutsideExtent { .. } | AcceptError::ScalarArity { .. }) => {
             ApiError::Contract(e.to_string())
         }
@@ -635,6 +641,7 @@ pub fn map_change_batch_error(
             // Refused before the submit, so it never reached the executor. Ingest-only in
             // practice; named rather than folded, per this function's own rule.
             AcceptError::OutsideExtent { .. }
+            | AcceptError::UnknownView { .. }
             | AcceptError::ScalarArity { .. }
             | AcceptError::SteppedDown => false,
         });
@@ -651,6 +658,7 @@ pub fn map_change_batch_error(
             AcceptError::Exec(e) => exec_failure_may_be_in_force(*op, e),
             AcceptError::Submit(e) => e.may_have_taken_effect(),
             AcceptError::OutsideExtent { .. }
+            | AcceptError::UnknownView { .. }
             | AcceptError::ScalarArity { .. }
             | AcceptError::SteppedDown => false,
         });
@@ -663,6 +671,7 @@ pub fn map_change_batch_error(
         AcceptError::Submit(e) => !e.may_have_taken_effect(),
         // Refused before the submit: certainly not applied, which is this half's sense exactly.
         AcceptError::OutsideExtent { .. }
+        | AcceptError::UnknownView { .. }
         | AcceptError::ScalarArity { .. }
         | AcceptError::SteppedDown => true,
     });

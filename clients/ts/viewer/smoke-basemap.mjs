@@ -80,7 +80,7 @@ const reading = await page.evaluate(() => {
   const drawn = explorer.store.get('view');
   return {
     view: meta.views[0],
-    quantisation: meta.quantisation,
+    quantisation: meta.views[0].quantisation,
     basemap: explorer.map?.basemap?.id ?? null,
     depth: drawn.depth,
     served: drawn.served.shown,

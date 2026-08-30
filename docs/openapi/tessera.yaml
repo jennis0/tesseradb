@@ -633,7 +633,7 @@ components:
     Meta:
       type: object
       additionalProperties: false
-      required: [api_version, bundle_format, idset, views, quantisation, declared_scalars, filter_operands, selection, layers]
+      required: [api_version, bundle_format, idset, views, declared_scalars, filter_operands, selection, layers]
       properties:
         api_version:
           type: integer
@@ -649,12 +649,22 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [id, display_name, projection, world_aspect, tile_scheme, tile]
+            required: [id, display_name, quantisation, projection, world_aspect, tile_scheme, tile]
             properties:
               id:
                 type: string
               display_name:
                 type: string
+              quantisation:
+                type: object
+                additionalProperties: false
+                required: [x_min, x_max, y_min, y_max]
+                description: The extent a point's `code` is scaled against in this view — 32 bits per axis over this range. Per view and not per bundle (decision 0040), because two views of one bundle may quantise differently and a client drawing the second would otherwise decode every position against the first's ground.
+                properties:
+                  x_min: { type: number }
+                  x_max: { type: number }
+                  y_min: { type: number }
+                  y_max: { type: number }
               projection:
                 description: What placed this view's positions — the name declared, from the closed set `projections.md` §5 enumerates, and `none` for a view that projects nothing. A deployment constant, identical for every principal.
                 type: string
@@ -675,16 +685,6 @@ components:
                   z: { type: integer, minimum: 0 }
                   x: { type: integer, minimum: 0 }
                   y: { type: integer, minimum: 0 }
-        quantisation:
-          type: object
-          additionalProperties: false
-          required: [x_min, x_max, y_min, y_max]
-          description: The extent a point's `code` is scaled against — 32 bits per axis over this range.
-          properties:
-            x_min: { type: number }
-            x_max: { type: number }
-            y_min: { type: number }
-            y_max: { type: number }
         declared_scalars:
           type: array
           description: The column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column.
@@ -937,7 +937,7 @@ components:
           minItems: 4
           maxItems: 4
           items: { type: number }
-          description: "`[x0, y0, x1, y1]` in the quantisation extent's coordinates, `x0 ≤ x1`, `y0 ≤ y1`, all finite. The tiles answered for are the depth-`zoom` tiles it intersects."
+          description: "`[x0, y0, x1, y1]` in the view's quantisation extent's coordinates, `x0 ≤ x1`, `y0 ≤ y1`, all finite. The tiles answered for are the depth-`zoom` tiles it intersects."
         tiles:
           type: array
           items:
@@ -1106,8 +1106,8 @@ components:
       type: object
       description: |
         Exactly one of `polygon`, `bbox`, `circle`, `ellipse` — a shape in the view's own space
-        (`/v1/meta`'s quantisation extent), with `space` (`view`, the default, or `wgs84` on a
-        view that declares a projection — degrees, densified before projection so the edge is
+        (the view's quantisation extent, as `/v1/meta` publishes it), with `space` (`view`, the
+        default, or `wgs84` on a view that declares a projection — degrees, densified before projection so the edge is
         straight in the plane it was declared in; `wgs84` on a view that projects nothing is a
         `422`) — or `artifact`, a
         published shape named by its `tessera_id`, answered from its held membership under the

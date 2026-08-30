@@ -468,8 +468,8 @@ fn a_projected_bundles_manifest_names_its_projection() {
     // The frame alone would not have said it: this one is the unit square either way.
     assert_eq!(
         (
-            bundle.manifest.quantisation.x_min,
-            bundle.manifest.quantisation.x_max
+            bundle.manifest.views[0].quantisation.x_min,
+            bundle.manifest.views[0].quantisation.x_max
         ),
         (0.0, 1.0)
     );

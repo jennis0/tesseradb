@@ -344,7 +344,7 @@ mod tests {
 
     use tessera_lifecycle::{IngestBuffer, Overlay};
     use tessera_plugin::Plugin;
-    use tessera_store::manifest::{IdentityDescriptor, Manifest, Quantisation};
+    use tessera_store::manifest::{IdentityDescriptor, Manifest};
     use tessera_store::Bundle;
 
     use super::*;
@@ -368,12 +368,6 @@ mod tests {
             declared_scalars: vec![],
             vocabularies: vec![],
             small_term_threshold: 32,
-            quantisation: Quantisation {
-                x_min: 0.0,
-                x_max: 1.0,
-                y_min: 0.0,
-                y_max: 1.0,
-            },
             entity_id_high_water: 0,
             identity: IdentityDescriptor {
                 construction: "siphash-2-4".to_string(),

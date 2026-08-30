@@ -169,7 +169,7 @@ const metaResp = await fetch(`${viewer}/v1/meta`, {headers: {authorization: `Bea
 if (!metaResp.ok) throw new Error(`meta: ${metaResp.status} ${await metaResp.text()}`);
 const meta = await metaResp.json();
 const view = meta.views[0].id;
-const q = meta.quantisation;
+const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
 
 console.log(`sampling points at depth ${SAMPLE_DEPTH}, k=${SAMPLE_K}, as the publishing principal`);
 const sampled = await viewport(token, {

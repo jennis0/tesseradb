@@ -16,8 +16,7 @@ import {tileRectOfBbox} from '../src/budget.js';
 const META: Meta = {
   apiVersion: 1,
   idset: 0,
-  views: [{id: 's0', displayName: 'default'}],
-  quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200},
+  views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200}}],
   declaredScalars: [{name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true}],
   layers: [],
   selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},
@@ -36,7 +35,7 @@ type FakeRequest = {zoom: number; bbox?: [number, number, number, number]; tiles
  */
 function responseCovering(req: FakeRequest, contentKey: string, served = 3): ViewportResponse {
   const base = response(contentKey, 'ik', served);
-  const q = META.quantisation;
+  const q = META.views[0].quantisation;
   let prefixes: bigint[];
   if (req.tiles) prefixes = req.tiles;
   else {

@@ -94,7 +94,7 @@ function frames(buf) {
 
 async function viewport(token, body) {
   const meta = await metaOf(token);
-  const q = meta.quantisation;
+  const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
   const r = await fetch(`${viewer}/v1/viewport`, {
     method: 'POST',
     headers: {authorization: `Bearer ${token}`, 'content-type': 'application/json'},

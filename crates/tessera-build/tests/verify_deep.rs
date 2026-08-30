@@ -181,7 +181,9 @@ fn flushed_bundle(root: &Path) {
         FlushInput {
             seg_id: "flush-1",
             rows,
-            quantisation: manifest.quantisation,
+            quantisation: manifest
+                .quantisation_of("s0")
+                .expect("the built manifest declares view 's0'"),
             identity_key: &key,
             shard_id: 0,
             scalar_schema: &[],

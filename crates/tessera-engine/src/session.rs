@@ -2921,18 +2921,27 @@ impl Engine {
                 got: row.scalars.len(),
             });
         }
-        let quantisation = self.meta().quantisation;
-        if let Some((index, row)) = rows
-            .iter()
-            .enumerate()
-            .find(|(_, row)| !quantisation.contains(row.x, row.y))
-        {
-            return Err(crate::write::AcceptError::OutsideExtent {
-                index,
-                x: row.x,
-                y: row.y,
-                quantisation,
-            });
+        // **Each row against its own view's frame** (decision 0040). The extent is the view's,
+        // so one bundle-wide check would pass a row that has no cell in the view it is destined
+        // for — silently clamped onto that view's grid edge at the flush. A row naming a view
+        // this bundle does not declare is refused here for the same reason: there is no frame to
+        // check it against, and the handler's own 404 guards only one of the buffer's writers.
+        let meta = self.meta();
+        for (index, row) in rows.iter().enumerate() {
+            let Some(quantisation) = meta.quantisation_of(&row.view) else {
+                return Err(crate::write::AcceptError::UnknownView {
+                    index,
+                    view: row.view.clone(),
+                });
+            };
+            if !quantisation.contains(row.x, row.y) {
+                return Err(crate::write::AcceptError::OutsideExtent {
+                    index,
+                    x: row.x,
+                    y: row.y,
+                    quantisation,
+                });
+            }
         }
         self.write
             .accept_ingest(rows, batch_id, body_hash, artifacts)

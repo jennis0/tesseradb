@@ -294,13 +294,13 @@ class Bundle:
         self.manifest = json.loads(manifest_bytes)
         self._verify_files(self.manifest["files"])
 
-        self.quantisation = self.manifest["quantisation"]
-        self.extent = (
-            self.quantisation["x_min"],
-            self.quantisation["x_max"],
-            self.quantisation["y_min"],
-            self.quantisation["y_max"],
-        )
+        # The quantisation frame is the *view's*, not the bundle's (decision 0040): two views of
+        # one bundle may quantise differently, so there is no bundle-wide extent to read. A
+        # manifest whose view omits it is malformed and refuses here, as the Rust reader does.
+        self.views = {view["id"]: view for view in self.manifest["views"]}
+        for view_id, view in self.views.items():
+            if "quantisation" not in view:
+                raise ValueError(f"view '{view_id}' declares no quantisation extent")
 
         # `identity` (contracts r6, docs/evidence/memos/2026-07-30-tessera-id-construction.md
         # §2): the per-deployment key and the §13.3 shard prefix `tessera_id` is built
@@ -372,6 +372,34 @@ class Bundle:
 
     def term_id_of(self, descriptor: bytes) -> int | None:
         return self.descriptor_to_term_id.get(descriptor)
+
+    def extent_of(self, view_id: str) -> tuple[float, float, float, float]:
+        """The frame a view's positions are quantised against, as `(x_min, x_max, y_min, y_max)`.
+
+        Per view and never bundle-wide (decision 0040). An unknown view raises rather than
+        falling back: a tile prefix decoded against another view's frame names different ground,
+        and nothing downstream would notice.
+        """
+        try:
+            q = self.views[view_id]["quantisation"]
+        except KeyError:
+            raise KeyError(f"the manifest declares no view '{view_id}'") from None
+        return (q["x_min"], q["x_max"], q["y_min"], q["y_max"])
+
+    @property
+    def extent(self) -> tuple[float, float, float, float]:
+        """The sole declared view's frame, for a caller that has no view id to hand.
+
+        Raises where the bundle declares more than one, because there is then no answer: the
+        extent belongs to the view (decision 0040), and picking the first would decode the
+        second's positions against ground they do not sit on. Use [`extent_of`] there.
+        """
+        if len(self.views) != 1:
+            raise ValueError(
+                f"this bundle declares {len(self.views)} views, so it has no single extent; "
+                "ask `extent_of(view_id)` for the one you mean"
+            )
+        return self.extent_of(next(iter(self.views)))
 
     def segment_dir(self, view_id: str) -> Path:
         for seg in self.segments_manifest["segments"]:

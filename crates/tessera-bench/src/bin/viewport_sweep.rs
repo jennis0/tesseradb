@@ -100,7 +100,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let bundle = open_bundle(&args.fixture)?;
-    let q = bundle.manifest.quantisation;
+    // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+    // measures against it.
+    let q = bundle
+        .manifest
+        .views
+        .first()
+        .expect("a built bundle declares a view")
+        .quantisation;
     let view_id = bundle
         .partitions
         .values()

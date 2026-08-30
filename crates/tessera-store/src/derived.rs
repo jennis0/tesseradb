@@ -1428,11 +1428,12 @@ pub fn shape_input(kind: ShapeKind, input: ShapeInput) -> Result<ShapeF64, Shape
 /// before it is quantised (`polygon-membership.md` §4.3, R10), and a caller cannot canonicalise
 /// one without naming the function that placed the points.
 ///
-/// ⊘ Every view shares one frame today — a bundle has one quantisation, and a build materialises
-/// one view — so the per-view loop canonicalises against the same extent and the same projection
-/// for each, and the design's "per view, in its own frame" reduces to one form stored under each
-/// view's name. The loop is kept because the storage is keyed by view and the frame is a property
-/// of the view rather than of the bundle in the design.
+/// ⊘ The frame is now the view's in the manifest (decision 0040), but this function still takes
+/// **one** extent and one projection for every named view: a build materialises one view, so the
+/// views of a layer share a frame in fact, and the design's "per view, in its own frame"
+/// (`polygon-membership.md` §4.3 — the projection must agree across a layer's views, the extent
+/// need not) reduces to one form stored under each view's name. The loop is kept because the
+/// storage is keyed by view; per-view extents here wait on a bundle that carries two.
 pub fn canonical_shapes(
     shape: &ShapeF64,
     views: &[&str],

@@ -361,23 +361,32 @@ async fn require_operator_credential(
     Ok(next.run(request).await)
 }
 
-/// The projection a layer's declared views were placed under.
+/// The frame a layer's shapes are canonicalised in: the projection its declared views were placed
+/// under, and the extent they are quantised against.
 ///
 /// A shape layer whose views declare different projections is refused at the declaration
 /// (`polygon-membership.md` §4.3), so every view here agrees and any one of them answers. What is
 /// not safe is reading the *bundle's* first view: a layer need not be declared on it, and a shape
 /// placed by a projection none of its own views declares holds the wrong rows with nothing saying
-/// so.
-fn layer_projection(
-    meta: &tessera_engine::EngineMeta,
+/// so. The frame comes from the same view as the projection, so the two cannot be drawn from
+/// different views.
+///
+/// ⊘ The extent is the layer's **first** view's, and views of one layer are *not* required to
+/// share one (`polygon-membership.md` §4.3: a shape is clipped in each view's own frame). That
+/// reduction holds exactly while a bundle carries one view, which is what `tessera build` emits;
+/// canonicalising per view against per-view frames is `canonical_shapes`' own ⊘.
+fn layer_frame<'m>(
+    meta: &'m tessera_engine::EngineMeta,
     views: &[&str],
-) -> Result<tessera_engine::Projection, ApiError> {
+) -> Result<&'m tessera_engine::MetaView, ApiError> {
     let first = views
         .first()
         .ok_or_else(|| {
             ApiError::Contract("this layer declares no view to publish a shape into".into())
         })?;
-    meta.projection_of(first)
+    meta.views
+        .iter()
+        .find(|v| &v.id == first)
         .ok_or_else(|| ApiError::Unknown(format!("unknown view '{first}'")))
 }
 
@@ -2152,6 +2161,7 @@ fn alarm_change_failure(op: ChangeOp, e: &AcceptError) {
         // Ingest-only, and refused before the submit — unreachable from a change, and in force in
         // no sense even if it were.
         AcceptError::OutsideExtent { .. }
+        | AcceptError::UnknownView { .. }
         | AcceptError::ScalarArity { .. }
         | AcceptError::SteppedDown => false,
     };
@@ -2447,23 +2457,25 @@ fn canonical_authored_content(
     let input = authored_shape_input(kind, text).map_err(|e| refuse(e.to_string()))?;
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
     let meta = state.engine.meta();
-    let q = meta.quantisation;
+    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+    // **The frame of the layer's own views**, not the bundle's first — and the bundle has no
+    // frame of its own to read (decision 0040). A shape layer spanning views with different
+    // projections is refused at the declaration, so the views agree and the first is the answer
+    // for all of them; it must be *this layer's* first and not the bundle's, or a shape is placed
+    // by a projection no view of it declares.
+    let frame = layer_frame(&meta, &views)?;
+    let q = frame.quantisation;
     let extent = tessera_engine::shapes::Bounds {
         x_min: q.x_min,
         x_max: q.x_max,
         y_min: q.y_min,
         y_max: q.y_max,
     };
-    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
     let canonical = canonical_shapes(
         &shape,
         &views,
         space,
-        // **The projection of the layer's own views**, not the bundle's first. A shape layer
-        // spanning views with different projections is refused at the declaration, so the views
-        // agree and the first is the answer for all of them — but it must be *this layer's* first
-        // and not the bundle's, or a shape is placed by a projection no view of it declares.
-        layer_projection(&meta, &views)?,
+        frame.projection,
         &extent,
         state.max_shape_vertices,
     )
@@ -2576,23 +2588,25 @@ fn canonical_row_shape(
     };
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
     let meta = state.engine.meta();
-    let q = meta.quantisation;
+    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
+    // **The frame of the layer's own views**, not the bundle's first — and the bundle has no
+    // frame of its own to read (decision 0040). A shape layer spanning views with different
+    // projections is refused at the declaration, so the views agree and the first is the answer
+    // for all of them; it must be *this layer's* first and not the bundle's, or a shape is placed
+    // by a projection no view of it declares.
+    let frame = layer_frame(&meta, &views)?;
+    let q = frame.quantisation;
     let extent = tessera_engine::shapes::Bounds {
         x_min: q.x_min,
         x_max: q.x_max,
         y_min: q.y_min,
         y_max: q.y_max,
     };
-    let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
     let canonical = canonical_shapes(
         &shape,
         &views,
         space,
-        // **The projection of the layer's own views**, not the bundle's first. A shape layer
-        // spanning views with different projections is refused at the declaration, so the views
-        // agree and the first is the answer for all of them — but it must be *this layer's* first
-        // and not the bundle's, or a shape is placed by a projection no view of it declares.
-        layer_projection(&meta, &views)?,
+        frame.projection,
         &extent,
         state.max_shape_vertices,
     )

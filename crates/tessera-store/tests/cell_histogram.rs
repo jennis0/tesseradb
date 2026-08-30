@@ -149,12 +149,6 @@ fn build_bundle(root: &Path) {
         declared_scalars: vec![],
         vocabularies: vec![],
         small_term_threshold: 32,
-        quantisation: Quantisation {
-            x_min: extent.x_min,
-            x_max: extent.x_max,
-            y_min: extent.y_min,
-            y_max: extent.y_max,
-        },
         entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
@@ -166,6 +160,13 @@ fn build_bundle(root: &Path) {
         views: vec![ViewDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),
+            // The frame is the view's, not the bundle's (decision 0040).
+            quantisation: Quantisation {
+                x_min: extent.x_min,
+                x_max: extent.x_max,
+                y_min: extent.y_min,
+                y_max: extent.y_max,
+            },
             projection: tessera_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
