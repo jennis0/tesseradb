@@ -74,6 +74,7 @@ overlaps, dead patterns and the unclaimed set; `--selftest` checks the matcher i
 cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/check-layers.sh
+bash scripts/check-test-reachability.sh --quick
 bash scripts/check-clients.sh
 bash scripts/check-track-allowlist.sh <track>
 python3 scripts/check-doc-links.py

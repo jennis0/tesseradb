@@ -583,7 +583,7 @@ fn the_two_layouts_answer_identically() {
 /// not any point is served and the gather is paid whether or not any layer is named, so
 /// `(layers, k) − (layers, 0) − ((no layers, k) − (no layers, 0))` is the column alone.
 #[test]
-#[ignore]
+#[ignore = "measurement: the column's per-response cost by differencing — run with --ignored --nocapture"]
 fn measure_the_column_cost() {
     for layout in [ServingLayout::ArtifactMajor, ServingLayout::RowMajorList] {
         let fx = fixture();
