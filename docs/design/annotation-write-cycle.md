@@ -22,7 +22,7 @@ deferred edit pass (Stage 7) and the proportional criterion's denominator for pr
 (Stage 6).
 **Reads against:** design §4 (I1, I2, I3, I7, I8, I9, I10, I12), §7.6–§7.8, §11.2, Appendix C;
 [`write-path.md`](write-path.md) §2–§5 (**normative** for the write path); [`compaction.md`](compaction.md)
-§3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`views-and-multi-table.md`](views-and-multi-table.md) §3;
+§3–§5, §9; [`filter-index.md`](filter-index.md) §6; [`views.md`](views.md) §3;
 decisions [0047](../decisions/0047-edit-is-delete-plus-reingest.md),
 [0048](../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md),
 [0043](../decisions/0043-geometry-maintenance-never-blocks-a-request.md),
@@ -517,7 +517,7 @@ exists for every entity (I10). Contradicts the model's addressing as read; rulin
 
 | Operation | Route | What is durable | Refused when |
 |---|---|---|---|
-| **Layer create** | control verb; the view lifecycle's shape verbatim ([`views-and-multi-table.md`](views-and-multi-table.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay. **Or a build input** — a `[[layer]]` block in the corpus declaration `tessera build` reads writes the registry section directly, running the same registry and allocator so both routes refuse and place identically; a build has no WAL, its manifest being the durable output | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
+| **Layer create** | control verb; the view lifecycle's shape verbatim ([`views.md`](views.md) §3): WAL'd registry entry, served registry = manifest + WAL overlay. **Or a build input** — a `[[layer]]` block in the corpus declaration `tessera build` reads writes the registry section directly, running the same registry and allocator so both routes refuse and place identically; a build has no WAL, its manifest being the durable output | the registry record; **one entity ID is allocated to the layer itself** (below) | name in use **or tombstoned**; gate unevaluable; declaration refused at parse (empty term list, missing gate — rep §10) |
 | **Level publish** (bulk) | build plane, `--attach-view`'s shape: `tessera build` reading a layer's `source` and its `[layer.members]` source, members named by source id and resolved through the build's own assignment, packed into the same membership and record extents a control-plane publication writes | the files, digested; the publication record | per-artifact validation (spec §3.1, §5); a level is **not atomic** — publishing artifacts is monotone and a partial level is coherent, merely incomplete (rep §5.0) |
 | **Layer suppress / unsuppress** | `/control/changes` **on the layer's own entity** — which is why it has one. Rule S applies; the reachability check gains one live `verdict` lookup ahead of the session's resolved set | the existing deny machinery, end to end | never for load |
 | **Layer drop** | WAL'd registry tombstone; vanishes from discovery at ack; artifacts reclaimed at the fold; **the name stays tombstoned for ever** | the tombstone | — |

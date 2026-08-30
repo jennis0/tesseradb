@@ -198,7 +198,7 @@ what a member with none gets. Omit `default` for points and a point with no labe
 principal — the narrow direction, so it may be omitted; a *widening* default never may.
 
 **The container's gate conjoins and can only narrow**, at both levels. That is already normative
-for views ([`views-and-multi-table.md`](../../design/views-and-multi-table.md) §3: a view's
+for views ([`views.md`](../../design/views.md) §3: a view's
 gate is a label, evaluated by the item-visibility predicate verbatim, *conjunctive with item
 labels, never substitutive*). ⊘ **View gating is specified and not implemented** — a bundle has
 one coordinate system reachable by every principal that authorises — so the `[[view]]` block is
@@ -330,7 +330,7 @@ us.
 the shared entity space — disjoint time ranges, several embedding spaces, several datasets — and
 *slice* reads as the temporal case that was merely the first instance. This is the one rename in
 this memo that reaches beyond the config: `slices-and-multi-table.md` (now
-[`views-and-multi-table.md`](../../design/views-and-multi-table.md)) is a normative document whose
+[`views.md`](../../design/views.md)) is a normative document whose
 title, sections and every citation carried the word, as did `SliceDescriptor`, `slice_id`, the
 per-slice layout paths and `--slice`. Pre-release that costs nothing but the edit
 ([decision 0048](../../decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)); it

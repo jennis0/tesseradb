@@ -6,7 +6,7 @@
 
 ---
 
-**The multi-table elaboration of this sketch** — physical `(view, group, flush)` tables, the promotion policy with its hysteresis and dwell, carve and fold at compaction, the fan-out sweep and the byte-level single-vs-multi-table differential — is r4 of `views-and-multi-table.md` (git `ead7e906`, §2 and §4–§9). Its r5 is views alone, and this sketch is again where grouping lives.
+**The multi-table elaboration of this sketch** — physical `(view, group, flush)` tables, the promotion policy with its hysteresis and dwell, carve and fold at compaction, the fan-out sweep and the byte-level single-vs-multi-table differential — is r4 of `views.md`, then named `views-and-multi-table.md` (git `ead7e906`, §2 and §4–§9). Its r5 is views alone, and this sketch is again where grouping lives.
 
 **Row-space signature-major layout (probes, optimisations §4) — needs deciding, not before Phase 2.** Sorting rows by (signature, morton) for the largest signature groups with a Morton-only residual. It is a *per-deployment build decision*, but it is listed here because two of its consequences reach the core and one of them is a format change.
 

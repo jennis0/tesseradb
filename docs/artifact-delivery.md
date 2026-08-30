@@ -141,7 +141,7 @@ its content, content before the events that can invalidate it.
 and both removal rules; the record blob (where supplied content lives); row space, the permutation
 and the fold; the composed mask and `and_cardinality`; the filter tree and the token index. **What
 does not exist** — anything artifact-shaped at all, and the WAL'd registry pattern the layer
-lifecycle is specified against: `views-and-multi-table.md` §3 is a *design*, not code, so the layer
+lifecycle is specified against: `views.md` §3 is a *design*, not code, so the layer
 registry is the first implementation of that shape rather than a reuse of it, and views will
 inherit it.
 

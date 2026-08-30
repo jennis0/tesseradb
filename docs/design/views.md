@@ -1,4 +1,4 @@
-# Views and view groups — design
+# Views — design
 
 **Date:** 2026-08-30
 **Status:** Provisional r5 — under review and **not approved**. The rest of the corpus governs
@@ -17,9 +17,10 @@ own sections are cited as **spec §n**.
 > document is views alone, and grouping — a performance layout with its own adoption gates and
 > no dependency on anything below — returns to
 > [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md), which now points at
-> r4 (git `ead7e906`) for the multi-table elaboration. r4's identity-stability tiers and its
-> roll-mode rotation are dropped from this document for the same reason: they are partition and
-> rotation questions, recoverable from git, and nothing here depends on them.
+> r4 — then named `views-and-multi-table.md`, git `ead7e906` — for the multi-table elaboration.
+> r4's identity-stability tiers and its roll-mode rotation are dropped from this document for the
+> same reason: they are partition and rotation questions, recoverable from git, and nothing here
+> depends on them.
 
 ---
 

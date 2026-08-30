@@ -19,7 +19,7 @@ therefore stands unqualified.
 **Reads against:** architecture §4 (I2, I3, I9, I12), §5.3, §8.2, §8.3, §10.3, §10.5, Appendix A,
 Appendix C (C8, C11); contracts §2.1–§2.4, §3.2, §3.4; [`write-path.md`](write-path.md) §1.2, §4.3,
 §5.4; [`records-and-search.md`](records-and-search.md) §2–§3, §4.2, §5 (cited as **records §n**);
-`views-and-multi-table.md` §51, §53, §61, §80, §87 (itself provisional);
+`views.md` §51, §53, §61, §80, §87 (itself provisional);
 `system-architecture.md` §7; design memo 2026-07-29 (secondary attribute indexing);
 decisions [0013](../decisions/0013-mark-specified-vs-implemented.md),
 [0039](../decisions/0039-multi-valued-categoricals-are-slow-path-only.md),
