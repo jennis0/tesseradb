@@ -127,14 +127,18 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points_path.to_path_buf(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -377,7 +381,14 @@ pub async fn mount_server_with_ingest_limits(
     compute_gate: ComputeGate,
     ingest_limits: IngestLimits,
 ) -> TestServer {
-    mount_server_with(engine, max_k, compute_gate, ingest_limits, CorsOrigins::none()).await
+    mount_server_with(
+        engine,
+        max_k,
+        compute_gate,
+        ingest_limits,
+        CorsOrigins::none(),
+    )
+    .await
 }
 
 /// The two CORS origin lists, named rather than positional.
@@ -656,10 +667,7 @@ pub struct ArtifactIdentityRow {
     pub matched: Option<bool>,
 }
 
-fn str_col(
-    batch: &arrow::record_batch::RecordBatch,
-    i: usize,
-) -> arrow::array::StringArray {
+fn str_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> arrow::array::StringArray {
     batch
         .column(i)
         .as_any()
@@ -683,7 +691,10 @@ fn u64_col(batch: &arrow::record_batch::RecordBatch, i: usize) -> UInt64Array {
 /// refused (`tessera_wire::split_frames`).
 pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
     let frames = tessera_wire::split_frames(bytes).expect("well-formed frame sequence");
-    assert!(!frames.is_empty(), "a response carries at least tiles + trailer");
+    assert!(
+        !frames.is_empty(),
+        "a response carries at least tiles + trailer"
+    );
     assert_eq!(
         frames.first().unwrap().0,
         tessera_wire::FRAME_TILES,
@@ -766,7 +777,9 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                             .as_any()
                             .downcast_ref::<arrow::array::StringArray>()
                             .unwrap();
-                        values.value(column.key(i).expect("layer is never null")).to_string()
+                        values
+                            .value(column.key(i).expect("layer is never null"))
+                            .to_string()
                     };
                     let tessera_id = u64_col(&batch, 1);
                     let u32_col_at = |col: usize, name: &str| {
@@ -826,7 +839,11 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                     // from a null one, so 0076's null rule gains no third reading.
                     let shapes = batch.num_columns() > 14;
                     if shapes {
-                        assert_eq!(batch.num_columns(), 16, "shape_x and shape_y travel together");
+                        assert_eq!(
+                            batch.num_columns(),
+                            16,
+                            "shape_x and shape_y travel together"
+                        );
                         assert_eq!(batch.schema().field(14).name(), "shape_x");
                         assert_eq!(batch.schema().field(15).name(), "shape_y");
                     }
@@ -901,9 +918,7 @@ pub fn decode_viewport_frames(bytes: &[u8]) -> DecodedViewport {
                         rows.push(ArtifactRow {
                             layer: layer_at(i),
                             tessera_id: tessera_id.value(i),
-                            key: key
-                                .is_valid(i)
-                                .then(|| key.value(i).to_string()),
+                            key: key.is_valid(i).then(|| key.value(i).to_string()),
                             masked_count: masked_count.value(i),
                             centroid: f64_at(4, i)
                                 .map(|x| [x, f64_at(5, i).expect("both axes or neither")]),

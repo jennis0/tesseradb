@@ -320,9 +320,9 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     use tessera_lifecycle::{IngestBuffer, Overlay};
+    use tessera_plugin::Plugin;
     use tessera_store::manifest::{IdentityDescriptor, Manifest};
     use tessera_store::Bundle;
-    use tessera_plugin::Plugin;
 
     use super::*;
 
@@ -352,6 +352,7 @@ mod tests {
                 shard_id: 0,
                 idset: 1,
             },
+            groups: Vec::new(),
             views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),

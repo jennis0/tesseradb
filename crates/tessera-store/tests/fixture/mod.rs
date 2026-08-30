@@ -153,6 +153,7 @@ pub fn build_bundle(root: &Path, n: u64) {
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![ViewDescriptor {
             id: VIEW.to_string(),
             display_name: VIEW.to_string(),

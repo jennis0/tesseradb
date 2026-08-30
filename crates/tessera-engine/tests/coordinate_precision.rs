@@ -54,10 +54,7 @@ fn frame() -> Bounds {
 fn fixture_points() -> Vec<(f64, f64)> {
     let mut points = vec![(65_508.5, 65_508.5), (65_508.501, 65_508.501)];
     for i in 0..14u64 {
-        points.push((
-            65_504.25 + i as f64 * 1.0625,
-            65_519.75 - i as f64 * 1.0625,
-        ));
+        points.push((65_504.25 + i as f64 * 1.0625, 65_519.75 - i as f64 * 1.0625));
     }
     points
 }
@@ -113,14 +110,18 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
     write_points(points_path, points);
     write_pairs(pairs_path, points.len() as u64);
     build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points_path.to_path_buf(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: frame(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
-        extent: frame(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -161,8 +162,13 @@ fn served_positions(engine: &Engine) -> BTreeMap<u64, u64> {
         [f.x_min, f.y_min, f.x_max, f.y_max],
         N_ITEMS as usize,
     );
-    let out = engine.viewport(&session, request).expect("the viewport answers");
-    out.points.iter().map(|(id, code)| (id.raw(), code)).collect()
+    let out = engine
+        .viewport(&session, request)
+        .expect("the viewport answers");
+    out.points
+        .iter()
+        .map(|(id, code)| (id.raw(), code))
+        .collect()
 }
 
 /// **The property.** The same sixteen coordinates, reached once through a build and once through

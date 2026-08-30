@@ -193,7 +193,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
         "[defaults]\nnonesuch = 1\n",
         "[defaults]",
-        &["source", "entity_id_field"],
+        &["source", "entity_id_field", "allocation_view"],
     );
     expect_keys(
         "[[view]]\nname = \"s0\"\nnonesuch = 1\n",
@@ -1111,7 +1111,11 @@ fn a_projected_view_states_its_frame_in_degrees() {
 /// alignment it exists to have.
 #[test]
 fn the_unprojected_extent_spellings_are_refused_on_a_projected_view() {
-    let refused = |extent: &str| err(&projected(&format!("projection = \"web_mercator\"\n{extent}")));
+    let refused = |extent: &str| {
+        err(&projected(&format!(
+            "projection = \"web_mercator\"\n{extent}"
+        )))
+    };
 
     let message = refused("extent = { min = -25.0, max = 25.0 }");
     assert!(message.contains("names min, max"), "{message}");
@@ -1134,7 +1138,9 @@ fn the_unprojected_extent_spellings_are_refused_on_a_projected_view() {
 /// degrees as though they were the file's own units.
 #[test]
 fn a_degree_box_is_refused_on_an_unprojected_view() {
-    let message = err(&projected("extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }"));
+    let message = err(&projected(
+        "extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }",
+    ));
     assert!(message.contains("no projection"), "{message}");
     assert!(message.contains("web_mercator"), "{message}");
 }
@@ -1142,7 +1148,11 @@ fn a_degree_box_is_refused_on_an_unprojected_view() {
 /// **A value outside ±180 or ±90 is not a coordinate** (§2), on either axis.
 #[test]
 fn a_frame_outside_the_wgs84_range_is_refused() {
-    let refused = |extent: &str| err(&projected(&format!("projection = \"web_mercator\"\n{extent}")));
+    let refused = |extent: &str| {
+        err(&projected(&format!(
+            "projection = \"web_mercator\"\n{extent}"
+        )))
+    };
 
     let message = refused("extent = { lon = [-190.0, 1.8], lat = [49.9, 60.9] }");
     assert!(message.contains("not a longitude"), "{message}");
@@ -1166,7 +1176,10 @@ fn a_box_crossing_the_antimeridian_is_refused() {
     let message = err(&projected(
         "projection = \"web_mercator\"\nextent = { lon = [-8.6, 1.8], lat = [60.9, 49.9] }",
     ));
-    assert!(message.contains("runs south from its own maximum"), "{message}");
+    assert!(
+        message.contains("runs south from its own maximum"),
+        "{message}"
+    );
     assert!(message.contains("lat = [49.9, 60.9]"), "{message}");
 }
 
@@ -1194,7 +1207,10 @@ fn a_projected_view_reads_lon_and_lat() {
     let message = err(&projected(&format!(
         "{base}\nsource = \"other\"\nfields = {{ x = \"a\", y = \"b\" }}"
     )));
-    assert!(message.contains("`fields.x` on a projected view"), "{message}");
+    assert!(
+        message.contains("`fields.x` on a projected view"),
+        "{message}"
+    );
     assert!(message.contains("`fields.lon`"), "{message}");
 
     // And the reverse, on a view with no projection to read a degree with.
@@ -1211,7 +1227,10 @@ fn a_projected_view_reads_lon_and_lat() {
     let message = err(&projected(&format!(
         "{base}\nsource = \"other\"\nfields = {{ morton = \"m\" }}"
     )));
-    assert!(message.contains("`fields.morton` on a projected view"), "{message}");
+    assert!(
+        message.contains("`fields.morton` on a projected view"),
+        "{message}"
+    );
 }
 
 /// **The snap, against hand-computed squares.** Each frame below is arithmetic a reader can redo:
@@ -1307,11 +1326,16 @@ fn a_check_answers_a_projected_views_frame_from_the_declaration_alone() {
     let (asked, snap) = report.frames[0].snapped.expect("a stated box snaps");
     assert_eq!(asked.lon_min, -180.0);
     // `x [0, 0.25], y [0, 0.25]`, whose maxima are the z2 boundary and so belong to the next tile.
-    assert_eq!(snap.square, tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 });
+    assert_eq!(
+        snap.square,
+        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
+    );
     assert!(!snap.floored);
 
-    let fitted = parse_str(&projected("projection = \"web_mercator\"\nextent = \"auto\""))
-        .expect("the declaration parses");
+    let fitted = parse_str(&projected(
+        "projection = \"web_mercator\"\nextent = \"auto\"",
+    ))
+    .expect("the declaration parses");
     let report = crate::check::check(&fitted);
     assert_eq!(report.frames.len(), 1);
     assert!(
@@ -1862,12 +1886,23 @@ fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     );
     // Four kinds, so the word is a choice and not a courtesy: absent is refused naming them.
     let absent = spatial("\n  [layer.shape]\n");
-    assert!(err(&absent).contains("bbox, circle, ellipse, polygon"), "{}", err(&absent));
+    assert!(
+        err(&absent).contains("bbox, circle, ellipse, polygon"),
+        "{}",
+        err(&absent)
+    );
     let unknown = spatial("\n  [layer.shape]\n  kind = \"radius\"\n");
-    assert!(err(&unknown).contains("is not a shape kind"), "{}", err(&unknown));
+    assert!(
+        err(&unknown).contains("is not a shape kind"),
+        "{}",
+        err(&unknown)
+    );
 
     // A shape beside a membership that reads none is a rule nothing evaluates.
-    let enumerated = format!("{}\n  [layer.shape]\n  kind = \"bbox\"\n", predicate_fixture());
+    let enumerated = format!(
+        "{}\n  [layer.shape]\n  kind = \"bbox\"\n",
+        predicate_fixture()
+    );
     assert!(
         err(&enumerated).contains("is a rule nothing evaluates"),
         "{}",
@@ -1881,7 +1916,9 @@ fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     let with_space = |word: &str, body: &str| {
         spatial(body).replace(
             "membership                = \"spatial\"",
-            &format!("default_space             = \"{word}\"\nmembership                = \"spatial\""),
+            &format!(
+                "default_space             = \"{word}\"\nmembership                = \"spatial\""
+            ),
         )
     };
     let view = with_space("view", "\n  [layer.shape]\n  kind = \"bbox\"\n");
@@ -2794,12 +2831,14 @@ fn a_label_layer_sharing_a_name_with_a_layer_is_refused() {
 fn acquisition_names_the_files_this_build_reads() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = parse_at(dir.path(), ACQUIRED, &HashMap::new()).unwrap();
-    let acquired = config.acquire("s0").expect("the view is declared");
-    assert_eq!(acquired.points, dir.path().join("geometry.parquet"));
+    let acquired = config.acquire().expect("the entity-space inputs acquire");
+    let registry = config.build_views().expect("the registry compiles");
+    let view = crate::config::acquire_view(&registry[0]).expect("the view is declared");
+    assert_eq!(view.points, dir.path().join("geometry.parquet"));
     assert!(
-        matches!(&acquired.access.source, crate::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")),
+        matches!(&view.access.source, crate::config::AccessSource::Relation(p) if *p == dir.path().join("pairs.parquet")),
         "{:?}",
-        acquired.access
+        view.access
     );
     assert_eq!(
         acquired.attribute_sources[0].path,
@@ -2807,7 +2846,7 @@ fn acquisition_names_the_files_this_build_reads() {
     );
     assert!(acquired.layers.is_empty());
     assert_eq!(
-        acquired.extent,
+        registry[0].extent,
         Extent::Auto {
             margin: DEFAULT_AUTO_MARGIN
         }
@@ -2827,7 +2866,7 @@ fn a_layer_names_its_artifacts_and_its_members() {
     );
     let config =
         parse_at(dir.path(), &text, &HashMap::new()).expect("the layer's two sources are declared");
-    let acquired = config.acquire("s0").unwrap();
+    let acquired = config.acquire().unwrap();
     assert_eq!(
         artifact_path(&acquired.layers[0]),
         Some(dir.path().join("hdbscan.parquet"))
@@ -2839,7 +2878,7 @@ fn a_layer_names_its_artifacts_and_its_members() {
     // And the members source is overridable on its own name, without disturbing the roster.
     let config = parse_at(dir.path(), &text, &files(&["hdbscan_members"]))
         .expect("one source staged elsewhere");
-    let acquired = config.acquire("s0").unwrap();
+    let acquired = config.acquire().unwrap();
     assert_eq!(
         artifact_path(&acquired.layers[0]),
         Some(dir.path().join("hdbscan.parquet"))
@@ -2873,7 +2912,7 @@ fn two_layers_read_their_own_files() {
     let dir = tempfile::tempdir().expect("tempdir");
     let text = format!("{ACQUIRED}{first}{second}");
     let config = parse_at(dir.path(), &text, &HashMap::new()).expect("both layers parse");
-    let acquired = config.acquire("s0").expect("both sources acquire");
+    let acquired = config.acquire().expect("both sources acquire");
     let paths: Vec<Option<PathBuf>> = acquired.layers.iter().map(artifact_path).collect();
     assert_eq!(
         paths,
@@ -2884,13 +2923,21 @@ fn two_layers_read_their_own_files() {
     );
 }
 
-/// The build materialises one view and reads its source, so a `--view` it cannot find is a build
-/// with no geometry rather than a default one.
+/// The anchor view is a declaration, not a default (decision 0112), so one naming a view the
+/// registry does not carry refuses listing the candidates.
 #[test]
-fn a_build_refuses_a_view_the_config_does_not_declare() {
+fn a_build_refuses_an_anchor_the_config_does_not_declare() {
     let config = parse_bound(ACQUIRED, &HashMap::new()).unwrap();
-    let message = format!("{}", config.acquire("s9").expect_err("expected a refusal"));
-    assert!(message.contains("--view 's9'"), "{message}");
+    let registry = config.build_views().unwrap();
+    let mut config = config;
+    config.allocation_view = Some("s9".to_string());
+    let message = format!(
+        "{}",
+        config
+            .anchor_view(&registry)
+            .expect_err("expected a refusal")
+    );
+    assert!(message.contains("allocation_view"), "{message}");
     assert!(
         message.contains("s0"),
         "the refusal must list them: {message}"
@@ -2905,7 +2952,11 @@ fn a_build_refuses_a_view_with_no_source() {
         .replace("source           = \"geometry\"\n", "")
         .replace("[defaults]\nsource = \"corpus\"\n", "");
     let config = parse_bound(&text, &HashMap::new()).unwrap();
-    let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
+    let registry = config.build_views().unwrap();
+    let message = format!(
+        "{}",
+        crate::config::acquire_view(&registry[0]).expect_err("expected a refusal")
+    );
     assert!(
         message.contains("`source` is required to build"),
         "{message}"
@@ -2922,7 +2973,8 @@ fn every_label_route_acquires() {
         "{ field = \"categories\", default = \"public\" }",
     );
     let config = parse_bound(&field, &HashMap::new()).unwrap();
-    let acquired = config.acquire("s0").expect("a field route acquires");
+    let registry = config.build_views().unwrap();
+    let acquired = crate::config::acquire_view(&registry[0]).expect("a field route acquires");
     assert!(
         matches!(&acquired.access.source, AccessSource::Field(f) if f == "categories"),
         "{:?}",
@@ -2935,7 +2987,8 @@ fn every_label_route_acquires() {
         "{ default = \"ir:analyst\" }",
     );
     let config = parse_bound(&only_default, &HashMap::new()).unwrap();
-    let acquired = config.acquire("s0").expect("a default alone acquires");
+    let registry = config.build_views().unwrap();
+    let acquired = crate::config::acquire_view(&registry[0]).expect("a default alone acquires");
     assert!(
         matches!(acquired.access.source, AccessSource::Default),
         "{:?}",
@@ -2956,7 +3009,7 @@ fn a_build_refuses_an_attribute_with_no_source() {
         config.attribute_sources.is_empty(),
         "no source named, so no group to read"
     );
-    let message = format!("{}", config.acquire("s0").expect_err("expected a refusal"));
+    let message = format!("{}", config.acquire().expect_err("expected a refusal"));
     assert!(message.contains("name no `source`"), "{message}");
     assert!(
         message.contains("severity"),
@@ -3144,9 +3197,15 @@ fn a_roster_table_without_the_groups_points_is_refused() {
     );
 
     // And the roster table's own file, which is not the group's.
-    let text = format!("{SEVERITY}{GROUP_B}")
-        .replace("[view_group.views]\nsource = \"other\"\n", "[view_group.views]\n");
-    assert!(err(&text).contains("`source` is required"), "{}", err(&text));
+    let text = format!("{SEVERITY}{GROUP_B}").replace(
+        "[view_group.views]\nsource = \"other\"\n",
+        "[view_group.views]\n",
+    );
+    assert!(
+        err(&text).contains("`source` is required"),
+        "{}",
+        err(&text)
+    );
 }
 
 /// **Under form A the file is the view**, so a group-level `source` beside inline blocks is a
@@ -3225,7 +3284,10 @@ fn members_naming_no_group_is_refused() {
          source = \"other\"\npoint_visibility = { default = \"public\" }\n",
     );
     let message = err(&text);
-    assert!(message.contains("names no `[[view_group]]` block"), "{message}");
+    assert!(
+        message.contains("names no `[[view_group]]` block"),
+        "{message}"
+    );
     assert!(message.contains("quarter"), "{message}");
 }
 
@@ -3256,9 +3318,14 @@ fn two_views_of_one_group_may_not_share_a_key() {
 /// wherever they meet.
 #[test]
 fn a_group_and_a_view_may_not_share_a_name() {
-    let message = err(&with_group("")
-        .replace("name             = \"quarter\"", "name             = \"s0\""));
-    assert!(message.contains("has the name of a `[[view]]` block"), "{message}");
+    let message = err(&with_group("").replace(
+        "name             = \"quarter\"",
+        "name             = \"s0\"",
+    ));
+    assert!(
+        message.contains("has the name of a `[[view]]` block"),
+        "{message}"
+    );
 
     // And two groups of one name, on the same argument the duplicate-view rule rests on.
     let message = err(&with_group(GROUP));
@@ -3306,10 +3373,7 @@ fn a_roster_entry_may_not_declare_a_group_level_key() {
 /// metadata names — so the closure is kept by hand, and this is the assertion that it is kept.
 #[test]
 fn an_unknown_key_in_a_roster_entry_is_refused_against_the_declared_names() {
-    let text = with_group("").replace(
-        "key    = \"2026-Q2\"",
-        "key    = \"2026-Q2\"\nnonesuch = 1",
-    );
+    let text = with_group("").replace("key    = \"2026-Q2\"", "key    = \"2026-Q2\"\nnonesuch = 1");
     let message = err(&text);
     assert!(
         message.contains("is not a key of a `[[view_group.view]]` block"),
@@ -3354,14 +3418,19 @@ fn a_metadata_value_is_typed_against_its_declaration() {
 fn a_metadata_timestamp_needs_an_offset() {
     let text = with_group("").replace("2026-04-01T00:00:00Z", "2026-04-01T00:00:00");
     let message = err(&text);
-    assert!(message.contains("needs a date, a time and an offset"), "{message}");
+    assert!(
+        message.contains("needs a date, a time and an offset"),
+        "{message}"
+    );
 }
 
 /// A group's own gate takes the same two readings a view's does.
 #[test]
 fn a_groups_gate_and_a_roster_records_gate_are_refused_as_unbuilt() {
-    let text = with_group("")
-        .replace("visibility       = \"public\"", "visibility       = \"ir:analyst\"");
+    let text = with_group("").replace(
+        "visibility       = \"public\"",
+        "visibility       = \"ir:analyst\"",
+    );
     let message = err(&text);
     assert!(message.contains("specified and not built"), "{message}");
 
@@ -3369,7 +3438,11 @@ fn a_groups_gate_and_a_roster_records_gate_are_refused_as_unbuilt() {
         "key    = \"2026-Q2\"",
         "key    = \"2026-Q2\"\nvisibility = \"ir:analyst\"",
     );
-    assert!(err(&text).contains("specified and not built"), "{}", err(&text));
+    assert!(
+        err(&text).contains("specified and not built"),
+        "{}",
+        err(&text)
+    );
 }
 
 #[test]
@@ -3382,10 +3455,15 @@ fn an_attribute_scopes_to_a_group_that_owns_its_views() {
     assert_eq!(config.scopes.attribute("severity"), Some("quarter"));
 
     let message = err(&scoped.replace("group = \"quarter\"", "group = \"quarterly\""));
-    assert!(message.contains("names no `[[view_group]]` block"), "{message}");
+    assert!(
+        message.contains("names no `[[view_group]]` block"),
+        "{message}"
+    );
 
-    let message =
-        err(&scoped.replace("scope      = { group = \"quarter\" }", "scope      = \"quarterly\""));
+    let message = err(&scoped.replace(
+        "scope      = { group = \"quarter\" }",
+        "scope      = \"quarterly\"",
+    ));
     assert!(message.contains("not a value this key takes"), "{message}");
 }
 
@@ -3403,7 +3481,10 @@ fn a_scope_naming_a_members_group_points_at_the_owner() {
         "[[attribute]]\nscope      = { group = \"quarter_map\" }\nname       = \"severity\"",
     );
     let message = err(&text);
-    assert!(message.contains("declares `members = \"quarter\"`"), "{message}");
+    assert!(
+        message.contains("declares `members = \"quarter\"`"),
+        "{message}"
+    );
     assert!(
         message.contains("scope = { group = \"quarter\" }"),
         "the refusal must point at the owner: {message}"
@@ -3455,20 +3536,37 @@ fn fields_view_on_an_unscoped_layer_is_refused() {
          fields                    = { view = \"quarter\" }",
     ));
     let message = err(&text);
-    assert!(message.contains("names a field this object never declared"), "{message}");
+    assert!(
+        message.contains("names a field this object never declared"),
+        "{message}"
+    );
     assert!(message.contains("entity-scoped"), "{message}");
 }
 
 /// ⊘ The multi-view build is specified and not implemented (`views.md` §7), so a declaration
 /// carrying a group refuses at the build rather than materialising its plain views alone.
 #[test]
-fn a_declaration_with_a_group_has_no_sole_view() {
+fn a_declaration_with_a_group_materialises_the_groups_views_too() {
     let config = parse_str(&with_group("")).expect("the group parses");
-    let message = format!("{}", config.sole_view().expect_err("a group has no sole view"));
-    assert!(message.contains("view group(s)"), "{message}");
-    assert!(message.contains("views §7"), "{message}");
-    // Without one, the plain view is still the answer.
-    assert_eq!(parse_str(SEVERITY).unwrap().sole_view().unwrap(), "s0");
+    let registry = config.build_views().expect("the registry compiles");
+    assert!(
+        registry.iter().any(|v| v.id.contains(':')),
+        "a group's views are `group:key`: {:?}",
+        registry.iter().map(|v| v.id.as_str()).collect::<Vec<_>>()
+    );
+    // With several views the anchor is a declaration rather than a default (decision 0112).
+    let message = format!(
+        "{}",
+        config
+            .anchor_view(&registry)
+            .expect_err("several views and no anchor")
+    );
+    assert!(message.contains("allocation_view"), "{message}");
+    // One view, and naming it is noise.
+    let one = parse_str(SEVERITY).unwrap();
+    let registry = one.build_views().unwrap();
+    assert_eq!(registry.len(), 1);
+    assert_eq!(registry[one.anchor_view(&registry).unwrap()].id, "s0");
 }
 
 /// **The fixture is the acceptance case**, read from the repository rather than copied: it is
@@ -3476,8 +3574,8 @@ fn a_declaration_with_a_group_has_no_sole_view() {
 /// existed, and its README's feature table is the checklist this stage is measured against.
 #[test]
 fn the_multiview_fixture_parses() {
-    let declared = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../test_corpora/multiview/corpus.toml");
+    let declared =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_corpora/multiview/corpus.toml");
     let text = std::fs::read_to_string(&declared).expect("the fixture is in the repository");
     // **Written beside a vocabulary file rather than parsed in place.** A closed `[[vocabulary]]`
     // naming a source is *read* at parse — the values are part of the declaration — and the
@@ -3490,7 +3588,11 @@ fn the_multiview_fixture_parses() {
     std::fs::write(&path, text).expect("write the fixture's declaration");
     let config = Config::parse(&path, &HashMap::new()).expect("the multiview fixture parses");
     assert_eq!(
-        config.views.iter().map(|v| v.name.as_str()).collect::<Vec<_>>(),
+        config
+            .views
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect::<Vec<_>>(),
         ["world"]
     );
     assert_eq!(

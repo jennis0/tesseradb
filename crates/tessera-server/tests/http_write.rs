@@ -2160,8 +2160,7 @@ async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
 
     let outside = 1_000.000_02_f64;
     assert_eq!(
-        outside as f32,
-        1000.0_f32,
+        outside as f32, 1000.0_f32,
         "the fixture value must round to the extent maximum, or this case discriminates nothing"
     );
     assert_eq!(
@@ -4397,7 +4396,18 @@ async fn a_deleted_holder_does_not_block_reingest_but_a_suppressed_one_does() {
 /// seven types by a downcast chain while the schema declared fourteen, so a `bool`, `i8`, `i16`,
 /// `i32`, `f64` or `timestamp_us` column was declarable, buildable and un-ingestable.
 const SCALAR_TAIL_TYPES: [&str; 12] = [
-    "bool", "u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "f32", "f64", "timestamp_us",
+    "bool",
+    "u8",
+    "u16",
+    "u32",
+    "u64",
+    "i8",
+    "i16",
+    "i32",
+    "i64",
+    "f32",
+    "f64",
+    "timestamp_us",
 ];
 
 /// One `index = true` column per declarable type, named `c_<type>` so the schema, the points file,
@@ -4451,26 +4461,51 @@ fn scalar_tail_base_column(ty: &str, n: usize) -> Arc<dyn arrow::array::Array> {
 /// An Arrow column of `n` rows for `c_<ty>`, at the type's wire form. `planted` is the JSON value
 /// [`scalar_tail_planted`] chose (so the batch builder and the filter loop cannot disagree about
 /// what was ingested), or `Null` for the base value.
-fn scalar_tail_column(ty: &str, planted: serde_json::Value, n: usize) -> Arc<dyn arrow::array::Array> {
+fn scalar_tail_column(
+    ty: &str,
+    planted: serde_json::Value,
+    n: usize,
+) -> Arc<dyn arrow::array::Array> {
     use arrow::array::{
         BooleanArray, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
         TimestampMicrosecondArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     };
     let int = |base: i64| -> Vec<i64> {
-        let v = planted.as_i64().or_else(|| planted.as_u64().map(|u| u as i64));
+        let v = planted
+            .as_i64()
+            .or_else(|| planted.as_u64().map(|u| u as i64));
         vec![v.unwrap_or(base); n]
     };
     match ty {
-        "bool" => Arc::new(BooleanArray::from(vec![planted.as_bool().unwrap_or(false); n])),
-        "u8" => Arc::new(UInt8Array::from_iter_values(int(1).iter().map(|&v| v as u8))),
-        "u16" => Arc::new(UInt16Array::from_iter_values(int(1).iter().map(|&v| v as u16))),
-        "u32" => Arc::new(UInt32Array::from_iter_values(int(1).iter().map(|&v| v as u32))),
-        "u64" => Arc::new(UInt64Array::from_iter_values(int(1).iter().map(|&v| v as u64))),
+        "bool" => Arc::new(BooleanArray::from(vec![
+            planted.as_bool().unwrap_or(false);
+            n
+        ])),
+        "u8" => Arc::new(UInt8Array::from_iter_values(
+            int(1).iter().map(|&v| v as u8),
+        )),
+        "u16" => Arc::new(UInt16Array::from_iter_values(
+            int(1).iter().map(|&v| v as u16),
+        )),
+        "u32" => Arc::new(UInt32Array::from_iter_values(
+            int(1).iter().map(|&v| v as u32),
+        )),
+        "u64" => Arc::new(UInt64Array::from_iter_values(
+            int(1).iter().map(|&v| v as u64),
+        )),
         "i8" => Arc::new(Int8Array::from_iter_values(int(1).iter().map(|&v| v as i8))),
-        "i16" => Arc::new(Int16Array::from_iter_values(int(1).iter().map(|&v| v as i16))),
-        "i32" => Arc::new(Int32Array::from_iter_values(int(1).iter().map(|&v| v as i32))),
+        "i16" => Arc::new(Int16Array::from_iter_values(
+            int(1).iter().map(|&v| v as i16),
+        )),
+        "i32" => Arc::new(Int32Array::from_iter_values(
+            int(1).iter().map(|&v| v as i32),
+        )),
         "i64" => Arc::new(Int64Array::from_iter_values(int(1))),
-        "f32" => Arc::new(Float32Array::from(vec![planted.as_f64().unwrap_or(1.0) as f32; n])),
+        "f32" => Arc::new(Float32Array::from(vec![
+            planted.as_f64().unwrap_or(1.0)
+                as f32;
+            n
+        ])),
         "f64" => Arc::new(Float64Array::from(vec![planted.as_f64().unwrap_or(1.0); n])),
         "timestamp_us" => Arc::new(TimestampMicrosecondArray::from(int(1_000))),
         other => unreachable!("no column builder for '{other}'"),
@@ -4491,7 +4526,9 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         Field::new("y", DataType::Float64, false),
     ];
     let mut columns: Vec<Arc<dyn arrow::array::Array>> = vec![
-        Arc::new(arrow::array::UInt64Array::from_iter_values(0..SCALAR_TAIL_N)),
+        Arc::new(arrow::array::UInt64Array::from_iter_values(
+            0..SCALAR_TAIL_N,
+        )),
         Arc::new(arrow::array::Float64Array::from_iter_values(
             (0..SCALAR_TAIL_N).map(|e| ((e * 37) % 1000) as f64),
         )),
@@ -4501,12 +4538,17 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
     ];
     for ty in SCALAR_TAIL_TYPES {
         let column = scalar_tail_base_column(ty, n);
-        fields.push(Field::new(format!("c_{ty}"), column.data_type().clone(), false));
+        fields.push(Field::new(
+            format!("c_{ty}"),
+            column.data_type().clone(),
+            false,
+        ));
         columns.push(column);
     }
     let schema = Arc::new(Schema::new(fields));
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(&points).unwrap(), schema, None).unwrap();
+    let mut w =
+        ArrowWriter::try_new(std::fs::File::create(&points).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
     write_pairs_n(&pairs, SCALAR_TAIL_N);
@@ -4517,14 +4559,18 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         .unwrap()
         .schema;
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -4561,7 +4607,11 @@ fn build_scalar_tail_ingest_batch() -> Vec<u8> {
     ];
     for ty in SCALAR_TAIL_TYPES {
         let column = scalar_tail_column(ty, scalar_tail_planted(ty), 1);
-        fields.push(Field::new(format!("c_{ty}"), column.data_type().clone(), false));
+        fields.push(Field::new(
+            format!("c_{ty}"),
+            column.data_type().clone(),
+            false,
+        ));
         columns.push(column);
     }
     let schema = Arc::new(Schema::new(fields));
@@ -4664,7 +4714,9 @@ async fn every_declarable_scalar_type_round_trips_ingest_to_filter() {
             format!("c_{ty}"),
             serde_json::json!({ "eq": scalar_tail_planted(ty) }),
         );
-        let resp = viewport(Some(serde_json::Value::Object(filters))).await.unwrap();
+        let resp = viewport(Some(serde_json::Value::Object(filters)))
+            .await
+            .unwrap();
         assert_eq!(
             resp.status().as_u16(),
             200,

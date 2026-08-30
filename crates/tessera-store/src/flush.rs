@@ -140,11 +140,7 @@ pub fn write_flush_segment(
             input.seg_id
         )
     };
-    let seg_dir = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("views")
-        .join(view)
+    let seg_dir = crate::view_path(&prefix_dir.join("partitions").join(partition), view)
         .join("segments")
         .join(input.seg_id);
     fs::create_dir_all(&seg_dir).map_err(|source| StoreError::Io {

@@ -246,14 +246,18 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the every-home fixture schema parses");
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -652,8 +656,7 @@ fn sidecar_bindings(root: &Path) -> BTreeMap<u64, u64> {
 fn all_term(root: &Path) -> TermId {
     let prefix = root.join(current_prefix(root));
     let bundle = open_bundle(root).expect("the bundle opens");
-    let paths: Vec<PathBuf> = bundle
-        .partitions["default"]
+    let paths: Vec<PathBuf> = bundle.partitions["default"]
         .manifest
         .dict_extents
         .iter()

@@ -236,6 +236,15 @@ struct DefaultsBlock {
     /// The column an entity id is read from, wherever one is read under the canonical name.
     #[serde(default)]
     entity_id_field: Option<String>,
+    /// The view whose Morton code breaks entity-id ties within a signature group
+    /// ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    ///
+    /// Required when the declaration carries more than one view, and **explicit rather than
+    /// positional**: reordering declaration blocks must not silently re-key a rebuild, the ids
+    /// being permanent (I9). A group name is not a view — the anchor is one coordinate system,
+    /// so a group's view is named `<group>:<key>`.
+    #[serde(default)]
+    allocation_view: Option<String>,
 }
 
 /// `[[view]]` — one named coordinate system.
@@ -773,6 +782,12 @@ pub struct Config {
     /// reviewer diffing two builds' disclosure decisions still needs to know that a layer they did
     /// not write appeared because a `[layer.labels]` block asked for it.
     pub label_layers: BTreeMap<String, String>,
+    /// `[defaults].allocation_view` as written, or `None` where the declaration named none.
+    ///
+    /// **The anchor is a view id, resolved against the registry [`Config::build_views`] builds**
+    /// rather than against `[[view]]` alone: a group's view is nameable as `<group>:<key>` and is
+    /// an ordinary candidate ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    pub allocation_view: Option<String>,
     /// Each layer's bound sources, parallel to [`Config::layers`] and by the same name.
     ///
     /// **Beside the declarations rather than inside them.** A [`LayerDeclaration`] is exactly what
@@ -1268,7 +1283,10 @@ impl Frame {
             } else {
                 "none clamped onto the frame's edge"
             };
-            out.push_str(&format!("\n        {} point(s) placed, {edge}", survey.rows));
+            out.push_str(&format!(
+                "\n        {} point(s) placed, {edge}",
+                survey.rows
+            ));
         } else {
             out.push_str(&format!(
                 "\n        {} of {} point(s) ({:.1}%) CLAMP onto the frame's edge — {} on x, {} \
@@ -1337,8 +1355,12 @@ impl Frame {
             "snapped outward to the square at"
         };
         // y runs south (`projections.md` §4), so the frame's minimum y is its maximum latitude.
-        let (lon_min, lat_max) = self.projection.inverse(self.extent.x_min, self.extent.y_min);
-        let (lon_max, lat_min) = self.projection.inverse(self.extent.x_max, self.extent.y_max);
+        let (lon_min, lat_max) = self
+            .projection
+            .inverse(self.extent.x_min, self.extent.y_min);
+        let (lon_max, lat_min) = self
+            .projection
+            .inverse(self.extent.x_max, self.extent.y_max);
         format!(
             "\n        {asked} — {how} z{} ({}, {}), lon [{lon_min}, {lon_max}], lat [{lat_min}, \
              {lat_max}]",
@@ -1729,7 +1751,11 @@ fn compile_lon_lat_extent(
                      within ±90 (projections.md §2) — and a value outside that is not a \
                      coordinate. Convert the box to WGS84, or declare `projection = \"none\"` if \
                      this view's space is not the Earth",
-                    if axis == "lon" { "longitude" } else { "latitude" }
+                    if axis == "lon" {
+                        "longitude"
+                    } else {
+                        "latitude"
+                    }
                 )));
             }
         }
@@ -2010,6 +2036,7 @@ impl Config {
             layers,
             layer_sources,
             label_layers,
+            allocation_view: defaults.allocation_view.clone(),
         })
     }
 
@@ -2055,46 +2082,30 @@ impl Config {
         }
     }
 
-    /// The files this build reads, for the one view it materialises.
+    /// The entity-space files this build reads: the attribute sources and the layers.
     ///
     /// **Where the declaration meets the invocation.** Everything above is route-independent: the
     /// same blocks describe a deployment that never builds (`configuration.md` §2), and a config
     /// declaring no source at all is legal and declares an empty corpus. This is the method that
-    /// asks for the files, so it is where *this* build's absences become refusals — and where the
-    /// two acquisition routes that are specified and not built say so rather than reading nothing.
-    pub fn acquire(&self, view: &str) -> Result<Acquisition> {
-        let declared = self.views.iter().find(|v| v.name == view).ok_or_else(|| {
-            declaration_error(format!(
-                "--view '{view}' names no `[[view]]` block. Declared: {}. The build materialises \
-                 one coordinate system and reads its `source`, so a view it cannot find is a build \
-                 with no geometry rather than a default one",
-                names(self.views.iter().map(|v| v.name.as_str()))
-            ))
-        })?;
-        let points = declared.source.clone().ok_or_else(|| {
-            declaration_error(format!(
-                "view '{view}': `source` is required to build from a file (configuration.md §1). \
-                 It is the path — relative to this config — of this view's geometry: `entity_id` \
-                 with either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
-                 means the view is declared and empty, which is a bundle with no rows in it (§2) \
-                 and is not built"
-            ))
-        })?;
-        let access = AccessInput {
-            source: match (
-                &declared.point_visibility.source,
-                &declared.point_visibility.field,
-            ) {
-                (Some(path), _) => AccessSource::Relation(path.clone()),
-                (None, Some(field)) => AccessSource::Field(field.clone()),
-                // Legal, and the corpus with no permission model: every point takes the default
-                // (§1). *Nowhere* is the decision the `default` key makes, so nothing is refused
-                // here — a build with neither acquisition key reads no relation and writes the one
-                // label the declaration named.
-                (None, None) => AccessSource::Default,
-            },
-            default: declared.point_visibility.default.clone(),
-        };
+    /// asks for the files, so it is where *this* build's absences become refusals.
+    ///
+    /// Each view's own half — its geometry source and its labels — is [`acquire_view`], because a
+    /// view owns everything downstream of the permutation and nothing upstream of it
+    /// (`views.md` §1).
+    pub fn acquire(&self) -> Result<Acquisition> {
+        // ⊘ **A group-scoped attribute is a column family, and the build writes none**
+        // (`views.md` §5): one entity-space column per view of the group, each with its own
+        // presence bitmap, under `attrs/<column>/<group>/<key>/`. Refused by name rather than
+        // falling through to the unsourced check below, which would report the missing
+        // `[defaults].source` the scope deliberately withholds.
+        if let Some((attribute, group)) = self.scopes.attributes.iter().next() {
+            return Err(declaration_error(format!(
+                "attribute '{attribute}': ⊘ `scope = {{ group = \"{group}\" }}` is a column \
+                 family — one column per view of '{group}' — and the build writes entity-scoped \
+                 columns only (views §5). The declaration parses and `tessera check` reports it; \
+                 drop the scope to build the column once for every view meanwhile"
+            )));
+        }
         // **Every declared column must have a file by now.** Declaring one with no source is
         // legal (§2) and is the write-path deployment's normal state; a build that would have to
         // read it is where the absence becomes a refusal, naming the columns rather than the block
@@ -2124,37 +2135,73 @@ impl Config {
         }
         Ok(Acquisition {
             attribute_sources: self.attribute_sources.clone(),
-            projection: declared.projection,
-            extent: declared.extent,
-            points,
-            point_fields: declared.fields.clone(),
-            access,
             layers: self.layer_sources.clone(),
         })
     }
+}
+
+/// One view's own inputs: its geometry source and where its points' labels come from.
+///
+/// ⊘ **A form B discriminator is not yet selected on.** A view whose rows are picked out of a
+/// shared file by a `view` column needs the points reader to filter on it, which is the next
+/// stage's work (`views.md` §3.1); such a view refuses here rather than reading every other
+/// view's rows into its own row space.
+pub fn acquire_view(view: &BuildView) -> Result<ViewAcquisition> {
+    if let Some((column, key)) = &view.discriminator {
+        return Err(declaration_error(format!(
+            "view '{}': ⊘ its points are selected out of a shared file by `{column} = \"{key}\"` \
+             (views §3.1's form B), and the build reads a whole file per view. Give the group's \
+             views a file each — `[[view_group.view]]` with its own `source` — meanwhile",
+            view.id
+        )));
+    }
+    let points = view.source.clone().ok_or_else(|| {
+        declaration_error(format!(
+            "view '{}': `source` is required to build from a file (configuration.md §1). \
+             It is the path — relative to this config — of this view's geometry: `entity_id` \
+             with either `x`/`y` or `morton`/`residual`. ⊘ Declaring no source is legal and \
+             means the view is declared and empty, which is a bundle with no rows in it (§2) \
+             and is not built",
+            view.id
+        ))
+    })?;
+    Ok(ViewAcquisition {
+        points,
+        point_fields: view.fields.clone(),
+        access: AccessInput {
+            source: match (&view.point_visibility.source, &view.point_visibility.field) {
+                (Some(path), _) => AccessSource::Relation(path.clone()),
+                (None, Some(field)) => AccessSource::Field(field.clone()),
+                // Legal, and the corpus with no permission model: every point takes the default
+                // (§1). *Nowhere* is the decision the `default` key makes, so nothing is refused
+                // here — a build with neither acquisition key reads no relation and writes the one
+                // label the declaration named.
+                (None, None) => AccessSource::Default,
+            },
+            default: view.point_visibility.default.clone(),
+        },
+    })
+}
+
+/// One view's resolved inputs ([`acquire_view`]).
+#[derive(Debug, Clone)]
+pub struct ViewAcquisition {
+    /// The view's `source`: identity and geometry.
+    pub points: PathBuf,
+    /// Where the view's identity and geometry fields sit in that file.
+    pub point_fields: Fields,
+    /// Where this view's points get their access terms, and what a point carrying none gets.
+    pub access: AccessInput,
 }
 
 /// The files one build reads, resolved from the config and any `--file` overrides, plus the
 /// frame it quantises against.
 #[derive(Debug, Clone)]
 pub struct Acquisition {
-    /// The built view's `projection`: what turns each row's coordinates into a position in the
-    /// frame, before anything quantises (`projections.md` §3).
-    pub projection: Projection,
-    /// The built view's `extent`, as declared. [`frame_view`] turns the two `auto` spellings and
-    /// a longitude/latitude box into [`Bounds`] by reading [`Acquisition::points`] where it must;
-    /// `{ min, max }` and `{ x, y }` are already the answer.
-    pub extent: Extent,
     /// The declared attributes grouped by the file each is read from — one pass per group, joined
-    /// to the view's geometry by the identity column each group names. Empty for an empty schema;
-    /// an attribute with no file to read it from is refused at parse.
+    /// to entity space by the identity column each group names. Empty for an empty schema; an
+    /// attribute with no file to read it from is refused at parse.
     pub attribute_sources: Vec<AttributeSource>,
-    /// The built view's `source`: identity and geometry.
-    pub points: PathBuf,
-    /// Where the view's identity and geometry fields sit in that file.
-    pub point_fields: Fields,
-    /// Where this view's points get their access terms, and what a point carrying none gets.
-    pub access: AccessInput,
     /// Each layer's own artifacts and members, in declaration order. **One source per layer**, so
     /// no row anywhere names the layer it belongs to.
     pub layers: Vec<LayerSources>,
@@ -2359,6 +2406,9 @@ struct Defaults {
     source: Option<String>,
     /// The column an entity id is read from. `entity_id` where the declaration says nothing.
     entity_id_field: String,
+    /// `[defaults].allocation_view` as written. Resolved against the built view registry by
+    /// [`Config::anchor_view`], not here: the groups are compiled after `[defaults]` is.
+    allocation_view: Option<String>,
 }
 
 impl Defaults {
@@ -2367,6 +2417,7 @@ impl Defaults {
             return Ok(Defaults {
                 source: None,
                 entity_id_field: ENTITY_ID.to_string(),
+                allocation_view: None,
             });
         };
         if let Some(source) = &block.source {
@@ -2387,6 +2438,7 @@ impl Defaults {
         Ok(Defaults {
             source: block.source.clone(),
             entity_id_field,
+            allocation_view: block.allocation_view.clone(),
         })
     }
 }
@@ -3759,9 +3811,11 @@ fn compile_metadata_value(
         return Ok(MetadataValue::Text(key.to_string()));
     }
     Ok(match declared.ty {
-        ScalarType::Bool => {
-            MetadataValue::Bool(value.as_bool().ok_or_else(|| wrong("write `true` or `false`"))?)
-        }
+        ScalarType::Bool => MetadataValue::Bool(
+            value
+                .as_bool()
+                .ok_or_else(|| wrong("write `true` or `false`"))?,
+        ),
         ScalarType::F32 | ScalarType::F64 => match value {
             toml::Value::Float(f) => MetadataValue::Float(*f),
             // An integer where a float is declared is the value the author wrote rather than a
@@ -3775,12 +3829,10 @@ fn compile_metadata_value(
             }
             // The stored representation, for a producer that emits it directly.
             toml::Value::Integer(us) => MetadataValue::TimestampUs(*us),
-            _ => {
-                return Err(wrong(
-                    "write an offset date-time (`2026-04-01T00:00:00Z`), or the microseconds since \
+            _ => return Err(wrong(
+                "write an offset date-time (`2026-04-01T00:00:00Z`), or the microseconds since \
                      the Unix epoch as an integer",
-                ))
-            }
+            )),
         },
         ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => MetadataValue::Text(
             value
@@ -4696,9 +4748,7 @@ fn compile_layers(
         // draws the layer on every view of it, present and future, which is what lets a layer
         // follow a group that grows at ingest rather than being redeclared per quarter.
         for view in declared_views {
-            if !views.iter().any(|v| &v.name == view)
-                && !groups.iter().any(|g| &g.name == view)
-            {
+            if !views.iter().any(|v| &v.name == view) && !groups.iter().any(|g| &g.name == view) {
                 return Err(declaration_error(format!(
                     "layer '{}' declares view '{view}', which no `[[view]]` or `[[view_group]]` \
                      block declares. Declared: {}. A layer in a view that does not exist is \
@@ -4973,17 +5023,21 @@ fn compile_layers(
         // (`polygon-membership.md` §4.3): `wgs84` asks the view to project, and a view declaring
         // `projection = "none"` has one space and nothing to convert a degree from. Refused here,
         // where the declaration can be pointed at, rather than at the first row read.
-        let honourable = |space: tessera_store::derived::ShapeSpace| -> std::result::Result<(), String> {
-            for name in declared_views {
-                let Some(view) = views.iter().find(|v| &v.name == name) else {
-                    continue;
-                };
-                space.resolve(view.projection).map_err(|e| {
-                    format!("view '{name}' declares `projection = \"{}\"`: {e}", view.projection.name())
-                })?;
-            }
-            Ok(())
-        };
+        let honourable =
+            |space: tessera_store::derived::ShapeSpace| -> std::result::Result<(), String> {
+                for name in declared_views {
+                    let Some(view) = views.iter().find(|v| &v.name == name) else {
+                        continue;
+                    };
+                    space.resolve(view.projection).map_err(|e| {
+                        format!(
+                            "view '{name}' declares `projection = \"{}\"`: {e}",
+                            view.projection.name()
+                        )
+                    })?;
+                }
+                Ok(())
+            };
         let default_space = match block.default_space.as_deref() {
             None => tessera_store::derived::ShapeSpace::View,
             Some(word) => {
@@ -5648,3 +5702,250 @@ fn compile_criterion(
 
 #[cfg(test)]
 mod tests;
+
+// ---------------------------------------------------------------------------------------------
+// The build's view registry (`views.md` §7)
+// ---------------------------------------------------------------------------------------------
+
+/// A view of a group, as the registry records it (`views.md` §3.2).
+#[derive(Debug, Clone)]
+pub struct GroupMembership {
+    /// The group this view belongs to. `<group>:<key>` is the view id.
+    pub group: String,
+    pub key: String,
+    /// Creation order within the group, which at a build is roster order — monotone, never
+    /// reused, and an alias for the key (`views.md` §3.2).
+    pub ordinal: u32,
+    /// The group whose keys and ordinals these are, where this group declares `members`
+    /// (`views.md` §3.3); `None` where it owns them. Metadata and each view's own gate belong to
+    /// the owner, so a `members` group's views carry none of their own.
+    pub members_of: Option<String>,
+    /// This view's typed metadata, one entry per name the owning group declared.
+    pub metadata: BTreeMap<String, MetadataValue>,
+}
+
+/// One coordinate system a build materialises (`views.md` §7).
+///
+/// **The registry is ordered, and the order is a contract**: it decides which view's Morton code
+/// an item absent from the anchor is tie-broken on (decision 0112), and a group's view's ordinal
+/// is its position within its group. The order is the plain `[[view]]` blocks in declaration
+/// order, then each `[[view_group]]` in declaration order with its views in roster order —
+/// `Config` holds the two block kinds in separate lists, so their interleaving in the document is
+/// not recoverable and is deliberately not part of the order.
+#[derive(Debug, Clone)]
+pub struct BuildView {
+    /// The view id: a plain view's `name`, or a group's view as the joined `group:key` form.
+    pub id: String,
+    /// `None` for a plain view.
+    pub group: Option<GroupMembership>,
+    pub projection: Projection,
+    pub extent: Extent,
+    /// This view's points. `None` is a view declared and empty, which is legal to declare and
+    /// refused at a build that would have to read it.
+    pub source: Option<PathBuf>,
+    pub fields: Fields,
+    pub point_visibility: PointVisibility,
+    /// Form B: the column naming which view each row lands in, and the value this view's rows
+    /// carry (`views.md` §3.1). `None` where the file *is* the view — every plain view, and every
+    /// view of a form A group.
+    pub discriminator: Option<(String, String)>,
+    /// This view's own gate; `None` takes its group's. ⊘ No gate is evaluated (`views.md` §6).
+    pub visibility: Option<String>,
+}
+
+impl Config {
+    /// Every coordinate system a build materialises, in the registry's order
+    /// ([`BuildView`], `views.md` §7).
+    ///
+    /// **A build materialises every declared view and every view of every group.** What it cannot
+    /// yet enumerate is refused rather than silently dropped: a bundle whose declaration promises
+    /// coordinate systems it does not carry is the failure this refusal exists to prevent.
+    pub fn build_views(&self) -> Result<Vec<BuildView>> {
+        let mut registry: Vec<BuildView> = self
+            .views
+            .iter()
+            .map(|view| BuildView {
+                id: view.name.clone(),
+                group: None,
+                projection: view.projection,
+                extent: view.extent,
+                source: view.source.clone(),
+                fields: view.fields.clone(),
+                point_visibility: view.point_visibility.clone(),
+                discriminator: None,
+                visibility: view.visibility.clone(),
+            })
+            .collect();
+        for group in &self.view_groups {
+            let owner = match &group.members {
+                None => group,
+                Some(name) => self
+                    .view_groups
+                    .iter()
+                    .find(|g| &g.name == name)
+                    .ok_or_else(|| {
+                        declaration_error(format!(
+                            "view group '{}': `members = \"{name}\"` names no `[[view_group]]` \
+                             block",
+                            group.name
+                        ))
+                    })?,
+            };
+            let roster = match &owner.roster {
+                Roster::Inline(views) => views,
+                // ⊘ Both arms need a file read this stage does not do: the roster table's keys are
+                // rows of `[view_group.views].source`, and a discriminator group's are the
+                // distinct values of a column. Refused rather than built empty — a group with no
+                // views is a declaration promising coordinate systems the bundle would not carry.
+                Roster::Table(_) | Roster::Discriminator => {
+                    return Err(declaration_error(format!(
+                        "view group '{}': ⊘ its roster is {} and the build enumerates only the \
+                         inline form (`[[view_group.view]]` blocks) — the multi-view build reads \
+                         no roster table and discovers no discriminator value yet (views §3.1, \
+                         §7). Write the views as `[[view_group.view]]` blocks meanwhile",
+                        owner.name,
+                        owner.form()
+                    )))
+                }
+            };
+            // **One frame for the group** (`views.md` §3.1): its views differ by a key and by
+            // per-view metadata, and by nothing else — which is what makes a Morton prefix mean
+            // the same thing in each of them and a key set comparable at all. ⊘ An `auto` frame
+            // is fitted per file, so it would give each view its own box; fitting one over every
+            // view's source is the build this refusal is waiting for.
+            if matches!(group.extent, Extent::Auto { .. } | Extent::AutoLonLat) {
+                return Err(declaration_error(format!(
+                    "view group '{}': ⊘ `extent = \"auto\"` is fitted to one file's data, and a \
+                     group's views share one frame (views §3.1) — fitting it over every view's \
+                     source is not built. Write the box out, in any of configuration.md §1's \
+                     stated spellings",
+                    group.name
+                )));
+            }
+            let discriminator_field = group.fields.of("view").to_string();
+            for (ordinal, view) in roster.iter().enumerate() {
+                // Form A gives each view its own file, so there is nothing to select on; a
+                // `members` group carries every view's points in one file and selects by key.
+                let (source, discriminator) = if group.members.is_some() {
+                    (
+                        group.source.clone(),
+                        Some((discriminator_field.clone(), view.key.clone())),
+                    )
+                } else {
+                    (view.source.clone(), None)
+                };
+                registry.push(BuildView {
+                    id: format!("{}:{}", group.name, view.key),
+                    group: Some(GroupMembership {
+                        group: group.name.clone(),
+                        key: view.key.clone(),
+                        ordinal: ordinal as u32,
+                        members_of: group.members.clone(),
+                        metadata: if group.members.is_some() {
+                            BTreeMap::new()
+                        } else {
+                            view.metadata.clone()
+                        },
+                    }),
+                    projection: group.projection,
+                    extent: group.extent,
+                    source,
+                    fields: group.fields.clone(),
+                    point_visibility: group.point_visibility.clone(),
+                    discriminator,
+                    visibility: if group.members.is_some() {
+                        group.visibility.clone()
+                    } else {
+                        view.visibility.clone().or_else(|| group.visibility.clone())
+                    },
+                });
+            }
+        }
+        if registry.is_empty() {
+            return Err(declaration_error(
+                "the declaration has no `[[view]]` block and no `[[view_group]]`, so this build \
+                 has no coordinate system to materialise. A view names the geometry source and \
+                 the frame it is quantised against (configuration.md §1)",
+            ));
+        }
+        Ok(registry)
+    }
+
+    /// The group registry the manifest publishes, derived from a [`Config::build_views`]
+    /// registry (`views.md` §3.2).
+    ///
+    /// **The roster's durable home is the manifest** — one place, carried forward for ever, for
+    /// the reason `entity_id_low_water` and `layer_tombstones` are there (decision 0029).
+    pub fn group_registry(registry: &[BuildView]) -> Vec<tessera_store::manifest::GroupDescriptor> {
+        use tessera_store::manifest::{GroupDescriptor, GroupViewDescriptor, ViewMetadataValue};
+        let mut groups: Vec<GroupDescriptor> = Vec::new();
+        for view in registry {
+            let Some(membership) = &view.group else {
+                continue;
+            };
+            if !groups.iter().any(|g| g.name == membership.group) {
+                groups.push(GroupDescriptor {
+                    name: membership.group.clone(),
+                    members_of: membership.members_of.clone(),
+                    views: Vec::new(),
+                });
+            }
+            let group = groups
+                .iter_mut()
+                .find(|g| g.name == membership.group)
+                .expect("just inserted");
+            group.views.push(GroupViewDescriptor {
+                key: membership.key.clone(),
+                ordinal: membership.ordinal,
+                visibility: view.visibility.clone(),
+                metadata: membership
+                    .metadata
+                    .iter()
+                    .map(|(name, value)| {
+                        let value = match value {
+                            MetadataValue::Bool(v) => ViewMetadataValue::Bool(*v),
+                            MetadataValue::Int(v) => ViewMetadataValue::Int(*v),
+                            MetadataValue::Float(v) => ViewMetadataValue::Float(*v),
+                            MetadataValue::Text(v) => ViewMetadataValue::Text(v.clone()),
+                            MetadataValue::TimestampUs(v) => ViewMetadataValue::TimestampUs(*v),
+                        };
+                        (name.clone(), value)
+                    })
+                    .collect(),
+            });
+        }
+        groups
+    }
+
+    /// Which of `registry` is the **anchor view** — the one whose Morton code breaks entity-id
+    /// ties within a signature group ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)).
+    ///
+    /// **Required when more than one view is declared, and refused absent naming the candidates.**
+    /// Entity ids are permanent (I9), so the tie-break is a permanent property of the corpus: a
+    /// positional default would let reordering two declaration blocks silently re-key a rebuild.
+    /// With one view it is that view, and naming it is noise.
+    pub fn anchor_view(&self, registry: &[BuildView]) -> Result<usize> {
+        let candidates = || names(registry.iter().map(|v| v.id.as_str()));
+        match (&self.allocation_view, registry.len()) {
+            (Some(named), _) => registry.iter().position(|v| &v.id == named).ok_or_else(|| {
+                declaration_error(format!(
+                    "[defaults].allocation_view = \"{named}\" names no view this build \
+                         materialises. Declared: {}. The anchor is one coordinate system, so a \
+                         group is named through one of its views — `<group>:<key>` (views §3.2, \
+                         decision 0112)",
+                    candidates()
+                ))
+            }),
+            (None, 1) => Ok(0),
+            (None, _) => Err(declaration_error(format!(
+                "the declaration carries {} views and `[defaults].allocation_view` names none. \
+                 Entity ids are assigned once and are permanent (I9), and within a signature \
+                 group they are ordered by the item's Morton code in the anchor view — so with \
+                 several views the anchor is a declaration rather than a default, or reordering \
+                 two blocks would silently re-key a rebuild (decision 0112). Name one of: {}",
+                registry.len(),
+                candidates()
+            ))),
+        }
+    }
+}

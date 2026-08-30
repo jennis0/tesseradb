@@ -382,6 +382,7 @@ fn resolve_pairs_chunk(
     source_ids: &[u64],
     term_keys: &[u64],
     term_ids: &[u32],
+    distinct_of_ordinal: &mut [u32],
     mut emit: impl FnMut(u64) -> Result<()>,
 ) -> Result<()> {
     resolved.clear();
@@ -399,6 +400,19 @@ fn resolve_pairs_chunk(
     // Equal (term, ordinal) tuples are bit-identical, so the parallel unstable sort has one
     // output; the sweep cursor then only moves forward.
     resolved.par_sort_unstable();
+    // **How many distinct terms this chunk gave each ordinal**, counted here because this is the
+    // one place they are sorted and the chunk holds exactly one view's rows (`views.md` §7). The
+    // label-agreement refusal in the batch loop is a count identity over these tallies; the emit
+    // below is deliberately *not* deduplicated, the bucket sweep doing that and the pair total
+    // being checked against the dictionary pass's own row count.
+    let mut previous: Option<(u64, u64)> = None;
+    for &pair in resolved.iter() {
+        if previous != Some(pair) {
+            let slot = &mut distinct_of_ordinal[pair.1 as usize];
+            *slot = slot.saturating_add(1);
+            previous = Some(pair);
+        }
+    }
     let mut i = 0usize;
     for &(source_term, ordinal) in resolved.iter() {
         while i < term_keys.len() && term_keys[i] < source_term {
@@ -800,21 +814,15 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     require_decomposable_labelling(&plugin)?;
     let bounds = plugin.declared_bounds();
 
-    // ---- 1. ordinals: the sorted source ids ------------------------------------------
-    // An item's *ordinal* is its index in this array. Ordinal order is source-id order, which is
-    // the order the linear build walks items in — so "first appearance" below, and the
-    // source-id tiebreak in the signature sort, are both expressible as ordinal comparisons.
-    let mut source_ids = read_source_ids(args, None)?;
+    // ---- 1. pass one: entity space, once over every view's points (`views.md` §7) -----
+    // An item's *ordinal* is its index in this array. Ordinal order is source-id order over the
+    // **union** of every view's ids, which is the order the linear build walks items in — so
+    // "first appearance" below, and the source-id tiebreak in the signature sort, are both
+    // expressible as ordinal comparisons, exactly as they were when a build read one file.
+    let (source_ids, view_anchors) = read_source_ids_union(args)?;
     if source_ids.is_empty() {
         return Err(BuildError::Invalid(
             "no points selected — a bundle with no items has no expressible entity range".into(),
-        ));
-    }
-    source_ids.sort_unstable();
-    if let Some(w) = source_ids.windows(2).find(|w| w[0] == w[1]) {
-        let _ = w;
-        return Err(BuildError::Invalid(
-            "points file contains duplicate entity_id values".into(),
         ));
     }
     let n = source_ids.len() as u64;
@@ -823,13 +831,10 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "{n} items exceeds bundle_format 1's 2^32 entity-ID ceiling"
         )));
     }
-    // Anchors for the later passes over this same file (step 5's re-read, step 8's geometry
-    // scan): the re-read used to be verified against nothing, so a points file swapped
-    // mid-build could silently hand every item the wrong external id. An order-independent
-    // mixed sum ([`mix64`]) plus the extrema make that loud instead.
-    let ids_anchor = source_ids
-        .iter()
-        .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id)));
+    // The union's extrema, for step 8c's dense fast path. Each view's own anchors — its row count
+    // and an order-independent mixed sum of its ids ([`mix64`]) — are in `view_anchors`, and the
+    // geometry pass below is checked against them: a points file swapped mid-build would
+    // otherwise hand every item of that view another item's position, with nothing to notice.
     let (ids_first, ids_last) = (source_ids[0], *source_ids.last().expect("non-empty"));
 
     timer.end(BuildStage::SourceIds, source_ids.len() as u64);
@@ -840,6 +845,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // What every source term is called, established before any term id exists — a field-sourced
     // view's sorted vocabulary, or the relation's own integers (`crate::AccessPlan`).
     let access = crate::plan_access(args)?;
+    // Whether the label-agreement identity applies at all: a shared relation is entity space and
+    // is scanned once, so its rows cannot disagree between views (`crate::AccessRoute`).
+    let per_view_labels = !matches!(access.descriptors, crate::input::TermDescriptors::Ids);
     let Dictionary {
         term_keys,
         term_ids,
@@ -897,34 +905,57 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut failure: Option<BuildError> = None;
     let mut chunk: Vec<(u64, u64)> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(pair_rows.max(1)));
     let mut resolved: Vec<(u64, u64)> = Vec::new();
-    let mut resolve =
-        |chunk: &mut Vec<(u64, u64)>, resolved: &mut Vec<(u64, u64)>, sink: &mut BucketSink| {
-            resolve_pairs_chunk(
-                chunk,
-                resolved,
-                &source_ids,
-                &term_keys,
-                &term_ids,
-                |value| {
-                    pushed += 1;
-                    sink.push(value)
-                },
-            )
-        };
-    crate::scan_access(args, &access, |source_id, source_term| {
-        chunk.push((source_id, source_term));
-        if chunk.len() == JOIN_CHUNK_ROWS {
-            if let Err(e) = resolve(&mut chunk, &mut resolved, &mut sink) {
+    // Each view's own distinct contribution per ordinal, summed over the views — the numerator
+    // of the label-agreement identity the batch loop checks (`views.md` §7).
+    let mut distinct_of_ordinal: Vec<u32> = vec![0; n as usize];
+    let mut resolve = |chunk: &mut Vec<(u64, u64)>,
+                       resolved: &mut Vec<(u64, u64)>,
+                       distinct_of_ordinal: &mut [u32],
+                       sink: &mut BucketSink| {
+        resolve_pairs_chunk(
+            chunk,
+            resolved,
+            &source_ids,
+            &term_keys,
+            &term_ids,
+            distinct_of_ordinal,
+            |value| {
+                pushed += 1;
+                sink.push(value)
+            },
+        )
+    };
+    let mut current: Option<(usize, u64)> = None;
+    crate::scan_access(args, &access, |view, source_id, source_term| {
+        // A chunk **never spans two views**, and never splits a row: rows of one view arrive
+        // contiguously (a view holds one row per entity), so the boundary is taken at the change
+        // of view — always — or at the next change of entity once the chunk is full.
+        let changed_view = current.is_some_and(|(previous, _)| previous != view);
+        let changed_row = current != Some((view, source_id));
+        if changed_view || (changed_row && chunk.len() >= JOIN_CHUNK_ROWS) {
+            if let Err(e) = resolve(
+                &mut chunk,
+                &mut resolved,
+                &mut distinct_of_ordinal,
+                &mut sink,
+            ) {
                 failure = Some(e);
                 return ControlFlow::Break(());
             }
         }
+        current = Some((view, source_id));
+        chunk.push((source_id, source_term));
         ControlFlow::Continue(())
     })?;
     if let Some(error) = failure {
         return Err(error);
     }
-    resolve(&mut chunk, &mut resolved, &mut sink)?;
+    resolve(
+        &mut chunk,
+        &mut resolved,
+        &mut distinct_of_ordinal,
+        &mut sink,
+    )?;
     drop(chunk);
     drop(resolved);
     if pushed as usize != pair_rows {
@@ -932,17 +963,16 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "the pairs file yielded {pair_rows} rows, then {pushed}"
         )));
     }
-    // ---- 3b. geometry, by ordinal -----------------------------------------------------
-    // **The points file's geometry is read exactly once, and it is read here** — before entity ids
-    // exist, so it lands in *ordinal* space and is permuted into entity space at step 8 rather
-    // than re-read there.
+    // ---- 3b. geometry, by ordinal, once per (item, view) (`views.md` §7) --------------
+    // **Every view's geometry is read exactly once, and it is read here** — before entity ids
+    // exist, so it lands in *ordinal* space. Pass two permutes it into entity space rather than
+    // re-reading a parquet file per view: the transform (project, then quantise against that
+    // view's own frame) runs once per (item, view) and nowhere else.
     //
     // The pass exists because decision 0073 breaks signature ties on the Morton code, so the sort
-    // needs geometry it previously did not. Reading it here rather than adding a fourth pass is
-    // what makes that ruling free: an ordinal is only defined once `source_ids` is sorted, and the
-    // *entity* an item ends up with is not known until the batch loop below has run — so between
-    // those two facts, ordinal space is the only space this can land in, and step 8's scan becomes
-    // a scatter over memory it already has.
+    // needs geometry it previously did not, and decision 0112 says *which* view's: the declared
+    // anchor's, with the first-declared view that holds the item standing in where the anchor
+    // does not.
     //
     // **Mapped rather than heap-allocated**, on step 8's own argument: 4 B per item per axis is
     // 8 GB at 10⁹ of memory the kernel cannot reclaim. See [`spill::MappedU32`] — the bytes become
@@ -952,83 +982,136 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // The two integrity checks are the ones step 8 used to make, moved with the read: a shrunk file
     // resolves every id it still presents and would otherwise leave the missing items at (0, 0)
     // with no error, and a count alone accepts a repeat that compensates a removal ({1,2,3} become
-    // {2,2,2}), so the multiset of ids must be the first pass's.
-    let mut x_ord_map = spill::MappedU32::zeroed(tmp.path(), "x-of-ordinal.u32", n as usize)?;
-    let mut y_ord_map = spill::MappedU32::zeroed(tmp.path(), "y-of-ordinal.u32", n as usize)?;
-    let x_of_ordinal = x_ord_map.as_mut_slice();
-    let y_of_ordinal = y_ord_map.as_mut_slice();
-    {
-        let mut points_seen = 0u64;
-        let mut geom_anchor = 0u64;
-        let mut chunk: Vec<(u64, (u32, u32))> = Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
-        let mut failure: Option<BuildError> = None;
-        let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
-                       xs: &mut [u32],
-                       ys: &mut [u32],
-                       points_seen: &mut u64,
-                       geom_anchor: &mut u64| {
-            join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
-                let Some(ordinal) = ordinal else {
-                    return Err(input_changed(&format!(
-                        "the points file names entity {source_id}, which its first pass did not"
-                    )));
-                };
-                xs[ordinal as usize] = x;
-                ys[ordinal as usize] = y;
-                *points_seen += 1;
-                *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
-                Ok(())
-            })
-        };
-        input::scan_points(
-            &args.points,
-            &args.point_fields,
-            args.projection,
-            &args.extent,
-            args.limit,
-            |point| {
-                chunk.push((point.source_id, (point.qx, point.qy)));
-                if chunk.len() == JOIN_CHUNK_ROWS {
-                    if let Err(e) = resolve(
-                        &mut chunk,
-                        x_of_ordinal,
-                        y_of_ordinal,
-                        &mut points_seen,
-                        &mut geom_anchor,
-                    ) {
-                        failure = Some(e);
-                        return ControlFlow::Break(());
+    // {2,2,2}), so the multiset of ids must be that view's first pass's.
+    let mut geometry: Vec<ViewGeometry> = Vec::with_capacity(args.views.len());
+    // How many of this build's views hold each item — the denominator of the label-agreement
+    // identity below, and the population of each view's permutation.
+    let mut appearances: Vec<u32> = vec![0; n as usize];
+    for (index, view) in args.views.iter().enumerate() {
+        let mut x_map =
+            spill::MappedU32::zeroed(tmp.path(), &format!("x-of-ordinal-{index}.u32"), n as usize)?;
+        let mut y_map =
+            spill::MappedU32::zeroed(tmp.path(), &format!("y-of-ordinal-{index}.u32"), n as usize)?;
+        let mut present: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
+        {
+            let xs = x_map.as_mut_slice();
+            let ys = y_map.as_mut_slice();
+            let mut points_seen = 0u64;
+            let mut geom_anchor = 0u64;
+            let mut chunk: Vec<(u64, (u32, u32))> =
+                Vec::with_capacity(JOIN_CHUNK_ROWS.min(n as usize));
+            let mut failure: Option<BuildError> = None;
+            let resolve = |chunk: &mut Vec<(u64, (u32, u32))>,
+                           xs: &mut [u32],
+                           ys: &mut [u32],
+                           present: &mut [u64],
+                           appearances: &mut [u32],
+                           points_seen: &mut u64,
+                           geom_anchor: &mut u64| {
+                join_chunk(chunk, &source_ids, |ordinal, source_id, (x, y)| {
+                    let Some(ordinal) = ordinal else {
+                        return Err(input_changed(&format!(
+                            "the points file names entity {source_id}, which its first pass did \
+                             not"
+                        )));
+                    };
+                    xs[ordinal as usize] = x;
+                    ys[ordinal as usize] = y;
+                    bit_set(present, ordinal as usize);
+                    appearances[ordinal as usize] += 1;
+                    *points_seen += 1;
+                    *geom_anchor = geom_anchor.wrapping_add(mix64(source_id));
+                    Ok(())
+                })
+            };
+            input::scan_points(
+                &view.points,
+                &view.point_fields,
+                view.projection,
+                &view.extent,
+                args.limit,
+                |point| {
+                    chunk.push((point.source_id, (point.qx, point.qy)));
+                    if chunk.len() == JOIN_CHUNK_ROWS {
+                        if let Err(e) = resolve(
+                            &mut chunk,
+                            xs,
+                            ys,
+                            &mut present,
+                            &mut appearances,
+                            &mut points_seen,
+                            &mut geom_anchor,
+                        ) {
+                            failure = Some(e);
+                            return ControlFlow::Break(());
+                        }
                     }
-                }
-                ControlFlow::Continue(())
-            },
-        )?;
-        if let Some(error) = failure {
-            return Err(error);
+                    ControlFlow::Continue(())
+                },
+            )?;
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            resolve(
+                &mut chunk,
+                xs,
+                ys,
+                &mut present,
+                &mut appearances,
+                &mut points_seen,
+                &mut geom_anchor,
+            )?;
+            if points_seen != view_anchors[index].rows {
+                return Err(input_changed(&format!(
+                    "view '{}': the points file yielded {points_seen} geometry rows, but its \
+                     first pass selected {}",
+                    view.view_id, view_anchors[index].rows
+                )));
+            }
+            if geom_anchor != view_anchors[index].mixed {
+                return Err(input_changed(&format!(
+                    "view '{}': the points file's geometry pass carries different ids than its \
+                     first pass did (row count unchanged)",
+                    view.view_id
+                )));
+            }
         }
-        resolve(
-            &mut chunk,
-            x_of_ordinal,
-            y_of_ordinal,
-            &mut points_seen,
-            &mut geom_anchor,
-        )?;
-        if points_seen != n {
-            return Err(input_changed(&format!(
-                "the points file yielded {points_seen} geometry rows, but its first pass \
-                 selected {n}"
-            )));
-        }
-        if geom_anchor != ids_anchor {
-            return Err(input_changed(
-                "the points file's geometry pass carries different ids than its first pass did \
-                 (row count unchanged)",
-            ));
+        geometry.push(ViewGeometry {
+            x: x_map,
+            y: y_map,
+            present,
+            rows: view_anchors[index].rows,
+        });
+    }
+    // **The anchor's Morton code, with the declared fallback** (decision 0112): an item absent
+    // from the anchor takes its code in the first-declared view that holds it. Materialised here
+    // rather than chosen inside the sort, so the batch loop reads one array and the choice is
+    // made once per item.
+    let mut anchor_x_map = spill::MappedU32::zeroed(tmp.path(), "x-anchor.u32", n as usize)?;
+    let mut anchor_y_map = spill::MappedU32::zeroed(tmp.path(), "y-anchor.u32", n as usize)?;
+    {
+        let xs = anchor_x_map.as_mut_slice();
+        let ys = anchor_y_map.as_mut_slice();
+        let order: Vec<usize> = std::iter::once(args.anchor)
+            .chain((0..args.views.len()).filter(|&v| v != args.anchor))
+            .collect();
+        for (ordinal, (x, y)) in xs.iter_mut().zip(ys.iter_mut()).enumerate() {
+            let held = order
+                .iter()
+                .copied()
+                .find(|&v| bit_get(&geometry[v].present, ordinal))
+                .expect("the union of the views' ids is where this ordinal came from");
+            *x = geometry[held].x.as_slice()[ordinal];
+            *y = geometry[held].y.as_slice()[ordinal];
         }
     }
+    let x_of_ordinal = anchor_x_map.as_slice();
+    let y_of_ordinal = anchor_y_map.as_slice();
     timer.end(BuildStage::GeometryRead, n);
 
-    drop(source_ids);
+    // `source_ids` is **held** past this point rather than dropped and re-read: pass one unions
+    // several files, so recovering it later would be one re-read per view against anchors that
+    // would each have to be carried anyway. 8 B/item, released at step 8c with the layer join.
     drop(term_keys);
     drop(term_ids);
     drop(row_counts);
@@ -1042,17 +1125,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // global sort+dedup (a duplicate pair shares its ordinal, hence its batch), and one batch
     // covering everything reproduces the pre-batching assignment exactly.
     let mut entity_of_ordinal: Vec<u32> = vec![0; n as usize];
-    // Geometry in entity order, filled by the assignment walk below rather than by a pass of its
-    // own. Allocated here because that walk is where both indices are in hand: `entity` ascends
-    // with position, so these two writes stream, and the *ordinal* is the random side — a gather
-    // beside the random write into `entity_of_ordinal` this walk already performs, which is the
-    // cheapest place in the build to pay for it. A standalone permute over the same data measured
-    // slower at 25M than the pass it replaced (docs/artifact-delivery.md), because it is serial
-    // where a points-file scan decodes on a worker pool.
-    let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
-    let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
-    let x_of_entity = x_map.as_mut_slice();
-    let y_of_entity = y_map.as_mut_slice();
     // Exact per-term post-dedup counts, accumulated as bands are emitted; drives the band
     // sweep's offsets. u32 is sound (a term's entities are distinct, so count <= n < 2^32).
     let mut term_counts: Vec<u32> = vec![0; term_count as usize];
@@ -1148,14 +1220,34 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         for (position, rec) in recs.iter().enumerate() {
             let entity = (entity_base + position as u64) as u32;
             entity_of_ordinal[rec.ordinal as usize] = entity;
-            // Geometry into entity order, here rather than in a pass of its own. Every ordinal is
-            // visited exactly once across all batches (they partition ordinal space) and entity is
-            // a fresh position each time, so every slot is written exactly once — the same
-            // bijection the old scan relied on, reached without a traversal.
-            x_of_entity[entity as usize] = x_of_ordinal[rec.ordinal as usize];
-            y_of_entity[entity as usize] = y_of_ordinal[rec.ordinal as usize];
             let local = (rec.ordinal as u64 - ordinal_lo) as usize;
             let sig = &packed[starts[local] as usize..starts[local + 1] as usize];
+            // **The label is the entity's, not the row's** (`views.md` §7): every view holding
+            // this item must have given it the same term set. `sig` is the deduplicated union
+            // over the views, and `distinct_of_ordinal` is the sum of each view's own distinct
+            // count — so the two agree exactly when every view contributed the whole union, and
+            // the identity is a refusal rather than a hash comparison.
+            //
+            // Checked only on the per-view route: a shared relation is entity space already and
+            // is scanned once, so there is nothing for two views to disagree about
+            // (`crate::AccessRoute`).
+            if per_view_labels
+                && distinct_of_ordinal[rec.ordinal as usize] as u64
+                    != sig.len() as u64 * appearances[rec.ordinal as usize] as u64
+            {
+                return Err(BuildError::Invalid(format!(
+                    "entity_id {} carries different access labels in different views. A label is \
+                     the entity's, not the row's (views §7): it is one set wherever the entity \
+                     appears, and a re-label is a delete plus a re-ingest (decision 0047). The \
+                     views this build reads are {}",
+                    source_ids[rec.ordinal as usize],
+                    args.views
+                        .iter()
+                        .map(|v| format!("'{}' ({})", v.view_id, v.points.display()))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
             for &value in sig {
                 let term = term_of(value);
                 let band = band_los.partition_point(|&lo| lo <= term) - 1;
@@ -1178,12 +1270,12 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             "batches assigned {entity_base} entities for {n} items"
         )));
     }
-    // The ordinal-space geometry has served its two readers — the sort's Morton tiebreak and the
-    // assignment walk — and is released here rather than at the end of the build. At 10⁹ that is
-    // 8 GB of dirty mapped pages returned before the band sweep and the postings write start
-    // competing for page cache.
-    drop(x_ord_map);
-    drop(y_ord_map);
+    // The anchor's Morton geometry has served its one reader — the sort's tiebreak — and is
+    // released here rather than at the end of the build. At 10⁹ that is 8 GB of dirty mapped
+    // pages returned before the band sweep and the postings write start competing for page
+    // cache. Each view's own geometry stays: pass two is what reads it.
+    drop(anchor_x_map);
+    drop(anchor_y_map);
     let band_receipts: Vec<spill::SpillReceipt> = band_writers
         .into_iter()
         .map(|w| w.finish())
@@ -1199,42 +1291,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let view_dir = partition_dir.join("views").join(&args.view_id);
-    let segment_dir = view_dir.join("segments").join(SEG_ID);
-    for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
+    for dir in [&terms_dir, &entities_dir] {
         std::fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
-    }
-
-    // The source ids are needed twice more (external ids, geometry) and cost 8N to hold across
-    // the sort above; re-reading the points file is cheaper than carrying them through it —
-    // *provided the file has not changed.* The re-read is verified against the first pass's
-    // anchors: row count, order-independent id sum, and (after the sort) the extrema. Without
-    // this, a points file swapped since stage 1 would silently pair every entity with a wrong
-    // external id — the geometry pass's own checks compare the changed file against itself.
-    let mut source_ids = read_source_ids(args, Some(n as usize))?;
-    if source_ids.len() as u64 != n {
-        return Err(input_changed(&format!(
-            "the points file re-read for external ids yielded {} rows, not the {} its first \
-             pass did",
-            source_ids.len(),
-            n
-        )));
-    }
-    if source_ids
-        .iter()
-        .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id)))
-        != ids_anchor
-    {
-        return Err(input_changed(
-            "the points file re-read for external ids carries different ids than its first \
-             pass did (row count unchanged)",
-        ));
-    }
-    source_ids.par_sort_unstable();
-    if source_ids[0] != ids_first || *source_ids.last().expect("non-empty") != ids_last {
-        return Err(input_changed(
-            "the points file's id range changed between its first pass and the re-read",
-        ));
     }
 
     timer.end(BuildStage::Assignment, n);
@@ -1423,6 +1481,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // tables are read whole and the published memberships stay resident, and this ran unattributed
     // inside the attribute tail until the campaign's kills made the distinction worth having
     // (`residency.rs`).
+    let view_ids: Vec<String> = args.views.iter().map(|v| v.view_id.clone()).collect();
     let mut published_layers = if args.layers.is_empty() {
         crate::layers::PublishedLayers::default()
     } else {
@@ -1430,8 +1489,13 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
-                args.projection,
-                &args.extent,
+                // ⊘ **One frame for a layer's several views** (`views.md` §2's marker): an
+                // authored shape canonicalises against the anchor view's projection and extent,
+                // which `polygon-membership.md` §4.3 wants per view. A layer's views must share a
+                // projection, and a group's share a frame by construction, so this is exact for
+                // every declaration the build can enumerate today.
+                args.views[args.anchor].projection,
+                &args.views[args.anchor].extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
                 // The build's own `.build-tmp/`, which the member spill writes its runs into —
                 // still open here, and swept by the `close` below whether this stage succeeds or
@@ -1466,7 +1530,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 n,
                 &args.out.join(crate::PREFIX),
                 crate::PHASH,
-                &args.view_id,
+                &view_ids,
                 &crate::layers::predicate_artifact_keys(
                     &args.layers,
                     &args.schema,
@@ -1478,7 +1542,6 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     };
 
     drop(source_ids);
-    drop(entity_of_ordinal);
 
     crate::write_containment_report(&args.out, &published_layers)?;
 
@@ -1527,189 +1590,224 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     }
     timer.end(BuildStage::ColumnRelease, n);
 
-    // ---- 9. the tiler: (morton, tessera_id) ascending, no further tiebreak (contracts
-    // §2.6 r6) — `tessera_id` is computed here, BEFORE the sort (2026-07-30 fold, memo §6):
-    // `priority = high16(tessera_id)` is now the sort key, so the identity must exist before
-    // `sort_unstable_by` runs, not be written at the row after it. -------------------------
-    // Indexed parallel map: the collect preserves entity order, and `forward`/`morton_of` are
-    // pure, so this is byte-identical to the serial loop it replaces.
-    let mut rows: Vec<RowRec> = (0..n as usize)
-        .into_par_iter()
-        .map(|entity| {
-            let tessera_id = args
-                .identity_key
-                .forward(args.shard_id, EntityId::new(entity as u64))?;
-            Ok(RowRec {
-                // From the quantised form directly: `split32`'s cell half is by
-                // construction the code `morton_of` would give for the same point.
-                morton: split32(x_of_entity[entity], y_of_entity[entity]).0.raw(),
-                entity: entity as u32,
-                priority: tessera_id.priority(),
-                _pad: 0,
-            })
-        })
-        .collect::<Result<_>>()?;
-    // The comparator is a total order — `(morton, priority, full tessera_id)`, and `forward`
-    // is a bijection per entity — so the parallel unstable sort has exactly one output.
-    // `IdentityKey` is a pure value type; `forward` takes `&self` and is safe to call from
-    // every worker at once, and the tie path's `expect` stays loud through rayon's panic
-    // propagation.
-    rows.par_sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
+    // ---- 9/10. pass two: one row space per view (`views.md` §7) ----------------------
+    // **The build below is what it always was, run once per view.** What is not one-view-at-a-
+    // time is everything above: identity, the dictionary, the postings, the external ids and the
+    // attribute columns are entity space and were built once, over the union of every view's
+    // items. Here each view transforms through its own projection, quantises against its own
+    // frame (decision 0040), Morton-sorts and writes its segment, its permutation and its
+    // row→entity file.
+    //
+    // A view holds a **subset** of entity space — its `present` bits — so its permutation is
+    // sentinel wherever it does not, and `row_count` is the view's population rather than `n`.
+    let mut view_files: Vec<PathBuf> = Vec::new();
+    let mut segments: Vec<tessera_store::manifest::SegmentDescriptor> = Vec::new();
+    let mut occupancies: Vec<crate::Occupancy> = Vec::with_capacity(args.views.len());
+    let mut artifact_paths: Vec<PathBuf> = Vec::new();
+    for (index, view) in args.views.iter().enumerate() {
+        let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
+        let segment_dir = view_dir.join("segments").join(SEG_ID);
+        std::fs::create_dir_all(&segment_dir).map_err(|e| BuildError::io(&segment_dir, e))?;
 
-    timer.end(BuildStage::TilerSort, n);
-
-    // ---- 10. the segment -------------------------------------------------------------
-    let morton_path = segment_dir.join("morton.u32");
-    // **The resolution this frame actually gave the corpus**, counted off the same sorted codes
-    // that are about to become `morton.u32` — the linear build counts the identical thing at its
-    // own segment write. Nothing is retained: `rows` is already `(morton, tessera_id)` ascending,
-    // so distinct cells is a comparison per row (see `Occupancy::of_sorted_codes`).
-    let occupancy = crate::Occupancy::of_sorted_codes(rows.iter().map(|r| r.morton));
-    write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
-        .map_err(|e| BuildError::io(&morton_path, e))?;
-
-    let permutation_path = view_dir.join("permutation.bin");
-    write_permutation_iter(
-        &permutation_path,
-        rows.iter().map(|r| EntityId::new(r.entity as u64)),
-        n,
-    )
-    .map_err(|e| BuildError::io(&permutation_path, e))?;
-    fsync_file(&permutation_path)?;
-
-    // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted rows
-    // the permutation was scattered from.
-    let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
-    // Collected **once** and kept: this is the row→entity permutation, and the attribute tail
-    // below wants the same vector. It used to be gathered here and again there, so 4 B per row was
-    // held twice for the whole segment write — 1 GB at 2.5×10⁸ and 4 GB at 10⁹, for two passes over
-    // `rows` producing identical bytes. Neither copy was dropped before the record batch, which is
-    // the one place the build is asked to hold as little as possible beside it.
-    let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
-    tessera_store::write_row_entity(&row_entity_path, &entity_row)
-        .map_err(|e| BuildError::io(&row_entity_path, e))?;
-    fsync_file(&row_entity_path)?;
-
-    let columns_path = segment_dir.join("columns.arrow");
-    let mut presence_paths: Vec<PathBuf> = Vec::new();
-    {
-        // Built and released one column at a time: the record batch itself is the largest thing
-        // this build ever holds, so nothing that can be dropped first is kept alongside it.
-        // Indexed parallel gathers — collect preserves row order, so bytes are unchanged; at
-        // 10⁹ rows the serial versions are a billion random 4-byte reads each.
-        // The residual is the low half of the same `split32` whose high half became the row's
-        // Morton code above — one splitting of one fixed-point position, so `columns.arrow` and
-        // `morton.u32` cannot describe different points.
-        let residual_row: Vec<u32> = rows
-            .par_iter()
-            .map(|r| {
-                let entity = r.entity as usize;
-                split32(x_of_entity[entity], y_of_entity[entity]).1
-            })
-            .collect();
-        drop(x_map);
-        drop(y_map);
-        drop(rows);
-        // `forward` is fallible (Important I-1): a checked conversion, never `as u32`. At build
-        // the allocator cap makes the error unreachable, and collecting into a `Result` is what
-        // keeps it that way rather than assuming it. This is the permutation of an identity
-        // vector that already existed before the sort (step 9 above), not its first computation.
-        let tessera_row: Vec<u64> = entity_row
-            .par_iter()
-            .map(|&e| {
-                args.identity_key
-                    .forward(args.shard_id, EntityId::new(e as u64))
-                    .map(|id| id.raw())
-            })
-            .collect::<std::result::Result<_, _>>()
-            .map_err(BuildError::Identity)?;
-        // The declared attribute tail, permuted into the same row order as everything above.
-        //
-        // **Gathered per entity, then permuted — not read in row order.** The attribute pass
-        // visits the points file in *file* order, and `entity_row` is the row-order permutation
-        // of entity ids, so the tail is materialised entity-major first and indexed through
-        // `entity_row` exactly as `residual_row` is. Reading the file a third time in row order
-        // is the alternative, and it is a random-access read of a multi-gigabyte parquet file.
-        //
-        // Held after `x_of_entity`/`y_of_entity` are dropped, so the peak is the record batch plus
-        // one attribute tail rather than both — at the widths §3.6 argues for (1–4 B/row against
-        // geometry's 8) the tail is the smaller term either way.
-        let tail =
-            permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row, &scratch)?;
-        drop(entity_row);
-        for (column, rows) in tail.presence {
-            if let Some(path) =
-                tessera_store::flush::write_render_presence(&segment_dir, &column, rows, n as u32)
-                    .map_err(|e| BuildError::Invalid(format!("attribute '{column}': {e}")))?
-            {
-                presence_paths.push(path);
+        // The view's geometry, permuted from ordinal into entity space — the one scatter this
+        // costs, against a parquet re-read per view (`views.md` §8's file arithmetic).
+        let mut x_map = spill::MappedU32::zeroed(tmp.path(), "x-of-entity.u32", n as usize)?;
+        let mut y_map = spill::MappedU32::zeroed(tmp.path(), "y-of-entity.u32", n as usize)?;
+        {
+            let xs = x_map.as_mut_slice();
+            let ys = y_map.as_mut_slice();
+            let (view_x, view_y) = (geometry[index].x.as_slice(), geometry[index].y.as_slice());
+            for (ordinal, &entity) in entity_of_ordinal.iter().enumerate() {
+                xs[entity as usize] = view_x[ordinal];
+                ys[entity as usize] = view_y[ordinal];
             }
         }
-        write_columns(&columns_path, tessera_row, residual_row, tail.columns)
-            .map_err(|e| BuildError::io(&columns_path, e))?;
+        // Membership in entity space, from the same permutation of the ordinal-space bits.
+        let mut member: Vec<u64> = vec![0; (n as usize).div_ceil(64)];
+        for (ordinal, &entity) in entity_of_ordinal.iter().enumerate() {
+            if bit_get(&geometry[index].present, ordinal) {
+                bit_set(&mut member, entity as usize);
+            }
+        }
+        let x_of_entity = x_map.as_slice();
+        let y_of_entity = y_map.as_slice();
+
+        // §2.6 r6: `(morton, tessera_id)` ascending, no further tiebreak. `tessera_id` is
+        // computed BEFORE the sort (2026-07-30 fold, memo §6) — `priority = high16(tessera_id)`
+        // is a sort key, so the identity must exist before `sort_unstable_by` runs.
+        let mut rows: Vec<RowRec> = (0..n as usize)
+            .into_par_iter()
+            .filter(|entity| bit_get(&member, *entity))
+            .map(|entity| {
+                let tessera_id = args
+                    .identity_key
+                    .forward(args.shard_id, EntityId::new(entity as u64))?;
+                Ok(RowRec {
+                    // From the quantised form directly: `split32`'s cell half is by
+                    // construction the code `morton_of` would give for the same point.
+                    morton: split32(x_of_entity[entity], y_of_entity[entity]).0.raw(),
+                    entity: entity as u32,
+                    priority: tessera_id.priority(),
+                    _pad: 0,
+                })
+            })
+            .collect::<Result<_>>()?;
+        rows.par_sort_unstable_by(|a, b| a.cmp(b, &args.identity_key, args.shard_id));
+        let rows_in_view = rows.len() as u32;
+        if rows_in_view as u64 != geometry[index].rows {
+            return Err(input_changed(&format!(
+                "view '{}': {rows_in_view} rows in the segment for the {} its points file \
+                 selected",
+                view.view_id, geometry[index].rows
+            )));
+        }
+        timer.end(BuildStage::TilerSort, rows_in_view as u64);
+
+        let morton_path = segment_dir.join("morton.u32");
+        // **The resolution this frame actually gave the corpus**, counted off the same sorted
+        // codes that are about to become `morton.u32`. Nothing is retained: `rows` is already
+        // `(morton, tessera_id)` ascending, so distinct cells is a comparison per row.
+        occupancies.push(crate::Occupancy::of_sorted_codes(
+            rows.iter().map(|r| r.morton),
+        ));
+        write_morton_codes(&morton_path, rows.iter().map(|r| r.morton))
+            .map_err(|e| BuildError::io(&morton_path, e))?;
+
+        // **Bounded by entity space, populated by the view.** An entity this view does not hold
+        // keeps the row-absent sentinel `PermutationWriter::create` laid down, which is exactly
+        // what a sparse view is (`views.md` §8).
+        let permutation_path = view_dir.join("permutation.bin");
+        write_permutation_iter(
+            &permutation_path,
+            rows.iter().map(|r| EntityId::new(r.entity as u64)),
+            n,
+        )
+        .map_err(|e| BuildError::io(&permutation_path, e))?;
+        fsync_file(&permutation_path)?;
+
+        // The row→entity direction beside it (`tessera_store::row_entity`), from the same sorted
+        // rows the permutation was scattered from.
+        let row_entity_path = view_dir.join(tessera_store::ROW_ENTITY_FILE);
+        let entity_row: Vec<u32> = rows.iter().map(|r| r.entity).collect();
+        tessera_store::write_row_entity(&row_entity_path, &entity_row)
+            .map_err(|e| BuildError::io(&row_entity_path, e))?;
+        fsync_file(&row_entity_path)?;
+
+        let columns_path = segment_dir.join("columns.arrow");
+        let mut presence_paths: Vec<PathBuf> = Vec::new();
+        {
+            // The residual is the low half of the same `split32` whose high half became the
+            // row's Morton code above — one splitting of one fixed-point position, so
+            // `columns.arrow` and `morton.u32` cannot describe different points.
+            let residual_row: Vec<u32> = rows
+                .par_iter()
+                .map(|r| {
+                    let entity = r.entity as usize;
+                    split32(x_of_entity[entity], y_of_entity[entity]).1
+                })
+                .collect();
+            drop(rows);
+            // `forward` is fallible (Important I-1): a checked conversion, never `as u32`.
+            let tessera_row: Vec<u64> = entity_row
+                .par_iter()
+                .map(|&e| {
+                    args.identity_key
+                        .forward(args.shard_id, EntityId::new(e as u64))
+                        .map(|id| id.raw())
+                })
+                .collect::<std::result::Result<_, _>>()
+                .map_err(BuildError::Identity)?;
+            // The declared attribute tail, permuted into this view's row order. Gathered per
+            // entity and then permuted — the values are entity space and are shared by every
+            // view, which is the whole of `views.md` §1's factoring.
+            let tail =
+                permute_attribute_tail(&args.schema, &attributes_by_entity, &entity_row, &scratch)?;
+            for (column, rows) in tail.presence {
+                if let Some(path) = tessera_store::flush::write_render_presence(
+                    &segment_dir,
+                    &column,
+                    rows,
+                    rows_in_view,
+                )
+                .map_err(|e| BuildError::Invalid(format!("attribute '{column}': {e}")))?
+                {
+                    presence_paths.push(path);
+                }
+            }
+            write_columns(&columns_path, tessera_row, residual_row, tail.columns)
+                .map_err(|e| BuildError::io(&columns_path, e))?;
+        }
+        fsync_file(&columns_path)?;
+        fsync_file(&morton_path)?;
+        drop(x_map);
+        drop(y_map);
+        timer.end(BuildStage::SegmentWrite, rows_in_view as u64);
+
+        // ---- 10b. the post-bundle artifact pass, per view (decision 0094's first half) ----
+        //
+        // **Here and not at step 8c**, where the layers were published: the pick reads where each
+        // membership landed in *row* space, and this view's row space did not exist until the
+        // permutation above.
+        let artifact_store = std::mem::take(&mut published_layers.store);
+        let artifact_pass = crate::artifact_pass::run(
+            &mut published_layers,
+            &artifact_store,
+            &args.out.join(crate::PREFIX),
+            crate::PHASH,
+            &view.view_id,
+            rows_in_view,
+            &plugin.data_plugin_hash(),
+        );
+        published_layers.store = artifact_store;
+        crate::artifact_pass::report(&artifact_pass);
+        // **Accumulated across views, not replaced.** Every artifact extent is keyed by
+        // `(view, layer, level)`, so each view's pass adds its own; assigning would leave the
+        // manifest carrying the last view's alone.
+        published_layers
+            .tile_index_extents
+            .extend(artifact_pass.tile_index_extents.iter().cloned());
+        published_layers
+            .row_column_extents
+            .extend(artifact_pass.row_column_extents.iter().cloned());
+        published_layers
+            .containment_extents
+            .extend(artifact_pass.containment_extents.iter().cloned());
+        published_layers
+            .shape_rows_extents
+            .extend(artifact_pass.shape_rows_extents.iter().cloned());
+        published_layers
+            .shape_held_extents
+            .extend(artifact_pass.shape_held_extents.iter().cloned());
+        artifact_paths.extend(artifact_pass.paths.iter().cloned());
+
+        view_files.push(permutation_path);
+        view_files.push(row_entity_path);
+        view_files.push(columns_path);
+        view_files.push(morton_path);
+        view_files.extend(presence_paths);
+        segments.push(tessera_store::manifest::SegmentDescriptor {
+            view: view.view_id.clone(),
+            seg_id: SEG_ID.to_string(),
+            row_count: rows_in_view,
+            entity_lo: 0,
+            entity_hi: n,
+        });
     }
-    fsync_file(&columns_path)?;
-    fsync_file(&morton_path)?;
-    // The spill directory closes **here**, not after the postings write where it used to: the
-    // geometry pass now keeps its entity-major scratch in it too (`spill::MappedU32`), so the
-    // directory's lifetime is the whole of the build's transient on-disk state rather than the
-    // pairs half of it. Both mappings are dropped by this point, so the tree is unbusy.
+    drop(geometry);
+    drop(entity_of_ordinal);
+    // The spill directory closes **here**: every view's ordinal-space geometry and every
+    // entity-space scatter are dropped by this point, so the tree is unbusy.
     tmp.close()?;
 
-    timer.end(BuildStage::SegmentWrite, n);
-
-    // ---- 10b. the post-bundle artifact pass (decision 0094's first half) ---------------
-    //
-    // **Here and not at step 8**, where the layers were published: the pick reads where each
-    // membership landed in *row* space, and row space did not exist until the permutation two
-    // statements above. Before the manifests, so the layouts it records and the extents it writes
-    // ride the write the build was always going to make — see `crate::artifact_pass`.
-    // Taken out of the report so the pass can edit the registered records beside it, and dropped
-    // with this statement's scope: the records are what the manifest carries and the store is only
-    // what the pass observes.
-    let artifact_store = std::mem::take(&mut published_layers.store);
-    let artifact_pass = crate::artifact_pass::run(
-        &mut published_layers,
-        &artifact_store,
-        &args.out.join(crate::PREFIX),
-        crate::PHASH,
-        &args.view_id,
-        n as u32,
-        &plugin.data_plugin_hash(),
-    );
-    drop(artifact_store);
-    crate::artifact_pass::report(&artifact_pass);
-    published_layers
-        .tile_index_extents
-        .clone_from(&artifact_pass.tile_index_extents);
-    published_layers
-        .row_column_extents
-        .clone_from(&artifact_pass.row_column_extents);
-    published_layers
-        .containment_extents
-        .clone_from(&artifact_pass.containment_extents);
-    published_layers
-        .shape_rows_extents
-        .clone_from(&artifact_pass.shape_rows_extents);
-    published_layers
-        .shape_held_extents
-        .clone_from(&artifact_pass.shape_held_extents);
-
     // ---- 11. manifests ---------------------------------------------------------------
-    let mut other_paths = vec![
-        postings_path,
-        permutation_path,
-        row_entity_path,
-        columns_path,
-        morton_path,
-    ];
+    let mut other_paths = vec![postings_path];
+    other_paths.extend(view_files);
     other_paths.extend(filter_paths);
     other_paths.extend(record_paths);
     other_paths.extend(pairs_path);
     other_paths.extend(ext_locator_path);
-    other_paths.extend(presence_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
-    other_paths.extend(artifact_pass.paths.iter().cloned());
+    other_paths.extend(artifact_paths);
     let mut report = write_manifests(
         args,
         &BundleFiles {
@@ -1725,7 +1823,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         plan.recorded_batch_items,
         &minters,
         &published_layers,
-        occupancy,
+        &segments,
+        &occupancies,
     )?;
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
@@ -3458,7 +3557,7 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
 /// geometry, identity and attributes cannot come from different items.
 fn permute_attribute_tail(
     schema: &crate::config::Schema,
-    by_entity: Vec<EntityColumn>,
+    by_entity: &[EntityColumn],
     entity_row: &[u32],
     scratch: &crate::column::ColumnScratch,
 ) -> Result<AttributeTail> {
@@ -3468,13 +3567,12 @@ fn permute_attribute_tail(
     // split, exactly as it is in the attribute join. `collect` over an indexed parallel iterator
     // preserves declared order, which the tail's column order is.
     //
-    // The entity-order columns are dropped as their lanes finish rather than one at a time down a
-    // serial loop, so their files stand together for the length of this pass. That is disk, and it
-    // is the pass immediately before `tmp.close()`.
+    // **Borrowed, not consumed**: the values are entity space and every view's row space is a
+    // permutation of the same columns (`views.md` §1), so pass two calls this once per view.
     let lanes: Vec<Result<Option<Lane>>> = schema
         .attributes
         .par_iter()
-        .zip(by_entity.into_par_iter())
+        .zip(by_entity.par_iter())
         .map(|(attribute, values)| {
             // **The tail is exactly the render columns.** An `index`-only column is entity-space
             // and has already been written there; including it here would give it a slot in every
@@ -3487,7 +3585,6 @@ fn permute_attribute_tail(
             for (row, &entity) in entity_row.iter().enumerate() {
                 column.set(row, values.value_at(entity as usize), &attribute.name)?;
             }
-            drop(values);
             // **The absent slot is left as the mapping's zero, which *is* the render
             // placeholder.** The column is non-nullable on the wire (contracts R4), so an absent
             // value has to be written as something; `ScalarValue::or_render_placeholder` gives the
@@ -3570,19 +3667,18 @@ pub(crate) fn render_presence_of(
 /// Counted first and then read: letting a `Vec` double its way to 8 GB would peak at three times
 /// the final size during the last reallocation, which is precisely the kind of transient this
 /// build exists to avoid.
-fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u64>> {
-    let count = match known_count {
-        Some(count) => count,
+fn read_source_ids(args: &BuildArgs, view: &crate::ViewArgs) -> Result<Vec<u64>> {
+    let count = match args.limit {
         // No limit ⇒ every row is selected ⇒ the metadata row count is exact and the counting
         // decode is a whole pass over the file for nothing.
-        None if args.limit.is_none() => input::count_point_rows(&args.points)? as usize,
-        None => {
+        None => input::count_point_rows(&view.points)? as usize,
+        Some(_) => {
             let mut count = 0usize;
             input::scan_points(
-                &args.points,
-                &args.point_fields,
-                args.projection,
-                &args.extent,
+                &view.points,
+                &view.point_fields,
+                view.projection,
+                &view.extent,
                 args.limit,
                 |_| {
                     count += 1;
@@ -3594,10 +3690,10 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
     };
     let mut ids = Vec::with_capacity(count);
     input::scan_points(
-        &args.points,
-        &args.point_fields,
-        args.projection,
-        &args.extent,
+        &view.points,
+        &view.point_fields,
+        view.projection,
+        &view.extent,
         args.limit,
         |point| {
             ids.push(point.source_id);
@@ -3605,6 +3701,61 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
         },
     )?;
     Ok(ids)
+}
+
+/// One view's geometry in **ordinal** space, read once in pass one and permuted into entity
+/// space in pass two (`views.md` §7).
+struct ViewGeometry {
+    x: spill::MappedU32,
+    y: spill::MappedU32,
+    /// Which ordinals this view holds a row for — the view's population, and what makes its
+    /// permutation sentinel wherever it does not.
+    present: Vec<u64>,
+    rows: u64,
+}
+
+/// What one view's points file said about itself, for the later passes over it to be checked
+/// against ([`read_source_ids_union`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ViewIdAnchor {
+    rows: u64,
+    /// An order-independent mixed sum of the ids, so a file swapped mid-build is loud rather
+    /// than silently repairing its own row count.
+    mixed: u64,
+}
+
+/// **Pass one's entity space** (`views.md` §7): every view's point source, unioned by
+/// `external_id`.
+///
+/// A row is unique per `(external_id, view)` — an id repeated *within* one view's file is the
+/// old duplicate refusal, unchanged, while the same id in two views is the ordinary case and is
+/// what makes an entity's identity, label and attributes shared across the row spaces.
+fn read_source_ids_union(args: &BuildArgs) -> Result<(Vec<u64>, Vec<ViewIdAnchor>)> {
+    let mut union: Vec<u64> = Vec::new();
+    let mut anchors = Vec::with_capacity(args.views.len());
+    for view in &args.views {
+        let mut ids = read_source_ids(args, view)?;
+        anchors.push(ViewIdAnchor {
+            rows: ids.len() as u64,
+            mixed: ids
+                .iter()
+                .fold(0u64, |acc, &id| acc.wrapping_add(mix64(id))),
+        });
+        ids.par_sort_unstable();
+        if ids.windows(2).any(|w| w[0] == w[1]) {
+            return Err(BuildError::Invalid(format!(
+                "view '{}': {} contains duplicate entity_id values. A row is unique per (entity, \
+                 view) — the same entity in several views is the ordinary case and is several \
+                 files, never several rows of one (views §4)",
+                view.view_id,
+                view.points.display()
+            )));
+        }
+        union.extend_from_slice(&ids);
+    }
+    union.par_sort_unstable();
+    union.dedup();
+    Ok((union, anchors))
 }
 
 /// Refuse to run unless the configured plugin labels items the way this pipeline assumes.
@@ -3722,7 +3873,7 @@ fn build_dictionary(
         })
     };
     let mut failure: Option<BuildError> = None;
-    let fill = crate::scan_access(args, access, |source_id, source_term| {
+    let fill = crate::scan_access(args, access, |_view, source_id, source_term| {
         pair_rows += 1;
         chunk.push((source_id, source_term));
         if chunk.len() == JOIN_CHUNK_ROWS {

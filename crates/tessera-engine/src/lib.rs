@@ -25,12 +25,12 @@ pub mod histogram;
 pub mod layout;
 pub mod membership_column;
 mod merge;
-pub mod region;
-pub mod shapes;
 mod refresh;
+pub mod region;
 pub mod row_column;
 pub mod select;
 pub mod session;
+pub mod shapes;
 mod single_flight;
 pub mod tile_index;
 pub mod timing;
@@ -329,6 +329,7 @@ pub(crate) fn synthetic_generation_parts() -> (Arc<FragmentCache>, Arc<session::
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![],
         partitions: vec![],
         provenance: serde_json::json!({}),

@@ -70,14 +70,20 @@ fn ensure_bundle() -> PathBuf {
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
-            projection: tessera_spatial::Projection::None,
-            point_fields: Default::default(),
-            points: root.join("data/scaled/geometry.parquet"),
+            views: vec![tessera_build::ViewArgs {
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: extent(),
+                points: root.join("data/scaled/geometry.parquet"),
+                point_fields: Default::default(),
+                access: tessera_build::config::AccessInput::relation(
+                    root.join("data/scaled/pairs/categories-subclass.pairs.parquet"),
+                ),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
             attribute_sources: Vec::new(),
-            access: tessera_build::config::AccessInput::relation(root.join("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
-            extent: extent(),
-            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
             identity_key_hex: TEST_KEY_HEX.to_string(),

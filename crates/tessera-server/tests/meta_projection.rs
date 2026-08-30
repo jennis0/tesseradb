@@ -60,25 +60,32 @@ fn write_lon_lat_points(path: &Path, n: u64) {
 /// the unit square the transform produces (`projections.md` §4.2) — and is passed outright here so
 /// that a test can state the square it means and then compute the tile address it expects by hand.
 fn build_projected(out: &Path, tmp: &Path, projection: Projection, frame: Bounds) {
-    let points = tmp.join(format!("points-{}.parquet", out.display().to_string().len()));
+    let points = tmp.join(format!(
+        "points-{}.parquet",
+        out.display().to_string().len()
+    ));
     let pairs = tmp.join(format!("pairs-{}.parquet", out.display().to_string().len()));
     write_lon_lat_points(&points, N_ITEMS);
     write_pairs_n(&pairs, N_ITEMS);
     let args = BuildArgs {
-        projection,
-        // `lon`/`lat` become the canonical `x`/`y` at the declaration, which is what
-        // `compile_projected_fields` does for a `[[view]]` block; built outright here because
-        // there is no document around this build.
-        point_fields: tessera_build::config::Fields::moved(
-            "points",
-            [("x", "lon"), ("y", "lat")],
-        ),
-        points: points.clone(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection,
+            extent: frame,
+            points: points.clone(),
+            // `lon`/`lat` become the canonical `x`/`y` at the declaration, which is what
+            // `compile_projected_fields` does for a `[[view]]` block; built outright here because
+            // there is no document around this build.
+            point_fields: tessera_build::config::Fields::moved(
+                "points",
+                [("x", "lon"), ("y", "lat")],
+            ),
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: out.to_path_buf(),
-        extent: frame,
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),

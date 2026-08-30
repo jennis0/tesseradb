@@ -1895,7 +1895,10 @@ pub enum AcceptError {
     /// its view, and a row whose view cannot be resolved has nothing to be checked against. The
     /// HTTP handler refuses an unknown `x-tessera-view` with its own 404 and is only one of the
     /// buffer's writers.
-    UnknownView { index: usize, view: String },
+    UnknownView {
+        index: usize,
+        view: String,
+    },
     /// A row carries a number of scalars other than one per declared column.
     ///
     /// **The commit window indexes `row.scalars` positionally against `MANIFEST.declared_scalars`**
@@ -3839,6 +3842,7 @@ mod segment_schema_tests {
                 shard_id: 0,
                 idset: 1,
             },
+            groups: Vec::new(),
             views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
@@ -6203,8 +6207,10 @@ impl Executor {
         let mut carried_rels: BTreeSet<String> = BTreeSet::new();
         for descriptor in &carried_segments {
             let segment_prefix = format!(
-                "partitions/{}/views/{}/segments/{}",
-                plan.partition, descriptor.view, descriptor.seg_id
+                "partitions/{}/{}/segments/{}",
+                plan.partition,
+                tessera_store::view_rel(&descriptor.view),
+                descriptor.seg_id
             );
             for name in ["morton.u32", "columns.arrow"] {
                 carried_rels.insert(format!("{segment_prefix}/{name}"));
@@ -10130,12 +10136,8 @@ impl Executor {
     ) -> Vec<(String, tessera_store::RowSpace)> {
         let mut spaces: Vec<(String, tessera_store::RowSpace)> = Vec::new();
         for (view, row_count) in views {
-            let path = prefix_dir
-                .join("partitions")
-                .join(partition)
-                .join("views")
-                .join(view)
-                .join("permutation.bin");
+            let partition_dir = prefix_dir.join("partitions").join(partition);
+            let path = tessera_store::view_path(&partition_dir, view).join("permutation.bin");
             match tessera_store::Permutation::load(&path) {
                 Ok(permutation) => spaces.push((
                     view.clone(),
@@ -11914,11 +11916,8 @@ fn fold_segments(
 ) -> Vec<(String, tessera_store::read::SegmentData)> {
     let mut out = Vec::with_capacity(segments.len());
     for descriptor in segments {
-        let dir = prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("views")
-            .join(&descriptor.view)
+        let partition_dir = prefix_dir.join("partitions").join(partition);
+        let dir = tessera_store::view_path(&partition_dir, &descriptor.view)
             .join("segments")
             .join(&descriptor.seg_id);
         let morton = tessera_store::read::MortonSlice::load(&dir.join("morton.u32"));

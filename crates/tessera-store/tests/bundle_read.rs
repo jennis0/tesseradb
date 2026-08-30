@@ -162,6 +162,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![ViewDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),

@@ -294,14 +294,18 @@ fn inputs() -> Inputs {
 
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: inputs.points.clone(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: inputs.points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(inputs.pairs.clone()),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -2529,8 +2533,14 @@ fn every_shape_kind_builds_and_a_depth_is_refused() {
 
     let circle = SHAPE_LAYER
         .replace("kind = \"bbox\"", "kind = \"circle\"")
-        .replace("bbox = [0.0, 0.0, 400.0, 1000.0]", "circle = [200.0, 500.0, 150.0]")
-        .replace("bbox = [600.0, 0.0, 1000.0, 1000.0]", "circle = [800.0, 500.0, 150.0]");
+        .replace(
+            "bbox = [0.0, 0.0, 400.0, 1000.0]",
+            "circle = [200.0, 500.0, 150.0]",
+        )
+        .replace(
+            "bbox = [600.0, 0.0, 1000.0, 1000.0]",
+            "circle = [800.0, 500.0, 150.0]",
+        );
     let inputs = predicate_inputs(&circle);
     run(&inputs, &inputs.at("bundle")).expect("a circle layer builds");
 
@@ -2552,7 +2562,10 @@ fn every_shape_kind_builds_and_a_depth_is_refused() {
     let message = run(&inputs, &inputs.at("bundle"))
         .expect_err("a depth is refused")
         .to_string();
-    assert!(message.contains("polygon-membership.md") && message.contains("depth"), "{message}");
+    assert!(
+        message.contains("polygon-membership.md") && message.contains("depth"),
+        "{message}"
+    );
 }
 
 /// **An artifact's shape and its layer's kind are one statement**, so each half without the other
@@ -2738,7 +2751,10 @@ fn a_predicate_over_a_category_column_mints_its_values() {
         .iter()
         .find(|v| v.layer == "grades/by-value" && v.level == 0)
         .expect("the level's version reaches the manifest — the values were published at all");
-    assert_eq!(level.version, 1, "the values were minted in one publication");
+    assert_eq!(
+        level.version, 1,
+        "the values were minted in one publication"
+    );
     let extents: Vec<_> = manifest
         .membership_extents
         .iter()
@@ -2798,7 +2814,8 @@ fn a_build_reads_an_authored_shape_content_and_discloses_the_kind() {
     let inputs = predicate_inputs(AUTHORED_LAYER);
     run(&inputs, &inputs.at("bundle")).expect("an authored polygon builds");
     let config = tessera_build::config::Config::parse(&inputs.config, &Default::default()).unwrap();
-    let disclosure = serde_json::to_value(tessera_build::disclosure::Disclosure::of(&config)).unwrap();
+    let disclosure =
+        serde_json::to_value(tessera_build::disclosure::Disclosure::of(&config)).unwrap();
     let layer = disclosure["layers"]
         .as_array()
         .unwrap()
@@ -2806,14 +2823,20 @@ fn a_build_reads_an_authored_shape_content_and_discloses_the_kind() {
         .find(|l| l["name"] == "clusters/drawn")
         .expect("in the report");
     assert_eq!(layer["shape"], serde_json::json!("authored"));
-    assert_eq!(layer["content"]["supplied"][1]["type"], serde_json::json!("polygon"));
+    assert_eq!(
+        layer["content"]["supplied"][1]["type"],
+        serde_json::json!("polygon")
+    );
 
     let bad = AUTHORED_LAYER.replace("\"POLYGON ((0 0, 400 0, 400 1000, 0 1000, 0 0), (100 100, 200 100, 200 200, 100 200, 100 100))\"", "\"a polygon, in words\"");
     let inputs = predicate_inputs(&bad);
     let message = run(&inputs, &inputs.at("bundle"))
         .expect_err("a value that is not WKT is refused")
         .to_string();
-    assert!(message.contains("west") && message.contains("outline"), "{message}");
+    assert!(
+        message.contains("west") && message.contains("outline"),
+        "{message}"
+    );
 
     // A hull beside it is two drawn geometries, refused at the declaration.
     let two = AUTHORED_LAYER.replace(

@@ -957,7 +957,11 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
     let mut segments: Vec<SegmentDescriptor> = Vec::with_capacity(plan.views.len());
     let mut base_segment_bytes = 0u64;
     for view in &plan.views {
-        let view_rel = format!("partitions/{}/views/{}", plan.partition, view.view);
+        let view_rel = format!(
+            "partitions/{}/{}",
+            plan.partition,
+            tessera_store::view_rel(&view.view)
+        );
         let view_dir = ctx.to_prefix_dir.join(&view_rel);
         std::fs::create_dir_all(&view_dir).map_err(|e| failed("creating the view", &e))?;
         let segment_rel = format!("{view_rel}/segments/{}", ctx.seg_id);

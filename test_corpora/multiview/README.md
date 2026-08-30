@@ -4,11 +4,17 @@
 parent README). Not a rung on the dataset ladder — it measures nothing and is outside the ingest
 campaign. Its job is to be a `corpus.toml` a two-view build can be pointed at, once one exists.
 
-**`tessera check` passes against it; `tessera build` refuses it.** The declaration surface —
-`[[view_group]]`, both roster forms, `members`, typed metadata, `scope` on an attribute and on a
-layer — parses and validates as of the build-surface stage, and `check` reports the group shape
-beside the views. ⊘ The multi-view build is still specified and not implemented (views.md §7), so
-a build against this file refuses naming that, which is expected.
+**`tessera check` passes against it; `tessera build` refuses it, and the refusal has moved.** The
+declaration surface — `[[view_group]]`, both roster forms, `members`, typed metadata, `scope` on
+an attribute and on a layer — parses and validates, and `check` reports the group shape beside the
+views. The multi-view build's two passes are now built for the point half (views.md §7), so
+`world` and `quarter`'s four inline views build together — with one entity space over their five
+files, and a row space each. ⊘ What this file still reaches past the build is named at the
+refusal, in the order the build meets them: the group-scoped attribute `sentiment` (§5's column
+family), `quarter_alt`'s points behind a `fields.view` discriminator (§3.1's form B), and the two
+layers, one of which names a group and one of which is scoped to it (§3.5). Removing those three
+things from a copy of this declaration is what builds today, and is how the five-view shape below
+was measured.
 
 ## What is real-derived and what is synthetic
 
@@ -69,7 +75,7 @@ This table is the fixture's point — read it as the implementation's checklist,
 
 | `views.md` feature | Where in this fixture |
 |---|---|
-| A plain `[[view]]` (§2) | `world` |
+| A plain `[[view]]` (§2) | `world`, and `[defaults].allocation_view` names it as the build's anchor (decision 0112) |
 | A view group, form A — one file per view (§3.1) | `quarter`, `[[view_group.view]]` × 4 |
 | A view group, form B — one file, a discriminator column (§3.1) | `quarter_alt`, `fields.view = "quarter"` |
 | Typed roster metadata (§3.1) | `quarter.metadata = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }`, present on all 4 `[[view_group.view]]` blocks |

@@ -141,14 +141,18 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         .expect("the text schema parses")
         .schema;
     build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -269,16 +273,16 @@ fn answers(engine: &Engine, terms: &[String]) -> BTreeMap<String, Vec<u32>> {
 /// Read from the artefact rather than through the composition, because the composition unions the
 /// layers: a pass that edited the manifest and published a layer holding nothing would still answer
 /// every question correctly from the base, and this is what separates the two.
-fn extent_index(root: &Path, extent: &tessera_store::manifest::TextExtent) -> BTreeMap<String, Vec<u32>> {
+fn extent_index(
+    root: &Path,
+    extent: &tessera_store::manifest::TextExtent,
+) -> BTreeMap<String, Vec<u32>> {
     let prefix = root.join(current_prefix(root));
-    let dict = tessera_filter::SortedDict::open(
-        &prefix.join(&extent.dict),
-        tessera_filter::Access::Read,
-    )
-    .expect("the coalesced dictionary opens");
-    let postings =
-        tessera_filter::ColumnPostings::open(&prefix.join(&extent.postings), false)
-            .expect("the coalesced postings open");
+    let dict =
+        tessera_filter::SortedDict::open(&prefix.join(&extent.dict), tessera_filter::Access::Read)
+            .expect("the coalesced dictionary opens");
+    let postings = tessera_filter::ColumnPostings::open(&prefix.join(&extent.postings), false)
+        .expect("the coalesced postings open");
     assert_eq!(
         dict.len(),
         postings.record_count(),
@@ -471,7 +475,9 @@ fn a_coalesced_text_layer_that_does_not_cover_its_window_is_refused() {
     let mut short = croaring::Bitmap::deserialize::<croaring::Portable>(
         &std::fs::read(prefix.join(&extent.presence)).expect("the presence file reads"),
     );
-    let dropped = short.minimum().expect("the coalesced layer covers something");
+    let dropped = short
+        .minimum()
+        .expect("the coalesced layer covers something");
     short.remove(dropped);
     let short_path = dir.path().join("short-presence.roaring");
     std::fs::write(&short_path, short.serialize::<croaring::Portable>()).unwrap();

@@ -183,14 +183,18 @@ fn fixture() -> Fixture {
     write_members(&tmp.path().join("clumped_members.parquet"), &clumped_rows);
 
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -345,7 +349,8 @@ fn the_first_request_over_a_fresh_bundle_adopts_and_composes_nothing() {
     let out = engine
         .viewport(
             &session,
-            ViewportRequest::new("s0", 0, WHOLE_MAP, 0).layers(LayerSelection::Named(&[SPREAD, CLUMPED])),
+            ViewportRequest::new("s0", 0, WHOLE_MAP, 0)
+                .layers(LayerSelection::Named(&[SPREAD, CLUMPED])),
         )
         .expect("the first viewport over a freshly built bundle");
     let elapsed = started.elapsed();

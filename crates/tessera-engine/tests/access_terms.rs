@@ -101,17 +101,21 @@ fn write_points(path: &Path, access: impl Fn(u64) -> Option<Vec<&'static str>>) 
 
 fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
     BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        points: points.to_path_buf(),
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            access: AccessInput {
+                source: AccessSource::Field("categories".to_string()),
+                default: default.to_string(),
+            },
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: AccessInput {
-            source: AccessSource::Field("categories".to_string()),
-            default: default.to_string(),
-        },
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -206,7 +210,7 @@ fn a_default_alone_gives_every_point_the_declared_label() {
         &dir.path().join("bundle"),
         "public",
     );
-    args.access.source = AccessSource::Default;
+    args.views[0].access.source = AccessSource::Default;
     build(&args).expect("a default-only view builds");
     assert_eq!(visible(dir.path(), &[]), N);
 }

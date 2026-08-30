@@ -210,14 +210,12 @@ pub(crate) fn execute(plan: MergePlan, ctx: MergeContext) -> Result<CompletedMer
     )
     .map_err(|e| MergeFailed(format!("merge: {e}")))?;
 
-    let seg_dir = ctx
-        .prefix_dir
-        .join("partitions")
-        .join(&plan.partition)
-        .join("views")
-        .join(&plan.view)
-        .join("segments")
-        .join(&ctx.seg_id);
+    let seg_dir = tessera_store::view_path(
+        &ctx.prefix_dir.join("partitions").join(&plan.partition),
+        &plan.view,
+    )
+    .join("segments")
+    .join(&ctx.seg_id);
     let segment = SegmentData {
         seg_id: ctx.seg_id.clone(),
         row_count: output.segment.row_count,
@@ -310,8 +308,9 @@ pub(crate) fn rebase_into(
     // has removed, which refuses at the next open.
     for seg_id in &consumed {
         let seg_rel = format!(
-            "partitions/{}/views/{}/segments/{seg_id}",
-            plan.partition, plan.view
+            "partitions/{}/{}/segments/{seg_id}",
+            plan.partition,
+            tessera_store::view_rel(&plan.view)
         );
         for name in [
             "morton.u32",

@@ -46,13 +46,19 @@ fn write_points(path: &Path) {
         vec![
             Arc::new(UInt64Array::from(ids.clone())),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 37) % 1000) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 37) % 1000) as f64)
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 53) % 1000) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 53) % 1000) as f64)
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(Int64Array::from(
-                ids.iter().map(|&e| Some((e * 11) as i64)).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|&e| Some((e * 11) as i64))
+                    .collect::<Vec<_>>(),
             )),
         ],
     )
@@ -144,21 +150,28 @@ fn project(dir: &Path, covered: &[u64]) -> Config {
 }
 
 fn args(config: &Config, out: PathBuf) -> BuildArgs {
-    let acquired = config.acquire("s0").expect("the declaration acquires");
+    let acquired = config.acquire().expect("the declaration acquires");
+    let registry = config.build_views().expect("the registry compiles");
+    let acquired_view =
+        tessera_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
     BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        points: acquired.points,
-        point_fields: acquired.point_fields,
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            points: acquired_view.points,
+            point_fields: acquired_view.point_fields,
+            access: acquired_view.access,
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: acquired.attribute_sources,
-        access: acquired.access,
         out,
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 1000.0,
-            y_min: 0.0,
-            y_max: 1000.0,
-        },
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -195,10 +208,21 @@ fn source_to_entity(out: &Path) -> HashMap<u64, u32> {
             arrow::ipc::reader::FileReader::try_new(File::open(&path).unwrap(), None).unwrap();
         for batch in reader {
             let batch = batch.unwrap();
-            let ext = batch.column(0).as_any().downcast_ref::<BinaryArray>().unwrap();
-            let ent = batch.column(1).as_any().downcast_ref::<UInt32Array>().unwrap();
+            let ext = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap();
+            let ent = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .unwrap();
             for i in 0..batch.num_rows() {
-                map.insert(u64::from_le_bytes(ext.value(i).try_into().unwrap()), ent.value(i));
+                map.insert(
+                    u64::from_le_bytes(ext.value(i).try_into().unwrap()),
+                    ent.value(i),
+                );
             }
         }
     }
@@ -281,10 +305,15 @@ fn rows_naming_entities_this_build_did_not_load_are_ignored() {
 
     let rows = rows_by_source(&out);
     for source in 0..N {
-        let score = rows[&source].iter().find(|(t, _)| *t == 1).map(|(_, v)| v.clone());
+        let score = rows[&source]
+            .iter()
+            .find(|(t, _)| *t == 1)
+            .map(|(_, v)| v.clone());
         assert_eq!(
             score,
-            source.is_multiple_of(2).then(|| RecordValue::F64(score_of(source))),
+            source
+                .is_multiple_of(2)
+                .then(|| RecordValue::F64(score_of(source))),
             "source {source}"
         );
     }
@@ -307,7 +336,10 @@ fn a_source_that_meets_nothing_still_builds() {
             rows[&source].iter().all(|(t, _)| *t != 1),
             "no entity has a score, and every one still has its own count"
         );
-        assert!(rows[&source].iter().any(|(t, _)| *t == 0), "source {source}");
+        assert!(
+            rows[&source].iter().any(|(t, _)| *t == 0),
+            "source {source}"
+        );
     }
 }
 

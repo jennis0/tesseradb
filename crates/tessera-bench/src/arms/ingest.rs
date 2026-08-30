@@ -230,19 +230,23 @@ pub fn run_build(
 
             let collector = StageCollector::default();
             let args = BuildArgs {
-                projection: tessera_spatial::Projection::None,
-                point_fields: Default::default(),
-                points: geometry.clone(),
+                views: vec![tessera_build::ViewArgs {
+                    view_id: "s0".to_string(),
+                    projection: tessera_spatial::Projection::None,
+                    extent: Bounds {
+                        x_min: 0.0,
+                        x_max: 65536.0,
+                        y_min: 0.0,
+                        y_max: 65536.0,
+                    },
+                    points: geometry.clone(),
+                    point_fields: Default::default(),
+                    access: tessera_build::config::AccessInput::relation(pairs.clone()),
+                }],
+                anchor: 0,
+                groups: Vec::new(),
                 attribute_sources: Vec::new(),
-                access: tessera_build::config::AccessInput::relation(pairs.clone()),
                 out: out.clone(),
-                extent: Bounds {
-                    x_min: 0.0,
-                    x_max: 65536.0,
-                    y_min: 0.0,
-                    y_max: 65536.0,
-                },
-                view_id: "s0".to_string(),
                 limit: Some(scale),
                 identity_key: IdentityKey::from_hex(TEST_KEY_HEX)?,
                 identity_key_hex: TEST_KEY_HEX.to_string(),

@@ -183,14 +183,18 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     write_pairs(&pairs);
 
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.clone(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -479,14 +483,18 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -517,14 +525,18 @@ fn build_rejects_an_empty_selection() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: tmp.path().join("bundle"),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: Some(0),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -555,16 +567,20 @@ fn morton_input_requires_the_identity_extent() {
     write_pairs(&pairs);
 
     let args = |extent| BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.clone(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent,
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: tmp
             .path()
             .join(format!("bundle-{extent:?}").replace(['/', ' '], "_")),
-        extent,
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -604,14 +620,18 @@ fn morton_input_requires_the_identity_extent() {
     };
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: identity,
+            points,
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: identity,
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -652,14 +672,18 @@ fn build_rejects_an_unsafe_view_id() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "../escape".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: tmp.path().join("bundle"),
-        extent: extent(),
-        view_id: "../escape".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -699,14 +723,18 @@ fn limit_filters_the_source_entity_id_prefix() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: Some(100),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -740,14 +768,18 @@ fn verify_accepts_a_freshly_built_bundle() {
     write_pairs(&pairs);
 
     build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -784,14 +816,18 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points,
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -946,7 +982,8 @@ fn morton_plus_residual_recovers_sub_cell_position() {
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     rows.sort_by_key(|r| r.source_id);
     assert_eq!(rows.len(), 4);
 
@@ -982,7 +1019,8 @@ fn bare_morton_widens_with_a_zero_residual() {
         tessera_spatial::Projection::None,
         &IDENTITY_EXTENT,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(!rows.is_empty());
     for row in &rows {
         assert_eq!(
@@ -1089,14 +1127,18 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         write_fixture(&points, &pairs);
 
         let args = BuildArgs {
-            projection: tessera_spatial::Projection::None,
-            point_fields: Default::default(),
+            views: vec![tessera_build::ViewArgs {
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: tessera_build::input::IDENTITY_EXTENT,
+                points,
+                point_fields: Default::default(),
+                access: tessera_build::config::AccessInput::relation(pairs),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
             attribute_sources: Vec::new(),
-            points,
-            access: tessera_build::config::AccessInput::relation(pairs),
             out: out.clone(),
-            extent: tessera_build::input::IDENTITY_EXTENT,
-            view_id: "s0".to_string(),
             limit: None,
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),

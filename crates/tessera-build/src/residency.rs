@@ -718,19 +718,23 @@ require_member_visibility = "none"
         std::fs::write(&config_path, &config).unwrap();
         let parsed = crate::config::Config::parse(&config_path, &Default::default()).unwrap();
         let args = crate::BuildArgs {
-            projection: parsed.views[0].projection,
-            points: points.clone(),
-            point_fields: parsed.views[0].fields.clone(),
+            views: vec![crate::ViewArgs {
+                view_id: "s0".into(),
+                projection: parsed.views[0].projection,
+                extent: tessera_spatial::Bounds {
+                    x_min: 0.0,
+                    x_max: 1024.0,
+                    y_min: 0.0,
+                    y_max: 1024.0,
+                },
+                points: points.clone(),
+                point_fields: parsed.views[0].fields.clone(),
+                access: crate::config::AccessInput::relation(pairs.clone()),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
             attribute_sources: parsed.attribute_sources.clone(),
-            access: crate::config::AccessInput::relation(pairs.clone()),
             out: dir.join("bundle"),
-            extent: tessera_spatial::Bounds {
-                x_min: 0.0,
-                x_max: 1024.0,
-                y_min: 0.0,
-                y_max: 1024.0,
-            },
-            view_id: "s0".into(),
             limit: None,
             identity_key: tessera_types::IdentityKey::from_hex("000102030405060708090a0b0c0d0e0f")
                 .unwrap(),

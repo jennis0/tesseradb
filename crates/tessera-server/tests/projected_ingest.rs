@@ -64,18 +64,18 @@ fn world_frame() -> Bounds {
 /// nowhere else.
 fn places() -> Vec<(f64, f64)> {
     vec![
-        (-0.1276, 51.5072),    // London
-        (139.6917, 35.6895),   // Tokyo
-        (-74.0060, 40.7128),   // New York
-        (151.2093, -33.8688),  // Sydney
-        (0.0, 0.0),            // the origin of both axes
-        (-180.0, 0.0),         // the western edge of the world
-        (18.4241, -33.9249),   // Cape Town
-        (-58.3816, -34.6037),  // Buenos Aires
-        (37.6173, 55.7558),    // Moscow
-        (-155.5828, 19.8968),  // Hawai'i
+        (-0.1276, 51.5072),     // London
+        (139.6917, 35.6895),    // Tokyo
+        (-74.0060, 40.7128),    // New York
+        (151.2093, -33.8688),   // Sydney
+        (0.0, 0.0),             // the origin of both axes
+        (-180.0, 0.0),          // the western edge of the world
+        (18.4241, -33.9249),    // Cape Town
+        (-58.3816, -34.6037),   // Buenos Aires
+        (37.6173, 55.7558),     // Moscow
+        (-155.5828, 19.8968),   // Hawai'i
         (10.0, -85.0511287798), // just inside the southern domain cut
-        (10.0, 89.5),          // POLAR: outside the domain, and therefore clipped
+        (10.0, 89.5),           // POLAR: outside the domain, and therefore clipped
     ]
 }
 
@@ -119,14 +119,18 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
     write_lon_lat_points(&points_path, points);
     write_pairs_n(&pairs_path, points.len() as u64);
     build(&BuildArgs {
-        projection: Projection::WebMercator,
-        point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-        points: points_path,
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: Projection::WebMercator,
+            extent: world_frame(),
+            points: points_path,
+            point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+            access: tessera_build::config::AccessInput::relation(pairs_path),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs_path),
         out: out.to_path_buf(),
-        extent: world_frame(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -145,10 +149,7 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
 }
 
 /// An ingest batch under caller-chosen column names, so the refusal tests can spell them wrong.
-fn ingest_batch(
-    columns: (&str, &str),
-    rows: &[(Vec<u8>, f64, f64, &str)],
-) -> Vec<u8> {
+fn ingest_batch(columns: (&str, &str), rows: &[(Vec<u8>, f64, f64, &str)]) -> Vec<u8> {
     let schema = Arc::new(Schema::new(vec![
         Field::new("external_id", DataType::Binary, false),
         Field::new(columns.0, DataType::Float64, false),
@@ -237,7 +238,10 @@ fn served_positions(engine: &Engine, k: usize) -> BTreeMap<u64, u64> {
         .authorise(br#"{"terms": ["0"]}"#)
         .expect("the fixture's pairs grant term 0 to every row");
     let out = engine
-        .viewport(&session, ViewportRequest::new("s0", 0, [0.0, 0.0, 1.0, 1.0], k))
+        .viewport(
+            &session,
+            ViewportRequest::new("s0", 0, [0.0, 0.0, 1.0, 1.0], k),
+        )
         .expect("the viewport answers over the whole frame");
     out.points
         .iter()
@@ -372,7 +376,10 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
     );
     let rows = vec![(ingested_id(POLAR), lon, lat, "0")];
     let (status, body) = post_ingest(&server, "polar", ingest_batch(("lon", "lat"), &rows)).await;
-    assert_eq!(status, 200, "a clipped row is accepted, never refused: {body}");
+    assert_eq!(
+        status, 200,
+        "a clipped row is accepted, never refused: {body}"
+    );
     assert_eq!(body["accepted"], 1);
     assert_eq!(
         body["clipped"], 1,
@@ -382,7 +389,11 @@ async fn a_polar_row_is_clipped_counted_and_lands_on_the_frames_edge() {
 
     let positions = served_positions(&server.state.engine, 400);
     let ingested = position_of(&server.state.engine, &positions, &ingested_id(POLAR));
-    let built = position_of(&server.state.engine, &positions, &external_id_of(POLAR as u64));
+    let built = position_of(
+        &server.state.engine,
+        &positions,
+        &external_id_of(POLAR as u64),
+    );
     assert_eq!(
         ingested, built,
         "the same polar row through the two doors must land in the same cell"

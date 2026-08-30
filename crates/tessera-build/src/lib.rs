@@ -89,16 +89,65 @@ pub(crate) fn report_shapes(reports: &[crate::shapes::ShapeLayerReport]) {
     }
 }
 
-/// Arguments to [`build`].
-#[derive(Clone)]
-pub struct BuildArgs {
-    /// Parquet file of points: `entity_id` plus either `x`/`y` or `morton` (see [`input`]).
-    ///
-    /// The built view's own `source` (`configuration.md` §1), overridable by `--file NAME=PATH`.
+/// One coordinate system a build materialises, and where its points come from
+/// (`views.md` §7).
+///
+/// **A view owns everything downstream of the permutation and nothing upstream of it**
+/// (`views.md` §1): the projection, the frame, the geometry source and the labels its own rows
+/// carry are here; identity, the term index, the attributes and the layers are on
+/// [`BuildArgs`], shared by every view of the build.
+#[derive(Debug, Clone)]
+pub struct ViewArgs {
+    /// The view this row space belongs to: a plain view's name, or a group's view as the joined
+    /// `group:key` id (`views.md` §3.2). [`tessera_store::view_path`] derives the on-disc path.
+    pub view_id: String,
+    /// What turns each row's coordinates into a position in this view's frame, before anything is
+    /// quantised (`projections.md` §3). [`tessera_spatial::Projection::None`] — the default —
+    /// transforms nothing, and is the exact identity.
+    pub projection: tessera_spatial::Projection,
+    /// The quantisation extent this view's Morton codes are computed against (contracts §2.5),
+    /// **per view and never per bundle** (decision 0040): an embedding and a map cannot share a
+    /// frame without one of them wasting most of the grid.
+    pub extent: Bounds,
+    /// Parquet file of this view's points: `entity_id` plus either `x`/`y` or `morton` (see
+    /// [`input`]). The view's own `source` (`configuration.md` §1), overridable by
+    /// `--file NAME=PATH`.
     pub points: PathBuf,
     /// Where the view's identity and geometry fields sit in that file — the view's `fields` map,
     /// resolved. [`config::Fields::default`] is canonical names throughout.
     pub point_fields: crate::config::Fields,
+    /// Where each of this view's points gets its access terms, and what a point carrying none
+    /// gets — the view's `point_visibility`, resolved.
+    ///
+    /// **The label is the entity's, not the row's** (`views.md` §7): pass one unions the label
+    /// sets a view's rows carry over every view an entity appears in, and a disagreement is a
+    /// refusal naming the entity and the files.
+    pub access: crate::config::AccessInput,
+}
+
+/// Arguments to [`build`].
+#[derive(Clone)]
+pub struct BuildArgs {
+    /// Every coordinate system this build materialises, in **declaration order**
+    /// (`views.md` §7): one entry per plain `[[view]]` and one per view of every
+    /// `[[view_group]]`. Declaration order is what decides which view's Morton code an item
+    /// absent from the anchor is tie-broken on (decision 0112).
+    pub views: Vec<ViewArgs>,
+    /// Index into [`BuildArgs::views`] of the **anchor view**: the one whose Morton code orders
+    /// entity ids within a signature group (decision 0112, extending 0073).
+    ///
+    /// `[defaults].allocation_view` names it, and it is **required when the declaration carries
+    /// more than one view** — explicit rather than positional, so reordering declaration blocks
+    /// cannot silently re-key a rebuild, the ids being permanent (I9).
+    pub anchor: usize,
+    /// The view groups and their rosters (`views.md` §3.1), in declaration order — what the
+    /// manifest publishes so a client can order and name a group's views. Empty for a
+    /// declaration of plain views alone.
+    ///
+    /// **Recorded, never evaluated**: ⊘ no gate is evaluated anywhere (`views.md` §6), so a
+    /// roster entry's `visibility` is a record of the declaration rather than a means of
+    /// restricting reachability.
+    pub groups: Vec<tessera_store::manifest::GroupDescriptor>,
     /// The declared attributes **grouped by the file each is read from**, and the identity column
     /// each group joins on (`configuration.md` §1's `[sources]` and `[defaults]`).
     ///
@@ -112,23 +161,8 @@ pub struct BuildArgs {
     /// are per view, attributes are entity space, and a corpus whose geometry is recomputed does
     /// not rewrite its attributes to say so.
     pub attribute_sources: Vec<crate::config::AttributeSource>,
-    /// Where each point's access terms come from, and what a point carrying none gets.
-    ///
-    /// The built view's `point_visibility`, resolved: an exploded `(entity_id, term_id)` relation,
-    /// a `list<string>` field of the points source, or neither — every point taking the default.
-    pub access: crate::config::AccessInput,
     /// Bundle root to create.
     pub out: PathBuf,
-    /// What turns each row's coordinates into a position in the frame, before anything is
-    /// quantised (`projections.md` §3). [`tessera_spatial::Projection::None`] — the default —
-    /// transforms nothing, and is the exact identity.
-    pub projection: tessera_spatial::Projection,
-    /// The quantisation extent Morton codes are computed against (contracts §2.5). For a
-    /// projected view this is the aligned square the declared box snapped to, over the unit
-    /// square the transform produces, rather than anything the caller wrote.
-    pub extent: Bounds,
-    /// The view this build's segment belongs to.
-    pub view_id: String,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
     pub limit: Option<u64>,
     /// The deployment's identity key (contracts §2.2). **Not** per bundle: it must be carried
@@ -222,12 +256,11 @@ pub struct BuildArgs {
 impl std::fmt::Debug for BuildArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuildArgs")
-            .field("points", &self.points)
+            .field("views", &self.views)
+            .field("anchor", &self.anchor)
+            .field("groups", &self.groups)
             .field("attribute_sources", &self.attribute_sources)
-            .field("access", &self.access)
             .field("out", &self.out)
-            .field("extent", &self.extent)
-            .field("view_id", &self.view_id)
             .field("limit", &self.limit)
             .field("identity_key", &self.identity_key)
             .field(
@@ -247,9 +280,22 @@ impl std::fmt::Debug for BuildArgs {
 
 /// What a completed build produced.
 #[derive(Debug, Clone)]
+pub struct ViewReport {
+    /// The view id: a plain view's name, or a group's view as `group:key` (`views.md` §3.2).
+    pub view_id: String,
+    /// Rows in this view's segment — the view's population, which is a **subset** of entity
+    /// space wherever the view does not hold every item (`views.md` §8).
+    pub rows: u64,
+    /// What this view's frame gave the corpus, counted off its own sorted Morton codes.
+    pub occupancy: Occupancy,
+}
+
+/// What a completed build produced, per view.
+#[derive(Debug, Clone)]
 pub struct BuildReport {
     pub prefix: String,
-    pub view_id: String,
+    /// One entry per view the build materialised, in registry order (`views.md` §7).
+    pub views: Vec<ViewReport>,
     pub seg_id: String,
     /// Number of items (= `entity_id_high_water`, since the bootstrap build allocates from 0).
     pub items: u64,
@@ -259,8 +305,6 @@ pub struct BuildReport {
     pub pairs: u64,
     /// Total size on disk of every file the manifests name.
     pub bundle_bytes: u64,
-    /// How much of the frame's resolution the points actually used.
-    pub occupancy: Occupancy,
     /// Member rows whose key said *this point is in no artifact* — a null key, or exactly `-1`
     /// (`artifacts-from-points.md` §2). Noise is a quarter of the points at each split of a
     /// condensed tree, so this is an ordinary number rather than a fault; it is here because a
@@ -449,69 +493,154 @@ pub fn signature_sort_key(terms: &[TermId]) -> Vec<u32> {
 /// a disagreement about every permanent entity id (I9).
 pub(crate) struct AccessPlan {
     pub descriptors: input::TermDescriptors,
-    /// The source term a point carrying none is given. Meaningless for the relation route, which
-    /// fills nothing.
-    pub default_term: u64,
+    /// The source term a point of view `v` carrying none is given, indexed by
+    /// [`BuildArgs::views`]. Meaningless for the relation route, which fills nothing.
+    ///
+    /// **One vocabulary, one term per view's default** (`views.md` §7): term ids are entity
+    /// space and every view's labels are interned into the same dictionary, so the vocabulary is
+    /// the union over every view's source; what stays per view is which of its entries an
+    /// unlabelled point of that view takes.
+    pub default_term: Vec<u64>,
+}
+
+/// How a build's views declare where their labels come from, checked once (`views.md` §7).
+///
+/// **A label is the entity's, not the row's.** The two routes cannot be mixed across the views of
+/// one build, and two relations cannot be: an entity's term set has to be one set, and there is
+/// nothing to check a second relation's disagreement against — the field route's per-view sets are
+/// compared entity by entity (the count identity in [`pipeline`]'s batch loop), which a relation
+/// carrying entity-space pairs is outside of.
+enum AccessRoute<'a> {
+    /// Every view reads its labels from a column of its own points file, or takes its default.
+    /// One vocabulary over every view's distinct values, and one set per (entity, view) to agree.
+    PerView,
+    /// Every view names the same exploded `(entity_id, term_id)` relation. Entity space already,
+    /// so it is scanned once and there is nothing to disagree.
+    SharedRelation(&'a std::path::Path),
+}
+
+/// Which route this build's views declare, refusing a mixture.
+fn access_route(args: &BuildArgs) -> Result<AccessRoute<'_>> {
+    use crate::config::AccessSource;
+    let mut relation: Option<&std::path::Path> = None;
+    let mut per_view: Option<&str> = None;
+    for view in &args.views {
+        match &view.access.source {
+            AccessSource::Relation(path) => match relation {
+                None => relation = Some(path.as_path()),
+                Some(first) if first == path.as_path() => {}
+                Some(first) => {
+                    return Err(BuildError::Invalid(format!(
+                        "view '{}' reads its labels from {} and another view reads them from {}. \
+                         A label is the entity's, not the row's (views §7), so two relations \
+                         would be two answers to one question with nothing to reconcile them",
+                        view.view_id,
+                        path.display(),
+                        first.display()
+                    )))
+                }
+            },
+            AccessSource::Field(_) | AccessSource::Default => per_view = Some(&view.view_id),
+        }
+    }
+    match (relation, per_view) {
+        (Some(path), None) => Ok(AccessRoute::SharedRelation(path)),
+        (None, _) => Ok(AccessRoute::PerView),
+        (Some(path), Some(view)) => Err(BuildError::Invalid(format!(
+            "view '{view}' reads its labels from its own points file and another view reads them \
+             from the relation {}. A build's views must declare one route (views §7): an \
+             entity's label is one set, and the two routes cannot be checked against each other",
+            path.display()
+        ))),
+    }
 }
 
 /// Read whatever a build must know before assigning term ids (see [`AccessPlan`]).
 pub(crate) fn plan_access(args: &BuildArgs) -> Result<AccessPlan> {
     use crate::config::AccessSource;
-    let field = match &args.access.source {
+    if let AccessRoute::SharedRelation(_) = access_route(args)? {
         // The relation supplies its own integer term ids and needs no vocabulary pass.
-        AccessSource::Relation(_) => {
-            return Ok(AccessPlan {
-                descriptors: input::TermDescriptors::Ids,
-                default_term: 0,
-            })
-        }
-        AccessSource::Field(field) => Some(field.as_str()),
-        AccessSource::Default => None,
-    };
-    let vocabulary = input::read_access_vocabulary(
-        &args.points,
-        &args.point_fields,
-        field,
-        &args.access.default,
-        args.limit,
-    )?;
-    let default_term = vocabulary
-        .binary_search_by(|t| t.as_str().cmp(&args.access.default))
-        .expect("the default is read into the vocabulary unconditionally")
-        as u64;
+        return Ok(AccessPlan {
+            descriptors: input::TermDescriptors::Ids,
+            default_term: vec![0; args.views.len()],
+        });
+    }
+    // **The union, sorted** — one dictionary over every view's distinct values. With one view
+    // this is that view's own sorted vocabulary, unchanged, which is what keeps a single-view
+    // bundle byte-identical across this change.
+    let mut vocabulary: Vec<String> = Vec::new();
+    for view in &args.views {
+        let field = match &view.access.source {
+            AccessSource::Field(field) => Some(field.as_str()),
+            _ => None,
+        };
+        vocabulary.extend(input::read_access_vocabulary(
+            &view.points,
+            &view.point_fields,
+            field,
+            &view.access.default,
+            args.limit,
+        )?);
+    }
+    vocabulary.sort_unstable();
+    vocabulary.dedup();
+    let default_term = args
+        .views
+        .iter()
+        .map(|view| {
+            vocabulary
+                .binary_search_by(|t| t.as_str().cmp(&view.access.default))
+                .expect("every view's default is read into the vocabulary unconditionally")
+                as u64
+        })
+        .collect();
     Ok(AccessPlan {
         descriptors: input::TermDescriptors::Vocabulary(vocabulary),
         default_term,
     })
 }
 
-/// Walk this build's access relation, whichever of the three shapes declared it, as
-/// `(source entity id, source term)`.
-pub(crate) fn scan_access<F: FnMut(u64, u64) -> std::ops::ControlFlow<()>>(
+/// Walk every view's access relation, whichever of the three shapes declared it, as
+/// `(view index, source entity id, source term)`.
+///
+/// **Every view, in [`BuildArgs::views`] order**, because entity space is unioned over them
+/// (`views.md` §7). The view index is what lets the caller count each view's contribution
+/// separately, which is how the label-agreement refusal is made exact.
+pub(crate) fn scan_access<F: FnMut(usize, u64, u64) -> std::ops::ControlFlow<()>>(
     args: &BuildArgs,
     plan: &AccessPlan,
-    visit: F,
+    mut visit: F,
 ) -> Result<input::AccessFill> {
     use crate::config::AccessSource;
-    match (&args.access.source, &plan.descriptors) {
-        (AccessSource::Relation(path), _) => {
-            input::scan_pairs(path, &access_fields(args), args.limit, visit)?;
-            Ok(input::AccessFill::default())
-        }
-        (source, input::TermDescriptors::Vocabulary(vocabulary)) => input::scan_access_field(
-            &args.points,
-            &args.point_fields,
-            match source {
+    if let AccessRoute::SharedRelation(path) = access_route(args)? {
+        // Scanned **once**, not once per view: its rows are entity space, and a second pass over
+        // them would double every posting.
+        input::scan_pairs(path, &access_fields(args), args.limit, |id, term| {
+            visit(0, id, term)
+        })?;
+        return Ok(input::AccessFill::default());
+    }
+    let input::TermDescriptors::Vocabulary(vocabulary) = &plan.descriptors else {
+        unreachable!("planned by `plan_access` together")
+    };
+    let mut fill = input::AccessFill::default();
+    for (index, view) in args.views.iter().enumerate() {
+        let one = input::scan_access_field(
+            &view.points,
+            &view.point_fields,
+            match &view.access.source {
                 AccessSource::Field(field) => Some(field.as_str()),
                 _ => None,
             },
             vocabulary,
-            plan.default_term,
+            plan.default_term[index],
             args.limit,
-            visit,
-        ),
-        (_, input::TermDescriptors::Ids) => unreachable!("planned by `plan_access` together"),
+            |id, term| visit(index, id, term),
+        )?;
+        fill.carried += one.carried;
+        fill.filled += one.filled;
     }
+    Ok(fill)
 }
 
 /// Say how many points carried terms of their own and how many took the view's default.
@@ -523,10 +652,15 @@ pub(crate) fn report_access_fill(args: &BuildArgs, fill: input::AccessFill) {
     if fill.filled == 0 {
         return;
     }
+    // Totalled over every view the build reads, which is what the number means: a point in two
+    // views carries its label in both, and the fill is a property of the corpus rather than of
+    // one row space.
     eprintln!(
-        "view '{}': {} point(s) carried access terms of their own; {} took the declared default \
-         '{}'",
-        args.view_id, fill.carried, fill.filled, args.access.default
+        "{} view(s): {} point row(s) carried access terms of their own; {} took the declared \
+         default",
+        args.views.len(),
+        fill.carried,
+        fill.filled
     );
 }
 
@@ -617,14 +751,41 @@ pub(crate) fn report_attribute_coverage(coverage: &[AttributeCoverage]) {
 /// relation is `entity_id` and `term_id` under those names. What this carries is the *object*, so
 /// a file missing one of them is refused naming the view whose labels went unread.
 fn access_fields(args: &BuildArgs) -> crate::config::Fields {
-    crate::config::Fields::canonical(format!("view '{}' point_visibility", args.view_id))
+    crate::config::Fields::canonical(format!(
+        "view '{}' point_visibility",
+        args.views[args.anchor].view_id
+    ))
 }
 
 /// Argument and destination checks shared by both build implementations.
 fn validate_args(args: &BuildArgs) -> Result<()> {
-    args.extent
-        .validate()
-        .map_err(|detail| BuildError::Invalid(format!("extent: {detail}")))?;
+    if args.views.is_empty() {
+        return Err(BuildError::Invalid(
+            "this build materialises no view, so it has no coordinate system to write a row \
+             space in (views §7)"
+                .into(),
+        ));
+    }
+    if args.anchor >= args.views.len() {
+        return Err(BuildError::Invalid(format!(
+            "the anchor view is index {} of {} declared (decision 0112)",
+            args.anchor,
+            args.views.len()
+        )));
+    }
+    let mut seen: Vec<&str> = Vec::with_capacity(args.views.len());
+    for view in &args.views {
+        view.extent.validate().map_err(|detail| {
+            BuildError::Invalid(format!("view '{}' extent: {detail}", view.view_id))
+        })?;
+        if seen.contains(&view.view_id.as_str()) {
+            return Err(BuildError::Invalid(format!(
+                "view '{}' is materialised twice; a view id names one row space (views §2)",
+                view.view_id
+            )));
+        }
+        seen.push(&view.view_id);
+    }
     if args.batch_items == Some(0) {
         return Err(BuildError::Invalid(
             "--batch-items 0 is meaningless; omit it for a single batch".into(),
@@ -668,16 +829,22 @@ fn validate_args(args: &BuildArgs) -> Result<()> {
             )));
         }
     }
-    for (what, value) in [("view id", args.view_id.as_str())] {
-        if value.is_empty()
-            || value.contains('/')
-            || value.contains('\\')
-            || value == "."
-            || value == ".."
-        {
-            return Err(BuildError::Invalid(format!(
-                "{what} '{value}' is not a safe path component"
-            )));
+    // **The path is derived from the id, never the id used as a path** (`views.md` §3.2): a
+    // group's view is `group:key` and lives at `views/<group>/<key>/`, so what has to be safe is
+    // each component [`tessera_store::view_path`] derives, not the joined form.
+    for view in &args.views {
+        for component in tessera_store::view_path_components(&view.view_id) {
+            if component.is_empty()
+                || component.contains('/')
+                || component.contains('\\')
+                || component == "."
+                || component == ".."
+            {
+                return Err(BuildError::Invalid(format!(
+                    "view id '{}' is not a safe path: '{component}'",
+                    view.view_id
+                )));
+            }
         }
     }
 
@@ -742,16 +909,32 @@ pub fn build_observed(
 /// is permanent (I9) and every digest in the bundle depends on it.
 pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     validate_args(args)?;
+    // **The oracle materialises one view.** It exists to be the byte-equality reference for the
+    // streaming pipeline's entity-id assignment, and a second implementation of pass one's union
+    // would be a second thing to keep in step rather than a check on the first. A multi-view
+    // declaration goes through `build` (`views.md` §7).
+    let [view] = args.views.as_slice() else {
+        return Err(BuildError::Invalid(format!(
+            "the linear build materialises one view and this build declares {}: {}. It is the \
+             byte-equality oracle for the streaming pipeline, not a second multi-view build \
+             (views §7)",
+            args.views.len(),
+            args.views
+                .iter()
+                .map(|v| v.view_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    };
 
     // ---- 1. read inputs --------------------------------------------------------------
-    let mut points =
-        input::read_points(
-            &args.points,
-            &args.point_fields,
-            args.projection,
-            &args.extent,
-            args.limit,
-        )?;
+    let mut points = input::read_points(
+        &view.points,
+        &view.point_fields,
+        view.projection,
+        &view.extent,
+        args.limit,
+    )?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
             "no points selected — a bundle with no items has no expressible entity range".into(),
@@ -771,7 +954,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // sorted vocabulary, or the relation's own integers (`AccessPlan`).
     let access = plan_access(args)?;
     let mut pairs_by_source: HashMap<u64, Vec<u64>> = HashMap::new();
-    let fill = scan_access(args, &access, |source_id, source_term| {
+    let fill = scan_access(args, &access, |_view, source_id, source_term| {
         pairs_by_source
             .entry(source_id)
             .or_default()
@@ -894,7 +1077,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
     let terms_dir = partition_dir.join("terms");
     let entities_dir = partition_dir.join("entities");
-    let view_dir = partition_dir.join("views").join(&args.view_id);
+    let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
     let segment_dir = view_dir.join("segments").join(SEG_ID);
     for dir in [&terms_dir, &entities_dir, &view_dir, &segment_dir] {
         fs::create_dir_all(dir).map_err(|e| BuildError::io(dir, e))?;
@@ -1188,8 +1371,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
-                args.projection,
-                &args.extent,
+                view.projection,
+                &view.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
                 tmp.path(),
                 args.memory_budget
@@ -1207,7 +1390,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 n,
                 &args.out.join(PREFIX),
                 PHASH,
-                &args.view_id,
+                std::slice::from_ref(&view.view_id),
                 // The linear build holds its values on the items rather than in typed entity
                 // columns, which is the only thing about the two builds this rule sees.
                 &crate::layers::predicate_artifact_keys(
@@ -1245,7 +1428,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &artifact_store,
         &args.out.join(PREFIX),
         PHASH,
-        &args.view_id,
+        &view.view_id,
         n as u32,
         &plugin.data_plugin_hash(),
     );
@@ -1293,7 +1476,14 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         args.batch_items.filter(|&b| b < n),
         &minters,
         &published_layers,
-        occupancy,
+        &[SegmentDescriptor {
+            view: view.view_id.clone(),
+            seg_id: SEG_ID.to_string(),
+            row_count: n as u32,
+            entity_lo: 0,
+            entity_hi: n,
+        }],
+        std::slice::from_ref(&occupancy),
     )?;
     report.attribute_coverage = attribute_coverage;
     Ok(report)
@@ -1339,7 +1529,8 @@ fn write_manifests(
     batch_items_recorded: Option<u64>,
     minters: &HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     published_layers: &crate::layers::PublishedLayers,
-    occupancy: Occupancy,
+    segments_written: &[SegmentDescriptor],
+    occupancies: &[Occupancy],
 ) -> Result<BuildReport> {
     let bounds = plugin.declared_bounds();
     let partition_dir = args.out.join(PREFIX).join("partitions").join(PHASH);
@@ -1402,15 +1593,16 @@ fn write_manifests(
         shape_rows_extents: published_layers.shape_rows_extents.clone(),
         shape_held_extents: published_layers.shape_held_extents.clone(),
         artifact_record_extents: published_layers.artifact_record_extents.clone(),
-        segments: vec![SegmentDescriptor {
-            view: args.view_id.clone(),
-            seg_id: SEG_ID.to_string(),
-            row_count: n as u32,
-            entity_lo: 0,
-            // An empty build has no entity range at all; `entity_hi` is inclusive, so saturate
-            // rather than underflow.
-            entity_hi: n.saturating_sub(1),
-        }],
+        // One per view the build materialised (`views.md` §7), in registry order. `entity_hi`
+        // is inclusive, and an empty build has no entity range at all — hence the saturating
+        // subtraction pass two hands over.
+        segments: segments_written
+            .iter()
+            .map(|descriptor| SegmentDescriptor {
+                entity_hi: descriptor.entity_hi.saturating_sub(1),
+                ..descriptor.clone()
+            })
+            .collect(),
         deltas: Vec::new(),
         dict_extents,
         attr_extents: Vec::new(),
@@ -1522,22 +1714,29 @@ fn write_manifests(
             shard_id: args.shard_id,
             idset: args.idset,
         },
-        views: vec![ViewDescriptor {
-            id: args.view_id.clone(),
-            display_name: args.view_id.clone(),
-            // The frame this view's positions are quantised against — the view's own, not the
-            // bundle's, because two views of one bundle may quantise differently (decision 0040).
-            quantisation: Quantisation {
-                x_min: args.extent.x_min,
-                x_max: args.extent.x_max,
-                y_min: args.extent.y_min,
-                y_max: args.extent.y_max,
-            },
-            // What placed these positions before the frame did. A bundle that carries
-            // projected positions and cannot say so is one the write path and the differential
-            // oracle both have to be told about out of band (`projections.md` §3).
-            projection: args.projection,
-        }],
+        // **One entry per view, each carrying its own frame** (decision 0040): two views of one
+        // bundle may quantise differently, and an embedding and a map cannot share a frame
+        // without one of them wasting most of the grid (`views.md` §2).
+        groups: args.groups.clone(),
+        views: args
+            .views
+            .iter()
+            .map(|view| ViewDescriptor {
+                id: view.view_id.clone(),
+                display_name: view.view_id.clone(),
+                quantisation: Quantisation {
+                    x_min: view.extent.x_min,
+                    x_max: view.extent.x_max,
+                    y_min: view.extent.y_min,
+                    y_max: view.extent.y_max,
+                },
+                // What placed these positions before the frame did. A bundle that carries
+                // projected positions and cannot say so is one the write path and the
+                // differential oracle both have to be told about out of band
+                // (`projections.md` §3).
+                projection: view.projection,
+            })
+            .collect(),
         partitions: vec![PartitionDescriptor {
             phash: PHASH.to_string(),
             required_terms: Vec::new(),
@@ -1566,13 +1765,20 @@ fn write_manifests(
 
     Ok(BuildReport {
         prefix: PREFIX.to_string(),
-        view_id: args.view_id.clone(),
         seg_id: SEG_ID.to_string(),
+        views: segments_written
+            .iter()
+            .zip(occupancies)
+            .map(|(descriptor, occupancy)| ViewReport {
+                view_id: descriptor.view.clone(),
+                rows: descriptor.row_count as u64,
+                occupancy: *occupancy,
+            })
+            .collect(),
         items: n,
         terms: term_count,
         pairs: pair_count,
         bundle_bytes,
-        occupancy,
         unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
         minted_artifacts: published_layers.minted.values().sum(),
         // Filled by the caller: the join happened stages ago and this function digests files.
@@ -2135,19 +2341,23 @@ mod tests {
     fn build_args_debug_does_not_print_the_identity_key() {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
-            projection: tessera_spatial::Projection::None,
-            point_fields: Default::default(),
-            points: PathBuf::from("points.parquet"),
+            views: vec![crate::ViewArgs {
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                extent: Bounds {
+                    x_min: 0.0,
+                    x_max: 1.0,
+                    y_min: 0.0,
+                    y_max: 1.0,
+                },
+                points: PathBuf::from("points.parquet"),
+                point_fields: Default::default(),
+                access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
             attribute_sources: Vec::new(),
-            access: crate::config::AccessInput::relation(PathBuf::from("pairs.parquet")),
             out: PathBuf::from("out"),
-            extent: Bounds {
-                x_min: 0.0,
-                x_max: 1.0,
-                y_min: 0.0,
-                y_max: 1.0,
-            },
-            view_id: "s0".to_string(),
             limit: None,
             identity_key: tessera_types::IdentityKey::from_hex(KEY_HEX).unwrap(),
             identity_key_hex: KEY_HEX.to_string(),

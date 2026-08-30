@@ -187,14 +187,18 @@ fn build_projected(out: &Path, tmp: &Path) -> Config {
     write_pairs_n(&pairs_path, PLACES.len() as u64);
     let config = built_layers(tmp);
     build(&BuildArgs {
-        projection: Projection::WebMercator,
-        point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
-        points: points_path,
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: Projection::WebMercator,
+            extent: world_frame(),
+            points: points_path,
+            point_fields: Fields::moved("view 's0'", [("x", "lon"), ("y", "lat")]),
+            access: tessera_build::config::AccessInput::relation(pairs_path),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs_path),
         out: out.to_path_buf(),
-        extent: world_frame(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -287,7 +291,9 @@ async fn publish(
 }
 
 /// The drawn geometry of every served artifact, by layer — the frame the client is handed.
-async fn shapes_by_layer(server: &TestServer) -> std::collections::BTreeMap<String, Vec<Vec<Vec<[u32; 2]>>>> {
+async fn shapes_by_layer(
+    server: &TestServer,
+) -> std::collections::BTreeMap<String, Vec<Vec<Vec<[u32; 2]>>>> {
     let auth = authorise(server, &["0"]).await;
     let token = auth["token"].as_str().unwrap();
     let resp = server
@@ -320,7 +326,10 @@ async fn an_authored_wgs84_shape_lands_where_a_membership_one_does_through_eithe
     let server = serve_projected(&tmp).await;
 
     // The control plane's two: the batch's `default_space`, and a row overriding it.
-    assert_eq!(register(&server, drawing_layer("regions/batch")).await.0, 201);
+    assert_eq!(
+        register(&server, drawing_layer("regions/batch")).await.0,
+        201
+    );
     assert_eq!(register(&server, drawing_layer("regions/row")).await.0, 201);
     let members: Vec<String> = (0..PLACES.len() as u64).map(member).collect();
     let (status, body) = publish(
@@ -389,7 +398,10 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
         &tmp.path().join("wal.log"),
     )
     .await;
-    assert_eq!(register(&server, drawing_layer("regions/flat")).await.0, 201);
+    assert_eq!(
+        register(&server, drawing_layer("regions/flat")).await.0,
+        201
+    );
 
     let (status, body) = publish(
         &server,
@@ -402,7 +414,10 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
     )
     .await;
     assert_eq!(status, 422, "{body}");
-    assert!(body.to_string().contains("`projection` is `none`"), "{body}");
+    assert!(
+        body.to_string().contains("`projection` is `none`"),
+        "{body}"
+    );
 
     // The same declaration in view space is accepted, which is what says the refusal is about the
     // space and not about the drawing.
@@ -420,7 +435,10 @@ async fn the_authored_wgs84_refusals_are_the_membership_shapes_own() {
     // And on the projected bundle, a latitude that is not one.
     let tmp = TempDir::new().unwrap();
     let server = serve_projected(&tmp).await;
-    assert_eq!(register(&server, drawing_layer("regions/batch")).await.0, 201);
+    assert_eq!(
+        register(&server, drawing_layer("regions/batch")).await.0,
+        201
+    );
     let (status, body) = publish(
         &server,
         "regions/batch",

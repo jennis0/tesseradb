@@ -256,14 +256,18 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
         .expect("the fixture declaration parses");
     let root = dir.join("bundle");
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.clone(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: root.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -287,7 +291,12 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
 }
 
 async fn serve(built: &Built) -> TestServer {
-    spawn_server(&built.root, &built.dir.join("cache"), &built.dir.join("wal")).await
+    spawn_server(
+        &built.root,
+        &built.dir.join("cache"),
+        &built.dir.join("wal"),
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -371,7 +380,10 @@ async fn register_layer(
     value_set: &str,
     criterion: serde_json::Value,
 ) {
-    let criterion = criterion.as_object().is_some_and(|c| !c.is_empty()).then_some(criterion);
+    let criterion = criterion
+        .as_object()
+        .is_some_and(|c| !c.is_empty())
+        .then_some(criterion);
     let resp = server
         .client
         .put(server.control_url("/control/layers"))
@@ -538,7 +550,10 @@ async fn wait_until(
         if done(&server.state.engine.write_executor_stats()) {
             return;
         }
-        assert!(std::time::Instant::now() < deadline, "{what}: never happened");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what}: never happened"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
@@ -630,8 +645,11 @@ fn artifacts_by_key(body: &[u8]) -> Vec<ClientArtifact> {
             .downcast_ref::<StringArray>()
             .unwrap()
             .clone();
-        let layer_at =
-            |i: usize| layer_values.value(layer.key(i).expect("layer is never null")).to_string();
+        let layer_at = |i: usize| {
+            layer_values
+                .value(layer.key(i).expect("layer is never null"))
+                .to_string()
+        };
         let ids = column(1);
         let ids = ids.as_any().downcast_ref::<UInt64Array>().unwrap();
         let keys = column(2);
@@ -728,7 +746,12 @@ async fn assert_same_database(
     let served: std::collections::BTreeMap<String, u64> = full
         .artifacts
         .iter()
-        .map(|a| (a.key.clone().expect("a built artifact carries its key"), a.masked_count))
+        .map(|a| {
+            (
+                a.key.clone().expect("a built artifact carries its key"),
+                a.masked_count,
+            )
+        })
         .collect();
     assert_eq!(
         served,
@@ -759,7 +782,11 @@ async fn assert_same_database(
     let broad = client_view(built, &["0", "1"]).await;
     let narrow = client_view(built, &["1"]).await;
     assert_eq!(
-        broad.tiles.iter().map(|(_, visible, _)| visible).sum::<u64>(),
+        broad
+            .tiles
+            .iter()
+            .map(|(_, visible, _)| visible)
+            .sum::<u64>(),
         N,
         "{what}: the principal who can see everything is not being shown the whole corpus, so the \
          two sides could agree on a corpus neither of them holds"
@@ -837,7 +864,10 @@ async fn a_lineage_column_ingests_the_database_a_member_table_builds() {
 /// binds members with no artifact source of its own — which is the same rule from the other side.
 #[tokio::test]
 async fn a_closed_layer_refuses_an_unknown_key_and_ingests_nothing() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
     register_layer(&server, "closed/x", "flat", "closed", json!({})).await;
     publish_artifacts(
@@ -850,8 +880,12 @@ async fn a_closed_layer_refuses_an_unknown_key_and_ingests_nothing() {
     let before = control_status(&server).await;
     let rows = [SEED, SEED + 1];
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3), Some(4_242)]));
-    let (status, detail) =
-        post_ingest(&server, "unknown-key", ingest_batch(&rows, "closed/x", keys)).await;
+    let (status, detail) = post_ingest(
+        &server,
+        "unknown-key",
+        ingest_batch(&rows, "closed/x", keys),
+    )
+    .await;
     assert_eq!(status, 422, "{detail}");
     assert!(
         detail.contains("4242"),
@@ -924,12 +958,22 @@ async fn a_lineage_column_mints_the_chain_and_the_edges_it_declares() {
     // The comparison below carries the edges, and is only worth running if there are any.
     let view = client_view(&ingested, &["0", "1"]).await;
     assert!(
-        view.artifacts.iter().filter(|a| a.parent_key.is_some()).count() >= 3,
+        view.artifacts
+            .iter()
+            .filter(|a| a.parent_key.is_some())
+            .count()
+            >= 3,
         "the ingested side served no lineage, so the edges were not created: {:?}",
         view.artifacts
     );
 
-    assert_same_database(&built, &ingested, lineage_keys_of, "a minting lineage column").await;
+    assert_same_database(
+        &built,
+        &ingested,
+        lineage_keys_of,
+        "a minting lineage column",
+    )
+    .await;
 }
 
 /// **A tiered chain mints a level at a time, coarse first** — the ordering constraint edges carry
@@ -951,11 +995,21 @@ async fn a_tiered_column_mints_the_coarse_level_before_the_fine_one() {
 
     let view = client_view(&ingested, &["0", "1"]).await;
     assert!(
-        view.artifacts.iter().filter(|a| a.parent_key.is_some()).count() >= 3,
+        view.artifacts
+            .iter()
+            .filter(|a| a.parent_key.is_some())
+            .count()
+            >= 3,
         "a tiered containment was not created: {:?}",
         view.artifacts
     );
-    assert_same_database(&built, &ingested, lineage_keys_of, "a minting tiered column").await;
+    assert_same_database(
+        &built,
+        &ingested,
+        lineage_keys_of,
+        "a minting tiered column",
+    )
+    .await;
 }
 
 /// **At most one live artifact per key per level** (`artifacts-from-points.md` §5's second ruling):
@@ -963,13 +1017,17 @@ async fn a_tiered_column_mints_the_coarse_level_before_the_fine_one() {
 /// later batch naming the same key mints nothing at all.
 #[tokio::test]
 async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
     let before = server.state.engine.published_artifacts();
 
     let rows: Vec<u64> = (SEED..SEED + 6).collect();
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(9_001); 6]));
-    let (status, detail) = post_ingest(&server, "six-of-one", ingest_batch(&rows, LAYER, keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "six-of-one", ingest_batch(&rows, LAYER, keys)).await;
     assert_eq!(status, 200, "{detail}");
     assert_eq!(
         minted_of(&detail),
@@ -979,7 +1037,8 @@ async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
 
     let more: Vec<u64> = (SEED + 6..SEED + 10).collect();
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(9_001); 4]));
-    let (status, detail) = post_ingest(&server, "four-more", ingest_batch(&more, LAYER, keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "four-more", ingest_batch(&more, LAYER, keys)).await;
     assert_eq!(status, 200, "{detail}");
     assert_eq!(
         minted_of(&detail),
@@ -999,7 +1058,10 @@ async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
         .iter()
         .find(|a| a.key.as_deref() == Some("9001"))
         .expect("the minted cluster serves like any other");
-    assert_eq!(minted.masked_count, 10, "every point that named it joined it");
+    assert_eq!(
+        minted.masked_count, 10,
+        "every point that named it joined it"
+    );
 }
 
 /// **A suppressed artifact still exists, and its key is never minted again** — the one fail-open
@@ -1023,7 +1085,10 @@ async fn one_unknown_key_mints_one_artifact_however_many_points_name_it() {
 /// load-bearing rather than decorative.
 #[tokio::test]
 async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
     register_layer(&server, "hidden/x", "flat", "open", json!({ "count": 1 })).await;
     let published = publish_artifacts(
@@ -1042,8 +1107,12 @@ async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
     );
 
     let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("k")]));
-    let (status, detail) =
-        post_ingest(&server, "join-suppressed", ingest_batch(&[SEED], "hidden/x", keys)).await;
+    let (status, detail) = post_ingest(
+        &server,
+        "join-suppressed",
+        ingest_batch(&[SEED], "hidden/x", keys),
+    )
+    .await;
     assert_eq!(status, 200, "{detail}");
     assert_eq!(
         minted_of(&detail),
@@ -1083,7 +1152,10 @@ async fn a_suppressed_artifacts_key_mints_nothing_and_the_point_joins_it() {
 /// one.
 #[tokio::test]
 async fn a_deleted_key_that_returns_is_a_new_artifact() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
     register_layer(&server, "gone/x", "flat", "open", json!({ "count": 1 })).await;
     let published = publish_artifacts(
@@ -1101,8 +1173,12 @@ async fn a_deleted_key_that_returns_is_a_new_artifact() {
     fold(&server).await;
 
     let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("k")]));
-    let (status, detail) =
-        post_ingest(&server, "key-returns", ingest_batch(&[SEED], "gone/x", keys)).await;
+    let (status, detail) = post_ingest(
+        &server,
+        "key-returns",
+        ingest_batch(&[SEED], "gone/x", keys),
+    )
+    .await;
     assert_eq!(status, 200, "{detail}");
     assert_eq!(
         minted_of(&detail),
@@ -1129,7 +1205,10 @@ async fn a_deleted_key_that_returns_is_a_new_artifact() {
 /// batch can still be rejected on its own rather than at the close, where it would cost the window.
 #[tokio::test]
 async fn a_layer_declaring_supplied_content_refuses_to_mint() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
     let resp = server
         .client
@@ -1159,8 +1238,12 @@ async fn a_layer_declaring_supplied_content_refuses_to_mint() {
     assert_eq!(resp.status().as_u16(), 201, "the layer may be declared");
 
     let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("nobody-declared-this")]));
-    let (status, detail) =
-        post_ingest(&server, "unmintable", ingest_batch(&[SEED], "labels/x", keys)).await;
+    let (status, detail) = post_ingest(
+        &server,
+        "unmintable",
+        ingest_batch(&[SEED], "labels/x", keys),
+    )
+    .await;
     assert_eq!(status, 422, "{detail}");
     assert!(
         detail.contains("nobody-declared-this") && detail.contains("supplied content"),
@@ -1172,7 +1255,10 @@ async fn a_layer_declaring_supplied_content_refuses_to_mint() {
 /// was before this existed — and the message says which two things it could have been.
 #[tokio::test]
 async fn a_column_naming_neither_an_attribute_nor_a_layer_is_refused() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
 
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
@@ -1195,11 +1281,15 @@ async fn a_column_naming_neither_an_attribute_nor_a_layer_is_refused() {
 /// `name` and its `field`.
 #[tokio::test]
 async fn the_build_time_field_name_is_not_a_wire_column() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
 
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(3)]));
-    let (status, detail) = post_ingest(&server, "by-field", ingest_batch(&[SEED], "cluster", keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "by-field", ingest_batch(&[SEED], "cluster", keys)).await;
     assert_eq!(status, 422, "{detail}");
     assert!(detail.contains("'cluster'"), "{detail}");
 }
@@ -1221,7 +1311,8 @@ async fn a_row_whose_list_is_not_one_entry_per_level_is_refused() {
         Arc::new(Int64Array::from(vec![Some(1), Some(10)])) as ArrayRef,
         None,
     ));
-    let (status, detail) = post_ingest(&server, "short-list", ingest_batch(&[SEED], LAYER, keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "short-list", ingest_batch(&[SEED], LAYER, keys)).await;
     assert_eq!(status, 422, "{detail}");
     assert!(detail.contains("3 levels"), "{detail}");
 }
@@ -1232,7 +1323,10 @@ async fn a_row_whose_list_is_not_one_entry_per_level_is_refused() {
 /// for, made here one step earlier, where the batch can still be rejected without effect.
 #[tokio::test]
 async fn a_column_naming_a_predicate_layer_is_refused() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
 
     let resp = server
@@ -1255,7 +1349,11 @@ async fn a_column_naming_a_predicate_layer_is_refused() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "a predicate layer may be declared");
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "a predicate layer may be declared"
+    );
 
     let keys: ArrayRef = Arc::new(StringArray::from(vec![Some("anything")]));
     let (status, detail) = post_ingest(
@@ -1278,7 +1376,10 @@ async fn a_column_naming_a_predicate_layer_is_refused() {
 /// before child in one batch.
 #[tokio::test]
 async fn a_lineage_naming_an_edge_the_layer_does_not_hold_still_joins() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("flat", "cluster"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("flat", "cluster"),
+    );
     let server = serve(&built).await;
 
     let resp = server
@@ -1320,7 +1421,11 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_still_joins() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "two artifacts, neither carrying a parent");
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "two artifacts, neither carrying a parent"
+    );
 
     let item = Arc::new(Field::new("item", DataType::Utf8, true));
     let keys: ArrayRef = Arc::new(ListArray::new(
@@ -1329,7 +1434,8 @@ async fn a_lineage_naming_an_edge_the_layer_does_not_hold_still_joins() {
         Arc::new(StringArray::from(vec![Some("root"), Some("leaf")])) as ArrayRef,
         None,
     ));
-    let (status, detail) = post_ingest(&server, "no-edge", ingest_batch(&[SEED], "tree/x", keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "no-edge", ingest_batch(&[SEED], "tree/x", keys)).await;
     assert_eq!(
         status, 200,
         "the memberships are unambiguous, so the batch lands: {detail}"
@@ -1358,7 +1464,8 @@ async fn a_scalar_column_on_a_levelled_layer_names_level_zero() {
 
     // Key 1 is the root, published at level 0 by the seed's own lineage column.
     let keys: ArrayRef = Arc::new(Int64Array::from(vec![Some(1)]));
-    let (status, detail) = post_ingest(&server, "scalar-tiered", ingest_batch(&[SEED], LAYER, keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "scalar-tiered", ingest_batch(&[SEED], LAYER, keys)).await;
     assert_eq!(status, 200, "{detail}");
 }
 
@@ -1367,7 +1474,10 @@ async fn a_scalar_column_on_a_levelled_layer_names_level_zero() {
 /// adjacency a point declares is checked against the edge the publication stored.
 #[tokio::test]
 async fn a_lineage_contradicting_the_stored_edge_refuses_the_batch() {
-    let built = build_side(&(0..SEED).collect::<Vec<_>>(), &layer_toml("nested", "lineage"));
+    let built = build_side(
+        &(0..SEED).collect::<Vec<_>>(),
+        &layer_toml("nested", "lineage"),
+    );
     let server = serve(&built).await;
 
     // 100's parent is 10 in every row of the seed; this point says it is 11.
@@ -1378,7 +1488,8 @@ async fn a_lineage_contradicting_the_stored_edge_refuses_the_batch() {
         Arc::new(Int64Array::from(vec![Some(1), Some(11), Some(100)])) as ArrayRef,
         None,
     ));
-    let (status, detail) = post_ingest(&server, "two-parents", ingest_batch(&[SEED], LAYER, keys)).await;
+    let (status, detail) =
+        post_ingest(&server, "two-parents", ingest_batch(&[SEED], LAYER, keys)).await;
     assert_eq!(status, 422, "{detail}");
     assert!(
         detail.contains("100") && detail.contains("11"),
