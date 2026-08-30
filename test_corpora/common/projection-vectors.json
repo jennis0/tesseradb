@@ -1,0 +1,235 @@
+{
+  "note": "The contract the two implementations of this transform have to meet: test_corpora/common/projection.py, which placed the built geographic corpora, and tessera_spatial::projection, which replaces it. Both read this file rather than each carrying its own copy of the description. See docs/design/projections.md §5.1.",
+  "constants": {
+    "note": "Derived, not chosen. world_half_m is pi * earth_radius_m; max_latitude_deg is the latitude whose projected northing reaches it, degrees(2*atan(exp(pi)) - pi/2). Both implementations compute these and check the computation against these figures.",
+    "earth_radius_m": 6378137.0,
+    "world_half_m": 20037508.342789244,
+    "max_latitude_deg": 85.0511287798066
+  },
+  "web_mercator_metres": {
+    "note": "Longitude and latitude in degrees to EPSG:3857 metres, y SOUTH — so y_m is the negation of EPSG:3857's northing (projections.md §4). Normalised to the unit square, x = (x_m + world_half_m) / (2 * world_half_m), and y likewise. Every figure is exact or a published Web Mercator value; none was produced by either implementation.",
+    "vectors": [
+      {
+        "lon": 0.0,
+        "lat": 0.0,
+        "x_m": 0.0,
+        "y_m": 0.0
+      },
+      {
+        "lon": 180.0,
+        "lat": 0.0,
+        "x_m": 20037508.342789244,
+        "y_m": 0.0
+      },
+      {
+        "lon": -180.0,
+        "lat": 0.0,
+        "x_m": -20037508.342789244,
+        "y_m": 0.0
+      },
+      {
+        "lon": 90.0,
+        "lat": 0.0,
+        "x_m": 10018754.171394622,
+        "y_m": 0.0
+      },
+      {
+        "lon": 0.0,
+        "lat": 85.0511287798066,
+        "x_m": 0.0,
+        "y_m": -20037508.342789244
+      },
+      {
+        "lon": 0.0,
+        "lat": -85.0511287798066,
+        "x_m": 0.0,
+        "y_m": 20037508.342789244
+      },
+      {
+        "lon": 0.0,
+        "lat": 45.0,
+        "x_m": 0.0,
+        "y_m": -5621521.486192066
+      },
+      {
+        "lon": 0.0,
+        "lat": -45.0,
+        "x_m": 0.0,
+        "y_m": 5621521.486192066
+      }
+    ]
+  },
+  "xyz_tiles": {
+    "note": "The XYZ tile each place falls in at the stated zoom, over the unit square: tile_x = floor(x * 2^zoom), tile_y = floor(y * 2^zoom). This is the y direction's only real test — a frame mirrored north-south passes every round trip and fails these. The zoom 1 and 2 addresses are read off a slippy map and are the ones the incumbent Python module was written against; the zoom 10 and 16 addresses are that module's own output, recorded so a replacement is held to it at a depth where one cell is 611.50 / 2^zoom metres rather than a quarter of the world.",
+    "vectors": [
+      {
+        "place": "London",
+        "lon": -0.1276,
+        "lat": 51.5072,
+        "zoom": 1,
+        "tile_x": 0,
+        "tile_y": 0
+      },
+      {
+        "place": "Sydney",
+        "lon": 151.2093,
+        "lat": -33.8688,
+        "zoom": 1,
+        "tile_x": 1,
+        "tile_y": 1
+      },
+      {
+        "place": "Buenos Aires",
+        "lon": -58.3816,
+        "lat": -34.6037,
+        "zoom": 1,
+        "tile_x": 0,
+        "tile_y": 1
+      },
+      {
+        "place": "Tokyo",
+        "lon": 139.6917,
+        "lat": 35.6895,
+        "zoom": 1,
+        "tile_x": 1,
+        "tile_y": 0
+      },
+      {
+        "place": "Nairobi",
+        "lon": 36.8219,
+        "lat": -1.2921,
+        "zoom": 2,
+        "tile_x": 2,
+        "tile_y": 2
+      },
+      {
+        "place": "Reykjavik",
+        "lon": -21.8277,
+        "lat": 64.1265,
+        "zoom": 2,
+        "tile_x": 1,
+        "tile_y": 1
+      },
+      {
+        "place": "Tromso",
+        "lon": 18.956,
+        "lat": 69.6496,
+        "zoom": 2,
+        "tile_x": 2,
+        "tile_y": 0
+      },
+      {
+        "place": "London",
+        "lon": -0.1276,
+        "lat": 51.5072,
+        "zoom": 10,
+        "tile_x": 511,
+        "tile_y": 340
+      },
+      {
+        "place": "Sydney",
+        "lon": 151.2093,
+        "lat": -33.8688,
+        "zoom": 10,
+        "tile_x": 942,
+        "tile_y": 614
+      },
+      {
+        "place": "Buenos Aires",
+        "lon": -58.3816,
+        "lat": -34.6037,
+        "zoom": 10,
+        "tile_x": 345,
+        "tile_y": 617
+      },
+      {
+        "place": "Tokyo",
+        "lon": 139.6917,
+        "lat": 35.6895,
+        "zoom": 10,
+        "tile_x": 909,
+        "tile_y": 403
+      },
+      {
+        "place": "Nairobi",
+        "lon": 36.8219,
+        "lat": -1.2921,
+        "zoom": 10,
+        "tile_x": 616,
+        "tile_y": 515
+      },
+      {
+        "place": "Reykjavik",
+        "lon": -21.8277,
+        "lat": 64.1265,
+        "zoom": 10,
+        "tile_x": 449,
+        "tile_y": 272
+      },
+      {
+        "place": "Tromso",
+        "lon": 18.956,
+        "lat": 69.6496,
+        "zoom": 10,
+        "tile_x": 565,
+        "tile_y": 232
+      },
+      {
+        "place": "London",
+        "lon": -0.1276,
+        "lat": 51.5072,
+        "zoom": 16,
+        "tile_x": 32744,
+        "tile_y": 21792
+      },
+      {
+        "place": "Sydney",
+        "lon": 151.2093,
+        "lat": -33.8688,
+        "zoom": 16,
+        "tile_x": 60294,
+        "tile_y": 39327
+      },
+      {
+        "place": "Buenos Aires",
+        "lon": -58.3816,
+        "lat": -34.6037,
+        "zoom": 16,
+        "tile_x": 22139,
+        "tile_y": 39489
+      },
+      {
+        "place": "Tokyo",
+        "lon": 139.6917,
+        "lat": 35.6895,
+        "zoom": 16,
+        "tile_x": 58198,
+        "tile_y": 25804
+      },
+      {
+        "place": "Nairobi",
+        "lon": 36.8219,
+        "lat": -1.2921,
+        "zoom": 16,
+        "tile_x": 39471,
+        "tile_y": 33003
+      },
+      {
+        "place": "Reykjavik",
+        "lon": -21.8277,
+        "lat": 64.1265,
+        "zoom": 16,
+        "tile_x": 28794,
+        "tile_y": 17425
+      },
+      {
+        "place": "Tromso",
+        "lon": 18.956,
+        "lat": 69.6496,
+        "zoom": 16,
+        "tile_x": 36218,
+        "tile_y": 14851
+      }
+    ]
+  }
+}
