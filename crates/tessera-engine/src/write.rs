@@ -3475,7 +3475,10 @@ pub(crate) struct MaintenanceDeps {
     /// geometry swap exactly as the row-projection cache is — a row-space artefact keyed on a
     /// generation is unusable after it (I11), and only retention is left to do.
     pub(crate) region_cache: Arc<
-        crate::single_flight::SingleFlightCache<crate::region::RegionKey, crate::region::RegionDecomposition>,
+        crate::single_flight::SingleFlightCache<
+            crate::region::RegionKey,
+            crate::region::RegionDecomposition,
+        >,
     >,
     /// The spatial levels' held shapes and per-segment pieces (`crate::shapes`) — filled by the
     /// flush before its publication, rebuilt at a publication into a shape layer, re-resolved at
@@ -3527,11 +3530,17 @@ pub(crate) struct MaintenanceDeps {
     /// state in which a merge or coalesce can dispatch, publish, and leave the fold planned against
     /// artefacts the live manifest no longer lists.
     ///
-    /// That state is reachable in production and is not a contrivance: the fold thread clears
-    /// `fold_in_flight` after its send, and an executor already inside `tick_if_due` reads the
-    /// cleared flag and dispatches. The window is microseconds wide there and every outcome is
-    /// fail-closed; what this makes is that same window deterministic, so compaction §12's
-    /// obligation 9 is a test rather than an argument.
+    /// That state was reachable in production, and **not rarely**: the fold thread clears
+    /// `fold_in_flight` after its send, and an executor already inside `tick_if_due` read the
+    /// cleared flag and dispatched. Measured at **3 of 93 whole-binary runs and 12 of 480 runs of
+    /// the single test (~3%)** under 3–4 concurrent lanes, each occurrence costing a discarded
+    /// corpus rewrite and an orphan prefix nothing sweeps. The instruction window is microseconds
+    /// wide; the *observed* rate is not that, because the executor's loop and the job's completion
+    /// are both driven by the tick cadence and align far more often than independence predicts.
+    /// The dispatchers now suspend on publication rather than on completion
+    /// ([`Executor::fold_outstanding`]), so the state is no longer reachable through the executor
+    /// at all. This hook is what holds a fold in it, which is how the suspension itself is tested:
+    /// a merge offered ten ticks under a held fold takes none of them.
     pub(crate) fold_publication_paused: Arc<AtomicBool>,
     /// Whether a **completed** merge is left undrained in its channel —
     /// `Engine::set_merge_publication_paused_for_test`. Always `false` in a shipped build.
@@ -4427,7 +4436,10 @@ struct Executor {
     row_projection_cache: Arc<RowProjectionCache>,
     /// See [`MaintenanceDeps::region_cache`].
     region_cache: Arc<
-        crate::single_flight::SingleFlightCache<crate::region::RegionKey, crate::region::RegionDecomposition>,
+        crate::single_flight::SingleFlightCache<
+            crate::region::RegionKey,
+            crate::region::RegionDecomposition,
+        >,
     >,
     /// The artifact row forms — rebuilt here at the fold, and read by every viewport. See
     /// [`MaintenanceDeps::artifact_projections`].
@@ -4888,21 +4900,102 @@ impl Executor {
         drop(generation);
     }
 
-    /// Select and dispatch an entity-space coalesce, if one qualifies and none is running.
+    /// Whether a fold is **outstanding**: running, or completed and not yet published.
     ///
-    /// **At most one in flight, checked before the plan is built**, for the same reason a flush
+    /// # Publication is the boundary the mutual exclusion has to use, and running was not
+    ///
+    /// A fold plans against a snapshot of which artefacts the live manifest lists; a merge and a
+    /// coalesce change exactly that. So the three exclude one another — and the state each must
+    /// exclude is not "the other is executing" but "the other's effect is not visible yet". A
+    /// background job passes through three phases: running, completed and sitting undrained in its
+    /// channel, and published. The `*_in_flight` flag covers only the first, and the executor's own
+    /// loop straddles the second: `publish_completed_merges` runs at the top of an iteration and
+    /// drains nothing because the merge is still working, and `tick_if_due` later in the *same*
+    /// iteration reads a by-then-cleared `merge_in_flight` and dispatches a fold against a
+    /// generation that is about to change. The next iteration publishes the merge, and the fold is
+    /// left naming artefacts the live manifest no longer lists — discarded whole at its rebase
+    /// check.
+    ///
+    /// **Every outcome of that was fail-closed, and it was still worth closing**: the cost is a
+    /// discarded corpus rewrite — minutes to hours at scale — plus an orphan prefix tree nothing
+    /// sweeps, compaction §7's startup sweep covering only what is present when an executor
+    /// starts. It was also not rare. Measured on the merge-lands-during-fold direction: **3 of 93
+    /// runs of the whole `--test fold` binary and 12 of 480 runs of the single test, ~3%**, under
+    /// 3–4 concurrent lanes, with the mechanism confirmed each time (one dispatch, one orphan
+    /// prefix holding only `partitions/`, the discard line, then a second dispatch). "Microseconds
+    /// wide" describes the instruction window and is not the rate, because the loop and the job's
+    /// completion are both driven by the tick cadence rather than being independent.
+    ///
+    /// The `*_completed_pending` flags this reads are the ones the completion handshake already
+    /// maintains — set before the send, cleared by the drain
+    /// ([`ExecutorHealth::flush_completed_pending`] states the ordering) — so the boundary needed
+    /// no new state, only the right flag.
+    ///
+    /// # Suspended, not refused
+    ///
+    /// A pass that does not start here has had nothing rejected and has lost no intent, which is
+    /// why every site says *suspended*. `dispatch_merge` calls `plan_merge` fresh on every tick, so
+    /// a merge that does not start is simply re-decided at the next one against whatever the corpus
+    /// is then; the plan does not survive the tick, and it is not meant to. That is the same
+    /// principle this boundary rests on — a merge plan names specific segments, so one made before
+    /// a fold and held until after would be a plan against a generation the fold is about to
+    /// replace. Re-planning is what keeps a plan and the generation it executes on together.
+    ///
+    /// # Why this cannot wedge
+    ///
+    /// A suspension here lasts at most one pass. The pending flags are set only by a completing job
+    /// and cleared only by `publish_completed_*`, which [`Executor::run`] calls at the top of every
+    /// iteration, unconditionally and *before* `tick_if_due` — no dispatcher's suspension can
+    /// suppress the drain that clears the flag it suspended on, because no dispatcher runs before
+    /// it. Nothing on this path sets a pending flag, so a dispatcher cannot starve itself, and the
+    /// mutual case resolves for the same reason: whichever flags are set, the next iteration's drain
+    /// clears them all before any dispatch is attempted. The executor also cannot sleep through it —
+    /// [`Executor::wait_for_work`] treats every pending flag as a reason for the fast completion
+    /// poll rather than the full tick. The one state in which a pending flag never clears is a
+    /// test's publication pause, which is `false` in a shipped build and wakes the executor when it
+    /// is lifted.
+    ///
+    /// A suspended *requested* fold is not consumed either: the request flag stays armed and the
+    /// next tick tries again, which is the treatment `dispatch_fold` already gives a fold suspended
+    /// for a running merge.
+    fn fold_outstanding(&self) -> bool {
+        self.fold_in_flight.load(Ordering::SeqCst)
+            || self.health.fold_completed_pending.load(Ordering::SeqCst)
+    }
+
+    /// Whether a merge is running, or completed and not yet published — the boundary
+    /// [`Executor::fold_outstanding`] states, applied to the row-space merge.
+    fn merge_outstanding(&self) -> bool {
+        self.merge_in_flight.load(Ordering::SeqCst)
+            || self.health.merge_completed_pending.load(Ordering::SeqCst)
+    }
+
+    /// Whether a coalesce is running, or completed and not yet published — the boundary
+    /// [`Executor::fold_outstanding`] states, applied to the entity-space coalesce.
+    fn coalesce_outstanding(&self) -> bool {
+        self.coalesce_in_flight.load(Ordering::SeqCst)
+            || self
+                .health
+                .coalesce_completed_pending
+                .load(Ordering::SeqCst)
+    }
+
+    /// Select and dispatch an entity-space coalesce, if one qualifies and none is outstanding.
+    ///
+    /// **At most one outstanding, checked before the plan is built**, for the same reason a flush
     /// is: two passes would select overlapping windows and the loser's manifest edit would no
     /// longer rebase, having done all of its IO first.
     fn dispatch_coalesce(&mut self, generation: &Arc<Generation>) {
-        // **Suspended for a fold's duration** (compaction §1): a coalesce publishing under one
-        // would be orphaned by the flip and would discard the fold at its rebase check, so running
-        // it is waste rather than hazard. The safety argument rests on that rebase check, not on
+        // **Suspended until a fold is published, not merely until it stops running** (compaction
+        // §1, and [`Executor::fold_outstanding`] for why the later boundary is the load-bearing
+        // one): a coalesce publishing under a fold would be orphaned by the flip and would discard
+        // the fold at its rebase check, so running it is waste rather than hazard. The safety argument rests on that rebase check, not on
         // this line; what this buys is that the fold is not routinely discarded by the maintenance
         // running beside it.
         if self.coalesce_policy.width < 2
             || !self.coalesce_enabled.load(Ordering::SeqCst)
-            || self.coalesce_in_flight.load(Ordering::SeqCst)
-            || self.fold_in_flight.load(Ordering::SeqCst)
+            || self.coalesce_outstanding()
+            || self.fold_outstanding()
             || !self.may_publish()
         {
             return;
@@ -4979,10 +5072,11 @@ impl Executor {
     /// nothing (`plan_merge` checks the last itself, it being bundle state rather than executor
     /// health).
     fn dispatch_merge(&mut self, generation: &Arc<Generation>) {
-        // Suspended for a fold's duration, for the reason `dispatch_coalesce` states.
+        // Suspended until a fold is *published*, for the reason `dispatch_coalesce` states and on
+        // the boundary `fold_outstanding` states.
         if !self.merge_enabled.load(Ordering::SeqCst)
-            || self.merge_in_flight.load(Ordering::SeqCst)
-            || self.fold_in_flight.load(Ordering::SeqCst)
+            || self.merge_outstanding()
+            || self.fold_outstanding()
             || self.wal.is_poisoned()
             || !self.may_publish()
         {
@@ -5291,11 +5385,13 @@ impl Executor {
     /// request-serving workers for its duration is exactly the maintenance schedule leaking into
     /// the product that decision 0043 forbids.
     ///
-    /// **The request flag is consumed by a refusal but not by a wait.** A gate — poisoned,
-    /// diverged, stepped down — is a state an operator must act on, and re-planning into it every
-    /// tick is the log flood compaction §9 refuses; the request is answered with one warning and
-    /// dropped. A merge or coalesce already in flight is neither a refusal nor a state to act on,
-    /// so the flag stays armed and the next tick tries again once that pass lands.
+    /// **The request flag is consumed by a refusal but not by a suspension**, and the two words
+    /// are kept apart deliberately. A gate — poisoned, diverged, stepped down — is a state an
+    /// operator must act on, and re-planning into it every tick is the log flood compaction §9
+    /// refuses; the request is *refused*, answered with one warning and dropped. A merge or
+    /// coalesce that is *outstanding* — running, or completed and not yet published — is neither,
+    /// so the fold is *suspended*: the flag stays armed and the next tick tries again once that
+    /// pass lands ([`Executor::fold_outstanding`] states why nothing is lost by re-deciding).
     fn dispatch_fold(&mut self, generation: &Arc<Generation>) {
         // A fold this node could not publish is hours of IO spent to produce an orphan. The
         // planner's own gates cover the recoverable postures; this one covers the two that latch.
@@ -5318,6 +5414,13 @@ impl Executor {
             }
             return;
         }
+        // **A completed fold not yet drained excludes a second one, quietly.** Unlike the refusal
+        // above this consumes nothing: publication is one pass away, so a request left armed is
+        // answered by the next tick rather than dropped — the treatment a fold suspended for a
+        // running merge already gets.
+        if self.fold_outstanding() {
+            return;
+        }
         // A request dispatches on its own terms — whatever hour it is and whatever the gauges read
         // — so the schedule is not consulted for one. **That is about attribution rather than
         // about whether the fold happens**: evaluating both would dispatch exactly the same fold,
@@ -5332,12 +5435,11 @@ impl Executor {
         if !requested && scheduled.is_none() {
             return;
         }
-        // **At most one fold, and none while a merge or a coalesce is running.** Their outputs
-        // would be orphaned by the flip and their inputs are the fold's, so starting now would
-        // mean re-reading the corpus to discard it at the rebase check.
-        if self.merge_in_flight.load(Ordering::SeqCst)
-            || self.coalesce_in_flight.load(Ordering::SeqCst)
-        {
+        // **At most one fold, and none while a merge or a coalesce is outstanding** — running, or
+        // completed and not yet published ([`Executor::fold_outstanding`]). Their outputs would be
+        // orphaned by the flip and their inputs are the fold's, so starting now would mean
+        // re-reading the corpus to discard it at the rebase check.
+        if self.merge_outstanding() || self.coalesce_outstanding() {
             return;
         }
 
@@ -5579,8 +5681,18 @@ impl Executor {
         //
         // ABA-safe because ids are never reused (contracts §2.1), so an artefact still listed is
         // the same artefact the fold consumed. A merge or a coalesce that published under the fold
-        // fails this — which the suspension in `dispatch_merge`/`dispatch_coalesce` makes a
-        // crash-and-race path rather than the steady one.
+        // fails this.
+        //
+        // **Unreachable by construction while the suspension holds, and kept anyway.** No merge or
+        // coalesce can publish under a fold at all: `dispatch_merge` and `dispatch_coalesce` are
+        // the only routes to either, both run from the tick, and both consult
+        // `Executor::fold_outstanding`, which covers the fold from dispatch through publication.
+        // What would make this reachable again is a dispatcher that stopped consulting those
+        // predicates, or a second route to a merge — a control-plane trigger, a second writer. The
+        // check costs one set comparison against a manifest already in hand, on a path that has
+        // just spent hours of IO, and its failure mode is fail-closed where forcing would drop
+        // every row the merge wrote; so it stays as defence in depth rather than as a path with a
+        // known rate.
         let consumed_segments: FxHashSet<(&str, &str)> = plan
             .views
             .iter()
@@ -10261,15 +10373,12 @@ impl Executor {
                     let column = if spatial {
                         // The fold's segment is the whole base at row base 0, so the piece
                         // resolved in `choose_layouts` is the level's membership in this view.
-                        let piece = self
-                            .shapes
-                            .get(view, layer, *level)
-                            .and_then(|held| {
-                                fold_segments
-                                    .iter()
-                                    .find(|(v, _)| v == view)
-                                    .and_then(|(_, segment)| held.piece(&segment.seg_id))
-                            });
+                        let piece = self.shapes.get(view, layer, *level).and_then(|held| {
+                            fold_segments
+                                .iter()
+                                .find(|(v, _)| v == view)
+                                .and_then(|(_, segment)| held.piece(&segment.seg_id))
+                        });
                         piece.and_then(|piece| {
                             crate::row_column::RowColumn::compose(
                                 &crate::artifacts::MembershipRows::of_rows(piece.as_ref().clone()),
@@ -10553,16 +10662,16 @@ impl Executor {
             n,
             projected
                 .into_iter()
-                .map(|(view, layer, level, level_version, bytes)| {
-                    tessera_store::derived::Filed {
+                .map(
+                    |(view, layer, level, level_version, bytes)| tessera_store::derived::Filed {
                         view,
                         layer,
                         level,
                         level_version,
                         layout: tessera_types::layer::ServingLayout::ArtifactMajor,
                         bytes,
-                    }
-                })
+                    },
+                )
                 .collect(),
         )
     }

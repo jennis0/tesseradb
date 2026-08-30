@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r12, 2026-08-15
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r13, 2026-08-30
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -980,6 +980,19 @@ the residual is recorded at contracts §2.3, not closed.
   subsequent change by that external id addresses the new life, and the forgotten one
   accumulates nothing. A *suppressed* holder never enters this path — it still collides.
 - **Two flushes**: impossible — at most one in flight, skips alarmed.
+- **A maintenance pass dispatching against another's snapshot**: excluded, and the boundary is
+  **publication rather than completion**. A merge, a coalesce and compaction's fold each plan
+  against the set of artefacts the live manifest lists, and each changes it, so they exclude one
+  another; but a background job is invisible to a dispatcher reading in-flight flags alone for the
+  whole phase between completing and being published, and the executor's loop straddles exactly
+  that phase — it drains completed jobs at the top of an iteration and dispatches later in the same
+  one. Keyed on "still running", the exclusion let a merge dispatch under a completed, unpublished
+  fold and cost a discarded corpus rewrite at ~3% of runs (compaction §1 carries the measurement).
+  The exclusion is mutual and symmetric, and it cannot wedge: the drain runs before any dispatch on
+  every iteration, so a suspension lasts one pass. **Suspended, not refused** — a pass that does not
+  start is re-decided on the next tick against the corpus as it then is, which is the only treatment
+  that holds, since a plan names specific artefacts and one held across another pass's publication
+  would name a generation that pass has replaced.
 - **⊘ Multi-partition (none exists)**: `write_deny_state` serialises the *global* deny sets into
   whichever partition manifest is written, a flush refreshes only its own partition's manifest,
   and open *unions* every partition's seed — so with two partitions a flush in A could rotate
@@ -1390,6 +1403,15 @@ item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merge
 with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
 
 ## Appendix R — Review record
+
+**r13 (2026-08-30) — mutual exclusion between the maintenance passes is stated once, at the
+boundary that holds.** §6 gains the interleaving: the passes exclude one another on *publication*,
+not on completion, because the phase between a job finishing and its result being drained is
+invisible to an in-flight flag and the executor's loop straddles it. Keyed on completion, a merge
+dispatched under a completed fold at a measured ~3% of runs and the fold was discarded whole
+(compaction §1, §12's obligation 9, which that boundary lets restate as an exclusion rather than a
+recovery). No mechanism in this document moves; what changes is that the rule now exists somewhere
+a reader can find it.
 
 **r12 (2026-08-15) — how a build's own artefact is recognised, corrected by measurement.** §7
 said the coalesce never takes the build's own artefacts because "they are the entries
