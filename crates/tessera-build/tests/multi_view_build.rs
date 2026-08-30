@@ -531,3 +531,138 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
     // Nothing clamps: the box was fitted to every row it will place.
     assert!(group.refusal().is_none());
 }
+
+/// **The roster as a table** (`views.md` §3.1's form B): the keys are rows of a file, read before
+/// pass two, and each becomes a view of the group with its ordinal, its typed metadata and its
+/// own selection out of the shared points file.
+#[test]
+fn a_roster_table_enumerates_the_groups_views() {
+    use arrow::array::{Int64Array, StringArray};
+
+    let dir = tempfile::tempdir().unwrap();
+    write_discriminated(
+        &dir.path().join("quarter-alt.parquet"),
+        &[("2026-Q2", WORLD), ("2026-Q3", QUARTER)],
+    );
+    // One row per view: the key, its own gate, and the group's declared metadata.
+    let roster = dir.path().join("roster.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("visibility", DataType::Utf8, true),
+        Field::new("label", DataType::Utf8, false),
+        Field::new("starts", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["2026-Q2", "2026-Q3"])),
+            Arc::new(StringArray::from(vec![Some("public"), None])),
+            Arc::new(StringArray::from(vec!["Q2 2026", "Q3 2026"])),
+            Arc::new(Int64Array::from(vec![1_775_001_600_000_000i64, 1i64])),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&roster).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+
+    let config = dir.path().join("corpus.toml");
+    std::fs::write(
+        &config,
+        r#"
+[sources]
+alt    = "quarter-alt.parquet"
+roster = "roster.parquet"
+
+[defaults]
+allocation_view = "quarter:2026-Q2"
+
+[[view_group]]
+name             = "quarter"
+extent           = { x = [0.0, 1000.0], y = [0.0, 1000.0] }
+source           = "alt"
+fields           = { view = "quarter" }
+point_visibility = { field = "access", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us" }
+
+[view_group.views]
+source = "roster"
+fields = { key = "quarter" }
+"#,
+    )
+    .unwrap();
+    let config = tessera_build::config::Config::parse(&config, &Default::default())
+        .expect("the declaration parses");
+    let registry = config.build_views().expect("the roster enumerates");
+
+    assert_eq!(
+        registry.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+        ["quarter:2026-Q2", "quarter:2026-Q3"]
+    );
+    let group = registry[1].group.as_ref().expect("a group's view");
+    assert_eq!(group.ordinal, 1, "the ordinal is the roster's own order");
+    assert_eq!(
+        group.metadata.get("label"),
+        Some(&tessera_build::config::MetadataValue::Text(
+            "Q3 2026".to_string()
+        ))
+    );
+    assert_eq!(
+        group.metadata.get("starts"),
+        Some(&tessera_build::config::MetadataValue::TimestampUs(1))
+    );
+    // Every view's points are the group's one file, selected by its key, and the selection
+    // carries the whole roster so a stray key can be refused naming it.
+    let select = registry[0].select.as_ref().expect("form B selects");
+    assert_eq!(select.column, "quarter");
+    assert_eq!(select.value, "2026-Q2");
+    assert_eq!(select.keys, ["2026-Q2", "2026-Q3"]);
+    // The anchor names a view of the group, which is a view id like any other (`views.md` §3.2).
+    assert_eq!(config.anchor_view(&registry).expect("the anchor"), 0);
+}
+
+/// **A listed key with no rows is an empty view** (`views.md` §3.1) — declared, materialised, and
+/// holding nobody: its permutation is sentinel everywhere and its segment has no rows.
+#[test]
+fn a_roster_key_with_no_rows_is_an_empty_view() {
+    let dir = tempfile::tempdir().unwrap();
+    let points = dir.path().join("quarter-alt.parquet");
+    write_discriminated(&points, &[("2026-Q2", 0..ENTITIES)]);
+    let pairs = dir.path().join("pairs.parquet");
+    write_pairs(&pairs);
+    let out = dir.path().join("bundle");
+
+    let report = build(&BuildArgs {
+        views: vec![
+            selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
+            selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
+        ],
+        anchor: 0,
+        groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("an empty view builds");
+
+    assert_eq!(report.views[1].rows, 0);
+    let bundle = open_bundle(&out).expect("the bundle opens");
+    let partition = bundle.partitions.get("default").expect("one partition");
+    let empty = partition.views.get("quarter_alt:2026-Q3").expect("Q3");
+    assert_eq!(empty.segments[0].row_count, 0);
+    for entity in 0..ENTITIES {
+        assert!(empty.row_space.row_of(EntityId::new(entity)).is_none());
+    }
+}

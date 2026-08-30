@@ -5825,6 +5825,45 @@ pub struct BuildView {
     pub visibility: Option<String>,
 }
 
+/// The roster table's rows as roster records (`views.md` §3.1's form B).
+///
+/// **The same rules the inline block is held to**, applied to a file: the key charset, no key
+/// twice, and each view's own gate through the one gate compiler — so which form a corpus wrote
+/// its roster in changes nothing about what the roster may say.
+fn read_roster(group: &ViewGroup, table: &RosterTable) -> Result<Vec<RosterView>> {
+    let object = format!("view group '{}' `[view_group.views]`", group.name);
+    let rows = crate::input::read_roster_table(&table.source, &table.fields, &group.metadata)?;
+    if rows.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: {} carries no rows, so this group has no views. A group with none is a \
+             declaration promising coordinate systems the bundle would not carry (views §3.1)",
+            table.source.display()
+        )));
+    }
+    let mut roster: Vec<RosterView> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let view = format!("{object}, view '{}'", row.key);
+        check_view_name(&view, &row.key)?;
+        if roster.iter().any(|v| v.key == row.key) {
+            return Err(declaration_error(format!(
+                "{object}: view key '{}' appears twice. A key is the caller's own name for one \
+                 view, tombstoned on drop and never reused, and `<group>:<key>` is the id every \
+                 request and every stored path is written under (views §3.2)",
+                row.key
+            )));
+        }
+        roster.push(RosterView {
+            key: row.key,
+            // Form B's points are the group's own file, selected by the discriminator: a roster
+            // row names no source of its own.
+            source: None,
+            visibility: compile_view_gate(&view, row.visibility.as_deref())?,
+            metadata: row.metadata,
+        });
+    }
+    Ok(roster)
+}
+
 impl Config {
     /// Every coordinate system a build materialises, in the registry's order
     /// ([`BuildView`], `views.md` §7).
@@ -5863,18 +5902,22 @@ impl Config {
                         ))
                     })?,
             };
-            let roster = match &owner.roster {
-                Roster::Inline(views) => views,
-                // ⊘ Both arms need a file read this stage does not do: the roster table's keys are
-                // rows of `[view_group.views].source`, and a discriminator group's are the
-                // distinct values of a column. Refused rather than built empty — a group with no
-                // views is a declaration promising coordinate systems the bundle would not carry.
-                Roster::Table(_) | Roster::Discriminator => {
+            // **The roster's rows are views**, whichever form declared them: inline blocks, or
+            // the rows of `[view_group.views].source` read here — before pass two, because the
+            // registry is what pass two iterates and a key the table carries is a coordinate
+            // system this build materialises (`views.md` §3.1, §7).
+            let roster: Vec<RosterView> = match &owner.roster {
+                Roster::Inline(views) => views.clone(),
+                Roster::Table(table) => read_roster(owner, table)?,
+                // ⊘ A discriminator group's keys are the distinct values of a column, discovered
+                // as the points are read. Refused rather than built empty — a group with no views
+                // is a declaration promising coordinate systems the bundle would not carry.
+                Roster::Discriminator => {
                     return Err(declaration_error(format!(
-                        "view group '{}': ⊘ its roster is {} and the build enumerates only the \
-                         inline form (`[[view_group.view]]` blocks) — the multi-view build reads \
-                         no roster table and discovers no discriminator value yet (views §3.1, \
-                         §7). Write the views as `[[view_group.view]]` blocks meanwhile",
+                        "view group '{}': ⊘ its roster is {} and the build enumerates a roster it \
+                         can read — `[[view_group.view]]` blocks, or a `[view_group.views]` table \
+                         — rather than discovering keys from the points (views §3.1, §7). Write \
+                         the views out meanwhile",
                         owner.name,
                         owner.form()
                     )))

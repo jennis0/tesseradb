@@ -2364,3 +2364,232 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The roster as a table (`views.md` §3.1's form B)
+// ---------------------------------------------------------------------------------------------
+
+/// One row of a `[view_group.views]` table: a view of the group, as the file declares it.
+///
+/// **The rows are the roster, in file order**, which is the table's analogue of block order: the
+/// ordinal is creation order and a build creates the views in the order it reads them.
+#[derive(Debug, Clone)]
+pub struct RosterRow {
+    pub key: String,
+    /// The view's own gate, where the table carries a `visibility` column and this row a value.
+    /// `None` takes the group's (`views.md` §6).
+    pub visibility: Option<String>,
+    pub metadata: std::collections::BTreeMap<String, crate::config::MetadataValue>,
+}
+
+/// Read the roster table: one row per view, the canonical `key`, `visibility` and one column per
+/// declared metadata name (`views.md` §3.1).
+///
+/// **Every declared name, on every row, non-null.** A roster record is immutable
+/// ([decision 0108](../../../docs/decisions/0108-a-roster-record-is-immutable.md)), so a value the
+/// table leaves out is a view served with that field missing for the whole of its life rather than
+/// one an update fills in later — the same rule the inline block is held to.
+///
+/// `visibility` is the one optional column: a table carrying none is a roster of views that all
+/// take the group's gate.
+pub fn read_roster_table(
+    path: &Path,
+    fields: &Fields,
+    metadata: &[crate::config::ViewMetadata],
+) -> Result<Vec<RosterRow>> {
+    use crate::config::MetadataValue;
+    use arrow::array::{BooleanArray, LargeStringArray, StringArray};
+
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    let key_name = fields.of("key").to_string();
+    let visibility_name = fields.of("visibility").to_string();
+    if schema.column_with_name(&key_name).is_none() {
+        return Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "the roster table has no '{key_name}' column, and the key is the view's own name \
+                 — `<group>:<key>` is the id every request names (views §3.2). Its columns are: {}",
+                column_names(&schema)
+            ),
+        });
+    }
+    let carries_visibility = schema.column_with_name(&visibility_name).is_some();
+    let reader = builder
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let key_idx = column_index(path, &projected, &key_name)?;
+    let visibility_idx = match carries_visibility {
+        true => Some(column_index(path, &projected, &visibility_name)?),
+        false => None,
+    };
+    let metadata_idx: Vec<usize> = metadata
+        .iter()
+        .map(|declared| {
+            let name = fields.of(&declared.name);
+            column_index(path, &projected, name).map_err(|_| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the roster table has no '{name}' column, and this group declares '{}' as \
+                     metadata every view carries (views §3.1). Its columns are: {}",
+                    declared.name,
+                    column_names(&projected)
+                ),
+            })
+        })
+        .collect::<Result<_>>()?;
+
+    /// One column's rows as strings, or a refusal naming the column's type.
+    fn strings(path: &Path, column: &arrow::array::ArrayRef, name: &str) -> Result<Vec<Option<String>>> {
+        if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
+            return Ok((0..values.len())
+                .map(|i| (!values.is_null(i)).then(|| values.value(i).to_string()))
+                .collect());
+        }
+        if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
+            return Ok((0..values.len())
+                .map(|i| (!values.is_null(i)).then(|| values.value(i).to_string()))
+                .collect());
+        }
+        Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "the roster column '{name}' has type {:?}, and this one is a string",
+                column.data_type()
+            ),
+        })
+    }
+
+    let mut rows: Vec<RosterRow> = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let keys = strings(path, batch.column(key_idx), &key_name)?;
+        let gates = match visibility_idx {
+            Some(idx) => strings(path, batch.column(idx), &visibility_name)?,
+            None => vec![None; keys.len()],
+        };
+        // One decode per column per batch, as every other reader here does: the roster is a
+        // handful of rows, and the shape is the file's rather than the row's.
+        let mut values: Vec<Vec<MetadataValue>> = Vec::with_capacity(metadata.len());
+        for (declared, &idx) in metadata.iter().zip(&metadata_idx) {
+            let column = batch.column(idx);
+            let name = fields.of(&declared.name);
+            let missing = |row: usize| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the roster's row {row} carries no '{name}', and this group declares it as \
+                     metadata every view carries (views §3.1). A roster record is immutable \
+                     (decision 0108), so a value left out is a view served with that field \
+                     missing for the whole of its life"
+                ),
+            };
+            let held: Vec<MetadataValue> = if declared.vocabulary.is_some() {
+                // A category's key, carried as written: it is resolved against the vocabulary
+                // where a category column's values are, which is not this parse's decision.
+                strings(path, column, name)?
+                    .into_iter()
+                    .enumerate()
+                    .map(|(row, value)| value.map(MetadataValue::Text).ok_or_else(|| missing(row)))
+                    .collect::<Result<_>>()?
+            } else {
+                match declared.ty {
+                    ScalarType::Bool => {
+                        let values = column
+                            .as_any()
+                            .downcast_ref::<BooleanArray>()
+                            .ok_or_else(|| BuildError::Schema {
+                                path: path.to_path_buf(),
+                                detail: format!(
+                                    "the roster column '{name}' has type {:?}, and this group \
+                                     declares it 'bool'",
+                                    column.data_type()
+                                ),
+                            })?;
+                        (0..values.len())
+                            .map(|row| match values.is_null(row) {
+                                true => Err(missing(row)),
+                                false => Ok(MetadataValue::Bool(values.value(row))),
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                    ScalarType::F32 | ScalarType::F64 => {
+                        let nulls = column.nulls().cloned();
+                        read_f64_column(path, &batch, idx, name)?
+                            .into_iter()
+                            .enumerate()
+                            .map(|(row, value)| {
+                                match nulls.as_ref().is_some_and(|n| n.is_null(row)) {
+                                    true => Err(missing(row)),
+                                    false => Ok(MetadataValue::Float(value)),
+                                }
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                    ScalarType::Utf8 | ScalarType::Keyword | ScalarType::Text => {
+                        strings(path, column, name)?
+                            .into_iter()
+                            .enumerate()
+                            .map(|(row, value)| {
+                                value.map(MetadataValue::Text).ok_or_else(|| missing(row))
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                    ty => {
+                        let widened =
+                            read_integer(column.as_any(), column.data_type()).ok_or_else(|| {
+                                BuildError::Schema {
+                                    path: path.to_path_buf(),
+                                    detail: format!(
+                                        "the roster column '{name}' has type {:?}, and this group \
+                                         declares it '{}'. A `timestamp_us` reads a microsecond \
+                                         timestamp or an `i64`, and nothing else — a millisecond \
+                                         column read here would be a date a thousandfold wrong",
+                                        column.data_type(),
+                                        ty.arrow_type_name()
+                                    ),
+                                }
+                            })?;
+                        let nulls = column.nulls().cloned();
+                        widened
+                            .into_iter()
+                            .enumerate()
+                            .map(|(row, value)| {
+                                if nulls.as_ref().is_some_and(|n| n.is_null(row)) {
+                                    return Err(missing(row));
+                                }
+                                Ok(match ty {
+                                    ScalarType::TimestampUs => MetadataValue::TimestampUs(value),
+                                    _ => MetadataValue::Int(value),
+                                })
+                            })
+                            .collect::<Result<_>>()?
+                    }
+                }
+            };
+            values.push(held);
+        }
+        for (row, key) in keys.into_iter().enumerate() {
+            let key = key.ok_or_else(|| BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "the roster's row {row} carries no '{key_name}', and a view's key is required \
+                     at creation (views §3.2)"
+                ),
+            })?;
+            rows.push(RosterRow {
+                key,
+                visibility: gates[row].clone(),
+                metadata: metadata
+                    .iter()
+                    .zip(&values)
+                    .map(|(declared, held)| (declared.name.clone(), held[row].clone()))
+                    .collect(),
+            });
+        }
+    }
+    Ok(rows)
+}
