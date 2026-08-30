@@ -1011,6 +1011,23 @@ fn run_viewport_stream(
             // A `region` leaf is canonicalised here, against the view's own extent — the one
             // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
             // every coordinate refusal are `422`s before any compute (selection-operand §2).
+            // **The projection of the view this request names**, not the bundle's first. A
+            // `region` leaf declared in longitude and latitude is placed by the same function
+            // that placed the points it selects (`polygon-membership.md` R12), and that function
+            // belongs to the view being filtered — reading any other view's would hold the wrong
+            // rows with nothing saying so.
+            let projection = match meta.projection_of(&req.view) {
+                Some(projection) => projection,
+                None => {
+                    if let Some(tx) = sink.first_tx.take() {
+                        let _ = tx.send(Err(ApiError::Unknown(format!(
+                            "unknown view '{}'",
+                            req.view
+                        ))));
+                    }
+                    return;
+                }
+            };
             let region = crate::filter_dto::RegionContext {
                 extent: tessera_engine::shapes::Bounds {
                     x_min: meta.quantisation.x_min,
@@ -1018,7 +1035,7 @@ fn run_viewport_stream(
                     y_min: meta.quantisation.y_min,
                     y_max: meta.quantisation.y_max,
                 },
-                projection: meta.projection,
+                projection,
                 max_vertices: state.max_region_vertices,
             };
             match crate::filter_dto::parse(

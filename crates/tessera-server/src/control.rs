@@ -351,6 +351,27 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// shared-secret check has no equivalent of). One layer over all three would have to carry three
 /// credential sources and three exemption lists, which is a policy table — the thing this change was
 /// explicitly not to build. Each plane keeps its own arrangement; only the control plane's moves.
+
+/// The projection a layer's declared views were placed under.
+///
+/// A shape layer whose views declare different projections is refused at the declaration
+/// (`polygon-membership.md` §4.3), so every view here agrees and any one of them answers. What is
+/// not safe is reading the *bundle's* first view: a layer need not be declared on it, and a shape
+/// placed by a projection none of its own views declares holds the wrong rows with nothing saying
+/// so.
+fn layer_projection(
+    meta: &tessera_engine::EngineMeta,
+    views: &[&str],
+) -> Result<tessera_engine::Projection, ApiError> {
+    let first = views
+        .first()
+        .ok_or_else(|| {
+            ApiError::Contract("this layer declares no view to publish a shape into".into())
+        })?;
+    meta.projection_of(first)
+        .ok_or_else(|| ApiError::Unknown(format!("unknown view '{first}'")))
+}
+
 async fn require_operator_credential(
     State(state): State<Arc<AppState>>,
     request: axum::extract::Request,
@@ -2431,7 +2452,11 @@ fn canonical_authored_content(
         &shape,
         &views,
         tessera_engine::shapes::ShapeSpace::View,
-        meta.projection,
+        // **The projection of the layer's own views**, not the bundle's first. A shape layer
+        // spanning views with different projections is refused at the declaration, so the views
+        // agree and the first is the answer for all of them — but it must be *this layer's* first
+        // and not the bundle's, or a shape is placed by a projection no view of it declares.
+        layer_projection(&meta, &views)?,
         &extent,
         state.max_shape_vertices,
     )
@@ -2556,7 +2581,11 @@ fn canonical_row_shape(
         &shape,
         &views,
         space,
-        meta.projection,
+        // **The projection of the layer's own views**, not the bundle's first. A shape layer
+        // spanning views with different projections is refused at the declaration, so the views
+        // agree and the first is the answer for all of them — but it must be *this layer's* first
+        // and not the bundle's, or a shape is placed by a projection no view of it declares.
+        layer_projection(&meta, &views)?,
         &extent,
         state.max_shape_vertices,
     )
