@@ -75,8 +75,17 @@ selection path would trade an auditable definition for a cryptographic one. The 
 where it can be made once and read: `Bundle.verify_identity_cross_check` proves the stored column
 *is* `forward(key, shard, entity_of_row)` for a sample of rows, `Bundle.derive_row_order` proves
 the rows are stored in the order that key implies, and the fixture — not the bundle — supplies the
-key. `conformance/tests/test_mask_catalogue.py` runs all three against the catalogue bundle, so by
-the time a `Selection` reads the column, nothing about it is being taken on trust.
+key.
+
+**Where those checks are run, and where they are not.**
+`conformance/tests/test_mask_catalogue.py` runs all three against the catalogue bundle, so on that
+bundle a `Selection` takes nothing about the column on trust. `reference/tests/test_differential.py`
+runs the §7.2 differential over the 250k `--mint-id-key` fixture and calls **none** of them, and it
+cannot call the third: that fixture's key is a build *output* rather than a fixture input, so there
+is nothing independent to compare the manifest's key against. On that bundle the shared artefact is
+open, and a wrong-but-self-consistent `tessera_id` column is agreed with rather than caught.
+`conformance.md` §4.6's I7 evidence is the catalogue differential, where the hole is closed, so no
+coverage row rests on the open half — a reader need not re-derive that.
 
 ## θ's anchor is computed here, never read back
 
