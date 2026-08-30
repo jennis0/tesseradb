@@ -1,0 +1,186 @@
+# multiview — a cheap fixture exercising every shape docs/design/views.md r6 adds.
+#
+# Produced by `prepare.py`, which copies this file next to the parquets it writes (the house
+# convention every rung in this tree follows: `[sources]` is relative to the declaring document,
+# configuration.md §3, so the copy beside the data is what `tessera build` would read).
+#
+# **This fixture leads the implementation.** `tessera build` does not parse `[[view_group]]` yet
+# (views.md §7's ⊘), so `tessera check` and `tessera build` against this file will refuse it —
+# that is expected and this file is not meant to pass either today.
+#
+# Positions: `world` and `quarter_alt` are real-derived (a seeded sample of the GeoNames rung's own
+# built points, its Web Mercator [0,1] coordinates un-projected back to WGS84 degrees — see
+# `prepare.py`'s docstring); `quarter`'s per-quarter layouts are synthetic, an abstract embedding
+# with no geographic meaning, which is exactly what `projection = "none"` says about it. `access`,
+# `importance` and `kind` are the GeoNames sample's own `country`, `population` and `feature_class`
+# columns, carried through unchanged. `sentiment` is synthetic throughout.
+
+[sources]
+world           = "world.parquet"           # entity_id, lon, lat, access — the plain view's points
+quarter_2026_q1 = "quarter-2026-Q1.parquet"  # entity_id, x, y, access, sentiment
+quarter_2026_q2 = "quarter-2026-Q2.parquet"
+quarter_2026_q3 = "quarter-2026-Q3.parquet"
+quarter_2026_q4 = "quarter-2026-Q4.parquet"
+quarter_alt_pts = "quarter-alt.parquet"      # entity_id, quarter, lon, lat, access — form B
+attrs_constant  = "attrs-constant.parquet"   # entity_id, importance, kind
+vocab_kind      = "vocab-kind.parquet"
+collections     = "collections.parquet"      # key, contents, members, access
+clusters_q      = "clusters-quarter.parquet" # key, quarter, contents, members
+
+[defaults]
+source          = "world"
+entity_id_field = "entity_id"
+
+# ---------------------------------------------------------------------------------------------
+# One plain view: the whole-corpus map, real-derived positions, a synthetic per-point compartment
+# scheme following the Overture rung's pattern — the point's own country stands in for an access
+# term, and a point with none takes the declared default. `world` holds three of the four entity
+# buckets `prepare.py` creates (spec §7's Appendix A worked example is the model this follows).
+# ---------------------------------------------------------------------------------------------
+
+[[view]]
+name             = "world"
+title            = "Whole corpus"
+projection       = "web_mercator"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+visibility       = "public"                                        # spec §6, default; written for clarity
+point_visibility = { field = "access", default = "public" }
+
+# ---------------------------------------------------------------------------------------------
+# One view group, form A (spec §3.1): one file per quarter, each an inline `[[view_group.view]]`
+# block. `extent` and `projection` are the group's own — an abstract embedding, not a map, so
+# `projection = "none"` and the box is the layout's own coordinate range rather than a geographic
+# one (spec §2's "an embedding and a map cannot share a frame" is why the extent sits here at all).
+# Entity overlap with `world` and across quarters is deliberately partial: some entities sit in
+# every quarter and in `world` (the corpus's stable core), some in `world` and one quarter, some in
+# `world` only, and some in two quarters and never in `world` — the shape `prepare.py`'s docstring
+# names as buckets A/B/C/D.
+# ---------------------------------------------------------------------------------------------
+
+[[view_group]]
+name             = "quarter"
+title            = "By quarter"
+projection       = "none"
+extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
+visibility       = "public"
+point_visibility = { field = "access", default = "public" }
+metadata         = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }
+
+[[view_group.view]]
+key    = "2026-Q1"
+source = "quarter_2026_q1"
+label  = "Q1 2026"
+starts = 2026-01-01T00:00:00Z
+ends   = 2026-04-01T00:00:00Z
+
+[[view_group.view]]
+key    = "2026-Q2"
+source = "quarter_2026_q2"
+label  = "Q2 2026"
+starts = 2026-04-01T00:00:00Z
+ends   = 2026-07-01T00:00:00Z
+
+[[view_group.view]]
+key    = "2026-Q3"
+source = "quarter_2026_q3"
+label  = "Q3 2026"
+starts = 2026-07-01T00:00:00Z
+ends   = 2026-10-01T00:00:00Z
+
+[[view_group.view]]
+key    = "2026-Q4"
+source = "quarter_2026_q4"
+label  = "Q4 2026"
+starts = 2026-10-01T00:00:00Z
+ends   = 2027-01-01T00:00:00Z
+
+# ---------------------------------------------------------------------------------------------
+# A second group sharing `quarter`'s views (spec §3.3), form B: one file, a `quarter` discriminator
+# column naming which view each row belongs to. Real-derived positions again — a geographic layout
+# beside the abstract one, the same pairing Appendix A draws between `quarter` and `quarter_map`.
+# `metadata` and a roster are refused on a `members` group (spec §3.3); its own `visibility` is the
+# one gate it may still declare, so it is written even though it agrees with the owning group's.
+# ---------------------------------------------------------------------------------------------
+
+[[view_group]]
+name             = "quarter_alt"
+title            = "By quarter, geographic"
+members          = "quarter"
+projection       = "web_mercator"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+source           = "quarter_alt_pts"
+fields           = { view = "quarter" }
+visibility       = "public"
+point_visibility = { field = "access", default = "public" }
+
+# ---------------------------------------------------------------------------------------------
+# One closed, public vocabulary and its two attributes: a constant numeric (indexed) and a constant
+# category (indexed, rendered — 9 values is a legend). Both are entity-scoped (no `scope` key,
+# spec §5's default) and read from `attrs_constant`, which is declared explicitly because it is not
+# `[defaults].source`: the constant attributes have to reach entities that never appear in `world`
+# (bucket D), and a constant attribute's own `source` is exactly the escape spec §5 gives for that.
+# ---------------------------------------------------------------------------------------------
+
+[[vocabulary]]
+name       = "kind"
+title      = "Feature kind"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+source     = "vocab_kind"
+
+[[attribute]]
+name   = "importance"
+type   = "i64"
+index  = true
+source = "attrs_constant"
+
+[[attribute]]
+name       = "kind"
+type       = "category"
+vocabulary = "kind"
+index      = true
+render     = true
+source     = "attrs_constant"
+
+# The group-scoped attribute (spec §5): one entity-space column per view of `quarter`, applying to
+# `quarter_alt` too since it shares the same views. No `source` — read from each quarter's own file,
+# the group's views being form A, exactly as Appendix A's `sentiment` attribute is declared. Some
+# entities carry no value in some quarters, which is the presence bitmap's ordinary case rather
+# than a hole to fill (decision 0064).
+[[attribute]]
+name   = "sentiment"
+type   = "f32"
+scope  = { group = "quarter" }
+index  = true
+render = true
+
+# ---------------------------------------------------------------------------------------------
+# Two layers: one unscoped, drawn on the plain view and on every quarter alike (spec §3.5's
+# default `scope = "entity"`); one scoped to the group, a different artifact set per quarter
+# (`scope = { group = "quarter" }`), its rows carrying the `view` column via `fields.view`.
+# ---------------------------------------------------------------------------------------------
+
+[[layer]]
+name                      = "collections"
+title                     = "Curated collections"
+views                     = ["world", "quarter"]
+source                    = "collections"
+membership                = "enumerated"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { field = "access", default = "inherited" }
+require_member_visibility = "all"
+
+[[layer]]
+name                      = "quarter_clusters"
+title                     = "Clusters by quarter"
+views                     = ["quarter"]
+scope                     = { group = "quarter" }
+source                    = "clusters_q"
+fields                    = { view = "quarter" }
+membership                = "enumerated"
+hierarchy                 = { kind = "flat" }
+visibility                = "public"
+artifact_visibility       = { default = "inherited" }
+require_member_visibility = "any"
