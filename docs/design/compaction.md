@@ -1,7 +1,7 @@
 # Compaction — design
 
 **Date:** 2026-08-05
-**Status:** **Normative for the fold** (owner, 2026-08-07) **— r11.** Three adversarial rounds have
+**Status:** **Normative for the fold** (owner, 2026-08-07) **— r12.** Three adversarial rounds have
 run (r3, three lenses; r5, two lenses on the sections that changed shape; r10, three against the
 implementation) and all are dispositioned in the body, and probe P1 has measured the one claim that
 was never more than modelled (r11). r4's three fatal findings and its refuted mechanism are fixed there:
@@ -114,10 +114,27 @@ survive rather than a scheduled outage.
 - **Ingest, denies and flush continue.** A deny takes effect at its own ack; a flush publishes into
   the *old* prefix and is carried forward at the flip. *"Flushes never block"* (SA §6.7) is not
   weakened here.
-- **Merge and coalesce are suspended for its duration.** Their outputs would be orphaned by the
-  flip and their inputs are the fold's, so running them is waste, not hazard. The safety argument
-  does not rest on the suspension — spec §4's presence check does — but the suspension is what
-  keeps the fold from being discarded by its own maintenance passes.
+- **Merge and coalesce are suspended until the fold is published**, not merely until it stops
+  running. Their outputs would be orphaned by the flip and their inputs are the fold's, so running
+  them is waste, not hazard. The safety argument does not rest on the suspension — spec §4's
+  presence check does — but the suspension is what keeps the fold from being discarded by its own
+  maintenance passes.
+
+  **Publication is the boundary because completion is not observable to anyone else.** A background
+  job runs, then sits completed and undrained in its channel, then is published; the in-flight flag
+  covers only the first phase, and the executor's own loop straddles the second — it drains at the
+  top of an iteration and dispatches later in the same one. A suspension keyed on "still running"
+  therefore let a merge dispatch against a generation the completed fold was about to replace, and
+  the fold was discarded whole at its presence check. Fail-closed and **not rare**: measured at 3 of
+  93 runs of the fold suite and 12 of 480 runs of the single case, ~3%, under 3–4 concurrent lanes.
+  The instruction window is microseconds; the rate is not, because the executor's loop and the job's
+  completion are both driven by the tick cadence rather than being independent. The exclusion is
+  mutual and symmetric — no fold dispatches under a completed, unpublished merge or coalesce
+  either — and it cannot wedge: the drain that clears the state runs at the top of every executor
+  iteration, before any dispatch, so a suspension lasts one pass and a *requested* fold keeps its
+  request armed. **Suspended, not refused**: nothing is rejected and no intent is lost, because a
+  merge is re-planned from scratch on the next tick — and it must be, since a plan names specific
+  segments and one held across a fold would name a generation the fold is about to replace.
 
 ## 2. What is folded, what is carried forward
 
@@ -851,8 +868,11 @@ That, and the absence of a throttle site (spec §6.1), is what remains open here
   close.
 - **Unsuppress during the fold**: mutates `suppressed`, which is serialised from live state at
   publication, so the flip carries the correct set and the row mask re-derives over it.
-- **Merge or coalesce publishing under the fold**: the fold discards. Suspension makes this rare
-  rather than safe.
+- **Merge or coalesce publishing under the fold**: excluded by construction. The suspension in
+  spec §1 ends at the fold's *publication* rather than at its completion, and the dispatchers are
+  the only route to either pass, so this state is unreachable. The fold's presence check still
+  discards a fold whose consumed artefacts are no longer listed, and remains the safety argument;
+  it is defence in depth rather than a path with a known rate (§12's obligation 9).
 - **Two folds**: impossible — at most one in flight, and the trigger is refused while one runs.
 - **Crash mid-fold**: orphaned files under an unreferenced prefix. ✔ **The startup sweep takes
   them**, and nothing else could: `next_prefix_name` steps *past* an orphan by construction, and the
@@ -1263,15 +1283,29 @@ establishes, and a section like this one is read as though it had checked.
    its external id is re-ingestible.
 8. **A flush published during the fold's flight is carried forward** and its items are visible
    after the flip, at their re-based row ids.
-9. **The fold discards rather than forces** when a merge or coalesce published under it, leaving
-   orphans and a re-plannable state. ✔ Covered, and the case is constructed at the window that
-   makes it real: merge and coalesce are suspended for `fold_in_flight`'s duration, and the fold's
-   own thread clears that flag *before* the executor drains the result, so an executor already
-   inside its tick dispatches a merge that publishes under a completed, unpublished fold. Holding
-   the completed fold undrained is that state, held still. **What the test pins is the outcome
-   rather than any one check**, and it must: a merge disturbs the segment list, the tiers and runs
-   beneath it, and the locator's entity span, and publication checks all three — disabling any one
-   of them still discards, at the next. Only all three together let the fold through.
+9. **A merge or coalesce cannot publish under a fold**, so no fold ever faces the choice between
+   discarding hours of IO and forcing a base that would drop the rows that merge wrote. ✔ Covered
+   by `a_merge_is_suspended_while_a_completed_fold_is_unpublished` and its mirror
+   `a_fold_is_suspended_while_a_completed_merge_is_unpublished`: a merge is offered ten ticks under
+   a completed, undrained fold and takes none of them, and the fold it would have orphaned then
+   publishes.
+
+   **The property protected is unchanged; what changed is that it is upheld by exclusion rather
+   than by recovery.** The obligation used to be stated as the recovery — *the fold discards rather
+   than forces* — because the interleaving was reachable: merge and coalesce were suspended for
+   `fold_in_flight`'s duration, and the fold's own thread clears that flag *before* the executor
+   drains the result, so an executor already inside its tick dispatched a merge that published
+   under a completed, unpublished fold. Spec §1's suspension now ends at publication instead, which
+   closes that window by construction — `dispatch_merge` has one call site, in the tick, beside
+   `dispatch_fold`, and there is no control-plane or operator route to a merge.
+
+   **The discard remains, as defence nothing can currently reach.** The presence check in
+   `publish_fold` still discards a fold whose consumed artefacts are no longer listed, and it is
+   still the safety argument (spec §7) rather than the suspension being it. It is unreachable while
+   the exclusion holds; what would make it reachable again is a dispatcher that stopped consulting
+   the outstanding predicates, or a second route to a merge. It is not tested, because a test that
+   reached it would have to switch the exclusion off and would then be testing a state production
+   cannot enter.
 10. **The watermark and `entity_id_high_water` pass through**, and no entity id is reissued after a
     fold (I9, fuzzed as the allocator already is). ✔ The pass-through half:
     `the_watermark_and_high_water_published_are_the_live_ones_not_the_snapshot` asserts the
@@ -1468,6 +1502,18 @@ P2 dropped its pre-swap arm: D2 was withdrawn at r3 (spec §13), so there is no 
 compare against and what the probe measures is the post-swap pass alone.
 
 ## Appendix R — Review record
+
+**r12 (2026-08-30) — the fold's mutual exclusion excluded the wrong boundary, corrected by
+measurement.** §1's suspension ran for `fold_in_flight`'s duration, which ends when the fold's
+thread finishes rather than when its result is published; the executor's own loop straddles the
+gap, so a merge dispatched against a generation the completed fold was about to replace and the
+fold was discarded whole — 3 of 93 runs of the fold suite, ~3%, not the microseconds-wide race the
+code's own note accepted. The suspension now ends at publication, in both directions and for the
+coalesce. §12's obligation 9 is restated to match: the property it protects is unchanged, but it
+is upheld by **exclusion** — a merge cannot publish under a fold — rather than by the fold's
+recovery from an interleaving that is no longer reachable. **No mechanism moves** — the presence
+check that discards is untouched, remains the safety argument, and stands as defence nothing can
+currently reach.
 
 **r11 (2026-08-07) — probe P1 ran, and it found the prohibition §3 states being broken in two
 places.** Not a review: a measurement, and the disposition of what it turned up.

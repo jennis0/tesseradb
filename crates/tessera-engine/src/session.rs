@@ -588,6 +588,82 @@ impl std::error::Error for EngineError {}
 
 pub type Result<T> = std::result::Result<T, EngineError>;
 
+/// Build the shared compute pool, **with the panic handler every pooled task depends on**.
+///
+/// One constructor rather than a `ThreadPoolBuilder` at each site, because the handler is not a
+/// refinement of the pool: it is the difference between a diagnosable failure and an unattributable
+/// one, and a second pool built without it would silently be the old behaviour.
+///
+/// # What rayon does with a panic, and why the two APIs differ
+///
+/// `install`, `join` and `scope` have an obvious caller to propagate a panic to, and they do —
+/// `Engine::viewport`'s tile sweep relies on exactly that, and the panic handler is **not** invoked
+/// for them ([`tests::a_panic_inside_the_shared_pool_propagates_to_the_caller`] pins it, and would
+/// abort this process instead of passing if that changed). `spawn` has no such caller: the write
+/// path's flush, merge and coalesce submit their result through a channel and nobody is waiting on
+/// the closure. With no handler configured, rayon's answer to a panic there is to **abort the
+/// process** — one line, no payload, no backtrace, and under `libtest` the panic's own message is
+/// discarded with the captured output of a test the runner never gets to name. That is what made a
+/// `debug_assert` anywhere inside flush, merge or coalesce undiagnosable in a debug build.
+///
+/// # The record, and why it is written twice
+///
+/// [`describe_pool_panic`] names the subsystem, the worker thread and the payload, and carries a
+/// backtrace of the **abort site** — the handler's own stack, since rayon calls it after unwinding
+/// has finished. The panic's own location is on the line the default panic hook already printed;
+/// what this adds is the attribution, and a copy that survives.
+///
+/// It goes to `tracing` for a deployment, which has a subscriber, and directly to `stderr` for
+/// everything that does not — a test binary above all, where `libtest`'s capture is discarded with
+/// the process the next line aborts.
+///
+/// **Aborting is deliberately unchanged.** A pooled task that panicked left its `in_flight` flag
+/// set — the store that clears it is the last statement of the closure the unwind skipped — so
+/// continuing would wedge the flush, merge or coalesce it was, silently and for the process's
+/// lifetime. Whether that should instead reach the write path's `Dead` posture, which refuses
+/// callers and says why, is a design question this does not settle.
+pub(crate) fn build_compute_pool(
+    threads: usize,
+) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .panic_handler(|payload| {
+            let record = describe_pool_panic(payload.as_ref());
+            tracing::error!(pool_panic = %record, "a task spawned on the shared compute pool panicked");
+            // Directly, not through `eprintln!`: `libtest` captures the print macros and drops
+            // what it captured when the process below dies, which is the whole reason this record
+            // exists.
+            let _ = std::io::Write::write_all(
+                &mut std::io::stderr().lock(),
+                format!("{record}\n").as_bytes(),
+            );
+            std::process::abort();
+        })
+        .build()
+}
+
+/// The record a pooled task's panic leaves: subsystem, worker thread, payload, abort-site
+/// backtrace.
+///
+/// Separate from the handler so it can be asserted without aborting the process that asserts it.
+fn describe_pool_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    let message = payload
+        .downcast_ref::<&'static str>()
+        .map(|s| (*s).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a payload that is neither &str nor String".to_string());
+    let thread = std::thread::current()
+        .name()
+        .unwrap_or("<unnamed>")
+        .to_string();
+    format!(
+        "tessera: a task spawned on the shared compute pool panicked; aborting\n  \
+         worker thread: {thread}\n  payload: {message}\n  abort-site backtrace (the panic's own \
+         location is on the default hook's line above):\n{}",
+        std::backtrace::Backtrace::force_capture()
+    )
+}
+
 /// The request-serving engine: one immutable [`Generation`] behind an atomically-swappable
 /// pointer, plus the state that genuinely is process-lifetime — the plugin, the compute pool, the
 /// `tessera_id` key, the row-projection cache and the bundle root.
@@ -610,8 +686,12 @@ pub struct Engine {
     /// see [`crate::region`]. Keyed on **no principal**, deliberately: the entry carries no
     /// authorisation, and the rows inside the shape are tested under each request's own mask
     /// rather than held (owner ruling 2026-08-29, selection-operand §10 (b)).
-    pub(crate) region_cache:
-        Arc<crate::single_flight::SingleFlightCache<crate::region::RegionKey, crate::region::RegionDecomposition>>,
+    pub(crate) region_cache: Arc<
+        crate::single_flight::SingleFlightCache<
+            crate::region::RegionKey,
+            crate::region::RegionDecomposition,
+        >,
+    >,
     /// `serve.max_region_cells` — the most boundary cells a region's descent may hold at one
     /// depth before it answers a cover (selection-operand §6). A setter rather than an
     /// `EngineConfig` field, for [`Engine::set_masked_count_cache_bytes`]'s reason.
@@ -1112,9 +1192,7 @@ impl Engine {
         // this engine's *open*-time health, not a fact to discover on whichever request happens
         // to be first (fail-closed: this engine simply does not open).
         let pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(config.compute_threads)
-                .build()
+            build_compute_pool(config.compute_threads)
                 .map_err(|e| EngineError::ThreadPoolBuild(e.to_string()))?,
         );
 
@@ -1454,6 +1532,17 @@ impl Engine {
         if !paused {
             self.write.wake();
         }
+    }
+
+    /// Whether a completed fold is waiting, undrained, at
+    /// [`Self::set_fold_publication_paused_for_test`]'s hold — the fold's half of
+    /// [`Self::merge_publication_is_held_for_test`], and the condition a test waits on rather than
+    /// guessing at the hold with a sleep.
+    pub fn fold_publication_is_held_for_test(&self) -> bool {
+        self.write
+            .health()
+            .fold_completed_pending
+            .load(Ordering::SeqCst)
     }
 
     /// Whether a completed merge is waiting, undrained, at
@@ -3395,16 +3484,24 @@ mod tests {
     /// to share that harness across a `tests/` integration binary and an internal `src/` module
     /// (different compilation units), for a test whose only load-bearing claim is "rayon
     /// propagates a worker panic through `install()`" — a property of rayon's own pool, not of
-    /// anything `Engine::open` does when building one. The construction below is checked against
-    /// `Engine::open`'s by inspection (both are a bare
-    /// `rayon::ThreadPoolBuilder::new().num_threads(n).build()`, no further configuration either
-    /// side) rather than by sharing code, which is what "identical construction" above means.
+    /// anything `Engine::open` does when building one. The pool below is now built by `Engine::open`'s own constructor
+    /// ([`super::build_compute_pool`]) rather than by a look-alike checked against it by
+    /// inspection, so "identical construction" above is a fact rather than a claim.
+    ///
+    /// # What it does not cover, which is the half the write path uses
+    ///
+    /// `install` is synchronous and has a caller to propagate to. The write path's flush, merge and
+    /// coalesce use `pool.spawn`, which has none, and a panic there reaches the pool's panic
+    /// handler instead — so this test says nothing about them, and the reassurance it reads as was
+    /// once taken for one. That path is pinned by
+    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`].
+    ///
+    /// **Mutations this kills:** removing the panic handler's exemption for propagating APIs — if
+    /// `install` ever routed through the handler, this test would abort its own process rather
+    /// than pass.
     #[test]
     fn a_panic_inside_the_shared_pool_propagates_to_the_caller() {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .expect("pool should build");
+        let pool = super::build_compute_pool(2).expect("pool should build");
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pool.install(|| {
@@ -3415,6 +3512,115 @@ mod tests {
         assert!(
             result.is_err(),
             "a panic inside install() must propagate to the caller, not be swallowed"
+        );
+    }
+
+    /// **A panic in a task spawned on the shared pool leaves a record naming what panicked, before
+    /// the process dies.**
+    ///
+    /// The write path's flush, merge and coalesce run on `pool.spawn`, whose panic rayon reports to
+    /// the pool's panic handler and, with none configured, answers by aborting the process — one
+    /// line, no payload, no backtrace, and `libtest` discarding the captured output of a test the
+    /// runner never names. That is the "target failed, no test named" this repository has seen
+    /// twice, and it is what makes a `debug_assert` inside those three passes undiagnosable.
+    ///
+    /// # A subprocess, because the behaviour under test ends the process
+    ///
+    /// The child is this same test binary, re-executed against the `#[ignore]`d case below, which
+    /// runs only with `POOL_PANIC_CHILD` set — so a plain `--ignored` sweep does not abort someone's
+    /// test run. What is asserted is the child's *stderr*, which is where the record has to be:
+    /// `libtest` captures the print macros and drops what it captured when the process dies, so a
+    /// record written through them would be exactly as lost as the panic message it replaces.
+    ///
+    /// **Mutations this kills** (each run): dropping the `panic_handler` from
+    /// [`super::build_compute_pool`] — the child aborts with rayon's own line and no payload;
+    /// writing the record through `eprintln!` rather than to `stderr` directly — the child aborts
+    /// with nothing; dropping the payload or the thread from [`super::describe_pool_panic`] — the
+    /// corresponding assertion fails.
+    #[cfg(unix)]
+    #[test]
+    fn a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let exe = std::env::current_exe().expect("the test binary knows its own path");
+        let out = std::process::Command::new(exe)
+            // A substring filter, not `--exact`: the module path of a unit test is not something
+            // this test should have to restate correctly.
+            .args(["--ignored", "--nocapture", "the_pool_panic_child"])
+            .env(POOL_PANIC_CHILD, "1")
+            .output()
+            .expect("the test binary re-executes");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+
+        assert!(
+            !out.status.success(),
+            "a panicked pooled task must not leave the process healthy: {out:?}"
+        );
+        assert_eq!(
+            out.status.signal(),
+            Some(libc::SIGABRT),
+            "the behaviour is unchanged — the process still aborts; only the record is new: \
+             {stderr}"
+        );
+        assert!(
+            stderr.contains("spawned on the shared compute pool panicked"),
+            "the record names the subsystem: {stderr}"
+        );
+        assert!(
+            stderr.contains("synthetic pooled-task panic"),
+            "the record carries the payload, which is what makes it a diagnosis: {stderr}"
+        );
+        assert!(
+            stderr.contains("worker thread:"),
+            "and the thread it happened on: {stderr}"
+        );
+    }
+
+    /// The child half of
+    /// [`a_panic_in_a_spawned_pool_task_is_recorded_before_the_process_aborts`]. Aborts the process
+    /// by design, and does nothing at all unless that parent set `POOL_PANIC_CHILD` — an
+    /// `--ignored` sweep must not take a test binary down with it.
+    #[test]
+    #[ignore]
+    fn the_pool_panic_child() {
+        if std::env::var_os(POOL_PANIC_CHILD).is_none() {
+            return;
+        }
+        let pool = super::build_compute_pool(1).expect("pool should build");
+        pool.spawn(|| panic!("synthetic pooled-task panic"));
+        // The abort arrives on the worker thread; this one only has to still be here for it.
+        std::thread::sleep(std::time::Duration::from_secs(30));
+        unreachable!("the panic handler aborts long before this");
+    }
+
+    const POOL_PANIC_CHILD: &str = "TESSERA_POOL_PANIC_CHILD";
+
+    /// **The record carries the payload for both of the shapes a panic can leave it in, and says so
+    /// when it is neither.**
+    ///
+    /// `panic!("literal")` leaves a `&'static str` and `panic!("{x}")` a `String`; an assertion
+    /// macro's payload is one of the two, and a `panic_any` is neither. A record that reads
+    /// "a payload that is neither" for the common case is the diagnosis quietly not happening.
+    ///
+    /// **Mutations this kills:** downcasting to only one of the two types; dropping the payload
+    /// from the record; dropping the backtrace.
+    #[test]
+    fn the_pool_panic_record_carries_every_payload_shape() {
+        let from_literal: Box<dyn std::any::Any + Send> = Box::new("a literal payload");
+        let from_format: Box<dyn std::any::Any + Send> =
+            Box::new("a formatted payload".to_string());
+        let from_neither: Box<dyn std::any::Any + Send> = Box::new(7u32);
+
+        let literal = super::describe_pool_panic(from_literal.as_ref());
+        assert!(literal.contains("a literal payload"), "{literal}");
+        assert!(
+            literal.contains("backtrace"),
+            "the record carries a backtrace, which is the half a one-line abort never had: \
+             {literal}"
+        );
+        assert!(super::describe_pool_panic(from_format.as_ref()).contains("a formatted payload"));
+        assert!(
+            super::describe_pool_panic(from_neither.as_ref()).contains("neither &str nor String")
         );
     }
 }
