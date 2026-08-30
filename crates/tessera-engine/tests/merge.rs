@@ -37,14 +37,22 @@
 //! release. That parked state is what a crash-mid-merge test kills into: the merged segment an
 //! orphan, its inputs untouched.
 //!
-//! **Still not covered here, and now for a sharper reason:** a suppression *accepted* in that
-//! window. `publish_merge` re-derives the deny mask from the live overlay at swap time, so the
-//! ordering is sound by construction — but the pause site cannot assemble the interleaving,
-//! because the parked thread *is* the deny lane's thread: no deny can be accepted while the
-//! executor is parked, and one submitted then is applied after the release completes the
-//! publication. Constructing "deny accepted after execution, before publication" would need a
-//! pause on the **pool's** side of the seam, which is not one of the three ruled sites. The
-//! re-derive at swap time remains the argument, held by the suppression cases above.
+//! **A suppression accepted in that window is covered, and the pause site is not what covers it.**
+//! `publish_merge` re-derives the deny mask from the live overlay at swap time; the case that
+//! tests it needs a deny *acked* between a merge's execution and its publication.
+//! `BeforeMergePublish` cannot assemble that, because the parked thread is the deny lane's own
+//! thread: a deny submitted while it is parked is applied only after the release has already
+//! published, which is the ordering a stale capture survives unnoticed.
+//! `Engine::set_merge_publication_paused_for_test` can, and does — it holds the completed merge
+//! undrained in its channel and leaves the executor free to accept the deny, which is the same
+//! window the watermark case below lands a *flush* in.
+//! `a_suppression_accepted_inside_a_merges_flight_survives_its_publication` is that interleaving
+//! with its ordering chosen; `a_suppression_racing_a_merge_is_in_force_once_both_have_landed`
+//! keeps the uncontrolled one beside it.
+//!
+//! *(This module recorded the interleaving as out of reach from 2026-08-05 until 2026-08-30. The
+//! paragraph was rewritten on 2026-08-15 to turn on the pause site — the same day the publication
+//! hold that does reach it landed, in another commit, for the watermark case.)*
 
 mod common;
 
@@ -97,7 +105,10 @@ fn engine_at(tmp: &std::path::Path, root: &std::path::Path) -> Engine {
 fn engine_at_with_faults(
     tmp: &std::path::Path,
     root: &std::path::Path,
-) -> (Engine, std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>) {
+) -> (
+    Engine,
+    std::sync::Arc<tessera_lifecycle::faults::FaultSwitchboard>,
+) {
     let mut engine = open_engine_at(tmp, root);
     let faults = std::sync::Arc::new(tessera_lifecycle::faults::FaultSwitchboard::new());
     engine
@@ -484,12 +495,15 @@ fn a_delete_before_a_merge_stays_deleted_across_it_and_a_restart() {
 
 /// **A suppression accepted while the merge is in flight is in force once it lands.**
 ///
-/// Not the pause-site race — see this module's doc for what is out of reach — but the interleaving
-/// that *is* deterministic in its assertion: the deny is submitted after the tick that dispatches
-/// the merge, so it may be applied before or after `publish_merge` re-derives, and the property
-/// must hold either way. A publication that re-derived from a *captured* overlay rather than the
-/// live one loses the deny on exactly one of the two orderings, so this fails intermittently
-/// rather than never.
+/// **The uncontrolled ordering**, kept beside the controlled one: the deny is submitted after the
+/// tick that dispatches the merge, so it may be applied before or after `publish_merge`
+/// re-derives, and the property must hold either way. A publication that re-derived from a
+/// *captured* overlay rather than the live one loses the deny on one of the two orderings only, so
+/// what this case catches depends on which ordering the scheduler produced — it caught a planted
+/// stale capture 20 runs out of 20 on one box, which is a fact about that box rather than a
+/// guarantee. `a_suppression_accepted_inside_a_merges_flight_survives_its_publication` is the same
+/// property with the ordering chosen rather than raced; this one stays because the ordering it
+/// usually lands is the one a real deny takes when it beats the planner.
 #[test]
 fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -516,6 +530,82 @@ fn a_suppression_racing_a_merge_is_in_force_once_both_have_landed() {
         "the suppression is in force whichever side of the swap it landed"
     );
     assert!(served.is_subset(&baseline));
+    assert!(engine.generation().overlay.is_suppressed(entity));
+}
+
+/// **A suppression accepted *inside* a merge's flight survives its publication** — the ordering
+/// chosen rather than raced.
+///
+/// The interleaving the case above can only stumble into: the deny is applied and acked while the
+/// completed merge is held undrained in its channel, so the publication that follows is
+/// unambiguously the *later* of the two and must re-derive the deny mask from an overlay that
+/// already carries it. A publication deriving from an overlay captured when the merge was planned
+/// re-exposes the suppressed entity here every time.
+///
+/// **The hold is the lever, and the pause site is not.** `PauseSite::BeforeMergePublish` parks the
+/// executor thread — which is the deny lane's own thread — so a deny submitted while it is parked
+/// is applied *after* the release completes the publication, which is the ordering the stale-capture
+/// defect survives. `set_merge_publication_paused_for_test` holds the completed merge in its
+/// channel instead and leaves the executor free, which is the only way in the tree to put an acked
+/// deny strictly between a merge's execution and its publication. The watermark case above uses
+/// the same hold to land a *flush* in the same window.
+///
+/// **Mutations this kills:** deriving `denied` in `publish_merge` from an overlay captured when
+/// the merge was dispatched rather than from `live.overlay`, and the same substitution in
+/// `write_deny_state`, which is the durable half of it. Planted, it re-exposes the suppressed
+/// entity here on every run — 20 of 20 — where the racing case can only catch it on the ordering
+/// the scheduler happens to give. The re-exposure is what this asserts; in a debug build the same
+/// plant is stopped earlier still, by `publish_arc`'s derivation assertion, so the served-set
+/// demonstration was taken with debug assertions off.
+#[test]
+fn a_suppression_accepted_inside_a_merges_flight_survives_its_publication() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("bundle");
+    let (engine, items) = engine_with_pending_merge(&tmp, &root);
+    let entities: Vec<EntityId> = items.iter().map(|(e, _)| *e).collect();
+    let session = engine.authorise(&full_coverage_credential()).unwrap();
+
+    let baseline = served_ids(&engine, &session);
+    let rows_before = rows_of(&engine, &entities);
+    let entity = items[ROWS_EACH * 3 + 1].0;
+
+    // The merge executes and completes, and is held undrained — the flight, held open for a deny
+    // rather than for a flush.
+    engine.set_merge_publication_paused_for_test(true);
+    engine.set_merge_for_test(true);
+    engine.request_flush();
+    wait_until("the merge to complete and hold", || {
+        engine.merge_publication_is_held_for_test()
+    });
+    // Off again, so nothing dispatches a second merge over the same extents.
+    engine.set_merge_for_test(false);
+
+    engine
+        .accept_change(entity, ChangeOp::Suppress)
+        .expect("a suppression is accepted");
+    let inside = served_ids(&engine, &session);
+    assert_eq!(
+        inside.len(),
+        baseline.len() - 1,
+        "the deny is in force before the merge publishes, which is what makes the ordering chosen          rather than raced"
+    );
+    assert!(engine.generation().overlay.is_suppressed(entity));
+
+    engine.set_merge_publication_paused_for_test(false);
+    wait_until("the merge to publish", || {
+        engine.write_executor_stats().merges >= 1
+    });
+
+    assert_ne!(
+        rows_of(&engine, &entities),
+        rows_before,
+        "the publication permuted row space — an identity permutation would make the assertion          below vacuous (see flush_interleaved_segments)"
+    );
+    assert_eq!(
+        served_ids(&engine, &session),
+        inside,
+        "the publication re-derived the deny mask over the new row space from the live overlay:          the suppressed entity is still absent and no other entity took its place"
+    );
     assert!(engine.generation().overlay.is_suppressed(entity));
 }
 
@@ -758,8 +848,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
             "a merge moves the watermark for no one, in memory included"
         );
         assert_eq!(
-            generation.bundle.partitions["default"].manifest.watermark,
-            watermark_served,
+            generation.bundle.partitions["default"].manifest.watermark, watermark_served,
             "the manifest the merge published must carry the live watermark, not its plan-time \
              snapshot — the manifest is what a restart believes, and every later publication \
              clones it forward"

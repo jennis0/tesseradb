@@ -145,9 +145,14 @@ pub enum Step {
     Ack,
 }
 
-/// Where the executor parks: two sites inside the ack contract's `append → fsync → apply → swap
+/// Where the executor parks: three sites inside the ack contract's `append → fsync → apply → swap
 /// → ack` sequence, and three at the write path's publication seams (decision 0071;
 /// correctness-suite §10.1, §12.3).
+///
+/// **One of the three ack sites is inside the durability primitive rather than in the executor**,
+/// because the ordering it discriminates — the sidecar offset published only after `sync_data`
+/// returns — is decided inside [`crate::wal::Wal::sync_and_publish`] and nowhere else. See
+/// [`PauseSite::BeforeSyncData`].
 ///
 /// **Two ack sites, because one cannot discriminate the ordering it exists to protect.** With only
 /// [`PauseSite::AfterFsync`], parking proves nothing about the *relative* order of the swap and
@@ -167,6 +172,24 @@ pub enum Step {
 #[cfg(feature = "fault-injection")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PauseSite {
+    /// Inside the WAL's `sync_data`, before it runs: **the records are written and nothing about
+    /// them is durable, and the sidecar must not yet name them**.
+    ///
+    /// Armed *inside* the sync, on the same argument [`PauseSite::BeforeAck`] makes for the ack,
+    /// and it discriminates the one ordering `Wal::sync_and_publish` exists to hold: the
+    /// last-fsynced offset is published only once `sync_data` has returned. A test parked here
+    /// reads the `.sync` sidecar off disc and requires it to still name the *old* offset, so a
+    /// build that publishes first parks with its lie already on disc and fails on that file alone,
+    /// with no reference to the step log.
+    ///
+    /// **The position is what makes the two mutations distinguishable.** At the call site the
+    /// point would be a statement about source order — hoist `write_sync_offset` above it and the
+    /// pause stays obediently below. Inside the sync, the point travels with the sync: an engine
+    /// that does not sync at all reaches no arrival, and `await_arrivals` fails on the absence
+    /// rather than the test passing vacuously. What no in-process site can reach is a `sync_data`
+    /// whose *body* is replaced by `Ok(())` — a syscall's absence has no in-process observer, and
+    /// only the correctness suite's truncating crash variant (conformance §5) sees it.
+    BeforeSyncData,
     /// After fsync, before the generation swap: **durable, not yet in force**.
     ///
     /// The position lifecycle §8's crash table calls "after fsync, before swap" (at risk: none),
@@ -222,14 +245,15 @@ pub enum PauseSite {
 
 #[cfg(feature = "fault-injection")]
 impl PauseSite {
-    const COUNT: usize = 5;
+    const COUNT: usize = 6;
     fn index(self) -> usize {
         match self {
-            PauseSite::AfterFsync => 0,
-            PauseSite::BeforeAck => 1,
-            PauseSite::BeforeManifestPublish => 2,
-            PauseSite::BeforeCurrentFlip => 3,
-            PauseSite::BeforeMergePublish => 4,
+            PauseSite::BeforeSyncData => 0,
+            PauseSite::AfterFsync => 1,
+            PauseSite::BeforeAck => 2,
+            PauseSite::BeforeManifestPublish => 3,
+            PauseSite::BeforeCurrentFlip => 4,
+            PauseSite::BeforeMergePublish => 5,
         }
     }
 
@@ -239,6 +263,7 @@ impl PauseSite {
     /// names, lowered).
     pub fn name(self) -> &'static str {
         match self {
+            PauseSite::BeforeSyncData => "before_sync_data",
             PauseSite::AfterFsync => "after_fsync",
             PauseSite::BeforeAck => "before_ack",
             PauseSite::BeforeManifestPublish => "before_manifest_publish",
@@ -250,6 +275,7 @@ impl PauseSite {
     /// The inverse of [`PauseSite::name`]. `None` for an unknown name — the arming surface's 422.
     pub fn from_name(name: &str) -> Option<Self> {
         [
+            PauseSite::BeforeSyncData,
             PauseSite::AfterFsync,
             PauseSite::BeforeAck,
             PauseSite::BeforeManifestPublish,
