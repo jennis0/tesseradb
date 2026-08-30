@@ -765,6 +765,14 @@ pub struct Wal {
     state: WalState,
     /// Where each record `open` replayed sits in the sequence — see [`Wal::replayed_positions`].
     replayed_positions: Vec<u64>,
+    /// The pause sites armed on this handle. **The one `#[cfg]` inside the durability primitive**,
+    /// and it is here because the ordering it holds is decided here: see
+    /// [`Wal::sync_data`] and [`crate::faults::PauseSite::BeforeSyncData`]. Every other fault
+    /// switch rides on [`ExecutorWal`] precisely so that `Wal` compiles identically in test and in
+    /// production; this field is that rule's single exception, and it changes no behaviour of a
+    /// build that never arms a site.
+    #[cfg(feature = "fault-injection")]
+    faults: Option<std::sync::Arc<crate::faults::FaultSwitchboard>>,
 }
 
 /// The on-disk size of a framed record whose postcard body is `body_len` bytes.
@@ -1031,6 +1039,8 @@ impl Wal {
                     active,
                     state: WalState::Healthy,
                     replayed_positions: Vec::new(),
+                    #[cfg(feature = "fault-injection")]
+                    faults: None,
                 },
                 Vec::new(),
             ));
@@ -1119,6 +1129,8 @@ impl Wal {
                 active: active.expect("the last member is always the active one"),
                 state: WalState::Healthy,
                 replayed_positions,
+                #[cfg(feature = "fault-injection")]
+                faults: None,
             },
             records,
         ))
@@ -1469,7 +1481,7 @@ impl Wal {
     /// The two arms are separate states rather than one poison because they are separately
     /// repairable — see [`Wal::retry_durability`].
     fn sync_and_publish(&mut self) -> Result<u64> {
-        if let Err(e) = self.active.file.sync_data() {
+        if let Err(e) = self.sync_data() {
             self.state = WalState::Unsynced;
             return Err(WalError::Io(e));
         }
@@ -1485,6 +1497,32 @@ impl Wal {
                 Err(WalError::Io(e))
             }
         }
+    }
+
+    /// Make the appended bytes durable — the first half of [`Wal::sync_and_publish`], and the half
+    /// whose *completion* the published offset is a claim about.
+    ///
+    /// A function rather than the bare call it wraps, because
+    /// [`crate::faults::PauseSite::BeforeSyncData`] is armed inside it. The site's whole
+    /// discrimination is that it travels with the sync: a build that publishes the offset first
+    /// parks here with the sidecar already naming bytes nothing has synced, and a build that drops
+    /// the sync drops this arrival with it. Sited at the call site instead, the point would say
+    /// only where a line used to be.
+    fn sync_data(&mut self) -> std::io::Result<()> {
+        #[cfg(feature = "fault-injection")]
+        if let Some(faults) = self.faults.clone() {
+            faults.pause_point(crate::faults::PauseSite::BeforeSyncData);
+        }
+        self.active.file.sync_data()
+    }
+
+    /// Arm this handle's pause sites. Fault-injection builds only.
+    ///
+    /// [`ExecutorWal::with_faults`] calls this, so an executor-driven test arms one switchboard and
+    /// reaches both layers; a test that drives a bare `Wal` calls it directly.
+    #[cfg(feature = "fault-injection")]
+    pub fn attach_faults(&mut self, faults: std::sync::Arc<crate::faults::FaultSwitchboard>) {
+        self.faults = Some(faults);
     }
 }
 
@@ -1502,7 +1540,10 @@ impl Wal {
 /// - **The fault switches**, which must not exist in a shipped binary at all (see
 ///   [`crate::faults`]). Putting a `#[cfg]` inside the durability primitive would mean the type
 ///   the whole fail-closed story rests on compiles differently in test and in production. Wrapping
-///   it means `Wal` is byte-for-byte the same type either way.
+///   it keeps `Wal` the same type either way — with **one exception, argued at its own site**:
+///   [`Wal::sync_data`] carries the [`crate::faults::PauseSite::BeforeSyncData`] point, because
+///   the ordering that point discriminates is decided inside `Wal` and is not observable from out
+///   here. A site in this wrapper would return before `Wal::fsync` was entered.
 ///
 /// ## Poisoning is mirrored, never remembered
 ///
@@ -1563,6 +1604,7 @@ impl ExecutorWal {
     /// Arm this handle with a fault switchboard. Test builds only.
     #[cfg(feature = "fault-injection")]
     pub fn with_faults(mut self, faults: std::sync::Arc<crate::faults::FaultSwitchboard>) -> Self {
+        self.wal.attach_faults(std::sync::Arc::clone(&faults));
         self.faults = Some(faults);
         self
     }
@@ -1943,7 +1985,10 @@ mod tests {
                     // The fifth optional field, and the last one — set here so the round-trip
                     // covers a record carrying every optional at once, which is the arrangement a
                     // positional decoder misreads first.
-                    shape: crate::membership::ArtifactShapes::new(vec![("s0".into(), vec![1, 2, 3])]),
+                    shape: crate::membership::ArtifactShapes::new(vec![(
+                        "s0".into(),
+                        vec![1, 2, 3],
+                    )]),
                 },
             ],
         };

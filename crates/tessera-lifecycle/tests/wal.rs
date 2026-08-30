@@ -54,6 +54,15 @@ fn corrupt_length_prefix(path: &Path, offset: u64, value: u32) {
     f.write_all(&value.to_le_bytes()).unwrap();
 }
 
+/// The last-fsynced offset as it stands **on disc**: the 8-byte little-endian value the sidecar
+/// holds, which is what `Wal::open` resolves a replay prefix against.
+fn read_sync_offset(sync_path: &Path) -> u64 {
+    let mut f = fs::File::open(sync_path).unwrap();
+    let mut b = [0u8; 8];
+    f.read_exact(&mut b).unwrap();
+    u64::from_le_bytes(b)
+}
+
 fn expect_corruption(result: tessera_lifecycle::wal::Result<(Wal, Vec<WalRecord>)>) {
     match result {
         Err(WalError::WalCorruption) => {}
@@ -768,4 +777,97 @@ fn an_injected_append_failure_follows_the_real_sequence() {
 extern "C" {
     #[link_name = "geteuid"]
     fn geteuid() -> u32;
+}
+
+/// **The published offset never runs ahead of the sync that makes it true.**
+///
+/// `sync_and_publish` is the one function whose whole contract is an ordering — `sync_data` first,
+/// the sidecar's last-fsynced offset second — and until this test there was nothing in the tree
+/// that could tell the two orders apart. Every other durability test asks the WAL to fail; an
+/// engine that acknowledged a write before it made it durable passed all of them.
+///
+/// The discrimination is the pause site's position, not the assertion's cleverness. Parked
+/// **inside** `sync_data` (`PauseSite::BeforeSyncData`), the test reads the `.sync` sidecar off
+/// disc while the sync is still ahead of the executor and requires it to name the offset from the
+/// *previous* window. A build that publishes first has already written the new offset by the time
+/// it parks, so it fails on the file alone. A build that never syncs never arrives, so the wait
+/// fails rather than the assertion passing vacuously.
+///
+/// The sidecar is read with a fresh `open` each time rather than cached: the point of the check is
+/// what a restarting process would find on disc, which is what `Wal::open` resolves the replay
+/// prefix against.
+///
+/// Mutations this kills, all three demonstrated rather than argued:
+/// - the sidecar offset published **before** `sync_data` runs — the defect the function exists to
+///   prevent: the parked read sees the new offset (`left: 44, right: 33`);
+/// - `sync_and_publish`'s call to the sync replaced by `Ok(())`: no arrival, and the wait fails on
+///   the absence;
+/// - `Wal::sync_data` reduced to a body of `Ok(())`: likewise, since the site is inside it.
+///
+/// **What it does not kill, stated because the gap is real**: the bare `self.active.file
+/// .sync_data()` line neutered while the function around it stands — the shape "every fsync in
+/// this module removed" takes. Every test in this crate stays green under that, this one included.
+/// A syscall that did not happen has no in-process observer at all; the correctness suite's
+/// truncating crash variant (conformance §5) is the only thing in the tree that reaches it.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn the_sync_offset_is_published_only_after_the_sync_that_makes_it_true() {
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tessera_lifecycle::faults::{FaultSwitchboard, PauseAction, PauseSite};
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("wal.log");
+    let sync_path = sidecar(&path, 1);
+
+    let (mut wal, _) = Wal::open(&path).unwrap();
+    let faults = Arc::new(FaultSwitchboard::new());
+    wal.attach_faults(Arc::clone(&faults));
+
+    // One completed window, so the sidecar holds a real previous offset to be distinguished from
+    // the new one. Nothing is armed yet, so this window runs through.
+    wal.append(&sample_record(1)).unwrap();
+    let first = wal.fsync().unwrap();
+    assert_eq!(
+        read_sync_offset(&sync_path),
+        first,
+        "a completed window publishes its own end"
+    );
+
+    wal.append(&sample_record(2)).unwrap();
+    faults.arm_pause(PauseSite::BeforeSyncData, PauseAction::Stall);
+    let syncing = std::thread::spawn(move || {
+        let out = wal.fsync();
+        (wal, out)
+    });
+
+    faults.await_arrivals(PauseSite::BeforeSyncData, 1, Duration::from_secs(10));
+    assert_eq!(
+        read_sync_offset(&sync_path),
+        first,
+        "the executor is parked with the sync still ahead of it, so the record it is about to make \
+         durable must not be named by anything on disc — a sidecar naming it here is an ack before \
+         its fsync"
+    );
+
+    faults.release();
+    let (wal, out) = syncing.join().unwrap();
+    let second = out.expect("nothing failed, so the window completes");
+    assert!(
+        second > first,
+        "the second window is longer than the first: {second} > {first}"
+    );
+    assert_eq!(
+        read_sync_offset(&sync_path),
+        second,
+        "and the publication does happen once the sync has returned"
+    );
+    drop(wal);
+
+    let (_wal, records) = Wal::open(&path).unwrap();
+    assert_eq!(
+        records,
+        vec![sample_record(1), sample_record(2)],
+        "both records are inside the durable prefix a restart replays"
+    );
 }
