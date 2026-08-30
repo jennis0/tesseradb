@@ -267,6 +267,7 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),
         out: root.clone(),
         limit: None,

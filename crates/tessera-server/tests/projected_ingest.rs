@@ -130,6 +130,7 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,

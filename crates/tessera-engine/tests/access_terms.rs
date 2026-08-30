@@ -115,6 +115,7 @@ fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         limit: None,

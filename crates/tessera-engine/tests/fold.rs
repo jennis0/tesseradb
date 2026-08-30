@@ -121,6 +121,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.to_path_buf(),
         // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,

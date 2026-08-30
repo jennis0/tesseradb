@@ -83,6 +83,7 @@ fn ensure_bundle() -> PathBuf {
             }],
             anchor: 0,
             groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: Vec::new(),
             out: bundle_root.clone(),
             limit: Some(ITEM_LIMIT),

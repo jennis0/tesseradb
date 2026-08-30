@@ -257,6 +257,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
         limit: None,

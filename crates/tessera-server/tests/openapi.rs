@@ -186,6 +186,7 @@ fn build_fixture_with_schema(out: &Path, points: &Path, pairs: &Path) {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,

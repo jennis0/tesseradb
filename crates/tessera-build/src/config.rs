@@ -770,6 +770,9 @@ pub struct Config {
     pub view_groups: Vec<ViewGroup>,
     /// Which attributes and which layers are bound to a group's views (`views.md` §5, §3.5).
     pub scopes: Scopes,
+    /// The group-scoped attributes, in declaration order — the column families a build writes
+    /// beside the entity-space schema (`views.md` §5).
+    pub scoped_attributes: Vec<ScopedAttribute>,
     /// In declaration order, which is registration order: a layer must be declared after every
     /// layer it names in `depends_on`.
     pub layers: Vec<LayerDeclaration>,
@@ -1034,6 +1037,20 @@ pub enum Scope {
     /// The group whose views this object is per-view over. Always a group that owns its views: a
     /// scope naming a `members` group is refused pointing at the owner.
     Group(String),
+}
+
+/// One attribute whose values are per view of a group (`views.md` §5).
+///
+/// **A family, not a column**: one entity-space column per view of the group, each with its own
+/// presence bitmap (decision 0064), written under `attrs/<column>/<group>/<key>/`. It is held
+/// beside [`Schema::attributes`] rather than in it because the manifest's declared scalars are one
+/// flat bundle-wide list, and a family has no slot there.
+#[derive(Debug, Clone)]
+pub struct ScopedAttribute {
+    pub attribute: Attribute,
+    /// The group that owns the views this column family is over — always the owner, a scope
+    /// naming a `members` group being refused pointing at it.
+    pub group: String,
 }
 
 /// Which attributes and which layers carry a group scope, by name.
@@ -2113,8 +2130,11 @@ impl Config {
         // names a group may not share; before the attributes and layers whose `scope` names one.
         let view_groups =
             compile_view_groups(&file.view_group, &views, &vocabularies, &sources, &defaults)?;
-        let attributes = compile_attributes(&file.attribute, &vocabularies)?;
+        // The scopes first: which attributes are entity space and which are a family is what
+        // decides the schema itself (`views.md` §5).
         let attribute_scopes = compile_attribute_scopes(&file.attribute, &view_groups)?;
+        let (attributes, scoped_attributes) =
+            compile_attributes(&file.attribute, &vocabularies, &attribute_scopes)?;
         let attribute_sources =
             compile_attribute_sources(&file.attribute, &attribute_scopes, &sources, &defaults)?;
         let (layers, layer_sources, label_layers, layer_scopes) =
@@ -2132,6 +2152,7 @@ impl Config {
                 attributes: attribute_scopes,
                 layers: layer_scopes,
             },
+            scoped_attributes,
             layers,
             layer_sources,
             label_layers,
@@ -2150,19 +2171,6 @@ impl Config {
     /// view owns everything downstream of the permutation and nothing upstream of it
     /// (`views.md` §1).
     pub fn acquire(&self) -> Result<Acquisition> {
-        // ⊘ **A group-scoped attribute is a column family, and the build writes none**
-        // (`views.md` §5): one entity-space column per view of the group, each with its own
-        // presence bitmap, under `attrs/<column>/<group>/<key>/`. Refused by name rather than
-        // falling through to the unsourced check below, which would report the missing
-        // `[defaults].source` the scope deliberately withholds.
-        if let Some((attribute, group)) = self.scopes.attributes.iter().next() {
-            return Err(declaration_error(format!(
-                "attribute '{attribute}': ⊘ `scope = {{ group = \"{group}\" }}` is a column \
-                 family — one column per view of '{group}' — and the build writes entity-scoped \
-                 columns only (views §5). The declaration parses and `tessera check` reports it; \
-                 drop the scope to build the column once for every view meanwhile"
-            )));
-        }
         // **Every declared column must have a file by now.** Declaring one with no source is
         // legal (§2) and is the write-path deployment's normal state; a build that would have to
         // read it is where the absence becomes a refusal, naming the columns rather than the block
@@ -2835,15 +2843,23 @@ fn compile_attribute_sources(
     defaults: &Defaults,
 ) -> Result<Vec<AttributeSource>> {
     let mut groups: Vec<AttributeSource> = Vec::new();
-    for (index, block) in blocks.iter().enumerate() {
+    // **The index recorded is the *schema's*, not the block's.** A group-scoped attribute is a
+    // column family and is not in the schema at all (`views.md` §5), so the two spaces differ the
+    // moment a scoped block is declared ahead of an entity-scoped one — and the scalar tail is
+    // stored positionally, which is what a shifted index would silently rewrite.
+    let mut schema_index = 0usize;
+    for block in blocks {
         let object = format!("attribute '{}'", block.name);
+        let index = schema_index;
+        if !scopes.contains_key(&block.name) {
+            schema_index += 1;
+        }
         // **`[defaults].source` does not reach a group-scoped attribute** (`views.md` §5). Its
-        // values are one per `(entity, view)`, so where it names no source of its own they are
-        // read from each view's own points file — which is what Appendix A's `sentiment` does —
-        // and the default, a single whole-corpus file, is exactly the wrong file. Taking it would
-        // group the column against a source carrying one value per entity and report the column
-        // missing from it.
-        if scopes.contains_key(&block.name) && block.source.is_none() {
+        // values are one per `(entity, view)` and are read from each view's own points file —
+        // which is what Appendix A's `sentiment` does — and the default, a single whole-corpus
+        // file, is exactly the wrong file. Taking it would group the column against a source
+        // carrying one value per entity and report the column missing from it.
+        if scopes.contains_key(&block.name) {
             continue;
         }
         // **An attribute with no source at all is legal to *declare*** (`configuration.md` §2):
@@ -4445,8 +4461,10 @@ fn check_codes(
 fn compile_attributes(
     blocks: &[AttributeBlock],
     vocabularies: &HashMap<String, Vocabulary>,
-) -> Result<Vec<Attribute>> {
+    scopes: &BTreeMap<String, String>,
+) -> Result<(Vec<Attribute>, Vec<ScopedAttribute>)> {
     let mut attributes = Vec::with_capacity(blocks.len());
+    let mut scoped: Vec<ScopedAttribute> = Vec::new();
     let mut seen_names: HashSet<&str> = HashSet::new();
 
     for decl in blocks {
@@ -4684,9 +4702,39 @@ fn compile_attributes(
                 }
             }
         };
-        attributes.push(attribute);
+        // **A group-scoped column is not one of `MANIFEST.declared_scalars`** (`views.md` §5):
+        // it is a *family* — one entity-space column per view of the group — and the manifest's
+        // list is one flat set of bundle-wide columns. Held apart here rather than filtered at
+        // each consumer, so no pass can forget: a scoped column in the schema would take a slot
+        // in every row's hot tail and a whole-corpus `attrs/<column>/` of its own, both of them
+        // absent for every entity, and both served as if the attribute were entity-scoped.
+        match scopes.get(&decl.name) {
+            None => attributes.push(attribute),
+            Some(group) => {
+                // ⊘ **A scoped attribute's own `source` is not read.** Its values are one per
+                // `(entity, view)`, so a file of its own needs `fields.view` to say which view
+                // each row's value is for (`views.md` §5) — which the build does not yet select
+                // on for an attribute source. Refused by name: taking the file as an entity-space
+                // source would read one arbitrary view's values as every view's.
+                if decl.source.is_some() {
+                    return Err(declaration_error(format!(
+                        "attribute '{}': ⊘ a `scope = {{ group = \"{group}\" }}` attribute with \
+                         its own `source` needs `fields.view` on that file to say which view each \
+                         row's value is for (views §5), and the build reads a scoped column from \
+                         each view's own points instead. Drop the `source` to read '{}' from the \
+                         group's views' files meanwhile",
+                        decl.name,
+                        attribute.column()
+                    )));
+                }
+                scoped.push(ScopedAttribute {
+                    attribute,
+                    group: group.clone(),
+                });
+            }
+        }
     }
-    Ok(attributes)
+    Ok((attributes, scoped))
 }
 
 fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {

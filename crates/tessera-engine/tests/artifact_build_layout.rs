@@ -194,6 +194,7 @@ fn fixture() -> Fixture {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: root.clone(),
         limit: None,

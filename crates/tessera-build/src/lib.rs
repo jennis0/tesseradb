@@ -133,6 +133,24 @@ pub struct ViewArgs {
     pub access: crate::config::AccessInput,
 }
 
+/// One group-scoped attribute, and the views of its group whose values this build reads
+/// (`views.md` §5).
+///
+/// **The values are the views' own.** Where the attribute declares no source of its own — the
+/// only shape the build reads today — each view's column is read from that view's points file,
+/// which for a form B group is the group's shared source under that view's own selection. So the
+/// family needs no file of its own: it names the views, and each view already says where its rows
+/// are.
+#[derive(Debug, Clone)]
+pub struct ScopedColumnFamily {
+    /// The column, exactly as an entity-scoped one is declared.
+    pub attribute: crate::config::Attribute,
+    /// The group that owns the views — the `<group>` component of the column's path.
+    pub group: String,
+    /// Indices into [`BuildArgs::views`], one per view of that group, in registry order.
+    pub views: Vec<usize>,
+}
+
 /// Arguments to [`build`].
 #[derive(Clone)]
 pub struct BuildArgs {
@@ -169,6 +187,16 @@ pub struct BuildArgs {
     /// are per view, attributes are entity space, and a corpus whose geometry is recomputed does
     /// not rewrite its attributes to say so.
     pub attribute_sources: Vec<crate::config::AttributeSource>,
+    /// The **group-scoped attribute column families** this build writes (`views.md` §5): one
+    /// entity-space column per view of the group, each with its own presence bitmap, under
+    /// `attrs/<column>/<group>/<key>/`.
+    ///
+    /// **Not part of [`BuildArgs::schema`], and deliberately.** `MANIFEST.declared_scalars` is one
+    /// flat bundle-wide list and a family has no slot in it, so a scoped column is stored and
+    /// digested and is on no serving surface: ⊘ no filter operand, no postings, no hot column —
+    /// `index` and `render` on a scoped attribute are recorded by the declaration and have nothing
+    /// to act on until contracts §2.3 carries the scope (`views.md` §11).
+    pub scoped_attributes: Vec<ScopedColumnFamily>,
     /// Bundle root to create.
     pub out: PathBuf,
     /// Prefix filter on the *source* entity ID: keep rows with `entity_id < limit`.
@@ -267,6 +295,7 @@ impl std::fmt::Debug for BuildArgs {
             .field("views", &self.views)
             .field("anchor", &self.anchor)
             .field("groups", &self.groups)
+            .field("scoped_attributes", &self.scoped_attributes)
             .field("attribute_sources", &self.attribute_sources)
             .field("out", &self.out)
             .field("limit", &self.limit)
@@ -937,6 +966,19 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         )));
     };
 
+    // **And one entity space, with no column family in it.** The oracle exists to be the
+    // byte-equality reference for the streaming build's entity-id assignment; a second
+    // implementation of the scoped families would be a second thing to keep in step rather than a
+    // check on the first, and they change no byte of what this build writes.
+    if let Some(family) = args.scoped_attributes.first() {
+        return Err(BuildError::Invalid(format!(
+            "the linear build writes no group-scoped column family, and this build declares one: \
+             '{}' over group '{}'. It is the byte-equality oracle for the streaming pipeline \
+             (views §5)",
+            family.attribute.name, family.group
+        )));
+    }
+
     // ---- 1. read inputs --------------------------------------------------------------
     let mut points = input::read_points(
         &view.points,
@@ -1192,6 +1234,8 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 &columns,
                 &mut minters,
                 args.limit,
+                // An attribute source is entity space and has no view to select (`views.md` §5).
+                None,
                 |batch| {
                     // **Serial, row by row, on purpose.** This is the reference build: the
                     // streaming pipeline splits a batch across its columns for the speed
@@ -2368,6 +2412,7 @@ mod tests {
             }],
             anchor: 0,
             groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: Vec::new(),
             out: PathBuf::from("out"),
             limit: None,

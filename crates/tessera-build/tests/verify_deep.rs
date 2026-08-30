@@ -114,6 +114,7 @@ fn flushed_bundle(root: &Path) {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,

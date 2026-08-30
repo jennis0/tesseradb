@@ -4570,6 +4570,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
         limit: None,

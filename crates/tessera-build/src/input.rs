@@ -1701,6 +1701,7 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     columns: &[&crate::config::Attribute],
     minters: &mut HashMap<String, VocabularyMinter>,
     limit: Option<u64>,
+    select: Option<&ViewSelector>,
     mut visit: F,
 ) -> Result<()> {
     if columns.is_empty() {
@@ -1731,6 +1732,11 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
                 })?,
         );
     }
+    // A group-scoped column is read from a points file that may hold several views' rows, so the
+    // selection rides the same projection here as it does on the geometry (`views.md` §5, §3.1).
+    if let Some(select) = select {
+        roots.push(discriminator_index(path, &file_schema, select)?);
+    }
     let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots.clone());
     let reader = builder
         .with_projection(projection)
@@ -1746,10 +1752,18 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
 
     // The batch's selected rows, rebuilt per batch into one retained allocation. Materialised even
     // where no limit is set, so the visitor has one shape to walk rather than two.
+    let select_idx = match select {
+        Some(select) => Some(column_index(path, &projected, &select.column)?),
+        None => None,
+    };
     let mut rows: Vec<u32> = Vec::with_capacity(ATTRIBUTE_BATCH_ROWS);
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
+        let selected = match (select, select_idx) {
+            (Some(select), Some(idx)) => Some(selected_rows(path, batch.column(idx), select)?),
+            _ => None,
+        };
 
         // **Decoded once per batch, not once per row.** An earlier revision called a
         // whole-column converter from inside the row loop, so a 65,536-row batch decoded its
@@ -1770,7 +1784,10 @@ pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
         rows.extend(
             ids.iter()
                 .enumerate()
-                .filter(|(_, &entity_id)| !limit.is_some_and(|l| entity_id >= l))
+                .filter(|(row, &entity_id)| {
+                    !limit.is_some_and(|l| entity_id >= l)
+                        && selected.as_ref().is_none_or(|selected| selected[*row])
+                })
                 .map(|(row, _)| row as u32),
         );
         visit(AttributeBatch {

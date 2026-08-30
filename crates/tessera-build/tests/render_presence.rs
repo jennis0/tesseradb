@@ -176,6 +176,7 @@ fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(
             points.to_path_buf(),
             &schema,

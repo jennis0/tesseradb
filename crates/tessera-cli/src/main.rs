@@ -1565,6 +1565,27 @@ fn main() -> ExitCode {
                     access: acquired_view.access,
                 })
                 .collect();
+            // **One column per view of the group** (`views.md` §5), resolved against the registry
+            // the build just enumerated: the views a family covers are the ones its group owns,
+            // and each of them already says where its rows are.
+            let scoped_attributes: Vec<tessera_build::ScopedColumnFamily> = config
+                .scoped_attributes
+                .iter()
+                .map(|scoped| tessera_build::ScopedColumnFamily {
+                    attribute: scoped.attribute.clone(),
+                    group: scoped.group.clone(),
+                    views: registry
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, view)| {
+                            view.group
+                                .as_ref()
+                                .is_some_and(|group| group.group == scoped.group)
+                        })
+                        .map(|(index, _)| index)
+                        .collect(),
+                })
+                .collect();
             // Read out before the declaration is broken up into build arguments: it is a
             // property of the declaration, and every value in it exists by now.
             let disclosure = tessera_build::disclosure::Disclosure::of(&config);
@@ -1623,6 +1644,7 @@ fn main() -> ExitCode {
                 views: view_args,
                 anchor,
                 groups: tessera_build::config::Config::group_registry(&registry),
+                scoped_attributes,
                 attribute_sources: acquired.attribute_sources,
                 out: out.clone(),
                 limit,

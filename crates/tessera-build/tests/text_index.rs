@@ -133,6 +133,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out,
         limit: None,

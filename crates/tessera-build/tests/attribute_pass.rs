@@ -240,6 +240,7 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(attributes, &schema),
         out,
         limit: None,

@@ -153,6 +153,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
         limit: None,

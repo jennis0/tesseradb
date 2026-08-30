@@ -134,6 +134,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
                 metadata: Default::default(),
             }],
         }],
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
@@ -274,6 +275,7 @@ fn a_label_that_disagrees_between_views_refuses() {
         views: vec![field_view("a", &a), field_view("b", &b)],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: dir.path().join("bundle"),
         limit: None,
@@ -320,6 +322,7 @@ fn a_discriminator_selects_each_views_rows_out_of_one_file() {
         ],
         anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
@@ -381,6 +384,7 @@ fn a_discriminator_value_outside_the_roster_refuses() {
         )],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: dir.path().join("bundle"),
         limit: None,
@@ -639,6 +643,7 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
         ],
         anchor: 0,
         groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
+        scoped_attributes: Vec::new(),
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
@@ -664,5 +669,134 @@ fn a_roster_key_with_no_rows_is_an_empty_view() {
     assert_eq!(empty.segments[0].row_count, 0);
     for entity in 0..ENTITIES {
         assert!(empty.row_space.row_of(EntityId::new(entity)).is_none());
+    }
+}
+
+/// **A group-scoped attribute is a family of entity-space columns** (`views.md` §5): one per view
+/// of the group, each with its own presence bitmap (decision 0064), read from that view's own
+/// rows. Here the group is form B — one points file, a discriminator — so the two columns are two
+/// selections of one file, which is the case a form A group's file-per-view never exercises.
+#[test]
+fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
+    use arrow::array::{Float32Array, StringArray};
+    use tessera_spatial::tiler::ScalarType;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Q2 holds 0..24 and Q3 12..36, and a row's sentiment is null on every third entity — so the
+    // two columns carry different values *and* different presence for the entities they share.
+    let points = dir.path().join("quarter-alt.parquet");
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("quarter", DataType::Utf8, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("sentiment", DataType::Float32, true),
+    ]));
+    let mut ids: Vec<u64> = Vec::new();
+    let mut keys: Vec<String> = Vec::new();
+    let (mut xs, mut ys) = (Vec::new(), Vec::new());
+    let mut sentiment: Vec<Option<f32>> = Vec::new();
+    for (key, range) in [("2026-Q2", WORLD), ("2026-Q3", QUARTER)] {
+        for e in range {
+            let (x, y) = position(key, e);
+            ids.push(e);
+            keys.push(key.to_string());
+            xs.push(x);
+            ys.push(y);
+            sentiment.push((e % 3 != 0).then_some(if key == "2026-Q2" { 0.5 } else { -0.5 }));
+        }
+    }
+    let q2_present = WORLD.filter(|e| e % 3 != 0).count() as u64;
+    let q3_present = QUARTER.filter(|e| e % 3 != 0).count() as u64;
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids)),
+            Arc::new(StringArray::from(keys)),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(Float32Array::from(sentiment)),
+        ],
+    )
+    .unwrap();
+    let mut writer = ArrowWriter::try_new(File::create(&points).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+    let pairs = dir.path().join("pairs.parquet");
+    write_pairs(&pairs);
+    let out = dir.path().join("bundle");
+
+    let sentiment = tessera_build::config::Attribute {
+        name: "sentiment".to_string(),
+        title: None,
+        field: None,
+        ty: ScalarType::F32,
+        analyser: None,
+        vocabulary: None,
+        value_set: None,
+        index: true,
+        render: false,
+    };
+    build(&BuildArgs {
+        views: vec![
+            selected_view("quarter_alt:2026-Q2", "2026-Q2", &points, &pairs),
+            selected_view("quarter_alt:2026-Q3", "2026-Q3", &points, &pairs),
+        ],
+        anchor: 0,
+        groups: vec![alt_group(&["2026-Q2", "2026-Q3"])],
+        scoped_attributes: vec![tessera_build::ScopedColumnFamily {
+            attribute: sentiment,
+            group: "quarter_alt".to_string(),
+            views: vec![0, 1],
+        }],
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a scoped family builds");
+
+    let bundle = open_bundle(&out).expect("the bundle opens");
+    // **No serving surface**: the family is stored and digested, and the manifest's flat list of
+    // declared scalars has no slot for it (`views.md` §5, §11).
+    assert!(bundle.manifest.declared_scalars.is_empty());
+    let attrs = out
+        .join("v00000")
+        .join("partitions/default/attrs/sentiment/quarter_alt");
+    for (key, present) in [("2026-Q2", q2_present), ("2026-Q3", q3_present)] {
+        let values = attrs.join(key).join("values.arrow");
+        let presence = attrs.join(key).join("presence.roaring");
+        assert!(values.is_file(), "{key} has a column");
+        let bytes = std::fs::read(&presence).expect("a presence bitmap beside it");
+        let bitmap = croaring::Bitmap::try_deserialize::<croaring::Portable>(&bytes)
+            .expect("the presence bitmap deserialises");
+        assert_eq!(
+            bitmap.cardinality(),
+            present,
+            "{key}'s presence is its own rows' values"
+        );
+        // Every file the build wrote is digested, which is what `tessera verify` walks.
+        for path in [&values, &presence] {
+            let rel = path
+                .strip_prefix(out.join("v00000"))
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+            assert!(
+                bundle.manifest.files.contains_key(&rel),
+                "{rel} is in the manifest"
+            );
+        }
     }
 }

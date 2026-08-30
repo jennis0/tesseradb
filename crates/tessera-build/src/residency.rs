@@ -734,6 +734,7 @@ require_member_visibility = "none"
             }],
             anchor: 0,
             groups: Vec::new(),
+            scoped_attributes: Vec::new(),
             attribute_sources: parsed.attribute_sources.clone(),
             out: dir.join("bundle"),
             limit: None,

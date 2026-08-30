@@ -134,6 +134,7 @@ fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: acquired.attribute_sources,
         out,
         limit: None,

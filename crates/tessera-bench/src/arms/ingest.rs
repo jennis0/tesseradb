@@ -246,6 +246,7 @@ pub fn run_build(
                 }],
                 anchor: 0,
                 groups: Vec::new(),
+                scoped_attributes: Vec::new(),
                 attribute_sources: Vec::new(),
                 out: out.clone(),
                 limit: Some(scale),

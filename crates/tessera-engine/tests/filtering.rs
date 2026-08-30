@@ -283,6 +283,7 @@ fn fixture() -> Fixture {
         }],
         anchor: 0,
         groups: Vec::new(),
+        scoped_attributes: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: bundle.clone(),
         limit: None,
