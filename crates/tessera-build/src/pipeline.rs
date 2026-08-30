@@ -70,6 +70,17 @@
 //! nondeterministically-scheduled sort still has exactly one output. The equivalence suite's
 //! byte-identity assertion is the oracle that keeps this true.
 //!
+//! The other parallel shape here is **one lane per declared column** — the attribute join stages,
+//! scatters and tallies each column on a thread of its own
+//! ([`read_one_attribute_source`]). It participates in no ordering decision either, and for a
+//! stronger reason than the sorts do: the lanes never meet. Each column is its own mapped array
+//! with its own presence bits and its own arena, indexed by entity, so no two lanes can name the
+//! same byte; the only shared state is read-only (the join's answer, the declaration) and the
+//! only shared *result* is the coverage tally, which is returned per lane and folded in
+//! declaration order rather than accumulated across threads. Minting stays where it was — a
+//! serial pre-pass per decoded batch, in file order — so the vocabulary codes a build assigns are
+//! not a function of how the lanes were scheduled.
+//!
 //! ## The two assumptions this construction makes
 //!
 //! **The inputs do not change while the build runs.** The linear build reads each file once;
@@ -137,7 +148,7 @@ use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::split32;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
 use tessera_store::write::{
-    write_columns, write_morton_codes, write_permutation_iter, ScalarColumnData,
+    write_columns, write_morton_codes, write_permutation_iter, ScalarColumn,
 };
 use tessera_types::{EntityId, IdentityKey, SMALL_TERM_THRESHOLD_DEFAULT};
 
@@ -297,9 +308,10 @@ const JOIN_STAGE_BYTES: usize = 256 << 20;
 /// corpus.
 fn staging_rows(attributes: &[&crate::config::Attribute], n: u64) -> usize {
     // The join key beside each staged row — `(source_id, pos)`, 16 bytes and not the 12 an earlier
-    // comment claimed — plus one typed slot per column. Each column's presence bit adds an eighth
-    // of a byte per row on top, which is left out rather than rounded up to a whole one.
-    let per_row: usize = 16 + attributes.iter().map(|a| staged_width(a.ty)).sum::<usize>();
+    // comment claimed — the 8 bytes the sweep's answer takes beside it (`(entity, pos)`), and one
+    // typed slot per column. Each column's presence bit adds an eighth of a byte per row on top,
+    // which is left out rather than rounded up to a whole one.
+    let per_row: usize = 24 + attributes.iter().map(|a| staged_width(a.ty)).sum::<usize>();
     (JOIN_STAGE_BYTES / per_row).clamp(1, n.max(1) as usize)
 }
 
@@ -750,7 +762,10 @@ fn plan_build(
     // 8 B/item of `x-of-entity`/`y-of-entity`, which outlive the release; 4 B/item of pairs
     // already written as postings.arrow before the window opened.
     let phase_columns = tail.mapped() + 8 * n + 4 * p;
-    let phase_assemble = 4 * p + 26 * n;
+    // The segment write: the spool becoming postings.arrow beside the segment, and the row-order
+    // attribute tail beside both — one mapped file per render column, built here and unlinked with
+    // the record batch that reads it (`residency::render_tail_bytes`).
+    let phase_assemble = 4 * p + 26 * n + crate::residency::render_tail_bytes(&args.schema, n);
     let disk_need = phase_spill
         .max(phase_bands)
         .max(phase_columns)
@@ -1619,7 +1634,8 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         // Held after `x_of_entity`/`y_of_entity` are dropped, so the peak is the record batch plus
         // one attribute tail rather than both — at the widths §3.6 argues for (1–4 B/row against
         // geometry's 8) the tail is the smaller term either way.
-        let tail = permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row)?;
+        let tail =
+            permute_attribute_tail(&args.schema, attributes_by_entity, &entity_row, &scratch)?;
         drop(entity_row);
         for (column, rows) in tail.presence {
             if let Some(path) =
@@ -1694,7 +1710,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     other_paths.extend(presence_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
     other_paths.extend(artifact_pass.paths.iter().cloned());
-    let report = write_manifests(
+    let mut report = write_manifests(
         args,
         &BundleFiles {
             dict_paths,
@@ -1714,6 +1730,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // Reported in bytes, not rows: this stage re-reads and SHA-256s every byte the build wrote,
     // so it scales with bundle size rather than with item count.
     timer.end(BuildStage::Manifests, report.bundle_bytes);
+    report.attribute_coverage = coverage;
     Ok(report)
 }
 
@@ -1800,11 +1817,6 @@ fn read_one_attribute_source(
     // that matter: an absent attribute matches fewer points in a filter, and an absent access
     // label leaves a point visible to nobody.
     let mut unknown_rows = 0u64;
-    // A value whose tag is not its column's is a build defect, not an input one, and `set` is the
-    // only place that can see it. Captured rather than unwrapped: the scan's callback cannot fail,
-    // and a panic here would report the row rather than the column that is wrong.
-    let mut mistyped: Option<String> = None;
-    let mut failure: Option<BuildError> = None;
 
     // **[`join_chunk`]'s merge sweep, not a probe per row.** This pass used a `binary_search` into
     // `source_ids` for every row, on the reasoning that it is "per-row work over a handful of
@@ -1825,12 +1837,23 @@ fn read_one_attribute_source(
     // Chunked, both sides ascend and the sweep is sequential, which is the same trade the geometry
     // pass makes for the same reason. The cost is a staging buffer, and **it is sized in bytes**:
     // see [`JOIN_STAGE_BYTES`] for why a row count is the wrong unit here.
-    let staged_rows = staging_rows(attributes, n);
+    //
+    // **At least one whole decoded batch**, because a batch is staged as a unit: the flush below
+    // happens between batches, so the buffer has to hold the largest one whatever the byte budget
+    // works out at. On a corpus smaller than a batch that is the only term that matters, and it is
+    // a few hundred kilobytes of file per column.
+    let staged_rows = staging_rows(attributes, n).max(input::ATTRIBUTE_BATCH_ROWS);
     let mut staged: Vec<EntityColumn> = attributes
         .iter()
         .map(|a| EntityColumn::filled(scratch, a.ty, staged_rows))
         .collect::<Result<_>>()?;
     let mut chunk: Vec<(u64, u32)> = Vec::with_capacity(staged_rows);
+    // The join's answer, held apart from the scatter that consumes it: `(entity, staged position)`
+    // for every row of the chunk that resolved, in the sweep's order. **This is what makes the
+    // scatter divisible** — the columns can then be walked independently over one shared,
+    // read-only list, where the old shape did every column's write inside the sweep's own callback
+    // and so did all of them on the sweep's thread.
+    let mut resolved: Vec<(u32, u32)> = Vec::with_capacity(staged_rows);
 
     // How many entities came away with a value in each of this group's columns — counted where the
     // value is moved across, which is the only place presence is known without a second scan.
@@ -1838,38 +1861,71 @@ fn read_one_attribute_source(
 
     // Everything mutable is a parameter rather than a capture, so the scan's callback and this can
     // both hold it — the shape the geometry pass's `resolve` uses, and for the same borrow reason.
-    let resolve = |chunk: &mut Vec<(u64, u32)>,
-                   staged: &mut [EntityColumn],
-                   by_entity: &mut [EntityColumn],
-                   matched: &mut u64,
-                   unknown: &mut u64,
-                   present: &mut [u64]| {
+    let flush = |chunk: &mut Vec<(u64, u32)>,
+                 resolved: &mut Vec<(u32, u32)>,
+                 staged: &mut [EntityColumn],
+                 by_entity: &mut [EntityColumn],
+                 matched: &mut u64,
+                 unknown: &mut u64,
+                 present: &mut [u64]|
+     -> Result<()> {
+        resolved.clear();
         join_chunk(chunk, source_ids, |ordinal, _source_id, pos| {
-            let Some(ordinal) = ordinal else {
-                *unknown += 1;
-                return Ok(());
-            };
-            let entity = entity_of_ordinal[ordinal as usize] as usize;
-            *matched += 1;
-            // **Indexed rather than zipped**, because a group's columns are a subsequence of the
-            // declaration: the staged buffer is this group's, and each of its columns lands in the
-            // slot the declaration gave that attribute.
-            for ((&column, src), count) in group
-                .attributes
-                .iter()
-                .zip(staged.iter_mut())
-                .zip(present.iter_mut())
-            {
-                if src.is_present(pos as usize) {
-                    *count += 1;
+            match ordinal {
+                None => *unknown += 1,
+                Some(ordinal) => {
+                    *matched += 1;
+                    resolved.push((entity_of_ordinal[ordinal as usize], pos));
                 }
-                let name = &args.schema.attributes[column].name;
-                // Not wrapped with the column's name: every error this can raise already carries
-                // it (`column.rs`) or names the file it could not write.
-                by_entity[column].take_from(entity, src, pos as usize, name)?;
             }
             Ok(())
         })?;
+        {
+            // **One lane per column, and the columns share nothing.** Each entity-order column is
+            // its own mapped array with its own presence bits, so a chunk's scatter splits across
+            // them with no synchronisation at all: `resolved` is read-only, and every write a lane
+            // makes — the value, the presence bit, the arena append, its own share of `present` —
+            // lands in storage no other lane can name.
+            //
+            // **Indexed rather than zipped**, because a group's columns are a subsequence of the
+            // declaration: the staged buffer is this group's, and each of its columns lands in the
+            // slot the declaration gave that attribute.
+            let mut homes: Vec<Option<&mut EntityColumn>> =
+                by_entity.iter_mut().map(Some).collect();
+            let mut lanes: Vec<(usize, &mut EntityColumn, &mut EntityColumn)> = group
+                .attributes
+                .iter()
+                .zip(staged.iter_mut())
+                .map(|(&column, src)| {
+                    let home = homes[column].take().expect(
+                        "an attribute is read from exactly one source, so one lane owns it",
+                    );
+                    (column, src, home)
+                })
+                .collect();
+            // Collected per lane and folded in lane order, so a build that fails here fails with
+            // the same column's message every time: which lane finished first is a scheduling
+            // detail, and a build error that moves with it cannot be reproduced from its report.
+            let counted: Vec<Result<u64>> = lanes
+                .par_iter_mut()
+                .map(|(column, src, home)| {
+                    let name = &args.schema.attributes[*column].name;
+                    let mut count = 0u64;
+                    for &(entity, pos) in resolved.iter() {
+                        if src.is_present(pos as usize) {
+                            count += 1;
+                        }
+                        // Not wrapped with the column's name: every error this can raise already
+                        // carries it (`column.rs`) or names the file it could not write.
+                        home.take_from(entity as usize, src, pos as usize, name)?;
+                    }
+                    Ok(count)
+                })
+                .collect();
+            for (slot, lane) in present.iter_mut().zip(counted) {
+                *slot += lane?;
+            }
+        }
         // Every string in the chunk has been moved across, so the staging arena starts the next
         // chunk empty rather than growing to the whole source's payload — the buffer is reused and
         // its bytes are appended (`column.rs`).
@@ -1882,58 +1938,66 @@ fn read_one_attribute_source(
     input::scan_attributes(
         &group.path,
         &group.fields,
-        &args.schema,
         attributes,
         minters,
         args.limit,
-        |source_id, values| {
-            let pos = chunk.len();
-            // Drained, not cloned: the scan's row buffer is cleared per row, so a value moved out
-            // here costs a pointer where a clone cost a copy of every string in the source.
-            for ((column, value), attribute) in staged
-                .iter_mut()
-                .zip(values.drain(..))
-                .zip(attributes.iter())
-            {
-                if let Err(e) = column.set(pos, value, &attribute.name) {
-                    mistyped.get_or_insert_with(|| e.to_string());
-                }
-            }
-            chunk.push((source_id, pos as u32));
-            if chunk.len() == staged_rows && failure.is_none() {
-                if let Err(e) = resolve(
+        |batch| {
+            // Flushed **before** the batch rather than after a row count is reached, because a
+            // batch is staged as a unit. Chunk boundaries are unobservable in the output — see
+            // [`JOIN_STAGE_BYTES`] — so where one falls is free to be whatever keeps the buffer
+            // bounded.
+            if !chunk.is_empty() && chunk.len() + batch.rows.len() > staged_rows {
+                flush(
                     &mut chunk,
+                    &mut resolved,
                     &mut staged,
                     by_entity,
                     &mut matched_rows,
                     &mut unknown_rows,
                     &mut present,
-                ) {
-                    failure = Some(e);
-                }
+                )?;
             }
+            let base = chunk.len();
+            for (offset, &row) in batch.rows.iter().enumerate() {
+                chunk.push((batch.ids[row as usize], (base + offset) as u32));
+            }
+            // The same lane-per-column split the scatter makes, over the same argument: resolving
+            // a row's value and staging it are per column, and the staging columns share nothing.
+            // This is where the pass spent most of its time — ~11 s of GeoNames' 17.6 s, against
+            // 1.6 s in the Parquet reader (`input::scan_attributes`).
+            let filled: Vec<Result<()>> = staged
+                .par_iter_mut()
+                .zip(batch.decoded.par_iter())
+                .zip(attributes.par_iter())
+                .map(|((dst, decoded), attribute)| {
+                    for (offset, &row) in batch.rows.iter().enumerate() {
+                        let value = decoded.value(row as usize, attribute, &args.schema)?;
+                        dst.set(base + offset, value, &attribute.name)?;
+                    }
+                    Ok(())
+                })
+                .collect();
+            // Folded in declaration order, for the reason the scatter's tally is.
+            for lane in filled {
+                lane?;
+            }
+            Ok(())
         },
     )?;
-    if !chunk.is_empty() && failure.is_none() {
-        if let Err(e) = resolve(
+    if !chunk.is_empty() {
+        flush(
             &mut chunk,
+            &mut resolved,
             &mut staged,
             by_entity,
             &mut matched_rows,
             &mut unknown_rows,
             &mut present,
-        ) {
-            failure = Some(e);
-        }
+        )?;
     }
     drop(staged);
     drop(chunk);
-    if let Some(error) = failure {
-        return Err(error);
-    }
-    if let Some(message) = mistyped {
-        return Err(BuildError::Invalid(message));
-    }
+    drop(resolved);
     coverage.push(crate::AttributeCoverage {
         source: group.name.clone(),
         entities: n,
@@ -3396,37 +3460,58 @@ fn permute_attribute_tail(
     schema: &crate::config::Schema,
     by_entity: Vec<EntityColumn>,
     entity_row: &[u32],
+    scratch: &crate::column::ColumnScratch,
 ) -> Result<AttributeTail> {
+    // **One lane per render column.** The columns are independent all the way down — each is
+    // permuted from its own entity-order column into its own mapped file, and neither the gather
+    // nor the presence sweep touches anything another lane can name — so the loop over them is the
+    // split, exactly as it is in the attribute join. `collect` over an indexed parallel iterator
+    // preserves declared order, which the tail's column order is.
+    //
+    // The entity-order columns are dropped as their lanes finish rather than one at a time down a
+    // serial loop, so their files stand together for the length of this pass. That is disk, and it
+    // is the pass immediately before `tmp.close()`.
+    let lanes: Vec<Result<Option<Lane>>> = schema
+        .attributes
+        .par_iter()
+        .zip(by_entity.into_par_iter())
+        .map(|(attribute, values)| {
+            // **The tail is exactly the render columns.** An `index`-only column is entity-space
+            // and has already been written there; including it here would give it a slot in every
+            // row as well, which is the per-row cost §10.3's routing exists to avoid and — for a
+            // `utf8` column — the one `render` on `utf8` is refused for outright.
+            if !attribute.render {
+                return Ok(None);
+            }
+            let mut column = EntityColumn::filled(scratch, attribute.ty, entity_row.len())?;
+            for (row, &entity) in entity_row.iter().enumerate() {
+                column.set(row, values.value_at(entity as usize), &attribute.name)?;
+            }
+            drop(values);
+            // **The absent slot is left as the mapping's zero, which *is* the render
+            // placeholder.** The column is non-nullable on the wire (contracts R4), so an absent
+            // value has to be written as something; `ScalarValue::or_render_placeholder` gives the
+            // type's zero for every renderable type, and a fresh mapping reads as zeros. Writing
+            // the placeholder explicitly would store the same bytes and lose the presence bit that
+            // says the zero means nothing — which is the bitmap below.
+            // `the_render_placeholder_is_the_zero_a_mapping_reads_as` holds the two together.
+            let presence =
+                render_presence_of((0..entity_row.len()).map(|row| column.is_present(row)));
+            Ok(Some(Lane {
+                name: attribute.name.clone(),
+                presence,
+                values: column.into_values(scratch, &attribute.name)?,
+            }))
+        })
+        .collect();
     let mut presence = Vec::new();
-    let mut out = Vec::with_capacity(by_entity.len());
-    for (attribute, values) in schema.attributes.iter().zip(by_entity) {
-        // **The tail is exactly the render columns.** An `index`-only column is entity-space and
-        // has already been written there; including it here would give it a slot in every row as
-        // well, which is the per-row cost §10.3's routing exists to avoid and — for a `utf8`
-        // column — the one `render` on `utf8` is refused for outright.
-        if !attribute.render {
-            continue;
+    let mut out = Vec::with_capacity(schema.attributes.len());
+    for lane in lanes {
+        let Some(lane) = lane? else { continue };
+        if let Some(rows) = lane.presence {
+            presence.push((lane.name.clone(), rows));
         }
-        // Taken before the substitution below, which is what erases the distinction: the column
-        // itself stays non-nullable (contracts R4) and an absent value is written as the type's
-        // zero, and this is what says that zero means nothing.
-        if let Some(rows) =
-            render_presence_of(entity_row.iter().map(|&e| values.is_present(e as usize)))
-        {
-            presence.push((attribute.name.clone(), rows));
-        }
-        let mut column = ScalarColumnData::of(attribute.ty, entity_row.len());
-        for &entity in entity_row {
-            column
-                .push(
-                    values
-                        .value_at(entity as usize)
-                        .or_render_placeholder(attribute.ty),
-                    &attribute.name,
-                )
-                .map_err(|e| BuildError::Invalid(format!("attribute '{}': {e}", attribute.name)))?;
-        }
-        out.push((attribute.name.clone(), column));
+        out.push((lane.name, lane.values));
     }
     Ok(AttributeTail {
         columns: out,
@@ -3434,10 +3519,18 @@ fn permute_attribute_tail(
     })
 }
 
+/// One render column, built by the lane that owns it.
+struct Lane {
+    name: String,
+    /// `None` where every row carries a value — the case that writes no file (decision 0064).
+    presence: Option<Bitmap>,
+    values: ScalarColumn,
+}
+
 /// A segment's attribute tail: the columns `write_columns` takes, and the presence bitmaps that go
 /// beside them (decision 0064) — one per render column that has an absence, in row order.
 struct AttributeTail {
-    columns: Vec<(String, ScalarColumnData)>,
+    columns: Vec<(String, ScalarColumn)>,
     presence: Vec<(String, Bitmap)>,
 }
 

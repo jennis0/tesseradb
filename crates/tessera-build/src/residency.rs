@@ -40,6 +40,14 @@
 //! each. They are now files under `.build-tmp/`, mapped rather than held ([`crate::column`]), so
 //! they cost the machine page cache the kernel may evict and not memory it must have.
 //!
+//! The segment's **row-order** tail moved the same way and at the same time
+//! ([`crate::pipeline::permute_attribute_tail`]): eight render columns at 7.4×10⁷ rows were ~2.4 GB
+//! of `Vec`, built by `push` immediately after the entity-order columns stopped being heap. ⊘ It
+//! was never a term of this model in either form — it lives in the segment write, not in the
+//! entity-order window this module covers — so what moved is its cost and not its accounting. What
+//! it is now is a mapped file per render column, priced by [`render_tail_bytes`] into the disk
+//! pre-flight's assembly phase.
+//!
 //! They are still modelled, and still printed, as **mapped** terms: an operator whose disk is the
 //! constraint has the same right to see the number as one whose memory is. What changed is that
 //! [`Residency::total`] — the figure `--memory-budget` is compared against — leaves them out. A
@@ -222,6 +230,29 @@ const BYTES_PER_MEMBER_ROW: u64 = 4;
 /// member row's `key` column is a list, so a row is one pair on a flat layer and one per level on
 /// a ladder.
 const SPILLED_BYTES_PER_MEMBER_ROW: u64 = 8;
+
+/// What the segment's **row-order** tail costs on disk: one fixed-width slot per row per render
+/// column, in `.build-tmp/`, for the length of the segment write.
+///
+/// Not a term of [`entity_order_residency`], because it is not in that window: the tail is built
+/// after the release that ends it, and every column it covers is one the release *kept*. It is the
+/// assembly phase's, beside `columns.arrow` and the postings spool.
+///
+/// A `bool` is counted twice over, at a byte a row and again at a bit: the lane fills a byte per
+/// row and packs it into Arrow's bit layout on the way out, and both mappings stand while it does.
+/// Every other render column is its declared width and nothing else — a string one cannot be here,
+/// `render` being refused for the whole family at the declaration.
+pub(crate) fn render_tail_bytes(schema: &crate::config::Schema, n: u64) -> u64 {
+    schema
+        .attributes
+        .iter()
+        .filter(|a| a.render)
+        .map(|a| match a.ty {
+            ScalarType::Bool => n.saturating_add(n.div_ceil(8)),
+            ty => fixed_width(ty).saturating_mul(n),
+        })
+        .sum()
+}
 
 /// The residency of everything the batch loop's model does not cover.
 ///

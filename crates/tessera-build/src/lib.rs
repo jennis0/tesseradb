@@ -273,6 +273,15 @@ pub struct BuildReport {
     /// what stands between an operator and noticing. An ingest batch reports the same number for
     /// itself in its own 200.
     pub minted_artifacts: u64,
+    /// What each declared attribute source's join met — the figures
+    /// [`report_attribute_coverage`] prints, returned as well as printed.
+    ///
+    /// **Returned because the tallies are computed where nothing else can check them.** The
+    /// streaming pipeline counts a column's presence inside a scatter it splits across threads,
+    /// and a tally that lost or double-counted a lane would change this report without changing
+    /// one byte of the bundle — the one defect a bundle comparison cannot see. The linear build
+    /// counts the same thing serially, so the two are comparable (`tests/attribute_pass.rs`).
+    pub attribute_coverage: Vec<AttributeCoverage>,
 }
 
 /// **How many of the grid's cells the placed points actually landed in**, beside how many points
@@ -957,6 +966,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     // `MANIFEST.vocabularies` below, so a rebuild and the serving path see exactly what this
     // build minted.
     let mut minters = args.schema.open_minters();
+    // Hoisted out of the block below so the report can carry it: what the join met is a figure of
+    // the build, not of the pass.
+    let mut attribute_coverage: Vec<AttributeCoverage> = Vec::new();
     if !args.schema.is_empty() {
         let position_of_source: HashMap<u64, usize> = staged
             .iter()
@@ -970,7 +982,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         for item in tiler_items.iter_mut() {
             item.scalars = vec![ScalarValue::Null; args.schema.attributes.len()];
         }
-        let mut coverage = Vec::with_capacity(args.attribute_sources.len());
+        attribute_coverage.reserve(args.attribute_sources.len());
         for group in &args.attribute_sources {
             let columns: Vec<&crate::config::Attribute> = group
                 .attributes
@@ -983,32 +995,43 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             input::scan_attributes(
                 &group.path,
                 &group.fields,
-                &args.schema,
                 &columns,
                 &mut minters,
                 args.limit,
-                |source_id, values| {
-                    let Some(&position) = position_of_source.get(&source_id) else {
-                        unknown_rows += 1;
-                        return;
-                    };
-                    matched_rows += 1;
-                    // Moved out of the scan's row buffer, which it clears per row — an early
-                    // return above leaves the row for that clear rather than for this loop.
-                    for ((&column, value), count) in group
-                        .attributes
-                        .iter()
-                        .zip(values.drain(..))
-                        .zip(present.iter_mut())
-                    {
-                        if !matches!(value, ScalarValue::Null) {
-                            *count += 1;
+                |batch| {
+                    // **Serial, row by row, on purpose.** This is the reference build: the
+                    // streaming pipeline splits a batch across its columns for the speed
+                    // (`pipeline::read_one_attribute_source`), and a second implementation that
+                    // did the same thing the same way would stop being an independent reading of
+                    // the same input.
+                    for &row in batch.rows {
+                        let source_id = batch.ids[row as usize];
+                        let Some(&position) = position_of_source.get(&source_id) else {
+                            unknown_rows += 1;
+                            continue;
+                        };
+                        matched_rows += 1;
+                        for ((&column, decoded), count) in group
+                            .attributes
+                            .iter()
+                            .zip(batch.decoded)
+                            .zip(present.iter_mut())
+                        {
+                            let value = decoded.value(
+                                row as usize,
+                                &args.schema.attributes[column],
+                                &args.schema,
+                            )?;
+                            if !matches!(value, ScalarValue::Null) {
+                                *count += 1;
+                            }
+                            tiler_items[position].scalars[column] = value;
                         }
-                        tiler_items[position].scalars[column] = value;
                     }
+                    Ok(())
                 },
             )?;
-            coverage.push(AttributeCoverage {
+            attribute_coverage.push(AttributeCoverage {
                 source: group.name.clone(),
                 entities: staged.len() as u64,
                 matched_rows,
@@ -1020,7 +1043,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                     .collect(),
             });
         }
-        report_attribute_coverage(&coverage);
+        report_attribute_coverage(&attribute_coverage);
     }
 
     // ---- 6c. attribute filter postings (filter-index §4) -------------------------------
@@ -1255,7 +1278,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
     other_paths.extend(filter_paths);
     other_paths.extend(published_layers.paths.iter().cloned());
     other_paths.extend(artifact_pass.paths.iter().cloned());
-    write_manifests(
+    let mut report = write_manifests(
         args,
         &BundleFiles {
             dict_paths,
@@ -1271,7 +1294,9 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         &minters,
         &published_layers,
         occupancy,
-    )
+    )?;
+    report.attribute_coverage = attribute_coverage;
+    Ok(report)
 }
 
 /// The schema as the segment writer wants it: `(name, type)` in declared order.
@@ -1548,6 +1573,8 @@ fn write_manifests(
         occupancy,
         unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
         minted_artifacts: published_layers.minted.values().sum(),
+        // Filled by the caller: the join happened stages ago and this function digests files.
+        attribute_coverage: Vec::new(),
     })
 }
 

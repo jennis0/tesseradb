@@ -185,6 +185,38 @@ impl<T: Zeroable> MappedArray<T> {
     }
 }
 
+/// The handover to Arrow, which asks of an allocation exactly what a mapped array of a plain-old
+/// element already is: shareable across threads, and free of the interior mutability a
+/// `catch_unwind` boundary would have to reason about. Stated as bounds here rather than as
+/// supertraits of [`Zeroable`], because they are Arrow's requirement and not the storage's.
+impl<T: Zeroable + Send + Sync + std::panic::RefUnwindSafe + 'static> MappedArray<T> {
+    /// Hand the mapping to Arrow as a values buffer, **without copying a byte**.
+    ///
+    /// The buffer owns this array, so the file lives exactly as long as the record batch reading
+    /// it and is unlinked with it — which is what lets a row-order column be built on disk and
+    /// still reach the segment writer as the values buffer it will be written from. `mmap` returns
+    /// a page-aligned pointer, so every element type's alignment holds (`write_columns_from_parts`
+    /// argues the same for its own two columns).
+    ///
+    /// A zero-length array holds no mapping and answers with an empty buffer.
+    pub(crate) fn into_arrow_buffer(self) -> arrow::buffer::Buffer {
+        let Some(map) = self.map.as_ref() else {
+            return arrow::buffer::Buffer::from_vec(Vec::<u8>::new());
+        };
+        let bytes = self.len * std::mem::size_of::<T>();
+        let ptr = std::ptr::NonNull::new(map.as_ptr() as *mut u8)
+            .expect("a mapping's address is never null");
+        // The array itself is the allocation: dropping the last reference to the buffer drops the
+        // mapping and unlinks the file, in that order (see `Drop` below).
+        let owner = std::sync::Arc::new(self);
+        // SAFETY: `ptr` addresses the start of a mapping of `len * size_of::<T>()` bytes, which is
+        // `bytes`; `owner` holds that mapping for as long as the buffer lives, and nothing else
+        // holds a reference to it — `self` was taken by value, and the only `&mut` route into the
+        // mapping (`as_mut_slice`) needs a `&mut MappedArray` no caller can now obtain.
+        unsafe { arrow::buffer::Buffer::from_custom_allocation(ptr, bytes, owner) }
+    }
+}
+
 impl<T: Zeroable> Drop for MappedArray<T> {
     fn drop(&mut self) {
         // Unlinked as the array is released rather than at `TmpDir::close`, so the disk comes back

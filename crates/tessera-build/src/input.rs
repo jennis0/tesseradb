@@ -230,7 +230,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                     let reader = b
                         .with_row_groups(shard)
                         .with_projection(projection)
-                        .with_batch_size(65_536)
+                        .with_batch_size(ATTRIBUTE_BATCH_ROWS)
                         .build()
                         .map_err(|e| BuildError::parquet(path, e))?;
                     let projected = arrow::array::RecordBatchReader::schema(&reader);
@@ -1482,18 +1482,26 @@ pub fn read_vocabulary_file(
 ///
 /// **`columns` is one source's group, not the whole schema** (`configuration.md` §1's
 /// `[sources]`): each attribute names the file it is read from, so a declaration whose columns sit
-/// in three files calls this three times, each over the columns that named that file. `schema_decl`
-/// is still the whole schema, because a vocabulary is shared across sources and a category's key is
-/// resolved against the declaration rather than against the file it arrived in.
+/// in three files calls this three times, each over the columns that named that file. A category's
+/// key is resolved against the whole declaration rather than against the file it arrived in, and
+/// that resolution is [`BatchColumn::value`]'s — the caller's, now that it holds the batch.
 ///
 /// **A second pass over the points file rather than a widening of [`scan_points`].** [`PointRow`]
 /// is a 16-byte `Copy` struct held one per entity by both builds, and its doc argues that width;
 /// a variable-length attribute tail hung off it would make the build's one per-entity structure
-/// grow with the schema. The two passes are independent, and this one is single-threaded because
-/// an attribute column is 1–8 bytes against geometry's decode cost — the parallel decode
-/// [`scan_points`] needs buys nothing here.
+/// grow with the schema. The two passes are independent.
 ///
-/// Category keys are mapped to codes against `schema_decl`'s compiled vocabularies. Under a
+/// **A batch is handed over whole, not a row at a time, because the per-row work is the pass and
+/// the Parquet decode is not.** Measured on GeoNames (13,463,857 rows, thirteen declared columns):
+/// of the 17.6 s the attribute pass took, the Parquet reader was **1.6 s** and
+/// [`BatchColumn::decode`] 0.04 s; the remaining ~16 s was [`BatchColumn::value`], the staging
+/// write beside it and the scatter after it — all of it per row *per column*, and all of it
+/// independent between columns. A row-shaped handover cannot be split that way, so the caller is
+/// given the decoded batch and splits it itself
+/// ([`crate::pipeline::read_attributes_by_entity`]). Decode stays serial and in file order, which
+/// is what keeps the mint pre-pass below deterministic.
+///
+/// Category keys are mapped to codes against the declaration's compiled vocabularies. Under a
 /// **declared** vocabulary an unknown key is a **build failure** naming the column and the key,
 /// per §5's declare-then-use rule. Under a **discovered** one, `minters` supplies a live
 /// [`VocabularyMinter`] per vocabulary — seeded from whatever the schema already pins — and this
@@ -1508,10 +1516,9 @@ pub fn read_vocabulary_file(
 /// `minters` is threaded through rather than owned here so the caller can hand its final state —
 /// every binding this scan minted, on top of whatever the schema seeded it with — to the manifest
 /// writer once the whole scan (there is exactly one, per build) has completed.
-pub fn scan_attributes<F: FnMut(u64, &mut Vec<ScalarValue>)>(
+pub fn scan_attributes<F: FnMut(AttributeBatch<'_>) -> Result<()>>(
     path: &Path,
     fields: &Fields,
-    schema_decl: &crate::config::Schema,
     columns: &[&crate::config::Attribute],
     minters: &mut HashMap<String, VocabularyMinter>,
     limit: Option<u64>,
@@ -1558,7 +1565,9 @@ pub fn scan_attributes<F: FnMut(u64, &mut Vec<ScalarValue>)>(
         .map(|a| column_index(path, &projected, a.column()))
         .collect::<Result<_>>()?;
 
-    let mut row_values: Vec<ScalarValue> = Vec::with_capacity(columns.len());
+    // The batch's selected rows, rebuilt per batch into one retained allocation. Materialised even
+    // where no limit is set, so the visitor has one shape to walk rather than two.
+    let mut rows: Vec<u32> = Vec::with_capacity(ATTRIBUTE_BATCH_ROWS);
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
@@ -1578,22 +1587,40 @@ pub fn scan_attributes<F: FnMut(u64, &mut Vec<ScalarValue>)>(
             )?);
         }
 
-        for (row, &entity_id) in ids.iter().enumerate() {
-            if limit.is_some_and(|l| entity_id >= l) {
-                continue;
-            }
-            // **Handed over rather than lent**: the visitor moves each value into its staging
-            // column, where borrowing it made every string in the source a second copy for the
-            // one line that landed it. The clear here is what makes that safe — a visitor that
-            // drains leaves nothing, one that returns early leaves a row this overwrites.
-            row_values.clear();
-            for (attribute, column) in columns.iter().zip(&decoded) {
-                row_values.push(column.value(row, attribute, schema_decl)?);
-            }
-            visit(entity_id, &mut row_values);
-        }
+        rows.clear();
+        rows.extend(
+            ids.iter()
+                .enumerate()
+                .filter(|(_, &entity_id)| !limit.is_some_and(|l| entity_id >= l))
+                .map(|(row, _)| row as u32),
+        );
+        visit(AttributeBatch {
+            ids: &ids,
+            rows: &rows,
+            decoded: &decoded,
+        })?;
     }
     Ok(())
+}
+
+/// How many rows one decoded batch of an attribute source carries — the Parquet reader's batch
+/// size, and the bound a caller's staging buffer must leave room for above its own budget.
+pub const ATTRIBUTE_BATCH_ROWS: usize = 65_536;
+
+/// One decoded batch of an attribute source, handed to [`scan_attributes`]'s visitor whole.
+///
+/// **The unit of the handover is a batch because the unit of the work is a column.** Every
+/// expensive thing the caller does with a row — resolving its value, staging it, scattering it
+/// into entity order — it does once per declared column, and the columns share nothing mutable;
+/// a row-shaped visit forces all of that onto one thread. See [`scan_attributes`] for the
+/// measurement that says so.
+pub struct AttributeBatch<'a> {
+    /// The batch's source ids, indexed by the values in [`Self::rows`].
+    pub ids: &'a [u64],
+    /// The rows of this batch the build selected, ascending — `--limit` already applied.
+    pub rows: &'a [u32],
+    /// One decoded column per declared attribute of this source, in the caller's `columns` order.
+    pub decoded: &'a [BatchColumn],
 }
 
 /// One batch's worth of a declared column, decoded to the shape the row loop indexes, together
@@ -1609,7 +1636,7 @@ pub fn scan_attributes<F: FnMut(u64, &mut Vec<ScalarValue>)>(
 /// The two families that already had somewhere to put absence keep doing so and do not consult
 /// this: a category spends the reserved code 0, and `Text` carries its own null through to
 /// `ScalarValue::Null`.
-struct BatchColumn {
+pub struct BatchColumn {
     nulls: Option<arrow::buffer::NullBuffer>,
     values: BatchValues,
 }
@@ -1824,7 +1851,7 @@ impl BatchColumn {
         }
     }
 
-    fn value(
+    pub fn value(
         &self,
         row: usize,
         attribute: &crate::config::Attribute,
