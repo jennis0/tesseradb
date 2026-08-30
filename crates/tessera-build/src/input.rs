@@ -37,7 +37,7 @@ use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::metadata::ParquetMetaData;
 use parquet::file::statistics::Statistics;
 use tessera_spatial::tiler::{ScalarType, ScalarValue};
-use tessera_spatial::{fixed32, Bounds};
+use tessera_spatial::{fixed32, Bounds, Projection};
 use tessera_store::vocabulary::VocabularyMinter;
 
 use crate::config::{Fields, ENTITY_ID};
@@ -101,11 +101,12 @@ pub const IDENTITY_EXTENT: Bounds = Bounds {
 pub fn read_points(
     path: &Path,
     fields: &Fields,
+    projection: Projection,
     extent: &Bounds,
     limit: Option<u64>,
 ) -> Result<Vec<PointRow>> {
     let mut out = Vec::new();
-    scan_points(path, fields, extent, limit, |row| {
+    scan_points(path, fields, projection, extent, limit, |row| {
         out.push(row);
         ControlFlow::Continue(())
     })?;
@@ -144,6 +145,7 @@ fn decode_worker_count(row_groups: usize) -> usize {
 pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
     path: &Path,
     fields: &Fields,
+    projection: Projection,
     extent: &Bounds,
     limit: Option<u64>,
     mut visit: F,
@@ -287,14 +289,21 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             if limit.is_some_and(|l| ids[i] >= l) {
                                 continue;
                             }
-                            // The one place a coordinate is quantised, reached in the width the
-                            // file was read at: the column arrives as `f64` whatever width it was
+                            // The one place a coordinate is placed, reached in the width the file
+                            // was read at: the column arrives as `f64` whatever width it was
                             // stored at, so nothing narrows between the Parquet page and the
-                            // fixed-point grid.
+                            // fixed-point grid. The transform runs here, at the boundary, in the
+                            // same place a write does it (`projections.md` §3);
+                            // `Projection::None` is the exact identity, so an unprojected view's
+                            // stored positions are the bits they always were. A coordinate outside
+                            // the projection's input domain is refused, and one outside its
+                            // *output* domain clipped and counted, by the survey pass that every
+                            // build runs before this one (`survey_points`).
+                            let (x, y) = projection.forward(xs[i], ys[i]);
                             if visit(PointRow {
                                 source_id: ids[i],
-                                qx: fixed32(xs[i], extent.x_min, extent.x_max),
-                                qy: fixed32(ys[i], extent.y_min, extent.y_max),
+                                qx: fixed32(x, extent.x_min, extent.x_max),
+                                qy: fixed32(y, extent.y_min, extent.y_max),
                             })
                             .is_break()
                             {
@@ -852,6 +861,12 @@ pub struct CoordinateSurvey {
     /// [`CoordinateSurvey::clamped`].
     pub clamped_x: u64,
     pub clamped_y: u64,
+    /// Rows whose latitude fell outside the **projection's** own domain — for `web_mercator`,
+    /// beyond ±85.0511287798066° (`projections.md` §7). Always `0` under `projection = "none"`,
+    /// which has no domain, and never a clamp: clipping lands a point exactly on the frame's
+    /// edge, which is where the clamp rule says a point is *not* clamped, so the two counters
+    /// cannot see each other's rows and a shared one would report the wrong cause.
+    pub clipped: u64,
 }
 
 impl CoordinateSurvey {
@@ -890,6 +905,7 @@ impl CoordinateSurvey {
 pub fn survey_points(
     path: &Path,
     fields: &Fields,
+    projection: Projection,
     limit: Option<u64>,
     against: Option<&Bounds>,
 ) -> Result<PointSurvey> {
@@ -927,10 +943,10 @@ pub fn survey_points(
     for canonical in [ENTITY_ID, "x", "y"] {
         roots.push(field_index(path, &schema, fields, canonical)?);
     }
-    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
+    let mask = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), roots);
     let reader = builder
         .with_row_groups(keep)
-        .with_projection(projection)
+        .with_projection(mask)
         .with_batch_size(65_536)
         .build()
         .map_err(|e| BuildError::parquet(path, e))?;
@@ -948,6 +964,7 @@ pub fn survey_points(
         clamped: 0,
         clamped_x: 0,
         clamped_y: 0,
+        clipped: 0,
     };
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
@@ -973,6 +990,34 @@ pub fn survey_points(
                     ),
                 });
             }
+            // **The transform runs here, and the two things it can find are different.** A
+            // coordinate outside WGS84's own range is not a coordinate and is refused
+            // (`projections.md` §2); a latitude inside that range but outside the *projection's*
+            // domain is clipped onto the frame's edge, counted, and never refused (§7) — the
+            // clamp counter below structurally cannot see one, because the edge is exactly where
+            // it says nothing is clamped. Every build takes this pass before any work, so it is
+            // the one place the check has to be.
+            let (x, y) = if projection == Projection::None {
+                (x, y)
+            } else {
+                if x.abs() > 180.0 || y.abs() > 90.0 {
+                    return Err(BuildError::Schema {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "{} {} is at lon {x}, lat {y}, which is not a place: this view is \
+                             projected ({}), and the accepted input coordinate system is WGS84 \
+                             degrees — longitude within ±180, latitude within ±90 \
+                             (projections.md §2). Convert the source to WGS84 before building, or \
+                             declare `projection = \"none\"` if this view's space is not the Earth",
+                            fields.of(ENTITY_ID),
+                            ids[i],
+                            projection.name()
+                        ),
+                    });
+                }
+                survey.clipped += u64::from(projection.is_clipped(y));
+                projection.forward(x, y)
+            };
             found = true;
             survey.rows += 1;
             x_min = x_min.min(x);

@@ -115,6 +115,7 @@ fn parse_schema(text: &str) -> Schema {
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.to_path_buf(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),

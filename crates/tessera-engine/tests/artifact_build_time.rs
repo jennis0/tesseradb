@@ -207,6 +207,7 @@ fn try_fixture(topics: fn(&Path)) -> Result<Fixture, tessera_build::BuildError> 
     write_members(&tmp.path().join("topics_members.parquet"), &topic_members());
 
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,

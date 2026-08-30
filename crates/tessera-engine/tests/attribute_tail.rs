@@ -156,6 +156,7 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema = parse_schema(tmp);
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
@@ -375,6 +376,7 @@ fn both_build_implementations_write_the_same_tail() {
     write_pairs_n(&pairs, 2_000);
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.clone(),
         attribute_sources: tessera_build::config::AttributeSource::over(
@@ -859,6 +861,7 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
@@ -1253,6 +1256,7 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the record fixture schema parses");
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,

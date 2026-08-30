@@ -53,10 +53,68 @@ pub struct SourceChecked {
     pub path: Option<String>,
 }
 
+/// A projected view's frame, answered from the declaration alone (`projections.md` §4.2, §8).
+///
+/// **The one thing about a frame a check *can* settle.** A stated longitude/latitude box projects
+/// and snaps with no data at all, so the square a corpus will be quantised against — and the
+/// resolution the snap costs — are readable in seconds rather than after a build. Under `auto` the
+/// frame is a function of the data, and this says so instead of guessing.
+#[derive(Debug, Clone)]
+pub struct FramePreview {
+    pub view: String,
+    pub projection: &'static str,
+    /// The box declared, and the square it snaps to. `None` under `auto`.
+    pub snapped: Option<(crate::config::LonLatBox, tessera_spatial::frame::Snap)>,
+}
+
+impl FramePreview {
+    /// One line for the view, and one for the snap where there is one.
+    pub fn print(&self) {
+        match &self.snapped {
+            None => eprintln!(
+                "  {:<20} {}, `extent = \"auto\"` — the frame is fitted to the data, so it is not \
+                 known until the build reads the points",
+                self.view, self.projection
+            ),
+            Some((asked, snap)) => {
+                let f = snap.square.bounds();
+                eprintln!(
+                    "  {:<20} {}, asked for lon [{}, {}], lat [{}, {}]",
+                    self.view,
+                    self.projection,
+                    asked.lon_min,
+                    asked.lon_max,
+                    asked.lat_min,
+                    asked.lat_max
+                );
+                eprintln!(
+                    "  {:<20} {} to the square at z{} ({}, {}) — x [{}, {}], y [{}, {}]",
+                    "",
+                    if snap.floored {
+                        "FLOORED at the offset cap rather than fitted"
+                    } else {
+                        "snapped outward"
+                    },
+                    snap.square.z,
+                    snap.square.x,
+                    snap.square.y,
+                    f.x_min,
+                    f.x_max,
+                    f.y_min,
+                    f.y_max
+                );
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct CheckReport {
     pub sources: Vec<SourceChecked>,
     pub findings: Vec<Finding>,
+    /// Per projected view, the frame its declaration implies — the half of the frame report that
+    /// needs no data.
+    pub frames: Vec<FramePreview>,
     /// Per shape layer, what its geometry is — computed from the geometry alone, before any
     /// build (`polygon-membership.md` §6.5); a layer that could not be sized says why.
     pub shapes: Vec<std::result::Result<crate::shapes::ShapeLayerReport, String>>,
@@ -254,6 +312,20 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
 
 fn check_view(view: &crate::config::View, report: &mut CheckReport) {
     let object = format!("view '{}'", view.name);
+    // **The frame, before the file** — a projected view's square is a function of its declaration
+    // alone, so it is answered here whether or not the source opens.
+    if view.projection != tessera_spatial::Projection::None {
+        report.frames.push(FramePreview {
+            view: view.name.clone(),
+            projection: view.projection.name(),
+            snapped: match &view.extent {
+                Extent::LonLat(asked) => {
+                    Some((*asked, crate::config::snap_lon_lat(view.projection, asked)))
+                }
+                _ => None,
+            },
+        });
+    }
     let Some(path) = &view.source else {
         report.sources.push(SourceChecked {
             object: object.clone(),

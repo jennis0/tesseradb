@@ -65,6 +65,7 @@ fn ensure_bundle() -> PathBuf {
     if !bundle_root.join("CURRENT").exists() {
         let root = workspace_root();
         let args = BuildArgs {
+            projection: tessera_spatial::Projection::None,
             point_fields: Default::default(),
             points: root.join("data/scaled/geometry.parquet"),
             attribute_sources: Vec::new(),

@@ -127,6 +127,7 @@ fn write_points_with_absent_category(path: &Path, n: u64, column: &str) {
 
 fn build_args(points: &Path, pairs: &Path, out: &Path, schema: Schema) -> BuildArgs {
     BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.to_path_buf(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),

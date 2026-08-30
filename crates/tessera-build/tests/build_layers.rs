@@ -294,6 +294,7 @@ fn inputs() -> Inputs {
 
 fn args(inputs: &Inputs, out: &Path) -> BuildArgs {
     BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: inputs.points.clone(),
         attribute_sources: Vec::new(),

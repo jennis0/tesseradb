@@ -357,6 +357,7 @@ fn write_attributed_points(path: &Path) {
 
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.to_path_buf(),
         attribute_sources: Vec::new(),
@@ -1013,6 +1014,7 @@ fn reference_build_at_scale() {
     let out = PathBuf::from("/tmp/tessera-reference-scale");
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: PathBuf::from("data/scaled/geometry.parquet"),
         attribute_sources: Vec::new(),

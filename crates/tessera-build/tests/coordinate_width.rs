@@ -79,7 +79,13 @@ fn write_points(path: &Path, xs: &[f64], ys: &[f64], width: &DataType) {
 
 /// The quantised positions a points file reads to, by source id.
 fn positions(path: &Path, extent: &Bounds) -> Vec<(u32, u32)> {
-    let mut rows = read_points(path, &Default::default(), extent, None).expect("the points read");
+    let mut rows = read_points(
+        path,
+        &Default::default(),
+        tessera_spatial::Projection::None,
+        extent,
+        None,
+    ).expect("the points read");
     rows.sort_by_key(|r| r.source_id);
     rows.iter().map(|r| (r.qx, r.qy)).collect()
 }

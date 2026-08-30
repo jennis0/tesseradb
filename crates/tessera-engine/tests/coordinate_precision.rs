@@ -113,6 +113,7 @@ fn build_fixture(out: &Path, points_path: &Path, pairs_path: &Path, points: &[(f
     write_points(points_path, points);
     write_pairs(pairs_path, points.len() as u64);
     build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points_path.to_path_buf(),
         attribute_sources: Vec::new(),

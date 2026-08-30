@@ -478,7 +478,15 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
             .and_then(|name| config.views.iter().find(|v| &v.name == name))
             .map(|view| match &view.extent {
                 Extent::Fixed(bounds) => Ok(*bounds),
-                Extent::Auto { .. } => Err(format!(
+                // A stated longitude/latitude box is a frame without reading anything: the
+                // projection and the snap are both functions of the declaration alone
+                // (`projections.md` §4.2).
+                Extent::LonLat(asked) => {
+                    Ok(crate::config::snap_lon_lat(view.projection, asked)
+                        .square
+                        .bounds())
+                }
+                Extent::Auto { .. } | Extent::AutoLonLat => Err(format!(
                     "layer '{}': its view's extent is `auto`, which is fitted to the points at the \
                      build; the shapes cannot be sized before then. Declare the extent to size \
                      them here",

@@ -4517,6 +4517,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         .unwrap()
         .schema;
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,

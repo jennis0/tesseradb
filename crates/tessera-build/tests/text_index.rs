@@ -115,6 +115,7 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,

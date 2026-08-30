@@ -127,6 +127,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
     write_points_n(points_path, n);
     write_pairs_n(pairs_path, n);
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points_path.to_path_buf(),
         attribute_sources: Vec::new(),

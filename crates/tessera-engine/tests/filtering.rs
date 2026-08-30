@@ -272,6 +272,7 @@ fn fixture() -> Fixture {
     let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
 
     build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.clone(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),

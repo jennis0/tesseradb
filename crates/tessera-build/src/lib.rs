@@ -119,7 +119,13 @@ pub struct BuildArgs {
     pub access: crate::config::AccessInput,
     /// Bundle root to create.
     pub out: PathBuf,
-    /// The quantisation extent Morton codes are computed against (contracts §2.5).
+    /// What turns each row's coordinates into a position in the frame, before anything is
+    /// quantised (`projections.md` §3). [`tessera_spatial::Projection::None`] — the default —
+    /// transforms nothing, and is the exact identity.
+    pub projection: tessera_spatial::Projection,
+    /// The quantisation extent Morton codes are computed against (contracts §2.5). For a
+    /// projected view this is the aligned square the declared box snapped to, over the unit
+    /// square the transform produces, rather than anything the caller wrote.
     pub extent: Bounds,
     /// The view this build's segment belongs to.
     pub view_id: String,
@@ -730,7 +736,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
 
     // ---- 1. read inputs --------------------------------------------------------------
     let mut points =
-        input::read_points(&args.points, &args.point_fields, &args.extent, args.limit)?;
+        input::read_points(
+            &args.points,
+            &args.point_fields,
+            args.projection,
+            &args.extent,
+            args.limit,
+        )?;
     if points.is_empty() {
         return Err(BuildError::Invalid(
             "no points selected — a bundle with no items has no expressible entity range".into(),
@@ -2076,6 +2088,7 @@ mod tests {
     fn build_args_debug_does_not_print_the_identity_key() {
         const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
         let args = BuildArgs {
+            projection: tessera_spatial::Projection::None,
             point_fields: Default::default(),
             points: PathBuf::from("points.parquet"),
             attribute_sources: Vec::new(),

@@ -1467,6 +1467,7 @@ fn main() -> ExitCode {
             // establishes how much of the corpus that frame clamps.
             let frame = match tessera_build::config::frame_view(
                 &view_id,
+                acquired.projection,
                 &acquired.extent,
                 &acquired.points,
                 &acquired.point_fields,
@@ -1544,6 +1545,7 @@ fn main() -> ExitCode {
             };
 
             let args = tessera_build::BuildArgs {
+                projection: acquired.projection,
                 points: acquired.points,
                 point_fields: acquired.point_fields,
                 attribute_sources: acquired.attribute_sources,
@@ -1740,6 +1742,15 @@ fn main() -> ExitCode {
             }
             for finding in &report.findings {
                 eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
+            }
+            // **The frame a projected view will quantise against** (`projections.md` §4.2) —
+            // computed from the declaration alone, so the square and the resolution the snap costs
+            // are readable without a build. Reported, never a finding.
+            if !report.frames.is_empty() {
+                eprintln!("projected views, from the declaration alone:");
+                for frame in &report.frames {
+                    frame.print();
+                }
             }
             // **The shape layers, sized from the geometry alone** (`polygon-membership.md` §6.5)
             // — the decomposition an operator sizing a boundary set reads before a build commits

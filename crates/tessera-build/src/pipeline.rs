@@ -968,6 +968,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         input::scan_points(
             &args.points,
             &args.point_fields,
+            args.projection,
             &args.extent,
             args.limit,
             |point| {
@@ -3481,6 +3482,7 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
             input::scan_points(
                 &args.points,
                 &args.point_fields,
+                args.projection,
                 &args.extent,
                 args.limit,
                 |_| {
@@ -3495,6 +3497,7 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
     input::scan_points(
         &args.points,
         &args.point_fields,
+        args.projection,
         &args.extent,
         args.limit,
         |point| {

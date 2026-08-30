@@ -113,9 +113,10 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 |---|---|---|
 | `name` | R | identity; tombstoned on drop, never reused |
 | `title` | O | human-readable, served on `/v1/meta` |
+| `projection` | D `none` | `web_mercator`, `equirectangular`, `plate_carree`, `gall_isographic` or `none` — what turns this view's input coordinates into positions in its frame ([`projections.md`](projections.md) §5). See below |
 | `source` | D | a `[sources]` key; `[defaults].source` where absent |
-| `fields` | D | canonical `entity_id`, `x`, `y`, or `morton` + `residual` — the geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
-| `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }`. See below |
+| `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
+| `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }` — and under a projection, `"auto"` or `{ lon = [a,b], lat = [c,d] }`. See below |
 | `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
 | `visibility` | ⊘ | the view's own gate; specified, not implemented (views §3) |
 
@@ -183,6 +184,39 @@ needs headroom or the first out-of-range ingest clamps. A caller who knows the b
 There is no constant for the full float range: spanning ±3.4×10³⁸ over 65,536 cells makes each cell
 10³⁴ wide, so every real dataset lands in one of them — it avoids clamping by destroying all
 resolution.
+
+**A `projection` makes the view a coordinate system on the Earth, and changes what its other three
+keys mean.** The function itself, the closed set it is drawn from and the frame model it implies are
+[`projections.md`](projections.md) §4–§5; what belongs here is the declaration.
+
+```toml
+[[view]]
+name       = "world"
+projection = "web_mercator"
+extent     = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }
+```
+
+- **The coordinate columns become `lon` and `lat`**, in that order, and `fields.x` or `fields.y` on
+  such a view is refused naming the geographic spelling. A corpus built with the two exchanged is
+  mirrored about the diagonal and nothing downstream can see that it is. `fields.lon` on a view with
+  no projection is refused the same way: there is nothing to turn a degree into a coordinate.
+  `morton`/`residual` is refused too — a code is a position already placed, so there is no longitude
+  to transform.
+- **The extent is written in longitude and latitude**, and is projected and then **snapped outward
+  to the smallest aligned square containing it**, with the zoom offset capped at 16. `"auto"` is the
+  same operation over the data's own longitude/latitude box. The other three spellings are refused:
+  `{ min, max }` and `{ x, y }` state a frame in the space the projection *produces*, and
+  `{ auto = true, margin = f }` asks for headroom the snap already supplies.
+- **A coordinate outside ±180 or ±90 is not a coordinate**, in the extent or in a row, and is
+  refused naming WGS84. So is a box crossing the antimeridian, which an aligned square cannot wrap;
+  the refusal names the wider box that does not cross.
+- **A latitude outside the projection's own domain is clipped, counted and never refused** — it is
+  moved onto the frame's edge, where the clamp rule below says nothing is clamped, so the two counts
+  are separate and neither can stand in for the other.
+
+The frame a stated box snaps to is a function of the declaration alone, so `tessera check` prints it
+— the square, and whether the offset cap chose it rather than the box. Under `"auto"` it cannot, the
+frame being a function of the data, and it says so.
 
 **Every build reports what the frame does to the data, and past half the corpus it refuses.** The
 extent alone is four plausible-looking numbers whatever the corpus holds, so the build prints the
@@ -1237,6 +1271,27 @@ disclosing nothing.
 
 
 ## Appendix R — review trail
+
+**2026-08-30 — a view declares a projection, and its frame is then written in degrees.** One key is
+added, `projection`, from the closed set [`projections.md`](projections.md) §5 enumerates and
+defaulting to `none` — so a corpus with no geography declares nothing and behaves exactly as it did.
+What the key changes is the meaning of the two beside it: the coordinate columns become `lon` and
+`lat`, and the extent becomes a box in longitude and latitude that the build projects and snaps
+outward to the enclosing aligned square. `extent` gains two entries in its table for that box and
+the surface stays closed, every one of them asserted against this section.
+
+Six refusals arrive with it, each naming what to write instead: a projection outside the set; a
+coordinate outside ±180 or ±90, in the declaration or in a row; `x`/`y` as a projected view's
+columns and `lon`/`lat` as an unprojected one's; the three unprojected extent spellings on a
+projected view; a box crossing the antimeridian, which an aligned square cannot wrap; and `auto`
+over a source selecting no rows, which was already refused and now says both spellings. The count
+is high for one key because the two spellings do not overlap at all — a caller is in one world or
+the other, and every refusal exists to say which one they are in.
+
+The **clip** count is new beside the clamp count and is deliberately not folded into it: a clipped
+point lands exactly on the frame's edge, which is where this section's clamp rule says a point is
+*not* clamped, so one counter would have to report the wrong cause. What a build *prints* about the
+projection, the snap and the clip is not yet written; the numbers are computed and carried.
 
 **2026-08-26 — the two CORS origin lists are enumerated here.** §3 gains the pair. They are the
 serving side's keys and this document had deferred all of those to SA §7, which was right for

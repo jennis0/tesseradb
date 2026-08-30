@@ -160,6 +160,7 @@ fn schema() -> Schema {
 fn args(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     let schema = schema();
     BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.to_path_buf(),
         attribute_sources: tessera_build::config::AttributeSource::over(

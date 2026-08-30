@@ -5,11 +5,12 @@
 //! function of two `f64`s — it does not read a declaration, does not know an extent, and does not
 //! quantise. `morton.rs` takes it from there.
 //!
-//! **⊘ Nothing calls this yet.** A view still declares four extent numbers and nothing records
-//! what they mean, and the two built geographic corpora are projected outside the build by
-//! `test_corpora/common/projection.py` before their rows are ever seen. So a reader must not read
-//! the presence of this module as a projected view being buildable; what makes one buildable is
-//! the configuration surface and the write path (`projections.md` §2, §3), which are unbuilt.
+//! **⊘ Partially reached.** A view declares its projection and a *build* transforms every
+//! coordinate through it (`projections.md` §2, §4; `tessera_build::config`). The **write path does
+//! not**: the ingest schema still pins `x`/`y`, so a projected view is buildable and not yet
+//! ingestable (§3), and the two built geographic corpora are still projected outside the build by
+//! `test_corpora/common/projection.py` before their rows are ever seen. `/v1/meta` publishes the
+//! frame alone, so a client cannot yet tell a geographic corpus from an embedding (§9).
 //!
 //! **Every projection's output is the unit square, x east and y south** (§4). The frame is
 //! `[0, 1]` on both axes whatever the projection, so tile addressing is integer arithmetic and a
@@ -106,6 +107,22 @@ impl Projection {
             "gall_isographic" => Some(Projection::GALL_ISOGRAPHIC),
             "none" => Some(Projection::None),
             _ => Option::None,
+        }
+    }
+
+    /// The name a declaration writes for this projection — [`Projection::from_name`]'s inverse.
+    ///
+    /// `plate_carree` and `equirectangular` are one transform *and* one aspect, so both come back
+    /// as `equirectangular`; `gall_isographic` is distinguishable because its standard parallel
+    /// is, and it is the aspect a client draws the world at.
+    pub fn name(&self) -> &'static str {
+        match *self {
+            Projection::WebMercator => "web_mercator",
+            Projection::Equirectangular {
+                standard_parallel_deg: 45.0,
+            } => "gall_isographic",
+            Projection::Equirectangular { .. } => "equirectangular",
+            Projection::None => "none",
         }
     }
 
@@ -414,6 +431,13 @@ mod tests {
         assert_eq!(Projection::WebMercator.world_aspect(), Some(1.0));
         assert_eq!(Projection::None.world_aspect(), Option::None);
         assert_eq!(Projection::from_name("lambert_cylindrical"), Option::None);
+
+        // `name` round-trips through `from_name` for every name the surface accepts, which is
+        // what lets a declaration be echoed back to a caller from the resolved projection alone.
+        for name in ["web_mercator", "equirectangular", "gall_isographic", "none"] {
+            assert_eq!(Projection::from_name(name).unwrap().name(), name);
+        }
+        assert_eq!(Projection::PLATE_CARREE.name(), "equirectangular");
     }
 
     /// The clip predicate at the boundary and past it, and the reason it cannot be a clamp count.

@@ -256,6 +256,7 @@ fn build_side(rows: &[u64], layer: &str) -> Built {
         .expect("the fixture declaration parses");
     let root = dir.join("bundle");
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.clone(),
         attribute_sources: tessera_build::config::AttributeSource::over(points, &config.schema),

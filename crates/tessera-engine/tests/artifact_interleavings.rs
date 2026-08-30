@@ -1250,6 +1250,7 @@ fn built_fixture() -> Fixture {
     );
 
     tessera_build::build(&tessera_build::BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,

@@ -230,6 +230,7 @@ pub fn run_build(
 
             let collector = StageCollector::default();
             let args = BuildArgs {
+                projection: tessera_spatial::Projection::None,
                 point_fields: Default::default(),
                 points: geometry.clone(),
                 attribute_sources: Vec::new(),
