@@ -101,22 +101,32 @@ same class of rarity as a re-label, which is delete plus re-ingest (decision 004
 
 ```toml
 [[view_group]]
-name             = "quarter"
-projection       = "none"
-extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
-point_visibility = { field = "access", default = "public" }
-source           = "embeddings"
-member_field     = "quarter"            # build only: which member each source row joins
-metadata         = ["label", "starts", "ends"]
+name              = "quarter"
+projection        = "none"
+extent            = { min = [-40.0, -40.0], max = [40.0, 40.0] }
+point_visibility  = { field = "access", default = "public" }
+visibility        = "public"
+member_visibility = { field = "quarter_access", default = "inherited" }
+source            = "embeddings"
+fields            = { member = "quarter", label = "quarter_label" }
+metadata          = ["label", "starts", "ends"]
 ```
 
 A group takes every key a `[[view]]` takes, with the same meanings, plus three of its own:
 
 | Key | | Value |
 |---|---|---|
-| `member_field` | O, build only | the source column whose value is each row's member key; absent, the build creates no members and the group starts empty |
 | `metadata` | O | the names of the per-member values a member carries; every member carries every name, as a string |
-| `index` | O | a declared `[[index]]` (spec §3.3); absent, the group's index is implicit and named after the group |
+| `member_visibility` | R | `{ field, default }` — each member's own gate, and what a member declaring none gets; `default` may be `inherited`, meaning the group's `visibility` (spec §6) |
+| `members` | O | another group's name: this group has that group's members rather than its own (spec §3.3) |
+
+`source` and `fields` keep their meanings from `[[view]]` and from `configuration.md` §8: the
+source is the file a build reads, and `fields` says where things are, never whether they exist.
+On a group the located fields are the view's own (`entity_id`, the coordinates), plus `member`
+— the column whose value is each row's member key — and one column per `metadata` name and for
+`member_visibility.field`; all default to their own names. A group with a source has members
+for every distinct `member` value the build reads; a group with no source is declared and empty,
+exactly as a layer with no source is, and its first member arrives by ingest.
 
 A group is not a view: it cannot be named on a viewer verb, has no row space and no permutation.
 Its members are views in every respect below the declaration — each with its own Morton order,
@@ -138,9 +148,9 @@ out of order gets them in arrival order and sorts by its own `starts` metadata i
 order. Keys and ordinals are tombstoned on drop and never reused (spec §3.4).
 
 **Creation is a side-effect of ingest.** The first batch naming `quarter@2026-Q3` creates the
-member; the batch's metadata travels in `x-tessera-view-metadata`, a JSON object carrying exactly
-the declared names, required on the creating batch and refused on any later one — a member's
-metadata is set once. The creation is a WAL record ahead of the batch, so replay recreates the
+member; its metadata and, where the group reads one, its own gate label travel in
+`x-tessera-view-metadata`, a JSON object carrying exactly the declared names, required on the
+creating batch and refused on any later one — a member's metadata and gate are set once. The creation is a WAL record ahead of the batch, so replay recreates the
 member before the rows that need it, and the served member set is the manifest's registry plus
 the WAL overlay, materialised at the next flush — the overlay-then-fold shape the write path has
 everywhere.
@@ -148,41 +158,67 @@ everywhere.
 This is the one place a view is created without an operator declaring it, and it is safe for a
 reason r4 spelled out when refusing auto-creation for plain views: a member has nothing of its own
 to review. Its frame, projection, visibility default and gate are the group's, already declared;
-the only things the batch supplies are a key and metadata, and metadata gates nothing.
+the only things the batch supplies are a key, metadata and at most a member gate that can
+only narrow the group's (spec §6).
 
 > **⊘ Specified, not implemented — the whole of this section.** There is no group object, no
 > member, no ordinal, no metadata header and no creation record. Every view that exists was
 > declared and built.
 
-### 3.3 The index
+### 3.3 Sharing members
 
-An **index** is the key space a group's members are drawn from, and it exists so that two groups
-can share one: a quarterly embedding and a quarterly map are different layouts over the same
-quarters, and an attribute that varies by quarter (spec §5) should apply to both without saying so
-twice. A group that declares no `index` has an implicit one of its own name; a group that names a
-declared `[[index]]` shares that index's members with every other group on it.
+Two groups may be layouts over the same members — a quarterly embedding and a quarterly map —
+and an attribute that varies by quarter (spec §5) should apply to both without being declared
+twice. A group declares `members = "quarter"` to say that its members are another group's:
 
 ```toml
-[[index]]
-name     = "quarter"
-metadata = ["label", "starts", "ends"]
+[[view_group]]
+name     = "quarter_map"
+members  = "quarter"
+projection = "web_mercator"
+extent   = "auto"
+point_visibility  = { field = "access", default = "public" }
+visibility        = "public"
+member_visibility = { default = "inherited" }
 ```
 
-Keys, ordinals and metadata belong to the index, not to the group: creating `quarter@2026-Q3` in
-one group creates the key for every group on the index, and the second group's member is
-materialised, empty, at the same moment, so a request naming it is answered rather than 404ed.
-Under the implicit index there is one group, and the distinction is invisible. `metadata` on a
-group that names an index is refused: the index owns it.
+Keys, ordinals, metadata and each member's own gate belong to the group that owns them, and a
+group naming `members` declares none of those: `metadata` and `member_visibility.field` are
+refused on it, and `member_visibility.default` is the one thing it may still say, because the
+inherited gate is its own. Creating `quarter@2026-Q3` creates `quarter_map@2026-Q3` at the same
+moment, empty, so a request naming it is answered rather than 404ed; dropping the key drops
+both. Chains are refused — `members` must name a group that declares none — so the owner of a
+key set is always one hop away.
+
+There is no separate object for the shared key set. One was considered and declined: with one
+group the object is invisible, and with two it is a second name for the first group.
 
 ### 3.4 Drop
 
 Dropping a member is a control operation: a WAL'd tombstone on the key. The member leaves
 `/v1/meta` on acknowledgement, a request naming it is a 404 from then on, and its row-space
-artifacts are reclaimed at the next fold. No entity is deleted — an entity that was only in that
-member still exists, with its attributes, and is simply in no view. Under a shared index the drop
-is of the key, and takes the member out of every group on it. A dropped key is never reused,
-because a recreated `2026-Q3` with different contents would silently repoint every bookmark, every
-cached θ and every client cache keyed on the view (decision 0029).
+artifacts are reclaimed at the next fold. Under `members` sharing the drop is of the key, and
+takes the member out of every group on it. A dropped key is never reused, because a recreated
+`2026-Q3` with different contents would silently repoint every bookmark, every cached θ and every
+client cache keyed on the view (decision 0029).
+
+**Dropping a view deletes no entity, and entity deletion drops no view.** An entity whose only
+member was dropped still exists, with its label, its attributes and its artifact memberships, in
+no view — and a later batch into a new member picks it up by `external_id` under spec §4's join
+rule, which is the ordinary shape of a corpus whose items come and go between slices. The two
+lifecycles are kept apart because they retire differently: a view is row space and its artifacts
+are garbage the moment the tombstone is acknowledged, while an entity leaves only through the
+deny lane and retires at the fold that executes it (Rule F, write-path §5.4).
+
+The drop takes one option, `delete_dangling = true`, for the caller who does mean "and the
+items that were only here". It is defined as sugar and nothing else: at acknowledgement the
+service computes the entities of the dropped member that hold a row in no other view — the
+buffer included — and submits them as ordinary deletions, which enter the overlay, are
+acknowledged with the drop, and retire at the fold like any deletion. It is not a second
+retirement route and must not become one; a drop that removed an entity any other way would be
+the fail-open the two removal rules exist to prevent. The cost is one permutation probe per
+other view per row of the member, paid once at the drop and reported in its acknowledgement
+with the count.
 
 ### 3.5 Layers over a group
 
@@ -208,7 +244,7 @@ refuses as a duplicate, and its rule is amended:
   0047), never a field carried in on a second-view row, because the alternative is a widening
   with no overlay entry or a narrowing that bypasses the deny lanes.
 - **An entity-scoped attribute** (spec §5) on a known id must byte-match the stored value or be
-  absent from the batch; a differing value is a 409 naming the column. An index-scoped attribute
+  absent from the batch; a differing value is a 409 naming the column. A group-scoped attribute
   is expected, because that is the value this member carries.
 - **A deleted holder is not a duplicate**, as today: the re-ingest allocates fresh.
 
@@ -241,39 +277,43 @@ each quarter. It is declared as a **scope**:
 [[attribute]]
 name  = "sentiment"
 type  = "f32"
-scope = { index = "quarter" }      # default: scope = "entity"
+scope = { group = "quarter" }      # default: scope = "entity"
 ```
 
-**Storage.** An index-scoped attribute is a family of entity-space columns, one per member of the
-index, each with its own presence bitmap (decision 0064 — an absent number is presence beside the
-column) and, for a category, its own postings. Nothing is materialised per row space, which is
-what keeps the attribute inside I2's argument: every value is indexed by entity, every predicate
-answers a bitmap in entity space, and the mask meets it there before any permutation is applied.
-The family grows by one column when a member is created, empty; the fold's attribute pass
+The group named is the one that owns the members; naming a group that declares `members` is
+refused, pointing at the owner. The attribute then applies to every group sharing those members.
+
+**Storage.** A group-scoped attribute is a family of entity-space columns, one per member, each
+with its own presence bitmap (decision 0064 — an absent number is presence beside the column)
+and, for a category, its own postings. Nothing is materialised per row space, which is what keeps
+the attribute inside I2's argument: every value is indexed by entity, every predicate answers a
+bitmap in entity space, and the mask meets it there before any permutation is applied. The
+family grows by one column when a member is created, empty; the fold's attribute pass
 (`filter-index.md` §6.2) runs per column and needs no new case.
 
 **Evaluation.** A filter leaf names the attribute, and the member whose column is read is decided
 one of two ways:
 
-- **Under a member of the index**, the request's own view decides: `sentiment` under
-  `quarter@2026-Q3` reads that quarter's column. Nothing is added to the wire.
-- **Under any other view** — a plain view, or a member of a different index — the leaf must
+- **Under a member of the group** (or of a group sharing its members), the request's own view
+  decides: `sentiment` under `quarter@2026-Q3` reads that quarter's column. Nothing is added to
+  the wire.
+- **Under any other view** — a plain view, or a member of an unrelated group — the leaf must
   **pin** a member: `sentiment@2026-Q3`. That is an ordinary entity-space bitmap and it composes
   with everything else, so "the documents that were negative in Q3, on the whole-corpus map" is a
-  filter like any other. An unpinned leaf there is a 422 naming the index, not an empty answer,
+  filter like any other. An unpinned leaf there is a 422 naming the group, not an empty answer,
   because a leaf with no column to read is a malformed request rather than a constraint.
 
-A pinned leaf under a member of the same index is allowed too — Q4's map filtered by Q3's
+A pinned leaf under a member of the same group is allowed too — Q4's map filtered by Q3's
 sentiment — and means what it says.
 
-**Ingest.** A batch into a member carries that member's values for every index-scoped attribute
-on its index, under the attribute's plain name; the member is known from the header, so the
-column is not qualified. A batch into a plain view may not carry an index-scoped attribute at
+**Ingest.** A batch into a member carries that member's values for every group-scoped attribute
+on its members, under the attribute's plain name; the member is known from the header, so the
+column is not qualified. A batch into a plain view may not carry a group-scoped attribute at
 all: there is no member for the value to belong to.
 
-**Render.** A `render = true` index-scoped attribute is rendered in the members of its index and
-in no other view, which is the rule `per-point-attributes.md` §3.9 already has for `render_in`
-with the view set decided by the scope instead of listed.
+**Render.** A `render = true` group-scoped attribute is rendered in the members of its group and
+of any group sharing them, and in no other view — the rule `per-point-attributes.md` §3.9 already
+has for `render_in`, with the view set decided by the scope instead of listed.
 
 **Member metadata is not an attribute.** A member's `label` or `starts` is one value per member,
 lives on the registry entry, filters nothing and is served on `/v1/meta`. A per-(entity, member)
@@ -285,30 +325,43 @@ value is an attribute. The two are kept apart so that neither grows the other's 
 
 ## 6. The gate
 
-A view or a group may declare `visibility`, a label evaluated by the plugin exactly as an item's
-label is; a group's gate is inherited by every member. Satisfaction is the item-visibility
-predicate verbatim (§6.1): the label resolves to its term set, and the gate is satisfied iff that
-set intersects the principal's satisfied set. Not the conservative label join — under §12.2's
-required-set reading a disjunctive gate (`finance | legal`) yields an empty required set and
-every principal passes, which is a fail-open on exactly what the gate protects. Intersection
-gives a disjunctive gate its intended meaning.
+Who may reach a view follows the shape a layer already has: a gate on the kind, and a gate on
+the individual.
+
+- **`visibility`** on a `[[view]]` or a `[[view_group]]` — an access label, or `public`
+  (decision 0088), required rather than defaulted, as it is on a layer: a disclosure control
+  nobody wrote is a value nobody chose. A plain view has only this.
+- **`member_visibility = { field, default }`** on a group — each member's own label, read from
+  the source column at a build or carried in `x-tessera-view-metadata` on the creating batch,
+  and `default` for a member supplying none. `default = inherited` means the group's own, which
+  is the same spelling `artifact_visibility` uses.
+
+A member is reachable only where its group is: the group's gate is the outer bound and the
+member's is taken as written inside it, so a member gate can narrow and cannot widen — the
+relation decision 0089 gives an artifact to its layer, and the I12 direction.
+
+Satisfaction is the item-visibility predicate verbatim (§6.1): the label resolves to its term
+set, and the gate is satisfied iff that set intersects the principal's satisfied set. Not the
+conservative label join — under §12.2's required-set reading a disjunctive gate
+(`finance | legal`) yields an empty required set and every principal passes, which is a fail-open
+on exactly what the gate protects. Intersection gives a disjunctive gate its intended meaning.
 
 - The principal's **visible-view set is resolved once at authorise**, every view and every member
   evaluated whatever the outcome, so the request-time check is one set-membership lookup and a
   gate-failed name costs the same work as a never-registered one — r23's
   work-indistinguishability standard, the closure C4 records for `/v1/items`.
-- A gate-failed view is absent from `/v1/meta` and its members with it; a request naming one is a
-  404 indistinguishable from an unknown name.
+- A gate-failed view or member is absent from `/v1/meta`; a request naming one is a 404
+  indistinguishable from an unknown name. A gate-failed group takes its member list with it.
 - The gate governs every view-valued surface, not only discovery: a layer's `views` list as
   served, a member list, anything else keyed by view omits gate-failed entries.
 - The gate is conjunctive with item labels, never substitutive: an item inside a gated view is
-  still governed by its own label. A gate narrows and never widens — the I12 direction.
-- A member created at ingest is born under its group's gate; there is no per-member gate.
+  still governed by its own label.
 
 > **⊘ Specified, not implemented.** `visibility` on a view is parsed and refused; no gate is
 > evaluated and no visible-view set exists. Every declared view is reachable by every principal
 > that authorises at all, and a reader must not count gating as an available means of
-> restricting reachability.
+> restricting reachability. Making `visibility` required is a change to every declaration in the
+> repository, which is the cost of not defaulting it.
 
 ## 7. Build and populate
 
@@ -353,7 +406,7 @@ choices below.
 - **A flush writes one pending segment per view touched**; a point in k views is k rows, k
   segments' worth of merge and fold debt. That is the price of independent coordinates and is
   visible at flush, never on the request path.
-- **An index-scoped attribute costs one entity-space column per member**, each the size the
+- **A group-scoped attribute costs one entity-space column per member**, each the size the
   attribute would cost alone.
 - **Files**: views × columns × (segments + 1), plus the attribute families — thousands at the
   counts above, inside every limit that matters.
@@ -377,7 +430,7 @@ row spaces, not channels. What has to be checked is what a viewer learns *from* 
 - **An item's presence in a view** is disclosed only through the mask: an entity the viewer
   cannot see is served in no view, and an entity absent from a view is indistinguishable from
   one invisible there.
-- **Index-scoped filters** are entity-space bitmaps intersected with the mask before any count,
+- **Group-scoped filters** are entity-space bitmaps intersected with the mask before any count,
   so the I2 argument for filters (`filter-surface.md`) applies unchanged; a pinned leaf under
   another view is the same operand with the column chosen by the request rather than by the
   view, and discloses nothing a filter under the member would not.
@@ -396,7 +449,6 @@ No new verb, no new leak-register row, one register note.
   [`deferred-signature-major-layout.md`](deferred-signature-major-layout.md).
 - **In-place position updates**, and removing one entity from one view.
 - **Runtime creation of plain views.** A plain view is a build; a member is an ingest.
-- **Per-member gates.** A member inherits its group's.
 - **Time in the Morton code** (§9): views are discrete and a viewer looks at one at a time.
 - **Historical authorisation.** Current credentials govern every view, historical ones included
   (§9, r17).
@@ -405,14 +457,14 @@ No new verb, no new leak-register row, one register note.
 
 | Document | Change |
 |---|---|
-| Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and indexes; the paged permutation admitted behind the reader interface |
-| Contracts §2.1 | A bundle carries several views, each `views/<view>/`; the `@` id form; the member registry and index registry in the manifest |
+| Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and shared members; the paged permutation admitted behind the reader interface |
+| Contracts §2.1 | A bundle carries several views, each `views/<view>/`; the `@` id form; the group and member registry in the manifest |
 | Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor; `bundle_format` bump |
-| Contracts §2.3 | Attribute `scope` in `declared_scalars`; index-scoped column families under `attrs/<column>@<key>/` |
+| Contracts §2.3 | Attribute `scope` in `declared_scalars`; group-scoped column families under `attrs/<column>@<key>/` |
 | Contracts §3.2 | `/v1/meta`: per-view `extent`, groups with members and metadata, gate-filtered; `filter_operands` carries the scope; the pinned leaf `name@key` in the filter grammar |
-| Contracts §3.4 | The duplicate rule amended per spec §4; `x-tessera-view-metadata`; member creation; identifier forms with mandatory idset on the `tessera_id` form |
-| Configuration §1 | `[[view_group]]`, `[[index]]`, `scope` on `[[attribute]]`, `visibility` on a view or group; `--view` withdrawn |
-| Write-path §2, §4 | Member creation record; the join rule at admission; one pending segment per view touched restated for several views |
+| Contracts §3.4 | The duplicate rule amended per spec §4; `x-tessera-view-metadata`; member creation; member drop with `delete_dangling`; identifier forms with mandatory idset on the `tessera_id` form |
+| Configuration §1 | `[[view_group]]` with `members`, `metadata` and `member_visibility`; `fields.member`; `scope` on `[[attribute]]`; `visibility` required on a view or group; `--view` withdrawn |
+| Write-path §2, §4, §5 | Member creation record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
 | Compaction | Reclamation of a dropped member; the attribute pass over a family |
 | Appendix C | C17 note (cross-view linkage), C15 note (member size via timing), the `views` field of `/v1/meta` under C11's precedent |
 | Conformance | A two-view differential: the oracle answers per view and per member; the pinned-leaf and unpinned-leaf cases; the gate's work-indistinguishability |
@@ -427,14 +479,18 @@ No new verb, no new leak-register row, one register note.
    4 GB for every sparse view.
 4. **Whether a plain view may be attached after the build at all** (`--attach-view`, spec §7),
    or whether "a plain view is a build" is the whole rule and a new embedding is a rebuild.
-5. **The pinned leaf** under a view outside the index — kept (the recommendation) or refused.
+5. **The pinned leaf** under a view outside the group — kept (the recommendation) or refused.
+7. **`visibility` becomes required** on every view, as on every layer — or stays optional with
+   `public` as its default, which would be the surface's second defaulted disclosure control.
+8. **`delete_dangling`** — offered on a member drop as sugar over deletion, or left out so that
+   a caller who wants the items gone deletes them.
 6. **The extent move** (spec §2) — taken with the first two-view build, or taken first as its own
    `bundle_format` bump so that the manifest shape is settled before members exist.
 
 ## Appendix R — review trail
 
 - **r5 (2026-08-30)** — rewritten against the built system. Views separated from signature
-  grouping; view groups, indexes and attribute scope added; the ingest map withdrawn in favour of
+  grouping; view groups, shared members and attribute scope added; the ingest map withdrawn in favour of
   per-batch addressing; runtime creation of plain views withdrawn; identity tiers and roll-mode
   rotation moved out. Not yet reviewed.
 - **r1–r4 (2026-08-01 → 2026-08-18)** — three independent reviews (performance, security,
