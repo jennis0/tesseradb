@@ -9,9 +9,10 @@ names a projection, and each corpus is rebuilt. That is a rerun rather than a lo
 projection is a pure function, which is exactly what `data/geometry.parquet` is not, and is why
 that file is hashed rather than seeded (`probes/dataset.md` §3).
 
-Until then this is the reference the Rust has to agree with, so `TEST_VECTORS` below is written to
-be readable from another language and `python -m test_corpora.common.projection` checks the
-implementation against it.
+Until then this is the reference the Rust has to agree with, so the vectors both are checked against
+live in `projection-vectors.json` beside this file — one description that two languages read, rather
+than two implementations of one. `python -m test_corpora.common.projection` checks this half of it;
+`tessera_spatial::projection` checks the other.
 
 **Two frames, one transform.** `unit` normalises the projection's whole domain to [0, 1] on both
 axes; `metres` is the same map without the final scale, in EPSG:3857's own units. They are affine
@@ -28,7 +29,9 @@ extent. The negation is applied here, at the definition, and never left to a cal
 
 from __future__ import annotations
 
+import json
 import math
+import pathlib
 from typing import Iterable, Literal, NamedTuple
 
 Frame = Literal["unit", "metres"]
@@ -151,33 +154,26 @@ def quantise(v: float, ext: Extent, bits: int = 16) -> int:
 
 
 # --------------------------------------------------------------------------------------------
-# Test vectors: the contract the Rust replacement has to meet. Written as data, not as asserts,
-# so another language can read them straight out of this file.
+# Test vectors: the contract this module and its Rust replacement both meet. They are data in a
+# file beside this one rather than literals here, because two languages have to read them and a
+# figure copied into a second language is a figure that can drift from the first.
 # --------------------------------------------------------------------------------------------
 
+VECTORS_PATH = pathlib.Path(__file__).with_name("projection-vectors.json")
+_VECTORS = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+
 #: (lon, lat, x_metres, y_metres) — y south, so the sign is the opposite of EPSG:3857's northing.
-#: Every value here is exact or a published Web Mercator figure, not one this module produced.
+#: Every value is exact or a published Web Mercator figure, not one this module produced.
 TEST_VECTORS = [
-    (0.0, 0.0, 0.0, 0.0),
-    (180.0, 0.0, WORLD_HALF_M, 0.0),
-    (-180.0, 0.0, -WORLD_HALF_M, 0.0),
-    (90.0, 0.0, WORLD_HALF_M / 2.0, 0.0),
-    (0.0, MAX_LATITUDE, 0.0, -WORLD_HALF_M),
-    (0.0, -MAX_LATITUDE, 0.0, WORLD_HALF_M),
-    (0.0, 45.0, 0.0, -5621521.486192066),
-    (0.0, -45.0, 0.0, 5621521.486192066),
+    (v["lon"], v["lat"], v["x_m"], v["y_m"])
+    for v in _VECTORS["web_mercator_metres"]["vectors"]
 ]
 
 #: (name, lon, lat, zoom, tile_x, tile_y) — XYZ tile addresses, which are the y-direction's real
 #: test: a mirrored frame passes every round trip and fails these.
 TILE_VECTORS = [
-    ("London", -0.1276, 51.5072, 1, 0, 0),
-    ("Sydney", 151.2093, -33.8688, 1, 1, 1),
-    ("Buenos Aires", -58.3816, -34.6037, 1, 0, 1),
-    ("Tokyo", 139.6917, 35.6895, 1, 1, 0),
-    ("Nairobi", 36.8219, -1.2921, 2, 2, 2),
-    ("Reykjavik", -21.8277, 64.1265, 2, 1, 1),
-    ("Tromso", 18.9560, 69.6496, 2, 2, 0),
+    (v["place"], v["lon"], v["lat"], v["zoom"], v["tile_x"], v["tile_y"])
+    for v in _VECTORS["xyz_tiles"]["vectors"]
 ]
 
 
@@ -207,6 +203,15 @@ def _self_check() -> None:
     print(f"MAX_LATITUDE  = {MAX_LATITUDE!r}")
     print(f"WORLD_HALF_M  = {WORLD_HALF_M!r}")
     print(f"world box     = {WORLD_BOX_WGS84}")
+
+    # The shared file records the three constants as figures; this module derives them. Both are
+    # checked against the other so the file cannot drift from the arithmetic that produced it —
+    # which is the only way the Rust, which reads the file, can rely on it.
+    consts = _VECTORS["constants"]
+    assert consts["earth_radius_m"] == EARTH_RADIUS_M, consts["earth_radius_m"]
+    assert consts["world_half_m"] == WORLD_HALF_M, consts["world_half_m"]
+    assert consts["max_latitude_deg"] == MAX_LATITUDE, consts["max_latitude_deg"]
+    print(f"vectors file  : {VECTORS_PATH.name}, constants derive to the bit")
 
     for lon, lat, mx, my in TEST_VECTORS:
         gx, gy = project(lon, lat, "metres")
