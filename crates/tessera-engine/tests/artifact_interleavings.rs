@@ -230,7 +230,7 @@ fn body_hash(seed: &str) -> [u8; 32] {
     hash
 }
 
-fn row(engine: &Engine, external_id: &str, x: f32, y: f32) -> UnallocatedRow {
+fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
     let descriptors = vec![b"0".to_vec()];
     UnallocatedRow {
         external_id: Some(external_id.as_bytes().to_vec()),
@@ -246,7 +246,7 @@ fn row(engine: &Engine, external_id: &str, x: f32, y: f32) -> UnallocatedRow {
 /// One batch of one point carrying the artifact that point belongs to — what `/control/ingest`'s
 /// membership column decodes to, taken at the engine boundary. Returns how many artifacts the
 /// batch created.
-fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f32, y: f32) -> u64 {
+fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str, x: f64, y: f64) -> u64 {
     engine
         .accept_ingest_joining(
             vec![row(engine, batch, x, y)],

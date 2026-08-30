@@ -354,7 +354,7 @@ mod tests {
 
     /// One input segment, laid out along x alone so that Morton order is x order — which is what
     /// lets the fixtures below say exactly which row each surviving item lands at.
-    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f32, ScalarValue)]) -> FoldSegmentInput {
+    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f64, ScalarValue)]) -> FoldSegmentInput {
         let flush_rows: Vec<FlushRow> = rows
             .iter()
             .map(|(entity, x, score)| FlushRow {

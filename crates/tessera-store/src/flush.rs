@@ -47,14 +47,19 @@ use crate::write::{write_segment, RunWriter};
 /// on that one; the engine converts. `x`/`y` are still the caller's coordinates — quantisation
 /// happens here, once, against the bundle's own `quantisation` (contracts §2.5), so there is no
 /// second place a coordinate could become a cell under bounds that have drifted.
+///
+/// They are `f64` because the whole coordinate path is (`projections.md` §6), and this is its last
+/// stop: an `f32` here would decide the cell rather than the sub-cell position at any frame past
+/// roughly zoom offset 8, and would do it after the wire and the log had both carried the value
+/// the caller sent.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlushRow {
     pub entity_id: EntityId,
     /// `None` for an item ingested without one (contracts §3.4 r6): addressable only by its
     /// `tessera_id`, present in no external-id extent, and given the locator's absent sentinel.
     pub external_id: Option<Vec<u8>>,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     /// One value per **render** column, in declared order. [`ScalarValue::Null`] is a legal member
     /// and is the caller's only way to say "this item has no value here": the writer records it in
     /// the column's presence bitmap and stores the type's zero in the row (decision 0064).
@@ -158,8 +163,8 @@ pub fn write_flush_segment(
     for row in &input.rows {
         items.push(TilerItem {
             tessera_id: tessera_id_of(input.identity_key, input.shard_id, row.entity_id)?,
-            qx: fixed32(row.x as f64, q.x_min, q.x_max),
-            qy: fixed32(row.y as f64, q.y_min, q.y_max),
+            qx: fixed32(row.x, q.x_min, q.x_max),
+            qy: fixed32(row.y, q.y_min, q.y_max),
             scalars: row.scalars.clone(),
         });
     }
@@ -439,7 +444,7 @@ mod tests {
         }
     }
 
-    fn row(entity: u64, x: f32, score: ScalarValue) -> FlushRow {
+    fn row(entity: u64, x: f64, score: ScalarValue) -> FlushRow {
         FlushRow {
             entity_id: EntityId::new(entity),
             external_id: None,

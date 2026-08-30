@@ -459,7 +459,7 @@ mod tests {
 
     /// Write one input segment. Items are laid out along x alone, so Morton order is x order and a
     /// fixture can say exactly which rows the merge will interleave.
-    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f32, ScalarValue)]) -> MergeInput {
+    fn segment(dir: &Path, seg_id: &str, rows: &[(u64, f64, ScalarValue)]) -> MergeInput {
         let key = IdentityKey::from_hex(KEY_HEX).expect("test key");
         let flush_rows: Vec<FlushRow> = rows
             .iter()

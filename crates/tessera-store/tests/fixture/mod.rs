@@ -212,8 +212,8 @@ pub fn flush_segment(
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
                     external_id: Some(format!("ext-{e}").into_bytes()),
-                    x: ((e * 37) % 100) as f32 / 100.0,
-                    y: ((e * 61) % 100) as f32 / 100.0,
+                    x: ((e * 37) % 100) as f64 / 100.0,
+                    y: ((e * 61) % 100) as f64 / 100.0,
                     scalars: vec![],
                 })
                 .collect(),

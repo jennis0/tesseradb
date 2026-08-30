@@ -205,7 +205,7 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
 
     /// One decoded batch's columns, extracted on a worker thread.
     enum PointCols {
-        Xy(Vec<u64>, Vec<f32>, Vec<f32>),
+        Xy(Vec<u64>, Vec<f64>, Vec<f64>),
         /// Codes only: 16 bits per axis, all a bare `morton` column can carry.
         Morton(Vec<u64>, Vec<u64>),
         /// Codes plus sub-cell residuals: the full 32 bits per axis.
@@ -252,8 +252,8 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                         let cols = match geometry {
                             Geometry::Xy(xi, yi) => PointCols::Xy(
                                 ids,
-                                read_f32_column(path, &batch, xi, x_name)?,
-                                read_f32_column(path, &batch, yi, y_name)?,
+                                read_f64_column(path, &batch, xi, x_name)?,
+                                read_f64_column(path, &batch, yi, y_name)?,
                             ),
                             Geometry::Morton(mi) => PointCols::Morton(
                                 ids,
@@ -287,12 +287,14 @@ pub fn scan_points<F: FnMut(PointRow) -> ControlFlow<()>>(
                             if limit.is_some_and(|l| ids[i] >= l) {
                                 continue;
                             }
-                            // The one place a coordinate is quantised. `f32` widens to `f64`
-                            // exactly, so this loses nothing the file had not already lost.
+                            // The one place a coordinate is quantised, reached in the width the
+                            // file was read at: the column arrives as `f64` whatever width it was
+                            // stored at, so nothing narrows between the Parquet page and the
+                            // fixed-point grid.
                             if visit(PointRow {
                                 source_id: ids[i],
-                                qx: fixed32(xs[i] as f64, extent.x_min, extent.x_max),
-                                qy: fixed32(ys[i] as f64, extent.y_min, extent.y_max),
+                                qx: fixed32(xs[i], extent.x_min, extent.x_max),
+                                qy: fixed32(ys[i], extent.y_min, extent.y_max),
                             })
                             .is_break()
                             {
@@ -950,8 +952,8 @@ pub fn survey_points(
     for batch in reader {
         let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
         let ids = read_u64_column(path, &batch, id_idx, fields.of(ENTITY_ID))?;
-        let xs = read_f32_column(path, &batch, x_idx, x_name)?;
-        let ys = read_f32_column(path, &batch, y_idx, y_name)?;
+        let xs = read_f64_column(path, &batch, x_idx, x_name)?;
+        let ys = read_f64_column(path, &batch, y_idx, y_name)?;
         for i in 0..ids.len() {
             if limit.is_some_and(|l| ids[i] >= l) {
                 continue;
@@ -959,7 +961,7 @@ pub fn survey_points(
             // A non-finite coordinate would poison every comparison below and produce a box the
             // extent validator then refuses with no mention of the row that caused it. Named
             // here, where the file and the value are both in hand.
-            let (x, y) = (xs[i] as f64, ys[i] as f64);
+            let (x, y) = (xs[i], ys[i]);
             if !x.is_finite() || !y.is_finite() {
                 return Err(BuildError::Schema {
                     path: path.to_path_buf(),
@@ -1245,7 +1247,21 @@ fn read_u64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
     Ok(values)
 }
 
-fn read_f32_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> Result<Vec<f32>> {
+/// Read a coordinate column as `f64`, **accepting both float widths and widening the narrower**.
+///
+/// This is the rule an attribute column declared `f64` is already read by — `f64` accepts `f32`
+/// and widens — and a coordinate takes only that half of it. The other half, `f32` accepting `f64`
+/// and rounding, has no counterpart here: an attribute's width is *declared*, so narrowing is what
+/// the declaration asked for, whereas a coordinate's width is a property of the corpus and nothing
+/// asks for it to be reduced.
+///
+/// **Widening rather than narrowing is what makes a deep frame honest.** A frame at zoom offset
+/// *k* resolves `2^(8−k)` `f32` steps per cell, so past roughly offset 8 a narrowing decides which
+/// **cell** a point occupies rather than merely its position within one — and no report downstream
+/// can see that it did, the quantiser having been handed a value the file did not hold
+/// (`projections.md` §6). A whole-world frame is served perfectly well by `f32` input, which is
+/// why the narrower width is accepted rather than refused.
+fn read_f64_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> Result<Vec<f64>> {
     let column = batch.column(idx);
     if column.null_count() > 0 {
         return Err(BuildError::Schema {
@@ -1259,15 +1275,15 @@ fn read_f32_column(path: &Path, batch: &RecordBatch, idx: usize, name: &str) -> 
             .downcast_ref::<Float32Array>()
             .expect("checked data type")
             .values()
-            .to_vec()),
+            .iter()
+            .map(|v| f64::from(*v))
+            .collect()),
         DataType::Float64 => Ok(column
             .as_any()
             .downcast_ref::<Float64Array>()
             .expect("checked data type")
             .values()
-            .iter()
-            .map(|v| *v as f32)
-            .collect()),
+            .to_vec()),
         other => Err(BuildError::Schema {
             path: path.to_path_buf(),
             detail: format!("column '{name}' has unsupported type {other:?}"),

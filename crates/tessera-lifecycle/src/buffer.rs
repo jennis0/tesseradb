@@ -155,8 +155,8 @@ impl<'a> DescriptorResolver<'a> {
 pub struct BufferedItem {
     pub terms: Vec<TermId>,
     pub view: String,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub scalars: Vec<WalScalar>,
     /// The caller-supplied external id, or `None` for an item ingested without one (contracts
     /// §3.4 r6) — carried because the **flush** is what writes it into the bundle's external-id

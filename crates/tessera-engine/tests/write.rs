@@ -162,7 +162,7 @@ fn an_out_of_extent_row_is_refused_at_the_engine_boundary_with_no_id_burned() {
 
     // NaN has no cell either, and `as u32` would saturate it to zero rather than erroring.
     let mut nan = row("nan");
-    nan.y = f32::NAN;
+    nan.y = f64::NAN;
     assert!(engine
         .accept_ingest(vec![nan], "batch-nan".to_string(), [0u8; 32])
         .is_err());

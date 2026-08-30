@@ -87,8 +87,8 @@ fn write_input(root: &Path, index: usize, entity_lo: u64, shape: &Shape) -> Merg
         .map(|e| FlushRow {
             entity_id: EntityId::new(e),
             external_id: Some(format!("ext-{e:012}").into_bytes()),
-            x: (((e * shape.stride + shape.phase) % 97) as f32) / 97.0,
-            y: (((e * 53 + shape.phase) % 89) as f32) / 89.0,
+            x: (((e * shape.stride + shape.phase) % 97) as f64) / 97.0,
+            y: (((e * 53 + shape.phase) % 89) as f64) / 89.0,
             scalars: vec![],
         })
         .collect();

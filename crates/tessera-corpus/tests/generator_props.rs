@@ -95,8 +95,8 @@ fn the_two_axes_are_independent() {
     let on_diagonal = (0u64..65_536)
         .filter(|&e| {
             let item = c.item(e);
-            tessera_spatial::cell(f64::from(item.x), e_bounds.x_min, e_bounds.x_max)
-                == tessera_spatial::cell(f64::from(item.y), e_bounds.y_min, e_bounds.y_max)
+            tessera_spatial::cell(item.x, e_bounds.x_min, e_bounds.x_max)
+                == tessera_spatial::cell(item.y, e_bounds.y_min, e_bounds.y_max)
         })
         .count();
     assert!(
@@ -227,7 +227,7 @@ fn census_tiles_agree_with_morton_code_ranges() {
                 }
                 let item = c.item(e);
                 let code =
-                    u64::from(morton_of(f64::from(item.x), f64::from(item.y), &e_bounds).raw());
+                    u64::from(morton_of(item.x, item.y, &e_bounds).raw());
                 code >= lo && code < hi
             })
             .count() as u64;

@@ -502,8 +502,8 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
                     descriptors: vec![b"0".to_vec()],
                     // Spread across the extent so the merge genuinely interleaves in Morton order
                     // rather than appending one segment after another.
-                    x: (batch * 149 % 1000) as f32,
-                    y: (batch * 271 % 1000) as f32,
+                    x: (batch * 149 % 1000) as f64,
+                    y: (batch * 271 % 1000) as f64,
                     scalars: vec![
                         WalScalar::U8((batch % 3) as u8 + 1),
                         WalScalar::I64(1_900_000_000_000_000 + batch as i64),

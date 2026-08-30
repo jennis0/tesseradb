@@ -431,8 +431,8 @@ struct RawIngestItem {
     /// gets no sidecar entry and is addressable only by its `tessera_id` (returned per row in
     /// [`IngestResp`]).
     external_id: Option<Vec<u8>>,
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
     access: Vec<u8>,
     scalars: Vec<WalScalar>,
 }
@@ -879,10 +879,12 @@ fn code_at(width: ScalarType, code: u32) -> WalScalar {
 }
 
 /// Parse `/control/ingest`'s body: one Arrow IPC stream, schema
-/// `(external_id: binary, x: float32, y: float32, access: utf8, node_id: utf8?, ...scalars)`
-/// (R5). `node_id` is accepted — so a well-formed client request is never rejected for including
-/// it — but not stored: `WalRow` has no `node_id` field, because a buffered item has no row geometry
-/// until the next build and `node_id` is a segment-column concept.
+/// `(external_id: binary, x: float32|float64, y: float32|float64, access: utf8, node_id: utf8?,
+/// ...scalars)` (R5). The coordinate columns take either float width and the narrower is widened —
+/// see [`coordinate_col`] for why the widening runs in that one direction. `node_id` is accepted
+/// — so a well-formed client request is never rejected for including it — but not stored: `WalRow`
+/// has no `node_id` field, because a buffered item has no row geometry until the next build and
+/// `node_id` is a segment-column concept.
 ///
 /// # The scalar tail is validated against `MANIFEST.declared_scalars`, and misalignment is a 422
 ///
@@ -959,8 +961,8 @@ fn parse_ingest_batch(
         let offset = items.len();
 
         let ext = optional_binary_col(&batch, "external_id")?;
-        let x = f32_col(&batch, "x")?;
-        let y = f32_col(&batch, "y")?;
+        let x = coordinate_col(&batch, "x")?;
+        let y = coordinate_col(&batch, "y")?;
         let access = utf8_col(&batch, "access")?;
 
         // Whole-batch schema validation, before a single row is read: a batch whose scalar tail
@@ -1074,8 +1076,8 @@ fn parse_ingest_batch(
             }
             items.push(RawIngestItem {
                 external_id,
-                x: x.value(i),
-                y: y.value(i),
+                x: x[i],
+                y: y[i],
                 access: access.value(i).as_bytes().to_vec(),
                 scalars,
             });
@@ -1153,18 +1155,35 @@ fn optional_binary_col<'a>(
     }
 }
 
-fn f32_col<'a>(
-    batch: &'a arrow::record_batch::RecordBatch,
+/// A coordinate column, as `f64` — **`float32` and `float64` are both accepted and the narrower is
+/// widened**, which is the rule the build reads a points file's coordinate columns by
+/// (`tessera_build::input`'s `read_f64_column`), stated here because ingest and build must not
+/// disagree about which files can be loaded (decision 0091).
+///
+/// The widening direction is the only one: an `f64` column is never narrowed. A frame at zoom
+/// offset *k* resolves `2^(8−k)` `f32` steps per cell, so past roughly offset 8 the narrowing would
+/// decide the **cell** a point occupies (`projections.md` §6), and it would do so inside a request
+/// the caller was acked for. A whole-world frame is served perfectly well by `float32`, which is
+/// why the narrower width stays acceptable rather than being refused.
+fn coordinate_col(
+    batch: &arrow::record_batch::RecordBatch,
     name: &str,
-) -> Result<&'a arrow::array::Float32Array, ApiError> {
-    batch
-        .column_by_name(name)
-        .and_then(|c| c.as_any().downcast_ref::<arrow::array::Float32Array>())
-        .ok_or_else(|| {
-            ApiError::Contract(format!(
-                "ingest body: column '{name}' missing or not float32"
-            ))
-        })
+) -> Result<Vec<f64>, ApiError> {
+    let column = batch.column_by_name(name).ok_or_else(|| {
+        ApiError::Contract(format!(
+            "ingest body: column '{name}' missing or not float32/float64"
+        ))
+    })?;
+    let any = column.as_any();
+    if let Some(a) = any.downcast_ref::<arrow::array::Float64Array>() {
+        Ok(a.values().to_vec())
+    } else if let Some(a) = any.downcast_ref::<arrow::array::Float32Array>() {
+        Ok(a.values().iter().map(|v| f64::from(*v)).collect())
+    } else {
+        Err(ApiError::Contract(format!(
+            "ingest body: column '{name}' missing or not float32/float64"
+        )))
+    }
 }
 
 fn utf8_col<'a>(

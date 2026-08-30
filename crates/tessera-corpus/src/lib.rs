@@ -165,8 +165,8 @@ pub struct Item {
     /// The planted join column: a keyed bijection of `e` (see the module doc), inverted by
     /// [`Corpus::item_of_fx_key`]. Never absent — it is the join every other comparison hangs on.
     pub fx_key: u64,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     /// The number family, in both homes (`render = true`, `index = true`).
     pub weight: Option<u32>,
     /// The datetime family (`timestamp_us`): microseconds since the epoch, within 2020–2026.
@@ -343,13 +343,19 @@ impl Corpus {
 
     /// One axis: 24 independent bits of the dimension's keyed mix, mapped into the extent at the
     /// step's midpoint (so no value lands exactly on the extent minimum or a cell edge by
-    /// construction). The `f64 → f32` narrowing is part of the definition: `f32` is what the
-    /// points file, the ingest wire and therefore the build all quantise, so the generator states
-    /// the position in the width the system consumes.
-    fn axis(&self, axis_salt: u64, e: u64, min: f64, max: f64) -> f32 {
+    /// construction).
+    ///
+    /// **The round trip through `f32` is the definition of the value, and removing it would move
+    /// every position this corpus has ever generated.** The coordinate path is `f64` now (the
+    /// points file, the ingest wire and the log all carry it — `projections.md` §6), so the value
+    /// is *stored* at the wider width; but the value itself is still the `f32` this expression
+    /// rounded to when the fixtures and their golden digests were written, and a generator is only
+    /// useful while it keeps answering the same. A wider draw is a different corpus, not a more
+    /// precise one.
+    fn axis(&self, axis_salt: u64, e: u64, min: f64, max: f64) -> f64 {
         const AXIS_BITS: u32 = 24;
         let step = (keyed(self.seed, axis_salt, e) >> (64 - AXIS_BITS)) as f64;
-        (min + (step + 0.5) * (max - min) / (1u64 << AXIS_BITS) as f64) as f32
+        f64::from((min + (step + 0.5) * (max - min) / (1u64 << AXIS_BITS) as f64) as f32)
     }
 
     /// Item `e`, every declared field evaluated — O(1), no I/O, no state, and no `n` anywhere
@@ -436,8 +442,8 @@ impl Corpus {
             }
             let x = self.axis(SALT_X, e, self.extent.x_min, self.extent.x_max);
             let y = self.axis(SALT_Y, e, self.extent.y_min, self.extent.y_max);
-            let cx = cell(f64::from(x), self.extent.x_min, self.extent.x_max);
-            let cy = cell(f64::from(y), self.extent.y_min, self.extent.y_max);
+            let cx = cell(x, self.extent.x_min, self.extent.x_max);
+            let cy = cell(y, self.extent.y_min, self.extent.y_max);
             // Widened before the shift: at zoom 0 the shift is the full 16 bits, which a `u16`
             // cannot express.
             let tile = interleave_bits(u32::from(cx) >> shift, u32::from(cy) >> shift, zoom);

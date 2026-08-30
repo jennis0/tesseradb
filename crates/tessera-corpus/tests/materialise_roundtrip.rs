@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use arrow::array::{
-    Array, ArrayAccessor, BinaryArray, Float32Array, StringArray, TimestampMicrosecondArray,
+    Array, ArrayAccessor, BinaryArray, Float64Array, StringArray, TimestampMicrosecondArray,
     UInt32Array, UInt64Array,
 };
 use arrow::record_batch::RecordBatch;
@@ -56,8 +56,8 @@ fn points_parquet_rows_are_the_items() {
     let mut rows = 0u64;
     for batch in read_parquet(&path) {
         let entity_id = column::<UInt64Array>(&batch, "entity_id");
-        let x = column::<Float32Array>(&batch, "x");
-        let y = column::<Float32Array>(&batch, "y");
+        let x = column::<Float64Array>(&batch, "x");
+        let y = column::<Float64Array>(&batch, "y");
         let fx_key = column::<UInt64Array>(&batch, "fx_key");
         let weight = column::<UInt32Array>(&batch, "weight");
         let seen_at = column::<TimestampMicrosecondArray>(&batch, "seen_at");
@@ -111,7 +111,7 @@ fn a_smaller_points_file_is_a_prefix_of_a_larger_one() {
             .flat_map(|batch| {
                 let e = column::<UInt64Array>(batch, "entity_id");
                 let fx = column::<UInt64Array>(batch, "fx_key");
-                let x = column::<Float32Array>(batch, "x");
+                let x = column::<Float64Array>(batch, "x");
                 (0..batch.num_rows())
                     .map(|i| (e.value(i), fx.value(i), x.value(i).to_bits()))
                     .collect::<Vec<_>>()
@@ -184,7 +184,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
     );
 
     let external_id = column::<BinaryArray>(&batch, "external_id");
-    let x = column::<Float32Array>(&batch, "x");
+    let x = column::<Float64Array>(&batch, "x");
     let access = column::<StringArray>(&batch, "access");
     let fx_key = column::<UInt64Array>(&batch, "fx_key");
     let bay = column::<StringArray>(&batch, "bay");

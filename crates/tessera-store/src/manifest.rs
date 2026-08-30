@@ -306,11 +306,8 @@ impl Quantisation {
     /// occupies the top of the grid and belongs there. **NaN fails in both directions** and is
     /// therefore outside — right, because a NaN coordinate has no cell either, and `as u32`
     /// saturates it to zero rather than erroring.
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        (x as f64) >= self.x_min
-            && (x as f64) <= self.x_max
-            && (y as f64) >= self.y_min
-            && (y as f64) <= self.y_max
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x_min && x <= self.x_max && y >= self.y_min && y <= self.y_max
     }
 }
 

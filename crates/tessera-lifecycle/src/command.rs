@@ -50,8 +50,8 @@ pub struct UnallocatedRow {
     pub external_id: Option<Vec<u8>>,
     pub view: String,
     pub descriptors: Vec<Vec<u8>>,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub scalars: Vec<WalScalar>,
     pub terms: Vec<TermId>,
 }
