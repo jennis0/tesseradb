@@ -62,7 +62,8 @@
 //! the framing above is what stops a truncation being read as a smaller extent.
 
 use std::fs::File;
-use std::path::Path;
+use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use memmap2::Mmap;
 
@@ -109,6 +110,127 @@ pub fn pack(ordinal_lo: u32, blobs: &[Vec<u8>]) -> Vec<u8> {
         out.extend_from_slice(blob);
     }
     out
+}
+
+/// Serialise one extent **a blob at a time**, straight to the file — [`pack`]'s bytes, without
+/// ever holding them.
+///
+/// # Why a second writer
+///
+/// [`pack`] takes every blob of a level at once and returns their concatenation, so at the moment
+/// it returns, a level's memberships stand in memory twice over. That is affordable for a
+/// publication that appends the tail one commit produced, and it is not affordable for a **build**,
+/// which publishes a whole corpus's levels in one pass and holds the encoded blobs of all of them
+/// while it does. The two callers are also not free to share one route: the online publication
+/// reads the artifact store under a lock it must not hold across an fsync, so it materialises and
+/// releases; a build owns its store outright and can encode as it writes.
+///
+/// **The count is a contract, not a hint.** It is the level's ordinal range, known before the first
+/// blob, which is what lets the offset table be reserved and filled in afterwards. [`Self::push`]
+/// refuses the blob past the end and [`Self::finish`] refuses a writer that was pushed fewer than
+/// it reserved: an extent addresses `[ordinal_lo, ordinal_lo + count)` densely, so a short one is a
+/// membership that decodes as absent for every viewer — which the existence criterion then renders
+/// as a cluster that legitimately failed its bar.
+pub struct PackWriter {
+    path: PathBuf,
+    file: BufWriter<File>,
+    ordinal_lo: u32,
+    count: u32,
+    /// Where each blob starts within the payload, and one more for the payload's end — the file's
+    /// own table, held here at 8 bytes an artifact until the payload has gone past and it can be
+    /// written back over the space reserved for it.
+    offsets: Vec<u64>,
+}
+
+impl PackWriter {
+    /// Reserve the header and the offset table for `count` blobs, and position at the payload.
+    pub fn create(path: &Path, ordinal_lo: u32, count: u32) -> Result<PackWriter> {
+        let file = File::create(path).map_err(|source| StoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let mut file = BufWriter::new(file);
+        let prologue = HEADER_LEN + (count as usize + 1) * 8;
+        file.write_all(&vec![0u8; prologue])
+            .map_err(|source| StoreError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
+        let mut offsets = Vec::with_capacity(count as usize + 1);
+        offsets.push(0);
+        Ok(PackWriter {
+            path: path.to_path_buf(),
+            file,
+            ordinal_lo,
+            count,
+            offsets,
+        })
+    }
+
+    /// Append one blob, in ordinal order.
+    pub fn push(&mut self, blob: &[u8]) -> Result<()> {
+        if self.offsets.len() > self.count as usize {
+            return Err(malformed(
+                &self.path,
+                format!(
+                    "a {}-blob extent was pushed a {}th blob",
+                    self.count,
+                    self.offsets.len()
+                ),
+            ));
+        }
+        self.file.write_all(blob).map_err(|source| StoreError::Io {
+            path: self.path.clone(),
+            source,
+        })?;
+        let at = self.offsets.last().copied().unwrap_or_default() + blob.len() as u64;
+        self.offsets.push(at);
+        Ok(())
+    }
+
+    /// Write the header and the offset table over the space reserved for them, and fsync.
+    ///
+    /// The file is durable when this returns — the caller still owns the *directory* sync and the
+    /// ordering against the manifest that names it, exactly as with [`crate::write_and_fsync`].
+    pub fn finish(self) -> Result<()> {
+        let PackWriter {
+            path,
+            file,
+            ordinal_lo,
+            count,
+            offsets,
+        } = self;
+        if offsets.len() != count as usize + 1 {
+            return Err(malformed(
+                &path,
+                format!(
+                    "{} blob(s) were written into an extent reserved for {count} — the ordinal \
+                     range it addresses would decode as absent above the last one",
+                    offsets.len() - 1,
+                ),
+            ));
+        }
+        let mut head = Vec::with_capacity(HEADER_LEN + offsets.len() * 8);
+        head.extend_from_slice(MAGIC);
+        head.extend_from_slice(&VERSION.to_le_bytes());
+        head.extend_from_slice(&0u16.to_le_bytes());
+        head.extend_from_slice(&count.to_le_bytes());
+        head.extend_from_slice(&ordinal_lo.to_le_bytes());
+        for at in &offsets {
+            head.extend_from_slice(&at.to_le_bytes());
+        }
+        let mut file = file.into_inner().map_err(|e| StoreError::Io {
+            path: path.clone(),
+            source: e.into_error(),
+        })?;
+        let io = |source| StoreError::Io {
+            path: path.clone(),
+            source,
+        };
+        file.seek(SeekFrom::Start(0)).map_err(io)?;
+        file.write_all(&head).map_err(io)?;
+        file.sync_all().map_err(io)
+    }
 }
 
 /// One extent, opened and validated. The mapping is held for the reader's life; blobs are slices
@@ -1599,6 +1721,45 @@ mod tests {
 
         let all: Vec<(u32, usize)> = pack.iter().map(|(o, b)| (o, b.len())).collect();
         assert_eq!(all, vec![(1000, 3), (1001, 0), (1002, 300)]);
+    }
+
+    /// **The streaming writer's bytes are [`pack`]'s bytes**, which is the whole of its contract:
+    /// a build writes its extents through it and a fold writes them through `pack`, and a reader
+    /// cannot tell which produced the file it opened.
+    #[test]
+    fn the_streaming_writer_produces_the_same_bytes_as_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let blobs = vec![vec![1u8, 2, 3], Vec::new(), vec![9u8; 300], vec![4u8; 7]];
+        let path = tmp.path().join("streamed.tsmb");
+        let mut writer = PackWriter::create(&path, 1000, blobs.len() as u32).unwrap();
+        for blob in &blobs {
+            writer.push(blob).unwrap();
+        }
+        writer.finish().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), pack(1000, &blobs));
+
+        let opened = MembershipPack::open(&path).unwrap();
+        assert_eq!(opened.ordinal_lo(), 1000);
+        assert_eq!(opened.blob(1002).map(<[u8]>::len), Some(300));
+    }
+
+    /// **A count that is not kept refuses.** The count is the level's ordinal range, so an extent
+    /// short of it addresses artifacts whose membership decodes as absent — which the existence
+    /// criterion then renders as a cluster that failed its bar, with nothing to notice.
+    #[test]
+    fn a_streamed_extent_that_does_not_fill_its_range_refuses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("short.tsmb");
+        let mut writer = PackWriter::create(&path, 0, 3).unwrap();
+        writer.push(&[1u8, 2]).unwrap();
+        writer.push(&[3u8]).unwrap();
+        assert!(writer.finish().is_err());
+
+        let path = tmp.path().join("long.tsmb");
+        let mut writer = PackWriter::create(&path, 0, 2).unwrap();
+        writer.push(&[1u8]).unwrap();
+        writer.push(&[2u8]).unwrap();
+        assert!(writer.push(&[3u8]).is_err());
     }
 
     #[test]

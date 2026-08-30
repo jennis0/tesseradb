@@ -1412,12 +1412,17 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         crate::layers::PublishedLayers::default()
     } else {
         {
-            let plan = crate::layers::read(
+            let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
                 args.projection,
                 &args.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+                // The build's own `.build-tmp/`, which the member spill writes its runs into —
+                // still open here, and swept by the `close` below whether this stage succeeds or
+                // not.
+                tmp.path(),
+                args.memory_budget.unwrap_or_else(detect_memory_budget),
             )?;
             crate::report_shapes(&plan.shape_reports);
             // **A contiguous id range makes the search a subtraction**, and whether it is
@@ -1431,7 +1436,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             // into 74M sorted `u64` is ~27 dependent cache misses where the subtraction is one.
             let dense = ids_last - ids_first + 1 == source_ids.len() as u64;
             crate::layers::publish(
-                &plan,
+                &mut plan,
                 &|source| {
                     let ordinal = if dense {
                         source

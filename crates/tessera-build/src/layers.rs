@@ -79,6 +79,7 @@ use crate::shapes::{
     inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
     ShapeLayerReport, ShapeReader,
 };
+use crate::spill;
 use tessera_store::derived::authored_shape_input;
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
@@ -110,21 +111,17 @@ struct PlannedArtifact {
 /// type below this one that can carry the spelling, so no serving path can learn it and none can
 /// evaluate a complement against a viewer's mask, which would disclose the existence of items
 /// outside it (`annotation-write-cycle.md` §6.1).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 enum PlannedMembership {
-    /// Rows from a `[layer.members]` source, accumulated — and the empty membership of an artifact
-    /// no source named.
-    Rows(Vec<u64>),
+    /// Rows from a `[layer.members]` source — **accumulated in [`MemberSpill`] and not here**, so
+    /// an artifact a hundred million rows name costs the plan nothing. Also the membership of an
+    /// artifact no source named at all, which is the empty one.
+    #[default]
+    Rows,
     /// The artifact row's own `members` list.
     Included(Vec<u64>),
     /// The artifact row's `excluding` list: the entities the membership leaves out.
     Excluded(Vec<u64>),
-}
-
-impl Default for PlannedMembership {
-    fn default() -> Self {
-        PlannedMembership::Rows(Vec::new())
-    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -137,11 +134,31 @@ struct PlannedContent {
 /// membership materialised — the complement included.
 #[derive(Debug)]
 struct ResolvedArtifact {
-    members: Vec<EntityId>,
+    members: ResolvedMembers,
     contents: Vec<IncomingContent>,
     attached_to: Option<IncomingAttachment>,
     parent_key: Option<String>,
     shape: Option<ArtifactShapes>,
+}
+
+/// Where an artifact's members are by the time anything wants to read them.
+///
+/// **The two spellings have different sizes and are held differently, and that is the whole of the
+/// distinction.** A membership from a `[layer.members]` source is one row per member, so a corpus
+/// of 5×10⁸ member rows has 5×10⁸ of them and no build may hold them; it goes through the spill
+/// and lives in the merged [`spill::MemberTable`], read back one artifact at a time. A membership
+/// spelled on the artifact's *own row* is one list per artifact in a file an author wrote, so it
+/// is held where it was read.
+///
+/// The members are raw entity ids rather than [`EntityId`] because a source id and the entity it
+/// resolves to are both `u64`, so the inline case is rewritten in place rather than copied. The
+/// newtype goes back on at [`incoming_artifact`], the one place these leave this module.
+#[derive(Debug)]
+enum ResolvedMembers {
+    /// At this artifact's extent of the merged member table.
+    Table,
+    /// Materialised here: the artifact row's `members`, or the complement of its `excluding`.
+    Inline(Vec<u64>),
 }
 
 /// What the build reads: declarations, and the artifacts to publish into them.
@@ -174,6 +191,148 @@ pub struct LayerPlan {
     /// knowingly, and the mitigation is that the number is printed. The wire says the same thing in
     /// its own 200.
     minted: BTreeMap<String, u64>,
+    /// Every member row's `(artifact, source)` pair, on its way to disk.
+    members: MemberSpill,
+}
+
+/// What one `(artifact, source)` pair is charged against the accumulator's budget: eight bytes of
+/// `u64` at sixteen, because a `Vec` grows by doubling and is on average half empty. The text
+/// index charges its postings on the same rule and for the same reason.
+const MEMBER_ENTRY_BYTES: usize = 16;
+
+/// What one artifact costs the accumulator beyond its members: the hash table's slot, the `Vec`
+/// header, the allocator's rounding on both and the table's load factor. **An estimate erring
+/// high**, which spills a run early; erring low is the failure a memory bound exists to prevent.
+const MEMBER_ARTIFACT_BYTES: usize = 80;
+
+/// The share of the build's memory budget the member accumulator may hold, and its floor and
+/// ceiling. Sixteenth, floor and ceiling all follow the text index's, which is the other pass in
+/// this build that spills sorted runs — one rule rather than two constants to keep in step.
+///
+/// ⊘ Deliberately **not** added to `residency.rs`'s model, for that pass's reason: it is a
+/// sixteenth of the same budget the model is checked against, inside the factor of two that module
+/// states as its own error bar, and adding it would turn builds that fit today into refusals.
+const MEMBER_BUDGET_SHARE: u64 = 16;
+const MEMBER_BUDGET_MIN: u64 = 64 << 20;
+const MEMBER_BUDGET_MAX: u64 = 1 << 30;
+
+/// The most runs one merge opens at once. A run is a file descriptor and a 4 MiB read buffer, so
+/// this is what the merge's own residency is a function of. The text index's number, for the same
+/// reason it has one.
+const MEMBER_MERGE_FAN_IN: usize = 128;
+
+/// Every layer's member rows, accumulated as `(artifact, source)` pairs and spilled as **sorted
+/// runs** once the accumulator reaches its budget.
+///
+/// **The plan used to hold all of them, and that was the build's largest single term.** One
+/// `Vec<u64>` per artifact, grown a member at a time as the member table was read, all of them
+/// live from the first row of the first source until the last level was published — 4 GB at the
+/// Overture rung, and linear in the corpus with nothing to bound it. Halving the constant (the
+/// resolution now rewrites in place rather than copying) left it linear.
+///
+/// So the pairs go to disk instead, on the shape the text index proved: accumulate to a budget,
+/// spill a sorted run, and merge the runs into per-artifact contiguity at the point of use. What
+/// is resident here is the budget, whatever the corpus is; the run count grows instead of the
+/// peak.
+///
+/// **Sorted by artifact, and within an artifact by source.** The artifact order is what the merge
+/// needs. The source order is what makes a run small — a membership's sources are dense in the
+/// corpus's id space, so their deltas are overwhelmingly one byte where an absolute id is five to
+/// ten — and it costs one sort of a slice that is usually already ascending, the member tables
+/// this reads being written in entity order.
+///
+/// **Duplicates survive.** The same document named twice for one artifact is two member entries,
+/// and the containment report counts entries; a spill that deduplicated would silently change a
+/// number an operator is given.
+struct MemberSpill {
+    /// `.build-tmp/`, the build's own transient directory — so a killed build leaves nothing for
+    /// the next one to trip over. `TmpDir` deletes a stale directory at creation and its own on
+    /// drop.
+    dir: PathBuf,
+    budget: usize,
+    bytes: usize,
+    /// The open window: artifact index → the sources this window has seen for it. Replaced rather
+    /// than cleared at each spill, because a cleared table keeps its capacity and the next fill
+    /// would count from zero against memory that was never released.
+    open: rustc_hash::FxHashMap<u32, Vec<u64>>,
+    receipts: Vec<spill::SpillReceipt>,
+    seq: usize,
+    /// Every pair ever pushed, across every run — what the merge checks itself against and what
+    /// the stage reports.
+    entries: u64,
+}
+
+impl MemberSpill {
+    fn new(dir: &Path, budget: u64) -> MemberSpill {
+        let budget = budget / MEMBER_BUDGET_SHARE;
+        MemberSpill {
+            dir: dir.to_path_buf(),
+            budget: budget.clamp(MEMBER_BUDGET_MIN, MEMBER_BUDGET_MAX) as usize,
+            bytes: 0,
+            open: rustc_hash::FxHashMap::default(),
+            receipts: Vec::new(),
+            seq: 0,
+            entries: 0,
+        }
+    }
+
+    fn push(&mut self, index: usize, source: u64) -> Result<()> {
+        // Entity space is `u32` by I9 and an artifact is an entity, so an index this cannot hold
+        // is a plan no build could publish anyway — refused here, where the number is still in
+        // hand, rather than as a truncation on disk.
+        let index = u32::try_from(index).map_err(|_| {
+            BuildError::Invalid(format!(
+                "this build planned more than {} artifacts, which is more than an entity space \
+                 can address",
+                u32::MAX
+            ))
+        })?;
+        match self.open.entry(index) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                e.get_mut().push(source);
+                self.bytes += MEMBER_ENTRY_BYTES;
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(vec![source]);
+                self.bytes += MEMBER_ARTIFACT_BYTES + MEMBER_ENTRY_BYTES;
+            }
+        }
+        self.entries += 1;
+        if self.bytes >= self.budget {
+            self.spill()?;
+        }
+        Ok(())
+    }
+
+    /// Write the open window out as one sorted run, leaving the accumulator empty.
+    fn spill(&mut self) -> Result<()> {
+        if self.open.is_empty() {
+            return Ok(());
+        }
+        let path = self.dir.join(format!("member-run-{:04}.spill", self.seq));
+        let mut writer = spill::MemberRunWriter::create(&path)?;
+        let mut order: Vec<u32> = self.open.keys().copied().collect();
+        order.sort_unstable();
+        for index in order {
+            let sources = self
+                .open
+                .get_mut(&index)
+                .expect("every index came from the map a statement ago");
+            sources.sort_unstable();
+            writer.push(index, sources)?;
+        }
+        self.receipts.push(writer.finish()?);
+        self.open = rustc_hash::FxHashMap::default();
+        self.bytes = 0;
+        self.seq += 1;
+        Ok(())
+    }
+
+    /// Spill the tail and hand over every run — the accumulator is empty afterwards.
+    fn finish(&mut self) -> Result<Vec<spill::SpillReceipt>> {
+        self.spill()?;
+        Ok(std::mem::take(&mut self.receipts))
+    }
 }
 
 impl LayerPlan {
@@ -352,6 +511,8 @@ pub fn read(
     projection: tessera_spatial::Projection,
     extent: &tessera_spatial::Bounds,
     max_shape_vertices: u64,
+    scratch: &Path,
+    memory_budget: u64,
 ) -> Result<LayerPlan> {
     let mut plan = LayerPlan {
         bodies: Vec::new(),
@@ -361,6 +522,7 @@ pub fn read(
         artifacts: BTreeMap::new(),
         unclustered: Vec::new(),
         minted: BTreeMap::new(),
+        members: MemberSpill::new(scratch, memory_budget),
     };
     for input in inputs {
         // An artifact source names artifacts *in a layer*, and a layer this build does not
@@ -987,11 +1149,22 @@ fn attach_member(
 ) -> Result<()> {
     // **One index, not a probe.** The key was resolved to this once when the artifact was first
     // met; every member entry after that writes straight through it.
-    let key = plan.addresses[index].2.clone();
-    let entry = &mut plan.bodies[index];
+    //
+    // **The key is read only where the refusal fires.** Naming it up front cloned a heap `String`
+    // per member entry and dropped it unread — 5×10⁸ times at the Overture rung. The plan is taken
+    // apart by field so the refusal can still name it while the body is mutably borrowed.
+    let LayerPlan {
+        bodies,
+        addresses,
+        members,
+        ..
+    } = plan;
+    let entry = &mut bodies[index];
     match rank {
-        None => match &mut entry.membership {
-            PlannedMembership::Rows(members) => members.push(source),
+        // **Straight to the spill, never into the plan.** This is the one call the whole member
+        // path funnels through, so it is the one place the corpus's memberships could accumulate.
+        None => match &entry.membership {
+            PlannedMembership::Rows => members.push(index, source)?,
             // **Two answers to what an artifact's members are.** The config refuses the two
             // declarations together; this is the same rule for a caller who bound the sources by
             // hand, and it is fail-closed either way — taking one would make a masked count, and
@@ -1003,10 +1176,14 @@ fn attach_member(
                      They are two shapes of one thing, so which one a masked count divides by \
                      would be the order the sources were read",
                     path.display(),
-                    key
+                    addresses[index].2
                 )))
             }
         },
+        // ⊘ **A generating set is still held in the plan.** It is one list per ranked content per
+        // artifact rather than one per member row, so it is not the term this spill exists to
+        // bound — but a member source carrying a `rank` column over a corpus-sized generating set
+        // would accumulate here exactly as memberships used to.
         Some(rank) => content_at_rank(entry, rank).generated_from.push(source),
     }
     Ok(())
@@ -1122,7 +1299,7 @@ fn content_at_rank(artifact: &mut PlannedArtifact, index: u32) -> &mut PlannedCo
 /// meet unnoticed.
 #[allow(clippy::too_many_arguments)]
 pub fn publish(
-    plan: &LayerPlan,
+    plan: &mut LayerPlan,
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
     high_water: u64,
     prefix_dir: &Path,
@@ -1190,82 +1367,89 @@ pub fn publish(
     // declared by exclusion is complemented against the entity space this build assigned, once, so
     // the hierarchy checks below and the store beneath them see the same set an inclusion would
     // have written — and no later stage has a spelling left to learn.
-    // **Resolved in parallel, collected in key order.** Each artifact's resolution reads only its
-    // own planned body and the `resolve` closure, which is a lookup into two immutable arrays — so
-    // there is no cross-artifact state and nothing to order. The *output* order is the `BTreeMap`'s
-    // and therefore the keys', not the scheduler's, which is what keeps ordinals a function of the
-    // artifacts under I9.
     //
-    // It is the one phase of this stage worth parallelising first: it is a pure map, and at the
-    // Overture rung it is 3×10⁸ member entries through the source-id lookup.
-    let resolved: BTreeMap<Address, ResolvedArtifact> = plan
-        .artifacts
-        .par_iter()
-        .map(|((layer, level, key), index)| {
-            resolve_artifact(
-                layer,
-                *level,
-                key,
-                &plan.bodies[*index],
-                resolve,
-                high_water,
-            )
-            .map(|artifact| ((layer.clone(), *level, key.clone()), artifact))
+    // **The member runs are merged into per-artifact contiguity first**, which is where every
+    // member row's source id meets `resolve` and where the memberships stop being a stream and
+    // become a membership. Nothing before this point held more than the spill's own budget of
+    // them, and nothing after this point holds more than one artifact's.
+    let receipts = plan.members.finish()?;
+    let table = merge_member_runs(&receipts, plan, resolve)?;
+
+    // **Resolved in parallel, in place.** Each artifact's resolution reads only its own planned
+    // body and the `resolve` closure, which is a lookup into two immutable arrays — so there is no
+    // cross-artifact state and nothing to order. The publication order is read off `plan.artifacts`
+    // below and is therefore the keys', never the scheduler's, which is what keeps ordinals a
+    // function of the artifacts under I9.
+    //
+    // What is left here is the artifacts' own rows: the contents, the attachment, the lineage, and
+    // the two membership spellings a row carries itself. The member sources' rows went through the
+    // merge above.
+    //
+    // **Indexed by body, not keyed by address.** The plan already holds the `(layer, level, key)`
+    // order in `artifacts`, so a second `BTreeMap` keyed on the same addresses bought nothing and
+    // cost two heap `String`s per artifact — 930,000 allocations at the GeoNames rung.
+    let addresses = &plan.addresses;
+    let mut resolved: Vec<ResolvedArtifact> = plan
+        .bodies
+        .par_iter_mut()
+        .enumerate()
+        .map(|(index, body)| {
+            let (layer, level, key) = &addresses[index];
+            resolve_artifact(layer, *level, key, body, resolve, high_water)
         })
         .collect::<Result<_>>()?;
 
     // **The hierarchy checks run before a single entity is allocated**, which is both the cheaper
     // and the more useful order: they read `declarations` and `resolved` and touch neither the
     // registry nor the store, and a structural fault in the edges is worth refusing before the
-    // publication that assigns permanent ids rather than after it. It also lets `resolved` be
-    // *consumed* below — the memberships are the largest thing this stage holds and nothing else
-    // needs them whole.
-    let (violations, coverage) = verify_hierarchies(&plan.declarations, &resolved)?;
+    // publication that assigns permanent ids rather than after it. It is also the last reader of a
+    // membership before the publication takes it — the memberships are the largest thing this stage
+    // holds, and nothing after this point needs them whole.
+    let (violations, coverage) =
+        verify_hierarchies(&plan.declarations, &plan.artifacts, &resolved, &table)?;
 
     // Grouped by `(layer, level)`, each level's artifacts in key order — so a level's
     // ordinals, and therefore its entities, are a function of the artifacts and never of the file's
-    // row order.
-    //
-    // **Owned, so a level's members are freed as it publishes.** Borrowing held every level's
-    // `Vec<EntityId>` alive until the last level was published, so the peak carried the whole
-    // corpus's memberships twice over — once as entity vectors and once as the Roaring bitmaps
-    // built from them. Consuming `resolved` here means each level's vectors drop at the end of the
-    // iteration that turned them into bitmaps.
-    let mut batched: BTreeMap<(String, u32), Vec<(String, ResolvedArtifact)>> = BTreeMap::new();
-    for ((layer, level, key), artifact) in resolved {
+    // row order. The plan's own map is already in that order, so this is a walk rather than a sort.
+    let mut batched: BTreeMap<(&str, u32), Vec<(&str, usize)>> = BTreeMap::new();
+    for ((layer, level, key), index) in &plan.artifacts {
         batched
-            .entry((layer, level))
+            .entry((layer.as_str(), *level))
             .or_default()
-            .push((key, artifact));
+            .push((key.as_str(), *index));
     }
 
     // **Published in declaration order, which is the order that honours `depends_on`.** An
     // attachment resolves against what is already published, so a label layer must follow the layer
     // it attaches into — and iterating the map instead would publish in alphabetical order, making
     // an operator's file work or fail on how their layers happen to sort.
-    let mut order: Vec<(String, u32)> = Vec::with_capacity(batched.len());
+    let mut order: Vec<(&str, u32)> = Vec::with_capacity(batched.len());
     for declaration in &plan.declarations {
         let name = declaration.name.as_str();
-        order.extend(
-            batched
-                .keys()
-                .filter(|(layer, _)| layer == name)
-                .cloned(),
-        );
+        order.extend(batched.keys().filter(|(layer, _)| *layer == name).copied());
     }
 
+    // One artifact's bytes and one artifact's entities, reused across every level — what makes the
+    // publication's residency a level of Roaring bitmaps plus the largest single artifact, rather
+    // than a level of entity vectors beside them.
+    let mut scratch: Vec<u8> = Vec::new();
+    let mut buf: Vec<u64> = Vec::new();
     for address in order {
-        let (layer, level) = (address.0.as_str(), address.1);
+        let (layer, level) = address;
         let artifacts = batched
             .remove(&address)
             .expect("every address came from the map a statement ago");
         let mut incoming = Vec::with_capacity(artifacts.len());
-        for (key, artifact) in &artifacts {
-            incoming.push(incoming_artifact(key, artifact));
+        for (key, index) in artifacts {
+            incoming.push(incoming_artifact(
+                key,
+                &mut resolved[index],
+                index,
+                &table,
+                &mut scratch,
+                &mut buf,
+            )?);
         }
-        // The entity vectors are done with the moment they are bitmaps; holding them through the
-        // publication is what made the peak twice what it needed to be.
-        drop(artifacts);
         let record = registry
             .prepare_publish(
                 layer,
@@ -1324,6 +1508,204 @@ pub fn publish(
     write_content_extent(&store, prefix_dir, partition, &mut published)?;
     published.store = store;
     Ok(published)
+}
+
+/// Merge every member run into one **member table**: each artifact's members contiguous, resolved
+/// to the entities this build assigned, and ascending.
+///
+/// **This is where the member rows meet `resolve`**, and it is the only place they do. The
+/// resolution used to run per artifact over a vector the plan held; the vector is the merge's
+/// output now, one artifact at a time, so what is resident is the largest single artifact's
+/// members and not the corpus's — **once**, the sources being rewritten into their entities rather
+/// than read into a second vector.
+///
+/// ⊘ **The sort is per artifact and it is why the largest one is the bound.** A source id's entity
+/// is not a monotone function of it — a build assigns entities in signature-sorted order — so the
+/// merge's ascending *sources* come out as unordered *entities*, and the membership has to be in
+/// hand to be put in order. The largest artifact at the Overture rung holds 16.3×10⁶ pairs — one
+/// division, 5.5% of `members-divisions.parquet`'s 294.1×10⁶ — which is 130 MB for the one
+/// artifact that has them, and 130 MB is what the rewrite above stops holding twice.
+///
+/// ⊘ **The largest *key* in that corpus is not an artifact, and a pair count taken from the
+/// column says it is.** `members-taxonomy.parquet`'s key column is a list per row, and 228.8×10⁶
+/// of its 441.8×10⁶ entries — 51.8% — are **null**: a point in no artifact at that level, counted
+/// as unclustered and never pushed to the spill ([`read_members`]). Flattening the column and
+/// counting values reads as one artifact holding half the corpus, and there is no such artifact;
+/// that ladder's real contribution is 213.0×10⁶ pairs across 2,097 keys, and the corpus's whole
+/// spill is 5.07×10⁸.
+fn merge_member_runs(
+    receipts: &[spill::SpillReceipt],
+    plan: &LayerPlan,
+    resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
+) -> Result<spill::MemberTable> {
+    if receipts.is_empty() {
+        return Ok(spill::MemberTable::empty(plan.bodies.len()));
+    }
+    let receipts = cascade_member_runs(receipts, &plan.members.dir)?;
+    let path = plan.members.dir.join("member-table.spill");
+    let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
+    let mut merge = MemberRunMerge::open(&receipts)?;
+    let mut pairs = 0u64;
+    while merge.next_artifact()? {
+        let index = merge.index() as usize;
+        let (layer, level, key) = &plan.addresses[index];
+        // **Resolved in place, in the merge's own buffer.** A source id and the entity it resolves
+        // to are both `u64`, so the artifact's sources *become* its entities; a second vector held
+        // the largest single membership of the corpus twice, which at the Overture rung is
+        // 16.3×10⁶ pairs and 130 MB apiece.
+        let entities = merge.sources_mut();
+        for slot in entities.iter_mut() {
+            let source = *slot;
+            *slot = resolve(source).ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "{layer} level {level} artifact {key}: membership names entity {source}, \
+                     which this build did not assign — the batch is refused rather than published \
+                     without it, a dropped member moving both the count a viewer is shown and the \
+                     size a proportional criterion divides by"
+                ))
+            })?;
+        }
+        entities.sort_unstable();
+        pairs += entities.len() as u64;
+        writer.push(index, entities)?;
+    }
+    // **Every pair that went in came back out.** Each run verifies its own count and anchor as it
+    // ends, so what this adds is the one thing no single run can see: that the *set* of runs is
+    // whole. A run file lost between the spill and the merge would otherwise be a membership
+    // quietly short by however much it held, which is the failure mode the receipts exist for.
+    if pairs != plan.members.entries {
+        return Err(BuildError::Invalid(format!(
+            "the member merge yielded {pairs} member entries where the sources held {} — a run \
+             file is missing or was not merged, and a short membership moves every masked count \
+             the artifact feeds",
+            plan.members.entries
+        )));
+    }
+    drop(merge);
+    for receipt in &receipts {
+        let _ = std::fs::remove_file(&receipt.path);
+    }
+    writer.finish()
+}
+
+/// Reduce `receipts` to at most [`MEMBER_MERGE_FAN_IN`] runs, deleting each pass's inputs as it
+/// goes — so a build's transient disk is the runs at one level of the cascade and not all of them.
+///
+/// ⊘ **Unreached by anything measured.** At the accumulator's ceiling a run holds 67×10⁶ pairs, and
+/// GeoNames' 68.4×10⁶ spilled **two**. It exists because a small `--memory-budget` over a large
+/// corpus is the caller's to choose: the budget is a sixteenth of that flag, so it is the flag and
+/// not the corpus that decides whether a cascade happens at all.
+fn cascade_member_runs(
+    receipts: &[spill::SpillReceipt],
+    dir: &Path,
+) -> Result<Vec<spill::SpillReceipt>> {
+    let mut receipts = receipts.to_vec();
+    let mut pass = 0usize;
+    while receipts.len() > MEMBER_MERGE_FAN_IN {
+        let mut merged = Vec::with_capacity(receipts.len().div_ceil(MEMBER_MERGE_FAN_IN));
+        for (group, runs) in receipts.chunks(MEMBER_MERGE_FAN_IN).enumerate() {
+            let path = dir.join(format!("member-cascade-{pass}-{group:04}.spill"));
+            let mut writer = spill::MemberRunWriter::create(&path)?;
+            let mut merge = MemberRunMerge::open(runs)?;
+            while merge.next_artifact()? {
+                // The concatenation of several runs' records for one artifact is not itself
+                // ascending, and a run that is not ascending cannot be delta-encoded — so the
+                // intermediate is sorted where the final table would have sorted by entity anyway.
+                merge.sort_sources();
+                writer.push(merge.index(), merge.sources())?;
+            }
+            merged.push(writer.finish()?);
+            drop(merge);
+            for run in runs {
+                let _ = std::fs::remove_file(&run.path);
+            }
+        }
+        receipts = merged;
+        pass += 1;
+    }
+    Ok(receipts)
+}
+
+/// A k-way merge over open run cursors, yielding each artifact once with every source id any run
+/// holds for it.
+///
+/// The heap holds `(head artifact, run)` pairs — an artifact index is four bytes, so unlike the
+/// text index's merge there is nothing to be gained by reaching into the cursors to compare. Ties
+/// break by run index, which makes the concatenation order a function of the run list and not of
+/// the heap's internals; the sort that follows makes it unobservable either way.
+struct MemberRunMerge {
+    cursors: Vec<spill::MemberRunReader>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, usize)>>,
+    index: u32,
+    /// Every source the selected artifact carries, across all the runs holding it.
+    sources: Vec<u64>,
+}
+
+impl MemberRunMerge {
+    fn open(receipts: &[spill::SpillReceipt]) -> Result<MemberRunMerge> {
+        let mut cursors = Vec::with_capacity(receipts.len());
+        let mut heap = std::collections::BinaryHeap::with_capacity(receipts.len());
+        for receipt in receipts {
+            let mut reader = spill::MemberRunReader::open(receipt)?;
+            // A run with no artifacts at all verifies its receipt here and takes no place in the
+            // heap. The spill never writes one, but a receipt is a receipt.
+            if reader.advance()? {
+                heap.push(std::cmp::Reverse((reader.index(), cursors.len())));
+            }
+            cursors.push(reader);
+        }
+        Ok(MemberRunMerge {
+            cursors,
+            heap,
+            index: 0,
+            sources: Vec::new(),
+        })
+    }
+
+    /// Select the next artifact, or `false` when every run is exhausted.
+    fn next_artifact(&mut self) -> Result<bool> {
+        let Some(&std::cmp::Reverse((index, _))) = self.heap.peek() else {
+            return Ok(false);
+        };
+        self.index = index;
+        self.sources.clear();
+        while let Some(std::cmp::Reverse((head, run))) = self.heap.peek().copied() {
+            if head != index {
+                break;
+            }
+            self.heap.pop();
+            let cursor = &mut self.cursors[run];
+            let sources = &mut self.sources;
+            cursor.take_sources(&mut |source| {
+                sources.push(source);
+                Ok(())
+            })?;
+            if cursor.advance()? {
+                let next = cursor.index();
+                self.heap.push(std::cmp::Reverse((next, run)));
+            }
+        }
+        Ok(true)
+    }
+
+    fn index(&self) -> u32 {
+        self.index
+    }
+
+    fn sources(&self) -> &[u64] {
+        &self.sources
+    }
+
+    /// The same buffer, to be **rewritten in place** — a source id and the entity it resolves to
+    /// are both `u64`, so the resolution is a rewrite and not a second vector. See
+    /// [`merge_member_runs`], the one caller.
+    fn sources_mut(&mut self) -> &mut [u64] {
+        &mut self.sources
+    }
+
+    fn sort_sources(&mut self) {
+        self.sources.sort_unstable();
+    }
 }
 
 /// **The artifacts a `membership = { attribute = f }` layer holds**, keyed by layer name — one per
@@ -1463,7 +1845,9 @@ type Address = (String, u32, String);
 
 fn verify_hierarchies(
     declarations: &[LayerDeclaration],
-    artifacts: &BTreeMap<Address, ResolvedArtifact>,
+    index_of: &BTreeMap<Address, usize>,
+    resolved: &[ResolvedArtifact],
+    table: &spill::MemberTable,
 ) -> Result<(Vec<ContainmentViolation>, Vec<SplitCoverage>)> {
     // Which parent has claimed each child, so a second claim is a refusal rather than a silent
     // reparenting: a child with two parents has two lineages, and which one a cut walks would
@@ -1472,8 +1856,9 @@ fn verify_hierarchies(
     // Children grouped under their parent, so containment and coverage are one pass over each
     // parent's membership rather than one per edge. **Each child by its full address**, because an
     // tiered layer's child sits at a different level from its parent and a bare key would
-    // then be looked up in the wrong one.
-    let mut children_of: BTreeMap<Address, Vec<Address>> = BTreeMap::new();
+    // then be looked up in the wrong one — borrowed from the plan's own keys, so an edge costs a
+    // pointer rather than the two heap `String`s an owned address did.
+    let mut children_of: BTreeMap<&Address, Vec<&Address>> = BTreeMap::new();
 
     // Which shape each layer's edges have, from its declaration and never from the edges
     // themselves. A layer that declares no lineage may carry none; a nested layer's edges stay
@@ -1484,8 +1869,9 @@ fn verify_hierarchies(
         .map(|d| (d.name.as_str(), d.hierarchy.kind))
         .collect();
 
-    for ((layer, level, key), artifact) in artifacts {
-        let Some(parent_key) = artifact.parent_key.as_deref() else {
+    for (address, index) in index_of {
+        let (layer, level, key) = address;
+        let Some(parent_key) = resolved[*index].parent_key.as_deref() else {
             continue;
         };
         let kind = kind_of
@@ -1510,7 +1896,7 @@ fn verify_hierarchies(
             let mut found = None;
             for coarser in 0..*level {
                 let candidate = (layer.clone(), coarser, parent_key.to_string());
-                if artifacts.contains_key(&candidate) {
+                if let Some((stored, _)) = index_of.get_key_value(&candidate) {
                     if found.is_some() {
                         return Err(BuildError::Invalid(format!(
                             "{layer} artifact {key} names parent {parent_key}, which exists in \
@@ -1518,7 +1904,7 @@ fn verify_hierarchies(
                              on the search order, so it is refused rather than resolved"
                         )));
                     }
-                    found = Some(candidate);
+                    found = Some(stored);
                 }
             }
             match found {
@@ -1533,16 +1919,18 @@ fn verify_hierarchies(
                 }
             }
         } else {
-            let address = (layer.clone(), *level, parent_key.to_string());
-            if !artifacts.contains_key(&address) {
-                return Err(BuildError::Invalid(format!(
-                    "{layer} level {level} artifact {key} names parent {parent_key}, which this \
-                     level does not declare — a nested layer's edges relate two artifacts of one \
-                     level, and a parent that does not exist would leave the child a root of a \
-                     tree nobody wrote"
-                )));
+            let candidate = (layer.clone(), *level, parent_key.to_string());
+            match index_of.get_key_value(&candidate) {
+                Some((stored, _)) => stored,
+                None => {
+                    return Err(BuildError::Invalid(format!(
+                        "{layer} level {level} artifact {key} names parent {parent_key}, which \
+                         this level does not declare — a nested layer's edges relate two artifacts \
+                         of one level, and a parent that does not exist would leave the child a \
+                         root of a tree nobody wrote"
+                    )))
+                }
             }
-            address
         };
         // **Only a within-level edge can name itself.** A key is unique per `(layer,
         // level)`, so a levelled taxonomy legitimately carries the same key at two levels — an
@@ -1559,37 +1947,57 @@ fn verify_hierarchies(
                  a child has one lineage or the cut that walks it depends on iteration order"
             )));
         }
-        children_of
-            .entry(parent_address)
-            .or_default()
-            .push((layer.clone(), *level, key.clone()));
+        children_of.entry(parent_address).or_default().push(address);
     }
 
     let mut violations = Vec::new();
     let mut coverage = Vec::new();
+    // **Two memberships resident, and never more**: the parent whose children are being walked,
+    // and the child being walked. Both are read from the merged table into buffers this loop owns
+    // and reuses, so a pass over a hierarchy of 10⁵ artifacts allocates a handful of times.
+    let mut parent_bytes: Vec<u8> = Vec::new();
+    let mut parent_buf: Vec<u64> = Vec::new();
+    let mut child_bytes: Vec<u8> = Vec::new();
+    let mut child_buf: Vec<u64> = Vec::new();
     for (address, children) in &children_of {
-        let (layer, level, parent_key) = address;
-        let parent = &artifacts[address];
-        // **The parent's distinct members, in order** — `resolve_artifact` sorted them, so this is
-        // a run-skip rather than a sort. It replaces a `HashSet<u64>` per parent, which for a
+        let (layer, level, parent_key) = *address;
+        let parent_index = index_of[*address];
+        load_members(
+            &resolved[parent_index],
+            parent_index,
+            table,
+            &mut parent_bytes,
+            &mut parent_buf,
+        )?;
+        // **The parent's distinct members, in order** — the merge sorted them, so this is a
+        // run-skip rather than a sort. It replaces a `HashSet<u64>` per parent, which for a
         // country-level division holding 2×10⁷ points was a ~300 MB table built and torn down, with
-        // a second one beside it for what the children covered.
-        let mut held: Vec<u64> = parent.members.iter().map(|e| e.raw()).collect();
-        held.dedup();
+        // a second one beside it for what the children covered. The dedup is in place because the
+        // buffer is this loop's own: nothing else is reading it, and the largest membership at the
+        // Overture rung is 73.6×10⁶ entries, which a copy would be 589 MB of.
+        parent_buf.dedup();
+        let held: &[u64] = &parent_buf;
         // One bit per distinct member, so `covered.len()` becomes a popcount: 2.5 MB where the
         // second `HashSet` was 300 MB, and the counts it feeds are identical by construction.
         let mut covered = vec![0u64; held.len().div_ceil(64)];
         let mut covered_count = 0u64;
 
         for child_address in children {
-            let child = &artifacts[child_address];
-            let (_, child_level, child_key) = child_address;
+            let child_index = index_of[*child_address];
+            load_members(
+                &resolved[child_index],
+                child_index,
+                table,
+                &mut child_bytes,
+                &mut child_buf,
+            )?;
+            let (_, child_level, child_key) = *child_address;
             let mut escaping = 0u64;
             // **Galloping from a cursor**, both sides being sorted: a child whose members sit in
             // one region of the parent's finds them in a few probes each rather than a full
             // binary search, and the walk is cache-resident where the hash table was not.
             let mut cursor = 0usize;
-            for member in child.members.iter().map(|e| e.raw()) {
+            for member in child_buf.iter().copied() {
                 if cursor < held.len() && held[cursor] > member {
                     cursor = 0;
                 }
@@ -1638,7 +2046,7 @@ fn verify_hierarchies(
         });
     }
 
-    detect_cycles(artifacts, &kind_of)?;
+    detect_cycles(index_of, resolved, &kind_of)?;
     Ok((violations, coverage))
 }
 
@@ -1657,7 +2065,8 @@ fn verify_hierarchies(
 /// taxonomy as a cycle. That is exactly what it did before this guard existed, and the demo corpus
 /// is what found it.
 fn detect_cycles(
-    artifacts: &BTreeMap<Address, ResolvedArtifact>,
+    index_of: &BTreeMap<Address, usize>,
+    resolved: &[ResolvedArtifact],
     kind_of: &BTreeMap<&str, tessera_types::layer::HierarchyKind>,
 ) -> Result<()> {
     // One `key → parent` map per nested level, in key order. The walk below reads nothing else, so
@@ -1667,7 +2076,7 @@ fn detect_cycles(
     // A `BTreeMap` at both levels, because the order artifacts are visited in is the order this
     // reports a cycle in, and that order must stay `artifacts.keys()`'s.
     let mut levels: BTreeMap<(&str, u32), BTreeMap<&str, Option<&str>>> = BTreeMap::new();
-    for ((layer, level, key), artifact) in artifacts {
+    for ((layer, level, key), index) in index_of {
         if !matches!(
             kind_of.get(layer.as_str()),
             Some(tessera_types::layer::HierarchyKind::Nested)
@@ -1677,7 +2086,7 @@ fn detect_cycles(
         levels
             .entry((layer.as_str(), *level))
             .or_default()
-            .insert(key.as_str(), artifact.parent_key.as_deref());
+            .insert(key.as_str(), resolved[*index].parent_key.as_deref());
     }
 
     // **One visit per artifact, not one walk per artifact.** Each node is coloured once it is known
@@ -1743,104 +2152,157 @@ fn resolve_artifact(
     layer: &str,
     level: u32,
     key: &str,
-    artifact: &PlannedArtifact,
+    artifact: &mut PlannedArtifact,
     resolve: &(dyn Fn(u64) -> Option<u64> + Sync),
     high_water: u64,
 ) -> Result<ResolvedArtifact> {
-    let entities = |ids: &[u64], what: &str| -> Result<Vec<EntityId>> {
-        ids.iter()
-            .map(|&source| {
-                resolve(source).map(EntityId::new).ok_or_else(|| {
-                    BuildError::Invalid(format!(
-                        "{layer} level {level} artifact {key}: {what} names entity {source}, which \
-                         this build did not assign — the batch is refused rather than published \
-                         without it, a dropped member moving both the count a viewer is shown and \
-                         the size a proportional criterion divides by"
-                    ))
-                })
-            })
-            .collect()
+    let refuse = |source: u64, what: &str| -> BuildError {
+        BuildError::Invalid(format!(
+            "{layer} level {level} artifact {key}: {what} names entity {source}, which this build \
+             did not assign — the batch is refused rather than published without it, a dropped \
+             member moving both the count a viewer is shown and the size a proportional criterion \
+             divides by"
+        ))
+    };
+    // **Rewritten where they sit.** A source id and the entity it resolves to are both `u64`, so
+    // the plan's vector is the resolved one and no second allocation of the corpus's whole
+    // membership exists to hold beside it.
+    let in_place = |ids: &mut Vec<u64>, what: &str| -> Result<()> {
+        for id in ids.iter_mut() {
+            let source = *id;
+            *id = resolve(source).ok_or_else(|| refuse(source, what))?;
+        }
+        Ok(())
     };
 
-    let members = match &artifact.membership {
-        PlannedMembership::Rows(ids) => entities(ids, "membership")?,
-        PlannedMembership::Included(ids) => entities(ids, "membership")?,
+    let members = match std::mem::take(&mut artifact.membership) {
+        // The member sources' rows are in the merged table by now, resolved and sorted by the
+        // merge — there is nothing here to do for them and nothing here to hold.
+        PlannedMembership::Rows => ResolvedMembers::Table,
+        PlannedMembership::Included(mut ids) => {
+            in_place(&mut ids, "membership")?;
+            // **Sorted here, once, and not deduped.** Two readers want it in order — the
+            // containment pass, which walks parent and child together instead of hashing a set per
+            // parent, and `bitmap_of_entities`, which sorts before its bulk add. Deduping would be
+            // wrong: a containment violation counts member *entries* that escape, duplicates
+            // included, and that is the number an operator is given.
+            ids.sort_unstable();
+            ResolvedMembers::Inline(ids)
+        }
         // **An excluded id this build did not assign refuses the build**, on the same rule an
         // unknown member does and for a sharper reason: an exclusion that resolves to nothing
         // silently *widens* the membership by the item it was meant to keep out.
-        PlannedMembership::Excluded(ids) => {
-            let excluded: std::collections::HashSet<u64> = entities(ids, "exclusion")?
-                .into_iter()
-                .map(|e| e.raw())
-                .collect();
-            (0..high_water)
-                .filter(|entity| !excluded.contains(entity))
-                .map(EntityId::new)
-                .collect()
+        //
+        // ⊘ **The complement is materialised in memory, and it is the one membership that still
+        // is.** It is `high_water` entities minus a handful, so a corpus's worth of them could not
+        // be held whichever side of the disk they sat — an `excluding` spelling is an authored one,
+        // one row per artifact in a file somebody wrote, and the corpora that reach the spill do
+        // not use it.
+        PlannedMembership::Excluded(mut ids) => {
+            in_place(&mut ids, "exclusion")?;
+            let excluded: std::collections::HashSet<u64> = ids.into_iter().collect();
+            ResolvedMembers::Inline(
+                (0..high_water)
+                    .filter(|entity| !excluded.contains(entity))
+                    .collect(),
+            )
         }
     };
 
-    // **Sorted here, once, and not deduped.** Two readers want it in order — the containment pass
-    // below, which walks parent and child together instead of hashing a set per parent, and
-    // `bitmap_of_entities`, which sorts before its bulk add. Deduping here would be wrong: a
-    // containment violation counts member *entries* that escape, duplicates included, and that is
-    // the number an operator is given.
-    let mut members = members;
-    members.sort_unstable_by_key(|e| e.raw());
-
     let mut contents = Vec::with_capacity(artifact.contents.len());
-    for (rank, content) in artifact.contents.iter().enumerate() {
+    for (rank, content) in artifact.contents.iter_mut().enumerate() {
         if content.values.is_empty() && content.generated_from.is_empty() {
             return Err(BuildError::Invalid(format!(
                 "{layer} level {level} artifact {key}: contents[{rank}] is empty, so the ranking \
                  above it names a description that was never supplied"
             )));
         }
+        in_place(&mut content.generated_from, &format!("contents[{rank}]"))?;
         contents.push(IncomingContent::new(
-            content.values.clone(),
-            entities(&content.generated_from, &format!("contents[{rank}]"))?,
+            std::mem::take(&mut content.values),
+            std::mem::take(&mut content.generated_from)
+                .into_iter()
+                .map(EntityId::new),
         ));
     }
 
     Ok(ResolvedArtifact {
         members,
         contents,
-        attached_to: artifact.attached_to.clone(),
-        parent_key: artifact.parent_key.clone(),
-        shape: artifact.shape.clone(),
+        attached_to: artifact.attached_to.take(),
+        parent_key: artifact.parent_key.take(),
+        shape: artifact.shape.take(),
     })
 }
 
 /// The same artifact as the registry takes it. A membership is a list of entities by this point,
 /// so there is nothing here to decide.
-fn incoming_artifact(key: &str, artifact: &ResolvedArtifact) -> IncomingArtifact {
-    let mut result = match artifact.attached_to.clone() {
-        None => IncomingArtifact::with_content(
-            Some(key.to_string()),
-            artifact.members.iter().copied(),
-            artifact.contents.clone(),
-        ),
-        Some(attached_to) => IncomingArtifact::attached(
-            Some(key.to_string()),
-            artifact.members.iter().copied(),
-            artifact.contents.clone(),
-            attached_to,
-        ),
+///
+/// **The members are read into `buf` and turned into a bitmap here**, which is what keeps a level's
+/// publication holding a level of *bitmaps* and never a level of entity vectors: the vector is one
+/// artifact's, reused, and the `EntityId` newtype goes back on the raw ids at the one boundary that
+/// leaves this module.
+fn incoming_artifact(
+    key: &str,
+    artifact: &mut ResolvedArtifact,
+    index: usize,
+    table: &spill::MemberTable,
+    scratch: &mut Vec<u8>,
+    buf: &mut Vec<u64>,
+) -> Result<IncomingArtifact> {
+    load_members(artifact, index, table, scratch, buf)?;
+    let members = buf.iter().copied().map(EntityId::new);
+    let contents = std::mem::take(&mut artifact.contents);
+    let mut result = match artifact.attached_to.take() {
+        None => IncomingArtifact::with_content(Some(key.to_string()), members, contents),
+        Some(attached_to) => {
+            IncomingArtifact::attached(Some(key.to_string()), members, contents, attached_to)
+        }
     };
-    result.parent_key = artifact.parent_key.clone();
-    result.shape = artifact.shape.clone();
-    result
+    result.parent_key = artifact.parent_key.take();
+    result.shape = artifact.shape.take();
+    Ok(result)
+}
+
+/// One artifact's members into `buf`, from wherever [`ResolvedMembers`] says they are — ascending,
+/// duplicates kept.
+///
+/// `scratch` is the caller's byte buffer for the table's extent, reused across artifacts so a pass
+/// over a level costs one allocation and not one per artifact.
+fn load_members(
+    artifact: &ResolvedArtifact,
+    index: usize,
+    table: &spill::MemberTable,
+    scratch: &mut Vec<u8>,
+    buf: &mut Vec<u64>,
+) -> Result<()> {
+    match &artifact.members {
+        ResolvedMembers::Table => table.read_into(index, scratch, buf),
+        ResolvedMembers::Inline(ids) => {
+            buf.clear();
+            buf.extend_from_slice(ids);
+            Ok(())
+        }
+    }
 }
 
 /// Pack every level's memberships into one extent and fsync it — the same format, one file per
 /// level, that a control-plane publication writes.
+///
+/// **A blob at a time, into the file.** The store answers a level's ordinal *range*
+/// (`pending_ranges`) and encodes an artifact's record where it stands (`encode_pending`), so what
+/// is resident here is one blob and one extent's offset table at 8 bytes an artifact. Asking for
+/// the blobs instead — which is what the online publication does, under a lock it may not hold
+/// across an fsync — encodes every unpublished level of the corpus before the first byte is
+/// written, and then `pack` concatenates each level again: two more copies of every membership in
+/// the bundle, at the stage that is already the build's peak.
 fn write_membership_extents(
     store: &ArtifactStore,
     prefix_dir: &Path,
     partition: &str,
     published: &mut PublishedLayers,
 ) -> Result<()> {
-    let (ready, skipped) = store.unpublished();
+    let (ready, skipped) = store.pending_ranges();
     if let Some((layer, level)) = skipped.first() {
         // Unreachable from a build: every artifact of a level is published in one batch, so a
         // level cannot have a hole below its high-water. A refusal rather than an alarm, because a
@@ -1859,14 +2321,27 @@ fn write_membership_extents(
         .join(partition)
         .join("members");
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
-    for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+    for (index, (layer, level, ordinal_lo, count)) in ready.into_iter().enumerate() {
         // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
         // name-derived path would escape the directory, or collide after escaping.
         let name = format!("members-000000-{index:03}.tsmb");
-        let count = blobs.len() as u32;
-        let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
         let path = dir.join(&name);
-        tessera_store::write_and_fsync(&path, &bytes).map_err(BuildError::Store)?;
+        let mut writer = tessera_store::membership::PackWriter::create(&path, ordinal_lo, count)
+            .map_err(BuildError::Store)?;
+        for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
+            // Unreachable: `pending_ranges` reports a level with a hole as skipped above rather
+            // than as a range. A refusal rather than an assertion because the alternative is an
+            // extent one blob short of the range it addresses, which serves every ordinal above
+            // the hole as another artifact's membership.
+            let blob = blob.ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "{layer} level {level} has no record at an ordinal inside the range it \
+                     reported as ready to pack"
+                ))
+            })?;
+            writer.push(&blob).map_err(BuildError::Store)?;
+        }
+        writer.finish().map_err(BuildError::Store)?;
         published.paths.push(path);
         published.membership_extents.push(MembershipExtent {
             path: format!("partitions/{partition}/members/{name}"),
@@ -2558,7 +3033,12 @@ struct KeyRoster {
     /// `level → key → plan index`, nested so the lookup borrows: a `HashMap<Box<str>, _>` answers
     /// a `&str`, where a `(u32, String)` tuple key would allocate on every probe — which is the
     /// whole point of interning the text path.
-    by_text: BTreeMap<u32, std::collections::HashMap<Box<str>, usize>>,
+    ///
+    /// **`FxHashMap`, because this is probed once per member entry** and the standard hasher is
+    /// SipHash — a keyed hash whose HashDoS resistance buys nothing over an artifact roster that
+    /// came out of the caller's own file. The map is probed and never iterated, so the weaker
+    /// hasher's ordering is unobservable.
+    by_text: BTreeMap<u32, rustc_hash::FxHashMap<Box<str>, usize>>,
 }
 
 impl KeyRoster {
@@ -2745,12 +3225,17 @@ mod tests {
         extent: Bounds,
     ) -> Result<(Vec<u8>, Vec<u8>)> {
         let (declarations, sources) = two_layers(space);
+        // These fixtures exercise the shape path and never reach the member spill; the scratch
+        // directory and budget are what `read` needs to construct one at all.
+        let scratch = tempfile::tempdir().expect("a scratch directory");
         let plan = read(
             &declarations,
             &sources,
             projection,
             &extent,
             DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
         )?;
         let body = |layer: &str| -> &PlannedArtifact {
             let index = plan.artifacts[&(layer.to_string(), 0, "uk".to_string())];
@@ -2827,12 +3312,15 @@ mod tests {
             serde_json::json!({ "key": "uk", "space": "wgs84", "contents": [[wkt]] }),
         )
         .expect("the fixture row is well-formed")]));
+        let scratch = tempfile::tempdir().expect("a scratch directory");
         read(
             &declarations,
             &sources,
             projection,
             &extent,
             DEFAULT_MAX_SHAPE_VERTICES,
+            scratch.path(),
+            1 << 30,
         )
         .err()
         .expect("the declaration is refused")
@@ -2857,5 +3345,107 @@ mod tests {
         let outside = "POLYGON ((-8 50, 2 91, -8 91, -8 50))";
         let message = draws_only(outside, Projection::WebMercator, world()).to_string();
         assert!(message.contains("not a coordinate"), "{message}");
+    }
+
+    /// One run from a list of `(artifact, sources)` records.
+    fn run(dir: &Path, seq: usize, records: &[(u32, Vec<u64>)]) -> spill::SpillReceipt {
+        let mut writer =
+            spill::MemberRunWriter::create(&dir.join(format!("run-{seq:04}.spill"))).unwrap();
+        for (index, sources) in records {
+            writer.push(*index, sources).unwrap();
+        }
+        writer.finish().unwrap()
+    }
+
+    /// Drain a merge into `(artifact, sources)` records, sorting each artifact's sources — which
+    /// is what both callers do, one before writing an intermediate run and one after resolving.
+    fn drain(receipts: &[spill::SpillReceipt]) -> Vec<(u32, Vec<u64>)> {
+        let mut merge = MemberRunMerge::open(receipts).unwrap();
+        let mut out = Vec::new();
+        while merge.next_artifact().unwrap() {
+            merge.sort_sources();
+            out.push((merge.index(), merge.sources().to_vec()));
+        }
+        out
+    }
+
+    /// **An artifact is yielded once, with every run's sources for it, and duplicates survive.**
+    /// The merge is what makes a membership out of a stream, so a pair it drops is a masked count
+    /// short and a pair it collapses is a containment report that disagrees with the operator's
+    /// own file.
+    #[test]
+    fn the_merge_gathers_an_artifact_from_every_run_that_holds_it() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let receipts = vec![
+            run(temp.path(), 0, &[(0, vec![5, 9]), (2, vec![1]), (7, vec![4])]),
+            run(temp.path(), 1, &[(0, vec![3]), (7, vec![4, 6])]),
+            run(temp.path(), 2, &[(1, vec![8])]),
+        ];
+        assert_eq!(
+            drain(&receipts),
+            vec![
+                (0, vec![3, 5, 9]),
+                (1, vec![8]),
+                (2, vec![1]),
+                // Named by both runs, and the pair is two member entries rather than one.
+                (7, vec![4, 4, 6]),
+            ]
+        );
+    }
+
+    /// **The merge's output is a function of the runs' contents and not of their order.** A k-way
+    /// merge is where an ordering assumption gets made implicitly, and an ordinal that moved with
+    /// one would be a corpus whose ids depend on how the spill happened to window — which I9 does
+    /// not allow.
+    #[test]
+    fn the_merge_yields_the_same_membership_whatever_order_the_runs_are_in() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let records: Vec<Vec<(u32, Vec<u64>)>> = vec![
+            vec![(0, vec![5, 9]), (3, vec![1, 1])],
+            vec![(0, vec![3]), (1, vec![7]), (3, vec![2])],
+            vec![(1, vec![0]), (3, vec![4])],
+        ];
+        let forward: Vec<spill::SpillReceipt> = records
+            .iter()
+            .enumerate()
+            .map(|(seq, r)| run(temp.path(), seq, r))
+            .collect();
+        let reversed: Vec<spill::SpillReceipt> = records
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(seq, r)| run(temp.path(), 10 + seq, r))
+            .collect();
+        assert_eq!(drain(&forward), drain(&reversed));
+    }
+
+    /// **The cascade is the same merge, and it holds every pair across a reduction.** Nothing
+    /// measured reaches it — GeoNames spills two runs against a fan-in of 128 — so the only
+    /// exercise it gets is this one, and it feeds the memberships every masked count divides by.
+    #[test]
+    fn a_cascade_reduces_the_runs_and_loses_no_pair() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // Two full passes' worth: each run names three artifacts drawn from a space small enough
+        // that every artifact is in most runs, which is the case a cascade has to gather.
+        let runs = MEMBER_MERGE_FAN_IN * 2 + 3;
+        let receipts: Vec<spill::SpillReceipt> = (0..runs)
+            .map(|seq| {
+                let records: Vec<(u32, Vec<u64>)> = (0..3)
+                    .map(|i| ((seq as u32 + i) % 5, vec![seq as u64, seq as u64]))
+                    .collect::<std::collections::BTreeMap<u32, Vec<u64>>>()
+                    .into_iter()
+                    .collect();
+                run(temp.path(), seq, &records)
+            })
+            .collect();
+        let direct = drain(&receipts);
+        let cascaded = cascade_member_runs(&receipts, temp.path()).unwrap();
+        assert!(cascaded.len() <= MEMBER_MERGE_FAN_IN, "the cascade reduces");
+        assert_eq!(drain(&cascaded), direct);
+        assert_eq!(
+            direct.iter().map(|(_, s)| s.len() as u64).sum::<u64>(),
+            receipts.iter().map(|r| r.count).sum::<u64>(),
+            "every pair the runs held came out of the cascade"
+        );
     }
 }

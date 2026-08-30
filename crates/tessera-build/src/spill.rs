@@ -1250,6 +1250,663 @@ impl TextRunReader {
 }
 
 // --------------------------------------------------------------------------------------------
+// Member runs, and the table they merge into
+// --------------------------------------------------------------------------------------------
+
+/// LEB128-encode a `u64` into `writer` (at most 10 bytes).
+///
+/// A twin of [`write_varint`] rather than a widening of it: the band and text encodings are
+/// `u32`-wide on disk and reading a `u64` decoder over them would accept five bytes of trailing
+/// continuation a `u32` file can never legally hold.
+fn write_varint64(writer: &mut BufWriter<File>, path: &Path, mut value: u64) -> Result<()> {
+    let mut buf = [0u8; 10];
+    let mut len = 0;
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            buf[len] = byte;
+            len += 1;
+            break;
+        }
+        buf[len] = byte | 0x80;
+        len += 1;
+    }
+    writer
+        .write_all(&buf[..len])
+        .map_err(|e| BuildError::io(path, e))
+}
+
+/// Appends one **member run**: artifacts in ascending index order, each with the source ids one
+/// window of a layer's member table named it with.
+///
+/// **On disk:** no header, then one record per artifact —
+/// `varint(index gap) ‖ varint(count) ‖ varint64(source₀) ‖ varint64(sourceᵢ − sourceᵢ₋₁)…`. The
+/// first record writes its index whole; every one after writes the gap from its predecessor, which
+/// must ascend strictly. Integrity is external, via the [`SpillReceipt`].
+///
+/// **A source delta of zero is legal, and this is the one place in the module where that is
+/// true.** A band's entities ascend strictly and a text run's do too, because both are sets. A
+/// membership is not: the same document may be named twice for one artifact, and the containment
+/// report counts member *entries* — so collapsing a duplicate here would silently change a number
+/// an operator is given. The sources ascend, they do not ascend strictly.
+pub(crate) struct MemberRunWriter {
+    path: PathBuf,
+    writer: BufWriter<File>,
+    last_index: u32,
+    started: bool,
+    /// Sources still owed on the open record, so a truncated caller is caught by `finish`.
+    owed: u32,
+    last_source: u64,
+    taken: u32,
+    count: u64,
+    anchor: u64,
+    /// [`mix64`] of the open artifact's index, folded once per record rather than once per pair.
+    mark: u64,
+}
+
+impl MemberRunWriter {
+    pub(crate) fn create(path: &Path) -> Result<MemberRunWriter> {
+        let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
+        Ok(MemberRunWriter {
+            path: path.to_path_buf(),
+            writer: BufWriter::with_capacity(SPILL_BUF_BYTES, file),
+            last_index: 0,
+            started: false,
+            owed: 0,
+            last_source: 0,
+            taken: 0,
+            count: 0,
+            anchor: 0,
+            mark: 0,
+        })
+    }
+
+    /// Open a record: the artifact, and how many sources will follow.
+    pub(crate) fn begin(&mut self, index: u32, sources: u32) -> Result<()> {
+        if self.owed > 0 {
+            return Err(BuildError::Invalid(format!(
+                "member run {}: artifact {index} opens while {} sources are still owed on {}",
+                self.path.display(),
+                self.owed,
+                self.last_index
+            )));
+        }
+        if sources == 0 {
+            return Err(BuildError::Invalid(format!(
+                "member run {}: artifact {index} carries no source — an artifact is in this file \
+                 only because a member row named it",
+                self.path.display()
+            )));
+        }
+        if self.started {
+            let gap = index.checked_sub(self.last_index).filter(|g| *g > 0).ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "member run {}: artifacts must ascend strictly: {index} follows {}",
+                    self.path.display(),
+                    self.last_index
+                ))
+            })?;
+            write_varint(&mut self.writer, &self.path, gap - 1)?;
+        } else {
+            write_varint(&mut self.writer, &self.path, index)?;
+        }
+        write_varint(&mut self.writer, &self.path, sources)?;
+        self.mark = mix64(index as u64);
+        self.last_index = index;
+        self.started = true;
+        self.owed = sources;
+        self.taken = 0;
+        self.last_source = 0;
+        Ok(())
+    }
+
+    /// Append one source to the open record. Sources ascend within a record — not strictly; see
+    /// the type docs on why a duplicate is a value and not a fault.
+    pub(crate) fn push_source(&mut self, source: u64) -> Result<()> {
+        if self.owed == 0 {
+            return Err(BuildError::Invalid(format!(
+                "member run {}: source {source} arrives with no open artifact",
+                self.path.display()
+            )));
+        }
+        let delta = if self.taken == 0 {
+            source
+        } else {
+            source.checked_sub(self.last_source).ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "member run {}: artifact {}'s sources must ascend: {source} follows {}",
+                    self.path.display(),
+                    self.last_index,
+                    self.last_source
+                ))
+            })?
+        };
+        write_varint64(&mut self.writer, &self.path, delta)?;
+        self.last_source = source;
+        self.taken += 1;
+        self.owed -= 1;
+        self.count += 1;
+        self.anchor = self.anchor.wrapping_add(mix64(self.mark ^ source));
+        Ok(())
+    }
+
+    /// One whole record, for the caller that holds the list — written through the streaming pair
+    /// so there is one encoding rule and not two that could drift.
+    pub(crate) fn push(&mut self, index: u32, sources: &[u64]) -> Result<()> {
+        let count = u32::try_from(sources.len()).map_err(|_| {
+            BuildError::Invalid(format!(
+                "member run {}: artifact {index} carries more sources than a u32 can count",
+                self.path.display()
+            ))
+        })?;
+        self.begin(index, count)?;
+        for &source in sources {
+            self.push_source(source)?;
+        }
+        Ok(())
+    }
+
+    /// Flush, fsync, and hand back the receipt [`MemberRunReader::open`] must be given.
+    pub(crate) fn finish(self) -> Result<SpillReceipt> {
+        if self.owed > 0 {
+            return Err(BuildError::Invalid(format!(
+                "member run {}: {} sources are still owed on artifact {}",
+                self.path.display(),
+                self.owed,
+                self.last_index
+            )));
+        }
+        let MemberRunWriter {
+            path,
+            writer,
+            count,
+            anchor,
+            ..
+        } = self;
+        let file = writer
+            .into_inner()
+            .map_err(|e| BuildError::io(&path, e.into_error()))?;
+        file.sync_all().map_err(|e| BuildError::io(&path, e))?;
+        Ok(SpillReceipt {
+            path,
+            count,
+            anchor,
+        })
+    }
+}
+
+/// Streams a member run back **artifact by artifact**, verifying count and anchor at end of
+/// stream.
+///
+/// The head's sources are not decoded until they are asked for, for [`TextRunReader`]'s reason: a
+/// k-way merge holds one open reader per run and compares only their head *indices*, and a reader
+/// that materialised each head's list would put *k* memberships in memory to choose between *k*
+/// integers.
+pub(crate) struct MemberRunReader {
+    path: PathBuf,
+    reader: BufReader<File>,
+    index: u32,
+    started: bool,
+    mark: u64,
+    pending: u32,
+    taken: u32,
+    last_source: u64,
+    expect_count: u64,
+    expect_anchor: u64,
+    count: u64,
+    anchor: u64,
+    done: bool,
+}
+
+impl MemberRunReader {
+    pub(crate) fn open(receipt: &SpillReceipt) -> Result<MemberRunReader> {
+        let file = File::open(&receipt.path).map_err(|e| BuildError::io(&receipt.path, e))?;
+        Ok(MemberRunReader {
+            path: receipt.path.clone(),
+            reader: BufReader::with_capacity(SPILL_BUF_BYTES, file),
+            index: 0,
+            started: false,
+            mark: 0,
+            pending: 0,
+            taken: 0,
+            last_source: 0,
+            expect_count: receipt.count,
+            expect_anchor: receipt.anchor,
+            count: 0,
+            anchor: 0,
+            done: false,
+        })
+    }
+
+    /// Move to the next artifact, returning `false` at a *verified* end of stream.
+    pub(crate) fn advance(&mut self) -> Result<bool> {
+        if self.done {
+            return Ok(false);
+        }
+        // Whatever the caller did not take: decoded and anchored, never skipped by seeking, so a
+        // malformation inside a record the merge had no use for is still caught.
+        while self.pending > 0 {
+            self.next_source()?;
+        }
+        let first = match next_byte(&mut self.reader).map_err(|e| BuildError::io(&self.path, e))? {
+            None => {
+                self.verify_end()?;
+                return Ok(false);
+            }
+            Some(byte) => byte,
+        };
+        let gap = self.decode_varint(first)?;
+        self.index = if self.started {
+            self.index
+                .checked_add(gap)
+                .and_then(|i| i.checked_add(1))
+                .ok_or_else(|| self.malformed("an artifact index gap overflows u32"))?
+        } else {
+            gap
+        };
+        let count = {
+            let byte = self.require_byte()?;
+            self.decode_varint(byte)?
+        };
+        if count == 0 {
+            return Err(self.malformed("an artifact with no sources"));
+        }
+        if self.count + count as u64 > self.expect_count {
+            return Err(self.malformed(&format!(
+                "trailing data: more pairs than the receipt's count {}",
+                self.expect_count
+            )));
+        }
+        self.mark = mix64(self.index as u64);
+        self.started = true;
+        self.pending = count;
+        self.taken = 0;
+        self.last_source = 0;
+        Ok(true)
+    }
+
+    /// The head artifact's index. Meaningful only after [`Self::advance`] returned `true`.
+    pub(crate) fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// Decode the head's remaining sources into `sink`, ascending.
+    pub(crate) fn take_sources(&mut self, sink: &mut impl FnMut(u64) -> Result<()>) -> Result<()> {
+        while self.pending > 0 {
+            let source = self.next_source()?;
+            sink(source)?;
+        }
+        Ok(())
+    }
+
+    fn next_source(&mut self) -> Result<u64> {
+        let byte = self.require_byte()?;
+        let delta = self.decode_varint64(byte)?;
+        let source = if self.taken == 0 {
+            delta
+        } else {
+            self.last_source
+                .checked_add(delta)
+                .ok_or_else(|| self.malformed("a source delta overflows u64"))?
+        };
+        self.last_source = source;
+        self.taken += 1;
+        self.pending -= 1;
+        self.count += 1;
+        self.anchor = self.anchor.wrapping_add(mix64(self.mark ^ source));
+        Ok(source)
+    }
+
+    fn verify_end(&mut self) -> Result<()> {
+        if self.count != self.expect_count {
+            return Err(self.malformed(&format!(
+                "pair count mismatch: decoded {} pairs but the receipt says {}",
+                self.count, self.expect_count
+            )));
+        }
+        if self.anchor != self.expect_anchor {
+            return Err(self.malformed(&format!(
+                "content anchor mismatch: recomputed {:#018x} but the receipt says {:#018x} — \
+                 the file's bytes are not the bytes that were written",
+                self.anchor, self.expect_anchor
+            )));
+        }
+        self.done = true;
+        Ok(())
+    }
+
+    fn decode_varint(&mut self, first: u8) -> Result<u32> {
+        let mut value = (first & 0x7F) as u32;
+        if first & 0x80 == 0 {
+            return Ok(value);
+        }
+        let mut shift = 7u32;
+        loop {
+            let byte = self.require_byte()?;
+            if shift == 28 {
+                if byte & 0xF0 != 0 {
+                    return Err(self.malformed("varint overflows u32"));
+                }
+                return Ok(value | ((byte as u32) << 28));
+            }
+            value |= ((byte & 0x7F) as u32) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+    }
+
+    fn decode_varint64(&mut self, first: u8) -> Result<u64> {
+        let mut value = (first & 0x7F) as u64;
+        if first & 0x80 == 0 {
+            return Ok(value);
+        }
+        let mut shift = 7u32;
+        loop {
+            let byte = self.require_byte()?;
+            if shift == 63 {
+                if byte & 0xFE != 0 {
+                    return Err(self.malformed("varint overflows u64"));
+                }
+                return Ok(value | ((byte as u64) << 63));
+            }
+            value |= ((byte & 0x7F) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+    }
+
+    fn require_byte(&mut self) -> Result<u8> {
+        match next_byte(&mut self.reader).map_err(|e| BuildError::io(&self.path, e))? {
+            Some(byte) => Ok(byte),
+            None => Err(self.malformed("truncated mid-record")),
+        }
+    }
+
+    fn malformed(&self, detail: &str) -> BuildError {
+        BuildError::Invalid(format!("member run {}: {detail}", self.path.display()))
+    }
+}
+
+/// Where one artifact's members sit in a [`MemberTable`], and what they must decode to.
+///
+/// **Count and anchor per extent, not one pair for the file.** Every other spill in this module is
+/// read once, sequentially, to completion, so a terminal check vouches for everything the caller
+/// saw. A member table is read by *extent*, in an order neither the writer nor the reader chooses
+/// — the hierarchy pass walks parents and their children, the publication walks levels in key
+/// order — and a check at the end of a file nobody reads to the end of would vouch for nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MemberExtent {
+    offset: u64,
+    bytes: u32,
+    entries: u32,
+    anchor: u64,
+}
+
+/// Writes the merged member table: every artifact's members, contiguous, in ascending index
+/// order.
+///
+/// **On disk:** one extent per artifact, `varint64(entity₀) ‖ varint64(entityᵢ − entityᵢ₋₁)…`, no
+/// header and no framing between extents — the [`MemberExtent`] index is what says where one ends,
+/// and it lives in the build's memory beside the receipts for [`SpillReceipt`]'s reason.
+pub(crate) struct MemberTableWriter {
+    path: PathBuf,
+    writer: BufWriter<File>,
+    offset: u64,
+    extents: Vec<MemberExtent>,
+}
+
+impl MemberTableWriter {
+    /// A table with a slot for every artifact of the plan — an artifact no member row named keeps
+    /// the empty extent, which is a legal membership and not a missing one.
+    pub(crate) fn create(path: &Path, artifacts: usize) -> Result<MemberTableWriter> {
+        let file = File::create(path).map_err(|e| BuildError::io(path, e))?;
+        Ok(MemberTableWriter {
+            path: path.to_path_buf(),
+            writer: BufWriter::with_capacity(SPILL_BUF_BYTES, file),
+            offset: 0,
+            extents: vec![MemberExtent::default(); artifacts],
+        })
+    }
+
+    /// Append one artifact's members, ascending. Duplicates are kept — see [`MemberRunWriter`].
+    pub(crate) fn push(&mut self, index: usize, entities: &[u64]) -> Result<()> {
+        if entities.is_empty() {
+            return Ok(());
+        }
+        let artifacts = self.extents.len();
+        let extent = self.extents.get_mut(index).ok_or_else(|| {
+            BuildError::Invalid(format!(
+                "member table {}: artifact {index} is outside the plan's {artifacts} artifacts",
+                self.path.display()
+            ))
+        })?;
+        if extent.bytes > 0 {
+            return Err(BuildError::Invalid(format!(
+                "member table {}: artifact {index} is written twice — the merge yields each \
+                 artifact once, so a second extent would be the first one's members lost",
+                self.path.display()
+            )));
+        }
+        let mark = mix64(index as u64);
+        let mut anchor = 0u64;
+        let mut last = 0u64;
+        let start = self.offset;
+        for (position, &entity) in entities.iter().enumerate() {
+            let delta = if position == 0 {
+                entity
+            } else {
+                entity.checked_sub(last).ok_or_else(|| {
+                    BuildError::Invalid(format!(
+                        "member table {}: artifact {index}'s members must ascend: {entity} \
+                         follows {last}",
+                        self.path.display()
+                    ))
+                })?
+            };
+            self.offset += write_varint64_counted(&mut self.writer, &self.path, delta)?;
+            last = entity;
+            anchor = anchor.wrapping_add(mix64(mark ^ entity));
+        }
+        *extent = MemberExtent {
+            offset: start,
+            bytes: u32::try_from(self.offset - start).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "member table {}: artifact {index}'s members encode to more than a u32 of \
+                     bytes",
+                    self.path.display()
+                ))
+            })?,
+            entries: u32::try_from(entities.len()).map_err(|_| {
+                BuildError::Invalid(format!(
+                    "member table {}: artifact {index} holds more members than a u32 can count",
+                    self.path.display()
+                ))
+            })?,
+            anchor,
+        };
+        Ok(())
+    }
+
+    /// Flush, fsync, and reopen for the random reads the two passes below make.
+    pub(crate) fn finish(self) -> Result<MemberTable> {
+        let MemberTableWriter {
+            path,
+            writer,
+            extents,
+            ..
+        } = self;
+        let file = writer
+            .into_inner()
+            .map_err(|e| BuildError::io(&path, e.into_error()))?;
+        file.sync_all().map_err(|e| BuildError::io(&path, e))?;
+        drop(file);
+        let file = File::open(&path).map_err(|e| BuildError::io(&path, e))?;
+        Ok(MemberTable {
+            path,
+            file: Some(file),
+            extents,
+        })
+    }
+}
+
+/// [`write_varint64`], reporting how many bytes it wrote — the member table tracks its own offset
+/// rather than asking the file, which would flush the buffer on every member.
+fn write_varint64_counted(
+    writer: &mut BufWriter<File>,
+    path: &Path,
+    mut value: u64,
+) -> Result<u64> {
+    let mut buf = [0u8; 10];
+    let mut len = 0;
+    loop {
+        let byte = (value & 0x7F) as u8;
+        value >>= 7;
+        if value == 0 {
+            buf[len] = byte;
+            len += 1;
+            break;
+        }
+        buf[len] = byte | 0x80;
+        len += 1;
+    }
+    writer
+        .write_all(&buf[..len])
+        .map_err(|e| BuildError::io(path, e))?;
+    Ok(len as u64)
+}
+
+/// The merged member table, read by extent.
+///
+/// **Random access, and that is the whole reason this file exists** rather than the merge feeding
+/// its consumers directly. The hierarchy pass reads a parent and then each of its children, which
+/// sit wherever their keys put them; the publication reads a level's artifacts in key order. Both
+/// are orders the merge cannot emit in, so the merge emits the one order it can — ascending
+/// artifact index — and the readers seek.
+#[derive(Debug)]
+pub(crate) struct MemberTable {
+    path: PathBuf,
+    /// `None` for the table [`Self::empty`] hands back, which every extent of is the empty
+    /// membership — so there is nothing to open, and a read that reached for a file would be a bug
+    /// rather than a missing artifact.
+    file: Option<File>,
+    extents: Vec<MemberExtent>,
+}
+
+impl MemberTable {
+    /// A table with no file behind it, for a build whose layers declare no member source at all.
+    /// Every artifact answers the empty membership, which is a membership and not an absence.
+    pub(crate) fn empty(artifacts: usize) -> MemberTable {
+        MemberTable {
+            path: PathBuf::new(),
+            file: None,
+            extents: vec![MemberExtent::default(); artifacts],
+        }
+    }
+
+    pub(crate) fn extent(&self, index: usize) -> MemberExtent {
+        self.extents.get(index).copied().unwrap_or_default()
+    }
+
+    /// Decode one artifact's members into `out`, which is cleared first — verifying the extent's
+    /// own count and anchor before a caller sees a member.
+    ///
+    /// `scratch` is the caller's byte buffer, reused across artifacts: an artifact's extent is
+    /// read whole because it is contiguous and small beside the file, and allocating that buffer
+    /// per artifact would be one allocation per artifact per pass.
+    pub(crate) fn read_into(
+        &self,
+        index: usize,
+        scratch: &mut Vec<u8>,
+        out: &mut Vec<u64>,
+    ) -> Result<()> {
+        use std::os::unix::fs::FileExt;
+        out.clear();
+        let extent = self.extent(index);
+        if extent.bytes == 0 {
+            return Ok(());
+        }
+        let file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| self.malformed(index, "an extent in a table with no file behind it"))?;
+        scratch.clear();
+        scratch.resize(extent.bytes as usize, 0);
+        file.read_exact_at(scratch, extent.offset)
+            .map_err(|e| BuildError::io(&self.path, e))?;
+        out.reserve(extent.entries as usize);
+        let mut cursor = 0usize;
+        let mut last = 0u64;
+        let mut anchor = 0u64;
+        let mark = mix64(index as u64);
+        for position in 0..extent.entries {
+            let delta = decode_varint64_at(scratch, &mut cursor).ok_or_else(|| {
+                self.malformed(index, "truncated inside an extent's member deltas")
+            })?;
+            let entity = if position == 0 {
+                delta
+            } else {
+                last.checked_add(delta)
+                    .ok_or_else(|| self.malformed(index, "a member delta overflows u64"))?
+            };
+            last = entity;
+            anchor = anchor.wrapping_add(mix64(mark ^ entity));
+            out.push(entity);
+        }
+        if cursor != scratch.len() {
+            return Err(self.malformed(
+                index,
+                "trailing bytes: the extent holds more than its member count decodes",
+            ));
+        }
+        if anchor != extent.anchor {
+            return Err(self.malformed(
+                index,
+                &format!(
+                    "content anchor mismatch: recomputed {anchor:#018x} but the extent says \
+                     {:#018x} — the file's bytes are not the bytes that were written",
+                    extent.anchor
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn malformed(&self, index: usize, detail: &str) -> BuildError {
+        BuildError::Invalid(format!(
+            "member table {}: artifact {index}: {detail}",
+            self.path.display()
+        ))
+    }
+}
+
+/// Decode one LEB128 `u64` from `bytes` at `cursor`, advancing it — `None` on a truncated or
+/// overlong encoding.
+fn decode_varint64_at(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    loop {
+        let byte = *bytes.get(*cursor)?;
+        *cursor += 1;
+        if shift == 63 {
+            if byte & 0xFE != 0 {
+                return None;
+            }
+            return Some(value | ((byte as u64) << 63));
+        }
+        value |= ((byte & 0x7F) as u64) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+        shift += 7;
+    }
+}
+
+// --------------------------------------------------------------------------------------------
 // Tests
 // --------------------------------------------------------------------------------------------
 
@@ -1875,6 +2532,315 @@ mod tests {
                 read.push((term, entities));
             }
             prop_assert_eq!(read, records);
+        }
+    }
+
+    // ---- member run files -------------------------------------------------------------
+
+    fn write_member_run(path: &Path, records: &[(u32, Vec<u64>)]) -> SpillReceipt {
+        let mut writer = MemberRunWriter::create(path).unwrap();
+        for (index, sources) in records {
+            writer.push(*index, sources).unwrap();
+        }
+        writer.finish().unwrap()
+    }
+
+    fn read_member_run(receipt: &SpillReceipt) -> Result<Vec<(u32, Vec<u64>)>> {
+        let mut reader = MemberRunReader::open(receipt)?;
+        let mut out = Vec::new();
+        while reader.advance()? {
+            let index = reader.index();
+            let mut sources = Vec::new();
+            reader.take_sources(&mut |source| {
+                sources.push(source);
+                Ok(())
+            })?;
+            out.push((index, sources));
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn member_run_round_trips() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let long: Vec<(u32, Vec<u64>)> = vec![
+            // Artifact 0 and source 0 first, which is where an absolute-vs-gap confusion in the
+            // first slot shows: a decoder reading either as a delta from a zeroed register lands
+            // somewhere else and every record after it shifts.
+            (0, vec![0]),
+            // **The same source twice**, which a membership may legitimately hold: the containment
+            // report counts member entries, so a run that collapsed this would move a number an
+            // operator is given.
+            (1, vec![3, 3, 3, 4]),
+            (2, vec![0, 1, 2, 63, 64, 65, u64::MAX]),
+            (9, (0..5_000u64).map(|e| e * 3).collect()),
+            (u32::MAX, vec![7]),
+        ];
+        let cases: Vec<Vec<(u32, Vec<u64>)>> = vec![vec![], vec![(4, vec![9])], long];
+        for (i, records) in cases.iter().enumerate() {
+            let path = temp.path().join(format!("member-run-{i}.spill"));
+            let receipt = write_member_run(&path, records);
+            assert_eq!(
+                receipt.count,
+                records.iter().map(|(_, s)| s.len() as u64).sum::<u64>()
+            );
+            assert_eq!(&read_member_run(&receipt).unwrap(), records);
+        }
+    }
+
+    #[test]
+    fn member_run_streams_a_record_a_source_at_a_time() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-run.spill");
+        let mut writer = MemberRunWriter::create(&path).unwrap();
+        writer.begin(2, 3).unwrap();
+        for source in [10u64, 10, 40] {
+            writer.push_source(source).unwrap();
+        }
+        let receipt = writer.finish().unwrap();
+        assert_eq!(read_member_run(&receipt).unwrap(), vec![(2, vec![10, 10, 40])]);
+    }
+
+    /// A record the merge had no use for is still decoded and anchored on the way past — a
+    /// malformation inside it is a refusal and not a run that quietly read short.
+    #[test]
+    fn member_run_anchors_a_record_the_caller_never_takes() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-run.spill");
+        let receipt = write_member_run(&path, &[(1, vec![4, 8]), (2, vec![5])]);
+        let mut reader = MemberRunReader::open(&receipt).unwrap();
+        assert!(reader.advance().unwrap());
+        // Nothing taken from artifact 1, and the stream still ends verified.
+        assert!(reader.advance().unwrap());
+        let mut sources = Vec::new();
+        reader
+            .take_sources(&mut |source| {
+                sources.push(source);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(sources, vec![5]);
+        assert!(!reader.advance().unwrap());
+    }
+
+    #[test]
+    fn member_run_flip_is_an_anchor_mismatch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-run.spill");
+        let records = vec![(1u32, vec![1u64, 5, 9]), (4, vec![2, 4])];
+        let receipt = write_member_run(&path, &records);
+        // The last byte is a source delta: flipping it changes one member and nothing else, which
+        // is exactly the failure a count check alone would miss.
+        let last = fs::read(&path).unwrap().len() - 1;
+        flip_byte(&path, last);
+        let message = err_string(read_member_run(&receipt));
+        assert!(message.contains("anchor mismatch"), "got: {message}");
+        assert!(message.contains("member-run.spill"), "got: {message}");
+    }
+
+    #[test]
+    fn member_run_truncation_is_caught() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-run.spill");
+        let records = vec![(1u32, vec![1u64, 5, 9]), (4, vec![2, 4])];
+        for cut in [1usize, 2, 3, 4, 5] {
+            let receipt = write_member_run(&path, &records);
+            truncate_by(&path, cut);
+            let message = err_string(read_member_run(&receipt));
+            assert!(
+                message.contains("truncated") || message.contains("count mismatch"),
+                "cut {cut} got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn member_run_trailing_data_is_caught() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-run.spill");
+        let receipt = write_member_run(&path, &[(1u32, vec![1u64, 5, 9])]);
+        // A whole extra record, well formed: the next artifact with one source. Only the
+        // receipt's pair count separates it from a legitimate stream.
+        append(&path, &[0, 1, 3]);
+        let message = err_string(read_member_run(&receipt));
+        assert!(message.contains("trailing data"), "got: {message}");
+    }
+
+    #[test]
+    fn member_run_refuses_an_emitter_that_does_not_ascend() {
+        let temp = tempfile::TempDir::new().unwrap();
+        // A writer apiece: a refused push may already have written a record's header, so the file
+        // one leaves behind is only ever discarded — which is what a build that fails here does.
+        let refused: Vec<(&str, u32, &[u64])> = vec![
+            ("an artifact that regresses", 2, &[3]),
+            ("an artifact that repeats", 4, &[3]),
+            ("an artifact with no source", 7, &[]),
+            ("a source that regresses", 7, &[5, 4]),
+        ];
+        for (i, (what, index, sources)) in refused.into_iter().enumerate() {
+            let path = temp.path().join(format!("refused-{i}.spill"));
+            let mut writer = MemberRunWriter::create(&path).unwrap();
+            writer.push(4, &[1, 2]).unwrap();
+            assert!(writer.push(index, sources).is_err(), "{what}");
+        }
+    }
+
+    /// A caller that opened a record and did not fill it has written a header the reader will
+    /// believe — so `finish` refuses rather than handing back a receipt for a short file.
+    #[test]
+    fn member_run_refuses_a_record_left_owing_sources() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-run.spill");
+        let mut writer = MemberRunWriter::create(&path).unwrap();
+        writer.begin(1, 3).unwrap();
+        writer.push_source(5).unwrap();
+        assert!(writer.begin(2, 1).is_err(), "a second record while one is owed");
+        assert!(writer.finish().is_err(), "a receipt for a record left open");
+    }
+
+    // ---- the merged member table ------------------------------------------------------
+
+    fn write_member_table(path: &Path, artifacts: usize, rows: &[(usize, Vec<u64>)]) -> MemberTable {
+        let mut writer = MemberTableWriter::create(path, artifacts).unwrap();
+        for (index, entities) in rows {
+            writer.push(*index, entities).unwrap();
+        }
+        writer.finish().unwrap()
+    }
+
+    fn read_member_table(table: &MemberTable, artifacts: usize) -> Result<Vec<Vec<u64>>> {
+        let mut scratch = Vec::new();
+        let mut out = Vec::new();
+        for index in 0..artifacts {
+            let mut buf = Vec::new();
+            table.read_into(index, &mut scratch, &mut buf)?;
+            out.push(buf);
+        }
+        Ok(out)
+    }
+
+    #[test]
+    fn member_table_round_trips_by_extent() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-table.spill");
+        // Artifact 1 is named by no member row and keeps the empty extent, which is a legal
+        // membership and not a missing one; artifact 3 holds the same entity twice.
+        let rows = vec![
+            (0usize, vec![0u64, 1, 2, u64::MAX]),
+            (2, (0..4_000u64).map(|e| e * 7).collect()),
+            (3, vec![9, 9, 10]),
+        ];
+        let table = write_member_table(&path, 5, &rows);
+        assert_eq!(
+            read_member_table(&table, 5).unwrap(),
+            vec![
+                rows[0].1.clone(),
+                Vec::new(),
+                rows[1].1.clone(),
+                rows[2].1.clone(),
+                Vec::new(),
+            ]
+        );
+        // Read out of order, twice: the extents are random access and carry their own integrity,
+        // which is why the check is per extent and not at an end of file nobody reads to.
+        let mut scratch = Vec::new();
+        let mut buf = Vec::new();
+        table.read_into(3, &mut scratch, &mut buf).unwrap();
+        assert_eq!(buf, vec![9, 9, 10]);
+        table.read_into(0, &mut scratch, &mut buf).unwrap();
+        assert_eq!(buf, vec![0, 1, 2, u64::MAX]);
+    }
+
+    #[test]
+    fn member_table_flip_is_an_anchor_mismatch() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-table.spill");
+        let table = write_member_table(&path, 2, &[(0, vec![1, 5, 9]), (1, vec![2, 4])]);
+        let last = fs::read(&path).unwrap().len() - 1;
+        flip_byte(&path, last);
+        let message = err_string(read_member_table(&table, 2));
+        assert!(message.contains("anchor mismatch"), "got: {message}");
+        assert!(message.contains("member-table.spill"), "got: {message}");
+    }
+
+    #[test]
+    fn member_table_refuses_a_membership_written_twice_or_out_of_range() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let path = temp.path().join("member-table.spill");
+        let mut writer = MemberTableWriter::create(&path, 2).unwrap();
+        writer.push(0, &[1, 2]).unwrap();
+        // The merge yields each artifact once, so a second extent would be the first one's
+        // members lost.
+        assert!(writer.push(0, &[3]).is_err());
+        assert!(writer.push(5, &[3]).is_err(), "outside the plan's artifacts");
+        assert!(writer.push(1, &[3, 2]).is_err(), "members must ascend");
+    }
+
+    /// A build whose layers declare no member source at all still answers every artifact — with
+    /// the empty membership, and without a file behind it.
+    #[test]
+    fn an_empty_member_table_answers_every_artifact() {
+        let table = MemberTable::empty(3);
+        assert_eq!(read_member_table(&table, 3).unwrap(), vec![Vec::<u64>::new(); 3]);
+    }
+
+    proptest! {
+        /// Any ascending artifact stream with ascending source lists round-trips exactly,
+        /// duplicates included.
+        #[test]
+        fn any_member_run_round_trips(
+            raw in prop::collection::vec(
+                (prop::num::u32::ANY,
+                 prop::collection::vec(prop::num::u64::ANY, 1..8)),
+                0..40),
+        ) {
+            let mut records: Vec<(u32, Vec<u64>)> = raw
+                .into_iter()
+                .map(|(index, mut sources)| {
+                    sources.sort_unstable();
+                    (index, sources)
+                })
+                .collect();
+            records.sort_by_key(|(index, _)| *index);
+            records.dedup_by_key(|(index, _)| *index);
+
+            let temp = tempfile::TempDir::new().unwrap();
+            let path = temp.path().join("member-run.spill");
+            let receipt = write_member_run(&path, &records);
+            prop_assert_eq!(read_member_run(&receipt).unwrap(), records);
+        }
+
+        /// Any set of memberships round-trips through the table, read back in an order the writer
+        /// did not choose.
+        #[test]
+        fn any_member_table_round_trips(
+            raw in prop::collection::vec(
+                prop::collection::vec(prop::num::u64::ANY, 0..8),
+                1..20),
+        ) {
+            let memberships: Vec<Vec<u64>> = raw
+                .into_iter()
+                .map(|mut entities| {
+                    entities.sort_unstable();
+                    entities
+                })
+                .collect();
+            let rows: Vec<(usize, Vec<u64>)> = memberships
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter(|(_, entities)| !entities.is_empty())
+                .collect();
+
+            let temp = tempfile::TempDir::new().unwrap();
+            let path = temp.path().join("member-table.spill");
+            let table = write_member_table(&path, memberships.len(), &rows);
+            let mut scratch = Vec::new();
+            let mut buf = Vec::new();
+            for index in (0..memberships.len()).rev() {
+                table.read_into(index, &mut scratch, &mut buf).unwrap();
+                prop_assert_eq!(&buf, &memberships[index]);
+            }
         }
     }
 }
