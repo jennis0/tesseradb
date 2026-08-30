@@ -4,15 +4,16 @@
 done and dispositioned, and the four normative amendments this design forces have landed:
 [`configuration.md`](configuration.md) §1 (the `[[view]]` block), [`contracts.md`](contracts.md) §2.2
 (the bundle's recorded projection), §3.2 (the `/v1/meta` fields) and §3.4 (the ingest schema's
-coordinate columns). What remains is the ladder — the two built geographic corpora rebuilt on a
-declared projection — and the owner's ruling on promotion.
+coordinate columns). What remains is the owner's ruling on promotion.
 
-**⊘ Built, except the corpora.** The transform, the declaration, the frame and its snap, the
+**Built, and the ladder is on it.** The transform, the declaration, the frame and its snap, the
 build- and write-path projections, the report, the `/v1/meta` fields and shapes declared in
-longitude and latitude are all in place. What is **not** yet done is the ladder: the two built
-geographic corpora are still placed by a Python module outside the build
-([`../../test_corpora/common/projection.py`](../../test_corpora/common/projection.py)), with their
-declarations describing its output, until each is rebuilt on a declared projection.
+longitude and latitude are all in place, and both built geographic corpora — GeoNames at 1.3×10⁷
+points and Overture at 7.4×10⁷ — are rebuilt on a declared `web_mercator` projection with their
+extents written in longitude and latitude. Nothing outside the build projects anything any more.
+Every stored position in both bundles was checked against a recomputation through
+[`../../test_corpora/common/projection.py`](../../test_corpora/common/projection.py), which is now
+the second implementation the transform is held to rather than the pipeline's own.
 
 **Reads with:** [`configuration.md`](configuration.md) §1 (the `[[view]]` block),
 [`polygon-membership.md`](polygon-membership.md) §4.3 (shapes declared in longitude and latitude,
@@ -326,7 +327,9 @@ are separate because they have separate causes, not because a clipped point is e
 
 The tail is small and real, and it is not symmetric. Of GBIF's 3,761,740,868 georeferenced records,
 **68,581 lie above +85.0511° and 905 below** — 18 per million. Of GeoNames' 13,463,857, **18 above and
-553 below**, the southern ones Antarctic. ⊘ The rest of the ladder is unmeasured.
+553 below**, the southern ones Antarctic. Of Overture's 73,631,092 places, **none**: they stop at
+83.57°N and 84.99°S, so the count that exists for a gazetteer is zero for a places corpus, and the
+line prints at zero to say so. ⊘ The rest of the ladder is unmeasured.
 
 ## 8. What the build reports
 
@@ -362,8 +365,8 @@ A projected view that is fed polar rows one batch at a time would otherwise lose
 mentions them.
 
 **`tessera check` prints the frame and the snap for a stated box without opening a data file.**
-Under `auto` it cannot: the frame is a function of the data, so the check reads the points source like
-the build does, and says so.
+Under `auto` it cannot, the frame being a function of the data, and it says so rather than guessing:
+the check reads footers and declarations, never a points file.
 
 ## 9. What a client is told
 
@@ -371,7 +374,7 @@ the build does, and says so.
 
 | field | |
 |---|---|
-| `projection` | the name declared, including an equirectangular alias |
+| `projection` | the projection's canonical name — a view declaring `plate_carree` publishes `equirectangular`, the two being one entry at one parallel |
 | `world_aspect` | the ratio the world should be drawn at — 1 for `web_mercator`, `2cos φ₁` for an equirectangular alias |
 | `tile_scheme` | the tile scheme the frame addresses — `xyz` for an aligned `web_mercator` frame, `null` for everything else |
 | `tile` | the `{ z, x, y }` the frame corresponds to under that scheme, when there is one |

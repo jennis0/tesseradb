@@ -21,9 +21,10 @@ of the true edge. Every point here is rejected unless it is at least three cells
 declared boundary, which makes an exact agreement on counts the right assertion rather than an
 optimistic one.
 
-⊘ **The build stage only.** A projected view's ingest schema still pins `x`/`y`
-(`projections.md` §3), so there is nothing to flush a longitude and a latitude through yet; the
-flush and fold stages of `test_shape_membership.py` are that module's, over an unprojected view.
+⊘ **The build stage only, and no longer for want of a route.** A projected view now takes
+`lon`/`lat` at ingest (`projections.md` §3), so the flush and fold stages are reachable for a
+`wgs84` shape and simply are not covered here; `test_shape_membership.py` covers them over an
+unprojected view.
 """
 
 from __future__ import annotations
