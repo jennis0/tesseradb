@@ -61,7 +61,7 @@ non-sentinel, never a stored set.
 ## 2. A view
 
 **Declaration.** `[[view]]` in the configuration surface (`configuration.md` §1): `name`,
-`title`, `projection`, `extent`, `source` and `fields`, `point_visibility`, and `view_visibility` (spec
+`title`, `projection`, `extent`, `source` and `fields`, `point_visibility`, and `visibility` (spec
 §6). A plain view is declared when the corpus is built and is constant for the life of the
 deployment: adding one is a rebuild, not an operation. That is deliberate — a view carries a frame
 and a gate, and the design has one place where those are reviewed. Growth at ingest is what
@@ -76,8 +76,9 @@ grid, which is why the extent is per view and not per bundle.
 > bundle-wide, and every consumer reads them there. With one view per bundle the bundle's extent
 > *is* the view's, so nothing is wrong today; two views with different extents cannot coexist
 > until the extent moves onto `ViewDescriptor` and the `views` entries of `/v1/meta` — a
-> `bundle_format` bump (contracts §2.2, §2.5) and a wire change (§3.2). A group's views all
-> share one extent by construction, so groups do not wait on this move; a second plain view does.
+> contracts §2.2/§2.5 and `/v1/meta` change. **It is taken first, ahead of any multi-view
+> build** (owner ruling 2026-08-30): pre-release the format changes freely and the artifacts are
+> recreated (decision 0048), so the manifest shape is settled before anything depends on it.
 
 **Addressing.** Every viewer verb names its view in the request body (contracts §3.2); an ingest
 batch names it in `x-tessera-view`, optional only while the bundle has one view (write-path
@@ -107,15 +108,14 @@ views it has — in one of two forms.
 name             = "quarter"
 title            = "By quarter"
 extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
-group_visibility = "public"
-view_visibility  = { default = "inherited" }
+visibility       = "public"                        # the group's own gate
 point_visibility = { field = "access", default = "public" }
 metadata         = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }
 
 [[view_group.view]]
 key        = "2026-Q2"
 source     = "q2"                   # this view's points: entity_id, x, y, access, …
-visibility = "public"
+visibility = "public"              # this view's gate; absent = the group's
 label      = "Q2 2026"
 starts     = 2026-04-01T00:00:00Z
 ends       = 2026-07-01T00:00:00Z
@@ -134,8 +134,7 @@ name             = "quarter"
 extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
 source           = "quarter_papers" # one row per (entity, view): entity_id, quarter, x, y, access, …
 fields           = { view = "quarter" }
-group_visibility = "public"
-view_visibility  = { field = "access", default = "inherited" }
+visibility       = "public"
 point_visibility = { field = "access", default = "public" }
 metadata         = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }
 
@@ -146,8 +145,7 @@ fields = { key = "quarter" }
 
 | Key | | Value |
 |---|---|---|
-| `group_visibility` | D `public` | the group's gate: an access label, or `public` (spec §6) |
-| `view_visibility` | D `{ default = "inherited" }` | `{ field, default }` — each view's own gate, and what a view declaring none gets; `inherited` is the group's |
+| `visibility` | D `public` | the group's own gate: an access label, or `public` (spec §6). A plain `[[view]]` carries the same key with the same meaning |
 | `metadata` | O | the per-view values a view carries, `name = type` over the `[[attribute]]` types; a category is `{ type = "category", vocabulary = … }` |
 | `members` | O | another group's name: this group's views are that group's (spec §3.3) |
 | `[[view_group.view]]` | O, repeatable | one view, inline — `key`, `source`, `visibility`, and one key per declared metadata name. **Form A.** |
@@ -165,7 +163,8 @@ is.
 `source` and `fields` keep `configuration.md` §8's rule: the map says where, never whether.
 Under form B the located fields are the view's own — `entity_id`, the coordinates,
 `point_visibility.field` — plus `view`; under a roster table they are `key`, `visibility` and the
-metadata names, all defaulting to their own names.
+metadata names, all defaulting to their own names; each view's own gate is the roster's
+`visibility`, and a view carrying none takes the group's.
 
 A group is not a view: it cannot be named on a viewer verb, has no row space and no permutation.
 Its views are views in every respect below the declaration — each with its own Morton order,
@@ -193,8 +192,8 @@ carrying the roster record — `visibility` and the metadata — which is the in
 `[[view_group.view]]` block as a request. The record is a WAL entry; the served roster is the
 manifest's plus the WAL overlay, materialised at the next flush, the overlay-then-fold shape
 the write path has everywhere. A batch naming a view that does not exist is a 404, as for any
-unknown view — with one exception: a group whose views carry nothing (no metadata,
-`view_visibility` with no field) has nothing to put in the record, and there the first batch
+unknown view — with one exception: a group whose views carry nothing (no metadata, no roster
+`visibility` field) has nothing to put in the record, and there the first batch
 naming a new key creates it. That is the one place a view comes into being without a
 declaration, and it is safe because the view has nothing of its own to declare: its frame,
 projection, visibility default and gate are the group's, already reviewed.
@@ -221,8 +220,8 @@ point_visibility = { field = "access", default = "public" }
 ```
 
 Keys, ordinals, metadata and each view's own gate belong to the group that owns them, and a
-group naming `members` declares none of those: `metadata`, `view_visibility` and a roster are
-refused on it, and `group_visibility` is the one gate it may still declare, because a second
+group naming `members` declares none of those: `metadata` and a roster are refused on it, and
+its own `visibility` is the one gate it may still declare, because a second
 layout may be narrower than the first. Its points come from its own `source` in form B's shape
 (a discriminator column), or per view under `[[view_group.view]]` blocks carrying only `key` and
 `source`. Creating `quarter:2026-Q3` creates `quarter_map:2026-Q3` at the same moment, empty, so
@@ -381,14 +380,13 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 Who may reach a view follows the shape a layer already has: a gate on the kind, and a gate on
 the individual.
 
-- **`group_visibility`** on a `[[view_group]]` — an access label, or `public` (decision 0088),
-  defaulting to `public` (owner ruling 2026-08-30): a view is a coordinate system over items
-  that carry their own labels, and the ordinary corpus gates none of them.
-- **`view_visibility`** — on a plain `[[view]]`, a label or `public`, defaulting to `public`;
-  on a group, `{ field, default }`: each view's own label, from the roster (the inline block's
-  `visibility`, the table's column, or the create operation's record), and `default` for a
-  view supplying none. `default = inherited` means the group's own, the spelling
-  `artifact_visibility` uses. One key, a string or a table, the way `extent` is.
+- **`visibility`** on a `[[view]]` or a `[[view_group]]` — an access label, or `public`
+  (decision 0088), defaulting to `public` (owner ruling 2026-08-30): a view is a coordinate
+  system over items that carry their own labels, and the ordinary corpus gates none of them.
+  One key, spelled as it is on a layer.
+- **A group's view carries its own `visibility` on the roster** — the inline block's key, the
+  roster table's column, the create operation's record — and a view carrying none takes the
+  group's, as an artifact's `inherited` takes its layer's.
 - **`point_visibility`** is the item's label and is unchanged.
 
 A view of a group is reachable only where its group is: the group's gate is the outer bound and
@@ -516,11 +514,11 @@ No new verb, no new leak-register row, one register note.
 |---|---|
 | Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and shared views; the paged permutation as the representation |
 | Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` and `group:#n` id forms; the roster in the manifest |
-| Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor; `bundle_format` bump |
+| Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor — first, ahead of any multi-view build |
 | Contracts §2.3 | Attribute `scope` and layer `scope` in the manifest; group-scoped column families under `attrs/<column>/<group>/<key>/` |
 | Contracts §3.2 | `/v1/meta`: per-view `extent`, groups with their rosters and typed metadata, gate-filtered; `filter_operands` carries the scope; the pinned leaf `name@key` / `name@#n` in the filter grammar |
 | Contracts §3.4 | The duplicate rule amended per spec §4; `PUT /control/views/{group}/{key}` and its drop with `delete_dangling`; identifier forms with mandatory idset on the `tessera_id` form; `--view` withdrawn |
-| Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata`, `group_visibility`, `view_visibility`; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]`; `view_visibility` on a plain view |
+| Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata` and per-view `visibility` on the roster; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]` |
 | Write-path §2, §4, §5 | The create record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
 | Compaction | Reclamation of a dropped view; the attribute pass over a family |
 | Appendix C | C17 note (cross-view linkage), C15 note (a group's view's size via timing), the `views` field of `/v1/meta` under C11's precedent |
@@ -530,19 +528,13 @@ No new verb, no new leak-register row, one register note.
 
 Made 2026-08-30 (owner): the `group:key` and `group:#ordinal` forms, with the ordinal always
 present and the key optional; the paged permutation as every view's representation; no plain
-view after the build; the pinned leaf kept; `group_visibility` and `view_visibility` defaulting
-to `public`; `delete_dangling` kept; typed metadata over the attribute types; the create
-operation ahead of the first batch; the two roster forms, `[[view_group.view]]` and
-`[view_group.views]`.
+view after the build; the pinned leaf kept; `visibility` as the one gate key on a view and a
+group alike, defaulting to `public`, with a group's per-view gate on the roster;
+`delete_dangling` kept; typed metadata over the attribute types; the create operation ahead of
+the first batch; the two roster forms, `[[view_group.view]]` and `[view_group.views]`; the
+extent move taken first, ahead of any multi-view build.
 
-Open:
-
-1. **The extent move** (spec §2) — taken with the first two-view build, or first as its own
-   `bundle_format` bump so the manifest shape is settled before any group exists. Groups do not
-   need it; a second plain view does.
-2. **`view_visibility` as one key, string on a plain view and table on a group** — applied here
-   for symmetry with `extent`; the alternative keeps `configuration.md`'s bare `visibility` on a
-   plain view.
+None open.
 
 ## Appendix A — a declaration, written out
 
@@ -571,15 +563,14 @@ entity_id_field = "doc_id"
 name             = "all"
 title            = "All papers"
 extent           = "auto"
-view_visibility  = "public"                                   # new; default
+visibility       = "public"                                   # new; default
 point_visibility = { field = "access", default = "public" }
 
 [[view_group]]                                                 # new block
 name             = "quarter"
 title            = "By quarter"
 extent           = { min = [-40.0, -40.0], max = [40.0, 40.0] }
-group_visibility = "public"
-view_visibility  = { default = "inherited" }
+visibility       = "public"
 point_visibility = { field = "access", default = "public" }
 metadata         = { label = "text", starts = "timestamp_us", ends = "timestamp_us" }
 
