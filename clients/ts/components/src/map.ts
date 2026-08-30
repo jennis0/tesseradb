@@ -435,9 +435,11 @@ export class TesseraMap extends TesseraElement {
       emit(this, 'tessera-artifactopen', {id: idString(sel.artifact.id), detail: sel.artifact.detail});
     }
     const region = s.get('region');
-    const meta = s.get('meta');
-    if (region && meta) {
-      const q = meta.quantisation;
+    // The store's own view's frame (decision 0040): the extent is the view's, so the conversion
+    // between data coordinates and world space is asked of the store rather than read off the
+    // bundle, which no longer has one.
+    const q = s.frame();
+    if (region && q) {
       if (region.shape.kind === 'box') {
         const [x0, y0] = dataToWorldXY(region.shape.bbox[0], region.shape.bbox[1], q);
         const [x1, y1] = dataToWorldXY(region.shape.bbox[2], region.shape.bbox[3], q);
@@ -904,9 +906,8 @@ export class TesseraMap extends TesseraElement {
    * `tessera-viewchange` reports the box actually shown.
    */
   fitBbox(extent: [number, number, number, number]): boolean {
-    const meta = this.resolvedStore?.get('meta');
-    if (!meta) return false;
-    const q = meta.quantisation;
+    const q = this.resolvedStore?.frame();
+    if (!q) return false;
     const [x0, y0] = dataToWorldXY(extent[0], extent[1], q);
     const [x1, y1] = dataToWorldXY(extent[2], extent[3], q);
     const {width, height} = this.size;

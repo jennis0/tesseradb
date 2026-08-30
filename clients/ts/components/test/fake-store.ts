@@ -62,6 +62,9 @@ export function fakeStore(overrides: Partial<Projections> = {}): FakeStore {
     setColourBy: spy('setColourBy'),
     setPalette: spy('setPalette'),
     setBudget: spy('setBudget'),
+    // The unit square, so a component's data↔world conversion is the identity here and a test
+    // asserting on world coordinates is asserting on what it wrote.
+    frame: () => ({xMin: 0, xMax: 1, yMin: 0, yMax: 1}),
     pick: async (...args: unknown[]) => {
       calls.push({name: 'pick', args});
     },

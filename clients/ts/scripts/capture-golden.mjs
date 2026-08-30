@@ -56,7 +56,7 @@ async function viewport(body) {
   return Buffer.from(await r.arrayBuffer());
 }
 
-const q = meta.quantisation;
+const q = meta.views[0].quantisation; // the frame is the view's (decision 0040)
 const full = [q.x_min, q.y_min, q.x_max, q.y_max];
 // **`layers: []` deliberately**, so these two goldens carry no artifacts frame however many layers
 // the capturing server happens to hold. Omitting it would answer for every layer this principal

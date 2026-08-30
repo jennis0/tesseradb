@@ -671,9 +671,17 @@ def check_meta(canon: Json, declaration: Declaration, reasons: list[str]) -> Non
         reasons.append(
             f"/v1/meta declares {served_shape} where the schema compiled {declared_shape}"
         )
-    extent = canon.payload["quantisation"]
-    if (extent["x_min"], extent["x_max"], extent["y_min"], extent["y_max"]) != GRID_EXTENT:
-        reasons.append(f"/v1/meta quantisation {extent} is not the fixture's extent")
+    # The frame rides with the view it belongs to (decision 0040): every view must state one,
+    # and every one of them must be the fixture's.
+    for view in canon.payload["views"]:
+        extent = view.get("quantisation")
+        if extent is None:
+            reasons.append(f"/v1/meta view {view['id']!r} publishes no quantisation extent")
+            continue
+        if (extent["x_min"], extent["x_max"], extent["y_min"], extent["y_max"]) != GRID_EXTENT:
+            reasons.append(
+                f"/v1/meta view {view['id']!r} quantisation {extent} is not the fixture's extent"
+            )
 
 
 def check_categories(

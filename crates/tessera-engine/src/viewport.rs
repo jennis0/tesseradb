@@ -1063,15 +1063,19 @@ pub struct ItemField {
 
 /// One declared view, as `GET /v1/meta` publishes it.
 ///
-/// **The projection is here and the frame is not, because that is where each is declared**
-/// (`projections.md` §3): a projection belongs to a view, and two views of one bundle may be
-/// projected differently, while [`EngineMeta::quantisation`] is bundle-wide. What a client draws
-/// under a view — the world's aspect, the tile scheme its frame addresses — is a function of the
-/// two together, and the server derives it at the wire (`projections.md` §9).
+/// **The projection and the frame are both here, because that is where each is declared**
+/// (`projections.md` §3, decision 0040): a projection and an extent belong to a view, and two
+/// views of one bundle may be projected — and quantised — differently. What a client draws under
+/// a view is a function of the two together, and the server derives `tile` from them here rather
+/// than at the wire (`projections.md` §9).
 #[derive(Debug, Clone)]
 pub struct MetaView {
     pub id: String,
     pub display_name: String,
+    /// The frame every position in this view is quantised against, immutable for the view's life
+    /// (decision 0040) — what a client decodes a Morton prefix with, and what the write path
+    /// checks a coordinate against.
+    pub quantisation: Quantisation,
     /// What placed every position in this view before the frame did — the closed set of
     /// `projections.md` §5, and [`Projection::None`] for a view that projects nothing.
     pub projection: Projection,
@@ -1102,9 +1106,10 @@ pub struct TileAddress {
 pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
-    /// The declared views, in manifest order.
+    /// The declared views, in manifest order — each with its own frame (decision 0040). There is
+    /// no bundle-level extent: [`EngineMeta::quantisation_of`] answers for a named view, and a
+    /// caller with no view id is asking a question the bundle cannot answer.
     pub views: Vec<MetaView>,
-    pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
     ///
@@ -1140,6 +1145,24 @@ impl EngineMeta {
             .find(|v| v.id == view)
             .map(|v| v.projection)
     }
+
+    /// The frame a named view's positions are quantised against, or `None` for a view this bundle
+    /// does not declare.
+    ///
+    /// **Keyed by view, never bundle-wide** (decision 0040), on exactly the argument
+    /// [`Self::projection_of`] makes for the projection beside it: the extent is the view's, so a
+    /// single answer would have to pick one of two differently framed views, and reading the
+    /// *first* declared view is correct only while a bundle carries one. It fails silently on the
+    /// day one carries two — a region canonicalised against another view's grid, or an ingest
+    /// row's cell checked against a frame it does not live in.
+    ///
+    /// An unknown name is `None` and the caller refuses. There is no default frame.
+    pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.quantisation)
+    }
 }
 
 impl Engine {
@@ -1155,21 +1178,22 @@ impl Engine {
                 .views
                 .iter()
                 // **One derivation of what a client is looking at** (`projections.md` §9). The
-                // scheme is a function of the view's projection and the bundle's frame together —
-                // the projection is declared per view and the frame is not — and it is derived
-                // here rather than at the wire so that the ingest plane, which reads this same
-                // structure, cannot come to a different answer about the same bundle.
+                // scheme is a function of the view's projection and the view's own frame together
+                // — both declared per view — and it is derived here rather than at the wire so
+                // that the ingest plane, which reads this same structure, cannot come to a
+                // different answer about the same bundle.
                 .map(|s| MetaView {
                     id: s.id.clone(),
                     display_name: s.display_name.clone(),
+                    quantisation: s.quantisation,
                     projection: s.projection,
                     tile: tessera_spatial::frame::tile_scheme(
                         s.projection,
                         &Bounds {
-                            x_min: manifest.quantisation.x_min,
-                            x_max: manifest.quantisation.x_max,
-                            y_min: manifest.quantisation.y_min,
-                            y_max: manifest.quantisation.y_max,
+                            x_min: s.quantisation.x_min,
+                            x_max: s.quantisation.x_max,
+                            y_min: s.quantisation.y_min,
+                            y_max: s.quantisation.y_max,
                         },
                     )
                     .map(|(scheme, square)| TileAddress {
@@ -1180,7 +1204,6 @@ impl Engine {
                     }),
                 })
                 .collect(),
-            quantisation: manifest.quantisation,
             // The **full** compiled schema, including `filter`-only columns: `/v1/meta` describes
             // what a caller may declare and supply on the ingest plane, not what occupies a row.
             // The segment-facing readers narrow to `render_scalars` at their own sites.
@@ -1942,7 +1965,16 @@ impl Engine {
         // beside the crossing it feeds. Everything between here and there is deliberately blind
         // to the filter.
 
-        let q = &generation.bundle.manifest.quantisation;
+        // **This view's frame, not the bundle's** (decision 0040): every tile address below is a
+        // fraction of the extent the requested view's positions were quantised against, so
+        // reading another view's would address different ground under the same prefix. An unknown
+        // name refuses rather than defaulting — there is no frame a view that does not exist
+        // could be drawn in.
+        let q = generation
+            .bundle
+            .manifest
+            .quantisation_of(view)
+            .ok_or_else(|| EngineError::UnknownView(view.to_string()))?;
         let extent = Bounds {
             x_min: q.x_min,
             x_max: q.x_max,

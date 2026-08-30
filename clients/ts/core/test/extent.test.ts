@@ -18,8 +18,7 @@ import type {Artifact, Meta, ViewportResponse, ViewportResult} from '../src/type
 const META: Meta = {
   apiVersion: 1,
   idset: 0,
-  views: [{id: 's0', displayName: 'default'}],
-  quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200},
+  views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 100, yMin: 0, yMax: 200}}],
   declaredScalars: [],
   layers: [{name: 'clusters/a', title: 'a', views: ['s0'], membership: 'enumerated', hierarchy: {kind: 'flat', pruneChildren: false}, levels: [], computedContent: ['centroid', 'box'], suppliedContent: [], depsOn: [], version: 1}],
   selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},

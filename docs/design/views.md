@@ -1,9 +1,13 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r6) — promoted 2026-08-30 after the two-lens review (security,
-implementability); the findings and their dispositions are Appendix R's r6 entry. §11's
-amendments to the wider corpus are scheduled work, and the ⊘ markers say what exists meanwhile.
+**Status:** Normative (r7) — **spec §2's per-view extent is built** (r7, 2026-08-30; contracts
+r52, decision 0040): the extent moved off the bundle onto `ViewDescriptor` and into each
+`/v1/meta` `views` entry, with no fallback, and §2's ⊘ marker records what remains instead of
+what was missing. No design changes; the marker does. Promoted at r6 on 2026-08-30 after the
+two-lens review (security, implementability); the findings and their dispositions are Appendix
+R's r6 entry. §11's amendments to the wider corpus are scheduled work, and the ⊘ markers say what
+exists meanwhile.
 One proposal is **not** ruled: the allocation key over several sources (spec §7), which extends
 decision 0073 and travels as its own decision at fold-in.
 **Reads against:** architecture §5.1, §9, §11; contracts §2.1–§2.3, §2.6, §3.2, §3.4;
@@ -56,8 +60,9 @@ non-sentinel, never a stored set.
 > artifact extent, a per-view projection. What has never existed is a bundle with **two** views:
 > `tessera build` materialises exactly one and refuses a declaration with several, so nothing
 > downstream has been run against more than one. The build (spec §7), the second-view join
-> (spec §4), the per-view extent (spec §2), groups and scoped attributes (spec §3, §5) and the
-> gate (spec §6) are what remain, and each is marked where it is claimed.
+> (spec §4), groups and scoped attributes (spec §3, §5) and the gate (spec §6) are what remain,
+> and each is marked where it is claimed. The per-view extent (spec §2) is **built** — it was
+> taken first, so the manifest shape was settled before anything depended on it.
 
 ## 2. A view
 
@@ -73,13 +78,18 @@ quantised against, immutable for the view's life, so a Morton prefix is a perman
 that view. An embedding and a map cannot share a frame without one of them wasting most of the
 grid, which is why the extent is per view and not per bundle.
 
-> **⊘ Specified, not implemented.** `Manifest.quantisation` and `/v1/meta`'s `quantisation` are
-> bundle-wide, and every consumer reads them there. With one view per bundle the bundle's extent
-> *is* the view's, so nothing is wrong today; two views with different extents cannot coexist
-> until the extent moves onto `ViewDescriptor` and the `views` entries of `/v1/meta` — a
-> contracts §2.2/§2.5 and `/v1/meta` change. **It is taken first, ahead of any multi-view
-> build** (owner ruling 2026-08-30): pre-release the format changes freely and the artifacts are
-> recreated (decision 0048), so the manifest shape is settled before anything depends on it.
+> **Implemented 2026-08-30** (contracts r52). `ViewDescriptor.quantisation` and the `quantisation`
+> object inside each `/v1/meta` `views` entry are where the extent lives; the bundle-level field is
+> deleted, with no fallback and no default — a manifest whose view omits it refuses at open. This
+> was taken first, ahead of any multi-view build (owner ruling 2026-08-30), so the manifest shape
+> was settled before anything depended on it; the artifacts are recreated rather than migrated
+> (decision 0048), and `bundle_format` did not move — the required field is the loud guard.
+>
+> **⊘ Two consumers still read one frame for a layer's several views.** A shape publication
+> canonicalises against the layer's *first* view's extent (`canonical_shapes`, and
+> `/control/layers`' own resolution), which is exactly right while a build materialises one view
+> and is what `polygon-membership.md` §4.3 says must eventually be per view: a layer's views must
+> share a projection, but need not share a frame. That waits on a bundle that carries two.
 
 **Addressing.** Every viewer verb names its view in the request body (contracts §3.2); an ingest
 batch names it in `x-tessera-view`, optional only while the bundle has one view (write-path
@@ -736,6 +746,14 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r7 (2026-08-30)** — spec §2's extent move is implemented, and the marker inverted: the
+  bundle-level `Manifest.quantisation` is deleted, `ViewDescriptor` and each `/v1/meta` `views`
+  entry carry the frame, and a manifest whose view omits it refuses at open with no fallback
+  (contracts r52; decision 0040's ruling, unchanged since 2026-08-02). `bundle_format` did not
+  move, by owner direction. What the marker now says is what did *not* move: a shape publication
+  still canonicalises a layer's views against the first one's frame, which
+  `polygon-membership.md` §4.3 wants per view and which waits on a bundle carrying two. No
+  design content changed in this revision.
 - **r6 (2026-08-30)** — the two-lens review. Security found one fail-open (the pinned leaf and
   `filter_operands` escaping the gate — closed, spec §5), one disclosure (the ordinal gap —
   accepted as a register row, spec §9), and the session/creation contradiction (ruled:

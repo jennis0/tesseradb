@@ -214,13 +214,23 @@ export type TileScheme = 'xyz';
 /**
  * One declared view, and what it is a picture of (`projections.md` §9).
  *
- * The four projection fields are **deployment constants, identical for every principal** — the
- * same class as the quantisation beside them — and they are what a host decides a basemap by.
- * `projection.ts` holds the two things a client does with them.
+ * The frame and the four projection fields are **deployment constants, identical for every
+ * principal**, and they are what a host decides a basemap by. `projection.ts` holds the two
+ * things a client does with them.
  */
 export type ViewInfo = {
   id: string;
   displayName: string;
+  /**
+   * The extent this view's positions are quantised against — what every wire coordinate is a
+   * fraction of, and what a client turns a grid unit back into a data coordinate with.
+   *
+   * **Per view and not per bundle** (decision 0040): two views of one bundle may quantise
+   * differently — an embedding and a map cannot share a frame without one of them wasting most
+   * of the grid — so a client holding one extent for the deployment would decode every position
+   * of the second view against the first's ground.
+   */
+  quantisation: Quantisation;
   /** What placed this view's positions; `'none'` for a view that projects nothing. */
   projection: ProjectionName;
   /**
@@ -243,8 +253,8 @@ export type ViewInfo = {
 export type Meta = {
   apiVersion: number;
   idset: number;
+  /** The declared views, each carrying its own frame — see {@link ViewInfo.quantisation}. */
   views: ViewInfo[];
-  quantisation: Quantisation;
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
   /**

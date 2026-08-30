@@ -45,8 +45,7 @@ function fakeModel(initial: Record<string, unknown>): WidgetModel & {sent: Sent[
 const META = {
   apiVersion: 1,
   idset: 0,
-  views: [{id: 's0', displayName: 'default'}],
-  quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1},
+  views: [{id: 's0', displayName: 'default', quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1}}],
   declaredScalars: [],
   layers: [],
   selection: {kMin: 1, kMaxMarks: 500, maxK: 5000, thetaTargetMarks: 10, maxUnderlayOffset: 0, maxCategoryValues: 1000, maxRegionVertices: 10_000, maxRegionCells: 262_144},

@@ -58,7 +58,14 @@ const REPS: usize = 40;
 /// exactly as `Engine::viewport` does (`tiles_for_bbox` then `tile_ranges_all`), against the
 /// bundle opened directly, no session or mask involved at any point.
 fn true_rows_in_ranges(bundle: &Bundle, view: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
-    let q = bundle.manifest.quantisation;
+    // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+    // measures against it.
+    let q = bundle
+        .manifest
+        .views
+        .first()
+        .expect("a built bundle declares a view")
+        .quantisation;
     let extent = Bounds {
         x_min: q.x_min,
         x_max: q.x_max,

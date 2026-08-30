@@ -67,7 +67,14 @@ const WARMUP: usize = 3;
 /// the bundle opened directly with no session involved. See `calibration_sweep.rs`'s module doc
 /// for why `StageTimings::rows_in_ranges` must not be used for this.
 fn true_predictors(bundle: &Bundle, view: &str, zoom: u8, bbox: [f64; 4]) -> (u64, u64) {
-    let q = bundle.manifest.quantisation;
+    // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+    // measures against it.
+    let q = bundle
+        .manifest
+        .views
+        .first()
+        .expect("a built bundle declares a view")
+        .quantisation;
     let extent = Bounds {
         x_min: q.x_min,
         x_max: q.x_max,

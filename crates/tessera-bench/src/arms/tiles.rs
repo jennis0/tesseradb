@@ -46,7 +46,14 @@ pub fn run(ctx: &Context, zooms: &[u8], coverages: &[f64], seed: u64) -> Result<
             continue;
         };
 
-        let q = &bundle.manifest.quantisation;
+        // The frame is the view's (decision 0040); a built bundle declares one, and this harness
+        // measures against it.
+        let q = &bundle
+            .manifest
+            .views
+            .first()
+            .expect("a built bundle declares a view")
+            .quantisation;
         let extent = Bounds {
             x_min: q.x_min,
             x_max: q.x_max,

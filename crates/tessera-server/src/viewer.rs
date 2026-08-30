@@ -178,6 +178,18 @@ async fn meta(
         "views": meta.views.iter().map(|v| serde_json::json!({
             "id": v.id,
             "display_name": v.display_name,
+            // The frame this view's positions are quantised against, and the one a client
+            // decodes its tile prefixes with. **Per view and not bundle-wide** (decision 0040):
+            // two views of one bundle may quantise differently — an embedding and a map cannot
+            // share a frame without one of them wasting most of the grid — so a single top-level
+            // key would have to pick one of them, and a client drawing the other would decode
+            // every position against the wrong ground.
+            "quantisation": {
+                "x_min": v.quantisation.x_min,
+                "x_max": v.quantisation.x_max,
+                "y_min": v.quantisation.y_min,
+                "y_max": v.quantisation.y_max,
+            },
             "projection": v.projection.name(),
             // The ratio the world should be drawn at — 1 for `web_mercator`, `2cos φ₁` for an
             // equirectangular alias, and `null` for `none`, which has no world to draw.
@@ -185,12 +197,6 @@ async fn meta(
             "tile_scheme": v.tile.map(|t| t.scheme),
             "tile": v.tile.map(|t| serde_json::json!({"z": t.z, "x": t.x, "y": t.y})),
         })).collect::<Vec<_>>(),
-        "quantisation": {
-            "x_min": meta.quantisation.x_min,
-            "x_max": meta.quantisation.x_max,
-            "y_min": meta.quantisation.y_min,
-            "y_max": meta.quantisation.y_max,
-        },
         // The column schema, and the **whole** of it: name, storage type, and — for a category —
         // the vocabulary it draws from, that vocabulary's kind and its `visibility`. Without the
         // `category` block a client cannot tell a `u16` category from a `u16` integer, since the
@@ -1011,31 +1017,29 @@ fn run_viewport_stream(
             // A `region` leaf is canonicalised here, against the view's own extent — the one
             // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
             // every coordinate refusal are `422`s before any compute (selection-operand §2).
-            // **The projection of the view this request names**, not the bundle's first. A
-            // `region` leaf declared in longitude and latitude is placed by the same function
-            // that placed the points it selects (`polygon-membership.md` R12), and that function
-            // belongs to the view being filtered — reading any other view's would hold the wrong
-            // rows with nothing saying so.
-            let projection = match meta.projection_of(&req.view) {
-                Some(projection) => projection,
-                None => {
-                    if let Some(tx) = sink.first_tx.take() {
-                        let _ = tx.send(Err(ApiError::Unknown(format!(
-                            "unknown view '{}'",
-                            req.view
-                        ))));
-                    }
-                    return;
+            // **The frame and the projection of the view this request names**, not the bundle's
+            // first: both are declared per view (decision 0040, `projections.md` §3). A `region`
+            // leaf declared in longitude and latitude is placed by the same function that placed
+            // the points it selects (`polygon-membership.md` R12), against the same grid — and
+            // reading any other view's would hold the wrong rows with nothing saying so. Both are
+            // taken from one lookup, so they cannot come from different views.
+            let Some(view) = meta.views.iter().find(|v| v.id == req.view) else {
+                if let Some(tx) = sink.first_tx.take() {
+                    let _ = tx.send(Err(ApiError::Unknown(format!(
+                        "unknown view '{}'",
+                        req.view
+                    ))));
                 }
+                return;
             };
             let region = crate::filter_dto::RegionContext {
                 extent: tessera_engine::shapes::Bounds {
-                    x_min: meta.quantisation.x_min,
-                    x_max: meta.quantisation.x_max,
-                    y_min: meta.quantisation.y_min,
-                    y_max: meta.quantisation.y_max,
+                    x_min: view.quantisation.x_min,
+                    x_max: view.quantisation.x_max,
+                    y_min: view.quantisation.y_min,
+                    y_max: view.quantisation.y_max,
                 },
-                projection,
+                projection: view.projection,
                 max_vertices: state.max_region_vertices,
             };
             match crate::filter_dto::parse(

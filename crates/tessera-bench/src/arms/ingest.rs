@@ -598,7 +598,13 @@ pub fn run_continuous(ctx: &Context, checkpoints: &[u64], k: usize, seed: u64) -
         }
 
         let bundle = open_bundle(&fixture.root)?;
-        let extent_span = bundle.manifest.quantisation.x_max - bundle.manifest.quantisation.x_min;
+        let q = bundle
+            .manifest
+            .views
+            .first()
+            .expect("a built bundle declares a view")
+            .quantisation;
+        let extent_span = q.x_max - q.x_min;
         let view_id = bundle
             .partitions
             .values()

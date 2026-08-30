@@ -128,8 +128,7 @@ describe('/v1/meta', () => {
     const base = {
       api_version: 1,
       idset: 7,
-      views: [{id: 's0', display_name: 'S0', projection: 'none', world_aspect: null, tile_scheme: null, tile: null}],
-      quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536},
+      views: [{id: 's0', display_name: 'S0', quantisation: {x_min: 0, x_max: 65536, y_min: 0, y_max: 65536}, projection: 'none', world_aspect: null, tile_scheme: null, tile: null}],
       declared_scalars: [],
       selection: {
         k_min: 1,

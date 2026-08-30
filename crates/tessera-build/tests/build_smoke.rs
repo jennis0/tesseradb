@@ -218,7 +218,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     assert!(bundle.manifest.partitions[0].required_terms.is_empty());
     assert_eq!(bundle.manifest.views.len(), 1);
     assert_eq!(bundle.manifest.views[0].id, "s0");
-    assert_eq!(bundle.manifest.quantisation.x_max, 1000.0);
+    assert_eq!(bundle.manifest.views[0].quantisation.x_max, 1000.0);
     assert!(!bundle.manifest.data_plugin_hash.is_empty());
     assert_eq!(
         bundle.manifest.provenance["generating_set_choice"],
@@ -641,7 +641,7 @@ fn morton_input_requires_the_identity_extent() {
         got, want,
         "the bundle must reproduce the source Morton codes exactly"
     );
-    assert_eq!(bundle.manifest.quantisation.x_max, 65536.0);
+    assert_eq!(bundle.manifest.views[0].quantisation.x_max, 65536.0);
 }
 
 #[test]

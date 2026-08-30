@@ -1514,12 +1514,6 @@ fn write_manifests(
             compiled
         },
         small_term_threshold: SMALL_TERM_THRESHOLD_DEFAULT,
-        quantisation: Quantisation {
-            x_min: args.extent.x_min,
-            x_max: args.extent.x_max,
-            y_min: args.extent.y_min,
-            y_max: args.extent.y_max,
-        },
         entity_id_high_water: n,
         identity: IdentityDescriptor {
             construction: IDENTITY_CONSTRUCTION.to_string(),
@@ -1531,7 +1525,15 @@ fn write_manifests(
         views: vec![ViewDescriptor {
             id: args.view_id.clone(),
             display_name: args.view_id.clone(),
-            // What placed these positions before `quantisation` did. A bundle that carries
+            // The frame this view's positions are quantised against — the view's own, not the
+            // bundle's, because two views of one bundle may quantise differently (decision 0040).
+            quantisation: Quantisation {
+                x_min: args.extent.x_min,
+                x_max: args.extent.x_max,
+                y_min: args.extent.y_min,
+                y_max: args.extent.y_max,
+            },
+            // What placed these positions before the frame did. A bundle that carries
             // projected positions and cannot say so is one the write path and the differential
             // oracle both have to be told about out of band (`projections.md` §3).
             projection: args.projection,

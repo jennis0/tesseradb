@@ -28,6 +28,7 @@ import type {
   FilterExpr,
   ItemDetail,
   Meta,
+  Quantisation,
   RegionVerdict,
   Shape,
   ShapeKind,
@@ -286,6 +287,14 @@ export interface Store {
   setColourBy(column: string | null): void;
   setPalette(kind: PaletteKind): void;
   setBudget(budget: number): void;
+  /**
+   * The extent this store's view is quantised against, or `null` before `meta` has arrived.
+   *
+   * **A view's, not the bundle's** (decision 0040) — a host converting between data coordinates
+   * and the world space the camera works in needs the frame of the view it is looking at, and a
+   * second view of the same bundle may declare another.
+   */
+  frame(): Quantisation | null;
   pick(id: bigint): Promise<void>;
   openArtifact(id: bigint): Promise<void>;
   /**
@@ -369,7 +378,8 @@ export function createStore(options: StoreOptions): Store {
   let contentKeyAtFrame = '';
   let selection: SelectionShape | null = null;
 
-  // Replica and the machinery on top of it are built after `meta`, which carries the quantisation.
+  // Replica and the machinery on top of it are built after `meta`, which carries the views and
+  // their frames.
   let replica: Replica | null = null;
   let presenter: Presenter | null = null;
   let channel: ArtifactChannel | null = null;
@@ -439,6 +449,28 @@ export function createStore(options: StoreOptions): Store {
     return refusal.code === 'bad-credential' && tokenEverUsed;
   }
 
+  /**
+   * The frame the store's current view is quantised against, or `null` before `meta` has arrived
+   * — **the view's, not the bundle's** (decision 0040): every conversion between wire grid units
+   * and data coordinates is a fraction of *this* view's extent, and a second view of the same
+   * bundle may declare another.
+   */
+  function frameOrNull(): Quantisation | null {
+    return meta?.views.find((v) => v.id === viewId)?.quantisation ?? null;
+  }
+
+  /**
+   * {@link frameOrNull} where the caller has already established that `meta` is in hand.
+   *
+   * It throws rather than returning a default because there is no default to return: a guessed
+   * extent draws every point in the wrong place, and nothing downstream would notice.
+   */
+  function frame(): Quantisation {
+    const q = frameOrNull();
+    if (!q) throw new Error(`the bundle declares no view '${viewId}'`);
+    return q;
+  }
+
   // ---- session bring-up ---------------------------------------------------------------------
 
   async function warm(): Promise<void> {
@@ -484,7 +516,7 @@ export function createStore(options: StoreOptions): Store {
           onPart
         );
       },
-      meta.quantisation,
+      frame(),
       {
         view: viewId,
         table,
@@ -518,7 +550,7 @@ export function createStore(options: StoreOptions): Store {
     channel = new ArtifactChannel(client, {
       clock,
       view: viewId,
-      quantisation: meta.quantisation,
+      quantisation: frame(),
       token: () => token,
       // The drawn depth, from the projection the frame handler has just replaced — the presenter's
       // own handle is assigned after it hands the frame over, so it is one frame behind here.
@@ -903,7 +935,7 @@ export function createStore(options: StoreOptions): Store {
   // ---- setView's conversion (§4) ------------------------------------------------------------
 
   function toDriverView(input: ViewInput): DriverViewState & {width: number; height: number} {
-    const q = meta!.quantisation;
+    const q = frame();
     const [dx0, dy0, dx1, dy1] = input.bbox;
     const [wx0, wy0] = dataToWorldXY(dx0, dy0, q);
     const [wx1, wy1] = dataToWorldXY(dx1, dy1, q);
@@ -1203,7 +1235,7 @@ export function createStore(options: StoreOptions): Store {
 
   function worldOfShape(shape: SelectionShape): WorldShape | null {
     if (!meta) return null;
-    const q = meta.quantisation;
+    const q = frame();
     if (shape.kind === 'artifact') return {kind: 'artifact'};
     if (shape.kind === 'box') {
       const [x0, y0] = dataToWorldXY(shape.bbox[0], shape.bbox[1], q);
@@ -1238,7 +1270,7 @@ export function createStore(options: StoreOptions): Store {
     }
     const extent = shape.kind === 'artifact' ? extentOf(shape.id) : null;
     if (!extent || !meta) return null;
-    const q = meta.quantisation;
+    const q = frame();
     const [x0, y0] = dataToWorldXY(extent[0], extent[1], q);
     const [x1, y1] = dataToWorldXY(extent[2], extent[3], q);
     return [Math.min(x0, x1), Math.min(y0, y1), Math.max(x0, x1), Math.max(y0, y1)];
@@ -1336,7 +1368,7 @@ export function createStore(options: StoreOptions): Store {
   }
 
   function dataXY(worldX: number, worldY: number): [number, number] {
-    const q = meta!.quantisation;
+    const q = frame();
     return [
       q.xMin + (worldX / WORLD_SIZE) * (q.xMax - q.xMin),
       q.yMin + (worldY / WORLD_SIZE) * (q.yMax - q.yMin)
@@ -1403,6 +1435,7 @@ export function createStore(options: StoreOptions): Store {
     setColourBy,
     setPalette,
     setBudget,
+    frame: frameOrNull,
     pick,
     openArtifact,
     needShape,

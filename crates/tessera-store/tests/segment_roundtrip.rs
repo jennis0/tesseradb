@@ -429,7 +429,6 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
         "created_at": "2026-07-28T00:00:00Z",
         "data_plugin_hash": tessera_plugin::Passthrough::new().data_plugin_hash(),
         "small_term_threshold": 32,
-        "quantisation": {"x_min": 0.0, "x_max": 1.0, "y_min": 0.0, "y_max": 1.0},
         "entity_id_high_water": 0,
         "views": [],
         "partitions": [],
@@ -438,6 +437,40 @@ fn a_manifest_without_an_identity_object_is_a_typed_error() {
     let err = serde_json::from_value::<Manifest>(json)
         .expect_err("a manifest without `identity` must fail to deserialise, not default it");
     let _ = err; // a typed deserialisation error, not a defaulted/half-read Manifest.
+}
+
+#[test]
+fn a_view_without_a_quantisation_extent_is_a_typed_error() {
+    // Decision 0040: the extent belongs to the view, and there is no bundle-level fallback to
+    // read one from. A view whose frame went missing is malformed, not unframed — every position
+    // it holds is a fraction of *some* extent, and a reader that guessed one would mis-decode all
+    // of them silently. Pre-release there is no older shape to tolerate (decision 0048), so the
+    // missing field refuses at open. This is the same rule `projection` beside it keeps.
+    let json = serde_json::json!({
+        "bundle_format": 4,
+        "created_at": "2026-08-30T00:00:00Z",
+        "data_plugin_hash": tessera_plugin::Passthrough::new().data_plugin_hash(),
+        "vocabularies": [],
+        "small_term_threshold": 32,
+        "entity_id_high_water": 0,
+        "identity": {
+            "construction": "siphash-2-4",
+            "rounds": 1,
+            "key": "0123456789abcdef0123456789abcdef",
+            "shard_id": 0,
+            "idset": 1
+        },
+        "views": [{"id": "s0", "display_name": "s0", "projection": "none"}],
+        "partitions": [],
+        "files": {}
+    });
+    let err = serde_json::from_value::<Manifest>(json).expect_err(
+        "a view without `quantisation` must fail to deserialise, not fall back to a bundle extent",
+    );
+    assert!(
+        err.to_string().contains("quantisation"),
+        "the refusal must name the missing field, got: {err}"
+    );
 }
 
 /// Write `bytes` to `path`, mmap it, and wrap the mapping as an arrow `Buffer` without copying
