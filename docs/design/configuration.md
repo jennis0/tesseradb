@@ -75,6 +75,7 @@ scores   = "sentiment.parquet"
 |---|---|---|
 | `source` | O | a `[sources]` key, taken by a `[[view]]` or an `[[attribute]]` that names none |
 | `entity_id_field` | D `entity_id` | the column an entity id is read from, wherever one is read |
+| `allocation_view` | R when several views are declared | the view whose Morton code breaks entity-id ties within a signature group at a build ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md)); with one view, that view. ⊘ Not read yet — the multi-view build is unbuilt (`views.md` §7) |
 
 **A `source` names a key, never a path, and there is no fallback between the two.** A name
 `[sources]` does not carry is refused, listing the names that do exist. Reading an unmatched name

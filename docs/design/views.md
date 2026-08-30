@@ -8,8 +8,7 @@ what was missing. No design changes; the marker does. Promoted at r6 on 2026-08-
 two-lens review (security, implementability); the findings and their dispositions are Appendix
 R's r6 entry. §11's amendments to the wider corpus are scheduled work, and the ⊘ markers say what
 exists meanwhile.
-One proposal is **not** ruled: the allocation key over several sources (spec §7), which extends
-decision 0073 and travels as its own decision at fold-in.
+Every ruling is made; decision 0112 (the allocation anchor view) closed the last.
 **Reads against:** architecture §5.1, §9, §11; contracts §2.1–§2.3, §2.6, §3.2, §3.4;
 [`configuration.md`](configuration.md) §1, §8; [`projections.md`](projections.md);
 [`filter-index.md`](filter-index.md) §7; [`per-point-attributes.md`](per-point-attributes.md)
@@ -489,15 +488,13 @@ that disagrees between appearances (it is the entity's label, not the row's), an
 `(external_id, view)`, and the same entity in two views is the ordinary case rather than a
 duplicate.
 
-**The allocation key over several sources is a proposal, not a ruling.** Decision 0073 orders
-entity ties by `(signature, morton, source ordinal)`; with several point sources the Morton
-code is per view and the source ordinal is no longer unique, so the key must be re-grounded
-before the first two-view build — the ids it assigns are permanent (I9) and the choice is
-irreversible. Proposed: `(signature, morton in the first-declared view that holds the entity,
-external_id bytes)` — the first-declared view plays the role the single source played, an
-entity in no declared plain view takes its first group's first view, and the external id is the
-tie-break that needs no ordinal. It travels as its own decision extending 0073 at fold-in, and
-nothing else here depends on which key is chosen.
+**The allocation key over several sources** ([decision 0112](../decisions/0112-the-anchor-view-orders-a-signature-groups-ids.md),
+extending 0073): within a signature group, ties order by the item's Morton code in the
+**declared anchor view** — `[defaults].allocation_view`, required when more than one view is
+declared, refused absent naming the candidates — then by `external_id` bytes. An item absent
+from the anchor takes its Morton code in the first-declared view that holds it. Explicit rather
+than positional, so reordering declaration blocks cannot silently re-key a rebuild; the ids are
+permanent (I9), which is why the anchor is a declaration and not a default.
 
 **Populate at ingest** is spec §2's addressing and spec §4's join rule, for a plain view and a
 group's view alike, after the create operation of spec §3.2 where the view is new.
@@ -598,7 +595,7 @@ No new verb; one new accepted register row (the ordinal gap), and the C15/C17 no
 | Compaction | Reclamation of a dropped view; the attribute pass over a family |
 | Appendix C | **New accepted row: the ordinal gap** (spec §9); C17 note (cross-view linkage), C15 note (a group's view's size via timing); the `views` field and the scoped `filter_operands` entries of `/v1/meta` gate-filtered under C11's precedent |
 | Conformance | A two-view differential: the oracle answers per view; the pinned-leaf cases, the gate-failed pin among them; the gate's work-indistinguishability |
-| Decisions | The allocation key over several sources (spec §7) — its own decision, extending 0073 |
+| Decisions | ~~The allocation key~~ — ruled, decision 0112 |
 
 ## 12. Rulings
 
@@ -613,7 +610,8 @@ gate (spec §5); the ordinal gap is accepted as an Appendix C row (spec §9); th
 set is fixed for the session's life and a new view waits for re-authorisation (spec §6); the
 key is required and the ordinal is an alias; roster records are immutable.
 
-Open: the allocation key over several sources (spec §7) — proposed, decided at fold-in.
+Made 2026-08-30 (owner): the allocation key — a declared anchor view's Morton code then
+`external_id` bytes, within the signature group (decision 0112). Nothing is open.
 
 ## Appendix A — a declaration, written out
 
@@ -759,6 +757,9 @@ each view under spec §4's rule.
   still canonicalises a layer's views against the first one's frame, which
   `polygon-membership.md` §4.3 wants per view and which waits on a bundle carrying two. No
   design content changed in this revision.
+- **r8 (2026-08-30)** — decision 0112 recorded (the anchor view orders a signature group's
+  ids); the extent examples corrected to the surface's own spelling and the `members`-group
+  roster contradiction settled the parser's way, both found by the build-surface implementation.
 - **r6 (2026-08-30)** — the two-lens review. Security found one fail-open (the pinned leaf and
   `filter_operands` escaping the gate — closed, spec §5), one disclosure (the ordinal gap —
   accepted as a register row, spec §9), and the session/creation contradiction (ruled:
