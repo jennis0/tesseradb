@@ -8,9 +8,63 @@ use tessera_types::{EntityId, Handle};
 use tessera_wire::handles::HandleTable;
 use tessera_wire::{
     artifacts_frame, artifacts_identity_frame, points_frame, split_frames, sub_cells_frame,
-    tiles_frame, trailer_frame, ArtifactRow, ScalarColumn, FRAME_ARTIFACTS, FRAME_POINTS,
-    FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
+    tiles_frame, trailer_frame, ArtifactRow, ScalarColumn, FRAME_ARTIFACTS, FRAME_HEADER_BYTES,
+    FRAME_POINTS, FRAME_SUB_CELLS, FRAME_TILES, FRAME_TRAILER,
 };
+
+/// The frame header's literal bytes, against `contracts §3.2`: five bytes of `u8 kind` then
+/// `u32 LE payload length`, in that order, and the payload immediately after them. Every other
+/// assertion in this file reaches a frame through `split_frames`, the reader half of the pair
+/// that writes it, so the two agree by construction and the layout itself is pinned by nothing
+/// on this side. The second reader is the TypeScript client, which decodes little-endian
+/// independently (`clients/ts/core/src/frame.ts`); a change here that both Rust halves accept
+/// breaks it at runtime.
+///
+/// Mutations this kills: writing or reading the length big-endian; emitting the length before
+/// the kind; changing the header's width.
+#[test]
+fn the_frame_header_is_a_kind_byte_then_a_little_endian_length() {
+    // Two frames, so the second's position also pins the header width and the length's meaning.
+    let tiles = tiles_frame(&[30, 31], &[10, 5], &[10, 5], &[2, 1]);
+    let mut body = tiles.clone();
+    body.extend_from_slice(&trailer_frame(b"{}"));
+
+    assert_eq!(
+        FRAME_HEADER_BYTES, 5,
+        "the header is one kind byte and four length bytes"
+    );
+
+    let tiles_payload_len = tiles.len() - FRAME_HEADER_BYTES;
+    // Non-vacuity: a length whose two byte orders coincide would pin nothing.
+    let len32 = u32::try_from(tiles_payload_len).unwrap();
+    assert_ne!(
+        len32.to_le_bytes(),
+        len32.to_be_bytes(),
+        "the fixture's payload length must distinguish the two byte orders, or this test \
+         discriminates nothing"
+    );
+
+    assert_eq!(body[0], FRAME_TILES, "byte 0 of a frame is its kind");
+    assert_eq!(
+        &body[1..5],
+        &len32.to_le_bytes(),
+        "bytes 1..5 are the payload length, little-endian"
+    );
+
+    // The payload begins immediately after the header, and the next frame's header begins
+    // immediately after the payload — so the length counts payload bytes and nothing else.
+    let trailer_at = FRAME_HEADER_BYTES + tiles_payload_len;
+    assert_eq!(
+        body[trailer_at], FRAME_TRAILER,
+        "the next frame's kind byte follows the previous frame's payload with no padding"
+    );
+    let trailer_len = u32::from_le_bytes(body[trailer_at + 1..trailer_at + 5].try_into().unwrap());
+    assert_eq!(
+        trailer_at + FRAME_HEADER_BYTES + trailer_len as usize,
+        body.len(),
+        "the declared lengths account for the whole body"
+    );
+}
 
 /// (a) Handle stability + per-session isolation: the same entity, minted in two independent
 /// tables, gets a handle stable within each table but not necessarily equal across tables.
@@ -197,17 +251,30 @@ fn the_points_frame_identity_column_is_tessera_id() {
     );
 }
 
-/// `IdentityKey` inverts every `tessera_id`. It is not secret against a bundle-holder (who can
-/// already invert every id trivially) but is secret against a client; leaking it on the viewer
-/// plane would hand a client entity space, which is exactly what I10 forbids.
-///
-/// Enforced structurally here, not by a runtime byte-scan: `tessera-wire` has no dependency on
-/// the module that defines `IdentityKey` (`tessera_types::identity`) and therefore cannot
-/// construct, hold, or serialise one in the first place — there is nothing this crate's public
-/// API could leak. `scripts/check-layers.sh` greps this crate's source for the type name so a
-/// future dependency edge cannot reintroduce the possibility silently.
-#[test]
-fn payload_bytes_never_contain_the_identity_key() {}
+// **The identity key on the viewer plane, and why no test here asserts it.**
+//
+// `IdentityKey` inverts every `tessera_id`. It is not secret against a bundle-holder (who can
+// already invert every id trivially) but is secret against a client; leaking it on the viewer
+// plane would hand a client entity space, which is exactly what I10 forbids.
+//
+// Nothing in `crates/tessera-wire/src/` constructs, holds or serialises an `IdentityKey`. That
+// is a property of the code as written and **not** of the dependency graph, which permits one:
+// this crate depends on `tessera-types`, `identity` is re-exported from that crate's root, and
+// `IdentityKey::from_hex` is public — a function here that parsed a key and derived a
+// `tessera_id` would compile. The mechanical guard is `scripts/check-layers.sh`'s grep for the
+// type name over this crate's source, which is tight (the only route to a key is `from_hex`,
+// which cannot be called without naming the type) and is the *only* one. It runs in a different
+// CI job from the one that runs these tests, so a change that dropped it would not be noticed
+// here.
+//
+// The byte-level evidence for I10 is the conformance suite's byte-scanner (`conformance.md`
+// §4.3), which §4.6 cites as the I10 row's evidence — not anything in this file. A `#[test]`
+// asserting the property from inside this crate would have to supply the key material itself,
+// since the frame builders take `u64` columns and `&str` layer names, so the assertion would be
+// about the fixture rather than about the code. `crates/tessera-types/tests/compile_fail.rs`'s
+// module doc has already ruled on that shape in the opposite direction, refusing to write an I8
+// placeholder because "a placeholder asserting that some stand-in type is immutable would report
+// green while checking nothing".
 
 /// The requested-but-empty underlay (contracts §3.2's r12 rule, carried into the framing): a
 /// present kind-2 frame whose payload is a schema-only, zero-row stream — decodable, zero rows,
@@ -394,9 +461,24 @@ fn the_artifacts_frame_carries_a_shape_as_parts_of_rings() {
     let (xs, ys) = (axis("shape_x"), axis("shape_y"));
     // Part 0 is an outer with one hole; part 1 is a second outer — a hole and a second part are
     // different things to a renderer, and the nesting keeps them apart.
-    assert_eq!(xs[0], Some(vec![vec![vec![1, 3, 5], vec![70, 90, 110, 130]], vec![vec![7, 8, 9]]]));
-    assert_eq!(ys[0], Some(vec![vec![vec![2, 4, 6], vec![80, 100, 120, 140]], vec![vec![1, 1, 2]]]));
-    assert_eq!(xs[1], None, "a layer with no drawn geometry is null, not an empty list");
+    assert_eq!(
+        xs[0],
+        Some(vec![
+            vec![vec![1, 3, 5], vec![70, 90, 110, 130]],
+            vec![vec![7, 8, 9]]
+        ])
+    );
+    assert_eq!(
+        ys[0],
+        Some(vec![
+            vec![vec![2, 4, 6], vec![80, 100, 120, 140]],
+            vec![vec![1, 1, 2]]
+        ])
+    );
+    assert_eq!(
+        xs[1], None,
+        "a layer with no drawn geometry is null, not an empty list"
+    );
     assert_eq!(ys[1], None);
 }
 
@@ -446,7 +528,10 @@ fn the_artifacts_frame_carries_the_filter_bit_with_null_meaning_no_filter() {
     );
     let field = schema.field_with_name("matched").unwrap();
     assert_eq!(field.data_type(), &DataType::Boolean);
-    assert!(field.is_nullable(), "null is *the request carried no filter*");
+    assert!(
+        field.is_nullable(),
+        "null is *the request carried no filter*"
+    );
 
     let column = batch
         .column_by_name("matched")
@@ -483,7 +568,9 @@ fn layer_at(batch: &arrow::record_batch::RecordBatch, row: usize) -> String {
         .as_any()
         .downcast_ref::<arrow::array::StringArray>()
         .unwrap();
-    values.value(column.key(row).expect("layer is never null")).to_string()
+    values
+        .value(column.key(row).expect("layer is never null"))
+        .to_string()
 }
 
 /// **The full frame's fixed columns sit at fixed positions and the shape columns trail** —

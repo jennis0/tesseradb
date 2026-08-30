@@ -36,3 +36,6 @@ icu_segmenter = "=2.2"
 
 [dev-dependencies]
 serde_json = "1"
+# The golden vectors are digested against `ANALYSER_VECTOR_DIGESTS` rather than only read, so the
+# test needs the workspace hash. Dev-only: nothing in the analyser itself hashes anything.
+sha2 = { workspace = true }

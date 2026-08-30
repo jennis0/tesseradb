@@ -27,7 +27,7 @@ mod ring;
 use ring::{contains, convex_hull, double_area};
 
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn what_a_triangulation_costs_against_the_dig() {
     let corpus = corpus::open();
     let mut rows: Vec<Row> = Vec::new();

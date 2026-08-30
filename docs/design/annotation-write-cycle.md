@@ -171,7 +171,7 @@ per layer:
 | Mode | A member is deleted | The kind of object it is for |
 |---|---|---|
 | **Strict** *(default)* | the fold **drops the supplied content and its generating set**; the artifact — no longer declaring that content — thereafter serves whole with its derived content: existence, masked count, recomputed geometry | anything whose text was written from material including the deleted document: a summary, an authored description, a label over a curated set |
-| **Permissive** | the fold **removes the member from the generating set** and the content goes on serving | a toponymy label over a clustering — the sample is statistical, and one document leaving changes nothing the label asserted |
+| **Permissive** | the fold **removes the member from the generating set** and the content goes on serving — unless the removal empties the set, in which case the content is withdrawn as under strict (§2.1's limit case, [decision 0107](../decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)) | a toponymy label over a clustering — the sample is statistical, and one document leaving changes nothing the label asserted |
 
 **Membership is not in scope and never was.** A deleted point simply leaves the artifact's
 membership, the masked count falls, and derived content recomputes without it — spec §3.1's delete
@@ -213,6 +213,23 @@ happens to the content that set generated: **strict** drops it along with the se
 keeps it and serves it from the smaller set. In both cases the artifact's identity is untouched and
 it serves whole again from the fold, and in both cases nothing durable still names the deleted
 entity.
+
+**Permissive says a content survives its survivors, and with none it does not survive**
+*(owner ruling, 2026-08-30; [decision 0107](../decisions/0107-a-generating-set-with-no-survivors-is-not-served.md))*.
+Where the deletion takes a content's **last** source, the fold withdraws the content rather than
+leaving it on the empty set — and the artifact then follows §2.1's own rule, absent until the caller
+republishes if its layer declares supplied content and this was the last of it. The reason is the
+one the publication gate already states: containment is a subset test, and **the empty set is
+contained in every mask**, so a content retained on it would be served to every principal who can
+see any member of the artifact — corpus-derived text drawn from a document they were never entitled
+to, which is exactly what C7's bound excludes and exactly what an empty set removes the bound from.
+Publication refuses such content on the way in for that reason; the fold was the only other route to
+the state. The outcome is identical to a strict withdrawal, so nothing new is expressible: what
+permissive changes remains what it says above, for every case where a member remains.
+
+**Content requiring only inherited visibility is untouched by any of this.** It carries no
+generating set at all — publication refuses one, C28 — so it names none of the entities a fold
+retires and neither the shrink nor the withdrawal reaches it.
 
 **That second property is the whole of [decision 0072](../decisions/0072-entity-ids-are-slots-and-are-reused-after-a-fold.md)'s
 reconciliation.** A freed slot is dangerous only while something durable names it and could resolve
@@ -777,6 +794,17 @@ For mechanical integration; neither sibling document is edited here.
   control verb is wanted is unexamined. The fold's report (spec §4.2) supplies the N.
 
 ## Appendix R
+
+**2026-08-30 — §2.1's shrink gains its limit case, and the fold no longer produces a set every
+principal satisfies** ([decision 0107](../decisions/0107-a-generating-set-with-no-survivors-is-not-served.md),
+owner ruling). §2.1 described permissive as serving *a principal satisfying the survivors* and said
+nothing about there being none; the code shrank the set and kept the content, and an empty
+generating set is contained in every mask, so the corpus-derived text served to everyone who could
+see any member. Found by a test-quality audit rather than by review. The publication gate already
+refused the same state on the way in, with the same reasoning, which is what made this a gap in the
+fold rather than a question about the mode: the fold now withdraws such content, the artifact
+follows the rule it already has, and no new outcome or stored bit is introduced. Appendix C's C7
+carries the same sentence.
 
 **2026-08-20 — the growth the ruled row promised is built, and §3.4's unbuilt marker moves to the wire.** What
 an ingested point needed in order to join an enumerated membership was machinery that did not exist:

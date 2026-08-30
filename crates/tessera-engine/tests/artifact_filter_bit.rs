@@ -239,8 +239,7 @@ fn a_filter_moves_neither_the_served_set_nor_the_masked_count() {
         for layer in [BY_LIST, BY_RULE] {
             for (zoom, bbox) in viewports() {
                 let plain = served(&fx.engine, grant, layer, zoom, bbox, None);
-                let filtered =
-                    served(&fx.engine, grant, layer, zoom, bbox, Some(bay_is(BAY)));
+                let filtered = served(&fx.engine, grant, layer, zoom, bbox, Some(bay_is(BAY)));
                 let empty = served(&fx.engine, grant, layer, zoom, bbox, Some(tag_is_absent()));
                 let where_ = format!("{layer}/{grant} at zoom {zoom} over {bbox:?}");
 
@@ -482,4 +481,153 @@ fn a_label_carries_its_targets_bit() {
 
     // And with no filter there is still no question, on a label as on anything else.
     assert!(both(None).values().all(|(_, m)| m.is_none()));
+}
+
+// ---------------------------------------------------------------------------------------------
+// I12's third conjunct: containment is what it is, filter or no filter.
+// ---------------------------------------------------------------------------------------------
+
+const DESCRIBED: &str = "case/described";
+
+/// A layer carrying **corpus-derived** supplied content: `All`, so a served description is one
+/// whose generating set the viewer holds entire.
+///
+/// The distinction this layer exists to make is between a layer's content *schema* and a published
+/// artifact's `generated_from`. Every other artifact reachable under a filter in this repository
+/// carries an empty generating set — inherited content must not carry one (C28) — so containment
+/// answers `NothingToContain` and the conjunct is never evaluated at all.
+fn described() -> LayerDeclaration {
+    LayerDeclaration {
+        name: DESCRIBED.into(),
+        title: Some("described".into()),
+        views: vec!["s0".into()],
+        membership: MembershipSource::Enumerated,
+        value_set: Default::default(),
+        visibility: None,
+        artifact_visibility: tessera_types::layer::ArtifactVisibility::inherited(),
+        require_member_visibility: None,
+        hierarchy: Hierarchy {
+            kind: HierarchyKind::Flat,
+            prune_children: false,
+        },
+        content: ContentDeclaration {
+            computed: Vec::new(),
+            supplied: vec![SuppliedContent {
+                name: "topic".into(),
+                ty: "text".into(),
+                require_member_visibility: tessera_types::layer::SuppliedRequirement::All,
+            }],
+            withdraw_on_member_deletion: true,
+        },
+        depends_on: Vec::new(),
+        levels: Vec::new(),
+        layout: None,
+        shape: None,
+    }
+}
+
+/// What the described layer serves one principal over the whole map: key against masked count and
+/// the description itself, which is the served form of the containment verdict.
+fn described_served(
+    engine: &Engine,
+    grant: &str,
+    filter: Option<FilterExpr>,
+) -> BTreeMap<String, (u64, Vec<String>)> {
+    let session = engine.authorise(&credential(grant)).unwrap();
+    let names = [DESCRIBED];
+    let mut request = ViewportRequest::new("s0", 0, WHOLE_MAP, N as usize);
+    request.layers = tessera_engine::LayerSelection::Named(&names);
+    request.filter = filter;
+    engine
+        .viewport(&session, request)
+        .expect("a viewport over the fixture")
+        .artifacts
+        .into_iter()
+        .map(|a| {
+            (
+                a.key.expect("this layer publishes keyed artifacts"),
+                (a.masked_count, a.content),
+            )
+        })
+        .collect()
+}
+
+/// **I12's third conjunct, at the one place it can be evaluated.** An artifact's existence verdict,
+/// its masked count *and its containment* are identical with and without a filter, because all
+/// three run against `M_auth` alone.
+///
+/// The fixture is what makes the claim testable: one artifact per principal, each carrying a
+/// generating set drawn **across** the filtered value — half its members carry `BAY` and half do
+/// not — and each drawn inside that principal's own coverage, so the description is served
+/// unfiltered and there is something for a filter to take away.
+///
+/// **Mutations this kills:** composing the filter into the mask handed to
+/// `ArtifactRows::satisfied_rank` — containment then fails for a viewer whose filter excludes a
+/// generating-set member, and the artifact and its description appear and disappear as that viewer
+/// types. Fail-closed rather than fail-open, and still a filter deciding what `M_auth` decides.
+#[test]
+fn a_filter_moves_neither_containment_nor_the_description_it_serves() {
+    let fx = fixture();
+    fx.engine.register_layer(described()).unwrap();
+
+    for grant in grants() {
+        let parsed = Grant::parse(grant).expect("the grant parses");
+        let members: Vec<u64> = (0..N)
+            .filter(|e| fx.corpus.visible(*e, &parsed))
+            .take(200)
+            .collect();
+        let (with_bay, without): (Vec<u64>, Vec<u64>) = members
+            .iter()
+            .copied()
+            .partition(|e| fx.corpus.item(*e).bay == Some(BAY));
+        assert!(
+            with_bay.len() >= 5 && without.len() >= 5,
+            "{grant}: the generating set must be drawn across the filtered value — a set every \
+             member of which the filter admits could not tell a filtered containment from an \
+             unfiltered one, and this test would prove nothing"
+        );
+        let generating: Vec<u64> = with_bay
+            .iter()
+            .take(5)
+            .chain(without.iter().take(5))
+            .copied()
+            .collect();
+        fx.engine
+            .publish_artifacts(
+                DESCRIBED.into(),
+                0,
+                vec![IncomingArtifact::with_content(
+                    Some(format!("g{}", grant.replace(',', "-"))),
+                    fx.members(members.iter().copied()),
+                    vec![IncomingContent::new(
+                        vec![format!("generated from {grant}")],
+                        fx.members(generating.iter().copied()),
+                    )],
+                )],
+            )
+            .expect("a described artifact publishes");
+    }
+
+    for grant in grants() {
+        let plain = described_served(&fx.engine, grant, None);
+        let filtered = described_served(&fx.engine, grant, Some(bay_is(BAY)));
+        let empty = described_served(&fx.engine, grant, Some(tag_is_absent()));
+
+        assert!(
+            plain.values().any(|(_, content)| !content.is_empty()),
+            "{grant} is served no description at all unfiltered, so the comparisons below are \
+             vacuous"
+        );
+        assert_eq!(
+            plain, filtered,
+            "{grant}: a filter moved which artifacts are served, their counts, or which \
+             description they carry — containment is a question about `M_auth` and a filter is \
+             not part of it"
+        );
+        assert_eq!(
+            plain, empty,
+            "{grant}: a filter matching nothing still serves every artifact with its description \
+             unchanged"
+        );
+    }
 }

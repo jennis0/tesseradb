@@ -337,4 +337,86 @@ mod tests {
             assert_eq!(rebuilt.finish(), want, "sparse={sparse}");
         }
     }
+
+    /// **The block path is taken at all**, which every test above is blind to: they compare the
+    /// finished bitmap with one built by insertion, and an implementation that quietly *became*
+    /// that insertion would satisfy all of them while giving up the whole reason this crate
+    /// exists — `CLAUDE.md`'s measured cost model, bitmap operations costing O(containers
+    /// touched) rather than O(cardinality). The projection measured 8,267 ms against 1,277 ms at
+    /// 10⁹ on exactly that difference.
+    ///
+    /// Asserted structurally rather than by timing: `correctness-suite.md` §17 keeps timing
+    /// assertions out of tests that run on developer machines. The observables are the staged
+    /// container itself — one descriptor per non-empty block, a payload of exactly the width its
+    /// cardinality selects, and `out` still **empty**, because a sink that inserted values would
+    /// have populated it before any stream was assembled — and then the stream croaring is
+    /// actually handed, which must deserialise, since `flush`'s fallback to `rebuild_staged` is
+    /// the per-value path this test exists to keep off the hot route.
+    ///
+    /// Mutations this kills: `push_block` rewritten to stamp entities into `out` directly;
+    /// emitting a bitset payload for an array container or the reverse; a descriptor or offset
+    /// that disagrees with the payload, which croaring refuses and `flush` then answers correctly
+    /// but slowly.
+    #[test]
+    fn a_block_is_staged_as_a_container_rather_than_inserted_value_by_value() {
+        let mut sink = Sink::new();
+        let mut want = Bitmap::new();
+        // Two blocks, one either side of the array/bitset threshold, and fewer than `STAGE` so
+        // nothing flushes underneath the assertions.
+        for (key, step) in [(0u16, 2usize), (5u16, 1_000usize)] {
+            let mut words = [0u64; WORDS];
+            let mut card = 0u32;
+            for slot in (0..BLOCK).step_by(step) {
+                words[slot >> 6] |= 1u64 << (slot & 63);
+                card += 1;
+                want.add((u32::from(key) << 16) + slot as u32);
+            }
+            sink.push_block(key, card, &words);
+        }
+
+        assert_eq!(
+            sink.keys,
+            vec![0u16, 5],
+            "one descriptor per non-empty block"
+        );
+        assert!(
+            sink.cards[0] > ARRAY_MAX && sink.cards[1] <= ARRAY_MAX,
+            "the fixture must straddle the threshold, or this test proves nothing: {:?}",
+            sink.cards
+        );
+        assert_eq!(
+            sink.payload.len(),
+            WORDS * 8 + 2 * sink.cards[1] as usize,
+            "the payload must be one bitset container's words followed by one array container's \
+             u16s — a sink that inserted its entities would have staged no payload at all"
+        );
+        assert_eq!(
+            sink.starts,
+            vec![0u32, (WORDS * 8) as u32],
+            "the second container must begin exactly where the first one ends"
+        );
+        assert!(
+            sink.out.is_empty(),
+            "no entity may reach the result before a stream is handed to croaring: value-by-value \
+             insertion is what this crate exists to avoid"
+        );
+
+        // The stream `flush` hands croaring. It must deserialise: `flush`'s fallback answers
+        // correctly by rebuilding entity by entity, so a stream croaring refuses is exactly the
+        // regression this test is for, and `debug_assert` would only catch it in a debug build.
+        sink.assemble();
+        assert_eq!(sink.stream[0..4], COOKIE_NO_RUN.to_le_bytes());
+        assert_eq!(sink.stream[4..8], 2u32.to_le_bytes());
+        assert_eq!(sink.stream[8..10], 0u16.to_le_bytes(), "first key");
+        assert_eq!(
+            sink.stream[10..12],
+            ((sink.cards[0] - 1) as u16).to_le_bytes(),
+            "cardinality is stored one less than it is"
+        );
+        let deserialized = Bitmap::try_deserialize::<Portable>(&sink.stream)
+            .expect("the assembled stream must be a portable bitmap, or flush rebuilds per value");
+        assert_eq!(deserialized, want, "and it must carry the set it staged");
+
+        assert_eq!(sink.finish(), want);
+    }
 }

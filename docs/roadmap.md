@@ -50,8 +50,9 @@ filters, clusters and their labels, and [#56]. The reference viewer ([#46]) can 
 The conformance suite is the deliverable. An implementation that keeps Morton ordering, Roaring
 masks and tiered decode while quietly dropping I2, I7 or I13b passes every functional test and
 leaks; the suite is what distinguishes the two, and at release it is the only thing standing
-between a security claim and a reader's trust in it. Five of thirteen invariants are covered as
-designed. Six have no coverage, four of them for want of an implementation to test.
+between a security claim and a reader's trust in it. Where coverage stands is
+[`design/conformance.md`](design/conformance.md) §4.6 and nowhere else; the count that stood here
+was a hand-maintained second copy and had drifted from it.
 
 **CI exists as of [#69]** — the per-PR gate runs the workspace tests, clippy, both checker scripts
 and the conformance suite, so [#14]'s two checkers now run automatically and a regression cannot

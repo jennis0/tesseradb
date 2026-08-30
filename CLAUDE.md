@@ -71,14 +71,16 @@ broken by a plausible-looking change:
   suppression applies to every request the moment it is accepted, whatever stamp was presented.
 
 The conformance suite is the deliverable: an implementation that keeps the Morton and Roaring
-machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking. Seven
-rows of the matrix are covered; **five have no coverage — I5, I6, I8, I11 and I13b — and only one
-of them, I6, is uncovered for want of an implementation to test**. There is no wasmtime host, so
-nothing can be asked of a guest plugin. The rest are a testing gap: the annotation machinery I8
-needs is built and enforced, I12's frontier half is built in the form that replaced the frontier
-(every artifact tested on its own — decisions 0080, 0082, 0083), and I11's cover was deleted with
-the pin that carried it. I5 and I13b sit between the two, each needing a second partition or a
-genuinely divergent plugin before an oracle could disagree at all.
+machinery while quietly dropping I2, I7 or I13b passes every functional test while leaking.
+**`conformance.md` §4.6 is the matrix of record and the only place that says where coverage
+stands** — a count restated here would be a second copy, and the three that existed had already
+drifted apart when they were removed on 2026-08-30.
+
+What does not change with the table is the shape of the gaps. **Only I6 is uncovered for want of
+an implementation to test**: there is no wasmtime host, so nothing can be asked of a guest plugin.
+The rest are testing gaps — the machinery exists and nothing drives it. I5 and I13b sit between
+the two, each needing a second partition or a genuinely divergent plugin before an oracle could
+disagree at all.
 
 *We cannot test this* and *we have not tested this* are different claims, and only the first is an
 excuse — a register that records built machinery as absent understates its own gap. Corrected
@@ -237,6 +239,7 @@ over invented terms.
 cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
 bash scripts/check-layers.sh
+bash scripts/check-test-reachability.sh --quick
 bash scripts/check-clients.sh
 bash clients/py/check.sh
 python3 scripts/check-doc-links.py

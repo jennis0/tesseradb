@@ -128,6 +128,42 @@ fn probes(shape: &Shape, seed: u64) -> Vec<(u32, u32)> {
     out
 }
 
+/// Whether every served ring is one stored ring with vertices removed — nothing added, nothing
+/// moved, nothing reordered.
+///
+/// The stored rings are matched in order and each is used at most once, so a served ring that
+/// appeared before the ring it came from, or twice, fails as well as one carrying a vertex the
+/// shape does not hold. Serving may drop a whole part or hole (`polygon-membership.md` §7.2), so
+/// a stored ring with no served counterpart is not itself a failure.
+fn each_served_ring_is_a_stored_ring_filtered(
+    served: &[Vec<Vec<(u32, u32)>>],
+    stored: &[Vec<(u32, u32)>],
+) -> Result<(), String> {
+    let mut next = 0usize;
+    for (i, ring) in served.iter().flatten().enumerate() {
+        let found = (next..stored.len()).find(|&k| is_subsequence(ring, &stored[k]));
+        match found {
+            Some(k) => next = k + 1,
+            None => {
+                return Err(format!(
+                    "served ring {i} ({} vertices) is not a subsequence of any stored ring at or \
+                     after {next} of {}: a served vertex is not one of the shape's own, or the \
+                     rings are out of order",
+                    ring.len(),
+                    stored.len()
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `a` is `b` with zero or more elements removed.
+fn is_subsequence(a: &[(u32, u32)], b: &[(u32, u32)]) -> bool {
+    let mut it = b.iter();
+    a.iter().all(|v| it.any(|w| w == v))
+}
+
 fn rings_strategy() -> impl Strategy<Value = ShapeF64> {
     // A star-shaped ring around a centre with random radii, sometimes with a hole and
     // sometimes a second part: simple enough to be OGC-valid, jagged enough to cross many cells.
@@ -270,21 +306,46 @@ proptest! {
         }
     }
 
+    /// **A served ring is the stored ring filtered** (`polygon-membership.md` §7.2): every vertex
+    /// on the wire is one of the shape's own, in the shape's own order, at every resolution. The
+    /// vertex count falling is the weaker half and is checked alongside it.
+    ///
+    /// Mutations this kills: a serving path that resamples or interpolates a ring rather than
+    /// dropping vertices from it (the count still falls, and every vertex is new); one that
+    /// perturbs a served coordinate; one that reorders the rings or the vertices within one.
     #[test]
     fn the_served_rings_are_a_subsequence_at_every_resolution(shape in rings_strategy()) {
         let (shape, _) = shape.canonical(Space::View, &E).unwrap();
         let Shape::Polygon(poly) = &shape else { unreachable!() };
+        // The stored rings, read from the polygon itself rather than back through the serving
+        // path — a comparison against `rings(0, MAX)` would be the serving path agreeing with
+        // itself.
+        let stored: Vec<Vec<(u32, u32)>> = poly
+            .parts
+            .iter()
+            .flat_map(|p| p.rings.iter())
+            .map(|r| r.vertices.iter().map(|v| (v.x, v.y)).collect())
+            .collect();
         let full = shape.rings(0, usize::MAX);
         prop_assert_eq!(full.iter().flatten().map(Vec::len).sum::<usize>() as u64, poly.vertex_count());
+        // Unfiltered, the wire is the stored rings exactly — which is the base case of the
+        // subsequence property and the guard that `stored` is the right reference.
+        prop_assert_eq!(full.iter().flatten().cloned().collect::<Vec<_>>(), stored.clone());
         let mut last = poly.vertex_count() as usize;
         for w in [1u32 << 8, 1 << 12, 1 << 16, 1 << 20] {
             let rings = shape.rings(w, 2048);
             let n: usize = rings.iter().flatten().map(Vec::len).sum();
             prop_assert!(n <= last.max(2048).min(last), "w={w} n={n} last={last}");
+            if let Err(why) = each_served_ring_is_a_stored_ring_filtered(&rings, &stored) {
+                return Err(TestCaseError::fail(format!("w={w}: {why}")));
+            }
             last = n;
         }
-        let capped = shape.rings(0, 8);
-        prop_assert!(capped.iter().flatten().map(Vec::len).sum::<usize>() <= 8);
+        let capped_rings = shape.rings(0, 8);
+        if let Err(why) = each_served_ring_is_a_stored_ring_filtered(&capped_rings, &stored) {
+            return Err(TestCaseError::fail(format!("budget 8: {why}")));
+        }
+        prop_assert!(capped_rings.iter().flatten().map(Vec::len).sum::<usize>() <= 8);
         // The guard says when it cut what the resolution alone would have kept
         // (`polygon-membership.md` §7.2), and only then.
         let (_, fired) = shape.rings_guarded(0, 8);
@@ -306,11 +367,17 @@ fn a_conics_guard_fires_only_when_the_budget_binds_its_densification() {
     let (shape, _) = circle.canonical(Space::View, &E).unwrap();
     let (ring, fired) = shape.rings_guarded(1, 64);
     assert_eq!(ring[0][0].len(), 64);
-    assert!(fired, "a 400-unit radius at a one-grid-unit tolerance wants far more than 64 chords");
+    assert!(
+        fired,
+        "a 400-unit radius at a one-grid-unit tolerance wants far more than 64 chords"
+    );
     let (ring, fired) = shape.rings_guarded(1, 1 << 20);
     assert!(ring[0][0].len() > 64 && !fired);
     let (_, fired) = shape.rings_guarded(u32::MAX, 8);
-    assert!(!fired, "at a tolerance wider than the circle, eight chords are all it asks for");
+    assert!(
+        !fired,
+        "at a tolerance wider than the circle, eight chords are all it asks for"
+    );
 }
 
 proptest! {
@@ -393,8 +460,16 @@ fn the_descent_is_linear_in_the_perimeter_not_the_area() {
             (c - h, c + h),
         ]]])
     };
-    let small = square(62_500.0).canonical(Space::View, &E).unwrap().0.decompose(None);
-    let large = square(375_000.0).canonical(Space::View, &E).unwrap().0.decompose(None);
+    let small = square(62_500.0)
+        .canonical(Space::View, &E)
+        .unwrap()
+        .0
+        .decompose(None);
+    let large = square(375_000.0)
+        .canonical(Space::View, &E)
+        .unwrap()
+        .0
+        .decompose(None);
     let ratio = large.boundary.len() as f64 / small.boundary.len() as f64;
     assert!(
         (5.0..7.0).contains(&ratio),

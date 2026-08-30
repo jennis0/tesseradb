@@ -24,7 +24,7 @@ mod ring;
 use ring::{contains, convex_hull, double_area};
 
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn measure_against_the_corpus() {
     let corpus = corpus::open();
     let mut rows: Vec<Row> = Vec::new();
@@ -215,7 +215,7 @@ struct Row {
 ///
 /// `0` in the budget list means **unbounded** — the dig runs until no bridging edge is left.
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn the_budget_sweep() {
     let corpus = corpus::open();
     let budgets: Vec<usize> = std::env::var("TESSERA_HULL_BUDGETS")
@@ -352,7 +352,7 @@ fn the_budget_sweep() {
 ///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_quantisation_sweep
 /// ```
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn the_quantisation_sweep() {
     let corpus = corpus::open();
     let divisions: Vec<u32> = std::env::var("TESSERA_HULL_DIVISIONS")
@@ -536,7 +536,7 @@ fn worst_from_one(v: &mut [f64]) -> f64 {
 ///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_derivation_profile
 /// ```
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn the_derivation_profile() {
     let corpus = corpus::open();
     let d = tessera_engine::derived::SERVED_QUANTISE_DIVISIONS;
@@ -701,7 +701,7 @@ fn one_pass_box_and_centroid(points: &[[u32; 2]]) -> ([u32; 4], [f64; 2]) {
 ///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_cell_occupancy
 /// ```
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn the_cell_occupancy() {
     use std::collections::HashSet;
     let corpus = corpus::open();
@@ -763,7 +763,7 @@ fn the_cell_occupancy() {
 ///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_resolution_floor
 /// ```
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn the_resolution_floor() {
     let corpus = corpus::open();
     let d = tessera_engine::derived::SERVED_QUANTISE_DIVISIONS;
@@ -918,7 +918,7 @@ fn cell_side(cloud: &[[u32; 2]], divisions: u32) -> Option<u64> {
 ///   cargo test --release -p tessera-engine --test hull_geometry -- --ignored --nocapture the_reduction_is_the_definition
 /// ```
 #[test]
-#[ignore]
+#[ignore = "measurement: needs a built bundle in TESSERA_HULL_BUNDLE, which is not in the repository — see the module doc"]
 fn the_reduction_is_the_definition() {
     let corpus = corpus::open();
     let d = tessera_engine::derived::SERVED_QUANTISE_DIVISIONS;

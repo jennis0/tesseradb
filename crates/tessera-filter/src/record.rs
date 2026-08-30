@@ -1053,6 +1053,17 @@ mod tests {
 
     /// A nested list refuses — the multi model is one level deep — and a list whose count runs
     /// past the payload refuses by bounds rather than allocating.
+    ///
+    /// **Both refusals are read by message, because `is_err()` cannot tell them apart.** The
+    /// nested payload carries no bytes for the inner list's own header, so a decoder with the
+    /// depth guard removed runs out of payload and refuses on truncation instead — a different
+    /// fault, the same `is_err()`. The two assertions here are therefore mirrored: the nested case
+    /// must name the depth rule and must *not* be a bounds refusal, and the overrunning case the
+    /// other way round.
+    ///
+    /// Mutations this kills: passing `true` for `lists_allowed` when decoding a list's elements,
+    /// or deleting the guard outright — either leaves unbounded recursion in `decode_value` over a
+    /// crafted bundle, which is a stack overflow rather than a refusal.
     #[test]
     fn a_nested_or_overrunning_list_refuses() {
         let mut nested = Vec::new();
@@ -1060,7 +1071,17 @@ mod tests {
         let payload = [0u8, 0, KIND_LIST, KIND_LIST, 1, 0, 0, 0];
         nested.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         nested.extend_from_slice(&payload);
-        assert!(decode(&nested, 1).is_err());
+        let err = decode(&nested, 1)
+            .expect_err("a list element that is itself a list refuses")
+            .to_string();
+        assert!(
+            err.contains("one level deep"),
+            "the depth rule must be what refuses, not a truncation behind it: {err}"
+        );
+        assert!(
+            !err.contains("runs past the end"),
+            "a bounds refusal here would mean the depth guard never ran: {err}"
+        );
 
         let mut overrun = Vec::new();
         overrun.extend_from_slice(&1u32.to_le_bytes());
@@ -1068,6 +1089,12 @@ mod tests {
         let payload = [0u8, 0, KIND_LIST, KIND_U64, 0xFF, 0xFF, 0xFF, 0xFF];
         overrun.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         overrun.extend_from_slice(&payload);
-        assert!(decode(&overrun, 1).is_err());
+        let err = decode(&overrun, 1)
+            .expect_err("a list claiming more elements than the payload holds refuses")
+            .to_string();
+        assert!(
+            err.contains("runs past the end"),
+            "the count must be refused by bounds rather than allocated for: {err}"
+        );
     }
 }

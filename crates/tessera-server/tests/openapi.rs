@@ -82,7 +82,10 @@ async fn assert_refusal(doc: &Value, resp: reqwest::Response, status: u16, code:
         .headers()
         .get("retry-after")
         .map(|v| v.to_str().unwrap().to_string());
-    let body: Value = resp.json().await.expect("a refusal carries the JSON envelope");
+    let body: Value = resp
+        .json()
+        .await
+        .expect("a refusal carries the JSON envelope");
     assert_valid(doc, "Error", &body);
     assert_eq!(body["error"], code, "{body}");
     if status == 429 {
@@ -238,7 +241,12 @@ async fn publish_layer(server: &TestServer) -> Vec<String> {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status().as_u16(), 201, "{}", resp.text().await.unwrap());
+    assert_eq!(
+        resp.status().as_u16(),
+        201,
+        "{}",
+        resp.text().await.unwrap()
+    );
 
     let member = |source_id: u64| {
         base64::engine::general_purpose::STANDARD.encode(external_id_of(source_id))
@@ -299,8 +307,8 @@ async fn fixture() -> Fixture {
 /// Authorise with the request body validated against the description, returning the response
 /// body already validated too.
 async fn authorise_checked(doc: &Value, server: &TestServer, terms: &[&str]) -> Value {
-    let auth_data = base64::engine::general_purpose::STANDARD
-        .encode(json!({ "terms": terms }).to_string());
+    let auth_data =
+        base64::engine::general_purpose::STANDARD.encode(json!({ "terms": terms }).to_string());
     let body = json!({ "auth_data": auth_data });
     assert_valid(doc, "AuthoriseRequest", &body);
     let resp = server
@@ -415,7 +423,10 @@ fn every_closed_dto_is_declared_closed() {
 fn every_429_in_the_description_requires_retry_after() {
     let doc = description();
     let backpressure = &doc["components"]["responses"]["Backpressure"];
-    assert_eq!(backpressure["headers"]["Retry-After"]["required"], json!(true));
+    assert_eq!(
+        backpressure["headers"]["Retry-After"]["required"],
+        json!(true)
+    );
     for (path, item) in doc["paths"].as_object().unwrap() {
         for (_method, op) in item.as_object().unwrap() {
             if let Some(r) = op["responses"].get("429") {
@@ -435,10 +446,18 @@ fn every_429_in_the_description_requires_retry_after() {
 fn the_layers_field_is_an_array_or_the_string_all() {
     let doc = description();
     for value in [json!([]), json!(["clusters/a"]), json!("all")] {
-        assert_valid(&doc, "ViewportRequest", &viewport_body(json!({ "layers": value })));
+        assert_valid(
+            &doc,
+            "ViewportRequest",
+            &viewport_body(json!({ "layers": value })),
+        );
     }
     for value in [json!("some"), json!(1), json!([1])] {
-        assert_invalid(&doc, "ViewportRequest", &viewport_body(json!({ "layers": value })));
+        assert_invalid(
+            &doc,
+            "ViewportRequest",
+            &viewport_body(json!({ "layers": value })),
+        );
     }
     // `artifact_budget` and `k = 0` are in the shape too.
     assert_valid(
@@ -447,8 +466,16 @@ fn the_layers_field_is_an_array_or_the_string_all() {
         &viewport_body(json!({ "k": 0, "artifact_budget": 3 })),
     );
     assert_invalid(&doc, "ViewportRequest", &viewport_body(json!({ "k": -1 })));
-    assert_invalid(&doc, "ViewportRequest", &viewport_body(json!({ "zoom": 17 })));
-    assert_invalid(&doc, "ViewportRequest", &viewport_body(json!({ "unknown": 1 })));
+    assert_invalid(
+        &doc,
+        "ViewportRequest",
+        &viewport_body(json!({ "zoom": 17 })),
+    );
+    assert_invalid(
+        &doc,
+        "ViewportRequest",
+        &viewport_body(json!({ "unknown": 1 })),
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -547,8 +574,8 @@ async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
         ComputeGate::new(0, 0, 250),
     )
     .await;
-    let auth_data = base64::engine::general_purpose::STANDARD
-        .encode(json!({ "terms": ["0"] }).to_string());
+    let auth_data =
+        base64::engine::general_purpose::STANDARD.encode(json!({ "terms": ["0"] }).to_string());
     let resp = server
         .client
         .post(server.session_url("/session/authorise"))
@@ -558,7 +585,11 @@ async fn a_saturated_gate_sheds_authorise_with_the_described_429() {
         .await
         .unwrap();
     let body = assert_refusal(&doc, resp, 429, "backpressure").await;
-    assert_eq!(body["retry_after_s"], json!(1), "the compute gate's figure is 1, fixed");
+    assert_eq!(
+        body["retry_after_s"],
+        json!(1),
+        "the compute gate's figure is 1, fixed"
+    );
 }
 
 #[tokio::test]
@@ -572,7 +603,10 @@ async fn the_probes_are_bare_status_codes_on_both_listeners() {
     ] {
         let resp = f.server.client.get(&url).send().await.unwrap();
         assert_eq!(resp.status().as_u16(), 200, "{url}");
-        assert!(resp.bytes().await.unwrap().is_empty(), "{url} carries no body");
+        assert!(
+            resp.bytes().await.unwrap().is_empty(),
+            "{url} carries no body"
+        );
     }
 }
 
@@ -637,7 +671,9 @@ async fn categories_match_the_description_in_both_forms_and_both_refusals() {
     };
 
     // The bare form, paged.
-    let resp = get("/v1/categories/archive?limit=2".to_string()).await.unwrap();
+    let resp = get("/v1/categories/archive?limit=2".to_string())
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let page: Value = resp.json().await.unwrap();
     assert_valid(&doc, "CategoriesResponse", &page);
@@ -645,7 +681,9 @@ async fn categories_match_the_description_in_both_forms_and_both_refusals() {
     assert!(page["next"].is_string());
 
     // The codes form: `next` is always null.
-    let resp = get("/v1/categories/archive?codes=11,33".to_string()).await.unwrap();
+    let resp = get("/v1/categories/archive?codes=11,33".to_string())
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let resolved: Value = resp.json().await.unwrap();
     assert_valid(&doc, "CategoriesResponse", &resolved);
@@ -655,7 +693,9 @@ async fn categories_match_the_description_in_both_forms_and_both_refusals() {
     // Refusals: a column that is not a category is 404; limit=0 is 422.
     let resp = get("/v1/categories/score".to_string()).await.unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
-    let resp = get("/v1/categories/archive?limit=0".to_string()).await.unwrap();
+    let resp = get("/v1/categories/archive?limit=0".to_string())
+        .await
+        .unwrap();
     assert_refusal(&doc, resp, 422, "contract").await;
 }
 
@@ -700,13 +740,22 @@ async fn viewport_carries_the_described_headers_and_framing() {
             );
         }
     }
-    let stale = resp.headers()["x-tessera-stale"].to_str().unwrap().to_string();
+    let stale = resp.headers()["x-tessera-stale"]
+        .to_str()
+        .unwrap()
+        .to_string();
     assert!(stale == "0" || stale == "1");
     let etag = resp.headers()["etag"].to_str().unwrap().to_string();
-    assert!(etag.starts_with('"') && etag.ends_with('"'), "etag is quoted: {etag}");
+    assert!(
+        etag.starts_with('"') && etag.ends_with('"'),
+        "etag is quoted: {etag}"
+    );
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     assert!(!decoded.tiles.is_empty());
-    assert!(decoded.sub_cells.is_some(), "underlay requested, so the kind-2 frame is present");
+    assert!(
+        decoded.sub_cells.is_some(),
+        "underlay requested, so the kind-2 frame is present"
+    );
 
     // The region leaf, and the one header it brings (`selection-operand.md` §6): present exactly
     // when asked for, and one of the two spellings the description gives it.
@@ -730,9 +779,14 @@ async fn viewport_carries_the_described_headers_and_framing() {
         || verdict
             .strip_prefix("cover; depth=")
             .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()));
-    assert!(described, "x-tessera-region {verdict:?} is not one of the described spellings");
+    assert!(
+        described,
+        "x-tessera-region {verdict:?} is not one of the described spellings"
+    );
     assert_eq!(verdict, "exact");
-    let artifacts = decoded.artifacts.expect("the named layer is reachable, so kind 5 is present");
+    let artifacts = decoded
+        .artifacts
+        .expect("the named layer is reachable, so kind 5 is present");
     assert_eq!(artifacts.len(), 2);
     assert!(decoded.trailer.is_object());
 
@@ -753,7 +807,10 @@ async fn viewport_carries_the_described_headers_and_framing() {
     assert_eq!(resp.status().as_u16(), 200);
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     assert!(decoded.artifacts.is_none());
-    assert!(decoded.sub_cells.is_none(), "no underlay requested, so no kind-2 frame");
+    assert!(
+        decoded.sub_cells.is_none(),
+        "no underlay requested, so no kind-2 frame"
+    );
 
     // A name this principal does not reach is intersected away — the narrow principal is served
     // only the artifact it clears, and a made-up name beside the real one changes nothing.
@@ -791,19 +848,28 @@ async fn viewport_carries_the_described_headers_and_framing() {
     )
     .await;
     assert_refusal(&doc, resp, 422, "contract").await;
-    let resp = viewport(&f.server, token, &viewport_body(json!({ "view": "no-such-view" }))).await;
+    let resp = viewport(
+        &f.server,
+        token,
+        &viewport_body(json!({ "view": "no-such-view" })),
+    )
+    .await;
     assert_refusal(&doc, resp, 404, "unknown").await;
     let resp = viewport(&f.server, "not-a-token", &viewport_body(json!({}))).await;
     assert_refusal(&doc, resp, 401, "bad-credential").await;
 }
 
-/// **The ruled semantics of an omitted `layers`, which this tree's server does not yet have.**
-/// Owner ruling 2026-08-25: omitted or `[]` means *no* layers, the string `"all"` means every
-/// reachable layer. The server change lands on the s3 track; until it merges an omitted field is
-/// read as `"all"` and the string is a `422`, so this test would fail against the server here.
-/// Ignored with that reason, for the controller to enable at integration — the description
-/// already states the ruled form, and [`the_layers_field_is_an_array_or_the_string_all`] checks
-/// the shape.
+/// **The ruled semantics of an omitted `layers`, at the wire.** Owner ruling 2026-08-25: omitted
+/// or `[]` means *no* layers, the string `"all"` means every reachable layer. The server change
+/// landed, and this test runs — it was written against the ruled behaviour before the server had
+/// it, `#[ignore]`d with that reason, and enabled at integration.
+///
+/// What it pins that its siblings do not is the pair *at one principal in one fixture*: the same
+/// broad token, the same request but for the field, absent giving no artifacts frame and `"all"`
+/// giving both reachable artifacts. `viewport_membership.rs`'s
+/// `omitted_layers_means_none_and_the_word_all_means_every_reachable_layer` pins the same ruling
+/// against the engine's membership columns, and
+/// [`the_layers_field_is_an_array_or_the_string_all`] pins the shape the description accepts.
 #[tokio::test]
 async fn an_omitted_layers_field_means_no_artifacts_frame() {
     let doc = description();
@@ -816,10 +882,19 @@ async fn an_omitted_layers_field_means_no_artifacts_frame() {
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
     assert!(decoded.artifacts.is_none(), "omitted `layers` is no layers");
 
-    let resp = viewport(&f.server, token, &viewport_body(json!({ "k": 0, "layers": "all" }))).await;
+    let resp = viewport(
+        &f.server,
+        token,
+        &viewport_body(json!({ "k": 0, "layers": "all" })),
+    )
+    .await;
     assert_eq!(resp.status().as_u16(), 200);
     let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
-    assert_eq!(decoded.artifacts.map(|a| a.len()), Some(2), "\"all\" is every reachable layer");
+    assert_eq!(
+        decoded.artifacts.map(|a| a.len()),
+        Some(2),
+        "\"all\" is every reachable layer"
+    );
 }
 
 #[tokio::test]
@@ -849,10 +924,15 @@ async fn items_match_the_description_with_every_refusal() {
     let item: Value = resp.json().await.unwrap();
     assert_valid(&doc, "ItemResponse", &item);
     assert!(
-        item["fields"]["archive"].as_str().is_some_and(|k| !k.is_empty()),
+        item["fields"]["archive"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty()),
         "a category arrives as its key: {item}"
     );
-    assert!(item["external_id"].is_string(), "the fixture mints external ids");
+    assert!(
+        item["external_id"].is_string(),
+        "the fixture mints external ids"
+    );
 
     // Refusals: an item nobody with zero terms may see is a 404 (identical to nonexistence); a
     // stale idset is a 409, decided before anything is looked up.
@@ -893,19 +973,30 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
     assert_eq!(artifact["layer"], LAYER);
     assert_eq!(artifact["key"], "c0");
     assert_eq!(artifact["masked_count"], json!(12));
-    assert!(artifact["centroid"].is_array() && artifact["box"].is_array() && artifact["shape"].is_array());
-    assert!(artifact.get("content").is_none(), "no supplied content declared, so absent");
+    assert!(
+        artifact["centroid"].is_array()
+            && artifact["box"].is_array()
+            && artifact["shape"].is_array()
+    );
+    assert!(
+        artifact.get("content").is_none(),
+        "no supplied content declared, so absent"
+    );
 
     // The masked count is the asking principal's: the narrow one sees c0 whole (its members all
     // carry term 0 and 1 alike) but c1 not at all.
     let narrow = authorise_checked(&doc, &f.server, &["1"]).await;
     let narrow_token = narrow["token"].as_str().unwrap();
-    let resp = post(&f.artifacts[1], body.clone(), narrow_token).await.unwrap();
+    let resp = post(&f.artifacts[1], body.clone(), narrow_token)
+        .await
+        .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
     // Same shape for a point's identifier, an unknown view, and a stale idset's 409.
     let resp = viewport(&f.server, token, &viewport_body(json!({}))).await;
     let (point_id, _) = decode_viewport_frames(&resp.bytes().await.unwrap()).points[0];
-    let resp = post(&point_id.to_string(), body.clone(), token).await.unwrap();
+    let resp = post(&point_id.to_string(), body.clone(), token)
+        .await
+        .unwrap();
     assert_refusal(&doc, resp, 404, "unknown").await;
     let resp = post(&f.artifacts[0], json!({ "view": "no-such-view" }), token)
         .await
@@ -921,4 +1012,232 @@ async fn artifacts_match_the_description_with_one_refusal_shape() {
     assert_refusal(&doc, resp, 409, "conflict").await;
     // `view` is required by the schema, as by the server.
     assert_invalid(&doc, "ArtifactRequest", &json!({}));
+}
+
+/// **Every viewer-plane route refuses a caller with no session credential, and one whose
+/// credential is not a token — enumerated from the description, not listed by hand.**
+///
+/// This is the viewer-plane counterpart of
+/// `every_control_route_requires_the_operator_credential` (`tests/http_write.rs`), and it exists
+/// for the same reason that test names: a per-route 401 test stays green forever while a sixth
+/// route ships wide open. The control plane also has structural cover —
+/// `require_operator_credential` wraps its whole router — and **the viewer plane has none**.
+/// `viewer::router` mounts no credential layer at all; each handler opens with its own
+/// `bearer_token(&headers).ok_or(ApiError::BadCredential)?`. A route written without that line is
+/// caught by nothing but this test.
+///
+/// **What is enumerated, and why that is the router's own list.** axum 0.8 exposes no route
+/// enumeration, so there is no way to ask the mounted router what it serves. The next-best source
+/// is not a list in this file but `docs/openapi/tessera.yaml`, and the enumeration here is over the
+/// description's operations and their declared `security` — so the assertion made is the
+/// description's own claim, checked against the running server. The chain that makes it bite on a
+/// *new* route is three links, all inside this crate:
+/// [`the_description_names_every_route_on_the_two_planes_and_no_other`] fails if a route is mounted
+/// and not described; describing it means declaring its `security`; and declaring `sessionToken`
+/// puts it in this loop with no exemption to skip it. A route deliberately declared `security: []`
+/// is skipped here — but that is an explicit published claim that it is unauthenticated, which is
+/// a different thing from an oversight, and the two probes are asserted below to be the only ones.
+///
+/// **The requests carry well-formed bodies on purpose.** The `Json` extractor runs ahead of the
+/// handler, so a POST with no body is refused during extraction and never reaches the credential
+/// check — such a request would prove nothing about authentication. Each POST route therefore has
+/// a body known to deserialise, and a route with no entry in that table is a panic naming the
+/// path rather than a silent skip.
+///
+/// **Mutations this kills:** deleting the `bearer_token` line from any viewer handler (each is
+/// followed by `authenticated_session`, so the pair must go, which is exactly the shape of a
+/// handler written without either); mounting a new viewer route with no credential check;
+/// answering a bare `StatusCode::UNAUTHORIZED` instead of `ApiError::BadCredential`'s body; and,
+/// on the probe half, putting `/healthz` or `/readyz` behind the credential
+/// (docs/decisions/0011-health-probes-off-control-plane.md).
+#[tokio::test]
+async fn every_viewer_route_requires_a_session_token() {
+    let doc = description();
+    let f = fixture().await;
+
+    // A body each POST route deserialises, consulted only for POST. A described POST route with
+    // no entry here is a panic naming the path, not a silent skip: without a body it accepts, the
+    // request would be refused during extraction and would say nothing about its credential.
+    let body_for = |path: &str| -> Value {
+        match path {
+            "/v1/viewport" => viewport_body(json!({})),
+            "/v1/items/{tessera_id}" => json!({}),
+            "/v1/artifacts/{tessera_id}" => json!({ "view": "s0" }),
+            other => panic!(
+                "{other} is a described POST route and this test has no request body for it; add \
+                 one rather than letting a new viewer route go unchecked"
+            ),
+        }
+    };
+
+    // `{tessera_id}` is an `AxumPath<u64>` and `{column}` a `String`; `1` satisfies both, and the
+    // credential check precedes any resolution of either, so the value need not exist.
+    let concrete = |path: &str| -> String {
+        path.split('/')
+            .map(|s| if s.starts_with('{') { "1" } else { s })
+            .collect::<Vec<_>>()
+            .join("/")
+    };
+
+    let mut gated = 0usize;
+    let mut probes = 0usize;
+    let mut session_plane = 0usize;
+
+    for (path, item) in doc["paths"].as_object().unwrap() {
+        for (method, op) in item.as_object().unwrap() {
+            let security = op["security"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{method} {path} declares no `security`"));
+            let scheme = security
+                .first()
+                .map(|s| s.as_object().unwrap().keys().next().unwrap().clone());
+            let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes()).unwrap();
+            let url = f.server.viewer_url(&concrete(path));
+
+            match scheme.as_deref() {
+                // The session plane's own credential, on its own listener — not this plane's
+                // claim and not this test's (contracts §3.3).
+                Some("sessionCredential") => {
+                    session_plane += 1;
+                    continue;
+                }
+                // Decision 0011: the probes answer without a credential, and they are the only
+                // two routes on this plane that do.
+                None => {
+                    probes += 1;
+                    let resp = f
+                        .server
+                        .client
+                        .request(method.clone(), url.clone())
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_ne!(
+                        resp.status().as_u16(),
+                        401,
+                        "{method} {path} is described as unauthenticated and must not demand a \
+                         credential"
+                    );
+                    continue;
+                }
+                Some("sessionToken") => gated += 1,
+                Some(other) => panic!("{method} {path} declares an unknown scheme {other}"),
+            }
+
+            for credential in [None, Some("not-a-session-token")] {
+                let mut req = f.server.client.request(method.clone(), url.clone());
+                if let Some(credential) = credential {
+                    req = req.bearer_auth(credential);
+                }
+                if method == reqwest::Method::POST {
+                    req = req.json(&body_for(path));
+                }
+                let resp = req.send().await.unwrap();
+                assert_eq!(
+                    resp.status().as_u16(),
+                    401,
+                    "{method} {path} answered {} for credential {credential:?}; every viewer \
+                     route, without exception, requires a session token",
+                    resp.status()
+                );
+                let body = assert_refusal(&doc, resp, 401, "bad-credential").await;
+                assert_eq!(
+                    body["detail"], "missing or invalid bearer credential",
+                    "{method} {path} must answer ApiError::BadCredential's own body, unchanged: \
+                     {body}"
+                );
+            }
+        }
+    }
+
+    // Non-vacuity, both halves: the loop must have found the five gated routes and the two
+    // probes, or it enumerated nothing and proved nothing.
+    assert_eq!(
+        gated, 5,
+        "the viewer plane's gated routes are meta, categories, viewport, items and artifacts; \
+         a change to that set belongs in this test's reasoning, not silently in its count"
+    );
+    assert_eq!(
+        probes, 2,
+        "/healthz and /readyz are the only unauthenticated routes"
+    );
+    assert_eq!(
+        session_plane, 2,
+        "/session/authorise and /session/revoke are the session plane's"
+    );
+}
+
+/// **An underlay request that yields no cells carries a present, zero-row kind-2 frame — never no
+/// frame at all** (contracts §3.2 item 2: presence follows the request, not the result).
+///
+/// The two states are what a positional reader tells apart, and only one of them is otherwise
+/// tested: [`viewport_carries_the_described_headers_and_framing`] asserts `is_some()` where the
+/// underlay returns cells and `is_none()` where none was asked for. The empty middle — asked for,
+/// nothing to say — is asserted here, over a bbox in a corner of the extent that holds no point.
+///
+/// Two non-vacuity guards, because a zero-row frame is what a broken underlay pass would also
+/// produce: the *same* request shape over an occupied bbox is asserted to carry cells, and the
+/// *same* empty bbox with `underlay_offset` dropped is asserted to carry no frame — so the frame
+/// here is present because it was asked for, and empty because the bbox is.
+///
+/// **Mutations this kills:** narrowing `WireSink::counts`'s `if let Some(cells) = sub_cells` to
+/// `sub_cells.filter(|c| !c.is_empty())`, or any other change that makes the frame's presence
+/// follow the result — the tidy-up that reads as a saving and takes the kind-2 slot away exactly
+/// when the answer is *no marks here*.
+#[tokio::test]
+async fn an_underlay_that_finds_no_cells_still_carries_a_zero_row_frame() {
+    let doc = description();
+    let f = fixture().await;
+    let auth = authorise_checked(&doc, &f.server, &["0"]).await;
+    let token = auth["token"].as_str().unwrap();
+
+    // Zoom 15 puts a tile at ~0.03 extent units, so this square holds no point of the fixture —
+    // the nearest are at (0, 0) and (37, 53).
+    let empty = json!({
+        "view": "s0", "zoom": 15, "bbox": [10.0, 10.0, 10.5, 10.5], "k": 200,
+        "underlay_offset": 1,
+    });
+    assert_valid(&doc, "ViewportRequest", &empty);
+    let resp = viewport(&f.server, token, &empty).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
+    // A tile with nothing visible carries no count row at all (`tessera-engine`'s `visible == 0`
+    // skip), so the zero-cell underlay is necessarily a zero-tile response. That is the state
+    // under test, and it is still a complete answer — a trailer, and no points.
+    assert!(decoded.tiles.is_empty(), "nothing is visible in this bbox");
+    assert_eq!(decoded.trailer["points"], json!(0));
+    assert_eq!(
+        decoded.sub_cells.as_deref(),
+        Some(&[][..]),
+        "an underlay asked for and yielding no cells is a present, zero-row frame — `None` here \
+         would be no frame at all, which is the shape reserved for an underlay never requested"
+    );
+
+    // The frame's presence is `underlay_offset`'s doing and nothing else: the same request
+    // without it carries no kind-2 frame, which is the state an absent frame is reserved for. Two
+    // responses over the same empty bbox, distinguished only by the field that decides presence.
+    let mut unasked = empty.clone();
+    unasked.as_object_mut().unwrap().remove("underlay_offset");
+    let resp = viewport(&f.server, token, &unasked).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
+    assert!(
+        decoded.sub_cells.is_none(),
+        "an underlay never requested is no frame at all, and is not the zero-row frame above"
+    );
+
+    // The positive control: the same request shape, at the same zoom and over a bbox of the
+    // same order, where a point does sit — (0, 0). A wider bbox would not do: at zoom 15 the
+    // whole extent is far past `max_tiles_per_request` and would be refused rather than served.
+    let occupied = json!({
+        "view": "s0", "zoom": 15, "bbox": [0.0, 0.0, 1.0, 1.0], "k": 200,
+        "underlay_offset": 1,
+    });
+    let resp = viewport(&f.server, token, &occupied).await;
+    assert_eq!(resp.status().as_u16(), 200);
+    let decoded = decode_viewport_frames(&resp.bytes().await.unwrap());
+    assert!(
+        decoded.sub_cells.is_some_and(|c| !c.is_empty()),
+        "the underlay pass serves cells when there are cells to serve"
+    );
 }

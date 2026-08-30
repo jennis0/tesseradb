@@ -2132,4 +2132,89 @@ mod tests {
         short_list.truncate(list.len() - 1);
         assert!(ListColumnPack::from_bytes(short_list).is_err());
     }
+
+    /// **Each of the four width rules refuses on its own**, with the length the header describes
+    /// left consistent so the generic length check cannot stand in for any of them.
+    ///
+    /// The corruptions in `a_torn_or_foreign_row_column_refuses` above cannot do this: both of its
+    /// width faults change byte 6 of a column packed at width 2, which changes the length the
+    /// header describes, so the length check refuses either of them whether the width rules are
+    /// there or not — and the list column had no width fault aimed at it at all. Every framing
+    /// refusal on these paths is the same `MalformedBundle`, so the assertions below read the
+    /// `detail`; an error-kind check would be no stronger than `is_err()`.
+    ///
+    /// Mutations this kills: deleting either width rule from either column reader. Removing the
+    /// width-set rule lets `label()`'s and the entry reader's `_ =>` arms read four bytes at a
+    /// three-byte stride; removing the ordinals-vs-width rule admits a column whose hole value is
+    /// also a legal ordinal, so rows carrying that ordinal read as holes and the artifacts holding
+    /// them silently stop being candidates.
+    #[test]
+    fn each_row_column_width_rule_refuses_without_help_from_the_length_check() {
+        fn detail(err: crate::StoreError) -> String {
+            match err {
+                crate::StoreError::MalformedBundle { detail } => detail,
+                other => panic!("expected a malformed-bundle refusal, got {other}"),
+            }
+        }
+
+        // Twelve labels at width 1 occupy 12 bytes, which is also four rows at width 3 — so the
+        // header describes exactly the bytes present and only the width-set rule can refuse.
+        let wide = pack_label_column(10, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0, 1]);
+        assert_eq!(wide.len(), LABEL_HEADER_LEN + 12, "packed at width 1");
+        let mut odd_width = wide.clone();
+        odd_width[6] = 3;
+        odd_width[8..12].copy_from_slice(&4u32.to_le_bytes());
+        assert_eq!(
+            odd_width.len(),
+            LABEL_HEADER_LEN + 4 * 3,
+            "the header must describe exactly the bytes present, or the length check refuses \
+             this instead and the width rule is untested"
+        );
+        let d = detail(LabelColumnPack::from_bytes(odd_width).unwrap_err());
+        assert!(
+            d.contains("expected 1, 2 or 4"),
+            "a label width outside the set must be what refuses: {d}"
+        );
+
+        // The same column, its width left alone, claiming a level whose ordinal count reaches the
+        // hole value. The bytes are untouched, so the length check has nothing to say.
+        let good = pack_label_column(10, &[0, 1, 2, 9]);
+        let mut narrow = good.clone();
+        narrow[12..16].copy_from_slice(&255u32.to_le_bytes());
+        assert_eq!(narrow.len(), good.len(), "only the header field moved");
+        let d = detail(LabelColumnPack::from_bytes(narrow).unwrap_err());
+        assert!(
+            d.contains("cannot be addressed at width 1"),
+            "255 ordinals at width 1 leaves no value for the hole: {d}"
+        );
+
+        // The list column carries the identical pair. Four entries at width 1 over four rows is
+        // 44 bytes; two rows at width 3 is 44 bytes as well, and the offsets still span the value
+        // column at the shortened row count, so nothing downstream of the width rule refuses.
+        let list = pack_list_column(3, &[0, 2, 4, 4, 4], &[0, 1, 2, 0]);
+        assert_eq!(list.len(), LIST_HEADER_LEN + 5 * 4 + 4, "packed at width 1");
+        let mut odd_width = list.clone();
+        odd_width[6] = 3;
+        odd_width[8..12].copy_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            odd_width.len(),
+            LIST_HEADER_LEN + 3 * 4 + 4 * 3,
+            "the header must describe exactly the bytes present, or the length check refuses \
+             this instead and the width rule is untested"
+        );
+        let d = detail(ListColumnPack::from_bytes(odd_width).unwrap_err());
+        assert!(
+            d.contains("expected 1, 2 or 4"),
+            "an entry width outside the set must be what refuses: {d}"
+        );
+
+        let mut narrow = list.clone();
+        narrow[12..16].copy_from_slice(&255u32.to_le_bytes());
+        assert_eq!(narrow.len(), list.len(), "only the header field moved");
+        let d = detail(ListColumnPack::from_bytes(narrow).unwrap_err());
+        assert!(
+            d.contains("cannot be addressed at width 1"),
+            "255 ordinals at width 1 leaves no value for the hole: {d}"
+        );
+    }
 }

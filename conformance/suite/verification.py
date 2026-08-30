@@ -33,15 +33,19 @@ make the mechanism unaffordable at exactly the sizes it exists for.
 
 ## Materialisation — the shim, and why it exists
 
-The corpus reaches the build as files — points, pairs, `config.toml` — written by the crate's own
-materialisers, and **the CLI carries no verb that writes them**: `tessera corpus` has `items` and
-`census` only, which answer expectations but cannot produce the build's inputs, and §12.1's
-"the corpus emits a batch and the driver posts it" names no route from Python to
-`Corpus::ingest_batch` either. So [`materialise_corpus`] compiles a two-file cargo shim against
-`crates/tessera-corpus` itself and runs it. This is the same trust chain as invoking the CLI — the
-one Rust generator, reached through a build — and deliberately not a Python restatement of the
-materialisers, for §12.1's reason. The shim is cached at a fixed path per machine and shares the
-workspace's target directory, so after the first run its cost is a cargo fingerprint check.
+The corpus reaches the build as files — points, pairs, the artifact rosters and their
+memberships, `config.toml` — written by the crate's own materialisers. `tessera corpus
+materialise` writes that set, but it writes only that set: §12.1's "the corpus emits a batch and
+the driver posts it" needs one `/control/ingest` body drawn from the same generator over an
+arbitrary item range, and no verb takes a range. So [`materialise_corpus`] compiles a two-file
+cargo shim against `crates/tessera-corpus` itself and runs it, calling the same materialisers the
+verb calls and then `Corpus::ingest_batch` beside them. This is the same trust chain as invoking
+the CLI — the one Rust generator, reached through a build — and deliberately not a Python
+restatement of the materialisers, for §12.1's reason. Two writers of one input set is the cost:
+the shim's calls and `Corpus::config_toml`'s declaration are one obligation held apart in two
+crates, which `test_materialisation.py` exists to keep matched. The shim is cached at a fixed
+path per machine and shares the workspace's target directory, so after the first run its cost is
+a cargo fingerprint check.
 
 ## What the harness owns, and the two rules a naive harness breaks
 
@@ -151,6 +155,11 @@ fn main() -> ExitCode {
     let corpus = tessera_corpus::Corpus::new(seed, n, extent).expect("corpus");
     corpus.write_points_parquet(&out.join("points.parquet")).expect("points");
     corpus.write_pairs_parquet(&out.join("pairs.parquet")).expect("pairs");
+    // Every remaining source `config_toml` declares — the four artifact rosters and their three
+    // membership relations — in one call. The declaration is a constant, so the file set it names
+    // and the file set written here are one obligation, checked by
+    // `test_materialisation.py::test_every_declared_source_is_a_file_the_shim_wrote`.
+    corpus.write_artifact_fixtures(&out).expect("artifact fixtures");
     std::fs::write(out.join("config.toml"), corpus.config_toml()).expect("config");
     if hi > lo {
         let batch = corpus.ingest_batch(lo..hi);

@@ -536,11 +536,19 @@ larger tiers, and every *n*th fold in the endurance tier.
 > name which stage corrupted an artefact instead of which run did. It is the better answer if the
 > re-hash is cheap against a run already dominated by ingest, which is unmeasured (spec §18).
 
-> **⊘ Specified, not implemented, and the built half needs extending before it can be invoked this
-> way.** Every bullet above is new. The identity loop of the built verifier restarts its row index
-> at zero for each segment while indexing an array spanning the whole view — correct for the
-> single-segment shape a build produces, and wrong for any bundle that has flushed. So "run it after
-> a merge" is not a call site; it is that loop taking a per-segment row offset first.
+> **Built, and the marker that stood here was wrong** *(corrected 2026-08-30)*. It read
+> "⊘ Specified, not implemented", said "every bullet above is new", and said the built verifier's
+> identity loop "restarts its row index at zero for each segment … wrong for any bundle that has
+> flushed". Every bullet is implemented in `crates/tessera-build/src/deep.rs` and damage-tested in
+> `crates/tessera-build/tests/verify_deep.rs`; `crates/tessera-build/src/lib.rs` looks the row base
+> up from the row space per segment — deliberately, so that it cannot depend on the segment list's
+> ordering — and a multi-segment flushed bundle verifies in test today. "Run it after a merge" is a
+> call site.
+>
+> Recorded rather than quietly deleted because of what the error was: a register saying that built
+> machinery is absent **understates its own gap**, which is the direction `CLAUDE.md` singles out.
+> *We cannot test this* and *we have not tested this* are different claims, and a marker that says
+> the first about something already built teaches a reader to discount the register.
 
 ### 11.1 Binding a bundle to its source
 

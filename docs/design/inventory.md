@@ -76,7 +76,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `annotation-representation.md` | Normative for the annotation representat | 40 |
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
-| `architecture.md` | Normative — r50 | 39 |
+| `architecture.md` | Normative — r51 | 39 |
 | `artifact-fetch-protocol.md` | Normative — r3 | 7 |
 | `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 21 |
 | `artifact-shapes.md` | Normative — r7 |  |
@@ -90,7 +90,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
 | `configuration.md` | Normative for the build-time configurati | 28 |
-| `conformance.md` | Normative — r15 | 20 |
+| `conformance.md` | Normative — r15 | 19 |
 | `contracts.md` | Normative — r50 | 25 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |

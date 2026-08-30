@@ -109,6 +109,30 @@ pub const UNICODE: &str = "unicode";
 /// a definition question.) A change to the rule itself would be `p1` → `p2` and a rebuild.
 const UNICODE_VERSION: &str = "icu4x-2.2/p1";
 
+/// The recorded answers each analyser is pinned to, digested — checked in **beside the version
+/// they were recorded under**, which is the point of it being here rather than in the vector file.
+///
+/// [`Analyser::identity`] is a function of the two constants above and of nothing the tokeniser
+/// does, so the identity check in `tests/golden.rs` cannot see the edit its own message calls the
+/// dangerous one: vectors regenerated from changed behaviour with the version left where it was.
+/// Both copies of the identity string still agree, and every token assertion agrees by
+/// construction, because the answers were taken from the new behaviour. This table is the half
+/// that does see it — editing `tests/vectors/golden.json` fails here until the digest is moved,
+/// and moving it is an edit one line from the version it should have moved with.
+///
+/// The digest is SHA-256 over the analyser's name, its recorded identity, and each vector's
+/// family, input and expected tokens, unit-separated and record-terminated; `tests/golden.rs`
+/// holds the canonical form and prints what it computed. The `why` notes are deliberately outside
+/// it — recording *why* an answer is right changes no index and is not a rebuild.
+///
+/// **Every name in [`ANALYSER_NAMES`] owes a row here**, which the same test asserts: a second
+/// pipeline arriving without one is the case decision 0070 forbids, a pinned analyser nothing
+/// pins.
+pub const ANALYSER_VECTOR_DIGESTS: &[(&str, &str)] = &[(
+    UNICODE,
+    "8f5b0d5efb3708f2f6d2d7a88ad56f163ffb91a03874908c38bd5bcda1eddbbd",
+)];
+
 /// Every analyser this binary can be asked for, by name. **A name not in this list is refused** —
 /// there is no default fallback, because falling back would index a column with a pipeline its
 /// declaration did not ask for, which is the silent-mismatch failure 0070 exists to prevent.
@@ -339,7 +363,10 @@ mod tests {
     #[test]
     fn duplicates_and_order_survive() {
         let a = Analyser::new();
-        assert_eq!(a.tokens("the cat the hat"), vec!["the", "cat", "the", "hat"]);
+        assert_eq!(
+            a.tokens("the cat the hat"),
+            vec!["the", "cat", "the", "hat"]
+        );
     }
 
     /// A script with no inter-word spaces segments into words rather than into one token — the
@@ -347,7 +374,8 @@ mod tests {
     #[test]
     fn a_script_without_spaces_is_not_one_token() {
         let a = Analyser::new();
-        for sample in ["日本語のテキスト", "ภาษาไทยเป็นภาษา", "中文分词测试"] {
+        for sample in ["日本語のテキスト", "ภาษาไทยเป็นภาษา", "中文分词测试"]
+        {
             let tokens = a.tokens(sample);
             assert!(
                 tokens.len() > 1,

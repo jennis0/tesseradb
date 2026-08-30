@@ -164,9 +164,14 @@ def read_source_geometry(
     The per-row arithmetic is vectorised in numpy rather than written as the loop the rest of this
     oracle prefers. That is a deliberate exception to "definitions, not algorithms": the quantities
     are the same quantities, and a Python loop over even the 250,000-row prefix — let alone the
-    groups a coarser statistic fails to exclude — costs minutes per test session. The definitions
-    themselves (`fixed32`, the interleave) stay scalar in `morton.py`; what is vectorised here is
-    only the extraction.
+    groups a coarser statistic fails to exclude — costs minutes per test session.
+
+    **What is shared with `morton.py` and what is not.** The interleave is shared: `_compact64`
+    below is the array form of the same bit gather, and the scalar `split32` is `morton`'s. The
+    **quantiser is not** — `_fixed32_vec` is a second implementation of `morton.fixed32`'s
+    clamp-and-floor, and `morton.fixed32` is not called anywhere on this path. So a reader should
+    not take the definition to be the thing running here; what runs is a copy of it, and what
+    disciplines the copy is stated at `_fixed32_vec` itself.
     """
     import pyarrow.parquet as pq  # local: keeps the module's import surface to what it always uses
 
@@ -226,9 +231,15 @@ def read_source_geometry(
 
 
 def _fixed32_vec(v: np.ndarray, vmin: float, vmax: float) -> np.ndarray:
-    """[`morton.fixed32`] over an array. Pinned against the scalar definition by
-    `test_differential`'s byte-for-byte position check, which compares what this produces against
-    what the engine stored, so a divergence in the clamp or the rounding fails there."""
+    """[`morton.fixed32`] over an array — a second implementation of it, not a call to it.
+
+    What pins it is `test_differential`'s byte-for-byte position check, and that check compares
+    what this produces against **what the engine stored**, not against `morton.fixed32`. So a
+    divergence in the clamp or the rounding surfaces as an oracle-vs-engine disagreement rather
+    than as a silent pass — which is a real pin, but a pin against the implementation and not
+    against the definition. The two are known to differ on NaN alone today: the scalar raises,
+    this produces an undefined `uint32`.
+    """
     scaled = np.floor((v - vmin) / (vmax - vmin) * 4294967296.0)
     return np.clip(scaled, 0.0, 4294967295.0).astype(np.uint32).astype(np.uint64)
 

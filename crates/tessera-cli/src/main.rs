@@ -1052,7 +1052,8 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
 
 /// `tessera corpus items` (correctness-suite §12.1): served `fx_key` values in, their expected
 /// items out. The corpus is constructed with `n = 0` because the lookups take no part in it —
-/// see the verb's own doc.
+/// see the verb's own doc. The `partition` column is answered here for the same reason: it is a
+/// function of `(seed, layer, e)`, not of the corpus's size (`tessera-corpus`'s `partition.rs`).
 fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     use arrow::array::{
         ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
@@ -1096,6 +1097,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     let mut bay = StringBuilder::new();
     let mut tag = StringBuilder::new();
     let mut blurb = StringBuilder::new();
+    let mut partition = UInt32Builder::new();
     for (line_no, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() {
@@ -1122,6 +1124,9 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
         bay.append_option(item.bay);
         tag.append_option(item.tag.as_deref());
         blurb.append_option(item.blurb.as_deref());
+        partition.append_value(
+            corpus.partition_artifact_of(tessera_corpus::materialise::PARTITION_LAYER, e) as u32,
+        );
     }
 
     let schema = Arc::new(Schema::new(vec![
@@ -1138,6 +1143,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
         Field::new("bay", DataType::Utf8, true),
         Field::new("tag", DataType::Utf8, true),
         Field::new("blurb", DataType::Utf8, true),
+        Field::new("partition", DataType::UInt32, false),
     ]));
     let batch = RecordBatch::try_new(
         schema,
@@ -1151,6 +1157,7 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
             Arc::new(bay.finish()),
             Arc::new(tag.finish()),
             Arc::new(blurb.finish()),
+            Arc::new(partition.finish()),
         ],
     )
     .expect("columns built to one length from one loop");

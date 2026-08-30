@@ -385,6 +385,11 @@ impl Corpus {
             Field::new("bay", DataType::Utf8, true),
             Field::new("tag", DataType::Utf8, true),
             Field::new("blurb", DataType::Utf8, true),
+            // Declared last, and so emitted last: ingest reads the declared scalars in declared
+            // order and refuses a body missing one. `Corpus::partition_artifact_of` answers for
+            // any `e`, this batch's `range` past the built prefix included, because the stride it
+            // divides by is a constant rather than a function of `n` (`partition.rs`).
+            Field::new("partition", DataType::UInt32, false),
         ]));
         let mut external_id = BinaryBuilder::new();
         let mut x = Float64Builder::with_capacity(rows);
@@ -396,6 +401,7 @@ impl Corpus {
         let mut bay = StringBuilder::new();
         let mut tag = StringBuilder::new();
         let mut blurb = StringBuilder::new();
+        let mut partition = UInt32Builder::with_capacity(rows);
         for e in range {
             let item = self.item(e);
             external_id.append_value(e.to_le_bytes());
@@ -414,6 +420,7 @@ impl Corpus {
             bay.append_option(item.bay);
             tag.append_option(item.tag.as_deref());
             blurb.append_option(item.blurb.as_deref());
+            partition.append_value(self.partition_artifact_of(PARTITION_LAYER, e) as u32);
         }
         RecordBatch::try_new(
             schema,
@@ -428,6 +435,7 @@ impl Corpus {
                 Arc::new(bay.finish()),
                 Arc::new(tag.finish()),
                 Arc::new(blurb.finish()),
+                Arc::new(partition.finish()),
             ],
         )
         .expect("columns built to one length from one loop")

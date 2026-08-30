@@ -1163,6 +1163,61 @@ mod tests {
         assert_eq!(detail, "stale idset; re-resolve by external_id");
     }
 
+    /// `UnderlayRefused` — the §3.3 underlay's three bounds (the configured offset ceiling, the
+    /// depth-16 grid limit, the total cell budget), refused and never clamped — maps to
+    /// `422 contract`, contracts §3.1's *shape* class: a request the caller can fix by asking for
+    /// less, and must not retry unchanged.
+    ///
+    /// **The detail is the engine's own, forwarded whole and deliberately.** Unlike the store and
+    /// join doors above, this one names only the caller's own numbers and the configured bound —
+    /// no path, no corpus fact — and a client that is told to ask for less needs to know by how
+    /// much. The `Display` prefix is *not* applied: the arm passes the inner string, so a change
+    /// to `ApiError::Contract(too_many.to_string())`-style wrapping here would be visible.
+    ///
+    /// **Mutations this kills:** deleting the arm, so the catch-all answers `500 fail-closed` —
+    /// which tells a client its own arithmetic was fine and the server broke, and the shipped
+    /// client has no way to learn otherwise. Also re-pointing it at `FailClosed`, `Unknown` or
+    /// `Backpressure`.
+    #[test]
+    fn map_engine_error_takes_a_refused_underlay_to_422_contract() {
+        let refused = EngineError::UnderlayRefused(
+            "offset 5 is above the configured maximum of 4".to_string(),
+        );
+        let (status, code, detail) = map_engine_error(refused).parts();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(code, "contract");
+        assert_eq!(
+            detail, "offset 5 is above the configured maximum of 4",
+            "the caller's own numbers and the configured bound reach the caller unchanged"
+        );
+    }
+
+    /// `TooManyTiles` — a `(zoom, bbox)` product above `max_tiles_per_request`, counted and
+    /// refused rather than allocated — maps to the same `422 contract` class, and for the same
+    /// reason: asking for less is the fix.
+    ///
+    /// This arm *does* apply the variant's `Display`, so the detail must name both the demanded
+    /// count and the limit; a rewrite that forwarded a bare string would drop the numbers a client
+    /// narrows its bbox by.
+    ///
+    /// **Mutations this kills:** deleting the arm (the catch-all answers `500 fail-closed`);
+    /// re-pointing it at any other `ApiError`; replacing `too_many.to_string()` with a fixed
+    /// string that carries neither number.
+    #[test]
+    fn map_engine_error_takes_too_many_tiles_to_422_contract() {
+        let (status, code, detail) = map_engine_error(EngineError::TooManyTiles {
+            demanded: 4_294_967_296,
+            limit: 262_144,
+        })
+        .parts();
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(code, "contract");
+        assert!(
+            detail.contains("4294967296") && detail.contains("262144"),
+            "the detail must name both the demanded count and the limit, got: {detail}"
+        );
+    }
+
     /// `Cancelled` is explicitly named in `map_engine_error`'s match (not caught only by the
     /// wildcard arm) and maps to the fail-closed 500 — never a 2xx or any 4xx. This is the arm's
     /// defence-in-depth case (see its comment at the match site): the server-side drop-guard fires
