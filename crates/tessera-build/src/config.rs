@@ -456,10 +456,11 @@ struct LayerBlock {
     /// ([`compile_shape`]).
     #[serde(default)]
     shape: Option<ShapeBlock>,
-    /// The space the layer's artifact table writes its shapes in, where a row carries no `space`
+    /// The space the layer's artifact table writes its geometry in, where a row carries no `space`
     /// of its own (`polygon-membership.md` §4.3) — `"view"` if absent. On the layer beside
     /// `source` and `fields` because it is an acquisition-side fact about the file, on the same
-    /// register those two are.
+    /// register those two are. Declarable on a layer carrying either kind of geometry: a
+    /// membership shape, or an authored shape content, which is read in the same space (§6.1).
     #[serde(default)]
     default_space: Option<String>,
 }
@@ -514,9 +515,11 @@ pub struct InlineArtifact {
     pub ellipse: Option<Vec<f64>>,
     #[serde(default)]
     pub wkt: Option<String>,
-    /// The space the shape is written in — `"view"` if absent, or `"wgs84"`, which a view
-    /// declaring a projection honours by putting the coordinates through it
-    /// (`polygon-membership.md` §4.3).
+    /// The space the row's geometry is written in — `"view"` if absent, or `"wgs84"`, which a
+    /// view declaring a projection honours by putting the coordinates through it
+    /// (`polygon-membership.md` §4.3). It governs **every** geometry the row declares: the shape
+    /// above, and the authored shape content in a `contents` cell, which is read in the same
+    /// space as the same producer's membership polygon (§6.1).
     #[serde(default)]
     pub space: Option<String>,
     /// The parent artifact in a hierarchy, by its key.
@@ -3657,6 +3660,15 @@ fn compile_layers(
         let shape = compile_shape(block, &membership)?;
         let shape_kind = shape.map(|s| s.kind);
         let kind_is = |kind: ShapeKind| shape_kind == Some(kind);
+        // **A layer has geometry to be in a space if it declares either kind** — a membership
+        // shape in `[layer.shape]`, or an authored shape content, which is read in the space its
+        // row declares exactly as a membership shape is (`polygon-membership.md` §6.1). The two
+        // are never declared together, so at most one of them is what a space governs.
+        let carries_geometry = shape.is_some()
+            || content
+                .supplied
+                .iter()
+                .any(|s| s.authored_shape_kind().is_some());
         // **A row's geometry sits in its layer's kind's fields and no other** — the box's four
         // bounds, the circle's three, the ellipse's five, the polygon's WKB `geometry` column
         // (GeoParquet's own name) — so naming a field of another kind is refused as a field the
@@ -3666,7 +3678,9 @@ fn compile_layers(
         // by different functions cannot share it. Two views both declaring `projection = "none"`
         // are warned rather than refused, at the build's shape report — nothing then says whether
         // they share a space, and a warning is the right weight for a thing that might be true.
-        if shape.is_some() {
+        // An authored shape content is under the same rule and for the same reason: it is placed
+        // by the view's own projection whenever its row declares `wgs84`.
+        if carries_geometry {
             let mut named: Vec<(&str, Projection)> = Vec::new();
             for name in declared_views {
                 if let Some(view) = views.iter().find(|v| &v.name == name) {
@@ -3709,10 +3723,11 @@ fn compile_layers(
         let default_space = match block.default_space.as_deref() {
             None => tessera_store::derived::ShapeSpace::View,
             Some(word) => {
-                if shape.is_none() {
+                if !carries_geometry {
                     return Err(declaration_error(format!(
-                        "{object}: `default_space` is declared and the layer declares no \
-                         `[layer.shape]`, so there is no geometry for it to be the space of"
+                        "{object}: `default_space` is declared and the layer declares neither \
+                         `[layer.shape]` nor an authored shape content, so there is no geometry \
+                         for it to be the space of"
                     )));
                 }
                 let space = tessera_store::derived::ShapeSpace::parse(word)
@@ -3800,9 +3815,9 @@ fn compile_layers(
                 ),
                 KnownField::asserted_by(
                     "space",
-                    shape.is_some(),
-                    "the layer declares no `[layer.shape]`, so its rows carry no geometry to be \
-                     in a space",
+                    carries_geometry,
+                    "the layer declares neither `[layer.shape]` nor an authored shape content, so \
+                     its rows carry no geometry to be in a space",
                 ),
                 KnownField::asserted_by(
                     "contents",

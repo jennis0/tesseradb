@@ -1852,9 +1852,35 @@ fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     assert!(err(&wgs84).contains("projections.md"), "{}", err(&wgs84));
     let spaceless = with_space("view", "");
     assert!(
-        err(&spaceless).contains("no `[layer.shape]`"),
+        err(&spaceless).contains("neither `[layer.shape]` nor an authored shape content"),
         "{}",
         err(&spaceless)
+    );
+
+    // **An authored shape content is geometry a space governs too** (`polygon-membership.md`
+    // §6.1): it is read in the space its row declares exactly as a membership shape is, so a
+    // layer that declares one and no `[layer.shape]` may still name the space its drawings are
+    // written in — and is refused for the same unhonourable pair.
+    let authored = |word: &str| {
+        format!(
+            "{}\n  [[layer.content.supplied]]\n  name = \"outline\"\n  type = \"polygon\"\n  \
+             require_member_visibility = \"inherited\"\n",
+            predicate_fixture().replace(
+                "membership                = \"enumerated\"",
+                &format!(
+                    "default_space             = \"{word}\"\nmembership                = \
+                     \"enumerated\""
+                ),
+            )
+        )
+    };
+    let drawn = authored("view");
+    assert!(parse_str(&drawn).is_ok(), "{}", err(&drawn));
+    let drawn_wgs84 = authored("wgs84");
+    assert!(
+        err(&drawn_wgs84).contains("projections.md"),
+        "{}",
+        err(&drawn_wgs84)
     );
 }
 

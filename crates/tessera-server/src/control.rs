@@ -2360,11 +2360,12 @@ struct PublishBody {
     /// key, so accepting an idset beside one would imply a check that never ran.
     #[serde(default)]
     idset: Option<u32>,
-    /// The space every row's shape is in where the row names none (`polygon-membership.md`
-    /// §4.3) — `"view"` if absent, or `"wgs84"`, which asks the view to project the coordinates
-    /// with the same function it projected its points with. A view whose `projection` is `none`
-    /// has one space and refuses the second; so does a coordinate outside ±180 × ±90 — each a
-    /// `422` naming the row, the whole batch without effect.
+    /// The space every row's geometry is in where the row names none (`polygon-membership.md`
+    /// §4.3) — its membership shape and its authored shape content alike, which are read in one
+    /// space (§6.1). `"view"` if absent, or `"wgs84"`, which asks the view to project the
+    /// coordinates with the same function it projected its points with. A view whose `projection`
+    /// is `none` has one space and refuses the second; so does a coordinate outside ±180 × ±90 —
+    /// each a `422` naming the row, the whole batch without effect.
     #[serde(default)]
     default_space: Option<String>,
     artifacts: Vec<IncomingArtifactBody>,
@@ -2406,19 +2407,28 @@ struct IncomingArtifactBody {
     ellipse: Option<Vec<f64>>,
     #[serde(default)]
     wkt: Option<String>,
-    /// This row's own space, overriding the batch's `default_space`.
+    /// This row's own space, overriding the batch's `default_space` — for the shape above and for
+    /// the authored shape content this row's `content` carries, which are one producer's geometry
+    /// in one coordinate system.
     #[serde(default)]
     space: Option<String>,
 }
 
 /// One ranked content's authored shape — the text at the layer's shape slot — canonicalised for
 /// every view of its layer, by the route [`canonical_row_shape`] takes for a membership shape.
+///
+/// **The `space` is the row's own**, resolved as a membership shape's is: the batch's
+/// `default_space` unless the row overrides it. A drawing and the membership beside it come from
+/// one source in one coordinate system, so a `wgs84` row whose polygon is placed by the view's
+/// transform and whose drawing is not would put the two in different places
+/// (`polygon-membership.md` §6.1, §4.3).
 fn canonical_authored_content(
     state: &AppState,
     declaration: &tessera_types::layer::LayerDeclaration,
     index: usize,
     rank: usize,
     kind: tessera_types::layer::ShapeKind,
+    space: tessera_engine::shapes::ShapeSpace,
     text: &str,
 ) -> Result<
     (
@@ -2445,12 +2455,10 @@ fn canonical_authored_content(
         y_max: q.y_max,
     };
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-    // Authored content carries no `space` of its own — it is the drawing a declaration wrote in
-    // the view's coordinates, exactly as the build reads it (`layers.rs`).
     let canonical = canonical_shapes(
         &shape,
         &views,
-        tessera_engine::shapes::ShapeSpace::View,
+        space,
         // **The projection of the layer's own views**, not the bundle's first. A shape layer
         // spanning views with different projections is refused at the declaration, so the views
         // agree and the first is the answer for all of them — but it must be *this layer's* first
@@ -2719,12 +2727,19 @@ async fn publish_artifacts(
     // **The authored shape content, read as a membership shape is** (`polygon-membership.md`
     // §6.1, ruling (h)): where the layer declares a `polygon`, `circle` or `ellipse` content, that
     // slot of every ranked content is canonicalised for every view of the layer — the same
-    // reader, the same report, the same vertex cap — and the slot then holds the canonical bytes
+    // reader, the same report, the same vertex cap and **the same space**, the batch's
+    // `default_space` and the row's own `space` — and the slot then holds the canonical bytes
     // in their content spelling, which is what the blob stores and the serve reads back into
     // `shape_x`/`shape_y`. Refused as a membership shape is refused, naming the row.
     if let Some((slot, kind)) = declaration.as_ref().and_then(|d| d.authored_shape()) {
         let declaration = declaration.as_ref().expect("an authored slot names a declaration");
         for (index, artifact) in artifacts.iter_mut().enumerate() {
+            let space = match artifact.space.as_deref() {
+                None => default_space,
+                Some(word) => tessera_engine::shapes::ShapeSpace::parse(word).map_err(|e| {
+                    ApiError::Contract(format!("artifact {index}: `space`: {e}"))
+                })?,
+            };
             for (rank, content) in artifact.content.iter_mut().enumerate() {
                 let Some(text) = content.values.get_mut(slot) else {
                     // Short of a value: the engine refuses the row below, naming the count.
@@ -2736,6 +2751,7 @@ async fn publish_artifacts(
                     index,
                     rank,
                     kind,
+                    space,
                     text,
                 )?;
                 shape_reports.push(serde_json::json!({

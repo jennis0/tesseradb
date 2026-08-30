@@ -1,6 +1,6 @@
 # Shape membership — requirements and design
 
-**Status:** **Normative — 2026-08-30 (r7).** Designed, taken through one adversarial review
+**Status:** **Normative — 2026-08-30 (r8).** Designed, taken through one adversarial review
 (Appendix R, r4), owner-ruled (§13), and **built in four stages on 2026-08-29** (§12), each in its
 own worktree and gate-green: the core, the artifact type, the wire and client, the region leaf.
 **`wgs84` shapes are built** (§4.3): a view now declares a projection, and a shape declared in
@@ -358,9 +358,13 @@ A shape is also a **supplied content type** (ruling (h)): `[[layer.content.suppl
 exactly as a membership shape is, and drawn through the same client path; what differs is that they
 select nothing. The value in the content slot is WKT for a polygon and the numbers of the kind's row
 field for a circle (`cx, cy, r`) or an ellipse (`cx, cy, a, b, angle`); at publication it goes
-through the same reader, report and vertex cap as a membership shape, and the slot then holds the
-canonical per-view bytes (§6.6). A `polygon` content is never an opaque string: the wire serves
-its rings and the slot itself is served blank. A layer declares at most one authored shape, and
+through the same reader, report, vertex cap **and space** as a membership shape, and the slot then
+holds the canonical per-view bytes (§6.6). The space is the row's own (§4.3) — a drawing and the
+membership beside it are one producer's geometry in one coordinate system, and a service that
+projected the second and not the first would place a ±180 × ±90 outline in a corner of a projected
+view's `[0, 1]` frame, with R12's degrees-looking report structurally unable to name it there. A
+`polygon` content is never an opaque string: the wire serves its rings and the slot itself is
+served blank. A layer declares at most one authored shape, and
 none beside a `hull` or a membership shape (§7.1).
 
 ### 6.2 What a spatial layer may now declare
@@ -1016,3 +1020,11 @@ space — two views both declaring `projection = "none"`. One thing it asserts i
 so: the degree-looking report cannot fire on a projected view, whose frame is itself inside
 ±180 × ±90. **Not reviewed** — the design is unchanged, R10 included; what changed is which of it
 is built.
+
+**r8 (2026-08-30).** §6.1 names the **space** in the list of what an authored shape content shares
+with a membership shape. It was covered by "read exactly as a membership shape is" and by nothing
+more specific, and both entry points had read the shorter list — the reader, the report and the
+vertex cap — as the whole of the parity and fixed the space at `view`. The design did not change;
+the sentence now says the one property the enumeration left implicit, and both the build and
+`PUT /control/layers/{name}/artifacts` resolve a table's `default_space` and a row's own `space`
+for authored content by the same route they resolve them for a membership shape.
