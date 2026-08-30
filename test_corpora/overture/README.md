@@ -10,25 +10,40 @@ half and anything published from it inherits that.
 cd "$TESSERA_LADDER/overture" && tessera check && tessera build
 ```
 
-**Status: prepared, and validated end to end on one of the sixteen places parts.** The whole corpus
-has not been run.
+**Status: built and verified over the whole corpus**, on a declared `web_mercator` projection with
+the division polygons declared in longitude and latitude.
 
-| one part, 2026-08-28, local NVMe | |
+| whole corpus, 2026-08-30, local NVMe | |
 |---|---|
-| `prepare.py --parts 1` | **98 s** — divisions 29 s, join 47 s, entity ids 18 s |
-| places | 4,599,286 |
-| `tessera check --payloads` | OK — 9 vocabularies, 12 attributes, 3 layers |
-| `tessera build` | **55 s wall, 1.33 GB peak RSS** |
-| served viewport, zoom 0, 3-country principal | 8,469 artifacts — 8,448 divisions, 13 taxonomy, 8 predicate |
-| bundle | 484,326,539 bytes — 105 B/point |
-| artifacts | 1,955 taxonomy minted · 17,544 division declared · 8 from the predicate layer |
-| in no artifact | 204,422 taxonomy (4.4%, no category path) · 5,062 divisions (0.11%, in no polygon) |
+| `prepare.py` steps | divisions 109 s · join 2,560 s · entity ids 1,130 s · points 43 s · vocabularies 8 s · members 32 s · artifacts 79 s |
+| places | 73,631,092 |
+| `tessera check` | OK in 526 s — 9 vocabularies, 12 attributes, 3 layers, and the polygon decomposition |
+| `tessera build` | **31:18 wall, 26.75 GB peak RSS** |
+| bundle | **12,565,390,654 bytes** — 170.7 B/point |
+| `tessera verify` | OK in 5.98 s |
+| artifacts | 2,097 taxonomy minted · 625,754 division declared, every one with a polygon · 9 from the predicate layer |
+| in no artifact | 3,285,234 taxonomy (4.5%, no category path) · 46,844 places in no division (0.06%) |
+| points with a cell of their own | 12.1% of 73,631,092, in 8,895,128 distinct cells |
 
-Sixteen parts extrapolate to roughly **20 minutes** of `prepare.py`.
+⊘ **The box was not idle.** Two other agents were building and testing on this machine throughout,
+so the wall and the peak are upper bounds rather than measurements. The bundle bytes and every
+count are unaffected.
 
-⊘ The build's `RESOLUTION LOST — only 6.5%` warning is the slice, not the corpus. `part-00000` is
-Latin America alone — 47 countries, x spanning 0.00 to 0.29 of the frame — inside a whole-world
-extent. The figure to hold against GeoNames' 85.7% is the one the full run gives.
+⊘ **This is not comparable with the 7,900,567,451-byte bundle of 2026-08-29.** That build read
+`boundaries/divisions` as an **enumerated** layer over `members-divisions.parquet`; this one reads
+it as a **spatial** layer over the division polygons, which is what the declaration has said since
+the shape work landed and had never been run. The 4.7 GB difference is the polygon decomposition —
+58,595,897 interior tiles and 80,699,330 boundary cells, 1.34 GB held before the build sees it —
+and none of it is the projection.
+
+⊘ **The join's artifact roster is not reproducible, and the projection had nothing to do with it.**
+Two runs over the same staged bytes gave 625,821 and 625,754 division artifacts, differing on 1,526
+and 1,459 keys. Every other figure the join produces matches row for row — the lineage-depth
+histogram, the containing-areas histogram, the per-tier counts and the 46,844 unplaced places all
+match exactly. The cause is `arg_max(a.lineage, a.depth)`, which picks an arbitrary maximum among
+equal-depth containing areas, and 18.2M places sit in two or more. State it beside any artifact
+count from this rung, and expect it to matter the first time this rung's roster has to be stable
+across a rebuild.
 
 ## What it is for
 
@@ -210,9 +225,37 @@ and that the corpus's own zoom→level map is what bounds it — 254 artifacts a
 Expect that finding to bite harder here, and expect it to be this rung's first serving result. It
 is named in the declaration at the layer it applies to.
 
-## The frame, and the standing deferral
+## The frame
 
-Web Mercator, whole domain, normalised to the unit square, **y south**, exactly as at GeoNames — so
-the two corpora share a tile address and a 16-bit cell is an XYZ tile at zoom 16. Latitude is
-clipped to ±85.0511° and `frame.json` carries the clip count, which the build's clamp report
-structurally cannot see. **This is redone when native projection lands**; see `../README.md`.
+The declaration asks for `lon = [-180, 180]`, `lat = [±85.0511287798066]` under
+`projection = "web_mercator"` — the projection's whole domain — and the build snaps that outward to
+the square at z0 (0, 0), which is `x [0, 1]`, `y [0, 1]`. That is the same frame GeoNames takes, so
+the two corpora share a tile address and a 16-bit cell is an XYZ tile at zoom 16.
+
+```
+view 'world': web_mercator, quantising against x [0, 1], y [0, 1]
+        asked for lon [-180, 180], lat [-85.0511287798066, 85.0511287798066] — snapped outward to
+        the square at z0 (0, 0), lon [-180, 180], lat [-85.05112877980659, 85.0511287798066]
+        the data spans x [0.0000054569325293130074, 0.9999933284235278],
+        y [0.0417008042316494, 0.9980468750000067] — 65536 x 62677 of the 65536 x 65536 cells
+        73631092 point(s) placed, none on the frame's edge
+        none of them outside web_mercator's ±85.0511287798066° domain, so nothing was clipped
+```
+
+**Nothing is clipped here, where GeoNames clips 571.** Overture's places stop at 83.57°N and
+84.99°S, inside Web Mercator's domain on both sides, so the count that exists for the gazetteer is
+zero for this corpus. The line prints anyway, which is the point of printing it: a reader learns
+what was checked rather than only what went wrong.
+
+**The polygons are declared in longitude and latitude too** — `default_space = "wgs84"` on the
+layer — so the build densifies and projects them with the same function it places the points with.
+Densification cost essentially nothing on a published boundary set: 326,261,582 vertices in,
+324,679,776 out, the reduction being the domain clip rather than the subdivision.
+
+**The corpus was placed by a Python module before the projection layer existed**, and this rebuild
+is what closed that. Every one of the 73,631,092 stored positions matches what
+`test_corpora/common/projection.py` computes from the source degrees, exactly and with no
+tolerance. Against the old bundle, 230,402 points (0.31%, one in 320) sit in a different cell —
+each by exactly one cell on one axis, and each because the old build narrowed the coordinate to
+`f32` before quantising, which resolves 256 steps per cell at this frame. The new placement is the
+accurate one.

@@ -4,11 +4,11 @@
 # relative to the declaring document (configuration.md §3), so the copy beside the data is what
 # `tessera build` reads and this one is what gets reviewed.
 #
-# **The extent is post-projection**, as at the GeoNames rung and for the same reason: Tessera has
-# no projection layer, so `prepare.py` transforms WGS84 to Web Mercator, normalises the whole
-# domain to the unit square and runs y **south**. A 16-bit cell is then exactly an XYZ tile at
-# zoom 16. When native projection lands this becomes `projection = "web_mercator"` with the WGS84
-# box `frame.json` records, and the corpus is rebuilt.
+# **The extent is written on the input side of the projection**, as at the GeoNames rung and for
+# the same reason (`projections.md` §4.2): the box below is longitude and latitude, in degrees, and
+# it is Web Mercator's whole domain — so it snaps to the world square at zoom offset 0 and a 16-bit
+# cell is exactly an XYZ tile at zoom 16. The transform, the normalisation and the **south**-running
+# y all happen inside the build, for the division polygons as much as for the places.
 #
 # **Licence, and it differs from GeoNames'.** Places is CDLA-Permissive 2.0; divisions is **ODbL**,
 # which is share-alike — a derived database distributed publicly carries the obligation. This rung
@@ -40,7 +40,8 @@ source = "points"
 [[view]]
 name             = "world"
 title            = "Overture places"
-extent           = { min = 0.0, max = 1.0 }
+projection       = "web_mercator"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
 point_visibility = { field = "country", default = "public" }
 
 # ---------------------------------------------------------------------------------------------
@@ -299,11 +300,13 @@ source = "members_taxonomy"
 #
 # **The membership is the polygon** (`polygon-membership.md` §6.1): `membership = "spatial"` with
 # `shape.kind = "polygon"`, each artifact row carrying `division_area`'s own geometry as WKB in
-# the `geometry` column, projected by `prepare.py` into this view's frame. The service resolves
-# which places each division holds from the geometry — at the build over its one segment, at
-# every flush over the segment it publishes — so `members-divisions.parquet` is no longer what
-# the layer reads. The offline join stays for the three lifted attribute columns and for the
-# roster.
+# the `geometry` column, in **longitude and latitude** — `default_space = "wgs84"` — so the build
+# puts it through this view's own transform, the same function the places go through. An edge
+# declared in degrees is straight in the degree plane, so the build densifies before projecting
+# (`projections.md` §10). The service resolves which places each division holds from the geometry
+# — at the build over its one segment, at every flush over the segment it publishes — so
+# `members-divisions.parquet` is no longer what the layer reads. The offline join stays for the
+# three lifted attribute columns and for the roster.
 #
 # **The edges are declared**, from each division's own `hierarchies[1]` — the `parent` column —
 # and never derived from containment: `division_area` polygons are generalised for cartography
@@ -319,6 +322,7 @@ source = "members_taxonomy"
 name                      = "boundaries/divisions"
 title                     = "Administrative divisions"
 source                    = "artifacts_divisions"
+default_space             = "wgs84"
 views                     = ["world"]
 membership                = "spatial"
 hierarchy                 = { kind = "nested", prune_children = true }

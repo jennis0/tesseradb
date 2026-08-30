@@ -5,16 +5,15 @@
 //! function of two `f64`s — it does not read a declaration, does not know an extent, and does not
 //! quantise. `morton.rs` takes it from there.
 //!
-//! **⊘ Partially reached.** A view declares its projection, and both entry points transform every
-//! coordinate through it: a *build* at the read of a points file (`projections.md` §2, §4;
-//! `tessera_build::config`) and an *ingest* at the decode of an Arrow batch, whose coordinate
-//! columns are `lon`/`lat` for a projected view and whose write-ahead log holds the frame
-//! coordinates this module produced (§3; `tessera_server`'s `control` module). What remains: the
-//! two built geographic corpora are still projected outside the build by
-//! `test_corpora/common/projection.py` before their rows are ever seen; the build's frame report
-//! does not yet name the projection or the snap (§8); `/v1/meta` publishes the frame alone, so a
-//! client cannot yet tell a geographic corpus from an embedding (§9); and a shape declared in
-//! longitude and latitude is still refused at parse (§10).
+//! A view declares its projection, and both entry points transform every coordinate through it: a
+//! *build* at the read of a points file (`projections.md` §2, §4; `tessera_build::config`) and an
+//! *ingest* at the decode of an Arrow batch, whose coordinate columns are `lon`/`lat` for a
+//! projected view and whose write-ahead log holds the frame coordinates this module produced (§3;
+//! `tessera_server`'s `control` module). The build's frame report names the projection and the
+//! snap (§8), `/v1/meta` publishes the projection, the world aspect and the tile scheme a client
+//! needs to decide whether a basemap may be drawn (§9), a shape may be declared in longitude and
+//! latitude and is densified before it is projected (§10), and both built geographic corpora are
+//! on a declared projection with nothing outside the build placing a point.
 //!
 //! **Every projection's output is the unit square, x east and y south** (§4). The frame is
 //! `[0, 1]` on both axes whatever the projection, so tile addressing is integer arithmetic and a
