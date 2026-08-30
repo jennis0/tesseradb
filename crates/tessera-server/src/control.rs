@@ -29,7 +29,7 @@ use rustc_hash::FxHashSet;
 use sha2::{Digest, Sha256};
 
 use tessera_engine::{
-    AcceptError, DeclaredScalar, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE,
+    AcceptError, DeclaredScalar, MetaView, ScalarType, Vocabularies, VocabularyKind, ABSENT_CODE,
     DENY_WINDOW_MAX_ENTRIES,
 };
 use tessera_lifecycle::{
@@ -1114,7 +1114,7 @@ fn parse_ingest_batch(
 /// No build path emits a multi-view bundle (`tessera-build` writes exactly one `ViewDescriptor`),
 /// so the second row is unreachable. It is implemented rather than asserted-away because it is a
 /// contract clause and it costs one comparison.
-fn resolve_view(view: Option<&str>, views: &[(String, String)]) -> Result<String, ApiError> {
+fn resolve_view(view: Option<&str>, views: &[MetaView]) -> Result<String, ApiError> {
     match view {
         None if views.len() > 1 => Err(ApiError::Contract(format!(
             "this bundle has {} views ({}), so x-tessera-view is required — which one a batch \
@@ -1122,14 +1122,14 @@ fn resolve_view(view: Option<&str>, views: &[(String, String)]) -> Result<String
             views.len(),
             views
                 .iter()
-                .map(|(id, _)| id.as_str())
+                .map(|v| v.id.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
-        None => views.first().map(|(id, _)| id.clone()).ok_or_else(|| {
+        None => views.first().map(|v| v.id.clone()).ok_or_else(|| {
             ApiError::Contract("this bundle declares no view to ingest into".into())
         }),
-        Some(id) if views.iter().any(|(known, _)| known == id) => Ok(id.to_string()),
+        Some(id) if views.iter().any(|v| v.id == id) => Ok(id.to_string()),
         Some(id) => Err(ApiError::Unknown(format!("unknown view '{id}'"))),
     }
 }

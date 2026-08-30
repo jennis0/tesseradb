@@ -1,0 +1,115 @@
+{
+  "url": "http://localhost:5173",
+  "dataset": "geonames-mercator",
+  "headed": false,
+  "view": {
+    "id": "world",
+    "displayName": "world",
+    "projection": "web_mercator",
+    "worldAspect": 1,
+    "tileScheme": "xyz",
+    "tile": {
+      "x": 0,
+      "y": 0,
+      "z": 0
+    }
+  },
+  "quantisation": {
+    "xMin": 0,
+    "xMax": 1,
+    "yMin": 0,
+    "yMax": 1
+  },
+  "basemapLayer": "basemap",
+  "depth": 8,
+  "served": 222852,
+  "visible": "223236",
+  "places": [
+    {
+      "place": "London",
+      "lon": -0.1276,
+      "lat": 51.5072,
+      "cell": [
+        32744,
+        21792
+      ],
+      "back": [
+        -0.1318359375,
+        51.50874245880335
+      ],
+      "driftDeg": 0.004235937500000009
+    },
+    {
+      "place": "Nairobi",
+      "lon": 36.8219,
+      "lat": -1.2921,
+      "cell": [
+        39471,
+        33003
+      ],
+      "back": [
+        36.8206787109375,
+        -1.290784355433135
+      ],
+      "driftDeg": 0.0013156445668649486
+    },
+    {
+      "place": "Sydney",
+      "lon": 151.2093,
+      "lat": -33.8688,
+      "cell": [
+        60294,
+        39327
+      ],
+      "back": [
+        151.204833984375,
+        -33.865854454071844
+      ],
+      "driftDeg": 0.004466015625013142
+    },
+    {
+      "place": "Buenos Aires",
+      "lon": -58.3816,
+      "lat": -34.6037,
+      "cell": [
+        22139,
+        39489
+      ],
+      "back": [
+        -58.3868408203125,
+        -34.601563177240884
+      ],
+      "driftDeg": 0.005240820312501171
+    },
+    {
+      "place": "Anchorage",
+      "lon": -149.9003,
+      "lat": 61.2181,
+      "cell": [
+        5479,
+        18579
+      ],
+      "back": [
+        -149.9029541015625,
+        61.220024168231625
+      ],
+      "driftDeg": 0.0026541015625127784
+    },
+    {
+      "place": "Singapore",
+      "lon": 103.8198,
+      "lat": 1.3521,
+      "cell": [
+        51667,
+        32521
+      ],
+      "back": [
+        103.8153076171875,
+        1.3566847287158743
+      ],
+      "driftDeg": 0.004584728715874231
+    }
+  ],
+  "consoleErrors": [],
+  "failures": []
+}

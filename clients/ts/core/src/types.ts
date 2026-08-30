@@ -201,10 +201,49 @@ export type Layer = {
   version: number;
 };
 
+/** The names a view's `projection` may take — the closed set of `projections.md` §5. */
+export type ProjectionName = 'web_mercator' | 'equirectangular' | 'gall_isographic' | 'none';
+
+/**
+ * The tile schemes a view's frame may be addressed in. One: the slippy-map `z/x/y` every basemap
+ * server publishes. It is a scheme rather than a flag because a frame can be aligned to a tiling
+ * nobody serves — see {@link ViewInfo.tileScheme}.
+ */
+export type TileScheme = 'xyz';
+
+/**
+ * One declared view, and what it is a picture of (`projections.md` §9).
+ *
+ * The four projection fields are **deployment constants, identical for every principal** — the
+ * same class as the quantisation beside them — and they are what a host decides a basemap by.
+ * `projection.ts` holds the two things a client does with them.
+ */
+export type ViewInfo = {
+  id: string;
+  displayName: string;
+  /** What placed this view's positions; `'none'` for a view that projects nothing. */
+  projection: ProjectionName;
+  /**
+   * The ratio the world should be drawn at, width ÷ height — 1 for `web_mercator`, `2cos φ₁` for
+   * an equirectangular alias, and `null` for `none`, which has no world to draw.
+   */
+  worldAspect: number | null;
+  /**
+   * The tile scheme this view's frame addresses, and **the field that decides whether a basemap
+   * may be drawn**. `null` — the answer for every projection but an aligned `web_mercator` one —
+   * means draw the points and draw no basemap. It is a scheme's name rather than a flag because
+   * an equirectangular frame is aligned to a square tiling no server publishes, so alignment
+   * alone would have a host draw a Mercator basemap under a corpus that cannot line up with one.
+   */
+  tileScheme: TileScheme | null;
+  /** The tile this view's frame is under {@link tileScheme}. Present exactly when it is. */
+  tile: {z: number; x: number; y: number} | null;
+};
+
 export type Meta = {
   apiVersion: number;
   idset: number;
-  views: {id: string; displayName: string}[];
+  views: ViewInfo[];
   quantisation: Quantisation;
   /** The column schema in full — see {@link DeclaredScalar}. Order is the declaration order. */
   declaredScalars: DeclaredScalar[];
