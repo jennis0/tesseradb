@@ -89,7 +89,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `client-obligations.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 28 |
+| `configuration.md` | Normative for the build-time configurati | 29 |
 | `conformance.md` | Normative — r15 | 19 |
 | `contracts.md` | Normative — r52 | 26 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
