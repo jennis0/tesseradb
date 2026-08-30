@@ -738,22 +738,24 @@ fn ensure_verified(
 /// bounded by *refusing* what it could not examine, never by ignoring it.
 ///
 /// **Known residuals, out of scope here.** A deny-carrying manifest is still stepped past when
-/// this loop cannot tell that it carries one — three ways, all of them the same shape:
+/// this loop cannot tell that it carries one — two ways, both of them the same shape:
 ///
 /// - it does not **parse** (`serde_json` error below),
-/// - it cannot be **read** (I/O error below — a permission or media fault),
-/// - it is present under a **non-canonical name** ([`list_segments_manifests`] parses
-///   `SEGMENTS-01.json` to `n = 1` and the loop then reads `SEGMENTS-1.json`, a different or
-///   absent file).
+/// - it cannot be **read** (I/O error below — a permission or media fault).
 ///
-/// None is closable here, and none should be closed by guessing: an ordinary torn write must
-/// not become a hard partition failure, and a manifest whose bytes are unavailable tells the
-/// reader nothing about what it carried. **The bound on all three is time, and that bound does
+/// Neither is closable here, and neither should be closed by guessing: an ordinary torn write
+/// must not become a hard partition failure, and a manifest whose bytes are unavailable tells
+/// the reader nothing about what it carried. **The bound on both is time, and that bound does
 /// not exist yet** — the `readyz` freshness gate (contracts §2.3) is unbuilt, so a replica in this
 /// state serves the older manifest indefinitely.
 ///
+/// A third residual — a manifest present under a **non-canonical name** — is closed:
+/// [`list_segments_manifests`] refuses such a name rather than parsing it (contracts §2.1), so a
+/// padded `SEGMENTS-01.json` is a typed error and never a step-past. It differed from the other
+/// two in being decidable without reading anything.
+///
 /// **The deny writer has shipped and the gate has not**, which an earlier note here said must
-/// never happen. The rule was stated wider than the condition it protected: all three residuals
+/// never happen. The rule was stated wider than the condition it protected: both residuals
 /// require a *replica* — a reader seeded from a manifest it did not write — and this deployment
 /// has one node, which replays its own WAL over the seed. The gate bounds how stale a synced
 /// replica's view may be, and there is nothing to sync. It ships with replication (owner ruling,
@@ -767,14 +769,10 @@ fn load_verifying_segments_manifest(
     partition_dir: &Path,
     verification: Verification,
 ) -> Result<SelectedManifest> {
-    let mut candidates = list_segments_manifests(partition_dir)?;
-    // Highest n first.
-    candidates.sort_unstable_by(|a, b| b.cmp(a));
-    let highest_candidate_n = candidates.first().copied();
-
     // Bundle-root-relative rather than the bare phash: this process swaps bundles at runtime, so
     // a log line or an error naming only `default` cannot say *which* bundle's `default` it
     // means. Short enough to stay a decent structured field, and free of the absolute prefix.
+    // Built before the listing because the listing can itself refuse (a non-canonical name).
     let partition_label = match (prefix_dir.file_name(), partition_dir.file_name()) {
         (Some(prefix), Some(phash)) => format!(
             "{}/partitions/{}",
@@ -783,6 +781,11 @@ fn load_verifying_segments_manifest(
         ),
         _ => partition_dir.display().to_string(),
     };
+
+    let mut candidates = list_segments_manifests(partition_dir, &partition_label)?;
+    // Highest n first.
+    candidates.sort_unstable_by(|a, b| b.cmp(a));
+    let highest_candidate_n = candidates.first().copied();
 
     // The **first** failure recorded, not the last: the loop walks highest-first, so the first
     // is the newest manifest's — the one an operator must fix. Overwriting per iteration leaves
@@ -895,7 +898,23 @@ struct SelectedManifest {
 
 /// List the `n` values of every `SEGMENTS-<n>.json` present in `partition_dir` (unordered,
 /// unverified — candidates only).
-fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
+///
+/// **A candidate whose name is not the canonical spelling of its `n` is refused, not parsed**
+/// (contracts §2.1, [`StoreError::NonCanonicalManifestName`]). `n` is unpadded decimal, and the
+/// caller reconstructs `SEGMENTS-{n}.json` to read from — so parsing `SEGMENTS-01.json` to
+/// `n = 1` discovers a manifest and then reads a different or absent file, which the candidate
+/// walk records as an I/O failure and steps past. That step-past carries the reader past a
+/// manifest that may hold a `deny`, and is indistinguishable from the file not being there at
+/// all. §2.1: "Parsing leniently and reconstructing canonically is the combination that hides
+/// it." The refusal is what makes the two distinguishable.
+///
+/// The test is canonical-spelling equality — the parsed number, re-rendered, must equal what was
+/// read — which admits `0` and `11` and refuses a leading zero, an empty or non-numeric part, a
+/// sign, whitespace, and anything past `u64`. It is deliberately confined to the
+/// `SEGMENTS-<…>.json` family: the `SEGMENTS-<n>.json.tmp` orphan a crashed manifest write
+/// leaves behind ([`crate::manifest_write`]) does not end in `.json`, is not a candidate, and
+/// must not become a partition failure.
+fn list_segments_manifests(partition_dir: &Path, partition_label: &str) -> Result<Vec<u64>> {
     let entries = match std::fs::read_dir(partition_dir) {
         Ok(entries) => entries,
         // No such directory at all is not itself a hard read error here: the caller reports a
@@ -916,8 +935,16 @@ fn list_segments_manifests(partition_dir: &Path) -> Result<Vec<u64>> {
             .strip_prefix("SEGMENTS-")
             .and_then(|r| r.strip_suffix(".json"))
         {
-            if let Ok(n) = rest.parse::<u64>() {
-                found.push(n);
+            // Canonical-spelling equality, before anything reads the file: `rest.parse()`
+            // alone accepts `007` and yields `7`, and the caller then opens `SEGMENTS-7.json`.
+            match rest.parse::<u64>() {
+                Ok(n) if n.to_string() == rest => found.push(n),
+                _ => {
+                    return Err(StoreError::NonCanonicalManifestName {
+                        partition: partition_label.to_string(),
+                        name: name.into_owned(),
+                    })
+                }
             }
         }
     }

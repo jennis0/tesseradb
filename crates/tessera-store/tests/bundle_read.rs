@@ -1111,3 +1111,151 @@ fn a_just_written_prefix_still_refuses_a_manifest_that_disagrees_with_its_own_fi
         "expected MalformedBundle, got: {err}"
     );
 }
+
+// -------------------------------------------------------------------------------------------
+// Non-canonical `SEGMENTS-<n>.json` names (contracts §2.1).
+//
+// `n` is unpadded decimal. A reader that parses `SEGMENTS-01.json` to `n = 1` and then
+// reconstructs `SEGMENTS-1.json` to read from discovers a manifest and then reads from an absent
+// path — which the candidate walk steps silently past, carrying the reader past a manifest that
+// may hold a `deny`. §2.1: "Parsing leniently and reconstructing canonically is the combination
+// that hides it."
+// -------------------------------------------------------------------------------------------
+
+/// Copy `SEGMENTS-0.json` to a literal `name` in the same partition directory, setting
+/// `segments_version` to `version` and applying `edit`. Unlike [`add_segments_manifest`] the
+/// name is not derived from the number, which is the whole point: these fixtures write names
+/// the writer cannot produce, because the file has to arrive from outside it — an operator
+/// copy, a partial object-store sync, another implementation.
+fn add_segments_manifest_named(
+    root: &Path,
+    name: &str,
+    version: u64,
+    edit: impl FnOnce(&mut serde_json::Value),
+) {
+    let dir = root.join("v00000/partitions/default");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("SEGMENTS-0.json")).expect("read SEGMENTS-0"))
+            .expect("parse SEGMENTS-0.json");
+    value["segments_version"] = serde_json::json!(version);
+    edit(&mut value);
+    fs::write(
+        dir.join(name),
+        serde_json::to_vec_pretty(&value).expect("serialise"),
+    )
+    .expect("write the named manifest");
+}
+
+/// **The disclosure this refusal exists to close.** A zero-padded `SEGMENTS-01.json` carrying an
+/// accepted suppression is present in the prefix. A reader that parses it to `n = 1` reads
+/// `SEGMENTS-1.json`, which does not exist, records an I/O error and steps down to a
+/// `SEGMENTS-0.json` that verifies perfectly — in which entity 17 is visible again. Not an error
+/// of the wrong type: an `Ok` that serves the pre-suppression state, indistinguishable from a
+/// prefix that never carried the deny at all.
+///
+/// The refusal converts that step-past into a loud, typed error naming the file.
+///
+/// Mutations this kills: dropping the canonical-spelling check in
+/// `list_segments_manifests` (a bare `rest.parse::<u64>()`, or a `continue`/skip in place of the
+/// refusal) — the padded deny is then stepped past and `open_bundle` returns the suppressed
+/// entity; and typing the refusal as `NoVerifyingSegmentsManifest`, which is the "absent
+/// manifest" report this must never be confused with.
+#[test]
+fn a_padded_manifest_carrying_a_deny_is_refused_never_stepped_past() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    add_segments_manifest_named(dir.path(), "SEGMENTS-01.json", 1, |value| {
+        value["deny"] = serde_json::json!([{"entity_id": 17, "cause": "suppress"}]);
+    });
+
+    match open_bundle(dir.path()).expect_err(
+        "a padded candidate must be refused by name; parsing it and reading the unpadded name \
+         steps past a manifest carrying an accepted suppression",
+    ) {
+        StoreError::NonCanonicalManifestName { name, .. } => {
+            assert_eq!(name, "SEGMENTS-01.json");
+        }
+        other => panic!(
+            "expected NonCanonicalManifestName — anything else leaves the padded deny \
+             indistinguishable from an absent manifest. Got: {other}"
+        ),
+    }
+}
+
+/// The refusal is by *name*, before any read: a padded candidate is refused whether or not it
+/// carries a deny, because the reader cannot know which it is without opening it, and opening it
+/// is what the canonical reconstruction prevents.
+#[test]
+fn a_padded_manifest_is_refused_even_carrying_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+
+    add_segments_manifest_named(dir.path(), "SEGMENTS-007.json", 7, |_| {});
+
+    match open_bundle(dir.path()).expect_err("a padded candidate is refused by name") {
+        StoreError::NonCanonicalManifestName { name, .. } => {
+            assert_eq!(name, "SEGMENTS-007.json")
+        }
+        other => panic!("expected NonCanonicalManifestName, got: {other}"),
+    }
+}
+
+/// A candidate whose numeric part is not a decimal number at all is non-canonical for the same
+/// reason and refused the same way — an empty part, a sign, whitespace, or a value past `u64`.
+/// None of these is a spelling of a number this reader could re-render, so none can be admitted
+/// without inventing a name the format does not define.
+#[test]
+fn other_non_canonical_numeric_parts_are_refused_too() {
+    for name in [
+        "SEGMENTS-.json",
+        "SEGMENTS-+1.json",
+        "SEGMENTS- 1.json",
+        "SEGMENTS-1 .json",
+        "SEGMENTS-latest.json",
+        "SEGMENTS-99999999999999999999.json",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        build_bundle(dir.path(), 50);
+        add_segments_manifest_named(dir.path(), name, 1, |_| {});
+
+        match open_bundle(dir.path())
+            .expect_err(&format!("'{name}' is not a canonical SEGMENTS-<n>.json"))
+        {
+            StoreError::NonCanonicalManifestName { name: got, .. } => assert_eq!(got, name),
+            other => panic!("expected NonCanonicalManifestName for '{name}', got: {other}"),
+        }
+    }
+}
+
+/// **The control.** `SEGMENTS-0.json` is canonical — a rule that refuses a legitimate zero is
+/// worse than the gap it closes — and so is a multi-digit `n`. Both open, and the walk still
+/// serves the highest.
+#[test]
+fn canonical_zero_and_multi_digit_names_still_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    add_segments_manifest(dir.path(), 11, |_| {});
+
+    let bundle = open_bundle(dir.path()).expect("canonical names open");
+    assert_eq!(
+        bundle.partitions["default"].segments_n, 11,
+        "SEGMENTS-11.json is canonical and is the highest candidate"
+    );
+}
+
+/// A file that is not a `SEGMENTS-<n>.json` candidate at all is not swept up by the refusal. The
+/// `.json.tmp` orphan a crashed manifest write leaves behind (`manifest_write`) is the case that
+/// matters: it is expected residue, not a manifest, and turning it into a hard partition failure
+/// would refuse a bundle that is entirely well-formed.
+#[test]
+fn a_crashed_write_orphan_is_not_a_candidate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 50);
+    let partition = dir.path().join("v00000/partitions/default");
+    fs::write(partition.join("SEGMENTS-1.json.tmp"), b"{}").expect("write orphan");
+    fs::write(partition.join("notes.txt"), b"hello").expect("write stray");
+
+    let bundle = open_bundle(dir.path()).expect("a .json.tmp orphan is not a manifest candidate");
+    assert_eq!(bundle.partitions["default"].segments_n, 0);
+}

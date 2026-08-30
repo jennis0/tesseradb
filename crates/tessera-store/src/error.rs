@@ -129,6 +129,24 @@ pub enum StoreError {
     /// on purpose (see `crate::sidecar`'s module doc) — a `None` here would read as "no such
     /// external id" and could turn a WAL-resident suppression into a silent no-op.
     InvalidSidecar { path: PathBuf, detail: String },
+    /// A directory entry in a partition directory is spelled like a `SEGMENTS-<n>.json` but is
+    /// not the canonical name of any `n` (contracts §2.1): a leading zero, an empty or
+    /// non-numeric part, a sign, whitespace, or a value past `u64`.
+    ///
+    /// **Refusing the name is what keeps a padded manifest from being silently stepped past.**
+    /// `n` is unpadded decimal, so a reader that parses `SEGMENTS-01.json` to `n = 1` and then
+    /// reconstructs `SEGMENTS-1.json` to read from discovers a manifest and reads a different or
+    /// absent file — an I/O failure the candidate walk records and steps past, carrying the
+    /// reader past a manifest that may hold a `deny`. §2.1: "Parsing leniently and reconstructing
+    /// canonically is the combination that hides it."
+    ///
+    /// **Its own variant so a caller can tell this from an absent manifest**, which is exactly
+    /// the confusion the refusal exists to end: [`StoreError::NoVerifyingSegmentsManifest`] says
+    /// nothing verified, and folding a mis-named file into it would report a manifest that is
+    /// present and unread as one that is not there. Nothing in this repository writes such a
+    /// name; a file carrying one arrived from outside the writer, and the operator response is to
+    /// rename it to its canonical spelling or remove it.
+    NonCanonicalManifestName { partition: String, name: String },
 }
 
 impl fmt::Display for StoreError {
@@ -209,6 +227,14 @@ impl fmt::Display for StoreError {
                 f,
                 "refusing to reclaim prefix '{prefix}': CURRENT still names '{current}' as live, \
                  and reclamation is the one operation here that deletes bundle data"
+            ),
+            StoreError::NonCanonicalManifestName { partition, name } => write!(
+                f,
+                "refusing '{name}' in partition '{partition}': SEGMENTS-<n>.json's n is unpadded \
+                 decimal (contracts §2.1), so this is not the canonical name of any n. It is \
+                 refused rather than parsed: parsing it and reading the canonical name back \
+                 would step silently past a manifest that may carry a deny. Rename it to its \
+                 canonical spelling or remove it"
             ),
             StoreError::UnsafePath { what, value } => {
                 write!(f, "unsafe path in manifest ({what}): '{value}'")
