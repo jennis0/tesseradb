@@ -106,7 +106,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `performance-suite.md` | Provisional — under review | 9 |
 | `polygon-membership.md` | Normative — r7 | 14 |
-| `projections.md` | Provisional — under review | 4 |
+| `projections.md` | Provisional — under review | 3 |
 | `records-and-search.md` | Provisional — under review | 29 |
 | `selection-operand.md` | Normative — r2 | 3 |
 | `streamed-serving.md` | Normative — r2 |  |

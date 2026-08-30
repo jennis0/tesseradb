@@ -1,14 +1,16 @@
 """GeoNames — 13,463,857 features, the ladder's first geographic rung.
 
 One DuckDB pass over `allCountries.txt` produces the points file, eight vocabularies, two member
-files and the admin layer's artifact names. No GPU, no embedding, no projection in the UMAP sense — the coordinates are already WGS84
-and become positions by [`..common.projection`][] and quantisation, which is why this rung is the
-cheapest real map in the corpus.
+files and the admin layer's artifact names. No GPU and no embedding: the coordinates are already
+WGS84 and reach the build as degrees, which is why this rung is the cheapest real map in the
+corpus.
 
-**Everything here projects, and it should not.** See the standing deferral in `../README.md`: when
-Tessera gains a projection layer this script emits `lon`/`lat` unchanged and the declaration names
-a projection. The WGS84 box that the frame was asked for is written to `frame.json` so the
-migration substitutes those numbers rather than deriving them back out of a constant.
+**Nothing here is projected.** `points.parquet` carries `lon` and `lat` exactly as GeoNames
+publishes them, and `corpus.toml` declares `projection = "web_mercator"` with its frame written as
+a longitude/latitude box. The transform runs inside the build, at the boundary, in the same place
+for a build and for an ingest (`projections.md` §3), so the frame report and the clip count are
+the build's rather than this script's. `frame.json` records the source's own degree bounds, which
+is what the declared box has to contain.
 
 Four decisions this script makes about the source, each because the data forced it rather than
 because the campaign plan called for it:
@@ -142,14 +144,12 @@ def unpack(src: Path, out: Path, member: str) -> Path:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--frame", choices=("unit", "metres"), default="unit")
     ap.add_argument("--vintage", default=VINTAGE)
     ap.add_argument("--limit", type=int, default=None, help="keep the first N by entity id")
     args = ap.parse_args()
 
     src, out = staged(RUNG, args.vintage), ladder(RUNG)
-    ext = projection.extent(args.frame)
-    print(f"source  {src}\noutput  {out}\nframe   {args.frame} — extent [{ext.min}, {ext.max}]\n")
+    print(f"source  {src}\noutput  {out}\ncoordinates  WGS84 degrees, unprojected\n")
 
     print("unpacking")
     all_countries = unpack(src / "allCountries.zip", out, "allCountries.txt")
@@ -184,9 +184,7 @@ def main() -> None:
     print(f"  {rows:,} rows in {time.monotonic() - started:.0f}s")
 
 
-    x_expr, y_expr = projection.sql("longitude", "latitude", args.frame)
-
-    print("\nprojecting and assigning entity ids")
+    print("\nassigning entity ids")
     started = time.monotonic()
     con.execute(
         f"""
@@ -203,8 +201,8 @@ def main() -> None:
         SELECT
             row_number() OVER (ORDER BY modification_date, geonameid) - 1 AS entity_id,
             geonameid,
-            {x_expr} AS x,
-            {y_expr} AS y,
+            longitude AS lon,
+            latitude  AS lat,
             feature_class,
             CASE WHEN feature_class IS NOT NULL AND feature_code IS NOT NULL
                  THEN feature_class || '.' || feature_code END AS feature_code,
@@ -240,7 +238,6 @@ def main() -> None:
             nullif(dem, -9999)::SMALLINT AS dem,
             modification_date::TIMESTAMP AS modification_date,
             name,
-            latitude,
             admin1_code, admin2_code, admin3_code, admin4_code
         FROM marked
         {f"QUALIFY entity_id < {args.limit}" if args.limit else ""}
@@ -259,14 +256,16 @@ def main() -> None:
             f"would merge with a real region; choose another marker."
         )
     kept = con.execute("SELECT count(*) FROM points").fetchone()[0]
-    # Counted over the rows kept rather than over the file, so that --limit reports its own corpus.
-    # The build's clamp report structurally cannot see these: a clipped point lands at exactly the
-    # frame maximum, and a point at the maximum is not clamped (`contracts` §2.5), which is why
-    # `projections.md` §4a asks for a separate count.
+    # **A survey of the source, not something this script acts on.** The build clips a latitude
+    # beyond Web Mercator's domain onto the frame's edge and reports the count itself
+    # (`projections.md` §7); this is the same population counted upstream, so that the two numbers
+    # can be held against each other and so that the rung's account of what the source turned out
+    # to be does not depend on a build having been run. Counted over the rows kept rather than over
+    # the file, so `--limit` surveys its own corpus.
     clipped = con.execute(
         f"""
-        SELECT count(*) FILTER (latitude > {projection.MAX_LATITUDE!r}),
-               count(*) FILTER (latitude < {-projection.MAX_LATITUDE!r})
+        SELECT count(*) FILTER (lat > {projection.MAX_LATITUDE!r}),
+               count(*) FILTER (lat < {-projection.MAX_LATITUDE!r})
         FROM points
         """
     ).fetchone()
@@ -275,7 +274,7 @@ def main() -> None:
     print("\nwriting")
     con.execute(
         f"""COPY (
-            SELECT entity_id, x, y, feature_class, feature_code, country,
+            SELECT entity_id, lon, lat, feature_class, feature_code, country,
                    admin1, admin2, admin3, admin4, timezone,
                    population, elevation, dem, modification_date, name
             FROM points ORDER BY entity_id
@@ -408,29 +407,30 @@ def main() -> None:
         ) TO '{out / "members-admin.parquet"}' (FORMAT parquet, COMPRESSION zstd)"""
     )
 
-    # --- the frame report ---------------------------------------------------------------------
+    # --- the source's own box -----------------------------------------------------------------
+    # In degrees, which is the space `points.parquet` is now written in and the space the
+    # declaration's `extent` is written in. The frame itself — the aligned square this box snaps
+    # to, and what it clamps — is the build's report and is not duplicated here.
     bounds = con.execute(
-        "SELECT min(x), max(x), min(y), max(y) FROM points"
+        "SELECT min(lon), max(lon), min(lat), max(lat) FROM points"
     ).fetchone()
     frame = {
-        "frame": args.frame,
-        "extent": {"min": ext.min, "max": ext.max},
-        "projection": "web_mercator",
-        "y_direction": "south",
-        "asked_for_wgs84": projection.WORLD_BOX_WGS84,
-        "clipped": {"north": clipped[0], "south": clipped[1], "total": sum(clipped)},
-        "data_bounds": {"x": [bounds[0], bounds[1]], "y": [bounds[2], bounds[3]]},
+        "coordinates": "wgs84_degrees",
+        "declared_projection": "web_mercator",
+        "declared_extent": projection.WORLD_BOX_WGS84,
+        "beyond_domain": {"north": clipped[0], "south": clipped[1], "total": sum(clipped)},
+        "data_bounds": {"lon": [bounds[0], bounds[1]], "lat": [bounds[2], bounds[3]]},
         "points": kept,
         "source": str(src),
         "vintage": args.vintage,
     }
     # --- report -------------------------------------------------------------------------------
     print(f"\npoints        {kept:,}")
-    print(f"extent        [{ext.min}, {ext.max}] — {args.frame}, y south")
-    print(f"data bounds   x [{bounds[0]:.6f}, {bounds[1]:.6f}]  y [{bounds[2]:.6f}, {bounds[3]:.6f}]")
+    print("coordinates   WGS84 degrees — the build projects and quantises them")
+    print(f"data bounds   lon [{bounds[0]:.6f}, {bounds[1]:.6f}]  lat [{bounds[2]:.6f}, {bounds[3]:.6f}]")
     print(
-        f"clipped       {sum(clipped):,} beyond ±{projection.MAX_LATITUDE:.4f}° "
-        f"({clipped[0]:,} north, {clipped[1]:,} south) — at the frame edge, not clamped"
+        f"beyond domain {sum(clipped):,} past ±{projection.MAX_LATITUDE:.4f}° "
+        f"({clipped[0]:,} north, {clipped[1]:,} south) — the build clips and counts these"
     )
     print("\nvocabularies")
     for name, size in sizes.items():

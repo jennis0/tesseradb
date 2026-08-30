@@ -6,24 +6,25 @@ measures against; nothing in it decides anything about Tessera. The campaign is
 and the survey behind it is
 [`../docs/evidence/memos/2026-08-26-dataset-ladder.md`](../docs/evidence/memos/2026-08-26-dataset-ladder.md).
 
-## The standing deferral: this tree projects, and it should not
+## Nothing here projects
 
-Tessera has no projection layer (`../docs/design/projections.md` §1). A view's `extent` is four
-numbers and nothing records what they mean, so every geographic rung here is **projected before
-ingest** by [`common/projection.py`](common/projection.py) and its declaration states the frame the
-projected numbers live in.
+A geographic rung emits `lon` and `lat` in degrees exactly as its publisher wrote them, and its
+declaration names `projection = "web_mercator"` with an `extent` written as a longitude/latitude
+box. The transform runs inside the build, at the boundary, in the same place for a build and for
+an ingest (`../docs/design/projections.md` §3), so the frame, the snap, the clamp count and the
+clip count are all the build's report and none of them is this tree's.
 
-**When native projection lands, this is redone.** Each geographic `prepare.py` stops calling
-`common.projection`, emits `lon` and `lat` unchanged, the declaration names a `projection` and
-writes its `extent` in WGS84 — and the corpus is rebuilt. That is a rerun of a script, not a lost
-artifact: a map projection is a pure function, which is exactly what `data/geometry.parquet` is not
-and why that file is hashed rather than seeded (`../probes/dataset.md` §3). Until then
-`common/projection.py` is the reference the Rust has to agree with, and its `TEST_VECTORS` and
-`TILE_VECTORS` are written as data so another language can read them out of the file.
+Both rungs were built the other way first — projected here, with the declaration stating the frame
+the projected numbers lived in — and rebuilt on the declared projection when it landed. The rebuild
+was a rerun of a script rather than a lost artifact, a map projection being a pure function, which
+is exactly what `data/geometry.parquet` is not and why that file is hashed rather than seeded
+(`../probes/dataset.md` §3).
 
-Each geographic corpus also records **the WGS84 box it was asked for** beside the projected extent
-it produced, so the migration substitutes those numbers into `extent` rather than deriving them
-back out of a constant.
+[`common/projection.py`](common/projection.py) stays, as the **second implementation** the engine's
+arithmetic is checked against: `tessera_spatial::projection` runs it over 100,000 sampled
+coordinates and requires the same stored position, its `TEST_VECTORS` and `TILE_VECTORS` are data in
+a file both languages read, and a built corpus is checked by recomputing every point's expected
+position through it from the source degrees. Both rungs agree exactly, over 87 million points.
 
 ## Layout
 
@@ -61,7 +62,7 @@ the **embedding** rung's, and it is separate because none of the geographic rung
 Its `requirements.txt` sits beside the rung.
 
 ```bash
-~/venvs/ingest/bin/python -m test_corpora.common.projection   # the transform's own checks
+python3 -m test_corpora.common.projection                    # the transform's own checks
 ~/venvs/ingest/bin/python -m test_corpora.geonames.prepare    # one geographic rung
 ~/venvs/arxiv/bin/python  -m test_corpora.arxiv.prepare       # the embedding rung
 ```
@@ -71,4 +72,5 @@ Its `requirements.txt` sits beside the rung.
 | Rung | Points | Bundle | State |
 |---|---|---|---|
 | `arxiv` | 2,422,486 | 1.4 GB | the corpus the artifact catalogue is exercised against; ported from `notebooks/` on 2026-08-28 and re-measured at 20,000 |
-| `geonames` | 13,463,857 | 1.33 GB | built and verified, 2026-08-28 |
+| `geonames` | 13,463,857 | 1.34 GB | built and verified on a declared `web_mercator` projection, 2026-08-30 |
+| `overture` | 73,631,092 | 12.57 GB | built and verified on the same declared projection, with its division polygons declared in longitude and latitude, 2026-08-30 |
