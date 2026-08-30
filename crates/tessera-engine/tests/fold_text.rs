@@ -142,6 +142,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         .expect("the text schema parses")
         .schema;
     build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,
@@ -190,8 +191,8 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
             external_id: Some(external.as_bytes().to_vec()),
             view: "s0".to_string(),
             descriptors: vec![b"0".to_vec()],
-            x: 10.0 + i as f32,
-            y: 10.0 + i as f32,
+            x: 10.0 + i as f64,
+            y: 10.0 + i as f64,
             scalars: vec![WalScalar::Utf8(flushed_prose(i))],
             terms: engine.resolve_terms(&[b"0".to_vec()]),
         };

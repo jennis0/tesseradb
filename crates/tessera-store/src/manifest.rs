@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use tessera_spatial::tiler::ScalarType;
+use tessera_spatial::Projection;
 use tessera_types::layer::{RegisteredLayer, ServingLayout};
 use tessera_types::{IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
@@ -306,11 +307,8 @@ impl Quantisation {
     /// occupies the top of the grid and belongs there. **NaN fails in both directions** and is
     /// therefore outside — right, because a NaN coordinate has no cell either, and `as u32`
     /// saturates it to zero rather than erroring.
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        (x as f64) >= self.x_min
-            && (x as f64) <= self.x_max
-            && (y as f64) >= self.y_min
-            && (y as f64) <= self.y_max
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        x >= self.x_min && x <= self.x_max && y >= self.y_min && y <= self.y_max
     }
 }
 
@@ -428,6 +426,54 @@ impl IdentityDescriptor {
 pub struct ViewDescriptor {
     pub id: String,
     pub display_name: String,
+    /// What placed every position in this view before the frame did (`projections.md` §3).
+    ///
+    /// **Here rather than beside `quantisation`, because a projection is declared per view** and
+    /// the frame is not: two views of one bundle may be projected differently, and a single
+    /// bundle-wide key would have to pick one of them.
+    ///
+    /// **Required, not `default`.** The frame alone does not imply a projection — a `[0, 1]`
+    /// extent is a legal frame for a view with no projection at all — so a bundle that carries
+    /// projected positions and cannot say so is one every second reader has to be told about out
+    /// of band: the write path, which would otherwise quantise a degree as though it were a frame
+    /// coordinate, and the differential oracle, which re-quantises source coordinates against the
+    /// recorded frame. Defaulting the field to `none` is exactly the misread the field exists to
+    /// stop, so a manifest omitting it is malformed rather than unprojected, and the
+    /// `bundle_format` bump that introduced it (4) makes every bundle written before it refuse at
+    /// open.
+    ///
+    /// **The declared name is the format, not the transform's parameters.** An equirectangular
+    /// alias differs from its siblings only in the world aspect a client draws
+    /// (`projections.md` §5.2), and serialising the standard parallel structurally would put a
+    /// display parameter into the artifact — which is what makes that family one entry rather
+    /// than five. An unknown name refuses the whole manifest, per [`scalar_type_name`]'s rule: a
+    /// reader that cannot resolve the projection cannot invert a stored position, and reading it
+    /// as `none` is the misread again.
+    #[serde(with = "projection_name")]
+    pub projection: Projection,
+}
+
+/// `views[..].projection` as the name a declaration writes (`projections.md` §5), refusing one
+/// outside the set rather than defaulting it.
+mod projection_name {
+    use super::Projection;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(p: &Projection, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(p.name())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<Projection, D::Error> {
+        let name = String::deserialize(d)?;
+        Projection::from_name(&name).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "'{name}' is not a projection this build can place points under \
+                 (projections.md §5)"
+            ))
+        })
+    }
 }
 
 /// `partitions` entry. This build writes exactly one, `phash == "default"`.

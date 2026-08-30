@@ -319,11 +319,16 @@ and the credential belong to the demo's configuration and to the notebook's kern
   `colour-by`, `layers`, `budget`, `palette`, `tooltip-fields` (which of the scalars already on
   the wire the hover hint shows — hover costs no request; the click costs one), `mode` (`pan`,
   `box`, `lasso`; shift-drag is the shortcut in `pan`), and `basemap` — a deck.gl layer drawn
-  **under** the points for a geographic corpus. ⊘ A tile basemap lines up with the points only
-  when the quantised extent is the basemap's tile grid — the whole Web Mercator square, or a
-  2^k-aligned sub-square at an integer zoom offset, with y increasing southward — which is an
-  ingest condition nothing states yet (client-interaction §12); a corpus quantised to a tight
-  bbox cannot be lined up by a `TileLayer` and is the tile-shaped adapter's case. Methods:
+  **under** the points for a geographic corpus. **Whether one may be drawn at all is
+  `/v1/meta`'s `tile_scheme`** (projections §9), which the host reads rather than inspecting the
+  extent: a tile basemap lines up with the points only when the view's frame is a square of that
+  scheme's own tiling, and grid alignment does not say so on its own — an equirectangular frame is
+  aligned to a square tiling no server serves, so a host reading alignment as availability would
+  draw a Mercator basemap under a corpus that cannot line up with one. A null scheme means draw
+  the points and no basemap; a corpus quantised to a tight bbox is that case, and is the
+  tile-shaped adapter's. The component does not choose a basemap — it is handed one — so the field
+  is for the host that chooses, and `lonLatOfCell` is how anything else on the page reads a stored
+  position back as a place. Methods:
   `fit()`, `fitTo(artifactId)`, `select(shape)`. Four **corner slots** — `top-left`,
   `top-right`, `bottom-left`, `bottom-right` — for anything a host wants over the map, which is
   where the explorer puts the status strip and the legend; the pattern is MapLibre's and

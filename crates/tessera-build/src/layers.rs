@@ -75,7 +75,10 @@ use rayon::prelude::*;
 
 use crate::config::{ArtifactSource, Fields, InlineArtifact, LayerSources};
 use crate::error::{BuildError, Result};
-use crate::shapes::{inline_shape, shape_declared, ShapeColumns, ShapeContext, ShapeLayerReport, ShapeReader};
+use crate::shapes::{
+    inline_shape, shape_declared, space_at, space_column, ShapeColumns, ShapeContext,
+    ShapeLayerReport, ShapeReader,
+};
 use tessera_store::derived::authored_shape_input;
 
 /// One artifact as the build inputs describe it, before any id has been resolved.
@@ -90,6 +93,11 @@ struct PlannedArtifact {
     /// The artifact's canonical shapes, one per view, on a layer whose `shape` declares one —
     /// which *is* its membership there, so `membership` stays empty beside it.
     shape: Option<ArtifactShapes>,
+    /// The row's own `space`, as it was written, overriding the table's `default_space`
+    /// (`polygon-membership.md` §4.3). Kept past the membership shape because the row's authored
+    /// shape content is read in the same space, and is read in a second pass once every row of the
+    /// layer is in hand.
+    space: Option<String>,
 }
 
 /// How a source spelled one artifact's membership.
@@ -341,6 +349,7 @@ impl Default for PublishedLayers {
 pub fn read(
     declarations: &[LayerDeclaration],
     inputs: &[LayerSources],
+    projection: tessera_spatial::Projection,
     extent: &tessera_spatial::Bounds,
     max_shape_vertices: u64,
 ) -> Result<LayerPlan> {
@@ -370,16 +379,20 @@ pub fn read(
         // **A shape layer's rows are canonicalised as they are read** — against the frame the
         // points are quantised in and for every view the layer is drawn in — and what that did is
         // reported beside the layer, never refused (`crate::shapes`).
+        // **The table's `default_space` is the layer's, not the membership shape's** (§4.3): it is
+        // the fallback for every geometry the rows declare, so the authored shape content below
+        // resolves against the same value the membership shape does.
+        let default_space = match &input.artifacts {
+            Some(ArtifactSource::File { default_space, .. }) => *default_space,
+            _ => tessera_store::derived::ShapeSpace::View,
+        };
         let mut shapes = shape_declared(declaration).map(|kind| {
-            let default_space = match &input.artifacts {
-                Some(ArtifactSource::File { default_space, .. }) => *default_space,
-                _ => tessera_store::derived::ShapeSpace::View,
-            };
             ShapeReader::new(
                 &input.name,
                 kind,
                 ShapeContext {
                     extent: *extent,
+                    projection,
                     views: declaration.views.clone(),
                     max_vertices: max_shape_vertices,
                 },
@@ -440,9 +453,11 @@ pub fn read(
         // §6.1, ruling (h)): where the declaration's supplied content names a `polygon`, `circle`
         // or `ellipse` kind, that slot of every ranked content — WKT, or the numbers of the kind's
         // row field — goes through the same reader, the same canonicalisation for every view, the
-        // same report and the same vertex cap, and the slot then carries the canonical bytes in
-        // their content spelling for the blob. The serve reads them back into `shape_x`/`shape_y`;
-        // the client is never handed the string.
+        // same report, the same vertex cap and **the same space** — the table's `default_space`
+        // and the row's own `space`, resolved against the view's projection exactly as a
+        // membership shape's is (§4.3) — and the slot then carries the canonical bytes in their
+        // content spelling for the blob. The serve reads them back into `shape_x`/`shape_y`; the
+        // client is never handed the string.
         if let Some((slot, kind)) = declaration.authored_shape() {
             let content_name = declaration.content.supplied[slot].name.clone();
             let mut reader = ShapeReader::new(
@@ -450,10 +465,11 @@ pub fn read(
                 kind,
                 ShapeContext {
                     extent: *extent,
+                    projection,
                     views: declaration.views.clone(),
                     max_vertices: max_shape_vertices,
                 },
-                tessera_store::derived::ShapeSpace::View,
+                default_space,
             );
             let mine: Vec<(String, usize)> = plan
                 .artifacts
@@ -462,6 +478,7 @@ pub fn read(
                 .map(|((_, _, key), index)| (key.clone(), *index))
                 .collect();
             for (key, index) in mine {
+                let space = plan.bodies[index].space.clone();
                 for content in &mut plan.bodies[index].contents {
                     let Some(text) = content.values.get_mut(slot) else {
                         // Short of a value: refused where every content is checked for width.
@@ -474,7 +491,7 @@ pub fn read(
                             kind.as_str()
                         ))
                     })?;
-                    let Some(canonical) = reader.row(&key, Some(shape), None)? else {
+                    let Some(canonical) = reader.row(&key, Some(shape), space.as_deref())? else {
                         return Err(BuildError::Invalid(format!(
                             "layer '{}': artifact {key}: the authored `{}` content '{content_name}' \
                              canonicalised to no view",
@@ -557,6 +574,9 @@ fn read_artifacts(
             Some(reader) => Some(ShapeColumns::open(path, &batch, fields, reader.kind())?),
             None => None,
         };
+        // Read whether or not the layer declares a membership shape: the same column is the space
+        // of the row's authored shape content, which the second pass below reads (§6.1).
+        let spaces = space_column(path, &batch, fields)?;
         let level = optional_u32(path, &batch, LEVEL)?;
         let contents = optional_ranked_values(path, &batch, fields, "contents")?;
         let members = optional_u64_list(path, &batch, fields, "members")?;
@@ -650,16 +670,14 @@ fn read_artifacts(
                     attached_to: attachment,
                     parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
                     shape: match (shapes.as_deref_mut(), shape_columns.as_ref()) {
-                        (Some(reader), Some(columns)) => {
-                            let space = columns.space_at(row);
-                            reader.row(
-                                &address.2,
-                                columns.at(path, row, &address.2)?,
-                                space.as_deref(),
-                            )?
-                        }
+                        (Some(reader), Some(columns)) => reader.row(
+                            &address.2,
+                            columns.at(path, row, &address.2)?,
+                            space_at(spaces, row),
+                        )?,
                         _ => None,
                     },
+                    space: space_at(spaces, row).map(str::to_string),
             };
         }
     }
@@ -743,6 +761,7 @@ fn plan_inline(
                         None
                     }
                 },
+                space: row.space.clone(),
         };
     }
     Ok(())
@@ -2645,4 +2664,198 @@ fn address(
         level.map_or(0, |c| number_at(c, row)),
         key,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ArtifactSource, InlineArtifact, LayerSources};
+    use tessera_lifecycle::membership::ArtifactShapes;
+    use tessera_spatial::{AlignedSquare, Bounds, Projection};
+    use tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES;
+
+    /// A triangle whose diagonal is straight in the longitude/latitude plane and a curve in the
+    /// frame — 8°W 50°N → 2°E 58°N → 8°W 58°N, the fixture `projected_build.rs` measures the two
+    /// readings apart on. It is in degrees, so on a projected view it is a `wgs84` declaration or
+    /// nothing: read as frame coordinates it falls wholly outside the `[0, 1]` unit square.
+    const UK: &str = "POLYGON ((-8 50, 2 58, -8 58, -8 50))";
+
+    /// A layer whose membership *is* the polygon, and one that merely draws it, declared as alike
+    /// as the two can be: one view, one polygon, one key, one space.
+    fn two_layers(space: Option<&str>) -> (Vec<LayerDeclaration>, Vec<LayerSources>) {
+        let common = serde_json::json!({
+            "views": ["world"],
+            "visibility": null,
+            "artifact_visibility": { "field": null, "default": "inherited" },
+            "require_member_visibility": null,
+            "hierarchy": { "kind": "flat", "prune_children": false },
+        });
+        let mut selects = common.clone();
+        selects["name"] = serde_json::json!("regions/selects");
+        selects["membership"] = serde_json::json!("spatial");
+        selects["shape"] = serde_json::json!({ "kind": "polygon" });
+        let mut draws = common;
+        draws["name"] = serde_json::json!("regions/draws");
+        draws["membership"] = serde_json::json!("enumerated");
+        draws["content"] = serde_json::json!({
+            "computed": [],
+            "supplied": [{
+                "name": "outline",
+                "type": "polygon",
+                "require_member_visibility": "inherited"
+            }],
+            "withdraw_on_member_deletion": true
+        });
+        let declarations = [selects, draws]
+            .into_iter()
+            .map(|d| serde_json::from_value(d).expect("the fixture declaration is well-formed"))
+            .collect();
+
+        let row = |shape: serde_json::Value| -> InlineArtifact {
+            let mut row = serde_json::json!({ "key": "uk", "space": space });
+            for (k, v) in shape.as_object().unwrap() {
+                row[k] = v.clone();
+            }
+            serde_json::from_value(row).expect("the fixture row is well-formed")
+        };
+        let sources = vec![
+            LayerSources {
+                name: "regions/selects".to_string(),
+                artifacts: Some(ArtifactSource::Inline(vec![row(
+                    serde_json::json!({ "wkt": UK }),
+                )])),
+                members: None,
+            },
+            LayerSources {
+                name: "regions/draws".to_string(),
+                artifacts: Some(ArtifactSource::Inline(vec![row(
+                    serde_json::json!({ "contents": [[UK]] }),
+                )])),
+                members: None,
+            },
+        ];
+        (declarations, sources)
+    }
+
+    /// The frame coordinates each layer's `uk` ended up on: the membership shape's canonical
+    /// bytes, and the authored content's read back out of the slot it was written into.
+    fn canonical_pair(
+        space: Option<&str>,
+        projection: Projection,
+        extent: Bounds,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (declarations, sources) = two_layers(space);
+        let plan = read(
+            &declarations,
+            &sources,
+            projection,
+            &extent,
+            DEFAULT_MAX_SHAPE_VERTICES,
+        )?;
+        let body = |layer: &str| -> &PlannedArtifact {
+            let index = plan.artifacts[&(layer.to_string(), 0, "uk".to_string())];
+            &plan.bodies[index]
+        };
+        let selects = body("regions/selects")
+            .shape
+            .as_ref()
+            .expect("the membership shape")
+            .for_view("world")
+            .expect("the one view")
+            .to_vec();
+        let draws = ArtifactShapes::from_content_text(&body("regions/draws").contents[0].values[0])
+            .expect("the authored slot holds canonical bytes, not the caller's WKT")
+            .for_view("world")
+            .expect("the one view")
+            .to_vec();
+        Ok((selects, draws))
+    }
+
+    fn world() -> Bounds {
+        AlignedSquare::WORLD.bounds()
+    }
+
+    fn unprojected() -> Bounds {
+        Bounds {
+            x_min: 0.0,
+            x_max: 1000.0,
+            y_min: 0.0,
+            y_max: 1000.0,
+        }
+    }
+
+    /// **An authored shape is read in the space its row declares, exactly as the membership shape
+    /// beside it is** (`polygon-membership.md` §6.1): the same degrees in through both, the same
+    /// canonical bytes out. A drawing and the membership it came from are written in one
+    /// coordinate system by one producer, so a build that projected the second and not the first
+    /// would place a ±180 × ±90 outline in a corner of the `[0, 1]` frame — refusing nothing and
+    /// reporting nothing, R12's degrees-looking report being blind on a projected view.
+    #[test]
+    fn an_authored_shape_is_read_in_the_space_its_row_declares() {
+        let (selects, draws) = canonical_pair(Some("wgs84"), Projection::WebMercator, world())
+            .expect("a `wgs84` polygon canonicalises on a projected view");
+        assert_eq!(selects, draws);
+        // And both reached the frame: read as view coordinates these degrees are wholly outside
+        // the unit square, and the equality above would hold with the pair collapsed to nothing.
+        assert!(
+            selects.len() > 64,
+            "the densified triangle is {} bytes; it did not reach the frame",
+            selects.len()
+        );
+    }
+
+    /// **A shape in view space is what it has always been**, whichever kind declares it — the
+    /// regression guard on every authored shape written before a space could be declared at all.
+    /// It holds under either reading of the space, which is the point: it is what must not move.
+    #[test]
+    fn an_authored_shape_in_view_space_is_unchanged() {
+        let (selects, draws) = canonical_pair(None, Projection::None, unprojected())
+            .expect("a view-space polygon canonicalises on any view");
+        assert_eq!(selects, draws);
+        // `space = "view"` written out is the same declaration as none written at all.
+        let (_, spelled) = canonical_pair(Some("view"), Projection::None, unprojected())
+            .expect("the default spelled out");
+        assert_eq!(draws, spelled);
+    }
+
+    /// The drawing layer on its own, so that a refusal below is the authored path's own and not
+    /// the membership shape beside it reaching the same check first.
+    fn draws_only(wkt: &str, projection: Projection, extent: Bounds) -> BuildError {
+        let (declarations, mut sources) = two_layers(Some("wgs84"));
+        sources.retain(|s| s.name == "regions/draws");
+        sources[0].artifacts = Some(ArtifactSource::Inline(vec![serde_json::from_value(
+            serde_json::json!({ "key": "uk", "space": "wgs84", "contents": [[wkt]] }),
+        )
+        .expect("the fixture row is well-formed")]));
+        read(
+            &declarations,
+            &sources,
+            projection,
+            &extent,
+            DEFAULT_MAX_SHAPE_VERTICES,
+        )
+        .err()
+        .expect("the declaration is refused")
+    }
+
+    /// A `wgs84` authored shape on a view with no projection is refused naming the view's own
+    /// declaration: such a view has one space and nothing to convert a degree from
+    /// (`polygon-membership.md` §4.3). The refusal is the membership path's, reached because the
+    /// space now reaches it.
+    #[test]
+    fn an_authored_wgs84_shape_on_an_unprojected_view_is_refused() {
+        let message = draws_only(UK, Projection::None, unprojected()).to_string();
+        assert!(message.contains("`projection` is `none`"), "{message}");
+        assert!(message.contains("regions/draws"), "{message}");
+    }
+
+    /// A `wgs84` coordinate outside ±180 × ±90 is not a coordinate, and is refused where the
+    /// authored shape is read (`projections.md` §2) — not clamped to the frame as a view-space
+    /// coordinate would be.
+    #[test]
+    fn an_authored_wgs84_coordinate_outside_the_range_is_refused() {
+        let outside = "POLYGON ((-8 50, 2 91, -8 91, -8 50))";
+        let message = draws_only(outside, Projection::WebMercator, world()).to_string();
+        assert!(message.contains("not a coordinate"), "{message}");
+    }
 }

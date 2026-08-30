@@ -92,9 +92,14 @@ pub struct GenerationStamp {
 // value's `label` renamed to `title` (configuration.md §1, decision 0088). The second is the one
 // that needs the number: `title` is optional, so a bundle at 2 opens against a reader at 3 with
 // every value title silently dropped, where the required key refuses loudly on its own.
+// 4: every `views` entry carries the `projection` it was built under (projections.md §3). The
+// frame alone does not imply one — a `[0, 1]` extent is a legal frame for a view with no
+// projection at all — so a bundle at 3 read as unprojected would have every second reader
+// quantising a degree as though it were a frame coordinate. The key is required, which is what
+// makes a bundle at 3 refuse at open rather than open as `none`.
 // Each bump makes a stale local bundle a loud refusal rather than a silent misread — a fail-closed
 // guard, not compatibility (decision 0048).
-pub const BUNDLE_FORMAT: u32 = 3;
+pub const BUNDLE_FORMAT: u32 = 4;
 pub const API_VERSION: u32 = 1;
 pub const ABI_VERSION: u32 = 1;
 pub const ROW_ABSENT: u32 = 0xFFFF_FFFF;
@@ -118,7 +123,7 @@ mod tests {
     }
     #[test]
     fn constants() {
-        assert_eq!(BUNDLE_FORMAT, 3);
+        assert_eq!(BUNDLE_FORMAT, 4);
         assert_eq!(ROW_ABSENT, 0xFFFF_FFFF);
     }
 }

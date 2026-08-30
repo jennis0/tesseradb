@@ -110,6 +110,7 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
     write_points_n(points_path, N_ITEMS);
     write_pairs_with_sparse_term(pairs_path, N_ITEMS);
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points_path.to_path_buf(),
         attribute_sources: Vec::new(),

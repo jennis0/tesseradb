@@ -6,7 +6,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use arrow::array::{Float32Array, UInt64Array};
+use arrow::array::{Float64Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use tessera_corpus::{Corpus, Grant};
 use tessera_spatial::Bounds;
@@ -74,7 +74,7 @@ fn items_answers_served_keys_with_their_items() {
         .column_by_name("x")
         .unwrap()
         .as_any()
-        .downcast_ref::<Float32Array>()
+        .downcast_ref::<Float64Array>()
         .unwrap();
     for (i, key) in keys.iter().enumerate() {
         assert_eq!(fx.value(i), *key);

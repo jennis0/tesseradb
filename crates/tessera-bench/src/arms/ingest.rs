@@ -230,6 +230,7 @@ pub fn run_build(
 
             let collector = StageCollector::default();
             let args = BuildArgs {
+                projection: tessera_spatial::Projection::None,
                 point_fields: Default::default(),
                 points: geometry.clone(),
                 attribute_sources: Vec::new(),
@@ -368,8 +369,8 @@ pub(crate) fn synth_rows(
                 external_id: Some(format!("bench-{n}").into_bytes()),
                 view: "s0".to_string(),
                 descriptors: descriptors.to_vec(),
-                x: ((n * 37) % 65536) as f32,
-                y: ((n * 53) % 65536) as f32,
+                x: ((n * 37) % 65536) as f64,
+                y: ((n * 53) % 65536) as f64,
                 scalars: Vec::new(),
                 terms: terms.to_vec(),
             }
@@ -1081,8 +1082,8 @@ fn rate_rows(
                 external_id: Some(format!("rate-{n}").into_bytes()),
                 view: "s0".to_string(),
                 descriptors: picks.iter().map(|&k| pool_descriptors[k].clone()).collect(),
-                x: ((n * 37) % 65536) as f32,
-                y: ((n * 53) % 65536) as f32,
+                x: ((n * 37) % 65536) as f64,
+                y: ((n * 53) % 65536) as f64,
                 scalars: Vec::new(),
                 terms: picks.iter().map(|&k| pool_terms[k]).collect(),
             }

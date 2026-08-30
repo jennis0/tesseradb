@@ -88,8 +88,8 @@ impl Corpus {
         let item = self.item(e);
         let depth = self.boundary_depth(layer, level);
         let shift = 16 - u32::from(depth);
-        let cx = cell(f64::from(item.x), self.extent().x_min, self.extent().x_max);
-        let cy = cell(f64::from(item.y), self.extent().y_min, self.extent().y_max);
+        let cx = cell(item.x, self.extent().x_min, self.extent().x_max);
+        let cy = cell(item.y, self.extent().y_min, self.extent().y_max);
         let prefix = interleave_bits(u32::from(cx) >> shift, u32::from(cy) >> shift, depth);
         self.boundary_is_authored(layer, level, prefix)
             .then_some(prefix)

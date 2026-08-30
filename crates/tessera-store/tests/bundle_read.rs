@@ -147,7 +147,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
     fs::write(partition_dir.join("SEGMENTS-0.json"), &segments_bytes).expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 3,
+        bundle_format: 4,
         created_at: "2026-07-28T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
@@ -171,6 +171,7 @@ fn build_bundle(root: &Path, n: u64) -> (Vec<TilerItem>, Vec<u32>) {
         views: vec![ViewDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),
+            projection: tessera_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: "default".to_string(),
@@ -201,7 +202,7 @@ fn open_bundle_loads_segments_and_columns_round_trip() {
     let (items, codes) = build_bundle(dir.path(), 200);
 
     let bundle = open_bundle(dir.path()).expect("open_bundle");
-    assert_eq!(bundle.manifest.bundle_format, 3);
+    assert_eq!(bundle.manifest.bundle_format, 4);
 
     let partition = bundle.partitions.get("default").expect("default partition");
     assert_eq!(partition.segments_n, 0);
@@ -669,6 +670,97 @@ fn a_manifest_with_no_unhonourable_state_opens_at_the_highest_n() {
         !partition.stepped_down(),
         "nothing was refused here; reporting a step-down would make the 2.2 freshness gate lie"
     );
+}
+
+/// **A bundle written before `views[..].projection` existed refuses at open** (`bundle_format`
+/// 4, `projections.md` §3).
+///
+/// The frame does not imply the projection — this fixture's `[0, 1]` extent is a legal frame for
+/// a view with no projection at all — so a manifest at 3 read as unprojected is not a partial
+/// read but a wrong one: the write path would quantise a degree as though it were a frame
+/// coordinate and nothing downstream could see that it had. `#[serde(default)]` on the field is
+/// exactly that misread, which is why the key is required and why this test asserts a refusal
+/// rather than a default.
+#[test]
+fn a_bundle_at_the_previous_format_is_refused_at_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 20);
+
+    // The manifest as the writer at `bundle_format` 3 produced it: no `projection` on any view.
+    let manifest_path = dir.path().join("v00000/MANIFEST.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
+            .expect("parse MANIFEST.json");
+    value["bundle_format"] = serde_json::json!(3);
+    for view in value["views"].as_array_mut().expect("views is an array") {
+        view.as_object_mut()
+            .expect("a view is an object")
+            .remove("projection")
+            .expect("the writer at 4 emitted one to remove");
+    }
+    let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
+    fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
+    // Re-digest, so the refusal is the format's and not `CURRENT`'s.
+    let current = CurrentPointer {
+        prefix: "v00000".to_string(),
+        manifest_digest: hex_sha256(&bytes),
+    };
+    fs::write(
+        dir.path().join("CURRENT"),
+        serde_json::to_vec_pretty(&current).expect("serialise CURRENT"),
+    )
+    .expect("rewrite CURRENT");
+
+    let err = open_bundle(dir.path())
+        .expect_err("a bundle that cannot say what projected its positions must not open");
+    match err {
+        StoreError::Json { source, .. } => {
+            let detail = source.to_string();
+            assert!(
+                detail.contains("projection"),
+                "the refusal must name the missing key, got: {detail}"
+            );
+        }
+        other => panic!("expected a manifest parse refusal naming `projection`, got: {other}"),
+    }
+}
+
+/// **A projection name outside the set refuses the whole manifest**, rather than the one field.
+///
+/// A reader that cannot resolve the name cannot invert a stored position, and resolving it to
+/// `none` is the same misread the field exists to stop.
+#[test]
+fn a_manifest_naming_a_projection_outside_the_set_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    build_bundle(dir.path(), 20);
+
+    let manifest_path = dir.path().join("v00000/MANIFEST.json");
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).expect("read MANIFEST.json"))
+            .expect("parse MANIFEST.json");
+    value["views"][0]["projection"] = serde_json::json!("lambert_cylindrical_equal_area");
+    let bytes = serde_json::to_vec_pretty(&value).expect("serialise");
+    fs::write(&manifest_path, &bytes).expect("rewrite MANIFEST.json");
+    let current = CurrentPointer {
+        prefix: "v00000".to_string(),
+        manifest_digest: hex_sha256(&bytes),
+    };
+    fs::write(
+        dir.path().join("CURRENT"),
+        serde_json::to_vec_pretty(&current).expect("serialise CURRENT"),
+    )
+    .expect("rewrite CURRENT");
+
+    match open_bundle(dir.path()).expect_err("an unresolvable projection must not open") {
+        StoreError::Json { source, .. } => {
+            let detail = source.to_string();
+            assert!(
+                detail.contains("lambert_cylindrical_equal_area"),
+                "the refusal must name what it could not resolve, got: {detail}"
+            );
+        }
+        other => panic!("expected a manifest parse refusal, got: {other}"),
+    }
 }
 
 #[test]

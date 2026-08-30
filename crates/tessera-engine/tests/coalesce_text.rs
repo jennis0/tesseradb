@@ -141,6 +141,7 @@ fn build_text_fixture(out: &Path, tmp: &Path) {
         .expect("the text schema parses")
         .schema;
     build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,

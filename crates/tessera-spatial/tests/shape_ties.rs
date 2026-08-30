@@ -17,7 +17,8 @@ use std::collections::BTreeSet;
 
 use tessera_spatial::morton::{split32, Bounds, Tile};
 use tessera_spatial::shape::{
-    Decomposition, Part, PolyCtx, Polygon, PreparedShape, Rect, Ring, Shape, ShapeF64, Vertex,
+    Decomposition, Part, PolyCtx, Polygon, PreparedShape, Rect, Ring, Shape, ShapeF64, Space,
+    Vertex,
 };
 
 /// The side of a tile at depth `d`, in grid units.
@@ -320,7 +321,7 @@ fn collinear_runs_are_removed_and_the_square_ties_as_before() {
         y_max: 4_294_967_296.0,
     };
     let (shape, report) = ShapeF64::Polygon(vec![vec![ring]])
-        .canonical(&extent)
+        .canonical(Space::View, &extent)
         .unwrap();
     assert_eq!(report.vertices_out, 4);
     let Shape::Polygon(p) = &shape else {

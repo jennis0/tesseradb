@@ -11,7 +11,7 @@
 //! position, exactly, as the design says (`polygon-membership.md` §4.1).
 
 use tessera_spatial::morton::{fixed32, split32, Bounds};
-use tessera_spatial::shape::{contexts_at, read_wkt, Rect, ShapeF64};
+use tessera_spatial::shape::{contexts_at, read_wkt, Rect, ShapeF64, Space};
 
 const E: Bounds = Bounds {
     x_min: 0.0,
@@ -37,7 +37,7 @@ const CASES: &[(&str, f64, f64)] = &[
 fn a_polygon_smaller_than_a_cell_agrees_with_itself_about_its_one_point() {
     for (wkt, x, y) in CASES {
         let shape = ShapeF64::Polygon(read_wkt(wkt).unwrap());
-        let (canonical, report) = shape.canonical(&E).unwrap();
+        let (canonical, report) = shape.canonical(Space::View, &E).unwrap();
         eprintln!("{report:?} vertices {}", canonical.vertex_count());
         let p = (fixed32(*x, E.x_min, E.x_max), fixed32(*y, E.y_min, E.y_max));
         let direct = canonical.contains(p);

@@ -66,8 +66,8 @@ use crate::row_column::RowColumn;
 // The publication-side vocabulary, re-exported for the server, which sees engine API types only
 // (`scripts/check-layers.sh`): what a row's shape is read into, how it is canonicalised, and what
 // that reported.
-pub use tessera_spatial::shape::{CanonError, CanonReport, Shape, ShapeF64};
-pub use tessera_spatial::Bounds;
+pub use tessera_spatial::shape::{CanonError, CanonReport, Shape, ShapeF64, Space};
+pub use tessera_spatial::{Bounds, Projection};
 pub use tessera_store::derived::{
     authored_shape_input, canonical_shapes, shape_input, CanonicalShapes, ShapeInput,
     ShapeRefusal, ShapeSpace, ShapeStats,

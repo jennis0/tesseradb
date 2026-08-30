@@ -11,7 +11,7 @@ this document records what was actually done and why.
 both of which are named there by owner direction. Whether the campaign is tracked here or on issues
 is the owner's to settle.
 
-**Last updated:** 2026-08-28.
+**Last updated:** 2026-08-30.
 
 ---
 
@@ -21,8 +21,8 @@ is the owner's to settle.
 |---|---|---|---|
 | — | arXiv | 2,422,486 | **Have, and now on the campaign's convention.** The pipeline that produces it was a notebook outside `test_corpora/`; ported to [`../test_corpora/arxiv/`](../test_corpora/arxiv/README.md) on 2026-08-28 as `prepare.py` plus an optional `toponymy.py`, and the notebook deleted. It is the ladder's only embedding corpus and the only one whose source is derived rather than staged |
 | 0 | Re-run the 5×10⁷ artifact tier | — | **Deferred, deliberately.** It confirms W1 and W2, which bite at rung 2 and not at rung 1, and it costs a ~45 GB build. Take it before rung 2, not before rung 1 |
-| **1** | **GeoNames** | **13,463,857** | **Built, verified and served.** Not done against §7.1's bar — see §2 |
-| **2** | **Overture places + divisions** | **7.4×10⁷** | **Prepared, not built.** [`../test_corpora/overture/`](../test_corpora/overture/README.md) carries the declaration and the pipeline, written against a survey of the staged bytes taken 2026-08-28 — which corrected four things the plan had wrong — see §3 |
+| **1** | **GeoNames** | **13,463,857** | **Built, verified and served**, and rebuilt 2026-08-30 on a declared `web_mercator` projection. Not done against §7.1's bar — see §2 |
+| **2** | **Overture places + divisions** | **7.4×10⁷** | **Built and verified**, and rebuilt 2026-08-30 on a declared projection with its boundary polygons in longitude and latitude — see §3 |
 | 3 | MedCPT / PubMed | 3.6×10⁷ | Not started. Staged; MeSH is **not** staged and is a prerequisite |
 | 4 | PaperSeek + OpenAlex | 1.02×10⁸ | Not started. Staged |
 | 5 | TreeOfLife | 2.33×10⁸ | Not started. Staged |
@@ -56,20 +56,27 @@ The plan's bar for *done* is six things. Two are met.
 | | |
 |---|---|
 | ✅ declaration passes `tessera check` | 6 sources, 1 view, 8 vocabularies, 13 attributes, 2 layers |
-| ✅ bundle exists, frame report recorded | 1,329,553,710 bytes; report in `frame.json` and the rung README |
+| ✅ bundle exists, frame report recorded | 1,341,841,220 bytes; the build's own frame report, which now names the projection and the snap |
 | ❌ decision 0091's build-vs-ingest test on real data | not attempted |
 | ❌ masked-count census exact against an oracle | not attempted |
 | ❌ one full write cycle (suppress → delete → re-ingest → fold → re-census) | not attempted |
 | ⚠️ a results row | build wall, peak RSS and bundle bytes yes; **ingest rows/s, p99 at three zooms and a screenshot all absent** |
 
-**Figures so far**, local NVMe, 47 GB machine, no `--memory-budget` set:
+**Figures**, local NVMe, 47 GB machine, no `--memory-budget` set, 2026-08-30 on the declared
+projection:
 
 ```
-prepare.py       ~2 min          tessera build   6:05 wall, 4.2 GB peak RSS
-bundle           1.33 GB         verify          0.94 s
-                 98.7 B/point    artifacts       465,343 minted
-resolution       85.7% of points have a cell of their own
+prepare.py       2:54            tessera build   2:59 wall, 3.55 GB peak RSS
+bundle           1.34 GB         verify          1.03 s
+                 99.7 B/point    artifacts       688 minted, 464,655 declared
+resolution       85.7% of points have a cell of their own — 11,544,034 distinct cells
 ```
+
+⊘ **The wall and the peak are not comparable with the 6:05 and 4.2 GB of 2026-08-28**: the mapped
+attribute columns and the split text index (§3.1) landed between the two runs, and neither is
+anything to do with the projection. The **bundle** is comparable, and it differs by **176 bytes**
+across 1.34 GB — compression deltas on files whose contents shifted by a few low-order position
+bits.
 
 Neither wall the plan expects — W1's Roaring round trip at 5×10⁷ members, W2's peak RSS ignoring
 its budget — is near being reached at this scale.
@@ -83,18 +90,39 @@ to be.
 [`../test_corpora/overture/`](../test_corpora/overture/README.md) carries the declaration, the
 pipeline and the full survey. **The whole corpus is built and verified**, 73,631,092 places.
 
-**Built, verified, and built again to prove the optimisation below changed nothing.**
+**Built, verified, and built again to prove the optimisation below changed nothing** — and rebuilt
+on 2026-08-30 on a declared projection, which is the run below.
 
 ```
-prepare.py    divisions 36 s · join 1,811 s · entity ids 394 s · outputs 46 s
-              points.parquet 3.09 GB · members-divisions 2.23 GB · members-taxonomy 293 MB
-tessera build 23:16–26:12 wall · 18.9 GB peak RSS · exit 0
-bundle        7,900,567,451 bytes — 107.3 B/point
-verify        OK in 6.6 s — 1 partition, 1 view, 1 segment, high-water 73,631,092
-artifacts     625,821 divisions · 2,097 taxonomy across 6 levels · 9 predicate
-no artifact   3,285,234 taxonomy (4.5%) · 46,844 divisions (0.06%)
-resolution    12.1% — 8,895,005 distinct cells
+prepare.py    divisions 109 s · join 2,560 s · entity ids 1,130 s · outputs 162 s
+              points.parquet 3.09 GB · members-taxonomy 293 MB · artifacts-divisions 4.62 GB
+tessera check OK in 526 s, and it reports the polygon decomposition from the geometry alone
+tessera build 31:18 wall · 26.75 GB peak RSS · exit 0
+bundle        12,565,390,654 bytes — 170.7 B/point
+verify        OK in 5.98 s — 1 partition, 1 view, 1 segment, high-water 73,631,092
+artifacts     625,754 divisions, every one with a polygon · 2,097 taxonomy across 6 levels · 9 predicate
+no artifact   3,285,234 taxonomy (4.5%) · 46,844 places in no division (0.06%)
+resolution    12.1% — 8,895,128 distinct cells
 ```
+
+⊘ **This run and the 2026-08-29 one are not the same build**, and the difference is not the
+projection. That build read `boundaries/divisions` as an **enumerated** layer over
+`members-divisions.parquet`; the declaration moved to a **spatial** layer over the division
+polygons when the shape work landed and had never been run, so the 7.90 → 12.57 GB is the polygon
+decomposition arriving — 58,595,897 interior tiles and 80,699,330 boundary cells, 1.34 GB held
+before the build starts. The spatial resolution itself is 386 s of the 31:18: 261,555,158 rows
+admitted from interior tiles and 90,460,123 tested one by one in boundary cells.
+
+⊘ **The box was not idle**, two other agents building and testing on it throughout, so the wall and
+the peak are upper bounds. Bytes and counts are unaffected.
+
+⊘ **The join's artifact roster is not reproducible.** Two runs over the same staged bytes gave
+625,821 and 625,754 division artifacts, differing on 1,526 and 1,459 keys — while the
+lineage-depth histogram, the containing-areas histogram, the per-tier counts and the 46,844
+unplaced places matched exactly. `arg_max(a.lineage, a.depth)` picks an arbitrary maximum among
+equal-depth containing areas and 18.2M places sit in two or more. It is a property of the rung's
+own pipeline rather than of anything Tessera does, and it means an artifact count from this rung
+carries ±0.25% between runs.
 
 **Both walls the plan expected here did not fire.**
 
@@ -301,7 +329,6 @@ registry's count and says the shape is not observed.
 
 ### 3.5 What is still open at this rung
 
-- The whole corpus has not been run, so **W1 and W2 have not been met**. They are expected here.
 - **A `nested` layer has no levels, so it has no zoom bound** — the other half of §5's first
   finding, at roughly 600,000 artifacts and with no zoom-to-level map to offer. Named in the
   declaration at the layer it applies to.
@@ -313,11 +340,10 @@ registry's count and says the shape is not observed.
   banding-and-merge machinery is the shape that answers it.
 - §7.1's bar: the 0091 build-vs-ingest test, the oracle census, the write cycle, ingest rows/s, p99
   at three zooms and a screenshot. None attempted.
-- One part of sixteen built: **55 s wall, 1.33 GB peak RSS, 484,326,539 bytes** (105 B/point),
-  1,955 taxonomy artifacts minted beside 17,544 declared division artifacts. ⊘ Its
-  `RESOLUTION LOST — only 6.5%` warning is the slice and not the corpus: `part-00000` is Latin
-  America alone, 47 countries, inside a whole-world frame. The figure to hold against GeoNames'
-  85.7% is the one the full run gives.
+- **The roster's ±0.25% run-to-run drift** (§3), which is `prepare.py`'s tie-break and not
+  Tessera's, and which nothing yet needs to be stable.
+- The **spatial** boundary layer has been built but never served. 386 s of the build goes into
+  resolving 73.6M rows against 625,754 polygons, and what that costs a request is unmeasured.
 
 ## 4. The machinery this campaign built
 
@@ -325,10 +351,13 @@ registry's count and says the shape is not observed.
   `corpus.toml`, `README.md`. Derived files go to `$TESSERA_LADDER/<rung>` (default
   `data/ladder/<rung>`), so the second volume is one environment variable rather than an edit to
   every script.
-- **`test_corpora/common/projection.py`** — the frozen WGS84 → Web Mercator transform, unit square,
-  **y south**. Checked against published values, against XYZ tile addresses (the only real test of
-  the y direction), and against DuckDB, which agrees bit-for-bit. Its `TEST_VECTORS` are written as
-  data so the eventual Rust can be checked against them.
+- **`test_corpora/common/projection.py`** — the WGS84 → Web Mercator transform, unit square,
+  **y south**. It placed both geographic rungs while Tessera had no projection layer and places
+  none now; what it is instead is the **second implementation** the engine's own transform is held
+  to. `tessera_spatial::projection` runs it over 100,000 sampled coordinates and requires the same
+  *stored* position, its `TEST_VECTORS` and `TILE_VECTORS` (the only real test of the y direction)
+  are data both languages read, and each rebuilt bundle was checked by recomputing every point's
+  expected 32-bit fixed-point position through it from the source degrees.
 - **`~/venvs/ingest`** — DuckDB and PyArrow, with `spatial` installed for rung 2's point-in-polygon
   join (§3). ⊘ Its Python is 3.10, so it has no `tomllib`; `~/venvs/projection` does.
 - **`run_demo.sh --terms / --ranks / --label`**, and `custom` on ports of its own — see §6.
@@ -349,10 +378,12 @@ has to answer, are in
 **This is the campaign's first real finding and it arrived at rung 1**, on the serving side, where
 the plan expected its first walls at rung 2 on the build side.
 
-**A geographic corpus is reproducible, and an embedding corpus is not.** A projection is a pure
-function, so a geographic rung built on a frame that later changes costs a rerun rather than the loss
-`data/geometry.parquet` would be. This is why rung 1 did not wait on native projection, and it does
-not transfer to rungs 3–5.
+**A geographic corpus is reproducible, and an embedding corpus is not** — and this was spent
+rather than merely asserted. A projection is a pure function, so a geographic rung built on a frame
+that later changes costs a rerun rather than the loss `data/geometry.parquet` would be. Both rungs
+were placed by a Python module before Tessera had a projection layer and both were rebuilt on the
+declared projection on 2026-08-30 for the price of a `prepare.py` and a `tessera build` each. It
+does not transfer to rungs 3–5.
 
 **Declare a width from a measured range, never from a maximum.** `population` was declared `u64`
 from a census that measured only the maximum; the build refused on a **-12** two reefs in Kiribati

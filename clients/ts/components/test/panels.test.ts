@@ -14,7 +14,7 @@ afterEach(() => {
 const META: Meta = {
   apiVersion: 1,
   idset: 0,
-  views: [{id: 's0', displayName: 'default'}],
+  views: [{id: 's0', displayName: 'default', projection: 'none', worldAspect: null, tileScheme: null, tile: null}],
   quantisation: {xMin: 0, xMax: 1, yMin: 0, yMax: 1},
   declaredScalars: [
     {name: 'archive', arrowType: 'u16', category: {vocabulary: 'a', kind: 'declared', visibility: 'public'}, render: true, index: true},

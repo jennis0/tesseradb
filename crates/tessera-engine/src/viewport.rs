@@ -53,6 +53,7 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use tessera_authz::FrozenFragment;
+use tessera_spatial::projection::Projection;
 use tessera_spatial::tiler::ScalarType;
 use tessera_spatial::{tiles_for_bbox, tiles_for_bbox_count, Bounds, Tile};
 use tessera_store::manifest::{DeclaredScalar, Quantisation};
@@ -1060,14 +1061,49 @@ pub struct ItemField {
     pub value: ScalarOut,
 }
 
+/// One declared view, as `GET /v1/meta` publishes it.
+///
+/// **The projection is here and the frame is not, because that is where each is declared**
+/// (`projections.md` §3): a projection belongs to a view, and two views of one bundle may be
+/// projected differently, while [`EngineMeta::quantisation`] is bundle-wide. What a client draws
+/// under a view — the world's aspect, the tile scheme its frame addresses — is a function of the
+/// two together, and the server derives it at the wire (`projections.md` §9).
+#[derive(Debug, Clone)]
+pub struct MetaView {
+    pub id: String,
+    pub display_name: String,
+    /// What placed every position in this view before the frame did — the closed set of
+    /// `projections.md` §5, and [`Projection::None`] for a view that projects nothing.
+    pub projection: Projection,
+    /// The tile this view's frame **is**, in the scheme that addresses it — or `None` where no
+    /// published scheme does, which is every projection but an aligned `web_mercator` one.
+    ///
+    /// **The scheme and the address are one field because neither is meaningful alone**: an
+    /// address without a scheme names nothing, and a scheme with no address gives a client no
+    /// tiles to ask for. The wire publishes them as two (`projections.md` §9) and they are absent
+    /// together.
+    pub tile: Option<TileAddress>,
+}
+
+/// The tile a view's frame corresponds to, and the scheme it is a tile of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TileAddress {
+    /// The tile scheme's name — [`tessera_spatial::frame::XYZ`], the slippy-map `z/x/y` every
+    /// basemap server publishes, is the only one this system can name.
+    pub scheme: &'static str,
+    pub z: u32,
+    pub x: u32,
+    pub y: u32,
+}
+
 /// `GET /v1/meta`'s payload (R5) — the bundle-level facts a viewer client needs before it can
 /// issue a sensible `/v1/viewport` call.
 #[derive(Debug, Clone)]
 pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
-    /// `(id, display_name)` pairs, in manifest order.
-    pub views: Vec<(String, String)>,
+    /// The declared views, in manifest order.
+    pub views: Vec<MetaView>,
     pub quantisation: Quantisation,
     pub declared_scalars: Vec<DeclaredScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
@@ -1084,6 +1120,28 @@ pub struct EngineMeta {
     pub idset: u32,
 }
 
+impl EngineMeta {
+    /// The projection that placed a named view's positions, or `None` for a view this bundle does
+    /// not declare.
+    ///
+    /// **Keyed by view, never bundle-wide.** A projection is declared per view (`projections.md`
+    /// §3) while the frame is not, so a single answer would have to pick one of two differently
+    /// projected views — and both callers are about one view's rows: a `region` leaf names the view
+    /// it filters, and a shape submission names the layer whose views it publishes into. Reading
+    /// the *first* declared view instead is correct only while a bundle carries one, and fails
+    /// silently rather than loudly on the day one carries two: a shape would be placed by another
+    /// view's projection and simply hold the wrong rows.
+    ///
+    /// An unknown name is `None` and the caller refuses. Defaulting it to [`Projection::None`]
+    /// would put a degree through the identity transform and quantise it as a frame coordinate.
+    pub fn projection_of(&self, view: &str) -> Option<Projection> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .map(|v| v.projection)
+    }
+}
+
 impl Engine {
     /// `GET /v1/meta` (R5): read-only bundle facts, no session/authorisation involved. Loads the
     /// generation once, like every other request path.
@@ -1096,7 +1154,31 @@ impl Engine {
             views: manifest
                 .views
                 .iter()
-                .map(|s| (s.id.clone(), s.display_name.clone()))
+                // **One derivation of what a client is looking at** (`projections.md` §9). The
+                // scheme is a function of the view's projection and the bundle's frame together —
+                // the projection is declared per view and the frame is not — and it is derived
+                // here rather than at the wire so that the ingest plane, which reads this same
+                // structure, cannot come to a different answer about the same bundle.
+                .map(|s| MetaView {
+                    id: s.id.clone(),
+                    display_name: s.display_name.clone(),
+                    projection: s.projection,
+                    tile: tessera_spatial::frame::tile_scheme(
+                        s.projection,
+                        &Bounds {
+                            x_min: manifest.quantisation.x_min,
+                            x_max: manifest.quantisation.x_max,
+                            y_min: manifest.quantisation.y_min,
+                            y_max: manifest.quantisation.y_max,
+                        },
+                    )
+                    .map(|(scheme, square)| TileAddress {
+                        scheme,
+                        z: square.z,
+                        x: square.x,
+                        y: square.y,
+                    }),
+                })
                 .collect(),
             quantisation: manifest.quantisation,
             // The **full** compiled schema, including `filter`-only columns: `/v1/meta` describes

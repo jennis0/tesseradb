@@ -183,6 +183,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
     write_pairs(&pairs);
 
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.clone(),
         attribute_sources: Vec::new(),
@@ -209,7 +210,7 @@ fn build_produces_a_verifiable_signature_sorted_bundle() {
 
     // ---- (a) manifests present, digests verify (open_bundle is the read protocol) ----------
     let bundle = open_bundle(&out).expect("open_bundle must verify the freshly built bundle");
-    assert_eq!(bundle.manifest.bundle_format, 3);
+    assert_eq!(bundle.manifest.bundle_format, 4);
     assert_eq!(bundle.manifest.entity_id_high_water, N_ITEMS);
     assert_eq!(bundle.manifest.small_term_threshold, 32);
     assert_eq!(bundle.manifest.partitions.len(), 1);
@@ -478,6 +479,7 @@ fn build_refuses_to_clobber_an_existing_bundle() {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,
@@ -515,6 +517,7 @@ fn build_rejects_an_empty_selection() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,
@@ -552,6 +555,7 @@ fn morton_input_requires_the_identity_extent() {
     write_pairs(&pairs);
 
     let args = |extent| BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.clone(),
         attribute_sources: Vec::new(),
@@ -600,6 +604,7 @@ fn morton_input_requires_the_identity_extent() {
     };
     let out = tmp.path().join("bundle-ok");
     build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,
@@ -647,6 +652,7 @@ fn build_rejects_an_unsafe_view_id() {
     write_points(&points);
     write_pairs(&pairs);
     assert!(build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,
@@ -693,6 +699,7 @@ fn limit_filters_the_source_entity_id_prefix() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,
@@ -733,6 +740,7 @@ fn verify_accepts_a_freshly_built_bundle() {
     write_pairs(&pairs);
 
     build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,
@@ -776,6 +784,7 @@ fn verify_rejects_a_columns_file_whose_tessera_ids_do_not_match_the_key() {
     write_pairs(&pairs);
 
     let report = build(&BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,
@@ -931,7 +940,13 @@ fn morton_plus_residual_recovers_sub_cell_position() {
     w.write(&batch).unwrap();
     w.close().unwrap();
 
-    let mut rows = read_points(&points, &Default::default(), &IDENTITY_EXTENT, None).unwrap();
+    let mut rows = read_points(
+        &points,
+        &Default::default(),
+        tessera_spatial::Projection::None,
+        &IDENTITY_EXTENT,
+        None,
+    ).unwrap();
     rows.sort_by_key(|r| r.source_id);
     assert_eq!(rows.len(), 4);
 
@@ -961,7 +976,13 @@ fn bare_morton_widens_with_a_zero_residual() {
     let points = tmp.path().join("points.parquet");
     write_morton_points(&points);
 
-    let rows = read_points(&points, &Default::default(), &IDENTITY_EXTENT, None).unwrap();
+    let rows = read_points(
+        &points,
+        &Default::default(),
+        tessera_spatial::Projection::None,
+        &IDENTITY_EXTENT,
+        None,
+    ).unwrap();
     assert!(!rows.is_empty());
     for row in &rows {
         assert_eq!(
@@ -1068,6 +1089,7 @@ fn entity_ids_break_signature_ties_on_the_morton_code() {
         write_fixture(&points, &pairs);
 
         let args = BuildArgs {
+            projection: tessera_spatial::Projection::None,
             point_fields: Default::default(),
             attribute_sources: Vec::new(),
             points,

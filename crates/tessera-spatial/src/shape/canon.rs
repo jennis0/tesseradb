@@ -1,6 +1,8 @@
 //! From what a caller wrote to what the grid holds (`polygon-membership.md` §4.3–§4.4).
 //!
-//! A shape arrives in data units — the view's own space, today the only one accepted — and
+//! A shape arrives in the space its submission declared — the view's own coordinates, or
+//! longitude and latitude, which [`super::project`] places in the view's frame through the
+//! view's own transform before anything here looks at it — and
 //! leaves as a [`Shape`] in grid units: clipped to the extent, quantised through `fixed32`,
 //! and for a polygon deduplicated, de-collinearised, oriented, rotated to a fixed start and
 //! weighted. Everything that happened on the way is in the [`CanonReport`], which the build
@@ -11,6 +13,7 @@
 use crate::morton::{fixed32, Bounds};
 
 use super::conic::Conic;
+use super::project::{place, Space};
 use super::polygon::{Part, Polygon, Ring};
 use super::simplify::weight_ring;
 use super::{Bbox, Shape};
@@ -64,6 +67,11 @@ pub enum CanonError {
     /// A box whose max is below its min on an axis.
     InvertedBox,
     NonPositiveAxis,
+    /// A `wgs84` coordinate outside ±180 × ±90, which is not a coordinate (`projections.md` §2).
+    NotACoordinate,
+    /// A `wgs84` shape on a view that projects nothing: one space, and nothing to convert from
+    /// (`polygon-membership.md` §4.3).
+    NoProjection,
 }
 
 impl std::fmt::Display for CanonError {
@@ -74,6 +82,18 @@ impl std::fmt::Display for CanonError {
             CanonError::NonPositiveAxis => {
                 write!(f, "a circle's radius or an ellipse's axis is not positive")
             }
+            CanonError::NotACoordinate => write!(
+                f,
+                "a `wgs84` coordinate is outside ±180 longitude or ±90 latitude, and a value \
+                 outside that is not a coordinate (projections.md §2)"
+            ),
+            CanonError::NoProjection => write!(
+                f,
+                "`space = \"wgs84\"` on a view whose `projection` is `none`: such a view has one \
+                 space and nothing to convert a degree from. Write the shape in the view's own \
+                 coordinates with `space = \"view\"`, or declare a projection on the view \
+                 (projections.md §5.3)"
+            ),
         }
     }
 }
@@ -101,8 +121,32 @@ impl ShapeF64 {
 
     /// The canonical shape over `extent`, with the report. The extent must be valid
     /// (`Bounds::validate`).
-    pub fn canonical(&self, extent: &Bounds) -> Result<(Shape, CanonReport), CanonError> {
+    ///
+    /// **`space` names the plane the shape's edges are straight in** (`polygon-membership.md`
+    /// R10), and carries with it the transform that reaches the view's frame. A
+    /// [`Space::Wgs84`] shape is densified and projected first ([`super::project::place`]), so
+    /// that everything below this line is working in the coordinates the points are stored in and
+    /// the shape and the corpus are placed by one function (R12).
+    pub fn canonical(
+        &self,
+        space: Space,
+        extent: &Bounds,
+    ) -> Result<(Shape, CanonReport), CanonError> {
         debug_assert!(extent.validate().is_ok());
+        let placed = place(self, space, extent)?;
+        let (shape, mut report) = placed.canonical_in_view(extent)?;
+        // **`vertices_in` is what the caller wrote**, not what densification produced: a `wgs84`
+        // polygon reaching this line already carries the vertices its curved edges needed, and a
+        // report saying `47 in → 47 out` would hide the transform the line exists to show.
+        report.vertices_in = match self {
+            ShapeF64::Polygon(parts) => parts.iter().flatten().map(|r| r.len() as u64).sum(),
+            _ => 0,
+        };
+        Ok((shape, report))
+    }
+
+    /// [`ShapeF64::canonical`] for a shape already in the view's coordinates.
+    fn canonical_in_view(&self, extent: &Bounds) -> Result<(Shape, CanonReport), CanonError> {
         let coords = self.coordinates();
         if coords.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
             return Err(CanonError::NotFinite);
@@ -423,8 +467,8 @@ mod tests {
             (10.0, 10.0),
             (10.0, 90.0),
         ]]]);
-        let (sa, ra) = a.canonical(&E).unwrap();
-        let (sb, rb) = b.canonical(&E).unwrap();
+        let (sa, ra) = a.canonical(Space::View, &E).unwrap();
+        let (sb, rb) = b.canonical(Space::View, &E).unwrap();
         assert_eq!(sa.encode(), sb.encode());
         assert_eq!(ra.vertices_out, 4);
         assert_eq!(rb.vertices_out, 4);
@@ -439,7 +483,7 @@ mod tests {
             (1500.0, 1500.0),
             (500.0, 1500.0),
         ]]]);
-        let (s, r) = over.canonical(&E).unwrap();
+        let (s, r) = over.canonical(Space::View, &E).unwrap();
         assert!(r.clipped && !r.outside);
         assert!(s.contains((u32::MAX, u32::MAX)));
         assert!(s.contains((1 << 31, u32::MAX)));
@@ -449,7 +493,7 @@ mod tests {
             (3000.0, 2000.0),
             (3000.0, 3000.0),
         ]]]);
-        let (s, r) = gone.canonical(&E).unwrap();
+        let (s, r) = gone.canonical(Space::View, &E).unwrap();
         assert!(r.outside);
         assert_eq!(s.vertex_count(), 0);
         assert!(!s.contains((0, 0)));
@@ -464,7 +508,7 @@ mod tests {
             (2.0, 2.0),
             (3.0, 3.0),
         ]]]);
-        let (s, r) = flat.canonical(&E).unwrap();
+        let (s, r) = flat.canonical(Space::View, &E).unwrap();
         assert_eq!(r.rings_dropped, 1);
         assert_eq!(s.vertex_count(), 0);
     }
@@ -478,7 +522,7 @@ mod tests {
             y_max: 20_000_000.0,
         };
         let p = ShapeF64::Polygon(vec![vec![vec![(-1.0, 51.0), (0.5, 51.0), (0.5, 52.0)]]]);
-        let (_, r) = p.canonical(&e).unwrap();
+        let (_, r) = p.canonical(Space::View, &e).unwrap();
         assert!(r.degrees_looking);
         let degrees = Bounds {
             x_min: -180.0,
@@ -486,7 +530,7 @@ mod tests {
             y_min: -90.0,
             y_max: 90.0,
         };
-        let (_, r) = p.canonical(&degrees).unwrap();
+        let (_, r) = p.canonical(Space::View, &degrees).unwrap();
         assert!(!r.degrees_looking);
     }
 
@@ -498,7 +542,7 @@ mod tests {
                 cy: 0.0,
                 r: 1.0
             }
-            .canonical(&E),
+            .canonical(Space::View, &E),
             Err(CanonError::NotFinite)
         );
         assert_eq!(
@@ -507,7 +551,7 @@ mod tests {
                 cy: 0.0,
                 r: 0.0
             }
-            .canonical(&E),
+            .canonical(Space::View, &E),
             Err(CanonError::NonPositiveAxis)
         );
         assert_eq!(
@@ -517,7 +561,7 @@ mod tests {
                 max_x: 1.0,
                 max_y: 1.0
             }
-            .canonical(&E),
+            .canonical(Space::View, &E),
             Err(CanonError::InvertedBox)
         );
     }

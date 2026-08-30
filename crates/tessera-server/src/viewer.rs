@@ -161,7 +161,30 @@ async fn meta(
         // in any response, log line or metric label (I10, Appendix C C17) -- this is the idset
         // only, which is meaningless without the key and is what `POST /v1/items` checks against.
         "idset": meta.idset,
-        "views": meta.views.iter().map(|(id, name)| serde_json::json!({"id": id, "display_name": name})).collect::<Vec<_>>(),
+        // **What a client is looking at** (`projections.md` §9), beside the frame below. Four
+        // fields per view, and each is a **deployment constant identical for every caller** — the
+        // same class as the frame and the selection parameters, derived from the declaration and
+        // from nothing any principal can see. The build's clip and clamp counts are operator-facing
+        // and are not here: they are properties of the corpus's own data (`projections.md` §7).
+        //
+        // Per view rather than bundle-wide, because a projection is declared per view while the
+        // frame is not — a single key would have to pick one of two differently projected views.
+        //
+        // **`tile_scheme` decides whether a basemap may be drawn, and it is a scheme's name rather
+        // than a boolean** because grid alignment alone is not enough: an equirectangular frame is
+        // aligned to a square tiling no server publishes, so `null` here on an aligned frame is the
+        // ordinary answer and not a defect. `tessera_spatial::frame::tile_scheme` is the one
+        // derivation; `null` means draw the points and draw no basemap.
+        "views": meta.views.iter().map(|v| serde_json::json!({
+            "id": v.id,
+            "display_name": v.display_name,
+            "projection": v.projection.name(),
+            // The ratio the world should be drawn at — 1 for `web_mercator`, `2cos φ₁` for an
+            // equirectangular alias, and `null` for `none`, which has no world to draw.
+            "world_aspect": v.projection.world_aspect(),
+            "tile_scheme": v.tile.map(|t| t.scheme),
+            "tile": v.tile.map(|t| serde_json::json!({"z": t.z, "x": t.x, "y": t.y})),
+        })).collect::<Vec<_>>(),
         "quantisation": {
             "x_min": meta.quantisation.x_min,
             "x_max": meta.quantisation.x_max,
@@ -988,6 +1011,23 @@ fn run_viewport_stream(
             // A `region` leaf is canonicalised here, against the view's own extent — the one
             // `/v1/meta` publishes — so the engine sees a grid-unit shape and the vertex cap and
             // every coordinate refusal are `422`s before any compute (selection-operand §2).
+            // **The projection of the view this request names**, not the bundle's first. A
+            // `region` leaf declared in longitude and latitude is placed by the same function
+            // that placed the points it selects (`polygon-membership.md` R12), and that function
+            // belongs to the view being filtered — reading any other view's would hold the wrong
+            // rows with nothing saying so.
+            let projection = match meta.projection_of(&req.view) {
+                Some(projection) => projection,
+                None => {
+                    if let Some(tx) = sink.first_tx.take() {
+                        let _ = tx.send(Err(ApiError::Unknown(format!(
+                            "unknown view '{}'",
+                            req.view
+                        ))));
+                    }
+                    return;
+                }
+            };
             let region = crate::filter_dto::RegionContext {
                 extent: tessera_engine::shapes::Bounds {
                     x_min: meta.quantisation.x_min,
@@ -995,6 +1035,7 @@ fn run_viewport_stream(
                     y_min: meta.quantisation.y_min,
                     y_max: meta.quantisation.y_max,
                 },
+                projection,
                 max_vertices: state.max_region_vertices,
             };
             match crate::filter_dto::parse(

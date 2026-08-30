@@ -113,9 +113,10 @@ no `fields` map and so has no way to say otherwise; it is `(entity_id, term_id)`
 |---|---|---|
 | `name` | R | identity; tombstoned on drop, never reused |
 | `title` | O | human-readable, served on `/v1/meta` |
+| `projection` | D `none` | `web_mercator`, `equirectangular`, `plate_carree`, `gall_isographic` or `none` — what turns this view's input coordinates into positions in its frame ([`projections.md`](projections.md) §5). See below |
 | `source` | D | a `[sources]` key; `[defaults].source` where absent |
-| `fields` | D | canonical `entity_id`, `x`, `y`, or `morton` + `residual` — the geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
-| `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }`. See below |
+| `fields` | D | canonical `entity_id`, and `x`, `y` or `morton` + `residual` — or `lon`, `lat` under a projection. The geometry shapes are mutually exclusive (§8). `entity_id` defaults to `[defaults].entity_id_field` |
+| `extent` | R | the quantisation frame: `"auto"`, `{ auto = true, margin = f }`, `{ min, max }` or `{ x = [a,b], y = [c,d] }` — and under a projection, `"auto"` or `{ lon = [a,b], lat = [c,d] }`. See below |
 | `point_visibility` | R | `{ field, default }`, or `{ source, default }` — where each point's label is, and what a point carrying none gets. See below |
 | `visibility` | ⊘ | the view's own gate; specified, not implemented (views §3) |
 
@@ -183,6 +184,39 @@ needs headroom or the first out-of-range ingest clamps. A caller who knows the b
 There is no constant for the full float range: spanning ±3.4×10³⁸ over 65,536 cells makes each cell
 10³⁴ wide, so every real dataset lands in one of them — it avoids clamping by destroying all
 resolution.
+
+**A `projection` makes the view a coordinate system on the Earth, and changes what its other three
+keys mean.** The function itself, the closed set it is drawn from and the frame model it implies are
+[`projections.md`](projections.md) §4–§5; what belongs here is the declaration.
+
+```toml
+[[view]]
+name       = "world"
+projection = "web_mercator"
+extent     = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }
+```
+
+- **The coordinate columns become `lon` and `lat`**, in that order, and `fields.x` or `fields.y` on
+  such a view is refused naming the geographic spelling. A corpus built with the two exchanged is
+  mirrored about the diagonal and nothing downstream can see that it is. `fields.lon` on a view with
+  no projection is refused the same way: there is nothing to turn a degree into a coordinate.
+  `morton`/`residual` is refused too — a code is a position already placed, so there is no longitude
+  to transform.
+- **The extent is written in longitude and latitude**, and is projected and then **snapped outward
+  to the smallest aligned square containing it**, with the zoom offset capped at 16. `"auto"` is the
+  same operation over the data's own longitude/latitude box. The other three spellings are refused:
+  `{ min, max }` and `{ x, y }` state a frame in the space the projection *produces*, and
+  `{ auto = true, margin = f }` asks for headroom the snap already supplies.
+- **A coordinate outside ±180 or ±90 is not a coordinate**, in the extent or in a row, and is
+  refused naming WGS84. So is a box crossing the antimeridian, which an aligned square cannot wrap;
+  the refusal names the wider box that does not cross.
+- **A latitude outside the projection's own domain is clipped, counted and never refused** — it is
+  moved onto the frame's edge, where the clamp rule below says nothing is clamped, so the two counts
+  are separate and neither can stand in for the other.
+
+The frame a stated box snaps to is a function of the declaration alone, so `tessera check` prints it
+— the square, and whether the offset cap chose it rather than the box. Under `"auto"` it cannot, the
+frame being a function of the data, and it says so.
 
 **Every build reports what the frame does to the data, and past half the corpus it refuses.** The
 extent alone is four plausible-looking numbers whatever the corpus holds, so the build prints the
@@ -370,7 +404,7 @@ the mis-split word does not find the document. `lindera` is the design's named e
 | `views` | R | the views this layer's artifacts are drawn on |
 | `source` | R unless inline | a `[sources]` key: one file per layer, so no discriminator field exists. Declaring it beside `artifacts` is refused. **`[defaults].source` does not reach here** — a layer with no source is declared and empty (§8) |
 | `fields` | D | canonical `key`, `contents`, `parent`, `attached_layer`, `attached_key`, the shape kind's own columns (`min_x`, `min_y`, `max_x`, `max_y`; `cx`, `cy`, `r`; `cx`, `cy`, `a`, `b`, `angle`; `geometry`) and `space` on a layer declaring `shape`, and `members` or `excluding` where membership rides the artifact row. Naming both memberships is refused, as is a map beside inline `artifacts` |
-| `default_space` | D `view` | the space the artifact table's shapes are written in where a row carries no `space` of its own ([`polygon-membership.md`](polygon-membership.md) §4.3). `view` is the space the points are stored in and the only value a view can honour; ⊘ `wgs84` is refused at parse naming [`projections.md`](projections.md), which is provisional — no view projects anything, and a shape projected by a function other than the one the points went through would select the wrong rows. Only on a layer declaring `shape` |
+| `default_space` | D `view` | the space the artifact table's shapes are written in where a row carries no `space` of its own ([`polygon-membership.md`](polygon-membership.md) §4.3). `view` is the space the points are stored in; `wgs84` is longitude and latitude, honoured on a view that declares a projection and refused on one that does not, and the shape goes through that view's own transform — the same function the points went through, which is what stops it selecting the wrong rows ([`projections.md`](projections.md) §10). Only on a layer declaring `shape` |
 | `artifacts` | O | inline array, instead of `source`, for an authored layer — the keys below |
 | `membership` | R | `enumerated` \| `spatial` \| `{ attribute = <field> }`. `{ attribute = f }` is a **predicate**: its artifacts are derived from the indexed column `f`, whose distinct values they are, so such a layer declares no `content`, no `depends_on`, no `levels`, no `artifact_visibility.field`, no `layout` and no hierarchy but `flat` — each of those would register a layer that is reachable and serves nothing. `spatial` reads `[layer.shape]`, and its artifacts are **published rows** each carrying a shape ([`polygon-membership.md`](polygon-membership.md) §6.2): a spatial layer may declare content, `depends_on`, `levels`, any hierarchy and a `layout` pin; what it may not declare is a proportional criterion or `artifact_visibility.field` |
 | `value_set` | D `closed` | whether a member key the layer's artifacts do not declare is refused, or creates an artifact carrying nothing but its name ([`artifacts-from-points.md`](artifacts-from-points.md) §3). `closed` makes `artifacts` the roster; `open` makes it enrichment, so a cluster the points name and the table omits exists without a title, a cluster the table carries and no point names is an artifact with no members, and neither is an error. **It governs both entry points**: a build mints from a member source, and an ingest batch mints from a column named for the layer, at the close of the commit window that allocates the points. What `open` costs is that a mistyped key becomes a permanent object rather than a refusal — reported, at both entry points, and not bounded |
@@ -1076,9 +1110,10 @@ for drill-down to return.
   membership over a region nobody wrote. A kind's numbers with some present and some absent is the
   same refusal. A row with **no** shape is not refused: it is published with an empty shape, holds
   no rows, and is reported;
-- **`space = "wgs84"`**, on a layer's `default_space` or a row — naming [`projections.md`](projections.md),
-  which is provisional: no view projects anything, and a shape projected by a function other than
-  the one the points went through would select the wrong rows;
+- **`space = "wgs84"`** on a view that declares no projection — naming
+  [`projections.md`](projections.md) §10: a view with one space has no second space to convert
+  from, and a shape placed by a function other than the one the points went through would select
+  the wrong rows. On a projected view it is honoured;
 - **an artifact declaring no attachment in a layer that declares `depends_on`**, and one attaching
   into a layer that layer did not name. A dependent is served only where what it depends on is
   served ([decision 0089](../decisions/0089-a-dependency-edge-carries-deletion-and-visibility.md)),
@@ -1237,6 +1272,27 @@ disclosing nothing.
 
 
 ## Appendix R — review trail
+
+**2026-08-30 — a view declares a projection, and its frame is then written in degrees.** One key is
+added, `projection`, from the closed set [`projections.md`](projections.md) §5 enumerates and
+defaulting to `none` — so a corpus with no geography declares nothing and behaves exactly as it did.
+What the key changes is the meaning of the two beside it: the coordinate columns become `lon` and
+`lat`, and the extent becomes a box in longitude and latitude that the build projects and snaps
+outward to the enclosing aligned square. `extent` gains two entries in its table for that box and
+the surface stays closed, every one of them asserted against this section.
+
+Six refusals arrive with it, each naming what to write instead: a projection outside the set; a
+coordinate outside ±180 or ±90, in the declaration or in a row; `x`/`y` as a projected view's
+columns and `lon`/`lat` as an unprojected one's; the three unprojected extent spellings on a
+projected view; a box crossing the antimeridian, which an aligned square cannot wrap; and `auto`
+over a source selecting no rows, which was already refused and now says both spellings. The count
+is high for one key because the two spellings do not overlap at all — a caller is in one world or
+the other, and every refusal exists to say which one they are in.
+
+The **clip** count is new beside the clamp count and is deliberately not folded into it: a clipped
+point lands exactly on the frame's edge, which is where this section's clamp rule says a point is
+*not* clamped, so one counter would have to report the wrong cause. What a build *prints* about the
+projection, the snap and the clip is not yet written; the numbers are computed and carried.
 
 **2026-08-26 — the two CORS origin lists are enumerated here.** §3 gains the pair. They are the
 serving side's keys and this document had deferred all of those to SA §7, which was right for

@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use arrow::array::{
-    ArrayRef, BinaryBuilder, Float32Builder, StringBuilder, TimestampMicrosecondBuilder,
+    ArrayRef, BinaryBuilder, Float64Builder, StringBuilder, TimestampMicrosecondBuilder,
     UInt32Builder, UInt64Builder,
 };
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -245,8 +245,8 @@ impl Corpus {
     pub fn write_points_parquet(&self, path: &Path) -> io::Result<()> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("entity_id", DataType::UInt64, false),
-            Field::new("x", DataType::Float32, false),
-            Field::new("y", DataType::Float32, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
             Field::new("fx_key", DataType::UInt64, false),
             Field::new("weight", DataType::UInt32, true),
             Field::new(
@@ -270,8 +270,8 @@ impl Corpus {
         while lo < self.n() {
             let hi = (lo + CHUNK_ROWS).min(self.n());
             let mut entity_id = UInt64Builder::with_capacity((hi - lo) as usize);
-            let mut x = Float32Builder::with_capacity((hi - lo) as usize);
-            let mut y = Float32Builder::with_capacity((hi - lo) as usize);
+            let mut x = Float64Builder::with_capacity((hi - lo) as usize);
+            let mut y = Float64Builder::with_capacity((hi - lo) as usize);
             let mut fx_key = UInt64Builder::with_capacity((hi - lo) as usize);
             let mut weight = UInt32Builder::with_capacity((hi - lo) as usize);
             let mut seen_at = TimestampMicrosecondBuilder::with_capacity((hi - lo) as usize);
@@ -372,8 +372,8 @@ impl Corpus {
             .expect("an ingest batch fits in memory by construction");
         let schema = Arc::new(Schema::new(vec![
             Field::new("external_id", DataType::Binary, false),
-            Field::new("x", DataType::Float32, false),
-            Field::new("y", DataType::Float32, false),
+            Field::new("x", DataType::Float64, false),
+            Field::new("y", DataType::Float64, false),
             Field::new("access", DataType::Utf8, false),
             Field::new("fx_key", DataType::UInt64, false),
             Field::new("weight", DataType::UInt32, true),
@@ -387,8 +387,8 @@ impl Corpus {
             Field::new("blurb", DataType::Utf8, true),
         ]));
         let mut external_id = BinaryBuilder::new();
-        let mut x = Float32Builder::with_capacity(rows);
-        let mut y = Float32Builder::with_capacity(rows);
+        let mut x = Float64Builder::with_capacity(rows);
+        let mut y = Float64Builder::with_capacity(rows);
         let mut access = StringBuilder::new();
         let mut fx_key = UInt64Builder::with_capacity(rows);
         let mut weight = UInt32Builder::with_capacity(rows);

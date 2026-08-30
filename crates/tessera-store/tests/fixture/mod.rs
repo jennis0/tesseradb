@@ -138,7 +138,7 @@ pub fn build_bundle(root: &Path, n: u64) {
     .expect("write SEGMENTS-0");
 
     let manifest = Manifest {
-        bundle_format: 3,
+        bundle_format: 4,
         created_at: "2026-08-02T00:00:00Z".to_string(),
         data_plugin_hash: tessera_plugin::Passthrough::new().data_plugin_hash(),
         declared_bounds: serde_json::json!({}),
@@ -162,6 +162,7 @@ pub fn build_bundle(root: &Path, n: u64) {
         views: vec![ViewDescriptor {
             id: VIEW.to_string(),
             display_name: VIEW.to_string(),
+            projection: tessera_spatial::Projection::None,
         }],
         partitions: vec![PartitionDescriptor {
             phash: PARTITION.to_string(),
@@ -212,8 +213,8 @@ pub fn flush_segment(
                 .map(|e| FlushRow {
                     entity_id: EntityId::new(e),
                     external_id: Some(format!("ext-{e}").into_bytes()),
-                    x: ((e * 37) % 100) as f32 / 100.0,
-                    y: ((e * 61) % 100) as f32 / 100.0,
+                    x: ((e * 37) % 100) as f64 / 100.0,
+                    y: ((e * 61) % 100) as f64 / 100.0,
                     scalars: vec![],
                 })
                 .collect(),

@@ -246,6 +246,7 @@ fn build_fixture_with_every_home(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the every-home fixture schema parses");
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,

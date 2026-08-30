@@ -1,17 +1,25 @@
-"""The frozen transform from WGS84 to a view's quantisation frame.
+"""The WGS84 to view-frame transform, as a second implementation of the one the engine runs.
 
-**This module exists to be replaced, and to be checked against its replacement.** Tessera has no
-projection layer today (`docs/design/projections.md` §1): a view's `extent` is four numbers and
-nothing records what they mean, so a geographic corpus is projected here, before ingest, and the
-declaration states the frame the projected numbers live in. When native projection lands, every
-`prepare.py` in this tree stops calling this module and emits `lon`/`lat` instead, the declaration
-names a projection, and each corpus is rebuilt. That is a rerun rather than a loss: a map
-projection is a pure function, which is exactly what `data/geometry.parquet` is not, and is why
-that file is hashed rather than seeded (`probes/dataset.md` §3).
+**This module was written to be replaced, and it has been.** It placed both built geographic
+corpora while Tessera had no projection layer; it places none now. `tessera_spatial::projection`
+is the transform, a view declares which one it uses, and every `prepare.py` in this tree emits
+`lon`/`lat` in degrees for the build to transform (`docs/design/projections.md` §3).
 
-Until then this is the reference the Rust has to agree with, so `TEST_VECTORS` below is written to
-be readable from another language and `python -m test_corpora.common.projection` checks the
-implementation against it.
+What it is instead is the **independent check on the engine's arithmetic**, in both directions.
+The vectors are data in `projection-vectors.json` beside this file — one description that two
+languages read, rather than two implementations of one — and `python -m
+test_corpora.common.projection` checks this half while `tessera_spatial::projection` checks the
+other. Beyond the vectors, `tessera_spatial::projection`'s `agrees_with_the_python_reference` runs
+this module over 100,000 sampled coordinates and requires the same *stored* position rather than a
+similar float. A built corpus is checked the same way: on 2026-08-30 every point of both geographic
+rungs had its expected 32-bit fixed-point position recomputed here from the source degrees and
+compared against what the bundle holds, and all 87,094,949 of them agreed — recorded in each rung's
+own README.
+
+Keeping a second implementation is the point. A single implementation checked against its own
+output cannot fail, and the quantised comparison admits no tolerance: two transforms that place a
+point in different cells have disagreed about where it is, and nothing downstream can see that
+they did.
 
 **Two frames, one transform.** `unit` normalises the projection's whole domain to [0, 1] on both
 axes; `metres` is the same map without the final scale, in EPSG:3857's own units. They are affine
@@ -28,7 +36,9 @@ extent. The negation is applied here, at the definition, and never left to a cal
 
 from __future__ import annotations
 
+import json
 import math
+import pathlib
 from typing import Iterable, Literal, NamedTuple
 
 Frame = Literal["unit", "metres"]
@@ -44,9 +54,8 @@ WORLD_HALF_M = math.pi * EARTH_RADIUS_M  # 20037508.342789244
 #: longer square, so every tile scheme cuts here; a point past it is *clipped*, not clamped.
 MAX_LATITUDE = math.degrees(2.0 * math.atan(math.exp(math.pi)) - math.pi / 2.0)
 
-#: The whole domain, as the WGS84 box a caller would write once `extent` is declared on the input
-#: side of the projection (`projections.md` §2). Recorded beside every corpus this module places so
-#: that the migration is a substitution rather than a derivation.
+#: The whole domain, as the WGS84 box a declaration writes for `extent` (`projections.md` §2, §4.2).
+#: Both geographic rungs declare exactly this box, and it snaps to the world square at offset 0.
 WORLD_BOX_WGS84 = {
     "lon": (-180.0, 180.0),
     "lat": (-MAX_LATITUDE, MAX_LATITUDE),
@@ -110,35 +119,13 @@ def unproject(x: float, y: float, frame: Frame = "unit") -> tuple[float, float]:
     return (lon, math.degrees(2.0 * math.atan(math.exp(merc_y)) - math.pi / 2.0))
 
 
-def sql(lon: str, lat: str, frame: Frame = "unit") -> tuple[str, str]:
-    """The same transform as two DuckDB expressions, so 10^7 rows never enter Python.
-
-    `lon` and `lat` are expressions the caller supplies — a column name, or a cast. The latitude
-    clip is applied here for the same reason `project` applies it: `tan` diverges at ±90° and
-    GeoNames carries points at exactly both poles.
-    """
-    ext = extent(frame)
-    clipped = f"greatest(-{MAX_LATITUDE!r}, least({MAX_LATITUDE!r}, {lat}))"
-    merc_y = f"ln(tan(pi() / 4.0 + radians({clipped}) / 2.0))"
-    if frame == "unit":
-        x, y = f"(({lon}) + 180.0) / 360.0", f"0.5 - ({merc_y}) / (2.0 * pi())"
-    elif frame == "metres":
-        x, y = (
-            f"{EARTH_RADIUS_M!r} * radians({lon})",
-            f"-{EARTH_RADIUS_M!r} * ({merc_y})",
-        )
-    else:
-        raise ValueError(f"unknown frame {frame!r}; expected 'unit' or 'metres'")
-    hold = lambda v: f"greatest({ext.min!r}, least({ext.max!r}, {v}))"  # noqa: E731
-    return (hold(x), hold(y))
-
-
 def is_clipped(lat: float) -> bool:
     """Whether this latitude falls outside the projected domain and is being moved onto its edge.
 
     The build's clamp report structurally cannot see these: clipping lands them at *exactly* the
-    frame maximum, and `contracts` §2.5 says a point at the maximum is not clamped. So the count is
-    taken here and printed by the corpus that takes it (`projections.md` §4a).
+    frame maximum, and `contracts` §2.5 says a point at the maximum is not clamped, which is why
+    the build counts clipping separately (`projections.md` §7). This is the same predicate, over
+    the source, for a survey taken before any build has run.
     """
     return lat > MAX_LATITUDE or lat < -MAX_LATITUDE
 
@@ -151,33 +138,26 @@ def quantise(v: float, ext: Extent, bits: int = 16) -> int:
 
 
 # --------------------------------------------------------------------------------------------
-# Test vectors: the contract the Rust replacement has to meet. Written as data, not as asserts,
-# so another language can read them straight out of this file.
+# Test vectors: the contract this module and its Rust replacement both meet. They are data in a
+# file beside this one rather than literals here, because two languages have to read them and a
+# figure copied into a second language is a figure that can drift from the first.
 # --------------------------------------------------------------------------------------------
 
+VECTORS_PATH = pathlib.Path(__file__).with_name("projection-vectors.json")
+_VECTORS = json.loads(VECTORS_PATH.read_text(encoding="utf-8"))
+
 #: (lon, lat, x_metres, y_metres) — y south, so the sign is the opposite of EPSG:3857's northing.
-#: Every value here is exact or a published Web Mercator figure, not one this module produced.
+#: Every value is exact or a published Web Mercator figure, not one this module produced.
 TEST_VECTORS = [
-    (0.0, 0.0, 0.0, 0.0),
-    (180.0, 0.0, WORLD_HALF_M, 0.0),
-    (-180.0, 0.0, -WORLD_HALF_M, 0.0),
-    (90.0, 0.0, WORLD_HALF_M / 2.0, 0.0),
-    (0.0, MAX_LATITUDE, 0.0, -WORLD_HALF_M),
-    (0.0, -MAX_LATITUDE, 0.0, WORLD_HALF_M),
-    (0.0, 45.0, 0.0, -5621521.486192066),
-    (0.0, -45.0, 0.0, 5621521.486192066),
+    (v["lon"], v["lat"], v["x_m"], v["y_m"])
+    for v in _VECTORS["web_mercator_metres"]["vectors"]
 ]
 
 #: (name, lon, lat, zoom, tile_x, tile_y) — XYZ tile addresses, which are the y-direction's real
 #: test: a mirrored frame passes every round trip and fails these.
 TILE_VECTORS = [
-    ("London", -0.1276, 51.5072, 1, 0, 0),
-    ("Sydney", 151.2093, -33.8688, 1, 1, 1),
-    ("Buenos Aires", -58.3816, -34.6037, 1, 0, 1),
-    ("Tokyo", 139.6917, 35.6895, 1, 1, 0),
-    ("Nairobi", 36.8219, -1.2921, 2, 2, 2),
-    ("Reykjavik", -21.8277, 64.1265, 2, 1, 1),
-    ("Tromso", 18.9560, 69.6496, 2, 2, 0),
+    (v["place"], v["lon"], v["lat"], v["zoom"], v["tile_x"], v["tile_y"])
+    for v in _VECTORS["xyz_tiles"]["vectors"]
 ]
 
 
@@ -207,6 +187,15 @@ def _self_check() -> None:
     print(f"MAX_LATITUDE  = {MAX_LATITUDE!r}")
     print(f"WORLD_HALF_M  = {WORLD_HALF_M!r}")
     print(f"world box     = {WORLD_BOX_WGS84}")
+
+    # The shared file records the three constants as figures; this module derives them. Both are
+    # checked against the other so the file cannot drift from the arithmetic that produced it —
+    # which is the only way the Rust, which reads the file, can rely on it.
+    consts = _VECTORS["constants"]
+    assert consts["earth_radius_m"] == EARTH_RADIUS_M, consts["earth_radius_m"]
+    assert consts["world_half_m"] == WORLD_HALF_M, consts["world_half_m"]
+    assert consts["max_latitude_deg"] == MAX_LATITUDE, consts["max_latitude_deg"]
+    print(f"vectors file  : {VECTORS_PATH.name}, constants derive to the bit")
 
     for lon, lat, mx, my in TEST_VECTORS:
         gx, gy = project(lon, lat, "metres")
@@ -264,48 +253,6 @@ def _self_check() -> None:
         f"clip          : poles land on the frame edge exactly, cells "
         f"{quantise(north, ext)} and {quantise(south, ext)} of {cells} — clamp report reads zero"
     )
-
-    sql_samples = [
-        (random.uniform(-180.0, 180.0), random.uniform(-90.0, 90.0)) for _ in range(20_000)
-    ]
-    sql_samples += [(lon, lat) for lon, lat, _, _ in TEST_VECTORS]
-    sql_samples += [(lon, lat) for _, lon, lat, _, _, _ in TILE_VECTORS]
-    for frame in ("unit", "metres"):
-        worst = check_sql_agrees(sql_samples, frame)
-        scale = 1.0 if frame == "unit" else 2.0 * WORLD_HALF_M
-        print(
-            f"duckdb '{frame}'{'  ' if frame == 'unit' else ''}: "
-            f"{len(sql_samples):,} points, worst disagreement {worst:.3e} "
-            f"({worst / scale * 65536:.2e} cells)"
-        )
-
-
-def check_sql_agrees(samples: Iterable[tuple[float, float]], frame: Frame = "unit") -> float:
-    """The largest disagreement between `sql()` and `project()` over these samples.
-
-    `prepare.py` sends every row through DuckDB and none through Python, so the two have to be the
-    same transform rather than two readings of one description. This is what says so.
-    """
-    import duckdb
-
-    rows = list(samples)
-    x_expr, y_expr = sql("lon", "lat", frame)
-    con = duckdb.connect()
-    con.execute("CREATE TABLE s (i BIGINT, lon DOUBLE, lat DOUBLE)")
-    con.executemany(
-        "INSERT INTO s VALUES (?, ?, ?)",
-        [(i, lon, lat) for i, (lon, lat) in enumerate(rows)],
-    )
-    got = con.execute(
-        f"SELECT i, {x_expr} AS x, {y_expr} AS y FROM s ORDER BY i"
-    ).fetchall()
-    con.close()
-
-    worst = 0.0
-    for i, sx, sy in got:
-        px, py = project(rows[i][0], rows[i][1], frame)
-        worst = max(worst, abs(sx - px), abs(sy - py))
-    return worst
 
 
 if __name__ == "__main__":

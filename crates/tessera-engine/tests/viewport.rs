@@ -783,6 +783,7 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: tmp.path().join("points.parquet"),
         attribute_sources: Vec::new(),
@@ -1291,6 +1292,7 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     let bundle_root = PathBuf::from("/tmp/tessera-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
+            projection: tessera_spatial::Projection::None,
             point_fields: Default::default(),
             points: PathBuf::from("data/scaled/geometry.parquet"),
             attribute_sources: Vec::new(),

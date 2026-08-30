@@ -968,6 +968,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         input::scan_points(
             &args.points,
             &args.point_fields,
+            args.projection,
             &args.extent,
             args.limit,
             |point| {
@@ -1414,6 +1415,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             let plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                args.projection,
                 &args.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
             )?;
@@ -3481,6 +3483,7 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
             input::scan_points(
                 &args.points,
                 &args.point_fields,
+                args.projection,
                 &args.extent,
                 args.limit,
                 |_| {
@@ -3495,6 +3498,7 @@ fn read_source_ids(args: &BuildArgs, known_count: Option<usize>) -> Result<Vec<u
     input::scan_points(
         &args.points,
         &args.point_fields,
+        args.projection,
         &args.extent,
         args.limit,
         |point| {

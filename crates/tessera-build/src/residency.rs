@@ -632,6 +632,7 @@ require_member_visibility = "none"
         std::fs::write(&config_path, &config).unwrap();
         let parsed = crate::config::Config::parse(&config_path, &Default::default()).unwrap();
         let args = crate::BuildArgs {
+            projection: parsed.views[0].projection,
             points: points.clone(),
             point_fields: parsed.views[0].fields.clone(),
             attribute_sources: parsed.attribute_sources.clone(),

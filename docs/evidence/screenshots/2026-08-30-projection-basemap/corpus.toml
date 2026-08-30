@@ -1,0 +1,15 @@
+# A projected corpus for the phase-F basemap capture: GeoNames places, every 60th row, placed by
+# the build from longitude and latitude rather than by anything upstream of it.
+
+[sources]
+points = "points.parquet"
+
+[defaults]
+source = "points"
+
+[[view]]
+name             = "world"
+title            = "GeoNames places"
+projection       = "web_mercator"
+extent           = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+point_visibility = { field = "country", default = "public" }

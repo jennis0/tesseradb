@@ -73,24 +73,25 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 
 | Document | Status | ⊘ |
 |---|---|---|
-| `annotation-representation.md` | Normative for the annotation representat | 39 |
+| `annotation-representation.md` | Normative for the annotation representat | 40 |
 | `annotation-write-cycle.md` | Normative for the annotation write cycle | 18 |
 | `annotations.md` | Normative — r43 | 18 |
 | `architecture.md` | Normative — r50 | 39 |
-| `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 22 |
-| `artifact-shapes.md` | Normative |  |
+| `artifact-fetch-protocol.md` | Normative — r3 | 7 |
+| `artifact-serving-at-scale.md` | Ruled, reviewed, amended, and re-measure | 21 |
+| `artifact-shapes.md` | Normative — r7 |  |
 | `artifact-system.md` | Descriptive. This document orients an ar | 6 |
 | `artifacts-from-points.md` | Draft | 2 |
 | `caching.md` | Provisional — under review |  |
 | `client-architecture.md` | Provisional — under review |  |
-| `client-components.md` | Provisional — under review | 11 |
+| `client-components.md` | Provisional — under review | 10 |
 | `client-interaction.md` | Provisional — under review |  |
 | `client-obligations.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r11 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
 | `configuration.md` | Normative for the build-time configurati | 28 |
 | `conformance.md` | Normative — r15 | 20 |
-| `contracts.md` | Normative — r40 | 25 |
+| `contracts.md` | Normative — r50 | 25 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
@@ -104,10 +105,10 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `measurement.md` | Provisional — under review | 5 |
 | `per-point-attributes.md` | Provisional — under review | 6 |
 | `performance-suite.md` | Provisional — under review | 9 |
-| `polygon-membership.md` | Requirements only. This document states  |  |
-| `projections.md` | Provisional — under review | 6 |
+| `polygon-membership.md` | Normative — r8 | 14 |
+| `projections.md` | Provisional — under review | 3 |
 | `records-and-search.md` | Provisional — under review | 29 |
-| `selection-operand.md` | Provisional — under review | 5 |
+| `selection-operand.md` | Normative — r2 | 3 |
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |

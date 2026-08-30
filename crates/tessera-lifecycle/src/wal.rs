@@ -167,14 +167,28 @@ pub enum WalScalar {
 /// revised, not once a published segment depends on it. The handler resolves it against the
 /// bundle's declared views and refuses anything else; nothing defaults it, because a defaulted
 /// view is how a row silently joins the wrong row space.
+///
+/// `x`/`y` are `f64`, the width the whole coordinate path carries (`projections.md` §6) — the wire
+/// reads it, this record stores it and the flush quantises it. Postcard encodes a float at its
+/// declared width, so the width is on-disk format: this field's change from `f32` is what
+/// `WAL_VERSION` 16 exists for, and a log at 15 is refused rather than read eight bytes at a time
+/// out of four.
+///
+/// **They are the view's frame coordinates, never longitude and latitude** (`projections.md` §3).
+/// A projected view's transform runs once, at the wire boundary, before the record is framed — so
+/// **replay reproduces the positions the original write produced rather than re-running the
+/// transform**. Nothing in recovery calls `Projection::forward`, and a platform's `log` and `tan`
+/// are therefore not part of it: Web Mercator is not bit-exact across C libraries (§11), and a log
+/// holding degrees would let a node come back up with points in different cells from the ones it
+/// acked.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WalRow {
     pub external_id: Option<Vec<u8>>,
     pub entity_id: EntityId,
     pub view: String,
     pub descriptors: Vec<Vec<u8>>,
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub scalars: Vec<WalScalar>,
 }
 
@@ -578,8 +592,13 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// [`WalRecord::ArtifactGrow`], appended so no existing discriminant moves — and the bump is the
 /// guard, because a version-14 reader meeting one would decode a growth as whatever it thinks that
 /// index means, which is nothing: the members that joined would be silently absent from the
-/// artifact a caller was acked for.
-const WAL_VERSION: u16 = 15;
+/// artifact a caller was acked for. Version 16 widens [`WalRow`]'s `x`/`y` to `f64`
+/// (`projections.md` §6) — a *field's type*, not a new variant or a new field, so nothing about a
+/// version-15 log looks wrong to a version-16 reader: the record's length is right, the CRC is
+/// right, and four of the eight bytes it takes for a coordinate come out of whatever field follows.
+/// A row read that way lands somewhere on the grid rather than failing, which is the whole reason
+/// the version is the guard and there is no migration.
+const WAL_VERSION: u16 = 16;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts

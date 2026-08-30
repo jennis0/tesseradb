@@ -103,6 +103,7 @@ fn flushed_bundle(root: &Path) {
     write_points(&points);
     write_pairs(&pairs);
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,

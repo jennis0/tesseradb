@@ -2,10 +2,15 @@
 
 DuckDB with the `spatial` extension over the staged GeoParquet. Two passes: the divisions are
 staged once as a local polygon table, and the places are streamed part by part through a
-point-in-polygon join against it. No GPU, no embedding — the coordinates are already WGS84 and
-become positions by [`..common.projection`][] and quantisation.
+point-in-polygon join against it. No GPU and no embedding: the coordinates are already WGS84 and
+reach the build as degrees.
 
-**Everything here projects, and it should not.** See the standing deferral in `../README.md`.
+**Nothing here is projected.** `points.parquet` carries `lon` and `lat`, the division polygons are
+written in degrees under `default_space = "wgs84"`, and `corpus.toml` declares
+`projection = "web_mercator"` with its frame as a longitude/latitude box. The transform runs
+inside the build, once, for the points and for the shapes alike (`projections.md` §3, §10) — which
+is also what makes a polygon's edges straight in the plane it was drawn in rather than in the
+plane it happens to be stored in.
 
 Five decisions this script makes about the source, each because the survey of 2026-08-28 forced it
 rather than because the campaign plan called for it. The plan is
@@ -201,7 +206,6 @@ PLACE_COLUMNS = """
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--frame", choices=("unit", "metres"), default="unit")
     ap.add_argument("--vintage", default=VINTAGE)
     ap.add_argument("--parts", type=int, default=None, help="read only the first N places parts")
     ap.add_argument(
@@ -220,10 +224,9 @@ def main() -> None:
     args = ap.parse_args()
 
     src, out = staged(RUNG, args.vintage), ladder(RUNG)
-    ext = projection.extent(args.frame)
     steps = Steps()
     parts = places_parts(src)[: args.parts]
-    print(f"source  {src}\noutput  {out}\nframe   {args.frame} — extent [{ext.min}, {ext.max}]")
+    print(f"source  {src}\noutput  {out}\ncoordinates  WGS84 degrees, unprojected")
     print(f"places  {len(parts)} of {len(places_parts(src))} parts\n")
 
     scratch = out / "prepare.duckdb"
@@ -237,12 +240,24 @@ def main() -> None:
     con.execute(f"PRAGMA temp_directory='{out / 'tmp'}'")
     con.execute("INSTALL spatial; LOAD spatial")
 
-    x_expr, y_expr = projection.sql("lon", "lat", args.frame)
-
+    joined = None
     if args.resume:
         # The polygons are not reloaded: nothing past the join reads a geometry, and `divisions` —
         # which the vocabularies and the artifact names do read — is in the scratch already.
-        placed_rows = con.execute("SELECT count(*) FROM placed").fetchone()[0]
+        #
+        # **Two states a run can be resumed from, because assigning entity ids costs as much as a
+        # tier of the join.** `placed` is the join's own result; `points` is that plus the entity
+        # ids and the three lifted columns, and the entity-id step drops `placed` once it holds.
+        # Either is a complete state to continue from, and which table is there says which one this
+        # is.
+        present = {name for (name,) in con.execute("SHOW TABLES").fetchall()}
+        joined = "points" if "points" in present else "placed" if "placed" in present else None
+        if joined is None:
+            raise SystemExit(
+                f"--resume needs {scratch} to hold either the join's `placed` table or the "
+                f"`points` table the entity-id step makes from it, and it holds neither"
+            )
+        joined_rows = con.execute(f"SELECT count(*) FROM {joined}").fetchone()[0]
         areas, orphans = con.execute(
             f"""SELECT count(*), count(*) FILTER (lineage IS NULL)
                 FROM read_parquet('{out / "areas.parquet"}')"""
@@ -252,10 +267,11 @@ def main() -> None:
         tier_of = {sub: tier for tier, subtypes in JOIN_TIERS for sub in subtypes}
         tier_counts = {tier: 0 for tier, _ in JOIN_TIERS}
         for subtype, n in con.execute(
-            "SELECT lineage_subtypes[-1], count(*) FROM placed WHERE lineage IS NOT NULL GROUP BY 1"
+            f"SELECT lineage_subtypes[-1], count(*) FROM {joined} "
+            f"WHERE lineage IS NOT NULL GROUP BY 1"
         ).fetchall():
             tier_counts[tier_of[subtype]] += n
-        print(f"resuming from {placed_rows:,} joined places in {scratch.name}\n")
+        print(f"resuming from {joined_rows:,} joined places in {scratch.name} (`{joined}`)\n")
     else:
         with steps.step("divisions"):
             areas, orphans = build_areas(con, src, out)
@@ -269,7 +285,7 @@ def main() -> None:
         con.execute(
             """
             CREATE OR REPLACE TABLE placed (
-                gers_id VARCHAR, x DOUBLE, y DOUBLE, lat DOUBLE,
+                gers_id VARCHAR, lon DOUBLE, lat DOUBLE,
                 name VARCHAR, category_path VARCHAR[], category_root VARCHAR,
                 category VARCHAR, basic_category VARCHAR, confidence FLOAT,
                 operating_status VARCHAR, country VARCHAR, source_dataset VARCHAR,
@@ -323,7 +339,7 @@ def main() -> None:
                 con.execute(
                     f"""
                     INSERT INTO placed
-                    SELECT p.gers_id, {x_expr}, {y_expr}, p.lat,
+                    SELECT p.gers_id, p.lon, p.lat,
                            p.name, p.category_path, p.category_root, p.category, p.basic_category,
                            p.confidence, p.operating_status, p.country, p.source_dataset,
                            p.update_time,
@@ -348,22 +364,29 @@ def main() -> None:
     # `update_time` rather than the GERS id, so that replaying the corpus in id order *is* the
     # time-ordered ingest the campaign plan asks each rung for. Ties break on the id so the order
     # is total and the run is reproducible.
-    with steps.step("entity ids"):
-        con.execute(
-            f"""
-            CREATE OR REPLACE TABLE points AS
-            SELECT row_number() OVER (ORDER BY update_time, gers_id) - 1 AS entity_id, *,
-                   {", ".join(
-                       f"list_extract(lineage, list_position(lineage_subtypes, '{s}'))"
-                       f" AS division_{s}" for s in COLUMN_SUBTYPES)}
-            FROM placed
-            """
-        )
+    if joined == "points":
         kept = con.execute("SELECT count(*) FROM points").fetchone()[0]
-        # `points` is `placed` plus the entity id and the three lifted columns, so holding both is
-        # two copies of the corpus in the scratch database for no reader.
-        con.execute("DROP TABLE placed")
+    else:
+        with steps.step("entity ids"):
+            con.execute(
+                f"""
+                CREATE OR REPLACE TABLE points AS
+                SELECT row_number() OVER (ORDER BY update_time, gers_id) - 1 AS entity_id, *,
+                       {", ".join(
+                           f"list_extract(lineage, list_position(lineage_subtypes, '{s}'))"
+                           f" AS division_{s}" for s in COLUMN_SUBTYPES)}
+                FROM placed
+                """
+            )
+            kept = con.execute("SELECT count(*) FROM points").fetchone()[0]
+            # `points` is `placed` plus the entity id and the three lifted columns, so holding both
+            # is two copies of the corpus in the scratch database for no reader.
+            con.execute("DROP TABLE placed")
 
+    # **A survey of the source, not something this script acts on.** The build clips a latitude
+    # beyond Web Mercator's domain onto the frame's edge and reports the count itself
+    # (`projections.md` §7); this is the same population counted upstream, so the two numbers can be
+    # held against each other.
     clipped = con.execute(
         f"""SELECT count(*) FILTER (lat > {projection.MAX_LATITUDE!r}),
                    count(*) FILTER (lat < {-projection.MAX_LATITUDE!r}) FROM points"""
@@ -372,7 +395,7 @@ def main() -> None:
     with steps.step("points.parquet"):
         con.execute(
             f"""COPY (
-                SELECT entity_id, x, y, category_root, category, basic_category, country,
+                SELECT entity_id, lon, lat, category_root, category, basic_category, country,
                        source_dataset, operating_status, confidence, update_time, name,
                        {", ".join(f"division_{s}" for s in COLUMN_SUBTYPES)}
                 FROM points ORDER BY entity_id
@@ -456,22 +479,22 @@ def main() -> None:
     # containment — the polygons are generalised for cartography and do not nest reliably, and
     # the build reports the children whose bounds escape their parent's rather than checking them.
     #
-    # The geometry is projected into the frame the points are in — Web Mercator, normalised, y
-    # south, exactly `projection.project` — so the shape is written in the view's own space
-    # (`space = "view"`), which is the only space the build honours. Latitude is clipped first, as
-    # the points' is: a vertex beyond ±MAX_LATITUDE would project outside the plane.
+    # **The geometry is written in longitude and latitude**, and the layer declares
+    # `default_space = "wgs84"`, so the build puts it through the view's own transform — the same
+    # function the points go through, which is what makes the two spaces comparable at all
+    # (`projections.md` §10). An edge is straight in the plane it was drawn in, so the build
+    # densifies before projecting; Overture's vertices are dense enough that the departure this
+    # corrects is well under a cell, and it is the build's business either way.
+    #
+    # A vertex is still clipped to Web Mercator's domain here, in degrees. That is a geometric
+    # intersection rather than a projection: without it a ring reaching ±90° would have its whole
+    # polar boundary collapsed onto one y value by the transform, which is a self-touching ring
+    # where a clipped one is an ordinary polygon.
     with steps.step("artifacts"):
         roster = "(SELECT DISTINCT unnest(lineage) AS key FROM points WHERE lineage IS NOT NULL)"
-        w = projection.WORLD_HALF_M
-        clip = (
+        held = (
             f"ST_Intersection(a.geom, ST_MakeEnvelope(-180.0, -{projection.MAX_LATITUDE!r}, "
             f"180.0, {projection.MAX_LATITUDE!r}))"
-        )
-        mercator = f"ST_Transform({clip}, 'EPSG:4326', 'EPSG:3857', true)"
-        projected = (
-            f"ST_Affine({mercator}, {1.0 / (2.0 * w)!r}, 0.0, 0.0, {-1.0 / (2.0 * w)!r}, 0.5, 0.5)"
-            if args.frame == "unit"
-            else f"ST_Affine({mercator}, 1.0, 0.0, 0.0, -1.0, 0.0, 0.0)"
         )
         con.execute(
             f"""COPY (
@@ -479,7 +502,7 @@ def main() -> None:
                        [[coalesce(d.name, k.key)]] AS contents,
                        CASE WHEN len(l.lineage) >= 2 AND l.lineage[-2] IN (SELECT key FROM {roster})
                             THEN l.lineage[-2] END                       AS parent,
-                       ({projected})::WKB_BLOB                            AS geometry
+                       ST_AsWKB({held})                              AS geometry
                 FROM {roster} k
                 LEFT JOIN divisions d ON d.division_id = k.key
                 LEFT JOIN (
@@ -503,8 +526,11 @@ def main() -> None:
         ).fetchone()
         print(f"  artifacts {artifacts:,}: {with_geometry:,} with a polygon, {with_parent:,} with a parent")
 
-    # --- the frame report ---------------------------------------------------------------------
-    bounds = con.execute("SELECT min(x), max(x), min(y), max(y) FROM points").fetchone()
+    # --- the source's own box -------------------------------------------------------------------
+    # In degrees, which is the space `points.parquet` is written in and the space the declaration's
+    # `extent` is written in. The frame itself — the aligned square this box snaps to, and what it
+    # clamps and clips — is the build's report and is not duplicated here.
+    bounds = con.execute("SELECT min(lon), max(lon), min(lat), max(lat) FROM points").fetchone()
     unplaced = con.execute("SELECT count(*) FROM points WHERE lineage IS NULL").fetchone()[0]
     depth_hist = con.execute(
         "SELECT len(lineage) d, count(*) c FROM points WHERE lineage IS NOT NULL GROUP BY 1 ORDER BY 1"
@@ -513,13 +539,11 @@ def main() -> None:
         "SELECT containing, count(*) c FROM points GROUP BY 1 ORDER BY 1"
     ).fetchall()
     frame = {
-        "frame": args.frame,
-        "extent": {"min": ext.min, "max": ext.max},
-        "projection": "web_mercator",
-        "y_direction": "south",
-        "asked_for_wgs84": projection.WORLD_BOX_WGS84,
-        "clipped": {"north": clipped[0], "south": clipped[1], "total": sum(clipped)},
-        "data_bounds": {"x": [bounds[0], bounds[1]], "y": [bounds[2], bounds[3]]},
+        "coordinates": "wgs84_degrees",
+        "declared_projection": "web_mercator",
+        "declared_extent": projection.WORLD_BOX_WGS84,
+        "beyond_domain": {"north": clipped[0], "south": clipped[1], "total": sum(clipped)},
+        "data_bounds": {"lon": [bounds[0], bounds[1]], "lat": [bounds[2], bounds[3]]},
         "points": kept,
         "parts_read": len(parts),
         "division_areas": areas,
@@ -535,11 +559,11 @@ def main() -> None:
 
     # --- report -------------------------------------------------------------------------------
     print(f"\npoints        {kept:,}")
-    print(f"extent        [{ext.min}, {ext.max}] — {args.frame}, y south")
-    print(f"data bounds   x [{bounds[0]:.6f}, {bounds[1]:.6f}]  y [{bounds[2]:.6f}, {bounds[3]:.6f}]")
+    print("coordinates   WGS84 degrees — the build projects and quantises them")
+    print(f"data bounds   lon [{bounds[0]:.6f}, {bounds[1]:.6f}]  lat [{bounds[2]:.6f}, {bounds[3]:.6f}]")
     print(
-        f"clipped       {sum(clipped):,} beyond ±{projection.MAX_LATITUDE:.4f}° "
-        f"({clipped[0]:,} north, {clipped[1]:,} south) — at the frame edge, not clamped"
+        f"beyond domain {sum(clipped):,} past ±{projection.MAX_LATITUDE:.4f}° "
+        f"({clipped[0]:,} north, {clipped[1]:,} south) — the build clips and counts these"
     )
     print(f"\ndivision artifacts  {artifacts:,}, of which {named:,} carry a published name")
     print(f"places in no division {unplaced:,} ({unplaced * 100.0 / kept:.2f}%)")

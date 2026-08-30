@@ -146,6 +146,7 @@ fn project(dir: &Path, covered: &[u64]) -> Config {
 fn args(config: &Config, out: PathBuf) -> BuildArgs {
     let acquired = config.acquire("s0").expect("the declaration acquires");
     BuildArgs {
+        projection: tessera_spatial::Projection::None,
         points: acquired.points,
         point_fields: acquired.point_fields,
         attribute_sources: acquired.attribute_sources,

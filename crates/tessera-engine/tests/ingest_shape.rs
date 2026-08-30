@@ -143,8 +143,8 @@ fn build_rows_with_signatures(
             UnallocatedRow {
                 external_id: Some(format!("{tag}-{i}").into_bytes()),
                 view: "s0".to_string(),
-                x: ((i * 7) % 1000) as f32,
-                y: ((i * 13) % 1000) as f32,
+                x: ((i * 7) % 1000) as f64,
+                y: ((i * 13) % 1000) as f64,
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,

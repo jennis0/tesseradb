@@ -8,3 +8,7 @@ tessera-types = { path = "../tessera-types" }
 
 [dev-dependencies]
 proptest = { workspace = true }
+# Test-only: the projection test vectors are a JSON file two languages read
+# (test_corpora/common/projection-vectors.json), so the Rust side needs a parser. Nothing in this
+# crate's own code reads JSON.
+serde_json = { workspace = true }

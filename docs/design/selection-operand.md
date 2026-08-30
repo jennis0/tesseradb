@@ -75,8 +75,9 @@ specifies so that the operand and the export verb never disagree about what a sh
 
 `region` takes exactly one of `polygon` — at least three vertices, implicitly closed — `bbox`, as
 `[x0, y0, x1, y1]`, `circle`, as `[cx, cy, r]`, or `ellipse`, as `[cx, cy, a, b, angle_degrees]`
-(`polygon-membership.md` §4.1's four kinds), each with `space` (§4.3 there: `view` if absent and
-the only value a view honours; `wgs84` is refused naming `projections.md`) — **or `artifact`**, a
+(`polygon-membership.md` §4.1's four kinds), each with `space` (§4.3 there: `view` if absent, or `wgs84`
+on a view that declares a projection, whose edges are densified before projection so each is
+straight in the plane it was declared in; `wgs84` on a view that projects nothing is refused) — **or `artifact`**, a
 published shape named by its `tessera_id`, which is `polygon-membership.md` §8's second spelling
 and carries nothing else. Coordinates are in the view's own space, the one `/v1/meta`'s
 quantisation extent defines and the client already works in, and are canonicalised **at the wire**

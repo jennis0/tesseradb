@@ -1883,8 +1883,8 @@ pub enum AcceptError {
     /// the edge of the grid.
     OutsideExtent {
         index: usize,
-        x: f32,
-        y: f32,
+        x: f64,
+        y: f64,
         quantisation: tessera_store::manifest::Quantisation,
     },
     /// A row carries a number of scalars other than one per declared column.

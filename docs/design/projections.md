@@ -1,228 +1,466 @@
-# Projections — the high-level position
+# Projections
 
-**Status:** **Provisional, high level — the shape of an answer, not the answer.** It records where
-the owner and this session got to on 2026-08-27 and what that implies; the detail is being
-researched separately and will correct parts of this. Nothing here is built. **To become
-normative:** the research folded in, the enumerated set decided, and the configuration surface
-amended.
+**Status:** **Provisional — reviewed, built, and awaiting promotion.** The adversarial review is
+done and dispositioned, and the four normative amendments this design forces have landed:
+[`configuration.md`](configuration.md) §1 (the `[[view]]` block), [`contracts.md`](contracts.md) §2.2
+(the bundle's recorded projection), §3.2 (the `/v1/meta` fields) and §3.4 (the ingest schema's
+coordinate columns). What remains is the owner's ruling on promotion.
 
-**Reads with:** [`configuration.md`](configuration.md) §1 (the `[[view]]` block and `extent`),
-[`client-interaction.md`](client-interaction.md) §12 (the geographic mode),
-[`client-components.md`](client-components.md) (the basemap alignment condition),
-[`views-and-multi-table.md`](views-and-multi-table.md) §3 (a view carries *projection provenance*),
-and [`polygon-membership.md`](polygon-membership.md), which depends on this.
+**Built, and the ladder is on it.** The transform, the declaration, the frame and its snap, the
+build- and write-path projections, the report, the `/v1/meta` fields and shapes declared in
+longitude and latitude are all in place, and both built geographic corpora — GeoNames at 1.3×10⁷
+points and Overture at 7.4×10⁷ — are rebuilt on a declared `web_mercator` projection with their
+extents written in longitude and latitude. Nothing outside the build projects anything any more.
+Every stored position in both bundles was checked against a recomputation through
+[`../../test_corpora/common/projection.py`](../../test_corpora/common/projection.py), which is now
+the second implementation the transform is held to rather than the pipeline's own.
+
+**Reads with:** [`configuration.md`](configuration.md) §1 (the `[[view]]` block),
+[`polygon-membership.md`](polygon-membership.md) §4.3 (shapes declared in longitude and latitude,
+which this unblocks), [`client-interaction.md`](client-interaction.md) §12 (the geographic mode) and
+[`client-components.md`](client-components.md) (the basemap alignment condition).
 
 ---
 
-## 1. Where things stand today
+## 1. What a projection is for here
 
-**Tessera has no projection layer. It has a frame.** A view is defined as a named coordinate
-system, but what the engine stores is numbers quantised against an `extent` — 16 bits of cell and
-16 bits of residual per axis — and nothing records what those numbers mean. Projection happens
-outside, before ingest, and leaves no trace.
+A view is a named coordinate system, and what the engine stores is a position quantised against that
+view's frame — 16 bits of cell and 16 bits of residual per axis, interleaved into a Morton code. A
+projection is the function that turns a place on the Earth into a coordinate in that frame, and
+declaring it does three things nothing else can:
 
-The gap is already named twice, both as ⊘: *"CRS handling is an ingest contract"*
-(`client-interaction.md` §12), and *"a geographic corpus's CRS is an ingest contract that does not
-exist; until it does, data coordinates are quantisation-space numbers and nothing here names a
-projection"* (`client-components.md`). The consequences are concrete rather than theoretical — a
-basemap lines up with the points only when the quantised extent is the basemap's own tile grid, and
-today nothing states that condition, checks it, or tells a client whether it holds.
+- **It makes a basemap possible.** A tile basemap lines up with the points only when the frame *is*
+  the basemap's tile grid. Declaring the projection and the frame together is what lets a client know
+  whether that holds, rather than discovering it visually.
+- **It makes a position invertible.** A client, an operator or an oracle can recover the longitude
+  and latitude a stored position came from.
+- **It makes two corpora comparable.** Two views under the same projection and the same frame address
+  the same tile, so a point in one can be located in the other.
 
-## 2. The position
+**The projection belongs to the corpus, not to a request.** Changing it re-places every point, so it
+is fixed when a view is declared and every later batch lands under it. Adding rows to a database is
+the same operation as building one, so a projection that had to be re-fitted to place a new point
+would not be usable at all — a re-fit moves every existing point and invalidates every stored Morton
+code and every artifact extent.
 
-**Accept WGS84, declare the projection per view, transform once at the boundary.**
+## 2. What a view declares
 
-- **The accepted input coordinate system is WGS84 longitude and latitude.** Every dataset in the
-  test ladder is already in it, GeoJSON mandates it, and Web Mercator is defined on it. A caller
-  holding anything else converts before arriving — which is the one conversion every GIS tool does
-  without ceremony.
-- **A view declares its projection**, from a **closed enumerated set**, as the configuration
-  surface requires of every value that is a word rather than a caller's string. `none` is the
-  setting for a view whose geometry is an embedding, where no projection applies and coordinates
-  are whatever produced them — and it stays the default, so a corpus with no geography is never
-  asked to name one.
-- **The service transforms; it does not negotiate.** No arbitrary coordinate systems, no datum
-  shifts, no national or regional grids. Those need grid files that are versioned data and change
-  answers between releases, and the set is unbounded.
-- **The projection is a property of the corpus, not of a request.** Changing it re-places every
-  point, exactly as re-fitting an embedding would, so it is decided once at build; and because
-  [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) makes build and
-  ingest the same operation, a later batch must land under the transform the build used.
-- **The extent follows from the projection** rather than being four numbers a caller types. Legal
-  frames are the projection's own domain or a 2^k-aligned sub-square at an integer zoom offset —
-  which is the condition `client-components.md` already states for basemap alignment, and which
-  closes the trap where a corpus quantised to a tight bounding box can never line up with any tile
-  grid and nothing says so.
-- **The extent is written in WGS84, on the input side of the projection** (owner ruling,
-  2026-08-27). A caller who had to state the frame in projected units would have to project their
-  own corner coordinates to discover what to write — which is the work the service just took on, put
-  back on them at the one point where getting it wrong misplaces every stored position. `y = [49.9,
-  60.9]` for the United Kingdom is a number from an atlas; `y = [6417441, 8611763]` is the output of
-  a calculation nobody should be asked to do by hand. This holds only because the candidate
-  projections are **cylindrical** — longitude to x is linear and latitude to y is monotone under all
-  three, so a longitude/latitude rectangle is still a rectangle after projection and its corners are
-  its bounds. It would not hold for a conic or an azimuthal projection, which is a further reason
-  the set stays cylindrical. Under `projection = "none"` there is only one space and the extent
-  keeps exactly today's meaning.
-- **A stated extent is snapped outward to the enclosing aligned square, and the build reports what
-  it snapped to.** A box written in degrees will essentially never project onto a 2^k-aligned
-  sub-square, so the two properties above are reconciled by the build taking the smallest legal
-  frame that contains what was asked for — the caller says roughly where, the frame stays a Morton
-  prefix of the tile grid, and the difference is printed beside the frame report rather than
-  silently absorbed. `auto` is the same operation over the data's own longitude/latitude box; without
-  the snap it would fit a per-dataset frame with no tile alignment at all, which is the trap the
-  bullet above exists to close.
-- **An exact frame is spelled as the tile it is**, not as projected coordinates. The one caller who
-  genuinely wants a specific frame rather than a region is matching an existing tile scheme, and
-  `{ z, x, y }` states that exactly, needs no snap, and is legible; projected units serve that case
-  worse than the notation it is really asking for. ⊘ The spelling is not designed and the
-  configuration surface does not have it.
+```toml
+[[view]]
+name       = "world"
+projection = "web_mercator"
+extent     = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }
+```
 
-## 3. What it resolves
+| key | | |
+|---|---|---|
+| `projection` | D `none` | `web_mercator`, `equirectangular`, an equirectangular alias (§5.2), or `none` |
+| `extent` | R | `auto`, or the box in **longitude and latitude** for a projected view; `configuration.md` §1's four spellings under `none` |
 
-- **The ingest contract that does not exist** starts existing, and both ⊘ marks above close.
-- **Polygon membership gets its coordinate question answered by construction.** Shapes arrive in
-  WGS84 like points and pass through the same declared transform, so there is no mismatch to
-  detect and no risk of corpus and geometry being placed by different code. Several of
-  [`polygon-membership.md`](polygon-membership.md)'s open questions are consequences of this
-  document rather than of that one.
-- **A client can be told what it is looking at** — whether a basemap may be drawn, and how to
-  invert a stored position back to longitude and latitude.
-- **Resolution for a regional corpus.** On the whole-world Web Mercator square a Morton cell is
-  ~611 m, which is coarse for a city; an aligned sub-square recovers it without losing tile
-  addressing.
+**The accepted input coordinate system is WGS84 longitude and latitude, in degrees.** Every dataset
+in the test ladder is already in it, GeoJSON mandates it, and Web Mercator is defined on it. A caller
+holding anything else converts before arriving, which is the one conversion every GIS tool does
+without ceremony. A value outside ±180 or ±90 is not a coordinate and is refused.
 
-## 4. What it costs, stated rather than discovered later
+**The service transforms; it does not negotiate.** No arbitrary coordinate systems, no datum shifts,
+no national or regional grids. Those need grid files that are versioned data and change answers
+between releases, and the set of them is unbounded. The enumerated set is the whole extent of what
+can be asked for, and §5.4 says what is deliberately outside it.
 
-- **An enumerated set is a permanent commitment.** Geometry is hashed rather than seeded, so a
-  projection's arithmetic is part of the format: adding an entry later is ordinary, changing an
-  existing one is a format break.
-- **Web Mercator distorts area,** and this system's product is counts and densities. A cell at 60°N
-  covers about a quarter the ground area of one at the equator, so a density map in Mercator is
-  density per screen area. It cannot be corrected inside the engine — masked counts are bitmap
-  cardinalities and Appendix H's line is a counting engine, not an aggregation engine — so it is a
-  reporting caveat and a client-side display choice.
-- **Web Mercator clips at ±85.0511°,** and that is data loss rather than distortion. Two rungs are
-  measured and both are a tail rather than a loss: GBIF holds 68,581 above and 905 below of
-  3,761,740,868 georeferenced (18 per million, §4a), and GeoNames 18 above and 553 below of
-  13,463,857 (42 per million, measured 2026-08-27 over `allCountries.txt`) — asymmetric in both
-  cases, and Antarctic in GeoNames'. ⊘ The rest of the ladder is unmeasured.
-- **Regional accuracy is given up deliberately.** A corpus that would be better served by a local
-  projection cannot have one.
+**A projected view spells its coordinate columns `lon` and `lat`, and `x`/`y` is refused there.**
+Longitude-then-latitude is the order GeoJSON and WKT use and the opposite of the order many sources
+publish, and a corpus built with the two exchanged is silently mirrored about the diagonal. Naming
+the axes for what they hold removes the ambiguity rather than documenting it. Under
+`projection = "none"` there is no longitude, and the columns stay `x` and `y`.
 
-## 4a. What the research found — verified, and it changes §2's detail
+**The other extent spellings are refused on a projected view.** `{ min, max }` and
+`{ x = [...], y = [...] }` describe a frame in the space the projection produces, which §4.2 puts on
+the wrong side of the transform; `{ auto = true, margin = f }` is refused because a projected frame's
+headroom is the snap of §4.2 rather than a fraction of the data span, and a margin inside an aligned
+square would only shrink the frame away from the alignment it exists to have.
 
-Research report of 2026-08-27, its two load-bearing claims about this repository verified here.
+## 3. Where the transform runs
 
-**The coordinate path is `f32`, and that is a prerequisite rather than a footnote.**
-`crates/tessera-build/src/input.rs:1269` narrows an `f64` Parquet column with `*v as f32`;
-`FlushRow.x`/`.y` are `f32`; the control-plane ingest schema is `Float32`. An `f32` ULP at Web
-Mercator magnitude is **exactly 2 m**, against a cell of 611.50 m at the world extent but 0.597 m at
-a zoom-10 sub-square — so past roughly zoom offset 8 the **cell** is wrong, not merely the residual,
-and nothing in any report can see it. At the world extent it only wastes residual bits, which is
-already true of today's embedding coordinates and has never mattered. **A tile-aligned sub-square
-cannot exist until the coordinate path reads and quantises in `f64`.** `PointRow` already carries
-the quantised `u32` pair, so nothing downstream changes.
+**At the boundary, once, in the same place for a build and for an ingest.** Building a database and
+adding rows to one are the same operation, so a coordinate arrives as longitude and latitude on both
+paths and is projected before anything else looks at it. Three consequences are worth stating, because
+each is a place where the two paths could drift apart and would not obviously do so:
 
-**Cell y must be north, and the first extent written down was upside down.**
-`clients/ts/core/src/coords.ts` pins — measured against deck.gl's `Tileset2D`, not assumed — that
-tile y and cell y increase together, and XYZ tile y=0 is north. EPSG:3857 northing increases
-*northward*, so a frame declared symmetrically in metres mirrors the map against every basemap. The
-projection's output must be defined **y-south** at the definition, and `/v1/meta` must say so rather
-than let each client re-derive it. The ingest campaign plan carried the wrong extent and is
-corrected.
+- **The wire carries `lon`/`lat` for a projected view**, exactly as the declaration does. The axis-order protection of §2 therefore holds on both
+  paths, which is what stops a projected view being something that can be built correctly and
+  ingested into wrongly.
+- **The write-ahead log holds frame coordinates, not longitude and latitude.** Replay then reproduces
+  the positions the original write produced, whatever the projection code has done since; a log
+  holding degrees would re-run the transform at recovery and make a platform's floating-point library
+  part of it (§11).
+- **A latitude outside the projection's domain is clipped and counted at ingest, never refused.** The
+  same row builds, and a row that a build accepts and an ingest rejects is a defect rather than a
+  policy. The out-of-frame check on the write path therefore sees a coordinate that has been
+  projected and clipped, and never an out-of-domain latitude. **That check refuses**, where the
+  build's counterpart clamps and reports. ⊘ **Unresolved, and inherited rather than introduced
+  here:** for *any* row outside the frame, a build clamps it, counts it and proceeds, while an
+  ingest answers `422`. That is the divergence
+  [decision 0091](../decisions/0091-build-is-ingest-into-an-empty-database.md) exists to forbid, and
+  it is general — clipping neither causes it nor is needed to reach it. What clipping does is
+  manufacture rows on the world's own edge, which fall inside a whole-world frame (the bound being
+  inclusive) and inside a sub-square only in the world's top or bottom tile row — so a polar corpus
+  framed on a polar tile keeps them and one framed elsewhere does not. The two entry points must
+  eventually agree; which way is not this design's to settle.
 
-**The ±85.0511° clip is measured, and the clamp report structurally cannot see it.** Live GBIF
-counts: **68,581 occurrences above +85.0511° and 905 below**, of 3,761,740,868 georeferenced — 18
-per million. Clipping before quantising lands every one exactly at the frame maximum, where
-`contracts` §2.5 says a point is *not* clamped. **A clip counter distinct from the clamp counter is
-required**, for `web_mercator` only.
+**The bundle records its view's projection**, beside the frame it already records. A bundle that
+carries positions in a projected frame and cannot say so is one every second reader has to be told
+about out of band — the write path, which would otherwise quantise a degree as though it were a frame
+coordinate; the differential oracle, which re-quantises source coordinates against the recorded frame
+and would do it without the transform; and any future reader of the artifact. The frame alone does
+not imply it: a `[0, 1]` extent is a legal frame for a view with no projection at all.
 
-**No crate earns its place.** `geo` has no projection maths at all; `geo`'s `proj` feature *is* the C
-library. Both candidate forward/inverse pairs are about twenty lines of `f64`. A dependency only
-becomes unavoidable for a projection with an iterative inverse — which is an argument for not
-choosing one.
+## 4. The frame
 
-**Equirectangular has zero transcendentals** and is therefore bit-exact on every platform, where Web
-Mercator composes one. The determinism exposure is small and lands on the *oracle contract* rather
-than on correctness: a 1-ULP libm disagreement flips a residual bit for ~4×10⁻⁷ of points — ~2,800
-at GBIF scale — while a **cell** flip is 0.04 expected across the entire corpus. The conformance
-suite compares quantised coordinates exactly, with no tolerance, so the exposure is a flake in a
-differential test rather than a wrong answer.
+**Every projection's output is normalised to the unit square, x east and y south.** The frame is
+`[0, 1]` on both axes whatever the projection, so tile addressing is integer arithmetic and a
+declaration carries no magic constant. **For `web_mercator` a 16-bit cell is then exactly an XYZ tile
+at zoom 16** — the identity that makes the engine speak the addressing every map client wants. It is
+a property of that projection and not of the normalisation: §5.2's world is a different shape, and a
+cell of it addresses no published tile.
 
-**A polygon edge means the projected-plane edge**, and the divergence is not small: the midpoint of
-a 50°→52° edge differs by **1.2 km** between the lat/lon plane and the Mercator plane, and a
-−40°→−20° edge by **57 km**. That is a sentence [`polygon-membership.md`](polygon-membership.md)
-owes its readers, not a defect.
+**y runs south, and this is applied at the definition rather than left to a caller.** An XYZ tile
+`y = 0` is the northernmost row, and in this system's cell grid tile y and cell y increase together —
+measured against deck.gl's own tileset implementation, not assumed
+([`../../clients/ts/core/src/coords.ts`](../../clients/ts/core/src/coords.ts)). EPSG:3857's northing
+increases *northward*, so a frame declared symmetrically in metres is mirrored against every basemap;
+and because a frame requires `y_max > y_min`, that mirroring cannot be repaired by inverting the
+extent afterwards. The negation is part of the projection.
 
-**The equirectangular family collapses under normalisation, so it is one entry and not five.**
-Equidistant cylindrical is parameterised by a standard parallel φ₁ — `x = R(λ−λ₀)cos φ₁`, `y = Rφ` —
-giving a world of aspect `2cos φ₁ : 1`: plate carrée at φ₁ = 0 is 2:1, Gall isographic at 45° is
-√2:1, and 60° is exactly 1:1. Normalised to the unit square, `tx` and `ty` are the same expressions
-whatever φ₁ is, so **every member of the family stores identical positions** and the parallel
-survives only as the aspect a client draws it at. Structurally the same result the research found
-for Lambert cylindrical equal-area. One enumerated entry, with the parallel as a display parameter.
+### 4.1 Legal frames
 
-⊘ **What does not vanish, and is open: how to allocate resolution to a non-square world.** Filling
-the square grid with a 2:1 world makes cells anisotropic on the ground — 611 m wide by 305 m tall at
-the equator — so a Morton tile covers a 2:1 ground rectangle. Using only the middle half of the grid
-vertically keeps cells square and spends half the grid. This is a real choice, it is independent of
-which parallel is named, and it does not arise for Web Mercator, whose world is square by
-construction.
+A frame is either **the projection's whole domain**, or a **2^k-aligned sub-square** — the square
+covered by one tile at some integer zoom offset. Nothing else is legal, because a frame that is not
+one of these can never coincide with a tile grid, and a corpus quantised to a tight bounding box
+would be unable to line up with any basemap with nothing saying so.
 
-**The oracle's exposure is a matter of scope, and the owner has scoped it** (2026-08-27): the
-differential oracle need cover only **one geographic dataset at fixture size**, not a pass over the
-corpus. At 4×10⁻⁷ divergence per point per axis that is 0.08 expected differing residuals at 10⁵
-points and ~0.8 at 10⁶ — so at fixture scale no mitigation is required at all, and the concern
-existed only under an assumption of full-corpus differential coverage that was never the intent.
-Two cheap reinforcements if wanted: test the projection **formula** against published test vectors,
-which is exact and catches a wrong formula immediately and is a different question from whether the
-pipeline agrees; and make the geographic fixture `equirectangular`, whose zero transcendentals make
-it bit-exact by construction.
+On the whole-world Web Mercator square a cell is about 611 m at the equator, which is coarse for a
+city; an aligned sub-square recovers the resolution without losing tile addressing. A sub-square at
+zoom offset *k* has cells `611.50 / 2^k` metres across at the equator.
 
-**Recommended shape, not yet adopted:** normalise every projection's output to the unit square, x
-east, y south, so tile alignment is integer arithmetic and the world's true aspect ratio becomes one
-number in `/v1/meta`; enumerate `web_mercator`, `equirectangular`, `none` and hold the equal-area
-entry, naming Lambert cylindrical equal-area as its candidate; spell a projected view's geometry
-`lon`/`lat` and refuse `x`/`y` there, which removes the axis-order footgun for free.
+**The offset is capped at 16.** At that offset the frame is exactly one cell of the whole-world grid,
+and a frame finer than one cell of the grid it is meant to be a prefix of has stopped being a prefix
+of anything. It is also far past any real corpus: a frame 611 m across, quantised to 9.3 mm cells.
 
-## 5. Open
+**A region straddling a top-level tile boundary gains nothing from a sub-square**, and that is a
+property of aligned frames rather than of this design — every tile scheme has it. The prime meridian
+is one of the two boundaries at the first offset and the equator is the other, so a box crossing
+either is contained by no square below the whole world. The United Kingdom therefore takes the world
+frame, and so does Kenya. Great Britain west of the meridian reaches offset 3, Ireland 5, Switzerland
+6, and Greater London west of the meridian 7. A corpus that crosses a boundary and wants the
+resolution has to be declared as a box that does not cross; there is no frame that gives it both.
 
-- Which projections the enumerated set holds. Candidates: Web Mercator (tiles and basemaps),
-  equirectangular (poles, trivial inversion, one entry per §4a), one equal-area (honest density),
-  and `none`.
-- How resolution is allocated for a world that is not square — fill the grid and accept anisotropic
-  ground cells, or keep cells square and spend half the grid (§4a).
-- Whether the axis names for a geographic view stay `x`/`y` read as longitude/latitude, or gain
-  their own spelling.
-- What the build reports about the projection, alongside the frame report it already prints — which
-  now has to include the snap of §2, and the frame that was asked for beside the frame that was
-  taken.
-- How the `{ z, x, y }` frame spelling of §2 is written, and whether a zoom offset with a corner is
-  a better shape than a tile address.
-- What a client does for a view that is not Web Mercator, where no basemap tile scheme matches.
-- The footguns — axis order, y-direction, the antimeridian, floating-point reproducibility of a
-  hashed artifact across platforms — which are under research and are expected to change §2's
-  detail.
+### 4.2 The extent is written in longitude and latitude
+
+A caller who had to state the frame in projected units would have to project their own corner
+coordinates to discover what to write — which is the work the service has just taken on, handed back
+at the one point where getting it wrong misplaces every stored position. `lat = [49.9, 60.9]` for the
+United Kingdom is a number from an atlas; `[6417441, 8611763]` is the output of a calculation nobody
+should do by hand.
+
+This holds because **every projection in the set is cylindrical**: longitude maps linearly to x and
+latitude monotonically to y, so a longitude/latitude rectangle is still a rectangle after projection
+and its corners are its bounds. It would not hold for a conic or an azimuthal projection, which is a
+further reason the set stays cylindrical.
+
+**A stated box is snapped outward to the enclosing aligned square, and the build reports the snap.**
+A box written in degrees will essentially never project onto an aligned square, so the caller says
+roughly where and the build takes the smallest legal frame containing it. `auto` is the same
+operation over the data's own longitude/latitude box; without the snap it would fit a per-dataset
+frame with no tile alignment at all.
+
+The difference between the frame asked for and the frame taken is resolution the corpus does not get,
+so it is printed beside the frame rather than absorbed. **⊘ There is no way to name a frame exactly.**
+A caller matching a foreign tile scheme would want to write the tile address itself; the box with its
+snap reaches every frame such an address could name, so the spelling is not provided.
+
+**Containment comes first and the cap second, and the order is what makes the degenerate cases
+right.** A box that constrains nothing — a single point, or a box small enough to sit inside one cell
+of the finest legal frame — is contained in aligned squares at every offset without bound, so it takes
+the cap of §4.1 and the build reports the frame as **floored rather than fitted**. But a degenerate
+*axis* is not a degenerate *box*: a box of zero width spanning thirty degrees of latitude is
+constrained by its height exactly as any other box is, and flooring it at the cap would hand back a
+frame excluding almost all of its own data — which quantisation clamps onto the border rather than
+filters. The frame contains the box first; the cap only bounds how far the search may go.
+
+A box whose corner lies exactly on a tile boundary is resolved by the half-open convention the cell
+grid already uses — a coordinate on a boundary belongs to the higher cell — so the containing square
+is unique at each offset. The consequence is worth stating, because it looks like an off-by-one: a box
+whose maximum sits exactly on a boundary spans two tiles there and snaps one offset coarser, which is
+correct, the frame having to contain the box.
+
+A box crossing the antimeridian is **refused**: an aligned square does not wrap, so `lon = [170, -170]`
+cannot be honoured and reads as an inverted box; the frame to write is the wider one that does not
+cross. And `auto` over a source selecting no rows is refused, naming that the frame must be stated —
+there is no data to fit and a default frame would be four numbers nothing justifies.
+
+## 5. The projections
+
+### 5.1 `web_mercator`
+
+The projection of every slippy-map tile scheme, and the reason the geographic mode works at all: a
+Web Mercator frame makes an XYZ tile *identically* a Morton prefix, so the engine already speaks the
+addressing MapLibre, OpenLayers and QGIS want.
+
+```
+x = (λ° + 180) / 360
+y = 0.5 − ln(tan(π/4 + φ/2)) / 2π          φ in radians, λ in degrees
+```
+
+**The domain is cut at ±85.0511287798066°**, the latitude whose projected northing reaches half the
+projected world. That cut is what makes the world square, and every tile scheme makes it for the same
+reason. A point beyond it is **clipped** — moved onto the frame's edge — which is data loss rather
+than distortion, and §7 says how it is counted.
+
+**This is the *pseudo*-Mercator, and it is conformal only to about 0.7%.** It puts a geodetic latitude
+through the spherical formula, using the ellipsoid's semi-major axis as a sphere radius, so the scale
+factors along the meridian and along the parallel differ by 0.674% at the equator, falling to zero at
+the poles. True ellipsoidal Mercator is exactly conformal and places a point up to 42.6 km away in
+projected metres — 30.2 km at 45°N — so the two are not interchangeable, and this set holds the one
+every tile scheme uses. Within that tolerance a small circle on the ground is a small circle on the
+map, which is what makes a drawn circular selection mean what a viewer expects, and no other entry in
+the set has the property at all.
+
+### 5.2 `equirectangular`
+
+Latitude and longitude used directly as coordinates. It has no transcendental functions at all, so it
+is bit-exact on every platform, and its inverse is trivial. Unlike Web Mercator it reaches the poles.
+
+```
+x = (λ° + 180) / 360
+y = 0.5 − φ° / 180
+```
+
+**The standard parallel does not appear in that transform, and this is the whole reason the family is
+one entry.** Equidistant cylindrical is parameterised by a standard parallel φ₁, giving a world of
+aspect `2cos φ₁ : 1` — 2:1 at the equator, √2:1 at 45°, square at 60°, and taller than wide beyond
+that. Normalised to the unit square, every member of the family produces **identical stored
+positions**, and the parallel survives only as the aspect a client draws the world at. So it is a
+display parameter, published on `/v1/meta` and carried by a name:
+
+| name | φ₁ | world aspect |
+|---|---|---|
+| `plate_carree` | 0° | 2:1 |
+| `gall_isographic` | 45° | √2:1 |
+| `equirectangular` | 0° | 2:1 |
+
+**The grid is filled rather than letterboxed.** Both axes use their full 16 bits, so a cell is 305.75 m
+north-south everywhere and `611.50 × cos(latitude)` east-west — square on the ground at ±60°, and
+progressively wider than tall towards the equator. The alternative — scaling both axes together to
+keep cells square in the projected plane — would cost up to half the grid and up to half the
+north-south resolution, and would buy only the ability to move the latitude at which ground cells are
+square. It would also make the standard parallel part of the stored format, which is precisely what
+makes the family one entry rather than five.
+
+**Equirectangular is not conformal**, and under the filled grid a circle in stored view coordinates is
+a ground ellipse everywhere except ±60°. A drawn circular selection over such a view therefore selects
+an ellipse on the ground, which is a reason to prefer `web_mercator` for any corpus whose viewers will
+draw shapes.
+
+### 5.3 `none`
+
+No projection. Coordinates are whatever produced them — an embedding layout, a synthetic corpus, any
+space that is not the Earth — the extent keeps exactly the meaning it has today, the axes are `x` and
+`y`, and no basemap or inversion is offered. This is the default, so a corpus with no geography is
+never asked to name a projection.
+
+### 5.4 What is deliberately absent
+
+- **An equal-area projection.** Web Mercator's area distortion is real and this system's product is
+  counts and densities, so an honest-density entry has a genuine argument — Lambert cylindrical
+  equal-area is the candidate. It is not in the set because nothing in reach needs it, and an entry
+  can be added later without disturbing the ones that exist.
+- **Conic and azimuthal projections**, which would break §4.2: a longitude/latitude rectangle is not a
+  rectangle after either, so the extent could no longer be written in degrees.
+- **Datum shifts, national grids, and caller-supplied projections**, per §2.
+
+## 6. Precision
+
+**The coordinate path is `f64` from the input file to the quantiser, and from the wire through the
+write-ahead log to the flush.** The build reads a coordinate column at
+either width and widens the narrower; the wire, the log record and the flush row carry `f64`.
+
+An `f32` value over the unit square resolves to about 2^24 steps per axis in the worst case, against a
+grid of 2^16 cells — 256 steps per cell at the whole-world frame, but only `2^(8−k)` at a sub-square
+at zoom offset *k*. Past roughly offset 8 there is less than one `f32` step per cell, so the **cell** a
+point lands in is wrong rather than merely its residual, and nothing in any report can see it. `f64`
+resolves far finer than the 16-bit grid can consume at any offset §4.1 permits.
+
+**Both widths are accepted on input and the narrower is widened.** A whole-world frame is perfectly
+served by `f32` coordinates, and a corpus emitting them should not be made to double the size of its
+largest columns to be read; a sub-square frame needs `f64` and the caller supplies it. Precision is a
+property of the corpus rather than of the release.
+
+**The stored form does not change.** A position is a 32-bit fixed-point pair against the frame,
+interleaved into a Morton code, and no float reaches the bundle.
+
+## 7. Clipping is not clamping
+
+Two different things move a point onto the frame's edge, and conflating them hides the one that
+matters.
+
+**Clamping** is a point outside the frame it was quantised against. It is reported unconditionally
+and refused past half the corpus, because a frame that misplaces the majority of a corpus describes
+some other data.
+
+**Clipping** is a point outside the *projection's own domain* — for `web_mercator` alone, a latitude
+beyond ±85.0511°. Clipping lands the point exactly on the frame's edge, where the clamp rule says a
+point is not clamped, so the clamp counter structurally cannot see a single clipped point. It is
+counted and reported on its own.
+
+**Clipping itself never earns a refusal, at any proportion.** The clamp refusal exists because a
+clamped point's stored position belongs to the frame rather than to the point, and a frame is a
+choice the caller can correct. A clipped point's position is the projection's own domain boundary,
+which no choice of frame moves; an Antarctic corpus under `web_mercator` is a caller asking the wrong
+projection for the job, and the report says so loudly while the build proceeds.
+
+**At a sub-square frame the two counts overlap, and the clamp refusal still applies.** Clipping lands
+a point on the *world's* edge, which for a frame that does not reach that edge is simply outside the
+frame — so such a point is clamped as well as clipped, and counts toward the refusal like any other
+out-of-frame row. That is the right behaviour rather than an exception to be carved out: a frame
+holding a minority of its corpus is the wrong frame whatever moved the rest out of it. The two counts
+are separate because they have separate causes, not because a clipped point is exempt from the frame.
+
+The tail is small and real, and it is not symmetric. Of GBIF's 3,761,740,868 georeferenced records,
+**68,581 lie above +85.0511° and 905 below** — 18 per million. Of GeoNames' 13,463,857, **18 above and
+553 below**, the southern ones Antarctic. Of Overture's 73,631,092 places, **none**: they stop at
+83.57°N and 84.99°S, so the count that exists for a gazetteer is zero for a places corpus, and the
+line prints at zero to say so. ⊘ The rest of the ladder is unmeasured.
+
+## 8. What the build reports
+
+The frame report gains the projection and the snap, beside the extent, the data's own box, the grid
+the data occupies and the clamp count it already carries:
+
+```
+view 'alps': web_mercator, quantising against x [0.515625, 0.53125], y [0.34375, 0.359375]
+        asked for lon [5.9, 10.5], lat [45.8, 47.8] — snapped outward to the square at z6 (33, 22),
+        lon [5.625, 11.25], lat [45.089035564831036, 48.922499263758255]
+        the data spans x [...], y [...] — 32623 x 18603 of the 65536 x 65536 cells
+        3 point(s) placed, none clamped onto the frame's edge
+        none of them outside web_mercator's ±85.0511287798066° domain, so nothing was clipped
+```
+
+**The frame is printed in the space the positions are stored in, and the snap line carries the
+degrees.** The line below it reports where the data sits in that same stored space, so a first line
+in degrees would put two coordinate systems on adjacent lines with nothing saying which is which. The
+snap line is where the two meet: the box the caller asked for, in the units they wrote it in, beside
+the frame that was taken, inverted back through the projection into those same units. That is the
+comparison §4.2 exists to make, and it puts both on one line.
+
+**The clip line prints at zero too**, naming the projection's domain. A count that appears only when
+it is non-zero teaches a reader nothing about what was checked, and this is the report whose whole
+purpose is that a silent build once shipped a degenerate map.
+
+The snap is printed as raw numbers whether or not it is large, for the same reason the frame is: a
+caller who can see both can judge them, and a resolution loss the caller did not intend shows up in
+the occupancy line that follows. A frame that was floored rather than fitted (§4.2) says so here.
+
+**The ingest response carries the same clip count**, beside the out-of-bound count it already returns.
+A projected view that is fed polar rows one batch at a time would otherwise lose the only report that
+mentions them.
+
+**`tessera check` prints the frame and the snap for a stated box without opening a data file.**
+Under `auto` it cannot, the frame being a function of the data, and it says so rather than guessing:
+the check reads footers and declarations, never a points file.
+
+## 9. What a client is told
+
+`/v1/meta` publishes, beside the frame:
+
+| field | |
+|---|---|
+| `projection` | the projection's canonical name — a view declaring `plate_carree` publishes `equirectangular`, the two being one entry at one parallel |
+| `world_aspect` | the ratio the world should be drawn at — 1 for `web_mercator`, `2cos φ₁` for an equirectangular alias |
+| `tile_scheme` | the tile scheme the frame addresses — `xyz` for an aligned `web_mercator` frame, `null` for everything else |
+| `tile` | the `{ z, x, y }` the frame corresponds to under that scheme, when there is one |
+
+**`tile_scheme` is what decides whether a basemap may be drawn, and grid alignment alone is not
+enough.** An equirectangular frame is aligned to a square tiling that no tile server serves — the
+published longitude/latitude schemes are 2:1 at their top level — so a host that read alignment as
+availability would draw a Mercator basemap against a corpus that cannot line up with one. A `null`
+scheme means: draw the points, draw no basemap.
+
+Together with the frame these are enough to decide whether to draw a basemap, which tiles to ask a
+tile server for, and how to invert a stored position back to longitude and latitude. A client that
+reads none of them still behaves as it did, the frame being unchanged beside them.
+
+A client does not choose a basemap — it is given one — so these fields are for the host that chooses.
+
+## 10. Shapes
+
+A shape — a polygon boundary, a drawn selection — may be declared in longitude and latitude, and is
+then passed through the **view's own declared transform** before it is canonicalised against the
+grid. Corpus and geometry are placed by one function, which is what makes the two spaces comparable
+at all.
+
+**The space a shape is declared in defines the plane its edges are straight in**
+(`polygon-membership.md` R10), and this design supplies the transform that rule was waiting for
+rather than changing it. An edge declared in longitude and latitude is straight in the
+longitude/latitude plane, so its projected image is a curve, and it is **densified before projection
+to a tolerance of one depth-16 cell** — which bounds the departure to the grid's own resolution. A
+circle or an ellipse declared in longitude and latitude is densified to a polygon by the same rule,
+a projected circle no longer being one.
+
+**The two planes disagree by more than rounding on any edge that spans both longitude and latitude.**
+An edge across the United Kingdom, from 8°W 50°N to 2°E 58°N, has midpoints 21.5 km apart between the
+two readings; a 1° × 1° edge at 50°N, 0.29 km — under one cell at the whole-world frame; and a
+60° × 60° edge, 586 km. An edge along a meridian or along the equator is straight in both planes and
+does not diverge at all, which is why a published boundary set, whose vertices are dense, is barely
+affected and a sparse hand-written polygon is.
+
+## 11. What it costs
+
+- **Web Mercator distorts area,** and a cell at 60°N covers about a quarter the ground of one at the
+  equator. Masked counts are bitmap cardinalities, so this cannot be corrected inside the engine: a
+  density map in Mercator is density per screen area, which is a caveat to state beside a density
+  figure and a display choice for a client.
+- **Web Mercator loses the poles** (§7).
+- **Regional accuracy is given up deliberately.** A corpus better served by a local projection cannot
+  have one; what it can have is an aligned sub-square, which recovers resolution but not the local
+  projection's shape fidelity.
+- **An enumerated set is a durable commitment.** Geometry is quantised against a declared frame and
+  the artifact *is* the record, so a projection's arithmetic is part of the format: adding an entry
+  is ordinary, changing an existing one re-places every point built under it.
+- **Web Mercator is not bit-exact across platforms.** It composes a logarithm and a tangent, so a
+  1-ULP disagreement between two C libraries flips a residual bit for about 4×10⁻⁷ of points — some
+  1,500 at GBIF's scale — while a *cell* flip is 0.04 expected across that entire corpus. The
+  quantised comparison a differential oracle makes is exact and has no tolerance, so the exposure is
+  a rare flake in a differential test rather than a wrong answer. `equirectangular` has no
+  transcendentals and is bit-exact by construction, which makes it the right projection for a
+  geographic test fixture.
 
 ## Appendix R — review trail
 
-**r3 (2026-08-27).** §2 gains the space the extent is written in, on the owner's ruling that it is
-WGS84 rather than projected units — the observation being that a caller stating a projected frame
-must project their own corners to find it, which is the work the service had just taken off them.
-Two consequences are recorded with it and are this session's rather than the owner's: the ruling
-depends on every candidate projection being cylindrical, and a stated box has to be snapped outward
-to the enclosing aligned square for §2's tile-addressing condition to survive an extent written in
-degrees. The `{ z, x, y }` spelling is named as the shape the projected-units case actually wanted
-and is marked ⊘. **Not reviewed.**
+**r7.** Four corrections the build found, each at a claim the implementation could check and the
+design could not. §3 had the write path's out-of-frame check *warning*; it refuses, where the build's
+counterpart clamps — and the asymmetry that exposes between the two entry points is recorded as open
+rather than resolved. §3 gains the bundle's recorded projection, without which no second reader can
+tell a projected bundle from one holding raw coordinates. §4.2's degenerate-box rule was written for
+a point and wrong for a box degenerate on one axis only, where the cap returns a frame excluding its
+own data. §8's example report was composed rather than computed, in both its frame and its numbers.
 
-**r2 (2026-08-27).** Research folded in (§4a), its two claims about this repository verified against
-the code rather than accepted. Three owner rulings the same day: the equirectangular family is one
-enumerated entry with the standard parallel as a display parameter; the differential oracle is
-scoped to one geographic dataset at fixture size; and a polygon may be declared in either WGS84 or
-projected space, which is [`polygon-membership.md`](polygon-membership.md)'s R10–R12.
+**r6.** Three corrections the implementation forced. §4.2 had a box of zero width or height taking
+the offset cap, which is true of a point and false of a zero-width box spanning thirty degrees of
+latitude — the cap would return a frame excluding its own data. Containment comes first and the cap
+second. §4.1 gains the consequence nobody had stated: the prime meridian and the equator are
+boundaries at the first offset, so a region crossing either takes the world frame and no sub-square
+at all. §8's example report was illustrative rather than computed, and its box straddles the meridian,
+so the tile beside it was one no box could snap to.
 
-**r1 (2026-08-27).** Written from a working session with the owner, on the owner's direction to
-record the high-level position while the detail is explored separately. The position is the
-owner's; the consequences and costs in §3 and §4 are this session's and are not reviewed.
-**Not reviewed, and the research it depends on is outstanding.**
+**r5.** Reviewed adversarially. The frame model, the y-south rule, the enumerated set and the
+precision argument survived recomputation. Four things changed: §10 had a shape's edges straight in
+the projected plane, contradicting `polygon-membership.md` R10, and supported it with meridional
+figures that measure a parameterisation shift no membership depends on; §3 did not exist, so the
+transform's place on the write path, the ingest schema's axis names and a clipped latitude at ingest
+were all unassigned; §4.2 had no answer for a degenerate box, an antimeridian box or an empty source,
+and §4.1 no maximum offset; and `/v1/meta` published grid alignment as though it were basemap
+availability, which is true only for Web Mercator.
+
+**r4.** The design completed from the high-level position: the enumerated set and its spelling, the
+filled grid with the standard parallel as a display parameter, `f64` on the coordinate path, the axis
+names, the clip counter, the build report and the `/v1/meta` fields. **Not reviewed.**

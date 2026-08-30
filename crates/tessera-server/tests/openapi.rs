@@ -172,6 +172,7 @@ fn build_fixture_with_schema(out: &Path, points: &Path, pairs: &Path) {
         .unwrap()
         .schema;
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         points: points.to_path_buf(),
         attribute_sources: tessera_build::config::AttributeSource::over(

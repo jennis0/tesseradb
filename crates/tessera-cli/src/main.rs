@@ -1055,7 +1055,7 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
 /// see the verb's own doc.
 fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     use arrow::array::{
-        ArrayRef, Float32Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
+        ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder, UInt32Builder,
         UInt64Builder,
     };
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -1089,8 +1089,8 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
 
     let mut fx_key = UInt64Builder::new();
     let mut e_col = UInt64Builder::new();
-    let mut x = Float32Builder::new();
-    let mut y = Float32Builder::new();
+    let mut x = Float64Builder::new();
+    let mut y = Float64Builder::new();
     let mut weight = UInt32Builder::new();
     let mut seen_at = TimestampMicrosecondBuilder::new();
     let mut bay = StringBuilder::new();
@@ -1127,8 +1127,8 @@ fn corpus_items(seed: u64, ids: &Path, extent: Bounds) -> ExitCode {
     let schema = Arc::new(Schema::new(vec![
         Field::new("fx_key", DataType::UInt64, false),
         Field::new("e", DataType::UInt64, false),
-        Field::new("x", DataType::Float32, false),
-        Field::new("y", DataType::Float32, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
         Field::new("weight", DataType::UInt32, true),
         Field::new(
             "seen_at",
@@ -1467,6 +1467,7 @@ fn main() -> ExitCode {
             // establishes how much of the corpus that frame clamps.
             let frame = match tessera_build::config::frame_view(
                 &view_id,
+                acquired.projection,
                 &acquired.extent,
                 &acquired.points,
                 &acquired.point_fields,
@@ -1544,6 +1545,7 @@ fn main() -> ExitCode {
             };
 
             let args = tessera_build::BuildArgs {
+                projection: acquired.projection,
                 points: acquired.points,
                 point_fields: acquired.point_fields,
                 attribute_sources: acquired.attribute_sources,
@@ -1740,6 +1742,15 @@ fn main() -> ExitCode {
             }
             for finding in &report.findings {
                 eprintln!("  FAILED       {}: {}", finding.object, finding.detail);
+            }
+            // **The frame a projected view will quantise against** (`projections.md` §4.2) —
+            // computed from the declaration alone, so the square and the resolution the snap costs
+            // are readable without a build. Reported, never a finding.
+            if !report.frames.is_empty() {
+                eprintln!("projected views, from the declaration alone:");
+                for frame in &report.frames {
+                    frame.print();
+                }
             }
             // **The shape layers, sized from the geometry alone** (`polygon-membership.md` §6.5)
             // — the decomposition an operator sizing a boundary set reads before a build commits

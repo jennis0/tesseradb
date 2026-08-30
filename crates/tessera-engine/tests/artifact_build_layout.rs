@@ -183,6 +183,7 @@ fn fixture() -> Fixture {
     write_members(&tmp.path().join("clumped_members.parquet"), &clumped_rows);
 
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: Vec::new(),
         points,

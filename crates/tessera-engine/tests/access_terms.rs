@@ -101,6 +101,7 @@ fn write_points(path: &Path, access: impl Fn(u64) -> Option<Vec<&'static str>>) 
 
 fn args(points: &Path, out: &Path, default: &str) -> BuildArgs {
     BuildArgs {
+        projection: tessera_spatial::Projection::None,
         points: points.to_path_buf(),
         point_fields: Default::default(),
         attribute_sources: Vec::new(),

@@ -270,8 +270,8 @@ fn ingest_point_into(
     external_id: &str,
     value: u32,
     term: u32,
-    x: f32,
-    y: f32,
+    x: f64,
+    y: f64,
     columns: usize,
     at: usize,
 ) -> u64 {
@@ -299,12 +299,12 @@ fn ingest_point_into(
 }
 
 /// The generator's own schema: seven declared columns, `partition` at [`PARTITION_SCALAR`].
-fn ingest_point(engine: &Engine, external_id: &str, value: u32, term: u32, x: f32, y: f32) -> u64 {
+fn ingest_point(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
     ingest_point_into(engine, external_id, value, term, x, y, 7, PARTITION_SCALAR)
 }
 
 /// This file's own declaration: one column, so `partition` is at 0.
-fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f32, y: f32) -> u64 {
+fn ingest_own(engine: &Engine, external_id: &str, value: u32, term: u32, x: f64, y: f64) -> u64 {
     ingest_point_into(engine, external_id, value, term, x, y, 1, 0)
 }
 

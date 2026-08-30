@@ -1,18 +1,20 @@
 # Shape membership — requirements and design
 
-**Status:** **Normative — 2026-08-29 (r6).** Designed, taken through one adversarial review
-(Appendix R, r4), owner-ruled (§13), and **built in four stages the same day** (§12), each in its
+**Status:** **Normative — 2026-08-30 (r8).** Designed, taken through one adversarial review
+(Appendix R, r4), owner-ruled (§13), and **built in four stages on 2026-08-29** (§12), each in its
 own worktree and gate-green: the core, the artifact type, the wire and client, the region leaf.
-The figures in §9 are measured on one Overture part; the world-scale figures stay modelled and
-say so. What remains unbuilt is scoped out in §11 — `wgs84` shapes wait on `projections.md`,
-saving a selection as a shape waits on the edit pass, and the export verb — and each is marked ⊘
-at its claim. §2 is the requirements set the owner directed on 2026-08-27, unchanged.
+**`wgs84` shapes are built** (§4.3): a view now declares a projection, and a shape declared in
+longitude and latitude goes through the view's own transform, each edge densified first — the last
+of R9 to land. The figures in §9 are measured on one Overture part; the world-scale figures stay
+modelled and say so. What remains unbuilt is scoped out in §11 — saving a selection as a shape
+waits on the edit pass, and the export verb — and each is marked ⊘ at its claim. §2 is the
+requirements set the owner directed on 2026-08-27, unchanged.
 
 The document is named for the polygon because that is the consumer that forced it; the design is
 for **shapes** — box, circle, ellipse and polygon — with one semantics (§4.1).
 
 **Required by** [`../evidence/memos/2026-08-27-ingest-campaign-plan.md`](../evidence/memos/2026-08-27-ingest-campaign-plan.md) §9.
-**Depends on** [`projections.md`](projections.md) for the WGS84 half of R9 (§4.3) and on
+**Depends on** [`projections.md`](projections.md) §10 for the WGS84 half of R9 (§4.3) and on
 [`selection-operand.md`](selection-operand.md) for the decomposition it shares (§5).
 **Reads with** [`annotation-representation.md`](annotation-representation.md) §2.0 (a spatial
 predicate stores no membership and never goes stale), `crates/tessera-engine/src/shapes.rs` (what
@@ -217,28 +219,36 @@ view's extent and quantised in that view's frame, which is the clipping above, r
 Views with different projections cannot share a shape and are refused; two views both declaring
 `projection = "none"` are *warned*, since nothing then says whether they share a space.
 
-On `PUT /control/layers` a row whose `space` the view cannot honour — `wgs84` today, on any view —
-is `422` naming the row, **whole batch without effect**, on the contracts convention. Until
-projections lands `view` is the only value, so `space` on the wire is an assertion that is either
-right or refused — worth saying plainly, since it looks like a choice.
+On `PUT /control/layers` a row whose `space` the view cannot honour is `422` naming the row,
+**whole batch without effect**, on the contracts convention.
 
-`view` is the space the points are stored in — the quantisation frame, whatever produced it — and
-is the only value that works today. `wgs84` says the coordinates are longitude and latitude and
-asks the view to project them **with the same function it projects points through**. ⊘ *Specified,
-not implemented, and blocked rather than deferred* (ruling (f)): `projections.md` is provisional and
-no view projects anything, so `wgs84` is refused at parse and at the leaf naming that document, and
-this design adds no projection of its own — a shape projected by one function and points by
-another is the mismatch R12 exists to forbid. Under `projection = "none"` a view has one space,
-`view` is the right word for it, and `wgs84` stays refused after projections lands too. When the
-view can project, `wgs84` shapes go through it before §4.4, and **R10's curved-edge consequence is
-handled by densifying each polygon edge before projection to a stated tolerance of one depth-16
-cell**, which bounds the error R11 permits to the grid's own resolution; a circle or an ellipse in
-`wgs84` is densified to a polygon by the same rule, since a projected circle is no longer one.
+`view` is the space the points are stored in — the quantisation frame, whatever produced it.
+`wgs84` says the coordinates are longitude and latitude and asks the view to project them **with
+the same function it projects points through**, which is what makes the two spaces comparable at
+all: the projection is read off the view's own declaration and is not a parameter of the
+submission, so a shape placed by a function the corpus was not placed by is not a thing a caller
+can write (R12). Under `projection = "none"` a view has one space, `view` is the right word for
+it, and `wgs84` is refused naming the view's own declaration — that did not change when
+projections landed, and will not.
+
+**A `wgs84` shape is densified before it is projected** (`projections.md` §10, R10): an edge
+declared in longitude and latitude is straight in the longitude/latitude plane, so its image in
+the frame is a curve, and each edge is subdivided until no point of that curve departs from the
+polyline by more than **one depth-16 cell** — one cell of the grid the view's own points are
+stored on, whatever zoom offset its frame sits at, which is the error R11 permits. A circle or an
+ellipse in `wgs84` is densified to a polygon by the same rule, since a projected circle is no
+longer one. A box is not: every projection in the set is cylindrical, so a meridian is a vertical
+line in the frame and a parallel a horizontal one, and a box in degrees is a box. What leaves the
+transform is a shape in the view's coordinates, which §4.4 then clips and quantises exactly as it
+does one that arrived in them. A `wgs84` coordinate outside ±180 × ±90 is not a coordinate and is
+refused (`projections.md` §2).
 
 R12's other half — a `view` shape that was *written* in degrees — is not detectable in general
 and is not refused. It is **reported**: a table whose every coordinate lies within ±180 × ±90 on a
-view whose extent is not, is named in the build report with the count, and the build proceeds. A
-`wgs84` coordinate outside ±180 × ±90 is not a coordinate and is refused.
+view whose extent is not, is named in the build report with the count, and the build proceeds.
+⊘ That report is blind on a **projected** view, whose frame is `[0, 1]` and therefore itself
+inside ±180 × ±90, so a degree-looking table is never named there; the R12 half that matters on
+such a view is the declared `space`, which is checked rather than guessed.
 
 A shape partly outside the view's extent is **clipped to the extent and reported**, on the rule
 that bounds warn and never exclude (`contracts.md` §3.4). A shape wholly outside holds no rows, is
@@ -348,9 +358,13 @@ A shape is also a **supplied content type** (ruling (h)): `[[layer.content.suppl
 exactly as a membership shape is, and drawn through the same client path; what differs is that they
 select nothing. The value in the content slot is WKT for a polygon and the numbers of the kind's row
 field for a circle (`cx, cy, r`) or an ellipse (`cx, cy, a, b, angle`); at publication it goes
-through the same reader, report and vertex cap as a membership shape, and the slot then holds the
-canonical per-view bytes (§6.6). A `polygon` content is never an opaque string: the wire serves
-its rings and the slot itself is served blank. A layer declares at most one authored shape, and
+through the same reader, report, vertex cap **and space** as a membership shape, and the slot then
+holds the canonical per-view bytes (§6.6). The space is the row's own (§4.3) — a drawing and the
+membership beside it are one producer's geometry in one coordinate system, and a service that
+projected the second and not the first would place a ±180 × ±90 outline in a corner of a projected
+view's `[0, 1]` frame, with R12's degrees-looking report structurally unable to name it there. A
+`polygon` content is never an opaque string: the wire serves its rings and the slot itself is
+served blank. A layer declares at most one authored shape, and
 none beside a `hull` or a membership shape (§7.1).
 
 ### 6.2 What a spatial layer may now declare
@@ -504,9 +518,11 @@ canonicalised to nothing; rings dropped; **degrees-looking coordinates under `sp
 and the decomposition's size — interior tiles and boundary cells, total and maximum per artifact —
 because that is the number §9 needs and nobody can estimate from a vertex count.
 
-None of these refuses a build. The three that refuse are a `wgs84` coordinate that is not one, a
-polygon over the publication vertex cap (§9), and a circle or ellipse with a non-positive radius or
-axis — each the caller's own arithmetic with a one-line fix.
+None of these refuses a build. What does: a coordinate that is not one — non-finite, or a `wgs84`
+value outside ±180 × ±90; a `space` the view cannot honour, which is `wgs84` on a view that
+projects nothing (§4.3); an inverted box; a polygon over the publication vertex cap (§9); and a
+circle or ellipse with a non-positive radius or axis — each the caller's own arithmetic with a
+one-line fix.
 
 ### 6.6 Storage
 
@@ -819,7 +835,6 @@ alone (§7.2).
 
 - **Saving a selection as a polygon** — the runtime-artifact path (selection-operand §9.2). This
   design gives it its storage form and its wire, and it waits for the edit pass as before.
-- **`wgs84` polygons**, until a view can project (§4.3).
 - **The export verb** and GeoJSON output.
 - **Deriving hierarchy from containment**; edges stay declared (§6.2).
 - **Shapes beyond the four** (§4.1).
@@ -907,7 +922,9 @@ All taken by the owner on 2026-08-29, in discussion, on the recommendations as d
   `hull`'s nesting (§7.1).
 - **(e)** `max_shape_vertices` refuses at publication; the held decomposition is reported and not
   capped (§9).
-- **(f)** `wgs84` is refused until a view can project; no shape-side projection (§4.3).
+- **(f)** `wgs84` is refused until a view can project; no shape-side projection (§4.3). A view
+  can now project, and the ruling's second half is what §4.3 is built on: the transform is the
+  view's own and this design still supplies none.
 - **(g)** Every kind is exact; `bbox` loses its depth-cover form and R3's *ranges are the
   membership* ruling is superseded (§4.1).
 - **(h)** Circle and ellipse join box and polygon as kinds; a shape is membership or supplied
@@ -991,3 +1008,23 @@ the precomputation trade stated against the delivery record's 78.5 GB / 4 GB mea
 
 **r6 (2026-08-29).** Promoted to Normative on the four stages landing (§12) — the last, the
 region leaf, promoting `selection-operand.md` with it and removing `architecture.md` §8.2's ⊘.
+
+**r7 (2026-08-30).** `wgs84` unblocked, on `projections.md` §10 landing: §4.3's ⊘ comes off and the
+paragraph says what is true — the view's own declared transform, each edge densified to one
+depth-16 cell before projection, a box in degrees still a box, a coordinate outside ±180 × ±90
+refused. §11 loses its `wgs84` bullet and ruling (f) keeps its second half, which is what the
+build rests on. Two things the document asserted became checkable at the same moment and are now
+checked: a shape layer whose views declare **different** projections is refused at the
+declaration, and the several-views warning fires only where nothing says whether the views share a
+space — two views both declaring `projection = "none"`. One thing it asserts is now blind and says
+so: the degree-looking report cannot fire on a projected view, whose frame is itself inside
+±180 × ±90. **Not reviewed** — the design is unchanged, R10 included; what changed is which of it
+is built.
+
+**r8 (2026-08-30).** §6.1 names the **space** in the list of what an authored shape content shares
+with a membership shape. It was covered by "read exactly as a membership shape is" and by nothing
+more specific, and both entry points had read the shorter list — the reader, the report and the
+vertex cap — as the whole of the parity and fixed the space at `view`. The design did not change;
+the sentence now says the one property the enumeration left implicit, and both the build and
+`PUT /control/layers/{name}/artifacts` resolve a table's `default_space` and a row's own `space`
+for authored content by the same route they resolve them for a membership shape.

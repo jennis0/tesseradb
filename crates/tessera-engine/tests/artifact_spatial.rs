@@ -36,6 +36,7 @@ use tessera_engine::viewport::ViewportRequest;
 use tessera_engine::Engine;
 use tessera_lifecycle::command::UnallocatedRow;
 use tessera_lifecycle::wal::ChangeOp;
+use tessera_spatial::shape::Space;
 use tessera_types::EntityId;
 
 const N: u64 = 3_000;
@@ -124,7 +125,7 @@ fn chosen_tiles(c: &Corpus) -> Vec<(u64, u32, u32)> {
     for e in 0..c.n() {
         let item = c.item(e);
         *population
-            .entry(tile_of(f64::from(item.x), f64::from(item.y)))
+            .entry(tile_of(item.x, item.y))
             .or_default() += 1;
     }
     let mut ranked: Vec<(u64, u64)> = population.into_iter().collect();
@@ -154,7 +155,7 @@ fn chosen_tiles(c: &Corpus) -> Vec<(u64, u32, u32)> {
 /// The canonical shape one declaration produces — what the oracle tests a quantised point against.
 fn canonical(shape: tessera_spatial::shape::ShapeF64) -> tessera_spatial::shape::Shape {
     shape
-        .canonical(&extent())
+        .canonical(Space::View, &extent())
         .expect("the fixture's shapes canonicalise")
         .0
 }
@@ -247,7 +248,7 @@ artifacts = [
 /// The speck: a diamond of half-width [`SPECK_HALF`] around the corpus's first point.
 fn speck_wkt(c: &Corpus) -> String {
     let item = c.item(0);
-    let (x, y) = (f64::from(item.x), f64::from(item.y));
+    let (x, y) = (item.x, item.y);
     let h = SPECK_HALF;
     format!(
         "POLYGON (({} {}, {} {}, {} {}, {} {}, {} {}))",
@@ -326,7 +327,7 @@ impl Fixture {
                 continue;
             }
             let item = self.corpus.item(e);
-            positions.push(grid_of(f64::from(item.x), f64::from(item.y)));
+            positions.push(grid_of(item.x, item.y));
         }
         for (x, y) in extra {
             positions.push(grid_of(*x, *y));
@@ -401,7 +402,7 @@ fn flush(engine: &Engine) {
 }
 
 /// Ingest one point at `(x, y)` visible to `term`.
-fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f32, y: f32) {
+fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f64, y: f64) {
     let descriptors = vec![term.to_string().into_bytes()];
     let mut hash = [0u8; 32];
     for (slot, byte) in hash.iter_mut().zip(external_id.as_bytes()) {
@@ -508,9 +509,9 @@ fn a_point_ingested_inside_a_boundary_counts_on_the_next_request() {
         (700.0, 698.0),
     ];
     let outside = (700.0, 702.0);
-    ingest_point(&engine, "inside-1", 0, inside[0].0 as f32, inside[0].1 as f32);
-    ingest_point(&engine, "inside-2", 0, inside[1].0 as f32, inside[1].1 as f32);
-    ingest_point(&engine, "outside-1", 0, outside.0 as f32, outside.1 as f32);
+    ingest_point(&engine, "inside-1", 0, inside[0].0, inside[0].1);
+    ingest_point(&engine, "inside-2", 0, inside[1].0, inside[1].1);
+    ingest_point(&engine, "outside-1", 0, outside.0, outside.1);
     flush(&engine);
 
     let after = served(&engine, "0", 0, WHOLE_MAP);
@@ -587,7 +588,7 @@ fn a_deny_reaches_a_boundary_and_its_members() {
     let victim = (0..fx.corpus.n())
         .find(|e| {
             let item = fx.corpus.item(*e);
-            fx.corpus.visible(*e, &g) && shape.contains(grid_of(f64::from(item.x), f64::from(item.y)))
+            fx.corpus.visible(*e, &g) && shape.contains(grid_of(item.x, item.y))
         })
         .expect("the box has a visible member");
     engine

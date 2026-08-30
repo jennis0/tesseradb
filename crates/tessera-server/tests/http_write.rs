@@ -10,7 +10,7 @@ mod common;
 
 use std::sync::Arc;
 
-use arrow::array::{BinaryArray, Float32Array, StringArray};
+use arrow::array::{BinaryArray, Float32Array, Float64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
@@ -50,6 +50,46 @@ fn build_ingest_batch(rows: &[(u64, f32, f32, &str)]) -> Vec<u8> {
     )
     .unwrap();
 
+    let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+/// [`build_ingest_batch`] with the coordinate columns at the **wider** width.
+///
+/// Contracts §3.4: an ingest batch's `x`/`y` are `float32` **or** `float64` and the narrower is
+/// widened, which is the rule a points file's coordinate columns are read by — so a corpus
+/// buildable at either width is ingestable at either width (decision 0091). Every other builder
+/// here writes `float32`, which is what keeps that half of the schema exercised too.
+fn build_ingest_batch_f64(rows: &[(u64, f64, f64, &str)]) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("access", DataType::Utf8, false),
+    ]));
+    let ext: Vec<Vec<u8>> = rows
+        .iter()
+        .map(|(id, _, _, _)| external_id_of(*id))
+        .collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter_values(
+                ext.iter().map(|v| v.as_slice()),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|(_, x, _, _)| *x),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|(_, _, y, _)| *y),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, _, _, a)| *a),
+            )),
+        ],
+    )
+    .unwrap();
     let mut writer = StreamWriter::try_new(Vec::new(), &schema).unwrap();
     writer.write(&batch).unwrap();
     writer.into_inner().unwrap()
@@ -2063,6 +2103,73 @@ async fn an_out_of_extent_ingest_is_refused_and_leaves_no_wal_record() {
     // posture the endpoint enters.
     let (status, _) = post_ingest(&server, "fine", &[(9_000_002, 5.0, 5.0, "0")], true).await;
     assert_eq!(status, 200);
+}
+
+/// **An ingest body carries its coordinates at either float width, and the wider one is not
+/// narrowed** (contracts §3.4; `projections.md` §6).
+///
+/// Acceptance alone would pass against an accessor that read a `float64` column and rounded every
+/// value, so the discriminating case is a coordinate whose *width decides whether it has a cell at
+/// all*. The fixture's extent is `0..1000`; one `f32` step there is 6.1 × 10⁻⁵, and
+/// `1000.00002` is inside half of one — so it rounds to exactly `1000.0`, which
+/// `Quantisation::contains` admits as the inclusive maximum. Read at the width the caller sent it,
+/// the same value is outside the extent and has no cell.
+///
+/// A narrowing wire therefore does not merely lose precision here: it acks a row that is outside
+/// the declared extent, and the flush places it on the grid's edge with nothing left to notice.
+#[tokio::test]
+async fn an_ingest_body_carries_its_coordinates_at_either_float_width() {
+    let tmp = TempDir::new().unwrap();
+    let bundle_root = tmp.path().join("bundle");
+    build_fixture(
+        &bundle_root,
+        &tmp.path().join("points.parquet"),
+        &tmp.path().join("pairs.parquet"),
+    );
+    let server = spawn_server(
+        &bundle_root,
+        &tmp.path().join("cache"),
+        &tmp.path().join("wal.log"),
+    )
+    .await;
+
+    let post = |batch_id: &'static str, rows: Vec<(u64, f64, f64, &'static str)>| {
+        let body = build_ingest_batch_f64(&rows);
+        let client = server.client.clone();
+        let url = server.control_url("/control/ingest");
+        async move {
+            client
+                .post(url)
+                .header("x-tessera-batch-id", batch_id)
+                .header("content-type", "application/octet-stream")
+                .bearer_auth(OPERATOR_CREDENTIAL)
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .as_u16()
+        }
+    };
+
+    assert_eq!(
+        post("wide", vec![(9_100_001, 12.5, 33.25, "0")]).await,
+        200,
+        "a float64 coordinate column is part of the schema, not a contract error"
+    );
+
+    let outside = 1_000.000_02_f64;
+    assert_eq!(
+        outside as f32,
+        1000.0_f32,
+        "the fixture value must round to the extent maximum, or this case discriminates nothing"
+    );
+    assert_eq!(
+        post("wide-outside", vec![(9_100_002, outside, 33.25, "0")]).await,
+        422,
+        "a coordinate outside the extent at the width it was sent has no cell, whatever it would \
+         have rounded to"
+    );
 }
 
 /// `POST /control/flush` is **accepted at any time and executed at the next tick** (contracts
@@ -4410,6 +4517,7 @@ fn build_scalar_tail_fixture(out: &std::path::Path, tmp: &std::path::Path) {
         .unwrap()
         .schema;
     let args = BuildArgs {
+        projection: tessera_spatial::Projection::None,
         point_fields: Default::default(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         points,

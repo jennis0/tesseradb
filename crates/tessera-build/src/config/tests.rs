@@ -200,6 +200,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
         &[
             "name",
             "title",
+            "projection",
             "source",
             "fields",
             "extent",
@@ -210,7 +211,7 @@ fn the_accepted_key_set_is_configuration_ms_table() {
     expect_keys(
         "[[view]]\nname = \"s0\"\nextent = { nonesuch = 1 }\n",
         "extent",
-        &["auto", "margin", "min", "max", "x", "y"],
+        &["auto", "margin", "min", "max", "x", "y", "lon", "lat"],
     );
     expect_keys(
         "[[view]]\nname = \"s0\"\npoint_visibility = { nonesuch = 1 }\n",
@@ -992,6 +993,299 @@ fn half_an_extent_is_refused_rather_than_completed() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// `projections.md` §2 and §4.2: what a projected view declares, and what it may not
+// ---------------------------------------------------------------------------------------------
+
+/// The declaration with `line` written in place of `SEVERITY`'s bare `extent = "auto"`.
+fn projected(line: &str) -> String {
+    SEVERITY.replace("extent           = \"auto\"", line)
+}
+
+fn view_of(line: &str) -> View {
+    parse_str(&projected(line))
+        .unwrap_or_else(|e| panic!("{line}: {e}"))
+        .views[0]
+        .clone()
+}
+
+/// **`none` is the default, so a corpus with no geography is never asked to name a projection**
+/// (`projections.md` §5.3), and every other name comes from the closed set.
+#[test]
+fn a_view_declares_a_projection_from_the_closed_set() {
+    assert_eq!(view_of("extent = \"auto\"").projection, Projection::None);
+    for (name, want) in [
+        ("web_mercator", Projection::WebMercator),
+        ("equirectangular", Projection::PLATE_CARREE),
+        ("plate_carree", Projection::PLATE_CARREE),
+        ("gall_isographic", Projection::GALL_ISOGRAPHIC),
+        ("none", Projection::None),
+    ] {
+        let view = view_of(&format!("projection = \"{name}\"\nextent = \"auto\""));
+        assert_eq!(view.projection, want, "{name}");
+    }
+}
+
+/// A projection outside the set is refused **listing the set**, because the arithmetic of a
+/// projection is part of the stored format: there is no reading of an unknown name that could be
+/// approximated safely.
+#[test]
+fn a_projection_outside_the_set_is_refused() {
+    let message = err(&projected(
+        "projection = \"lambert_cylindrical_equal_area\"\nextent = \"auto\"",
+    ));
+    assert!(message.contains("not one of the projections"), "{message}");
+    for name in [
+        "web_mercator",
+        "equirectangular",
+        "plate_carree",
+        "gall_isographic",
+        "none",
+    ] {
+        assert!(message.contains(name), "{name} missing from: {message}");
+    }
+}
+
+/// **A projected view's frame is a box in longitude and latitude, or `auto`** (§4.2).
+#[test]
+fn a_projected_view_states_its_frame_in_degrees() {
+    let view = view_of(
+        "projection = \"web_mercator\"\nextent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }",
+    );
+    assert_eq!(
+        view.extent,
+        Extent::LonLat(LonLatBox {
+            lon_min: -8.6,
+            lon_max: 1.8,
+            lat_min: 49.9,
+            lat_max: 60.9
+        })
+    );
+    let view = view_of("projection = \"web_mercator\"\nextent = \"auto\"");
+    assert_eq!(view.extent, Extent::AutoLonLat);
+}
+
+/// **The three other spellings are refused on a projected view**, each naming the one to write.
+///
+/// `min`/`max` and `x`/`y` state a frame in the space the projection *produces*, which is the
+/// output of a calculation nobody should do by hand; `margin` is headroom the outward snap already
+/// supplies, and a margin inside an aligned square would only shrink the frame away from the
+/// alignment it exists to have.
+#[test]
+fn the_unprojected_extent_spellings_are_refused_on_a_projected_view() {
+    let refused = |extent: &str| err(&projected(&format!("projection = \"web_mercator\"\n{extent}")));
+
+    let message = refused("extent = { min = -25.0, max = 25.0 }");
+    assert!(message.contains("names min, max"), "{message}");
+    assert!(message.contains("lon = ["), "{message}");
+
+    let message = refused("extent = { x = [-18, 19], y = [-22, 24] }");
+    assert!(message.contains("names x, y"), "{message}");
+    assert!(message.contains("lon = ["), "{message}");
+
+    let message = refused("extent = { auto = true, margin = 0.25 }");
+    assert!(message.contains("outward snap"), "{message}");
+    assert!(message.contains("extent = \"auto\""), "{message}");
+
+    // Half a box is still half a box.
+    let message = refused("extent = { lon = [-8.6, 1.8] }");
+    assert!(message.contains("`lon` without `lat`"), "{message}");
+}
+
+/// The reverse: a degree box on a view with nothing to transform it, which would quantise two
+/// degrees as though they were the file's own units.
+#[test]
+fn a_degree_box_is_refused_on_an_unprojected_view() {
+    let message = err(&projected("extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }"));
+    assert!(message.contains("no projection"), "{message}");
+    assert!(message.contains("web_mercator"), "{message}");
+}
+
+/// **A value outside ±180 or ±90 is not a coordinate** (§2), on either axis.
+#[test]
+fn a_frame_outside_the_wgs84_range_is_refused() {
+    let refused = |extent: &str| err(&projected(&format!("projection = \"web_mercator\"\n{extent}")));
+
+    let message = refused("extent = { lon = [-190.0, 1.8], lat = [49.9, 60.9] }");
+    assert!(message.contains("not a longitude"), "{message}");
+    assert!(message.contains("WGS84"), "{message}");
+
+    let message = refused("extent = { lon = [-8.6, 1.8], lat = [49.9, 95.0] }");
+    assert!(message.contains("not a latitude"), "{message}");
+}
+
+/// **A box crossing the antimeridian is refused**, naming the wider box that does not cross: a
+/// frame is one aligned square and an aligned square does not wrap.
+#[test]
+fn a_box_crossing_the_antimeridian_is_refused() {
+    let message = err(&projected(
+        "projection = \"web_mercator\"\nextent = { lon = [170.0, -170.0], lat = [-10.0, 10.0] }",
+    ));
+    assert!(message.contains("antimeridian"), "{message}");
+    assert!(message.contains("lon = [-170, 170]"), "{message}");
+
+    // Latitude cannot wrap at all, so an inverted one is only ever inverted.
+    let message = err(&projected(
+        "projection = \"web_mercator\"\nextent = { lon = [-8.6, 1.8], lat = [60.9, 49.9] }",
+    ));
+    assert!(message.contains("runs south from its own maximum"), "{message}");
+    assert!(message.contains("lat = [49.9, 60.9]"), "{message}");
+}
+
+/// **A projected view spells its coordinate columns `lon` and `lat`** (§2), and the resolved map
+/// puts them on the canonical axes so every reader below sees one coordinate pair.
+#[test]
+fn a_projected_view_reads_lon_and_lat() {
+    let base = "projection = \"web_mercator\"\nextent = { lon = [-180, 180], lat = [-85, 85] }";
+
+    // With no `fields` map at all, the columns are `lon` and `lat` — which is the whole of what
+    // makes those the projected view's names.
+    let view = view_of(base);
+    assert_eq!(view.fields.of("x"), "lon");
+    assert_eq!(view.fields.of("y"), "lat");
+
+    // A map moves them, under the geographic names.
+    let view = view_of(&format!(
+        "{base}\nsource = \"other\"\nfields = {{ lon = \"longitude\", lat = \"latitude\" }}"
+    ));
+    assert_eq!(view.fields.of("x"), "longitude");
+    assert_eq!(view.fields.of("y"), "latitude");
+
+    // `x`/`y` is refused there, naming the geographic spelling: a corpus built with the two
+    // exchanged is silently mirrored about the diagonal.
+    let message = err(&projected(&format!(
+        "{base}\nsource = \"other\"\nfields = {{ x = \"a\", y = \"b\" }}"
+    )));
+    assert!(message.contains("`fields.x` on a projected view"), "{message}");
+    assert!(message.contains("`fields.lon`"), "{message}");
+
+    // And the reverse, on a view with no projection to read a degree with.
+    let message = err(&projected(
+        "extent = \"auto\"\nsource = \"other\"\nfields = { lon = \"a\", lat = \"b\" }",
+    ));
+    assert!(
+        message.contains("`fields.lon` on a view that declares no projection"),
+        "{message}"
+    );
+    assert!(message.contains("`fields.x`"), "{message}");
+
+    // A Morton code is a position already placed, so there is no longitude to transform.
+    let message = err(&projected(&format!(
+        "{base}\nsource = \"other\"\nfields = {{ morton = \"m\" }}"
+    )));
+    assert!(message.contains("`fields.morton` on a projected view"), "{message}");
+}
+
+/// **The snap, against hand-computed squares.** Each frame below is arithmetic a reader can redo:
+/// `x = (lon + 180)/360` under either projection, and `y = 0.5 - lat/180` under equirectangular.
+///
+/// * `lon [-180, 180], lat [-85.0511287798066, 85.0511287798066]` under `web_mercator` is the unit
+///   square exactly — the projection's own domain — and only the whole world holds it.
+/// * `lon [-180, -90], lat [45, 90]` under `equirectangular` is `x [0, 0.25], y [0, 0.25]`, whose
+///   maxima sit **on** the z2 boundary and so belong to the next tile: it spans two and snaps to
+///   z1 (0, 0). The frame must contain the box, which is what decides this.
+/// * `lon [-144, -36], lat [-72, -18]` is `x [0.1, 0.4], y [0.6, 0.9]` — strictly inside z1 (0, 1)
+///   and straddling the z2 boundary at x = 0.25, so z1 (0, 1).
+/// * A single point takes the offset cap and is reported **floored** rather than fitted (§4.2).
+#[test]
+fn a_stated_box_snaps_to_the_smallest_containing_square() {
+    let snap = |projection: &str, extent: &str| {
+        let view = view_of(&format!("projection = \"{projection}\"\n{extent}"));
+        let Extent::LonLat(asked) = view.extent else {
+            panic!("{extent} did not compile to a longitude/latitude box");
+        };
+        snap_lon_lat(view.projection, &asked)
+    };
+
+    let world = snap(
+        "web_mercator",
+        "extent = { lon = [-180.0, 180.0], lat = [-85.0511287798066, 85.0511287798066] }",
+    );
+    assert_eq!(world.square, tessera_spatial::AlignedSquare::WORLD);
+    assert!(!world.floored);
+    assert_eq!(
+        world.square.bounds(),
+        Bounds {
+            x_min: 0.0,
+            x_max: 1.0,
+            y_min: 0.0,
+            y_max: 1.0
+        }
+    );
+
+    let boundary = snap(
+        "equirectangular",
+        "extent = { lon = [-180.0, -90.0], lat = [45.0, 90.0] }",
+    );
+    assert_eq!(
+        boundary.square,
+        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 }
+    );
+    assert!(!boundary.floored);
+
+    let inside = snap(
+        "equirectangular",
+        "extent = { lon = [-144.0, -36.0], lat = [-72.0, -18.0] }",
+    );
+    assert_eq!(
+        inside.square,
+        tessera_spatial::AlignedSquare { z: 1, x: 0, y: 1 }
+    );
+
+    // A single point: contained in aligned squares at every offset, so it takes the cap of 16 and
+    // says the frame was floored. `x = (0 + 180)/360 = 0.5` and `y = 0.5 - 0/180 = 0.5`, so the
+    // square is 32768 on each axis.
+    let point = snap(
+        "equirectangular",
+        "extent = { lon = [0.0, 0.0], lat = [0.0, 0.0] }",
+    );
+    assert_eq!(
+        point.square,
+        tessera_spatial::AlignedSquare {
+            z: 16,
+            x: 32768,
+            y: 32768
+        }
+    );
+    assert!(point.floored);
+}
+
+/// **`tessera check` prints the frame and the snap for a stated box without opening a data file**
+/// (`projections.md` §8), and says it cannot under `auto`.
+///
+/// The declaration here names no points source at all, which is legal, so nothing readable exists:
+/// the frame still comes out, because a stated box's square is a function of the projection and the
+/// box alone.
+#[test]
+fn a_check_answers_a_projected_views_frame_from_the_declaration_alone() {
+    let stated = parse_str(&projected(
+        "projection = \"equirectangular\"\nextent = { lon = [-180.0, -90.0], lat = [45.0, 90.0] }",
+    ))
+    .expect("the declaration parses");
+    let report = crate::check::check(&stated);
+    assert_eq!(report.frames.len(), 1);
+    assert_eq!(report.frames[0].view, "s0");
+    assert_eq!(report.frames[0].projection, "equirectangular");
+    let (asked, snap) = report.frames[0].snapped.expect("a stated box snaps");
+    assert_eq!(asked.lon_min, -180.0);
+    // `x [0, 0.25], y [0, 0.25]`, whose maxima are the z2 boundary and so belong to the next tile.
+    assert_eq!(snap.square, tessera_spatial::AlignedSquare { z: 1, x: 0, y: 0 });
+    assert!(!snap.floored);
+
+    let fitted = parse_str(&projected("projection = \"web_mercator\"\nextent = \"auto\""))
+        .expect("the declaration parses");
+    let report = crate::check::check(&fitted);
+    assert_eq!(report.frames.len(), 1);
+    assert!(
+        report.frames[0].snapped.is_none(),
+        "under `auto` the frame is a function of the data and a check cannot answer it"
+    );
+
+    // An unprojected view has no projected frame to preview, and does not appear.
+    let plain = parse_str(SEVERITY).expect("the declaration parses");
+    assert!(crate::check::check(&plain).frames.is_empty());
+}
+
 #[test]
 fn two_views_of_one_name_are_refused() {
     let text = format!(
@@ -1543,7 +1837,9 @@ fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     );
 
     // **The space lives with the submission** (§4.3): `default_space` on the layer and `space` on
-    // a row, `view` the one value a view can honour, `wgs84` refused naming `projections.md`.
+    // a row. `wgs84` asks the view to project, so it is honourable only where the view declares a
+    // projection — and this fixture's view declares none, which is a refusal naming that
+    // (`projections.md` §5.3).
     let with_space = |word: &str, body: &str| {
         spatial(body).replace(
             "membership                = \"spatial\"",
@@ -1556,9 +1852,35 @@ fn a_spatial_layer_declares_its_shape_kind_and_no_depth() {
     assert!(err(&wgs84).contains("projections.md"), "{}", err(&wgs84));
     let spaceless = with_space("view", "");
     assert!(
-        err(&spaceless).contains("no `[layer.shape]`"),
+        err(&spaceless).contains("neither `[layer.shape]` nor an authored shape content"),
         "{}",
         err(&spaceless)
+    );
+
+    // **An authored shape content is geometry a space governs too** (`polygon-membership.md`
+    // §6.1): it is read in the space its row declares exactly as a membership shape is, so a
+    // layer that declares one and no `[layer.shape]` may still name the space its drawings are
+    // written in — and is refused for the same unhonourable pair.
+    let authored = |word: &str| {
+        format!(
+            "{}\n  [[layer.content.supplied]]\n  name = \"outline\"\n  type = \"polygon\"\n  \
+             require_member_visibility = \"inherited\"\n",
+            predicate_fixture().replace(
+                "membership                = \"enumerated\"",
+                &format!(
+                    "default_space             = \"{word}\"\nmembership                = \
+                     \"enumerated\""
+                ),
+            )
+        )
+    };
+    let drawn = authored("view");
+    assert!(parse_str(&drawn).is_ok(), "{}", err(&drawn));
+    let drawn_wgs84 = authored("wgs84");
+    assert!(
+        err(&drawn_wgs84).contains("projections.md"),
+        "{}",
+        err(&drawn_wgs84)
     );
 }
 

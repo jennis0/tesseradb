@@ -1,8 +1,8 @@
 # GeoNames — the ladder's first geographic rung
 
 **13,463,857 features**, from the gazetteer staged at `geonames/2026-08-27` (CC BY 4.0). No
-embedding, no GPU, no projection in the UMAP sense: the coordinates are already WGS84 and become
-positions by transform and quantisation, which is what makes this the cheapest real map in the
+embedding and no GPU: the coordinates are already WGS84, and the build transforms and quantises
+them against a declared `web_mercator` frame, which is what makes this the cheapest real map in the
 corpus and the right place to shake out an ingest pipeline.
 
 ```bash
@@ -12,19 +12,27 @@ cd "$TESSERA_LADDER/geonames" && tessera check && tessera build
 
 ## What it built
 
-Local NVMe, 47 GB machine, 2026-08-28. `--memory-budget` not set, so the build derived its own.
+Local NVMe, 47 GB machine, 2026-08-30, on the declared projection. `--memory-budget` not set, so
+the build derived its own.
 
 | | |
 |---|---|
-| `prepare.py` wall | ~2 min (19 s to read `allCountries.txt`, 24 s to project and assign ids) |
-| `tessera build` wall | **6:05** |
-| build peak RSS | **4.2 GB** |
-| bundle | **1,329,553,710 bytes** — 98.7 B/point |
-| `tessera verify` | OK in 0.94 s |
-| artifacts minted | 465,343 — 688 feature, 464,655 admin |
-| points with a cell of their own | **85.7%** of 13,463,857, in 11,543,951 distinct cells |
+| `prepare.py` wall | 2:54 (15 s to read `allCountries.txt`, 37 s to assign ids) |
+| `tessera build` wall | **2:59** |
+| build peak RSS | **3.55 GB** |
+| bundle | **1,341,841,220 bytes** — 99.7 B/point |
+| `tessera verify` | OK in 1.03 s |
+| artifacts | 688 feature minted; 464,655 admin declared by `artifacts-admin.parquet` |
+| points with a cell of their own | **85.7%** of 13,463,857, in 11,544,034 distinct cells |
 | rows in no artifact | 5,003 feature (blank class), 398 admin (no country and no admin code) |
 | stored row | 13 columns, 25.00 B/row against the 12 B fixed row |
+
+⊘ **The wall and the peak are not comparable with the 6:05 and 4.2 GB recorded on 2026-08-28.**
+Two rounds of build work landed between those runs — the mapped attribute columns and the split
+text index — and neither has anything to do with the projection. The **bundle** is comparable, and
+it is the comparison worth having: this build and the last `f32` build of the same declaration
+differ by **176 bytes** across 1.34 GB, every one of them a compression delta on a file whose
+contents shifted by a few low-order position bits.
 
 The plan's estimate for this rung was a 1.4 GB bundle against ~4 GB transient; both held. Neither
 wall the campaign expects — the Roaring round trip at 5×10⁷ members, and peak RSS ignoring
@@ -117,21 +125,38 @@ listing computed per request from inside the mask.
 every level. `render` follows cardinality, which is a property of the data rather than a decision:
 254 countries is a legend, 231,645 fourth-level divisions is a lookup.
 
-## The frame, and the standing deferral
+## The frame
 
-Web Mercator, whole domain, normalised to the unit square, **y south** — the direction
-`clients/ts/core/src/coords.ts` pins against deck.gl's tile addressing and the one a symmetric
-frame in metres gets backwards. A 16-bit cell is therefore exactly an XYZ tile at zoom 16.
+The declaration asks for `lon = [-180, 180]`, `lat = [±85.0511287798066]` under
+`projection = "web_mercator"` — the projection's whole domain — and the build snaps that outward to
+the square at z0 (0, 0), which is `x [0, 1]`, `y [0, 1]`. So a 16-bit cell is exactly an XYZ tile
+at zoom 16, and y runs **south**, the direction `clients/ts/core/src/coords.ts` pins against
+deck.gl's tile addressing and the one a symmetric frame in metres gets backwards.
 
-Latitude is clipped to ±85.0511° and the projected result is then held inside the frame, which is
-not the same thing: `MAX_LATITUDE` is itself an `atan`/`exp` output, so projecting it overshoots
-[0, 1] by an ULP, and the build counts a clamp as `v > max` — without the hold, all 571 clipped
-points would be reported as clamped. `frame.json` carries the clip count, which the clamp report
-structurally cannot see.
+The frame report reads:
 
-**This is redone when native projection lands.** `prepare.py` then emits `lon`/`lat` unchanged, the
-declaration names a `projection` and writes its `extent` in WGS84 — the box `frame.json` already
-records — and the corpus is rebuilt. See `../README.md`.
+```
+view 'world': web_mercator, quantising against x [0, 1], y [0, 1]
+        asked for lon [-180, 180], lat [-85.0511287798066, 85.0511287798066] — snapped outward to
+        the square at z0 (0, 0), lon [-180, 180], lat [-85.05112877980659, 85.0511287798066]
+        the data spans x [0, 1], y [0, 1] — 65536 x 65536 of the 65536 x 65536 cells
+        13463857 point(s) placed, none clamped onto the frame's edge
+        571 of 13463857 point(s) (0.0%) CLIPPED at web_mercator's ±85.0511287798066° domain
+```
+
+**571 clipped and none clamped, and the two are different things** (`projections.md` §7). A
+latitude past the projection's domain lands *exactly* on the frame's edge, where the clamp rule
+says a point is not clamped — so the clamp counter structurally cannot see one of these however
+many there are, and clipping is counted on its own. `prepare.py` surveys the same 571 rows in the
+source and reports the same split, 18 north and 553 south.
+
+**The corpus was placed by a Python module before the projection layer existed**, and rebuilding it
+here is what closed that. The two bundles were compared point for point: every one of the
+13,463,857 stored positions matches what `test_corpora/common/projection.py` computes from the
+source degrees, exactly and with no tolerance. Against the old bundle, 40,293 points (0.30%, one in
+334) sit in a different cell — each by exactly one cell on one axis, and each because the old build
+narrowed the coordinate to `f32` before quantising, which resolves 256 steps per cell at this
+frame. The new placement is the accurate one.
 
 ## Not built yet
 

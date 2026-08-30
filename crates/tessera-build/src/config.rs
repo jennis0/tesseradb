@@ -100,9 +100,15 @@
 //! A coordinate is quantised across the view's extent into 32 bits, and quantisation **clamps** —
 //! so two bundles built from one corpus under different extents place the same point in different
 //! cells and both are well-formed. That is why it is declared here and not passed at invocation.
-//! [`Extent::Auto`] is the one value this module cannot resolve on its own: [`resolve_extent`]
-//! reads the view's points source to fit the box, which is legitimate precisely because the
-//! alternative is an operator guessing a frame their data has already decided.
+//! [`Extent::Auto`] and [`Extent::AutoLonLat`] are the values this module cannot resolve on its
+//! own: [`frame_view`] reads the view's points source to fit the box, which is legitimate precisely
+//! because the alternative is an operator guessing a frame their data has already decided.
+//!
+//! **The view's `projection` decides which spellings its `extent` and its `fields` take**
+//! (`projections.md` §2). Under the default, `none`, both are what they have always been. Under a
+//! projection the coordinate columns are `lon`/`lat` and the frame is a box in degrees, snapped
+//! outward to the enclosing aligned square — the two sets do not overlap, and each refusal names
+//! the set the view's own projection admits.
 //!
 //! **A `fields` map says *where*, never *whether*.** The object's own keys assert that a field
 //! exists — `hierarchy` that there are parent edges, `depends_on` that there are attachment edges,
@@ -146,8 +152,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use tessera_spatial::frame::{snap_outward, Snap};
 use tessera_spatial::tiler::ScalarType;
-use tessera_spatial::{cell, Bounds};
+use tessera_spatial::{cell, Bounds, Projection};
 use tessera_store::vocabulary::VocabularyMinter;
 use tessera_types::layer::{
     ArtifactVisibility, ContentDeclaration, ExistenceCriterion, Hierarchy, HierarchyKind,
@@ -232,6 +239,12 @@ struct ViewBlock {
     name: String,
     #[serde(default)]
     title: Option<String>,
+    /// The function that turns a place on the Earth into a coordinate in this view's frame
+    /// (`projections.md` §5), from the closed set and defaulting to `none`. Held as a string and
+    /// resolved by [`Projection::from_name`] so a name outside the set is refused listing the
+    /// ones inside it, rather than reported as *no variant matched*.
+    #[serde(default)]
+    projection: Option<String>,
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
@@ -291,6 +304,11 @@ struct ExtentTable {
     x: Option<[f64; 2]>,
     #[serde(default)]
     y: Option<[f64; 2]>,
+    /// The projected view's spelling, and the only one it takes (`projections.md` §4.2).
+    #[serde(default)]
+    lon: Option<[f64; 2]>,
+    #[serde(default)]
+    lat: Option<[f64; 2]>,
 }
 
 /// `{ field, default }` — where each artifact's own label is, and what one carrying none gets.
@@ -438,10 +456,11 @@ struct LayerBlock {
     /// ([`compile_shape`]).
     #[serde(default)]
     shape: Option<ShapeBlock>,
-    /// The space the layer's artifact table writes its shapes in, where a row carries no `space`
+    /// The space the layer's artifact table writes its geometry in, where a row carries no `space`
     /// of its own (`polygon-membership.md` §4.3) — `"view"` if absent. On the layer beside
     /// `source` and `fields` because it is an acquisition-side fact about the file, on the same
-    /// register those two are.
+    /// register those two are. Declarable on a layer carrying either kind of geometry: a
+    /// membership shape, or an authored shape content, which is read in the same space (§6.1).
     #[serde(default)]
     default_space: Option<String>,
 }
@@ -496,8 +515,11 @@ pub struct InlineArtifact {
     pub ellipse: Option<Vec<f64>>,
     #[serde(default)]
     pub wkt: Option<String>,
-    /// The space the shape is written in — `"view"` if absent, the only value a view can honour
-    /// today (`polygon-membership.md` §4.3).
+    /// The space the row's geometry is written in — `"view"` if absent, or `"wgs84"`, which a
+    /// view declaring a projection honours by putting the coordinates through it
+    /// (`polygon-membership.md` §4.3). It governs **every** geometry the row declares: the shape
+    /// above, and the authored shape content in a `contents` cell, which is read in the same
+    /// space as the same producer's membership polygon (§6.1).
     #[serde(default)]
     pub space: Option<String>,
     /// The parent artifact in a hierarchy, by its key.
@@ -757,15 +779,24 @@ pub struct View {
     /// three is a contracts change rather than a declaration one. A **level's** title is published
     /// today, and a **layer's** is.
     pub title: Option<String>,
+    /// What turns this view's input coordinates into positions in its frame
+    /// (`projections.md` §5). [`Projection::None`] — the default — transforms nothing, and the
+    /// coordinates keep exactly the meaning they have in the file.
+    pub projection: Projection,
     /// This view's geometry: `entity_id` with either `x`/`y` or `morton`/`residual`. `None` when
     /// the view declares no source, which is legal to *declare* and refused at a build that would
     /// have to read it.
     pub source: Option<PathBuf>,
     /// Where the identity and geometry fields sit in that file. Canonical is `entity_id` with
     /// either `x`/`y` or `morton`/`residual`.
+    ///
+    /// **A projected view's coordinate columns are `lon` and `lat`** (`projections.md` §2), and
+    /// they resolve onto the canonical `x`/`y` here: what differs is the axis's *meaning* before
+    /// the transform, and every reader below this point sees a coordinate pair either way.
     pub fields: Fields,
     /// The frame every position in this view is quantised across (`configuration.md` §1).
-    /// [`Extent::Auto`] still needs the data: [`resolve_extent`] turns it into [`Bounds`].
+    /// The two `auto` spellings still need the data: [`frame_view`] turns them into [`Bounds`],
+    /// and turns a [`Extent::LonLat`] box into the aligned square containing it.
     pub extent: Extent,
     /// Where each point's own access label is, and what a point carrying none gets.
     pub point_visibility: PointVisibility,
@@ -782,11 +813,52 @@ pub struct View {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Extent {
     /// `"auto"`, or `{ auto = true, margin = f }` — the **square** box around this build's own
-    /// data, with `margin` of the data span added on each side. Resolved by [`resolve_extent`].
+    /// data, with `margin` of the data span added on each side. Resolved by [`frame_view`].
     Auto { margin: f64 },
     /// `{ min, max }` or `{ x = [a, b], y = [c, d] }` — stated outright, and the only form a
     /// corpus that will be written to should rely on.
     Fixed(Bounds),
+    /// `{ lon = [a, b], lat = [c, d] }` — a **projected** view's frame, written where a caller
+    /// can read it off an atlas, and snapped outward to the enclosing aligned square
+    /// (`projections.md` §4.2).
+    LonLat(LonLatBox),
+    /// `"auto"` on a projected view: the same snap over the data's own longitude/latitude box.
+    /// Distinct from [`Extent::Auto`] because a projected frame's headroom is the snap and never
+    /// a fraction of the data span, so there is no margin to carry.
+    AutoLonLat,
+}
+
+/// A box in longitude and latitude, degrees, WGS84 — the only frame spelling a projected view
+/// takes (`projections.md` §4.2).
+///
+/// **Degenerate boxes are legal here and are not legal as a [`Bounds`]**: `lon = [a, a]` states a
+/// meridian, which is a box with no smallest enclosing square, and §4.2 answers it with the offset
+/// cap rather than a refusal. The frame it snaps to is always a proper square.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LonLatBox {
+    pub lon_min: f64,
+    pub lon_max: f64,
+    pub lat_min: f64,
+    pub lat_max: f64,
+}
+
+impl LonLatBox {
+    /// This box's image in the frame the projection produces.
+    ///
+    /// **Every projection in the set is cylindrical** — longitude maps linearly to x and latitude
+    /// monotonically to y — so the image of a longitude/latitude rectangle is a rectangle and its
+    /// corners are its bounds (`projections.md` §4.2). The y axis runs **south**, so the box's
+    /// minimum latitude is its maximum y.
+    pub fn project(&self, projection: Projection) -> Bounds {
+        let (x_min, y_max) = projection.forward(self.lon_min, self.lat_min);
+        let (x_max, y_min) = projection.forward(self.lon_max, self.lat_max);
+        Bounds {
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        }
+    }
 }
 
 /// `auto`'s margin when none is written: 1% of the data span on each side.
@@ -819,8 +891,20 @@ pub const CLAMP_REFUSAL_FRACTION: f64 = 0.5;
 #[derive(Debug, Clone)]
 pub struct Frame {
     pub view: String,
-    /// What every stored position in this view is quantised across.
+    /// What placed every position in this view, before the frame did (`projections.md` §3).
+    pub projection: Projection,
+    /// What every stored position in this view is quantised across. For a projected view this is
+    /// an aligned square over the unit square rather than anything the caller wrote.
     pub extent: Bounds,
+    /// The box the caller asked for, for a projected view that stated one. `None` under `auto`,
+    /// where the box is the data's own, and for an unprojected view, which states its frame
+    /// directly and has nothing to snap.
+    pub asked: Option<LonLatBox>,
+    /// The aligned square [`Frame::asked`] — or the data's own box — snapped outward to
+    /// (`projections.md` §4.2). `None` for an unprojected view. The difference between the box and
+    /// the square is resolution the corpus does not get, which is why it is carried rather than
+    /// absorbed.
+    pub snap: Option<Snap>,
     /// The data's own box and the frame's effect on it. [`PointSurvey::Quantised`] for a Morton
     /// source, which arrives already placed.
     pub survey: PointSurvey,
@@ -835,18 +919,50 @@ impl Frame {
         }
     }
 
+    /// Points whose latitude fell outside the projection's own domain, so the transform moved
+    /// them onto the frame's edge and lost the difference (`projections.md` §7).
+    ///
+    /// **Never a clamp, and never counted as one.** A clipped point lands exactly on the edge,
+    /// where the quantisation rule says nothing is clamped, so the clamp counter structurally
+    /// cannot see one however many there are. Zero for an unprojected view, which has no domain.
+    pub fn clipped(&self) -> u64 {
+        self.coordinates().map_or(0, |survey| survey.clipped)
+    }
+
     /// **What the build says about this frame, every time, whether or not anything is wrong.**
-    /// The extent, the data's own bounds beside it, how much of the grid that leaves the data
-    /// occupying, and how many points land on the boundary rather than where they were written.
+    /// The projection that placed the points and the extent they were quantised across; for a
+    /// projected view the box the caller asked for and the square it snapped to; the data's own
+    /// bounds; how much of the grid that leaves the data occupying; how many points land on the
+    /// boundary rather than where they were written; and, on its own line, how many the
+    /// projection clipped at its own domain (`projections.md` §8).
     ///
     /// Reported rather than merely available: the whole defect this closes was a build that had
-    /// every one of these numbers and printed none of them.
+    /// every one of these numbers and printed none of them. **It never refuses** — the refusal
+    /// this frame may earn is [`Frame::refusal`], and clipping is not among its causes (§7).
     pub fn report(&self) -> String {
         let e = &self.extent;
-        let mut out = format!(
-            "view '{}': quantising against x [{}, {}], y [{}, {}]",
-            self.view, e.x_min, e.x_max, e.y_min, e.y_max
-        );
+        // **The projection is named beside the frame, and only where there is one.** Under
+        // `projection = "none"` this is the line every build has always printed, to the word: the
+        // view's coordinates are its file's own, and naming an absent transform would put a word
+        // in front of every existing corpus's frame for nothing.
+        let mut out = match self.projection {
+            Projection::None => format!(
+                "view '{}': quantising against x [{}, {}], y [{}, {}]",
+                self.view, e.x_min, e.x_max, e.y_min, e.y_max
+            ),
+            projection => format!(
+                "view '{}': {}, quantising against x [{}, {}], y [{}, {}]",
+                self.view,
+                projection.name(),
+                e.x_min,
+                e.x_max,
+                e.y_min,
+                e.y_max
+            ),
+        };
+        if let Some(snap) = &self.snap {
+            out.push_str(&self.snap_line(snap));
+        }
         let Some(survey) = self.coordinates() else {
             out.push_str(
                 "\n        points arrive as Morton codes, already placed in this frame — nothing \
@@ -872,10 +988,17 @@ impl Frame {
             data.x_min, data.x_max, data.y_min, data.y_max
         ));
         if survey.clamped == 0 {
-            out.push_str(&format!(
-                "\n        {} point(s) placed, none on the frame's edge",
-                survey.rows
-            ));
+            // **The clamp counter alone cannot say the edge is empty.** A clipped point lands
+            // exactly on the edge and is deliberately *not* clamped (`projections.md` §7), so
+            // where anything was clipped this sentence would otherwise assert the opposite of the
+            // clip line two below it. It narrows to the claim the clamp counter can actually
+            // support, and the clip line makes the claim it cannot.
+            let edge = if survey.clipped == 0 {
+                "none on the frame's edge"
+            } else {
+                "none clamped onto the frame's edge"
+            };
+            out.push_str(&format!("\n        {} point(s) placed, {edge}", survey.rows));
         } else {
             out.push_str(&format!(
                 "\n        {} of {} point(s) ({:.1}%) CLAMP onto the frame's edge — {} on x, {} \
@@ -887,7 +1010,70 @@ impl Frame {
                 survey.clamped_y,
             ));
         }
+        // **Clipped points on their own line and in their own field** (`projections.md` §7). A
+        // clipped point is stored on the frame's edge, which is exactly where the clamp rule says
+        // a point is *not* clamped — so the counter above structurally cannot see one, and a
+        // second number on the clamp line would hand a real count to the wrong cause. Printed
+        // whether or not anything was clipped, for the same reason the frame is: silence has to
+        // mean *nothing was clipped* rather than *nobody counted*.
+        //
+        // Exactly where the projection has a domain to fall outside of, which is every entry in
+        // the set and not `none`.
+        if let Some(domain) = self.projection.max_latitude_deg() {
+            if survey.clipped == 0 {
+                out.push_str(&format!(
+                    "\n        none of them outside {}'s ±{domain}° domain, so nothing was clipped",
+                    self.projection.name()
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n        {} of {} point(s) ({:.1}%) CLIPPED at {}'s ±{domain}° domain — \
+                     stored on the frame's edge, not where they were written. Built anyway at any \
+                     proportion: the domain is the projection's own boundary and no frame moves \
+                     it, so a real tail beyond it is the wrong projection for this corpus rather \
+                     than the wrong frame",
+                    survey.clipped,
+                    survey.rows,
+                    survey.clipped as f64 / survey.rows as f64 * 100.0,
+                    self.projection.name(),
+                ));
+            }
+        }
         out
+    }
+
+    /// The box the caller asked for, the square it snapped to, and whether the offset cap chose
+    /// that square rather than the box (`projections.md` §4.2, §8).
+    ///
+    /// **Both boxes in degrees, at full precision, whether or not the difference is large.** The
+    /// snap is resolution the corpus does not get, and a caller who can see the box beside the
+    /// frame is the one who can judge that; rounding the frame's own corners would print two
+    /// different frames identically at the offsets where a cell is centimetres. The square's
+    /// address is the frame's exact identity either way, and it is the address `tessera check`
+    /// prints from the declaration alone (`crate::check::FramePreview`).
+    fn snap_line(&self, snap: &Snap) -> String {
+        let asked = match &self.asked {
+            Some(b) => format!(
+                "asked for lon [{}, {}], lat [{}, {}]",
+                b.lon_min, b.lon_max, b.lat_min, b.lat_max
+            ),
+            // `auto` on a projected view: the box snapped is the data's own, and the data's box
+            // is the line below this one.
+            None => "`extent = \"auto\"` over the data's own box".to_string(),
+        };
+        let how = if snap.floored {
+            "FLOORED at the offset cap rather than fitted: the square at"
+        } else {
+            "snapped outward to the square at"
+        };
+        // y runs south (`projections.md` §4), so the frame's minimum y is its maximum latitude.
+        let (lon_min, lat_max) = self.projection.inverse(self.extent.x_min, self.extent.y_min);
+        let (lon_max, lat_min) = self.projection.inverse(self.extent.x_max, self.extent.y_max);
+        format!(
+            "\n        {asked} — {how} z{} ({}, {}), lon [{lon_min}, {lon_max}], lat [{lat_min}, \
+             {lat_max}]",
+            snap.square.z, snap.square.x, snap.square.y
+        )
     }
 
     /// The refusal this frame earns, if any: past [`CLAMP_REFUSAL_FRACTION`] the frame is not
@@ -940,6 +1126,7 @@ impl Frame {
 /// [`crate::input::survey_points`], naming the extent to write instead).
 pub fn frame_view(
     view: &str,
+    projection: Projection,
     extent: &Extent,
     points: &Path,
     fields: &Fields,
@@ -947,27 +1134,62 @@ pub fn frame_view(
 ) -> Result<Frame> {
     let margin = match extent {
         Extent::Fixed(bounds) => {
-            let survey = crate::input::survey_points(points, fields, limit, Some(bounds))?;
+            let survey =
+                crate::input::survey_points(points, fields, projection, limit, Some(bounds))?;
             return Ok(Frame {
                 view: view.to_string(),
+                projection,
                 extent: *bounds,
+                asked: None,
+                snap: None,
                 survey,
+            });
+        }
+        // **A stated longitude/latitude box needs no data to become a frame** — it is projected
+        // and snapped here, and the pass that follows is the clamp survey every frame gets. That
+        // is what lets `tessera check` answer the same question against no file at all
+        // (`crate::check`).
+        Extent::LonLat(asked) => {
+            let snap = snap_lon_lat(projection, asked);
+            let bounds = snap.square.bounds();
+            let survey =
+                crate::input::survey_points(points, fields, projection, limit, Some(&bounds))?;
+            return Ok(Frame {
+                view: view.to_string(),
+                projection,
+                extent: bounds,
+                asked: Some(*asked),
+                snap: Some(snap),
+                survey,
+            });
+        }
+        // The projected `auto`: the same snap, over the data's own box rather than a stated one.
+        // The survey runs in the frame the projection produces, so the box it comes back with is
+        // already the thing to snap — projecting the corners of the degree-space box would give
+        // the same square, every projection in the set being monotone on each axis.
+        Extent::AutoLonLat => {
+            let survey = crate::input::survey_points(points, fields, projection, limit, None)?;
+            let PointSurvey::Coordinates(survey) = survey else {
+                unreachable!("survey_points refuses a Morton source when no frame is supplied")
+            };
+            let data = survey.bounds.ok_or_else(|| empty_auto_source(view))?;
+            let snap = snap_outward(&data);
+            return Ok(Frame {
+                view: view.to_string(),
+                projection,
+                extent: snap.square.bounds(),
+                asked: None,
+                snap: Some(snap),
+                survey: PointSurvey::Coordinates(survey),
             });
         }
         Extent::Auto { margin } => *margin,
     };
-    let survey = crate::input::survey_points(points, fields, limit, None)?;
+    let survey = crate::input::survey_points(points, fields, projection, limit, None)?;
     let PointSurvey::Coordinates(survey) = survey else {
         unreachable!("survey_points refuses a Morton source when no frame is supplied")
     };
-    let data = survey.bounds.ok_or_else(|| {
-        declaration_error(format!(
-            "view '{view}': `extent` is `auto` and the points source selects no rows, so there is \
-             no data to fit a box around. Either the source is empty or `--limit` excludes every \
-             row; state the frame instead — `extent = {{ min = <a>, max = <b>}}` — if this corpus \
-             is meant to start empty and be written to"
-        ))
-    })?;
+    let data = survey.bounds.ok_or_else(|| empty_auto_source(view))?;
     // Square, then margin: a circle in the data stays a circle on the grid. `span` is the larger
     // of the two axes, and a corpus whose points are all at one position has no span at all — a
     // unit box is the only non-degenerate frame available, and it is centred on the point.
@@ -1000,45 +1222,95 @@ pub fn frame_view(
     })?;
     Ok(Frame {
         view: view.to_string(),
+        projection,
         extent: bounds,
+        asked: None,
+        snap: None,
         survey: PointSurvey::Coordinates(survey),
     })
 }
 
-/// Compile a view's `extent`, in any of `configuration.md` §1's four spellings.
+/// `auto` over a source that selects no rows: there is no data to fit a box around, on either
+/// spelling, so the frame has to be stated (`projections.md` §4.2, `configuration.md` §1).
+fn empty_auto_source(view: &str) -> BuildError {
+    declaration_error(format!(
+        "view '{view}': `extent` is `auto` and the points source selects no rows, so there is no \
+         data to fit a box around. Either the source is empty or `--limit` excludes every row; \
+         state the frame instead — `extent = {{ min = <a>, max = <b> }}`, or `extent = {{ lon = \
+         [<a>, <b>], lat = [<c>, <d>] }}` under a projection — if this corpus is meant to start \
+         empty and be written to"
+    ))
+}
+
+/// A stated longitude/latitude box as a frame: projected, then snapped outward to the smallest
+/// aligned square containing it (`projections.md` §4.2).
 ///
-/// Every refusal names all four, because the key has no default and the value an absent line
-/// would supply is a decision about where every stored point lands.
-fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
+/// **No data is read**, which is what makes the frame a property of the declaration alone and lets
+/// `tessera check` print it in seconds.
+pub fn snap_lon_lat(projection: Projection, asked: &LonLatBox) -> Snap {
+    snap_outward(&asked.project(projection))
+}
+
+/// Compile a view's `extent`, in whichever spellings its projection admits.
+///
+/// **The projection decides the spelling, and the two sets do not overlap.** An unprojected view
+/// takes `configuration.md` §1's four, in the space its file is already in; a projected view takes
+/// `auto` or a box in longitude and latitude, and nothing else (`projections.md` §4.2) — `min`/`max`
+/// and `x`/`y` describe a frame in the space the projection *produces*, which is on the wrong side
+/// of the transform, and `margin` is headroom the snap already supplies. Every refusal names the
+/// spellings the view's own projection admits, because the key has no default and the value an
+/// absent line would supply is a decision about where every stored point lands.
+fn compile_extent(view: &str, projection: Projection, value: Option<&toml::Value>) -> Result<Extent> {
+    let projected = projection != Projection::None;
+    let spellings = if projected {
+        LON_LAT_SPELLINGS
+    } else {
+        EXTENT_SPELLINGS
+    };
     let Some(value) = value else {
         return Err(declaration_error(format!(
             "view '{view}': `extent` is required and has no default (configuration.md §1). It is \
              the frame every stored position is quantised across, and quantisation clamps — so a \
-             guessed frame is a bundle that is well-formed with the geometry wrong. Four \
-             spellings:{}",
-            EXTENT_SPELLINGS
+             guessed frame is a bundle that is well-formed with the geometry wrong. This view's \
+             spellings:{spellings}"
         )));
     };
     if let Some(word) = value.as_str() {
         if word == "auto" {
-            return Ok(Extent::Auto {
-                margin: DEFAULT_AUTO_MARGIN,
+            return Ok(if projected {
+                Extent::AutoLonLat
+            } else {
+                Extent::Auto {
+                    margin: DEFAULT_AUTO_MARGIN,
+                }
             });
         }
         return Err(declaration_error(format!(
             "view '{view}': `extent = \"{word}\"` is not a value this key takes. The only word \
-             it takes is `auto`; every other spelling is a table:{}",
-            EXTENT_SPELLINGS
+             it takes is `auto`; every other spelling is a table:{spellings}"
         )));
     }
     let Some(table) = value.as_table() else {
         return Err(declaration_error(format!(
-            "view '{view}': `extent` is neither the word `auto` nor a table:{}",
-            EXTENT_SPELLINGS
+            "view '{view}': `extent` is neither the word `auto` nor a table:{spellings}"
         )));
     };
     let table: ExtentTable = ExtentTable::deserialize(toml::Value::Table(table.clone()))
         .map_err(|e| declaration_error(format!("view '{view}': `extent`: {e}")))?;
+
+    if projected {
+        return compile_lon_lat_extent(view, projection, &table);
+    }
+    if table.lon.is_some() || table.lat.is_some() {
+        return Err(declaration_error(format!(
+            "view '{view}': `extent` is written in longitude and latitude, and this view declares \
+             no projection — so there is nothing to turn a degree into a coordinate and the two \
+             numbers would be quantised as though they were the file's own units \
+             (projections.md §5.3). Declare `projection = \"web_mercator\"` or \
+             `projection = \"equirectangular\"` if these are places on the Earth; otherwise state \
+             the frame in the coordinates the file carries:{EXTENT_SPELLINGS}"
+        )));
+    }
 
     let stated =
         table.min.is_some() || table.max.is_some() || table.x.is_some() || table.y.is_some();
@@ -1125,6 +1397,93 @@ fn compile_extent(view: &str, value: Option<&toml::Value>) -> Result<Extent> {
         .map_err(|detail| declaration_error(format!("view '{view}': `extent`: {detail}")))?;
     Ok(Extent::Fixed(bounds))
 }
+
+/// A projected view's `extent`: `auto`, or the box in longitude and latitude
+/// (`projections.md` §4.2). Every other spelling is refused here, naming this one.
+fn compile_lon_lat_extent(view: &str, projection: Projection, table: &ExtentTable) -> Result<Extent> {
+    let name = projection.name();
+    if table.auto.is_some() || table.margin.is_some() {
+        return Err(declaration_error(format!(
+            "view '{view}': `extent` declares `auto` as a table, and view is projected \
+             ({name}). A projected frame's headroom is the outward snap to the enclosing aligned \
+             square, not a fraction of the data span — and a margin inside an aligned square would \
+             only shrink the frame away from the alignment it exists to have \
+             (projections.md §4.2). Write `extent = \"auto\"`, which fits the data's own \
+             longitude/latitude box and snaps it:{LON_LAT_SPELLINGS}"
+        )));
+    }
+    if table.min.is_some() || table.max.is_some() || table.x.is_some() || table.y.is_some() {
+        let named = [
+            table.min.map(|_| "min"),
+            table.max.map(|_| "max"),
+            table.x.map(|_| "x"),
+            table.y.map(|_| "y"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+        return Err(declaration_error(format!(
+            "view '{view}': `extent` names {named}, and this view is projected ({name}). Those \
+             spellings state a frame in the space the projection *produces*, which is the output \
+             of a calculation nobody should do by hand — and getting it wrong misplaces every \
+             stored position. A projected view's frame is written in degrees, where a caller can \
+             read it off an atlas (projections.md §4.2):{LON_LAT_SPELLINGS}"
+        )));
+    }
+    let (Some(lon), Some(lat)) = (table.lon, table.lat) else {
+        let half = match (table.lon, table.lat) {
+            (Some(_), None) => "`lon` without `lat`",
+            (None, Some(_)) => "`lat` without `lon`",
+            _ => "no frame at all",
+        };
+        return Err(declaration_error(format!(
+            "view '{view}': `extent` is {half}. A projected view's frame is a box in longitude \
+             and latitude and neither half stands alone:{LON_LAT_SPELLINGS}"
+        )));
+    };
+    for (axis, limit, pair) in [("lon", 180.0, lon), ("lat", 90.0, lat)] {
+        for v in pair {
+            if !v.is_finite() || v.abs() > limit {
+                return Err(declaration_error(format!(
+                    "view '{view}': `extent.{axis}` names {v}, which is not a {}. The accepted \
+                     input coordinate system is WGS84 degrees — longitude within ±180, latitude \
+                     within ±90 (projections.md §2) — and a value outside that is not a \
+                     coordinate. Convert the box to WGS84, or declare `projection = \"none\"` if \
+                     this view's space is not the Earth",
+                    if axis == "lon" { "longitude" } else { "latitude" }
+                )));
+            }
+        }
+    }
+    if lon[0] > lon[1] {
+        return Err(declaration_error(format!(
+            "view '{view}': `extent.lon = [{}, {}]` runs west from its own maximum. Read as a box \
+             crossing the antimeridian it cannot be honoured — a frame is one aligned square and \
+             an aligned square does not wrap — and read as an ordinary box it is inverted. Write \
+             the wider box that does not cross: `lon = [{}, {}]`",
+            lon[0], lon[1], lon[1], lon[0]
+        )));
+    }
+    if lat[0] > lat[1] {
+        return Err(declaration_error(format!(
+            "view '{view}': `extent.lat = [{}, {}]` runs south from its own maximum, so it names \
+             no box. Latitude does not wrap; write `lat = [{}, {}]`",
+            lat[0], lat[1], lat[1], lat[0]
+        )));
+    }
+    Ok(Extent::LonLat(LonLatBox {
+        lon_min: lon[0],
+        lon_max: lon[1],
+        lat_min: lat[0],
+        lat_max: lat[1],
+    }))
+}
+
+/// A projected view's two spellings, appended to every `extent` refusal it earns.
+const LON_LAT_SPELLINGS: &str = "\n  \
+     extent = \"auto\"                                         # the data's own box, snapped\n  \
+     extent = { lon = [-8.6, 1.8], lat = [49.9, 60.9] }      # stated in degrees, snapped outward";
 
 /// The four spellings, appended to every `extent` refusal. A caller who got this key wrong is
 /// choosing between four shapes, not correcting a typo, so the whole set travels with the message.
@@ -1454,6 +1813,7 @@ impl Config {
         }
         Ok(Acquisition {
             attribute_sources: self.attribute_sources.clone(),
+            projection: declared.projection,
             extent: declared.extent,
             points,
             point_fields: declared.fields.clone(),
@@ -1467,8 +1827,12 @@ impl Config {
 /// frame it quantises against.
 #[derive(Debug, Clone)]
 pub struct Acquisition {
-    /// The built view's `extent`, as declared. [`resolve_extent`] turns [`Extent::Auto`] into
-    /// [`Bounds`] by reading [`Acquisition::points`]; every other spelling is already the answer.
+    /// The built view's `projection`: what turns each row's coordinates into a position in the
+    /// frame, before anything quantises (`projections.md` §3).
+    pub projection: Projection,
+    /// The built view's `extent`, as declared. [`frame_view`] turns the two `auto` spellings and
+    /// a longitude/latitude box into [`Bounds`] by reading [`Acquisition::points`] where it must;
+    /// `{ min, max }` and `{ x, y }` are already the answer.
     pub extent: Extent,
     /// The declared attributes grouped by the file each is read from — one pass per group, joined
     /// to the view's geometry by the identity column each group names. Empty for an empty schema;
@@ -2125,44 +2489,67 @@ fn compile_views(
                 None => None,
             },
         };
-        // **The two geometry shapes are mutually exclusive** (§1): a row carries `x`/`y` or
-        // `morton`/`residual`, and a map naming one of each says the file carries both — which the
-        // reader would resolve by preferring one, silently, over a declaration that asked for the
-        // other.
-        let fields = check_fields(
-            &object,
-            source.as_ref(),
-            &[
-                KnownField::always(ENTITY_ID),
-                KnownField::always("x"),
-                KnownField::always("y"),
-                KnownField::always("morton"),
-                KnownField::always("residual"),
-            ],
-            block.fields.as_ref(),
-            &defaults.entity_id_field,
-        )?;
-        if let Some(fields) = &block.fields {
-            let quantised = fields.contains_key("x") || fields.contains_key("y");
-            let coded = fields.contains_key("morton") || fields.contains_key("residual");
-            if quantised && coded {
-                return Err(declaration_error(format!(
-                    "view '{}': `fields` names both an `x`/`y` pair and a `morton` code, and the \
-                     two geometry shapes are mutually exclusive (configuration.md §1). A row \
-                     carries coordinates or a code, so naming both says the source has two \
-                     geometries and leaves the reader to pick",
-                    block.name
-                )));
+        let projection = compile_projection(&block.name, block.projection.as_deref())?;
+        // **A projected view's coordinate columns are `lon` and `lat`, and it has no other
+        // geometry shape** (`projections.md` §2). An unprojected view keeps the two shapes it has
+        // always had, mutually exclusive: a row carries `x`/`y` or `morton`/`residual`, and a map
+        // naming one of each says the file carries both — which the reader would resolve by
+        // preferring one, silently, over a declaration that asked for the other.
+        let fields = if projection == Projection::None {
+            if let Some(declared) = &block.fields {
+                for (geographic, axis) in [("lon", "x"), ("lat", "y")] {
+                    if declared.contains_key(geographic) {
+                        return Err(declaration_error(format!(
+                            "view '{}': `fields.{geographic}` on a view that declares no \
+                             projection. There is nothing to turn a degree into a coordinate, so \
+                             the column would be quantised as though it were the file's own units \
+                             (projections.md §5.3). Declare \
+                             `projection = \"web_mercator\"` or `projection = \
+                             \"equirectangular\"` if these are places on the Earth; otherwise \
+                             write `fields.{axis}`",
+                            block.name
+                        )));
+                    }
+                }
             }
-            if fields.contains_key("residual") && !fields.contains_key("morton") {
-                return Err(declaration_error(format!(
-                    "view '{}': `fields.residual` without `fields.morton`. A residual is the \
-                     sub-cell remainder of a Morton code and is read only beside one",
-                    block.name
-                )));
+            let fields = check_fields(
+                &object,
+                source.as_ref(),
+                &[
+                    KnownField::always(ENTITY_ID),
+                    KnownField::always("x"),
+                    KnownField::always("y"),
+                    KnownField::always("morton"),
+                    KnownField::always("residual"),
+                ],
+                block.fields.as_ref(),
+                &defaults.entity_id_field,
+            )?;
+            if let Some(declared) = &block.fields {
+                let quantised = declared.contains_key("x") || declared.contains_key("y");
+                let coded = declared.contains_key("morton") || declared.contains_key("residual");
+                if quantised && coded {
+                    return Err(declaration_error(format!(
+                        "view '{}': `fields` names both an `x`/`y` pair and a `morton` code, and \
+                         the two geometry shapes are mutually exclusive (configuration.md §1). A \
+                         row carries coordinates or a code, so naming both says the source has two \
+                         geometries and leaves the reader to pick",
+                        block.name
+                    )));
+                }
+                if declared.contains_key("residual") && !declared.contains_key("morton") {
+                    return Err(declaration_error(format!(
+                        "view '{}': `fields.residual` without `fields.morton`. A residual is the \
+                         sub-cell remainder of a Morton code and is read only beside one",
+                        block.name
+                    )));
+                }
             }
-        }
-        let extent = compile_extent(&block.name, block.extent.as_ref())?;
+            fields
+        } else {
+            compile_projected_fields(&block.name, &object, source.as_ref(), block, defaults)?
+        };
+        let extent = compile_extent(&block.name, projection, block.extent.as_ref())?;
         if block.visibility.is_some() {
             return Err(declaration_error(format!(
                 "view '{}': `visibility` is specified and not built (views §3 — a view's own \
@@ -2235,6 +2622,7 @@ fn compile_views(
         views.push(View {
             name: block.name.clone(),
             title: block.title.clone(),
+            projection,
             source,
             fields,
             extent,
@@ -2246,6 +2634,95 @@ fn compile_views(
         });
     }
     Ok(views)
+}
+
+/// A view's `projection`, from the closed set of `projections.md` §5 and defaulting to `none`.
+///
+/// **The set is closed and the default is no projection**, so a corpus with no geography is never
+/// asked to name one. A name outside the set is refused listing the set: the arithmetic of a
+/// projection is part of the stored format — geometry is quantised against a declared frame and
+/// the artifact *is* the record — so there is no reading of an unknown name that could be
+/// approximated safely.
+fn compile_projection(view: &str, declared: Option<&str>) -> Result<Projection> {
+    let Some(name) = declared else {
+        return Ok(Projection::None);
+    };
+    Projection::from_name(name).ok_or_else(|| {
+        declaration_error(format!(
+            "view '{view}': `projection = \"{name}\"` is not one of the projections this service \
+             transforms with. They are: web_mercator, equirectangular, plate_carree, \
+             gall_isographic, none (projections.md §5). The set is closed and stays cylindrical — \
+             a conic or azimuthal entry would stop a longitude/latitude rectangle being a \
+             rectangle, which is what lets an extent be written in degrees — and no datum shift, \
+             national grid or caller-supplied projection is accepted"
+        ))
+    })
+}
+
+/// A projected view's `fields`: `entity_id` with `lon` and `lat`, and nothing else
+/// (`projections.md` §2).
+///
+/// **The resolved map keys the coordinates on the canonical `x`/`y`**, so every reader below this
+/// point sees a coordinate pair and the axis names are a property of the declaration alone. What
+/// `lon`/`lat` buy is at the declaration: longitude-then-latitude is the order GeoJSON and WKT
+/// use and the opposite of the order many sources publish, and a corpus built with the two
+/// exchanged is silently mirrored about the diagonal. Naming the axes for what they hold removes
+/// the ambiguity rather than documenting it.
+fn compile_projected_fields(
+    view: &str,
+    object: &str,
+    source: Option<&PathBuf>,
+    block: &ViewBlock,
+    defaults: &Defaults,
+) -> Result<Fields> {
+    if let Some(declared) = &block.fields {
+        for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+            if declared.contains_key(axis) {
+                return Err(declaration_error(format!(
+                    "view '{view}': `fields.{axis}` on a projected view. A projected view's \
+                     coordinate columns are `lon` and `lat` — longitude then latitude, the order \
+                     GeoJSON and WKT use — because a corpus built with the two exchanged is \
+                     silently mirrored about the diagonal (projections.md §2). Write \
+                     `fields.{geographic}` instead"
+                )));
+            }
+        }
+        for coded in ["morton", "residual"] {
+            if declared.contains_key(coded) {
+                return Err(declaration_error(format!(
+                    "view '{view}': `fields.{coded}` on a projected view. A Morton code is a \
+                     position already placed in a frame, so there is no longitude for a \
+                     projection to transform (projections.md §3). Either declare \
+                     `projection = \"none\"` and read the codes against the grid's own frame, or \
+                     supply `lon`/`lat` columns"
+                )));
+            }
+        }
+    }
+    let fields = check_fields(
+        object,
+        source,
+        &[
+            KnownField::always(ENTITY_ID),
+            KnownField::always("lon"),
+            KnownField::always("lat"),
+        ],
+        block.fields.as_ref(),
+        &defaults.entity_id_field,
+    )?;
+    // `lon` and `lat` become the canonical `x` and `y`, defaulting to their own names — which is
+    // what makes `lon`/`lat` the columns a projected view reads with no `fields` map at all.
+    let mut map = fields.map;
+    for (axis, geographic) in [("x", "lon"), ("y", "lat")] {
+        let column = map
+            .remove(geographic)
+            .unwrap_or_else(|| geographic.to_string());
+        map.insert(axis.to_string(), column);
+    }
+    Ok(Fields {
+        object: fields.object,
+        map,
+    })
 }
 
 /// A word written where an access label goes. `public` is a label and is fine; `inherited` is the
@@ -3183,26 +3660,92 @@ fn compile_layers(
         let shape = compile_shape(block, &membership)?;
         let shape_kind = shape.map(|s| s.kind);
         let kind_is = |kind: ShapeKind| shape_kind == Some(kind);
+        // **A layer has geometry to be in a space if it declares either kind** — a membership
+        // shape in `[layer.shape]`, or an authored shape content, which is read in the space its
+        // row declares exactly as a membership shape is (`polygon-membership.md` §6.1). The two
+        // are never declared together, so at most one of them is what a space governs.
+        let carries_geometry = shape.is_some()
+            || content
+                .supplied
+                .iter()
+                .any(|s| s.authored_shape_kind().is_some());
         // **A row's geometry sits in its layer's kind's fields and no other** — the box's four
         // bounds, the circle's three, the ellipse's five, the polygon's WKB `geometry` column
         // (GeoParquet's own name) — so naming a field of another kind is refused as a field the
         // layer never declared.
+        // **A shape layer's views must share a coordinate system** (`polygon-membership.md` §4.3):
+        // the geometry is declared once and resolved per view, so two views placing their points
+        // by different functions cannot share it. Two views both declaring `projection = "none"`
+        // are warned rather than refused, at the build's shape report — nothing then says whether
+        // they share a space, and a warning is the right weight for a thing that might be true.
+        // An authored shape content is under the same rule and for the same reason: it is placed
+        // by the view's own projection whenever its row declares `wgs84`.
+        if carries_geometry {
+            let mut named: Vec<(&str, Projection)> = Vec::new();
+            for name in declared_views {
+                if let Some(view) = views.iter().find(|v| &v.name == name) {
+                    named.push((name.as_str(), view.projection));
+                }
+            }
+            if let Some((first, projection)) = named.first().copied() {
+                if let Some((other, differs)) =
+                    named.iter().find(|(_, p)| *p != projection).copied()
+                {
+                    return Err(declaration_error(format!(
+                        "{object}: view '{first}' declares `projection = \"{}\"` and view \
+                         '{other}' declares `projection = \"{}\"`. A shape layer's geometry is \
+                         declared once and resolved in every view it is drawn in, so the views \
+                         must place their points by the same function; draw the layer in one of \
+                         them, or declare the same projection on both \
+                         (polygon-membership.md §4.3)",
+                        projection.name(),
+                        differs.name()
+                    )));
+                }
+            }
+        }
+
+        // **A space is honourable only if the views the layer is drawn in can honour it**
+        // (`polygon-membership.md` §4.3): `wgs84` asks the view to project, and a view declaring
+        // `projection = "none"` has one space and nothing to convert a degree from. Refused here,
+        // where the declaration can be pointed at, rather than at the first row read.
+        let honourable = |space: tessera_store::derived::ShapeSpace| -> std::result::Result<(), String> {
+            for name in declared_views {
+                let Some(view) = views.iter().find(|v| &v.name == name) else {
+                    continue;
+                };
+                space.resolve(view.projection).map_err(|e| {
+                    format!("view '{name}' declares `projection = \"{}\"`: {e}", view.projection.name())
+                })?;
+            }
+            Ok(())
+        };
         let default_space = match block.default_space.as_deref() {
             None => tessera_store::derived::ShapeSpace::View,
             Some(word) => {
-                if shape.is_none() {
+                if !carries_geometry {
                     return Err(declaration_error(format!(
-                        "{object}: `default_space` is declared and the layer declares no \
-                         `[layer.shape]`, so there is no geometry for it to be the space of"
+                        "{object}: `default_space` is declared and the layer declares neither \
+                         `[layer.shape]` nor an authored shape content, so there is no geometry \
+                         for it to be the space of"
                     )));
                 }
-                tessera_store::derived::ShapeSpace::parse(word)
-                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?
+                let space = tessera_store::derived::ShapeSpace::parse(word)
+                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
+                honourable(space)
+                    .map_err(|e| declaration_error(format!("{object}: `default_space`: {e}")))?;
+                space
             }
         };
         for artifact in block.artifacts.iter().flatten() {
             if let Some(word) = artifact.space.as_deref() {
-                tessera_store::derived::ShapeSpace::parse(word).map_err(|e| {
+                let space = tessera_store::derived::ShapeSpace::parse(word).map_err(|e| {
+                    declaration_error(format!(
+                        "{object}: artifact '{}': `space`: {e}",
+                        artifact.key
+                    ))
+                })?;
+                honourable(space).map_err(|e| {
                     declaration_error(format!(
                         "{object}: artifact '{}': `space`: {e}",
                         artifact.key
@@ -3272,9 +3815,9 @@ fn compile_layers(
                 ),
                 KnownField::asserted_by(
                     "space",
-                    shape.is_some(),
-                    "the layer declares no `[layer.shape]`, so its rows carry no geometry to be \
-                     in a space",
+                    carries_geometry,
+                    "the layer declares neither `[layer.shape]` nor an authored shape content, so \
+                     its rows carry no geometry to be in a space",
                 ),
                 KnownField::asserted_by(
                     "contents",
