@@ -507,47 +507,240 @@ fn an_unprojected_bundles_manifest_says_none_rather_than_omitting_the_field() {
     assert_eq!(bundle.manifest.views[0].projection, Projection::None);
 }
 
-/// **The report does not claim an empty edge when anything was clipped** (§7).
+/// The frame report for a stated longitude/latitude box, whatever the points are.
+fn report_over(points: &Path, extent: &Extent) -> String {
+    frame_view(
+        "world",
+        Projection::WebMercator,
+        extent,
+        points,
+        &geographic(),
+        None,
+    )
+    .expect("the frame resolves")
+    .report()
+}
+
+/// A box in degrees as a projected view's extent.
+fn lon_lat(lon: [f64; 2], lat: [f64; 2]) -> Extent {
+    Extent::LonLat(LonLatBox {
+        lon_min: lon[0],
+        lon_max: lon[1],
+        lat_min: lat[0],
+        lat_max: lat[1],
+    })
+}
+
+/// **A clipped point is reported on its own line, and the clamp count beside it is zero** (§7,
+/// §8).
 ///
-/// The sentence is derived from the clamp counter, and a clipped point is deliberately *not*
-/// clamped — it lands exactly where the quantisation rule says nothing is — so the counter alone
-/// would assert the opposite of the thing §7 exists to keep separate. ⊘ The clip line itself, and
-/// the report's projection and snap wording, are not written yet.
+/// This is the case the clamp counter structurally cannot see: clipping lands a point exactly on
+/// the frame's edge, which is where the quantisation rule says a point is *not* clamped. A second
+/// number on the clamp line would hand a real count to the wrong cause, and the sentence the
+/// clamp counter prints when it is zero must not call that edge empty.
 #[test]
-fn the_report_does_not_call_the_edge_empty_when_points_were_clipped() {
+fn the_report_counts_clipped_points_on_their_own_line_and_clamps_none() {
     let tmp = tempfile::tempdir().unwrap();
     let clipped = tmp.path().join("polar.parquet");
     write_points(&clipped, ("lon", "lat"), &[0.0, -0.1276], &[89.9, 51.5072]);
     let clean = tmp.path().join("temperate.parquet");
     write_points(&clean, ("lon", "lat"), &[0.0, -0.1276], &[45.0, 51.5072]);
 
-    let report = |points: &Path| {
-        frame_view(
-            "world",
-            Projection::WebMercator,
-            &whole_world(),
-            points,
-            &geographic(),
-            None,
-        )
-        .expect("the frame resolves")
-        .report()
-    };
+    let report = report_over(&clipped, &whole_world());
+    assert!(
+        report.contains(
+            "1 of 2 point(s) (50.0%) CLIPPED at web_mercator's ±85.0511287798066° domain"
+        ),
+        "the clip count, on its own line and in its own field: {report}"
+    );
+    assert!(
+        report.contains("2 point(s) placed, none clamped onto the frame's edge"),
+        "the clamp counter is zero, and says only what it can support: {report}"
+    );
+    assert!(
+        !report.contains("none on the frame's edge"),
+        "a clipped point is exactly on the edge: {report}"
+    );
+    assert!(
+        !report.contains("CLAMP onto"),
+        "nothing here is clamped: {report}"
+    );
 
-    let clipped_report = report(&clipped);
+    // The clip line is printed whether or not anything was clipped: a line an operator sees only
+    // when something is wrong makes its absence unreadable.
+    let clean = report_over(&clean, &whole_world());
     assert!(
-        !clipped_report.contains("none on the frame's edge"),
-        "a clipped point is exactly on the edge: {clipped_report}"
+        clean.contains("2 point(s) placed, none on the frame's edge"),
+        "{clean}"
     );
     assert!(
-        clipped_report.contains("none clamped onto the frame's edge"),
-        "what the clamp counter can actually support: {clipped_report}"
+        clean.contains("none of them outside web_mercator's ±85.0511287798066° domain, so \
+                        nothing was clipped"),
+        "{clean}"
     );
-    // And the sentence is unchanged where nothing was clipped, which is every corpus built so far.
+}
+
+/// **A majority-clipped corpus at a whole-world frame builds and is reported, never refused**
+/// (§7) — and at a **sub-square** frame the same rows are clamped as well, and the clamp refusal
+/// applies to them like any other out-of-frame row.
+///
+/// The two counts overlap rather than exclude each other. Clipping lands a point on the *world's*
+/// edge; a frame that does not reach that edge simply does not contain it. Carving a clipped
+/// point out of the clamp count would make a frame holding a quarter of its corpus pass.
+#[test]
+fn clipping_never_refuses_at_the_world_frame_and_still_clamps_at_a_sub_square() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("mostly-polar.parquet");
+    // Three beyond the domain and one ordinary, every longitude inside the sub-square below so
+    // that the sub-square's clamps are the clipped rows and nothing else.
+    let lons = [10.0, 10.0, 10.0, 20.0];
+    let lats = [89.9, 88.0, 86.0, 20.0];
+    write_points(&points, ("lon", "lat"), &lons, &lats);
+
+    let world = frame_view(
+        "world",
+        Projection::WebMercator,
+        &whole_world(),
+        &points,
+        &geographic(),
+        None,
+    )
+    .expect("the frame resolves");
+    assert_eq!(world.clipped(), 3);
     assert!(
-        report(&clean).contains("2 point(s) placed, none on the frame's edge"),
-        "{}",
-        report(&clean)
+        world.refusal().is_none(),
+        "three quarters clipped and nothing refused: {:?}",
+        world.refusal()
+    );
+    let report = world.report();
+    assert!(
+        report.contains("3 of 4 point(s) (75.0%) CLIPPED"),
+        "{report}"
+    );
+    assert!(
+        report.contains("4 point(s) placed, none clamped onto the frame's edge"),
+        "{report}"
+    );
+
+    // The same rows against a frame that does not reach the world's northern edge. The box
+    // avoids the equator and the prime meridian, which are tile boundaries at the first offset,
+    // so it reaches a sub-square at all (§4.1).
+    let sub = frame_view(
+        "world",
+        Projection::WebMercator,
+        &lon_lat([0.0, 45.0], [1.0, 45.0]),
+        &points,
+        &geographic(),
+        None,
+    )
+    .expect("the frame resolves");
+    assert_eq!(sub.extent.y_min, 0.25, "the z2 square (2, 1)");
+    assert_eq!(sub.clipped(), 3, "the same three rows are still clipped");
+    let refusal = sub.refusal().expect("three of four rows are outside this frame");
+    assert!(refusal.contains("3 of 4 point(s) (75.0%)"), "{refusal}");
+    let report = sub.report();
+    assert!(report.contains("3 of 4 point(s) (75.0%) CLAMP onto"), "{report}");
+    assert!(report.contains("3 of 4 point(s) (75.0%) CLIPPED"), "{report}");
+}
+
+/// **A frame the offset cap chose says so; one the box chose does not** (§4.2, §8).
+///
+/// A single point is contained in aligned squares at every offset without bound, so the cap
+/// answers rather than the box — and a caller whose frame did not come from their box is told
+/// which one they got.
+#[test]
+fn the_report_says_floored_only_where_the_cap_chose_the_frame() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("alps.parquet");
+    write_points(&points, ("lon", "lat"), &[8.0, 9.0], &[46.0, 47.0]);
+
+    let fitted = report_over(&points, &lon_lat([5.9, 10.5], [45.8, 47.8]));
+    assert!(fitted.contains("snapped outward to the square at"), "{fitted}");
+    assert!(!fitted.contains("FLOORED"), "{fitted}");
+
+    let floored = report_over(&points, &lon_lat([8.0, 8.0], [46.0, 46.0]));
+    assert!(
+        floored.contains("FLOORED at the offset cap rather than fitted: the square at z16"),
+        "{floored}"
+    );
+    assert!(!floored.contains("snapped outward"), "{floored}");
+}
+
+/// **The report names the projection, and prints the box asked for beside the frame taken**
+/// (§8).
+///
+/// Both in degrees and both raw, whether or not the difference is large: the snap is resolution
+/// the corpus does not get, and a caller who can see the two together is the one who can judge
+/// it. The square's address is hand-computed — `x = (lon + 180)/360` puts 5.9°E and 10.5°E in
+/// column 33 of 64, and the box's latitudes in row 22 — so it is the design's arithmetic and not
+/// this code's.
+#[test]
+fn the_report_names_the_projection_and_prints_the_box_beside_the_frame() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("alps.parquet");
+    write_points(&points, ("lon", "lat"), &[8.0, 9.0], &[46.0, 47.0]);
+
+    let report = report_over(&points, &lon_lat([5.9, 10.5], [45.8, 47.8]));
+    let first = report.lines().next().unwrap();
+    assert!(
+        first.starts_with("view 'world': web_mercator, quantising against x ["),
+        "{first}"
+    );
+    assert!(
+        report.contains("asked for lon [5.9, 10.5], lat [45.8, 47.8]"),
+        "{report}"
+    );
+    assert!(
+        report.contains("snapped outward to the square at z6 (33, 22), lon [5.625, 11.25], lat ["),
+        "the frame taken, in the units the box was written in: {report}"
+    );
+
+    // `auto` snaps the data's own box, and says so where the stated box would have gone.
+    let auto = report_over(&points, &Extent::AutoLonLat);
+    assert!(
+        auto.contains("`extent = \"auto\"` over the data's own box — snapped outward to the \
+                       square at z"),
+        "{auto}"
+    );
+}
+
+/// **An unprojected view's report is the report every build has always printed, to the word.**
+///
+/// `projection = "none"` is the default and every corpus, fixture and declaration in this
+/// repository is built under it. A projection line, a snap line or a clip line here would change
+/// the output of every existing build for a view that has no transform, no box in degrees and no
+/// domain to fall outside of.
+#[test]
+fn an_unprojected_views_report_is_word_for_word_the_report_it_has_always_been() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("plain.parquet");
+    write_points(
+        &points,
+        ("x", "y"),
+        &[-17.0, 0.0, 3.5, 17.75],
+        &[-20.5, 1.25, 0.0, 22.5],
+    );
+
+    let frame = frame_view(
+        "s0",
+        Projection::None,
+        &Extent::Fixed(Bounds {
+            x_min: -25.0,
+            x_max: 25.0,
+            y_min: -25.0,
+            y_max: 25.0,
+        }),
+        &points,
+        &Default::default(),
+        None,
+    )
+    .expect("the frame resolves");
+
+    assert_eq!(
+        frame.report(),
+        "view 's0': quantising against x [-25, 25], y [-25, 25]\n        the data spans x [-17, \
+         17.75], y [-20.5, 22.5] — 45549 x 56362 of the 65536 x 65536 cells\n        4 point(s) \
+         placed, none on the frame's edge"
     );
 }
 

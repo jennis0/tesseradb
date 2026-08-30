@@ -926,17 +926,39 @@ impl Frame {
     }
 
     /// **What the build says about this frame, every time, whether or not anything is wrong.**
-    /// The extent, the data's own bounds beside it, how much of the grid that leaves the data
-    /// occupying, and how many points land on the boundary rather than where they were written.
+    /// The projection that placed the points and the extent they were quantised across; for a
+    /// projected view the box the caller asked for and the square it snapped to; the data's own
+    /// bounds; how much of the grid that leaves the data occupying; how many points land on the
+    /// boundary rather than where they were written; and, on its own line, how many the
+    /// projection clipped at its own domain (`projections.md` §8).
     ///
     /// Reported rather than merely available: the whole defect this closes was a build that had
-    /// every one of these numbers and printed none of them.
+    /// every one of these numbers and printed none of them. **It never refuses** — the refusal
+    /// this frame may earn is [`Frame::refusal`], and clipping is not among its causes (§7).
     pub fn report(&self) -> String {
         let e = &self.extent;
-        let mut out = format!(
-            "view '{}': quantising against x [{}, {}], y [{}, {}]",
-            self.view, e.x_min, e.x_max, e.y_min, e.y_max
-        );
+        // **The projection is named beside the frame, and only where there is one.** Under
+        // `projection = "none"` this is the line every build has always printed, to the word: the
+        // view's coordinates are its file's own, and naming an absent transform would put a word
+        // in front of every existing corpus's frame for nothing.
+        let mut out = match self.projection {
+            Projection::None => format!(
+                "view '{}': quantising against x [{}, {}], y [{}, {}]",
+                self.view, e.x_min, e.x_max, e.y_min, e.y_max
+            ),
+            projection => format!(
+                "view '{}': {}, quantising against x [{}, {}], y [{}, {}]",
+                self.view,
+                projection.name(),
+                e.x_min,
+                e.x_max,
+                e.y_min,
+                e.y_max
+            ),
+        };
+        if let Some(snap) = &self.snap {
+            out.push_str(&self.snap_line(snap));
+        }
         let Some(survey) = self.coordinates() else {
             out.push_str(
                 "\n        points arrive as Morton codes, already placed in this frame — nothing \
@@ -965,8 +987,8 @@ impl Frame {
             // **The clamp counter alone cannot say the edge is empty.** A clipped point lands
             // exactly on the edge and is deliberately *not* clamped (`projections.md` §7), so
             // where anything was clipped this sentence would otherwise assert the opposite of the
-            // thing that section exists to keep separate. It narrows to the claim the counter can
-            // actually support; ⊘ the clip line itself is not written here.
+            // clip line two below it. It narrows to the claim the clamp counter can actually
+            // support, and the clip line makes the claim it cannot.
             let edge = if survey.clipped == 0 {
                 "none on the frame's edge"
             } else {
@@ -984,7 +1006,70 @@ impl Frame {
                 survey.clamped_y,
             ));
         }
+        // **Clipped points on their own line and in their own field** (`projections.md` §7). A
+        // clipped point is stored on the frame's edge, which is exactly where the clamp rule says
+        // a point is *not* clamped — so the counter above structurally cannot see one, and a
+        // second number on the clamp line would hand a real count to the wrong cause. Printed
+        // whether or not anything was clipped, for the same reason the frame is: silence has to
+        // mean *nothing was clipped* rather than *nobody counted*.
+        //
+        // Exactly where the projection has a domain to fall outside of, which is every entry in
+        // the set and not `none`.
+        if let Some(domain) = self.projection.max_latitude_deg() {
+            if survey.clipped == 0 {
+                out.push_str(&format!(
+                    "\n        none of them outside {}'s ±{domain}° domain, so nothing was clipped",
+                    self.projection.name()
+                ));
+            } else {
+                out.push_str(&format!(
+                    "\n        {} of {} point(s) ({:.1}%) CLIPPED at {}'s ±{domain}° domain — \
+                     stored on the frame's edge, not where they were written. Built anyway at any \
+                     proportion: the domain is the projection's own boundary and no frame moves \
+                     it, so a real tail beyond it is the wrong projection for this corpus rather \
+                     than the wrong frame",
+                    survey.clipped,
+                    survey.rows,
+                    survey.clipped as f64 / survey.rows as f64 * 100.0,
+                    self.projection.name(),
+                ));
+            }
+        }
         out
+    }
+
+    /// The box the caller asked for, the square it snapped to, and whether the offset cap chose
+    /// that square rather than the box (`projections.md` §4.2, §8).
+    ///
+    /// **Both boxes in degrees, at full precision, whether or not the difference is large.** The
+    /// snap is resolution the corpus does not get, and a caller who can see the box beside the
+    /// frame is the one who can judge that; rounding the frame's own corners would print two
+    /// different frames identically at the offsets where a cell is centimetres. The square's
+    /// address is the frame's exact identity either way, and it is the address `tessera check`
+    /// prints from the declaration alone (`crate::check::FramePreview`).
+    fn snap_line(&self, snap: &Snap) -> String {
+        let asked = match &self.asked {
+            Some(b) => format!(
+                "asked for lon [{}, {}], lat [{}, {}]",
+                b.lon_min, b.lon_max, b.lat_min, b.lat_max
+            ),
+            // `auto` on a projected view: the box snapped is the data's own, and the data's box
+            // is the line below this one.
+            None => "`extent = \"auto\"` over the data's own box".to_string(),
+        };
+        let how = if snap.floored {
+            "FLOORED at the offset cap rather than fitted: the square at"
+        } else {
+            "snapped outward to the square at"
+        };
+        // y runs south (`projections.md` §4), so the frame's minimum y is its maximum latitude.
+        let (lon_min, lat_max) = self.projection.inverse(self.extent.x_min, self.extent.y_min);
+        let (lon_max, lat_min) = self.projection.inverse(self.extent.x_max, self.extent.y_max);
+        format!(
+            "\n        {asked} — {how} z{} ({}, {}), lon [{lon_min}, {lon_max}], lat [{lat_min}, \
+             {lat_max}]",
+            snap.square.z, snap.square.x, snap.square.y
+        )
     }
 
     /// The refusal this frame earns, if any: past [`CLAMP_REFUSAL_FRACTION`] the frame is not
