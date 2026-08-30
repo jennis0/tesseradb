@@ -3590,7 +3590,7 @@ mod tests {
     /// by design, and does nothing at all unless that parent set `POOL_PANIC_CHILD` — an
     /// `--ignored` sweep must not take a test binary down with it.
     #[test]
-    #[ignore]
+    #[ignore = "child half of the pool-panic test: inert unless the parent set POOL_PANIC_CHILD"]
     fn the_pool_panic_child() {
         if std::env::var_os(POOL_PANIC_CHILD).is_none() {
             return;
