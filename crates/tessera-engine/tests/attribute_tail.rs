@@ -145,7 +145,9 @@ fn write_points_with_attributes(path: &Path, n: u64) {
 fn parse_schema(tmp: &Path) -> Schema {
     let path = tmp.join("schema.toml");
     std::fs::write(&path, SCHEMA_TOML).unwrap();
-    Config::parse(&path, &std::collections::HashMap::new()).map(|c| c.schema).expect("the fixture schema parses")
+    Config::parse(&path, &std::collections::HashMap::new())
+        .map(|c| c.schema)
+        .expect("the fixture schema parses")
 }
 
 /// Build a fixture bundle carrying the attribute tail.
@@ -156,14 +158,18 @@ fn build_fixture_with_attributes(out: &Path, tmp: &Path, n: u64) {
     write_pairs_n(&pairs, n);
     let schema = parse_schema(tmp);
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -327,7 +333,10 @@ fn a_build_emits_the_declared_tail_and_records_its_vocabulary() {
         .iter()
         .find(|v| v.name == "band")
         .expect("the declared vocabulary reaches the manifest");
-    assert_eq!(vocabulary.visibility, tessera_store::manifest::Visibility::Public);
+    assert_eq!(
+        vocabulary.visibility,
+        tessera_store::manifest::Visibility::Public
+    );
     let codes: BTreeMap<&str, u32> = vocabulary
         .values
         .iter()
@@ -376,17 +385,18 @@ fn both_build_implementations_write_the_same_tail() {
     write_pairs_n(&pairs, 2_000);
     let schema = parse_schema(tmp.path());
     let args_for = |out: &Path| BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.clone(),
-        attribute_sources: tessera_build::config::AttributeSource::over(
-            points.clone(),
-            &schema,
-        ),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -861,14 +871,18 @@ fn build_non_prefix_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the non-prefix fixture schema parses");
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -988,7 +1002,11 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
         out.scalar_names.len(),
         "one buffer per name: the two lists zip positionally on the wire"
     );
-    assert_eq!(out.points.len(), 513, "every row of both segments is served");
+    assert_eq!(
+        out.points.len(),
+        513,
+        "every row of both segments is served"
+    );
     let flushed_id = engine.tessera_id_of(flushed_entity).unwrap();
     assert!(
         out.points.iter().any(|(id, _)| id == flushed_id),
@@ -997,8 +1015,12 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
 
     // Read by name, exactly as a client does; truth joined by identity from the segments.
     let truth = non_prefix_tail_by_identity(&root);
-    let position =
-        |name: &str| out.scalar_names.iter().position(|n| n.as_str() == name).unwrap();
+    let position = |name: &str| {
+        out.scalar_names
+            .iter()
+            .position(|n| n.as_str() == name)
+            .unwrap()
+    };
     let band = match &out.points.scalars[position("band")] {
         ColumnBuf::U8(v) => v,
         other => panic!("the column named 'band' must be u8, found {other:?}"),
@@ -1009,8 +1031,14 @@ fn a_non_prefix_render_declaration_serves_every_column_under_its_own_name() {
     };
     for (row, (id, _)) in out.points.iter().enumerate() {
         let (expected_band, expected_score) = truth[&id.raw()];
-        assert_eq!(band[row], expected_band, "row {row}'s band, under its own name");
-        assert_eq!(score[row], expected_score, "row {row}'s score, under its own name");
+        assert_eq!(
+            band[row], expected_band,
+            "row {row}'s band, under its own name"
+        );
+        assert_eq!(
+            score[row], expected_score,
+            "row {row}'s score, under its own name"
+        );
     }
 
     // A counts-only request seeds its empty columns from the same render schema the gather
@@ -1064,14 +1092,7 @@ fn a_drill_down_assembles_the_non_prefix_declaration_by_name() {
             ["audit", "band", "score"],
             "{label}: every declared column has a value in some home, in declared order"
         );
-        let value = |name: &str| {
-            &served
-                .fields
-                .iter()
-                .find(|f| f.name == name)
-                .unwrap()
-                .value
-        };
+        let value = |name: &str| &served.fields.iter().find(|f| f.name == name).unwrap().value;
         assert_eq!(
             value("audit"),
             &tessera_engine::ScalarOut::I64(audit),
@@ -1179,7 +1200,6 @@ fn tier_code_of(entity: u64) -> u8 {
     (entity % 3) as u8 + 1
 }
 
-
 /// The blob row the fixture's generation functions predict for `source`: `note` is declared at
 /// position 1 and `revision` at position 2, and the field tag **is** the declared position
 /// (records §3) — the same identity the build's blob stage and the flush's extent writer share.
@@ -1256,14 +1276,18 @@ fn build_record_fixture(out: &Path, tmp: &Path, n: u64) {
         .map(|c| c.schema)
         .expect("the record fixture schema parses");
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1380,7 +1404,12 @@ fn a_flushed_record_extent_round_trips_through_the_stack() {
         .fields
         .iter()
         .find(|f| f.name == "note")
-        .unwrap_or_else(|| panic!("the flushed item carries no `note` field: {:?}", served.fields));
+        .unwrap_or_else(|| {
+            panic!(
+                "the flushed item carries no `note` field: {:?}",
+                served.fields
+            )
+        });
     assert_eq!(
         note.value,
         tessera_engine::ScalarOut::Utf8("the-flushed-note".to_string()),

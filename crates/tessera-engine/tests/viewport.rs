@@ -21,13 +21,13 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+use sha2::Digest;
 use tessera_build::{build, BuildArgs};
 use tessera_engine::viewport::{ViewportRequest, SERIAL_FALLBACK_MAX_ROWS};
 use tessera_engine::{
     default_compute_threads, CancelToken, Engine, EngineConfig, EngineError, Session,
 };
 use tessera_lifecycle::wal::{ChangeOp, Wal, WalRecord};
-use sha2::Digest;
 use tessera_plugin::{Passthrough, Plugin};
 use tessera_spatial::{morton_of, tiles_for_bbox, Bounds};
 use tessera_store::read::open_bundle;
@@ -788,14 +788,18 @@ fn item_drill_down_works_on_a_bundle_with_no_external_id_sidecar() {
     write_points_n(&tmp.path().join("points.parquet"), N_ITEMS);
     write_pairs_n(&tmp.path().join("pairs.parquet"), N_ITEMS);
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: tmp.path().join("points.parquet"),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: tmp.path().join("points.parquet"),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(tmp.path().join("pairs.parquet")),
         out: bundle_root.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -1297,21 +1301,27 @@ fn latency_sanity_at_2_4m_p99_under_50ms() {
     let bundle_root = PathBuf::from("/tmp/tessera-2m4");
     if !bundle_root.join("CURRENT").exists() {
         let args = BuildArgs {
-            projection: tessera_spatial::Projection::None,
-            point_fields: Default::default(),
-            points: PathBuf::from("data/scaled/geometry.parquet"),
+            views: vec![tessera_build::ViewArgs {
+                view_id: "s0".to_string(),
+                projection: tessera_spatial::Projection::None,
+                // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes,
+                // not coordinates (`read_points`'s Morton branch requires this exact extent).
+                extent: Bounds {
+                    x_min: 0.0,
+                    x_max: 65536.0,
+                    y_min: 0.0,
+                    y_max: 65536.0,
+                },
+                points: PathBuf::from("data/scaled/geometry.parquet"),
+                point_fields: Default::default(),
+                access: tessera_build::config::AccessInput::relation(PathBuf::from(
+                    "data/scaled/pairs/categories-subclass.pairs.parquet",
+                )),
+            }],
+            anchor: 0,
+            groups: Vec::new(),
             attribute_sources: Vec::new(),
-            access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
             out: bundle_root.clone(),
-            // Identity extent (contracts §2.5 grid): `geometry.parquet` stores Morton codes, not
-            // coordinates (`read_points`'s Morton branch requires this exact extent).
-            extent: Bounds {
-                x_min: 0.0,
-                x_max: 65536.0,
-                y_min: 0.0,
-                y_max: 65536.0,
-            },
-            view_id: "s0".to_string(),
             limit: Some(ITEM_LIMIT),
             identity_key: test_key(),
             identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -2782,7 +2792,10 @@ fn viewport_output_is_byte_identical_at_compute_threads_1_and_8_below_the_serial
 #[derive(Default)]
 struct RecordingSink {
     head: Option<tessera_engine::ViewportHead>,
-    counts: Option<(Vec<tessera_engine::TileCount>, Option<Vec<tessera_engine::SubCellCount>>)>,
+    counts: Option<(
+        Vec<tessera_engine::TileCount>,
+        Option<Vec<tessera_engine::SubCellCount>>,
+    )>,
     artifacts: Option<Vec<tessera_engine::ArtifactOut>>,
     chunks: Vec<tessera_engine::PointColumns>,
     /// When `Some(n)`, the nth callback overall refuses with `SinkClosed`.

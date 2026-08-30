@@ -1,10 +1,13 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r7) — **spec §2's per-view extent is built** (r7, 2026-08-30; contracts
-r52, decision 0040): the extent moved off the bundle onto `ViewDescriptor` and into each
-`/v1/meta` `views` entry, with no fallback, and §2's ⊘ marker records what remains instead of
-what was missing. No design changes; the marker does. Promoted at r6 on 2026-08-30 after the
+**Status:** Normative (r9) — **spec §7's two passes are built for the point half** (r9,
+2026-08-30): a build materialises every plain view and every inline-declared view of a group,
+over one entity space unioned from their sources, ordered by the declared anchor (decision 0112).
+What the build cannot yet enumerate refuses by name; the markers at spec §1, §7 and §8 say which.
+Spec §2's per-view extent was built at r7 (contracts r52, decision 0040): the extent moved off the
+bundle onto `ViewDescriptor` and into each `/v1/meta` `views` entry, with no fallback. No design
+changes in either revision; the markers do. Promoted at r6 on 2026-08-30 after the
 two-lens review (security, implementability); the findings and their dispositions are Appendix
 R's r6 entry. §11's amendments to the wider corpus are scheduled work, and the ⊘ markers say what
 exists meanwhile.
@@ -56,12 +59,19 @@ non-sentinel, never a stored set.
 > **⊘ Partially implemented.** Everything is keyed per view — the manifest's `views` registry,
 > `partitions/<p>/views/<view>/` with its own permutation and segments, `WalRow.view`, one flush
 > segment and one fold plan per view, `view` on every viewer verb, `(view, layer, level)` on every
-> artifact extent, a per-view projection. What has never existed is a bundle with **two** views:
-> `tessera build` materialises exactly one and refuses a declaration with several, so nothing
-> downstream has been run against more than one. The build (spec §7), the second-view join
-> (spec §4), groups and scoped attributes (spec §3, §5) and the gate (spec §6) are what remain,
-> and each is marked where it is claimed. The per-view extent (spec §2) is **built** — it was
-> taken first, so the manifest shape was settled before anything depended on it.
+> artifact extent, a per-view projection. The per-view extent (spec §2) is **built** — it was
+> taken first, so the manifest shape was settled before anything depended on it — and so, since
+> 2026-08-30, is **the two-pass build of the point half** (spec §7): `tessera build` materialises
+> every plain `[[view]]` and every inline-declared view of every `[[view_group]]`, unions entity
+> space over their sources, refuses a label that disagrees between them, allocates against the
+> declared anchor (decision 0112), and writes a row space each. The roster is published in the
+> manifest and validated at open.
+>
+> What remains of the build is named at spec §3.1, §5 and §3.5: a roster **table** or a
+> **discriminator** group (the keys are rows of a file, not blocks of the declaration), a group's
+> points selected out of a shared file by `fields.view`, a group-scoped attribute's column family,
+> and a layer drawn on a group. Each refuses by name. Above the build, the second-view join
+> (spec §4) and the gate (spec §6) are untouched.
 
 ## 2. A view
 
@@ -504,8 +514,23 @@ ingest is what groups are for. r4's `--attach-view` — a build-plane backfill o
 existing corpus, the other views carried by manifest reference — is withdrawn with it; if the
 need arrives the design is in git.
 
-> **⊘ Specified, not implemented — the multi-view build and its two passes.** The build takes
-> `--view` and materialises one; a second view cannot be populated (spec §4).
+> **⊘ Partially implemented — the two passes are built for the point half.** `--view` is gone and
+> a build materialises every view the declaration enumerates: pass one unions `(external_id,
+> label)` over every view's source, refuses a disagreement naming the entity and the files, and
+> allocates against `[defaults].allocation_view`, whose absence is a refusal listing the
+> candidates; pass two transforms, quantises against each view's own frame, Morton-sorts and
+> writes each row space, a view's permutation being sentinel wherever it does not hold the entity.
+> What a build cannot yet enumerate it **refuses by name** rather than dropping: a roster table, a
+> discriminator group, a group's points behind a `fields.view` discriminator, a group-scoped
+> attribute (spec §5), a layer naming a group (spec §3.5), and an `auto` frame on a group — which
+> is fitted per file and would give each of a group's views its own box, where spec §3.1 gives
+> them one. Populating a view at ingest is spec §4's join rule, still unimplemented.
+>
+> **The registry's order is the declaration's, block kind by block kind**: the plain `[[view]]`
+> blocks in declaration order, then each `[[view_group]]` in declaration order with its views in
+> roster order. `Config` holds the two block kinds in separate lists, so their interleaving in the
+> document is not recoverable — which matters only to the fallback for an item absent from the
+> anchor, and is stated here rather than left to be inferred.
 
 ## 8. Cost
 
@@ -518,6 +543,11 @@ choices below.
   representation abstract for this reason, and a **paged permutation** — a directory over
   2¹⁶-entry pages, an absent page meaning all-sentinel — is every view's representation (owner
   ruling 2026-08-30), a flat array being the degenerate case with every page present.
+
+  > **⊘ The flat array is what is written.** A sparse view is correct — every entity the view does
+  > not hold reads the row-absent sentinel — and costs the full `4 × max(entity id)` bytes. The
+  > paged form is a representation change behind `Permutation`, and the multi-view build that
+  > makes it worth having landed first.
 - **The projected mask is per `(token, view, segments version)`**, so a session scrubbing through
   a group's views holds one projection per view touched. The filter-result cache
   (`filter-result-cache.md`) is view-independent by construction and is unaffected.
@@ -749,6 +779,16 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r9 (2026-08-30)** — spec §7's two passes are implemented for the point half, and the markers
+  at spec §1, §7 and §8 record what did and did not move. `tessera build` materialises every
+  plain view and every inline-declared view of a group; `[defaults].allocation_view` is read and
+  refused absent; the label-agreement rule is a refusal naming the entity and the files, made
+  exact by a count identity rather than a hash; the roster is published in the manifest and
+  validated at open; `views/<group>/<key>/` is derived from the joined id by one function every
+  path consumer goes through. Not moved, and each refusing by name: a roster table, a
+  discriminator group, a `fields.view` selection, a group-scoped attribute's column family, a
+  layer over a group, and the paged permutation (spec §8) — the flat array is what a sparse view
+  is written as.
 - **r7 (2026-08-30)** — spec §2's extent move is implemented, and the marker inverted: the
   bundle-level `Manifest.quantisation` is deleted, `ViewDescriptor` and each `/v1/meta` `views`
   entry carry the frame, and a manifest whose view omits it refuses at open with no fallback

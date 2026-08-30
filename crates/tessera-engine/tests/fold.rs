@@ -110,14 +110,18 @@ fn build_fixture_with_sparse_term(out: &Path, points_path: &Path, pairs_path: &P
     write_points_n(points_path, N_ITEMS);
     write_pairs_with_sparse_term(pairs_path, N_ITEMS);
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points_path.to_path_buf(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points_path.to_path_buf(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs_path.to_path_buf()),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         // No declared columns: this fixture's subject is the sparse *term*, not the scalar tail,
         // and an empty schema is what `common`'s builder uses for the same reason.
         schema: Default::default(),

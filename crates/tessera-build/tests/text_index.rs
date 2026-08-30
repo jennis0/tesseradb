@@ -59,7 +59,9 @@ fn write_points(path: &Path) {
                 ids.iter().map(|e| (e % 100) as f64).collect::<Vec<_>>(),
             )),
             Arc::new(Float64Array::from(
-                ids.iter().map(|e| ((e * 7) % 100) as f64).collect::<Vec<_>>(),
+                ids.iter()
+                    .map(|e| ((e * 7) % 100) as f64)
+                    .collect::<Vec<_>>(),
             )),
             Arc::new(StringArray::from(
                 ids.iter().map(|&e| Some(prose_of(e))).collect::<Vec<_>>(),
@@ -115,19 +117,23 @@ fn build_with(schema: Schema) -> tempfile::TempDir {
     write_empty_pairs(&pairs);
     let out = dir.path().join("bundle");
     build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        points,
-        access: tessera_build::config::AccessInput::relation(pairs),
         out,
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 1000.0,
-            y_min: 0.0,
-            y_max: 1000.0,
-        },
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -372,7 +378,11 @@ fn match_and_minimum_should_match_answer_from_the_index() {
         expected(&|t| t.iter().any(|x| x == "quick") && t.iter().any(|x| x == "fox")),
         "match is a conjunction"
     );
-    assert_eq!(got(m("fox quick", None)), got(m("quick fox", None)), "order is not a term");
+    assert_eq!(
+        got(m("fox quick", None)),
+        got(m("quick fox", None)),
+        "order is not a term"
+    );
 
     // A token no document carries makes the conjunction empty — and does not make it *everything*,
     // which is what a short circuit that skipped an unresolved token would produce.
@@ -387,7 +397,11 @@ fn match_and_minimum_should_match_answer_from_the_index() {
     assert_eq!(
         got(m("quick brown zzzznope", Some(2))),
         expected(&|t| {
-            [ "quick", "brown" ].iter().filter(|w| t.iter().any(|x| &x == w)).count() >= 2
+            ["quick", "brown"]
+                .iter()
+                .filter(|w| t.iter().any(|x| &x == w))
+                .count()
+                >= 2
         }),
         "an absent token keeps its place in the denominator"
     );
@@ -395,8 +409,14 @@ fn match_and_minimum_should_match_answer_from_the_index() {
     // The query is analysed by the column's analyser, so a fullwidth or uppercase query finds the
     // same documents a plain one does — the property that a wire-side tokeniser would put at risk.
     assert_eq!(got(m("QUICK", None)), got(m("quick", None)));
-    assert_eq!(got(m("日本語", None)), expected(&|t| t.iter().any(|x| x == "日本語")));
-    assert!(!got(m("日本語", None)).is_empty(), "the CJK term is findable");
+    assert_eq!(
+        got(m("日本語", None)),
+        expected(&|t| t.iter().any(|x| x == "日本語"))
+    );
+    assert!(
+        !got(m("日本語", None)).is_empty(),
+        "the CJK term is findable"
+    );
 }
 
 /// **The candidate bounds the answer.** Postings are corpus-wide; nothing derived from them may
@@ -417,16 +437,25 @@ fn match_never_answers_outside_the_candidate() {
     };
     let all: croaring::Bitmap = (0..N).map(|e| source_of[&e]).collect();
     let wide = columns.resolve("abstract", &everything, &all).unwrap();
-    assert!(wide.cardinality() > 2, "the fixture must have something to narrow");
+    assert!(
+        wide.cardinality() > 2,
+        "the fixture must have something to narrow"
+    );
 
     // Two entities only, one of which carries the term.
     let narrow_mask: croaring::Bitmap = [source_of[&0], source_of[&3]].into_iter().collect();
-    let narrow = columns.resolve("abstract", &everything, &narrow_mask).unwrap();
+    let narrow = columns
+        .resolve("abstract", &everything, &narrow_mask)
+        .unwrap();
     assert!(
         narrow.andnot(&narrow_mask).is_empty(),
         "the answer named an entity the candidate did not"
     );
-    assert_eq!(narrow.cardinality(), 1, "source 0 carries `quick`, source 3 does not");
+    assert_eq!(
+        narrow.cardinality(),
+        1,
+        "source 0 carries `quick`, source 3 does not"
+    );
 }
 
 fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
@@ -596,14 +625,20 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
         v.sort_unstable();
         v
     };
-    let phrase = |q: &str| FilterOperand::Phrase { query: q.to_string() };
+    let phrase = |q: &str| FilterOperand::Phrase {
+        query: q.to_string(),
+    };
     // The oracle: the corpus's own prose, analysed and searched for the word sequence. Upstream of
     // anything the build stored, which is the relation every assertion in this file checks against.
     let saying = |words: &[&str]| -> Vec<u64> {
         let a = tessera_analyse::Analyser::new();
         let want: Vec<String> = words.iter().map(|w| w.to_string()).collect();
         (0..N)
-            .filter(|e| a.tokens(&prose_of(*e)).windows(want.len()).any(|w| w == want))
+            .filter(|e| {
+                a.tokens(&prose_of(*e))
+                    .windows(want.len())
+                    .any(|w| w == want)
+            })
             .collect()
     };
     let matches = |q: &str| FilterOperand::Match {
@@ -631,9 +666,15 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
     assert!(!sources(phrase("fox brown")).contains(&0));
 
     // At the very start and the very end of a document, which is where a window walk goes wrong.
-    assert!(sources(phrase("the quick")).contains(&0), "the first two words");
+    assert!(
+        sources(phrase("the quick")).contains(&0),
+        "the first two words"
+    );
     assert!(sources(phrase("silver fox")).contains(&1));
-    assert!(sources(phrase("brown bear")).contains(&3), "the whole document");
+    assert!(
+        sources(phrase("brown bear")).contains(&3),
+        "the whole document"
+    );
     // And exhaustively, against the corpus's own prose rather than against three spot checks: the
     // route's answer *is* the set of documents saying the words in that order.
     for probe in [
@@ -677,7 +718,10 @@ fn a_phrase_matches_only_where_the_words_are_adjacent_and_in_order() {
 
     // The query is analysed by the column's own analyser here exactly as for `match`, so case and
     // width fold, and a CJK phrase works without spaces to split on.
-    assert_eq!(sources(phrase("QUICK BROWN")), sources(phrase("quick brown")));
+    assert_eq!(
+        sources(phrase("QUICK BROWN")),
+        sources(phrase("quick brown"))
+    );
     assert!(
         !sources(phrase("日本語のテキスト")).is_empty(),
         "a CJK phrase is a sequence of segmented words, not one token"
@@ -718,9 +762,16 @@ fn a_phrase_never_answers_or_reads_outside_the_candidate() {
         got.andnot(&narrow).is_empty(),
         "the answer named an entity the candidate did not"
     );
-    assert_eq!(got.cardinality(), 1, "source 0 carries the phrase, source 3 does not");
+    assert_eq!(
+        got.cardinality(),
+        1,
+        "source 0 carries the phrase, source 3 does not"
+    );
 
     // A candidate holding no carrier answers empty rather than reading anything.
     let none: croaring::Bitmap = [source_of[&3]].into_iter().collect();
-    assert!(columns.resolve("abstract", &operand, &none).unwrap().is_empty());
+    assert!(columns
+        .resolve("abstract", &operand, &none)
+        .unwrap()
+        .is_empty());
 }

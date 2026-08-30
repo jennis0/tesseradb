@@ -117,17 +117,24 @@ render     = true
 "#;
 
 fn args(dir: &Path, config: &Config, out: PathBuf) -> BuildArgs {
-    let acquired = config.acquire("s0").expect("the view acquires its inputs");
+    let acquired = config.acquire().expect("the view acquires its inputs");
+    let registry = config.build_views().expect("the registry compiles");
+    let acquired_view =
+        tessera_build::config::acquire_view(&registry[0]).expect("the view acquires its inputs");
     let _ = dir;
     BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        points: acquired.points,
-        point_fields: acquired.point_fields,
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: acquired_view.points,
+            point_fields: acquired_view.point_fields,
+            access: acquired_view.access,
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: acquired.attribute_sources,
-        access: acquired.access,
         out,
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -157,7 +164,8 @@ fn a_build_reads_the_columns_the_declaration_named() {
     write_moved_points(&dir.path().join("points.parquet"));
     write_pairs(&dir.path().join("pairs.parquet"));
     let config = parse(dir.path(), MOVED);
-    let report = build(&args(dir.path(), &config, dir.path().join("out"))).expect("the build reads");
+    let report =
+        build(&args(dir.path(), &config, dir.path().join("out"))).expect("the build reads");
     assert_eq!(report.items, N);
     // Three departments, minted from a column the canonical name would never have found.
     let bundle = tessera_store::open_bundle(&dir.path().join("out")).expect("the bundle opens");
@@ -198,7 +206,10 @@ fn an_attribute_field_absent_from_the_corpus_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     write_moved_points(&dir.path().join("points.parquet"));
     write_pairs(&dir.path().join("pairs.parquet"));
-    let config = parse(dir.path(), &MOVED.replace("field      = \"dept\"", "field      = \"team\""));
+    let config = parse(
+        dir.path(),
+        &MOVED.replace("field      = \"dept\"", "field      = \"team\""),
+    );
     let message = format!(
         "{}",
         build(&args(dir.path(), &config, dir.path().join("out"))).expect_err("expected a refusal")
@@ -242,7 +253,7 @@ fn a_moved_geometry_name_does_not_fall_through_to_the_other_shape() {
             &extent(),
             None,
         )
-            .expect_err("expected a refusal")
+        .expect_err("expected a refusal")
     );
     assert!(message.contains("field `x`"), "{message}");
     assert!(message.contains("entity_id, morton"), "{message}");

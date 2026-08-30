@@ -56,8 +56,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use arrow::array::{
-    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array,
-    ListArray, StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, FixedSizeListArray, Int16Array, Int32Array, Int64Array, Int8Array, ListArray,
+    StringArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -623,7 +623,11 @@ pub fn read(
         if let Some((slot, kind)) = declaration.authored_shape() {
             let content_name = declaration.content.supplied[slot].name.clone();
             let mut reader = ShapeReader::new(
-                &format!("{} (authored `{}` content '{content_name}')", input.name, kind.as_str()),
+                &format!(
+                    "{} (authored `{}` content '{content_name}')",
+                    input.name,
+                    kind.as_str()
+                ),
                 kind,
                 ShapeContext {
                     extent: *extent,
@@ -824,22 +828,22 @@ fn read_artifacts(
             };
             let index = plan.intern(address.clone());
             plan.bodies[index] = PlannedArtifact {
-                    membership,
-                    contents: match contents.as_ref() {
-                        None => Vec::new(),
-                        Some(column) => ranked_at(path, column, row, &address.2)?,
-                    },
-                    attached_to: attachment,
-                    parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
-                    shape: match (shapes.as_deref_mut(), shape_columns.as_ref()) {
-                        (Some(reader), Some(columns)) => reader.row(
-                            &address.2,
-                            columns.at(path, row, &address.2)?,
-                            space_at(spaces, row),
-                        )?,
-                        _ => None,
-                    },
-                    space: space_at(spaces, row).map(str::to_string),
+                membership,
+                contents: match contents.as_ref() {
+                    None => Vec::new(),
+                    Some(column) => ranked_at(path, column, row, &address.2)?,
+                },
+                attached_to: attachment,
+                parent_key: parent.as_ref().and_then(|c| value_at(c, row)),
+                shape: match (shapes.as_deref_mut(), shape_columns.as_ref()) {
+                    (Some(reader), Some(columns)) => reader.row(
+                        &address.2,
+                        columns.at(path, row, &address.2)?,
+                        space_at(spaces, row),
+                    )?,
+                    _ => None,
+                },
+                space: space_at(spaces, row).map(str::to_string),
             };
         }
     }
@@ -884,46 +888,46 @@ fn plan_inline(
         };
         let index = plan.intern(address);
         plan.bodies[index] = PlannedArtifact {
-                membership: match (&row.members, &row.excluding) {
-                    // Both is refused at parse, where the declaration can name the artifact.
-                    (Some(members), _) => PlannedMembership::Included(members.clone()),
-                    (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
-                    (None, None) => PlannedMembership::default(),
-                },
-                contents: row
-                    .contents
-                    .iter()
-                    .map(|values| PlannedContent {
-                        values: values.clone(),
-                        generated_from: Vec::new(),
-                    })
-                    .collect(),
-                attached_to,
-                parent_key: row.parent.clone(),
-                shape: match shapes.as_deref_mut() {
-                    Some(reader) => {
-                        let input = inline_shape(row, reader.kind())
-                            .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
-                        reader.row(&row.key, input, row.space.as_deref())?
-                    }
-                    None => {
-                        if row.bbox.is_some()
-                            || row.circle.is_some()
-                            || row.ellipse.is_some()
-                            || row.wkt.is_some()
-                        {
-                            return Err(BuildError::Invalid(format!(
-                                "layer '{layer}': artifact {} carries a shape, and the layer \
+            membership: match (&row.members, &row.excluding) {
+                // Both is refused at parse, where the declaration can name the artifact.
+                (Some(members), _) => PlannedMembership::Included(members.clone()),
+                (_, Some(excluding)) => PlannedMembership::Excluded(excluding.clone()),
+                (None, None) => PlannedMembership::default(),
+            },
+            contents: row
+                .contents
+                .iter()
+                .map(|values| PlannedContent {
+                    values: values.clone(),
+                    generated_from: Vec::new(),
+                })
+                .collect(),
+            attached_to,
+            parent_key: row.parent.clone(),
+            shape: match shapes.as_deref_mut() {
+                Some(reader) => {
+                    let input = inline_shape(row, reader.kind())
+                        .map_err(|e| BuildError::Invalid(format!("layer '{layer}': {e}")))?;
+                    reader.row(&row.key, input, row.space.as_deref())?
+                }
+                None => {
+                    if row.bbox.is_some()
+                        || row.circle.is_some()
+                        || row.ellipse.is_some()
+                        || row.wkt.is_some()
+                    {
+                        return Err(BuildError::Invalid(format!(
+                            "layer '{layer}': artifact {} carries a shape, and the layer \
                                  declares no `[layer.shape]`. Its members come from the stored \
                                  set its membership names, so a shape beside them is a region \
                                  nothing evaluates",
-                                row.key
-                            )));
-                        }
-                        None
+                            row.key
+                        )));
                     }
-                },
-                space: row.space.clone(),
+                    None
+                }
+            },
+            space: row.space.clone(),
         };
     }
     Ok(())
@@ -1233,11 +1237,7 @@ fn record_lineage(
 /// **A parent already on the artifact row must be the same one**: a `parent` column and a lineage
 /// column are two spellings of one edge, and an artifact holding a different parent in each is the
 /// same conflict as two points disagreeing.
-fn apply_lineage(
-    plan: &mut LayerPlan,
-    lineage: BTreeMap<usize, usize>,
-    path: &Path,
-) -> Result<()> {
+fn apply_lineage(plan: &mut LayerPlan, lineage: BTreeMap<usize, usize>, path: &Path) -> Result<()> {
     // **Applied in address order, not arena order.** The conflict below is a refusal, and which of
     // several a corpus carries is reported must not depend on the order keys happened to be met —
     // it is the order they sort in, which is what it has always been. One sort of at most one entry
@@ -1304,7 +1304,7 @@ pub fn publish(
     high_water: u64,
     prefix_dir: &Path,
     partition: &str,
-    view: &str,
+    views: &[String],
     derived: &BTreeMap<String, Vec<String>>,
 ) -> Result<PublishedLayers> {
     let mut registry = LayerRegistry::new();
@@ -1317,11 +1317,16 @@ pub fn publish(
         // appears only in the views it declares, so a mistyped view name would produce a bundle
         // whose layer is registered, reachable, and serves nothing — indistinguishable, from every
         // client, from a layer whose artifacts all failed their existence criterion.
-        if let Some(unknown) = declaration.views.iter().find(|s| s.as_str() != view) {
+        if let Some(unknown) = declaration
+            .views
+            .iter()
+            .find(|declared| !views.contains(declared))
+        {
             return Err(BuildError::Invalid(format!(
-                "layer {name} declares view {unknown}, and this build writes view {view}. A layer \
+                "layer {name} declares view {unknown}, and this build writes {}. A layer \
                  in a view this build does not write is registered, reachable and empty, which no \
-                 client can tell from one whose artifacts were all withheld"
+                 client can tell from one whose artifacts were all withheld",
+                views.join(", ")
             )));
         }
         let record = registry
@@ -2601,7 +2606,6 @@ fn optional_ranked_values<'a>(
     optional_list(path, batch, fields, canonical)
 }
 
-
 fn value_at(column: &StringArray, row: usize) -> Option<String> {
     (!column.is_null(row)).then(|| column.value(row).to_string())
 }
@@ -3377,7 +3381,11 @@ mod tests {
     fn the_merge_gathers_an_artifact_from_every_run_that_holds_it() {
         let temp = tempfile::TempDir::new().unwrap();
         let receipts = vec![
-            run(temp.path(), 0, &[(0, vec![5, 9]), (2, vec![1]), (7, vec![4])]),
+            run(
+                temp.path(),
+                0,
+                &[(0, vec![5, 9]), (2, vec![1]), (7, vec![4])],
+            ),
             run(temp.path(), 1, &[(0, vec![3]), (7, vec![4, 6])]),
             run(temp.path(), 2, &[(1, vec![8])]),
         ];

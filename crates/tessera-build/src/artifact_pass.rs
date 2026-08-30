@@ -49,9 +49,9 @@ use std::time::Instant;
 use croaring::Bitmap;
 use tessera_authz::postings::{PostingRef, PostingsReader};
 use tessera_lifecycle::membership::ArtifactStore;
+use tessera_plugin::Plugin;
 use tessera_store::derived::{resolve_segment, HeldShape, ShapeIndex};
 use tessera_store::read::{ColumnsRef, MortonSlice, SegmentData};
-use tessera_plugin::Plugin;
 // The derived structures' writer half lives beside the formats it writes; the alias is what keeps
 // the call sites below reading as what they do rather than as which file they are in.
 use tessera_store::derived;
@@ -146,8 +146,25 @@ pub fn run(
     // walks are `Fn` closures.
     let scratch = std::cell::RefCell::new(ProjectScratch::default());
 
+    // **Only the layers drawn on this view.** A layer appears in the views it declares and no
+    // others (`views.md` §3.5), so a pass over a view a layer does not name would write that
+    // layer an extent in a row space it is not drawn in — which the serving path would then
+    // answer from.
+    let drawn: std::collections::BTreeSet<&str> = published
+        .layers
+        .iter()
+        .filter(|layer| {
+            layer
+                .declaration
+                .views
+                .iter()
+                .any(|declared| declared == view)
+        })
+        .map(|layer| layer.declaration.name.as_str())
+        .collect();
     let levels: Vec<(String, u32)> = store
         .levels_and_extents()
+        .filter(|(layer, _, _)| drawn.contains(layer))
         .map(|(layer, level, _)| (layer.to_string(), level))
         .collect();
     if levels.is_empty() {
@@ -157,12 +174,9 @@ pub fn run(
     // **The row space of the bundle this build just wrote**, opened from the file rather than kept
     // from the sort: the permutation is fsynced by now, and reading it back is what makes this pass
     // a function of the published prefix rather than of a structure that only existed in memory.
-    let permutation_path = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("views")
-        .join(view)
-        .join("permutation.bin");
+    let permutation_path =
+        tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
+            .join("permutation.bin");
     let space = match tessera_store::Permutation::load(&permutation_path) {
         Ok(permutation) => RowSpace::new(std::sync::Arc::new(permutation), row_count),
         Err(error) => {
@@ -271,7 +285,10 @@ pub fn run(
                 return;
             }
             for (ordinal, record) in store.level(layer, *level) {
-                visit(ordinal, &space.project_base_with(&record.members, &mut scratch.borrow_mut()));
+                visit(
+                    ordinal,
+                    &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                );
             }
         });
         let layout = derived::choose(&registered.declaration, shape);
@@ -335,7 +352,10 @@ pub fn run(
                     return;
                 }
                 for (ordinal, record) in store.level(layer, *level) {
-                    visit(ordinal, &space.project_base_with(&record.members, &mut scratch.borrow_mut()));
+                    visit(
+                        ordinal,
+                        &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                    );
                 }
             }),
         });
@@ -371,7 +391,10 @@ pub fn run(
                 return;
             }
             for (ordinal, record) in store.level(layer, *level) {
-                visit(ordinal, &space.project_base_with(&record.members, &mut scratch.borrow_mut()));
+                visit(
+                    ordinal,
+                    &space.project_base_with(&record.members, &mut scratch.borrow_mut()),
+                );
             }
         });
         match bytes {
@@ -490,11 +513,7 @@ fn load_build_segment(
     view: &str,
     row_count: u32,
 ) -> Option<SegmentData> {
-    let dir = prefix_dir
-        .join("partitions")
-        .join(partition)
-        .join("views")
-        .join(view)
+    let dir = tessera_store::view_path(&prefix_dir.join("partitions").join(partition), view)
         .join("segments")
         .join(crate::BUILD_SEG_ID);
     let morton = MortonSlice::load(&dir.join("morton.u32"));
@@ -704,7 +723,10 @@ pub fn report(pass: &ArtifactPass) {
     let mut by_layer: std::collections::BTreeMap<&str, Vec<&LevelLayoutReport>> =
         std::collections::BTreeMap::new();
     for level in &pass.levels {
-        by_layer.entry(level.layer.as_str()).or_default().push(level);
+        by_layer
+            .entry(level.layer.as_str())
+            .or_default()
+            .push(level);
     }
     for (layer, mut levels) in by_layer {
         // **Only where there is more than one level**, because for a single-level layer the sum is
@@ -739,13 +761,17 @@ pub fn report(pass: &ArtifactPass) {
             match l.zoom {
                 Some((lo, hi)) => eprintln!(
                     "    level {} [{}]: {} artifact(s), zoom {lo}–{hi}",
-                    l.level, l.view, l.artifacts()
+                    l.level,
+                    l.view,
+                    l.artifacts()
                 ),
                 // A level with no range of its own beside levels that have one is served at every
                 // depth: it has no scale to be outside of.
                 None => eprintln!(
                     "    level {} [{}]: {} artifact(s), no zoom range — served at every depth",
-                    l.level, l.view, l.artifacts()
+                    l.level,
+                    l.view,
+                    l.artifacts()
                 ),
             }
         }

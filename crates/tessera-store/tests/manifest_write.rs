@@ -162,6 +162,7 @@ fn build_fixture(root: &Path, n: u64, created_at: &str) -> (Manifest, std::path:
             shard_id: 0,
             idset: 1,
         },
+        groups: Vec::new(),
         views: vec![ViewDescriptor {
             id: "main".to_string(),
             display_name: "Main".to_string(),

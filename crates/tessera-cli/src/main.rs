@@ -39,10 +39,6 @@ enum Command {
         /// directories is a server serving whatever was there before.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Which view to materialise. Omit where the declaration has exactly one — the ordinary
-        /// case — and a declaration with several refuses rather than choosing.
-        #[arg(long = "view")]
-        view_id: Option<String>,
         /// Keep only source rows with `entity_id < LIMIT` (a prefix of entity space).
         #[arg(long)]
         limit: Option<u64>,
@@ -1381,7 +1377,6 @@ fn main() -> ExitCode {
         Command::Build {
             deployment,
             out,
-            view_id,
             limit,
             config,
             file,
@@ -1447,14 +1442,22 @@ fn main() -> ExitCode {
                 );
             }
 
-            // **A build materialises one view.** With one declared, naming it is noise; with
-            // several, choosing for the operator would publish a coordinate system nobody asked
-            // for, so `sole_view` refuses and lists them.
-            let view_id = match view_id
-                .map(Ok)
-                .unwrap_or_else(|| config.sole_view().map(str::to_string))
-            {
-                Ok(view_id) => view_id,
+            // **A build materialises every declared view and every view of every group**
+            // (`views.md` §7). `--view` is withdrawn with the refusal it went with: there is
+            // nothing to choose between when the answer is all of them.
+            let registry = match config.build_views() {
+                Ok(registry) => registry,
+                Err(e) => {
+                    eprintln!("build refused: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            // The anchor decides which view's Morton code orders ids within a signature group
+            // (decision 0112). Resolved before any file is read: it is a permanent property of
+            // the corpus (I9), so a declaration that has not said which view it is refuses here
+            // rather than after a multi-minute build.
+            let anchor = match config.anchor_view(&registry) {
+                Ok(anchor) => anchor,
                 Err(e) => {
                     eprintln!("build refused: {e}");
                     return ExitCode::FAILURE;
@@ -1462,41 +1465,55 @@ fn main() -> ExitCode {
             };
             // The files this build reads, resolved from the declaration and any overrides — and
             // every absence a refusal here rather than an empty read (configuration.md §8).
-            let acquired = match config.acquire(&view_id) {
+            let acquired = match config.acquire() {
                 Ok(acquired) => acquired,
                 Err(e) => {
                     eprintln!("build refused: {e}");
                     return ExitCode::FAILURE;
                 }
             };
-            // **The frame, resolved before any work — and surveyed in the same pass.** `auto`
-            // fits the box; every other spelling is already the answer and the pass is what
-            // establishes how much of the corpus that frame clamps.
-            let frame = match tessera_build::config::frame_view(
-                &view_id,
-                acquired.projection,
-                &acquired.extent,
-                &acquired.points,
-                &acquired.point_fields,
-                limit,
-            ) {
-                Ok(frame) => frame,
-                Err(e) => {
-                    eprintln!("build refused: {e}");
+            // **The frame, resolved before any work — and surveyed in the same pass, per view.**
+            // `auto` fits the box; every other spelling is already the answer and the pass is
+            // what establishes how much of the corpus that frame clamps. Printed for every view,
+            // because the extent is the view's (decision 0040) and four plausible-looking numbers
+            // are only checkable beside the data's own box.
+            let mut view_args: Vec<tessera_build::ViewArgs> = Vec::with_capacity(registry.len());
+            for view in &registry {
+                let acquired_view = match tessera_build::config::acquire_view(view) {
+                    Ok(acquired) => acquired,
+                    Err(e) => {
+                        eprintln!("build refused: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                let frame = match tessera_build::config::frame_view(
+                    &view.id,
+                    view.projection,
+                    &view.extent,
+                    &acquired_view.points,
+                    &acquired_view.point_fields,
+                    limit,
+                ) {
+                    Ok(frame) => frame,
+                    Err(e) => {
+                        eprintln!("build refused: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                };
+                eprintln!("{}", frame.report());
+                if let Some(detail) = frame.refusal() {
+                    eprintln!("build refused: {detail}");
                     return ExitCode::FAILURE;
                 }
-            };
-            // **The frame, and what it does to the data — printed before any work, always.** The
-            // extent alone is four plausible-looking numbers; beside the data's own box it is
-            // checkable, and the clamp count is the number that says whether this bundle's
-            // geometry means anything. Past half the corpus on the boundary it is a refusal, and
-            // it fires here rather than after a multi-minute build.
-            eprintln!("{}", frame.report());
-            if let Some(detail) = frame.refusal() {
-                eprintln!("build refused: {detail}");
-                return ExitCode::FAILURE;
+                view_args.push(tessera_build::ViewArgs {
+                    view_id: view.id.clone(),
+                    projection: view.projection,
+                    extent: frame.extent,
+                    points: acquired_view.points,
+                    point_fields: acquired_view.point_fields,
+                    access: acquired_view.access,
+                });
             }
-            let extent = frame.extent;
             // Read out before the declaration is broken up into build arguments: it is a
             // property of the declaration, and every value in it exists by now.
             let disclosure = tessera_build::disclosure::Disclosure::of(&config);
@@ -1552,14 +1569,11 @@ fn main() -> ExitCode {
             };
 
             let args = tessera_build::BuildArgs {
-                projection: acquired.projection,
-                points: acquired.points,
-                point_fields: acquired.point_fields,
+                views: view_args,
+                anchor,
+                groups: tessera_build::config::Config::group_registry(&registry),
                 attribute_sources: acquired.attribute_sources,
-                access: acquired.access,
                 out: out.clone(),
-                extent,
-                view_id,
                 limit,
                 identity_key: identity.key,
                 identity_key_hex: identity.hex,
@@ -1582,20 +1596,20 @@ fn main() -> ExitCode {
             };
             match built {
                 Ok(report) => {
-                    // **Written beside the build rather than inside it**, because it is derived
-                    // from the declaration and from nothing the build computes — which is also why
-                    // `tessera check` can emit the identical document without opening a data file.
-                    // `reports/containment.json` is the other way round: a result, needing every
-                    // artifact published.
                     // **The other half of the frame report**, and the half the clamp count
                     // cannot see: data far too small for its frame clamps nothing, and every
                     // stored position is correct while nearly all the resolution is gone.
                     // Printed as raw numbers always — a frame this does not warn about is one
                     // the caller can still judge — and emphatically past the collapse threshold.
                     // Never a refusal: a coarse map is stored correctly, and may be meant.
-                    eprintln!("{}", report.occupancy.report(&report.view_id));
-                    if let Some(detail) = report.occupancy.warning(&report.view_id) {
-                        eprintln!("{detail}");
+                    //
+                    // **Per view, because the frame is** (decision 0040): two views of one
+                    // bundle may give the corpus quite different resolution.
+                    for view in &report.views {
+                        eprintln!("{}", view.occupancy.report(&view.view_id));
+                        if let Some(detail) = view.occupancy.warning(&view.view_id) {
+                            eprintln!("{detail}");
+                        }
                     }
                     if let Err(e) = tessera_build::write_disclosure_report(&out, &disclosure) {
                         eprintln!("build FAILED: writing reports/disclosure.json: {e}");
@@ -1613,6 +1627,11 @@ fn main() -> ExitCode {
                         report.minted_artifacts,
                         report.unclustered_member_rows,
                     );
+                    // The per-view shapes, which is what a multi-view build has to say and a
+                    // single total cannot: a view holds a subset of entity space (`views.md` §8).
+                    for view in &report.views {
+                        println!("  view {}: {} row(s)", view.view_id, view.rows);
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

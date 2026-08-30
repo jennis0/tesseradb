@@ -467,6 +467,66 @@ pub struct ViewDescriptor {
     pub projection: Projection,
 }
 
+/// `groups` entry: one view group and its roster (`views.md` §3.1, §3.2).
+///
+/// **The roster's durable home is the manifest**, not the WAL: rotation reclaims WAL records, so
+/// a roster that lived only in the log is lost at the first rotation, and a reused ordinal or key
+/// silently repoints every client cache keyed on the view (decision 0029, `views.md` §3.2).
+///
+/// A group is **not** a view: it cannot be named on a viewer verb, has no row space and no
+/// permutation. What it carries is the half of a view that is the same for all of them, beside
+/// the roster that differs — and each of its views appears in [`Manifest::views`] under the
+/// joined `group:key` id, which is what a request names.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupDescriptor {
+    pub name: String,
+    /// The group whose keys and ordinals these are, where this group declares `members`
+    /// (`views.md` §3.3); `None` where it owns them. Chains are refused at the declaration, so
+    /// this always names an owner.
+    pub members_of: Option<String>,
+    /// The roster, in ordinal order.
+    pub views: Vec<GroupViewDescriptor>,
+}
+
+/// One view of a group, as the roster records it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupViewDescriptor {
+    /// The caller's own key. `<group>:<key>` is the view id, and is the [`ViewDescriptor::id`]
+    /// this roster entry must have.
+    pub key: String,
+    /// Creation order within the group — monotone, never reused, an alias for the key. At a build
+    /// this is roster order (`views.md` §3.2).
+    pub ordinal: u32,
+    /// This view's own gate; `None` takes the group's.
+    ///
+    /// ⊘ **Recorded and never evaluated** (`views.md` §6). No gate is evaluated anywhere and no
+    /// visible-view set exists, so a reader must not count this as a means of restricting
+    /// reachability; the declaration refuses a non-`public` label, which is why every entry a
+    /// build writes is `None`.
+    pub visibility: Option<String>,
+    /// The typed per-view values this view carries, one per name the owning group declared.
+    /// Empty on a `members` group's views, whose metadata belongs to the owner.
+    pub metadata: BTreeMap<String, ViewMetadataValue>,
+}
+
+/// One roster metadata value, typed against the group's declaration (`views.md` §3.1).
+///
+/// **View metadata is not an attribute** (`views.md` §5): one value per view rather than one per
+/// `(entity, view)`, it filters nothing, and it is served typed. The two are kept apart so that
+/// neither grows the other's surface.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ViewMetadataValue {
+    Bool(bool),
+    /// Every integer width, and a category's key resolved to its code.
+    Int(i64),
+    Float(f64),
+    Text(String),
+    /// Microseconds since the Unix epoch — the one time unit a `timestamp_us` may hold, so a
+    /// declaration and a reader cannot disagree about it.
+    TimestampUs(i64),
+}
+
 /// `views[..].projection` as the name a declaration writes (`projections.md` §5), refusing one
 /// outside the set rather than defaulting it.
 mod projection_name {
@@ -524,6 +584,14 @@ pub struct Manifest {
     /// extent: [`Manifest::quantisation_of`] is how a caller that has a view id gets one, and a
     /// caller that has no view id is asking a question the bundle cannot answer.
     pub views: Vec<ViewDescriptor>,
+    /// The view groups and their rosters (`views.md` §3.2), in declaration order.
+    ///
+    /// **Required, not `default`**, on `vocabularies`' rule: a manifest that omits it is
+    /// malformed rather than group-free, and the two are indistinguishable under `default` — a
+    /// bundle whose views are a group's and whose roster went missing would open and serve views
+    /// no client can order or name. No bundle predates the field (decision 0048). Empty is the
+    /// ordinary case: a declaration of plain views alone.
+    pub groups: Vec<GroupDescriptor>,
     pub partitions: Vec<PartitionDescriptor>,
     #[serde(default)]
     pub provenance: serde_json::Value,
@@ -542,6 +610,55 @@ impl Manifest {
     ///
     /// An unknown name is `None` and the caller refuses; there is no default frame to fall back
     /// on, for the reason [`ViewDescriptor::quantisation`] gives.
+    /// Refuse a manifest whose roster and whose views disagree (`views.md` §3.2).
+    ///
+    /// **The roster is not a second list of views; it is what orders and names them.** Every
+    /// roster entry must have its `group:key` view declared, and every view whose id carries the
+    /// group separator must be on a roster — either direction failing leaves a view a client can
+    /// see and cannot address, or an ordinal that resolves to nothing.
+    pub fn validate_groups(&self) -> std::result::Result<(), String> {
+        let mut rostered: Vec<String> = Vec::new();
+        for group in &self.groups {
+            if group.name.contains(crate::GROUP_SEPARATOR) {
+                return Err(format!(
+                    "group '{}' carries the reserved separator '{}'",
+                    group.name,
+                    crate::GROUP_SEPARATOR
+                ));
+            }
+            let mut ordinals: Vec<u32> = group.views.iter().map(|v| v.ordinal).collect();
+            ordinals.sort_unstable();
+            if ordinals.windows(2).any(|w| w[0] == w[1]) {
+                return Err(format!(
+                    "group '{}' reuses an ordinal; an ordinal is monotone and never reused \
+                     (views §3.2)",
+                    group.name
+                ));
+            }
+            for view in &group.views {
+                let id = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, view.key);
+                if !self.views.iter().any(|v| v.id == id) {
+                    return Err(format!(
+                        "the roster of group '{}' names view '{id}', which the manifest does not \
+                         declare",
+                        group.name
+                    ));
+                }
+                rostered.push(id);
+            }
+        }
+        for view in &self.views {
+            if view.id.contains(crate::GROUP_SEPARATOR) && !rostered.contains(&view.id) {
+                return Err(format!(
+                    "view '{}' is a group's view and no roster carries it, so nothing gives it a \
+                     key or an ordinal (views §3.2)",
+                    view.id
+                ));
+            }
+        }
+        Ok(())
+    }
+
     pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {
         self.views
             .iter()

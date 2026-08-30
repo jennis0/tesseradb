@@ -241,11 +241,7 @@ pub fn execute_merge(
     }
 
     let seg_path = |seg_id: &str| {
-        prefix_dir
-            .join("partitions")
-            .join(partition)
-            .join("views")
-            .join(view)
+        crate::view_path(&prefix_dir.join("partitions").join(partition), view)
             .join("segments")
             .join(seg_id)
     };

@@ -272,14 +272,18 @@ fn fixture() -> Fixture {
     let schema = Config::parse(&schema_path, &HashMap::new()).unwrap().schema;
 
     build(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.clone(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(points.clone(), &schema),
-        access: tessera_build::config::AccessInput::relation(pairs.clone()),
         out: bundle.clone(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: "000102030405060708090a0b0c0d0e0f".to_string(),
@@ -1177,12 +1181,16 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let (overlapping, dict) = keyword_extent(&[0], &["collision".to_string()]);
     let err = fx
         .columns
-        .with_extents(&[(
-            "title".to_string(),
-            "attrs/title/extents/overlapping.arrow".to_string(),
-            overlapping,
-            Some(dict),
-        )], &[], &[])
+        .with_extents(
+            &[(
+                "title".to_string(),
+                "attrs/title/extents/overlapping.arrow".to_string(),
+                overlapping,
+                Some(dict),
+            )],
+            &[],
+            &[],
+        )
         .expect_err("an extent claiming entity 0 overlaps the base column");
     assert!(format!("{err}").contains("I9"), "{err}");
 
@@ -1191,12 +1199,16 @@ fn an_extent_overlapping_an_earlier_layer_is_refused() {
     let (stray, stray_dict) = keyword_extent(&[N as u32 + 1], &["stray".to_string()]);
     assert!(fx
         .columns
-        .with_extents(&[(
-            "no_such_column".to_string(),
-            "attrs/no_such_column/extents/stray.arrow".to_string(),
-            stray,
-            Some(stray_dict),
-        )], &[], &[])
+        .with_extents(
+            &[(
+                "no_such_column".to_string(),
+                "attrs/no_such_column/extents/stray.arrow".to_string(),
+                stray,
+                Some(stray_dict),
+            )],
+            &[],
+            &[]
+        )
         .is_err());
 }
 
@@ -1431,8 +1443,7 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
     );
     for tile in &filtered.tiles {
         assert_eq!(
-            tile.served,
-            tile.matched,
+            tile.served, tile.matched,
             "below the cap, every matched row in a tile is served"
         );
     }
@@ -1447,7 +1458,11 @@ fn a_filter_serves_every_match_up_to_the_cap_even_with_theta_live() {
             ViewportRequest::new("s0", 0, FULL_VIEWPORT, 5).filter(leaf("department", eng)),
         )
         .expect("a capped filtered viewport answers");
-    assert_eq!(capped.points.len(), 5, "the cap governs when matches exceed it");
+    assert_eq!(
+        capped.points.len(),
+        5,
+        "the cap governs when matches exceed it"
+    );
     assert_eq!(
         capped.points.tessera_ids,
         filtered.points.tessera_ids[..5],
@@ -3631,20 +3646,24 @@ fn a_coalesced_layer_that_does_not_cover_its_window_is_refused() {
     let second = "attrs/bonus/extents/b.arrow".to_string();
     let columns = fx
         .columns
-        .with_extents(&[
-            (
-                "bonus".to_string(),
-                first.clone(),
-                extent(&[100, 101]),
-                None,
-            ),
-            (
-                "bonus".to_string(),
-                second.clone(),
-                extent(&[200, 201]),
-                None,
-            ),
-        ], &[], &[])
+        .with_extents(
+            &[
+                (
+                    "bonus".to_string(),
+                    first.clone(),
+                    extent(&[100, 101]),
+                    None,
+                ),
+                (
+                    "bonus".to_string(),
+                    second.clone(),
+                    extent(&[200, 201]),
+                    None,
+                ),
+            ],
+            &[],
+            &[],
+        )
         .expect("two extents above the build's high-water compose");
 
     let window =

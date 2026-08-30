@@ -28,8 +28,13 @@ collections     = "collections.parquet"      # key, contents, members, access
 clusters_q      = "clusters-quarter.parquet" # key, quarter, contents, members
 
 [defaults]
-source          = "world"
-entity_id_field = "entity_id"
+source           = "world"
+entity_id_field  = "entity_id"
+# The anchor view (decision 0112): within a signature group, entity ids are ordered by the item's
+# Morton code *here*, then by external id. Required because this declaration carries more than one
+# view, and explicit so that reordering the blocks below cannot silently re-key a rebuild — the
+# ids are permanent (I9).
+allocation_view  = "world"
 
 # ---------------------------------------------------------------------------------------------
 # One plain view: the whole-corpus map, real-derived positions, a synthetic per-point compartment

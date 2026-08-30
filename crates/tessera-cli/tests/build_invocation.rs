@@ -121,6 +121,10 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).to_string()
 }
 
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
 fn refusal(cwd: &Path, args: &[&str]) -> String {
     let output = build_in(cwd, args);
     assert!(
@@ -173,8 +177,17 @@ fn a_missing_deployment_config_names_what_to_create() {
     let tmp = tempfile::tempdir().unwrap();
     let stderr = refusal(tmp.path(), &[]);
     assert!(stderr.contains("no tessera.toml found"), "{stderr}");
-    for expected in ["[bundle]", "[build]", "[identity]", "[serve]", "--deployment"] {
-        assert!(stderr.contains(expected), "{expected} missing from: {stderr}");
+    for expected in [
+        "[bundle]",
+        "[build]",
+        "[identity]",
+        "[serve]",
+        "--deployment",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "{expected} missing from: {stderr}"
+        );
     }
 }
 
@@ -186,7 +199,10 @@ fn the_deployment_config_can_be_named_outright() {
     let elsewhere = tempfile::tempdir().unwrap();
     let output = build_in(
         elsewhere.path(),
-        &["--deployment", tmp.path().join("tessera.toml").to_str().unwrap()],
+        &[
+            "--deployment",
+            tmp.path().join("tessera.toml").to_str().unwrap(),
+        ],
     );
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(tmp.path().join("bundles/corpus/CURRENT").is_file());
@@ -281,22 +297,51 @@ fn a_stated_extent_is_used_verbatim() {
     assert_eq!(reported_frame(&output), [-5.0, 2000.0, -5.0, 2000.0]);
 }
 
-/// A build materialises one coordinate system. With several declared, choosing one would publish
-/// geometry nobody asked for — two views quantise the same corpus differently.
-#[test]
-fn several_views_refuse_rather_than_choosing_one() {
-    let tmp = tempfile::tempdir().unwrap();
-    project(tmp.path());
-    let schema = std::fs::read_to_string(tmp.path().join("schema.toml")).unwrap();
+/// A declaration whose second view is the first under another name, with the anchor named.
+fn two_views(dir: &Path, defaults: &str) {
+    project(dir);
+    let schema = std::fs::read_to_string(dir.join("schema.toml")).unwrap();
     // `[sources]` is written once; the second view is the view block alone under another name.
     let (sources, view) = schema.split_once("[[view]]").unwrap();
     std::fs::write(
-        tmp.path().join("schema.toml"),
-        format!("{sources}[[view]]{view}[[view]]{}", view.replace("\"s0\"", "\"s1\"")),
+        dir.join("schema.toml"),
+        format!(
+            "{sources}{defaults}[[view]]{view}[[view]]{}",
+            view.replace("\"s0\"", "\"s1\"")
+        ),
     )
     .unwrap();
+}
+
+/// **A build materialises every declared view** (`views.md` §7). The per-view shapes are reported,
+/// and the bundle carries a row space for each.
+#[test]
+fn every_declared_view_is_materialised() {
+    let tmp = tempfile::tempdir().unwrap();
+    two_views(tmp.path(), "[defaults]\nallocation_view = \"s0\"\n");
+    let output = build_in(tmp.path(), &[]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let out = stdout(&output);
+    assert!(out.contains("view s0: 64 row(s)"), "{out}");
+    assert!(out.contains("view s1: 64 row(s)"), "{out}");
+    // And the bundle it wrote opens, with both row spaces in it.
+    let verified = tessera()
+        .arg("verify")
+        .arg(tmp.path().join("bundles/corpus"))
+        .output()
+        .expect("failed to run tessera verify");
+    let verified = stdout(&verified);
+    assert!(verified.contains("2 view(s)"), "{verified}");
+}
+
+/// The anchor view orders entity ids within a signature group and the ids are permanent (I9), so
+/// with several views it is a declaration rather than a default (decision 0112).
+#[test]
+fn several_views_refuse_without_a_declared_anchor() {
+    let tmp = tempfile::tempdir().unwrap();
+    two_views(tmp.path(), "");
     let stderr = refusal(tmp.path(), &[]);
-    assert!(stderr.contains("has 2 views"), "{stderr}");
+    assert!(stderr.contains("allocation_view"), "{stderr}");
     assert!(stderr.contains("s0, s1"), "{stderr}");
 }
 
@@ -317,8 +362,14 @@ fn write_projection_points(path: &Path) {
     // — a projection's two components are independent, so the points outside a grid-shaped frame
     // on x are not the same points that are outside it on y. Ramping them together would make the
     // union of the two halves one half, which is a corpus no projection produces.
-    let xs: Vec<f64> = ids.iter().map(|e| -17.0 + (*e as f64) * 35.0 / 63.0).collect();
-    let ys: Vec<f64> = ids.iter().map(|e| 23.0 - (*e as f64) * 44.0 / 63.0).collect();
+    let xs: Vec<f64> = ids
+        .iter()
+        .map(|e| -17.0 + (*e as f64) * 35.0 / 63.0)
+        .collect();
+    let ys: Vec<f64> = ids
+        .iter()
+        .map(|e| 23.0 - (*e as f64) * 44.0 / 63.0)
+        .collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -364,7 +415,10 @@ fn the_notebook_failure_is_loud() {
     assert!(stderr.contains("CLAMP onto the frame's edge"), "{stderr}");
     assert!(stderr.contains("of 64 point(s)"), "{stderr}");
     // The frame it was given, and the data's own bounds beside it — the pair is the diagnosis.
-    assert!(stderr.contains("quantising against x [0, 65536]"), "{stderr}");
+    assert!(
+        stderr.contains("quantising against x [0, 65536]"),
+        "{stderr}"
+    );
     assert!(stderr.contains("the data spans x [-17"), "{stderr}");
     // And how little of the grid that leaves, which is the number the degenerate map needed.
     assert!(stderr.contains("of the 65536 x 65536 cells"), "{stderr}");
@@ -403,7 +457,10 @@ fn a_point_at_the_maximum_is_not_a_clamp() {
     let output = build_in(tmp.path(), &[]);
     assert!(output.status.success(), "{}", stderr(&output));
     let text = stderr(&output);
-    assert!(text.contains("64 point(s) placed, none on the frame's edge"), "{text}");
+    assert!(
+        text.contains("64 point(s) placed, none on the frame's edge"),
+        "{text}"
+    );
 }
 
 /// `auto` fits the box around the data it read, so nothing it framed can clamp — reported as a
@@ -526,7 +583,10 @@ fn a_well_fitted_frame_reports_the_numbers_and_warns_about_nothing() {
         text.contains("10000 point(s) landed in 10000 distinct cell(s)"),
         "{text}"
     );
-    assert!(text.contains("100.0% of them have a position of their own"), "{text}");
+    assert!(
+        text.contains("100.0% of them have a position of their own"),
+        "{text}"
+    );
     assert!(!text.contains("RESOLUTION LOST"), "{text}");
 }
 
@@ -605,7 +665,10 @@ fn an_override_naming_no_source_refuses_the_build() {
     project(tmp.path());
     let stderr = refusal(tmp.path(), &["--file", "pionts=/elsewhere/points.parquet"]);
     assert!(stderr.contains("'pionts=…'"), "{stderr}");
-    assert!(stderr.contains("names no source in this declaration"), "{stderr}");
+    assert!(
+        stderr.contains("names no source in this declaration"),
+        "{stderr}"
+    );
     assert!(stderr.contains("points"), "{stderr}");
     assert!(
         !tmp.path().join("bundles").exists(),

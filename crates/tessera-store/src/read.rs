@@ -403,6 +403,13 @@ fn open_prefix(
     // silently read by this one (contracts §2.6 r6) — fail closed before any segment is opened.
     manifest.identity.validate()?;
 
+    // The roster against the views it names, and the views against the roster (`views.md` §3.2).
+    // Before any segment is opened, for the reason above it: a view a client can see and cannot
+    // address is a bundle to refuse, not one to serve part of.
+    manifest
+        .validate_groups()
+        .map_err(|detail| StoreError::MalformedBundle { detail })?;
+
     // The MANIFEST-level `files` set (dictionary extents and anything else it names) is
     // verified once, up front — it isn't partition-specific, and the reader protocol requires
     // every one of these entries to verify regardless of which SEGMENTS-<n>.json a partition
@@ -430,18 +437,24 @@ fn open_prefix(
 
         let mut views: HashMap<String, ViewData> = HashMap::new();
         for seg_desc in &segments_manifest.segments {
-            sanitize_component("view id", &seg_desc.view)?;
+            // **Per component the path derivation will lay down**, not on the joined id: a
+            // group's view is `group:key` and `:` is exactly the character the two-component path
+            // exists for (`views.md` §3.2).
+            for component in crate::view_path_components(&seg_desc.view) {
+                sanitize_component("view id", component)?;
+            }
             sanitize_component("segment id", &seg_desc.seg_id)?;
 
-            let view_dir = partition_dir.join("views").join(&seg_desc.view);
+            let view_dir = crate::view_path(&partition_dir, &seg_desc.view);
             let is_new_view = !views.contains_key(&seg_desc.view);
             let view_entry = match views.get_mut(&seg_desc.view) {
                 Some(entry) => entry,
                 None => {
                     let perm_path = view_dir.join("permutation.bin");
                     let perm_rel = format!(
-                        "partitions/{}/views/{}/permutation.bin",
-                        partition_desc.phash, seg_desc.view
+                        "partitions/{}/{}/permutation.bin",
+                        partition_desc.phash,
+                        crate::view_rel(&seg_desc.view)
                     );
                     ensure_verified(&perm_rel, &segments_manifest, &manifest.files, &perm_path)?;
                     let permutation = Permutation::load(&perm_path)?;
@@ -454,9 +467,9 @@ fn open_prefix(
                     // refusal, because a wrong row→entity mapping would put another entity's
                     // filter verdict on a row.
                     let row_entity_rel = format!(
-                        "partitions/{}/views/{}/{}",
+                        "partitions/{}/{}/{}",
                         partition_desc.phash,
-                        seg_desc.view,
+                        crate::view_rel(&seg_desc.view),
                         crate::row_entity::ROW_ENTITY_FILE
                     );
                     let row_entity = if segments_manifest.files.contains_key(&row_entity_rel)
@@ -499,12 +512,16 @@ fn open_prefix(
             let morton_path = seg_dir.join("morton.u32");
             let columns_path = seg_dir.join("columns.arrow");
             let morton_rel = format!(
-                "partitions/{}/views/{}/segments/{}/morton.u32",
-                partition_desc.phash, seg_desc.view, seg_desc.seg_id
+                "partitions/{}/{}/segments/{}/morton.u32",
+                partition_desc.phash,
+                crate::view_rel(&seg_desc.view),
+                seg_desc.seg_id
             );
             let columns_rel = format!(
-                "partitions/{}/views/{}/segments/{}/columns.arrow",
-                partition_desc.phash, seg_desc.view, seg_desc.seg_id
+                "partitions/{}/{}/segments/{}/columns.arrow",
+                partition_desc.phash,
+                crate::view_rel(&seg_desc.view),
+                seg_desc.seg_id
             );
             ensure_verified(
                 &morton_rel,
@@ -536,9 +553,9 @@ fn open_prefix(
                         source,
                     })?;
                     let rel = format!(
-                        "partitions/{}/views/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
+                        "partitions/{}/{}/segments/{}/{RENDER_PRESENCE_DIR}/{}",
                         partition_desc.phash,
-                        seg_desc.view,
+                        crate::view_rel(&seg_desc.view),
                         seg_desc.seg_id,
                         entry.file_name().to_string_lossy()
                     );

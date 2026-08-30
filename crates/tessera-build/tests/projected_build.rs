@@ -106,7 +106,10 @@ fn a_projected_build_places_a_place_at_its_published_tile() {
     )
     .expect("the frame resolves");
     // The domain is the whole unit square, and only the whole world contains it.
-    assert_eq!(frame.snap.expect("a projected frame snaps").square, AlignedSquare::WORLD);
+    assert_eq!(
+        frame.snap.expect("a projected frame snaps").square,
+        AlignedSquare::WORLD
+    );
     assert_eq!(
         frame.extent,
         Bounds {
@@ -264,7 +267,9 @@ fn auto_over_an_empty_source_is_refused() {
 fn a_coordinate_outside_the_wgs84_range_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let refused = |lons: &[f64], lats: &[f64]| {
-        let points = tmp.path().join(format!("bad{}.parquet", lons.len() + lats.len()));
+        let points = tmp
+            .path()
+            .join(format!("bad{}.parquet", lons.len() + lats.len()));
         write_points(&points, ("lon", "lat"), lons, lats);
         frame_view(
             "world",
@@ -319,12 +324,21 @@ fn an_unprojected_view_stores_the_files_own_coordinates() {
         None,
     )
     .expect("the frame resolves");
-    assert_eq!(frame.extent, extent, "an unprojected frame is what was stated");
+    assert_eq!(
+        frame.extent, extent,
+        "an unprojected frame is what was stated"
+    );
     assert!(frame.snap.is_none(), "there is nothing to snap");
     assert_eq!(frame.clipped(), 0, "`none` has no domain to clip against");
 
-    let mut rows = read_points(&points, &Default::default(), Projection::None, &extent, None)
-        .expect("points read");
+    let mut rows = read_points(
+        &points,
+        &Default::default(),
+        Projection::None,
+        &extent,
+        None,
+    )
+    .expect("points read");
     rows.sort_by_key(|r| r.source_id);
     for (i, row) in rows.iter().enumerate() {
         assert_eq!(
@@ -347,7 +361,9 @@ fn write_morton_points(path: &Path, codes: &[u64]) {
     let batch = RecordBatch::try_new(
         Arc::clone(&schema),
         vec![
-            Arc::new(UInt64Array::from((0..codes.len() as u64).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(UInt64Array::from(
+                (0..codes.len() as u64).collect::<Vec<_>>(),
+            )) as ArrayRef,
             Arc::new(UInt64Array::from(codes.to_vec())),
         ],
     )
@@ -390,14 +406,18 @@ fn build_bundle(
     write_pairs(&pairs, rows);
     let out = tmp.join("bundle");
     let args = BuildArgs {
-        projection,
-        point_fields: fields,
-        points: points.to_path_buf(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "world".to_string(),
+            projection,
+            extent,
+            points: points.to_path_buf(),
+            point_fields: fields,
+            access: tessera_build::config::AccessInput::relation(pairs),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs),
         out: out.clone(),
-        extent,
-        view_id: "world".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
         identity_key_hex: KEY_HEX.to_string(),
@@ -574,8 +594,10 @@ fn the_report_counts_clipped_points_on_their_own_line_and_clamps_none() {
         "{clean}"
     );
     assert!(
-        clean.contains("none of them outside web_mercator's ±85.0511287798066° domain, so \
-                        nothing was clipped"),
+        clean.contains(
+            "none of them outside web_mercator's ±85.0511287798066° domain, so \
+                        nothing was clipped"
+        ),
         "{clean}"
     );
 }
@@ -636,11 +658,19 @@ fn clipping_never_refuses_at_the_world_frame_and_still_clamps_at_a_sub_square() 
     .expect("the frame resolves");
     assert_eq!(sub.extent.y_min, 0.25, "the z2 square (2, 1)");
     assert_eq!(sub.clipped(), 3, "the same three rows are still clipped");
-    let refusal = sub.refusal().expect("three of four rows are outside this frame");
+    let refusal = sub
+        .refusal()
+        .expect("three of four rows are outside this frame");
     assert!(refusal.contains("3 of 4 point(s) (75.0%)"), "{refusal}");
     let report = sub.report();
-    assert!(report.contains("3 of 4 point(s) (75.0%) CLAMP onto"), "{report}");
-    assert!(report.contains("3 of 4 point(s) (75.0%) CLIPPED"), "{report}");
+    assert!(
+        report.contains("3 of 4 point(s) (75.0%) CLAMP onto"),
+        "{report}"
+    );
+    assert!(
+        report.contains("3 of 4 point(s) (75.0%) CLIPPED"),
+        "{report}"
+    );
 }
 
 /// **A frame the offset cap chose says so; one the box chose does not** (§4.2, §8).
@@ -655,7 +685,10 @@ fn the_report_says_floored_only_where_the_cap_chose_the_frame() {
     write_points(&points, ("lon", "lat"), &[8.0, 9.0], &[46.0, 47.0]);
 
     let fitted = report_over(&points, &lon_lat([5.9, 10.5], [45.8, 47.8]));
-    assert!(fitted.contains("snapped outward to the square at"), "{fitted}");
+    assert!(
+        fitted.contains("snapped outward to the square at"),
+        "{fitted}"
+    );
     assert!(!fitted.contains("FLOORED"), "{fitted}");
 
     let floored = report_over(&points, &lon_lat([8.0, 8.0], [46.0, 46.0]));
@@ -698,8 +731,10 @@ fn the_report_names_the_projection_and_prints_the_box_beside_the_frame() {
     // `auto` snaps the data's own box, and says so where the stated box would have gone.
     let auto = report_over(&points, &Extent::AutoLonLat);
     assert!(
-        auto.contains("`extent = \"auto\"` over the data's own box — snapped outward to the \
-                       square at z"),
+        auto.contains(
+            "`extent = \"auto\"` over the data's own box — snapped outward to the \
+                       square at z"
+        ),
         "{auto}"
     );
 }
@@ -870,9 +905,9 @@ fn a_wgs84_shape_layer_holds_the_rows_of_its_curved_image() {
         .iter()
         .map(|&(lon, lat)| Projection::WebMercator.forward(lon, lat))
         .collect()]])
-        .canonical(Space::View, &extent)
-        .expect("a well-formed triangle in frame coordinates")
-        .0;
+    .canonical(Space::View, &extent)
+    .expect("a well-formed triangle in frame coordinates")
+    .0;
     assert!(
         declared.vertex_count() > chorded.vertex_count(),
         "the declared shape was not densified: {} vertices against the chord's {}",
@@ -932,7 +967,11 @@ fn a_wgs84_shape_on_an_unprojected_view_is_refused() {
     };
     let mut reader = ShapeReader::new("regions/uk", ShapeKind::Bbox, ctx, ShapeSpace::View);
     let err = reader
-        .row("uk", Some(ShapeInput::Bbox([-8.0, 50.0, 2.0, 58.0])), Some("wgs84"))
+        .row(
+            "uk",
+            Some(ShapeInput::Bbox([-8.0, 50.0, 2.0, 58.0])),
+            Some("wgs84"),
+        )
         .expect_err("an unprojected view cannot honour `wgs84`");
     let message = err.to_string();
     assert!(message.contains("`projection` is `none`"), "{message}");

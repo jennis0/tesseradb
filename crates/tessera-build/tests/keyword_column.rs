@@ -110,19 +110,28 @@ fn parse_schema(text: &str) -> Schema {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("schema.toml");
     std::fs::write(&path, text).unwrap();
-    Config::parse(&path, &HashMap::new()).expect("schema parses").schema
+    Config::parse(&path, &HashMap::new())
+        .expect("schema parses")
+        .schema
 }
 
 fn args(points: &Path, pairs: &Path, out: PathBuf, schema: Schema) -> BuildArgs {
     BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.to_path_buf(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
         out,
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),

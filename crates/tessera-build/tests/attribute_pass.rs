@@ -224,19 +224,23 @@ fn args(dir: &Path, out: PathBuf) -> BuildArgs {
     let attributes = dir.join("attributes.parquet");
     let schema = schema();
     BuildArgs {
-        point_fields: Default::default(),
-        points: points.clone(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 1000.0,
+                y_min: 0.0,
+                y_max: 1000.0,
+            },
+            points: points.clone(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(dir.join("pairs.parquet")),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: tessera_build::config::AttributeSource::over(attributes, &schema),
-        access: tessera_build::config::AccessInput::relation(dir.join("pairs.parquet")),
         out,
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 1000.0,
-            y_min: 0.0,
-            y_max: 1000.0,
-        },
-        projection: tessera_spatial::Projection::None,
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
         identity_key_hex: TEST_KEY_HEX.to_string(),

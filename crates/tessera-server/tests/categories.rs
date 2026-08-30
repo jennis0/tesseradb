@@ -158,14 +158,21 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
         .unwrap()
         .schema;
     let args = BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.to_path_buf(),
-        attribute_sources: tessera_build::config::AttributeSource::over(points.to_path_buf(), &schema),
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            points.to_path_buf(),
+            &schema,
+        ),
         out: out.to_path_buf(),
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -360,10 +367,12 @@ async fn a_viewport_filters_on_a_rendered_number_over_its_own_rows() {
     // the corpus happened to have none: an item with no score is stored as 0.0 in the hot column,
     // and 0.0 is inside this range. Only the presence bitmap keeps it out.
     let absent = (0..N).filter(|&e| score_of(e).is_none()).count() as u64;
-    assert!(absent > 0, "the fixture must plant absences for this to mean anything");
+    assert!(
+        absent > 0,
+        "the fixture must plant absences for this to mean anything"
+    );
     assert_eq!(
-        matched,
-        expected,
+        matched, expected,
         "an item with no score matched a range containing zero — decision 0064's bitmap is not \
          being honoured on the row route"
     );

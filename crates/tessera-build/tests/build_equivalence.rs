@@ -357,14 +357,18 @@ fn write_attributed_points(path: &Path) {
 
 fn args_for(points: &Path, pairs: &Path, out: PathBuf) -> BuildArgs {
     BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: points.to_path_buf(),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: extent(),
+            points: points.to_path_buf(),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(pairs.to_path_buf()),
         out,
-        extent: extent(),
-        view_id: "s0".to_string(),
         limit: None,
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),
@@ -470,8 +474,8 @@ fn streaming_build_is_byte_identical_to_the_reference_build() {
     // **The occupancy figure is one of the report's numbers, not one path's.** It is counted at
     // each build's own segment write, and a resolution warning that appeared on one path and not
     // the other would be worse than none — which path ran is not something the caller chose.
-    assert_eq!(reference.occupancy, streaming.occupancy);
-    assert_eq!(reference.occupancy.points, reference.items);
+    assert_eq!(reference.views[0].occupancy, streaming.views[0].occupancy);
+    assert_eq!(reference.views[0].occupancy.points, reference.items);
     assert_bundles_identical(&reference_out, &streaming_out, "streaming vs reference");
 }
 
@@ -491,7 +495,7 @@ fn a_field_sourced_build_is_byte_identical_to_the_reference_build() {
     write_field_sourced_points(&points);
 
     let mut reference_args = args_for(&points, &points, temp.path().join("reference"));
-    reference_args.access = tessera_build::config::AccessInput {
+    reference_args.views[0].access = tessera_build::config::AccessInput {
         source: tessera_build::config::AccessSource::Field("categories".to_string()),
         default: "public".to_string(),
     };
@@ -1014,19 +1018,25 @@ fn reference_build_at_scale() {
     let out = PathBuf::from("/tmp/tessera-reference-scale");
     let _ = std::fs::remove_dir_all(&out);
     let report = build_in_memory(&BuildArgs {
-        projection: tessera_spatial::Projection::None,
-        point_fields: Default::default(),
-        points: PathBuf::from("data/scaled/geometry.parquet"),
+        views: vec![tessera_build::ViewArgs {
+            view_id: "s0".to_string(),
+            projection: tessera_spatial::Projection::None,
+            extent: Bounds {
+                x_min: 0.0,
+                x_max: 65536.0,
+                y_min: 0.0,
+                y_max: 65536.0,
+            },
+            points: PathBuf::from("data/scaled/geometry.parquet"),
+            point_fields: Default::default(),
+            access: tessera_build::config::AccessInput::relation(PathBuf::from(
+                "data/scaled/pairs/categories-subclass.pairs.parquet",
+            )),
+        }],
+        anchor: 0,
+        groups: Vec::new(),
         attribute_sources: Vec::new(),
-        access: tessera_build::config::AccessInput::relation(PathBuf::from("data/scaled/pairs/categories-subclass.pairs.parquet")),
         out,
-        extent: Bounds {
-            x_min: 0.0,
-            x_max: 65536.0,
-            y_min: 0.0,
-            y_max: 65536.0,
-        },
-        view_id: "s0".to_string(),
         limit: Some(limit),
         identity_key: test_key(),
         identity_key_hex: TEST_KEY_HEX.to_string(),

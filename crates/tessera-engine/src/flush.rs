@@ -375,8 +375,10 @@ pub(crate) fn execute_flush(
         plan.items.len() as u64,
     );
     let tier_rel = format!(
-        "partitions/{}/views/{}/segments/{}/delta.arrow",
-        ctx.partition, ctx.view, ctx.seg_id
+        "partitions/{}/{}/segments/{}/delta.arrow",
+        ctx.partition,
+        tessera_store::view_rel(&ctx.view),
+        ctx.seg_id
     );
     let tier_path = ctx.prefix_dir.join(&tier_rel);
     write_delta_tier(&tier_path, &promotion.postings, SMALL_TERM_THRESHOLD)
@@ -662,8 +664,10 @@ fn promote(plan: &FlushPlan, ctx: &FlushContext) -> Result<Promotion, FlushFaile
         dict: Arc::new(ctx.dict.extended_with(&interned)),
         extent: Some(DictExtent {
             path: format!(
-                "partitions/{}/views/{}/segments/{}/terms-0.dict",
-                ctx.partition, ctx.view, ctx.seg_id
+                "partitions/{}/{}/segments/{}/terms-0.dict",
+                ctx.partition,
+                tessera_store::view_rel(&ctx.view),
+                ctx.seg_id
             ),
             records: interned.len() as u64,
         }),
@@ -1052,12 +1056,10 @@ fn write_text_extents(
     }
     let mut out = Vec::with_capacity(ctx.text_schema.len());
     for spec in &ctx.text_schema {
-        let rel_dir = format!(
-            "partitions/{}/attrs/{}/extents",
-            ctx.partition, spec.name
-        );
+        let rel_dir = format!("partitions/{}/attrs/{}/extents", ctx.partition, spec.name);
         let dir = ctx.prefix_dir.join(&rel_dir);
-        std::fs::create_dir_all(&dir).map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
 
         let mut terms: std::collections::BTreeMap<String, Vec<u32>> =
             std::collections::BTreeMap::new();
@@ -1262,13 +1264,12 @@ fn record_value_of(
 /// This flush's segment directory. Both the segment writer and promotion address it; naming it
 /// once keeps them from drifting apart.
 fn segment_dir(ctx: &FlushContext) -> PathBuf {
-    ctx.prefix_dir
-        .join("partitions")
-        .join(&ctx.partition)
-        .join("views")
-        .join(&ctx.view)
-        .join("segments")
-        .join(&ctx.seg_id)
+    tessera_store::view_path(
+        &ctx.prefix_dir.join("partitions").join(&ctx.partition),
+        &ctx.view,
+    )
+    .join("segments")
+    .join(&ctx.seg_id)
 }
 
 /// The WAL's scalar shape into the segment writer's — the same set in the same order, so this is
@@ -1336,9 +1337,9 @@ mod tests {
 
     use tessera_lifecycle::wal::{ChangeOp, WalRow, WalScalar};
     use tessera_lifecycle::IngestBuffer;
+    use tessera_plugin::Plugin;
     use tessera_store::manifest::{IdentityDescriptor, Manifest};
     use tessera_store::Bundle;
-    use tessera_plugin::Plugin;
     use tessera_types::{TermId, IDENTITY_CONSTRUCTION, IDENTITY_ROUNDS};
 
     const VIEW: &str = "s0";
@@ -1404,6 +1405,7 @@ mod tests {
                 shard_id: 0,
                 idset: 1,
             },
+            groups: Vec::new(),
             views: vec![],
             partitions: vec![],
             provenance: serde_json::json!({}),
