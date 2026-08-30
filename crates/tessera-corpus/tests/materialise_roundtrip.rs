@@ -10,6 +10,7 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use tessera_corpus::materialise::PARTITION_LAYER;
 use tessera_corpus::Corpus;
 use tessera_spatial::Bounds;
 
@@ -179,7 +180,8 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
             "seen_at",
             "bay",
             "tag",
-            "blurb"
+            "blurb",
+            "partition"
         ]
     );
 
@@ -188,11 +190,18 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
     let access = column::<StringArray>(&batch, "access");
     let fx_key = column::<UInt64Array>(&batch, "fx_key");
     let bay = column::<StringArray>(&batch, "bay");
+    let partition = column::<UInt32Array>(&batch, "partition");
     for i in 0..batch.num_rows() {
         let e = 10 + i as u64;
         let item = c.item(e);
         assert_eq!(external_id.value(i), e.to_le_bytes());
         assert_eq!(x.value(i), item.x);
+        // Every row of this batch is past `n = 10`, which is the point: the partition value is a
+        // function of `(seed, layer, e)` and is answerable beyond the built prefix.
+        assert_eq!(
+            u64::from(partition.value(i)),
+            c.partition_artifact_of(PARTITION_LAYER, e)
+        );
         let expected_access = c
             .terms(e)
             .iter()
@@ -227,7 +236,7 @@ fn ingest_batch_is_the_wire_shape_of_the_same_items() {
 #[test]
 fn the_artifact_fixture_agrees_with_the_closed_forms() {
     use tessera_corpus::materialise::{
-        ArtifactFixtureCounts, BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER, PARTITION_LAYER,
+        ArtifactFixtureCounts, BOUNDARY_LAYER, FIXTURE_LEVEL, FLAT_LAYER,
     };
 
     let c = corpus(6_000);
