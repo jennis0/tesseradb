@@ -351,6 +351,15 @@ pub fn router(state: Arc<AppState>) -> Router {
 /// shared-secret check has no equivalent of). One layer over all three would have to carry three
 /// credential sources and three exemption lists, which is a policy table — the thing this change was
 /// explicitly not to build. Each plane keeps its own arrangement; only the control plane's moves.
+async fn require_operator_credential(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, ApiError> {
+    // Unconditional: no path, routed or not, is exempt. See "Why there is no exemption" above.
+    state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
+    Ok(next.run(request).await)
+}
 
 /// The projection a layer's declared views were placed under.
 ///
@@ -370,16 +379,6 @@ fn layer_projection(
         })?;
     meta.projection_of(first)
         .ok_or_else(|| ApiError::Unknown(format!("unknown view '{first}'")))
-}
-
-async fn require_operator_credential(
-    State(state): State<Arc<AppState>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> Result<axum::response::Response, ApiError> {
-    // Unconditional: no path, routed or not, is exempt. See "Why there is no exemption" above.
-    state.check_bearer(bearer_token(request.headers()), &state.operator_credential)?;
-    Ok(next.run(request).await)
 }
 
 /// Every route [`router`] mounts, as `(method, path)` — the subject of
