@@ -306,6 +306,12 @@ A view created at ingest has no artifact extents for either kind of layer until 
 writes them, and the layer answers empty on the new view until then — the ordinary state of a
 layer over a segment the fold has not seen.
 
+**A shape layer over several views** follows `polygon-membership.md` §4.3 (decision 0111): a
+`wgs84` shape spans any set of projected views, each through its own transform; `view`-space
+geometry spans only views sharing projection and frame — which a group's views do by
+construction, so a shape layer scoped to a group is the embedding case done safely; and a
+layer's views are all projected or all `none`, never the mix.
+
 ## 4. One entity in several views
 
 Identity is entity-space, so the same point in two views is the caller saying so at ingest: two

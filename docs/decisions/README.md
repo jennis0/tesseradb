@@ -128,3 +128,4 @@ prevent.
 | [0108](0108-a-view-group-grows-by-its-roster.md) | 2026-08-30 | A view group grows by its roster, and a roster record is immutable |
 | [0109](0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md) | 2026-08-30 | `scope` binds an attribute or a layer to a group's views, inside the gate |
 | [0110](0110-the-ordinal-gap-is-accepted.md) | 2026-08-30 | The ordinal gap is accepted as a register row |
+| [0111](0111-a-shape-spans-projected-views-through-wgs84.md) | 2026-08-30 | A shape spans projected views through wgs84, and no geometry spans both kinds of space |
