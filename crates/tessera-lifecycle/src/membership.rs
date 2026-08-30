@@ -41,6 +41,13 @@ use tessera_types::EntityId;
 /// reached from the write side: the alternative is serving the identity and the count with the
 /// description missing, which is the in-between state the decision forbids.
 ///
+/// **Permissive shrinks a generating set; it does not empty one.** A content whose last source this
+/// fold deleted leaves with the strict arm's contents rather than staying behind on the empty set,
+/// because the empty set is contained in every mask and would serve corpus-derived text to every
+/// principal who can see any member ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md),
+/// `annotation-write-cycle.md` §2.1). Content that requires only inherited visibility carries no
+/// generating set at all and is not reached by either arm.
+///
 /// Returns whether the record moved, which is what tells [`ArtifactStore::retire`] whether the
 /// level's version has to move with it: a level a fold walked over and did not change has a row
 /// form that is still correct, and rebuilding it would be the global grain back again in a
@@ -56,13 +63,29 @@ fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw
         }
         false => {
             let mut moved = false;
-            for content in &mut record.contents {
+            record.contents.retain_mut(|content| {
                 if content.generated_from.and_cardinality(retired) == 0 {
-                    continue;
+                    return true;
                 }
                 content.generated_from.andnot_inplace(retired);
                 moved = true;
-            }
+                // **A generating set with no survivors is not served**
+                // ([decision 0107](../../../docs/decisions/0107-a-generating-set-with-no-survivors-is-not-served.md)).
+                // Containment is a subset test, and the empty set is a subset of every mask — so a
+                // content whose last source this fold deleted would read as *satisfied* for every
+                // principal who can see any member, and corpus-derived text written from documents
+                // they were never entitled to would serve to all of them. Permissive says the
+                // content survives *its survivors*; with none, there is nothing for it to survive
+                // on. The publish path already refuses to accept such content
+                // (`registry.rs`, C28); this is the only other route to the state, and it is
+                // closed the same way the strict arm closes it — the content leaves, and an
+                // artifact left with no contents on a layer that declares them is withheld.
+                //
+                // Inherited content is untouched: it legitimately carries an empty generating set,
+                // it names none of the retired entities, and the early return above is what it
+                // takes.
+                !content.generated_from.is_empty()
+            });
             moved
         }
     }
@@ -2208,7 +2231,10 @@ mod tests {
             back_shape, shape,
             "the shapes are the membership of a shape layer"
         );
-        assert_eq!(back_shape.as_ref().unwrap().for_view("map"), Some(&[9u8][..]));
+        assert_eq!(
+            back_shape.as_ref().unwrap().for_view("map"),
+            Some(&[9u8][..])
+        );
         assert_eq!(back_shape.as_ref().unwrap().for_view("nowhere"), None);
 
         // An unattached artifact with no shape round-trips too, each carrying its own absence byte
