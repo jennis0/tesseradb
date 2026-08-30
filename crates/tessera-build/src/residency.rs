@@ -182,9 +182,10 @@ fn fixed_width(ty: ScalarType) -> u64 {
     }
 }
 
-/// What one layer member row costs the **machine**: about 4 bytes as Roaring — the incoming
-/// bitmap, the durable record's bytes and the store's own decoded copy, at the ~2 bytes an array
-/// container spends on a scattered member and less on a dense one.
+/// What one layer member row costs the **machine**: about 4 bytes as Roaring — the store's own
+/// decoded copy, at the ~2 bytes an array container spends on a scattered member and less on a
+/// dense one, and the level being published beside it, whose incoming bitmaps and durable record
+/// bytes are the same membership twice more.
 ///
 /// It was 12 until 2026-08-30, the other 8 being the plan's `Vec<u64>` of source ids: one vector
 /// per artifact, every one of them live from the first row of the first member source until the
@@ -192,9 +193,18 @@ fn fixed_width(ty: ScalarType) -> u64 {
 /// plan holds a spill budget rather than the corpus and the term that is left is the published
 /// memberships alone.
 ///
+/// **Only the store's copy is corpus-wide, and that is what changed later the same day.** The
+/// packing used to encode every unpublished level's records into a `Vec<Vec<u8>>` at once and then
+/// concatenate each level again — two more copies of every membership in the bundle, both linear in
+/// the corpus. `layers.rs` streams a blob at a time into the extent now, so what stands beside the
+/// store is one blob and one level's publication rather than the whole corpus's.
+///
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
-/// to be wrong in the direction that costs a rerun rather than a kill.
+/// to be wrong in the direction that costs a rerun rather than a kill. It is loose in one more
+/// direction since the packing was streamed: the constant charges the corpus for terms that are now
+/// a level's, and it is left at 4 rather than lowered because a term that errs high refuses a build
+/// that would have fitted, where one that errs low is the kill this module exists to pre-empt.
 const BYTES_PER_MEMBER_ROW: u64 = 4;
 
 /// What one layer member row costs the **disk** while the publication is running: the sorted runs

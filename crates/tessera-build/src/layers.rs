@@ -1497,13 +1497,23 @@ pub fn publish(
 /// **This is where the member rows meet `resolve`**, and it is the only place they do. The
 /// resolution used to run per artifact over a vector the plan held; the vector is the merge's
 /// output now, one artifact at a time, so what is resident is the largest single artifact's
-/// members and not the corpus's.
+/// members and not the corpus's — **once**, the sources being rewritten into their entities rather
+/// than read into a second vector.
 ///
 /// ⊘ **The sort is per artifact and it is why the largest one is the bound.** A source id's entity
 /// is not a monotone function of it — a build assigns entities in signature-sorted order — so the
 /// merge's ascending *sources* come out as unordered *entities*, and the membership has to be in
-/// hand to be put in order. 73.6×10⁶ entries at the Overture rung, which is 589 MB for the one
-/// artifact that has them.
+/// hand to be put in order. The largest artifact at the Overture rung holds 16.3×10⁶ pairs — one
+/// division, 5.5% of `members-divisions.parquet`'s 294.1×10⁶ — which is 130 MB for the one
+/// artifact that has them, and 130 MB is what the rewrite above stops holding twice.
+///
+/// ⊘ **The largest *key* in that corpus is not an artifact, and a pair count taken from the
+/// column says it is.** `members-taxonomy.parquet`'s key column is a list per row, and 228.8×10⁶
+/// of its 441.8×10⁶ entries — 51.8% — are **null**: a point in no artifact at that level, counted
+/// as unclustered and never pushed to the spill ([`read_members`]). Flattening the column and
+/// counting values reads as one artifact holding half the corpus, and there is no such artifact;
+/// that ladder's real contribution is 213.0×10⁶ pairs across 2,097 keys, and the corpus's whole
+/// spill is 5.07×10⁸.
 fn merge_member_runs(
     receipts: &[spill::SpillReceipt],
     plan: &LayerPlan,
@@ -1516,26 +1526,29 @@ fn merge_member_runs(
     let path = plan.members.dir.join("member-table.spill");
     let mut writer = spill::MemberTableWriter::create(&path, plan.bodies.len())?;
     let mut merge = MemberRunMerge::open(&receipts)?;
-    let mut entities: Vec<u64> = Vec::new();
     let mut pairs = 0u64;
     while merge.next_artifact()? {
         let index = merge.index() as usize;
         let (layer, level, key) = &plan.addresses[index];
-        entities.clear();
-        entities.reserve(merge.sources().len());
-        for &source in merge.sources() {
-            entities.push(resolve(source).ok_or_else(|| {
+        // **Resolved in place, in the merge's own buffer.** A source id and the entity it resolves
+        // to are both `u64`, so the artifact's sources *become* its entities; a second vector held
+        // the largest single membership of the corpus twice, which at the Overture rung is
+        // 16.3×10⁶ pairs and 130 MB apiece.
+        let entities = merge.sources_mut();
+        for slot in entities.iter_mut() {
+            let source = *slot;
+            *slot = resolve(source).ok_or_else(|| {
                 BuildError::Invalid(format!(
                     "{layer} level {level} artifact {key}: membership names entity {source}, \
                      which this build did not assign — the batch is refused rather than published \
                      without it, a dropped member moving both the count a viewer is shown and the \
                      size a proportional criterion divides by"
                 ))
-            })?);
+            })?;
         }
         entities.sort_unstable();
         pairs += entities.len() as u64;
-        writer.push(index, &entities)?;
+        writer.push(index, entities)?;
     }
     // **Every pair that went in came back out.** Each run verifies its own count and anchor as it
     // ends, so what this adds is the one thing no single run can see: that the *set* of runs is
@@ -1662,6 +1675,13 @@ impl MemberRunMerge {
 
     fn sources(&self) -> &[u64] {
         &self.sources
+    }
+
+    /// The same buffer, to be **rewritten in place** — a source id and the entity it resolves to
+    /// are both `u64`, so the resolution is a rewrite and not a second vector. See
+    /// [`merge_member_runs`], the one caller.
+    fn sources_mut(&mut self) -> &mut [u64] {
+        &mut self.sources
     }
 
     fn sort_sources(&mut self) {
@@ -2249,13 +2269,21 @@ fn load_members(
 
 /// Pack every level's memberships into one extent and fsync it — the same format, one file per
 /// level, that a control-plane publication writes.
+///
+/// **A blob at a time, into the file.** The store answers a level's ordinal *range*
+/// (`pending_ranges`) and encodes an artifact's record where it stands (`encode_pending`), so what
+/// is resident here is one blob and one extent's offset table at 8 bytes an artifact. Asking for
+/// the blobs instead — which is what the online publication does, under a lock it may not hold
+/// across an fsync — encodes every unpublished level of the corpus before the first byte is
+/// written, and then `pack` concatenates each level again: two more copies of every membership in
+/// the bundle, at the stage that is already the build's peak.
 fn write_membership_extents(
     store: &ArtifactStore,
     prefix_dir: &Path,
     partition: &str,
     published: &mut PublishedLayers,
 ) -> Result<()> {
-    let (ready, skipped) = store.unpublished();
+    let (ready, skipped) = store.pending_ranges();
     if let Some((layer, level)) = skipped.first() {
         // Unreachable from a build: every artifact of a level is published in one batch, so a
         // level cannot have a hole below its high-water. A refusal rather than an alarm, because a
@@ -2274,14 +2302,27 @@ fn write_membership_extents(
         .join(partition)
         .join("members");
     std::fs::create_dir_all(&dir).map_err(|e| BuildError::io(&dir, e))?;
-    for (index, (layer, level, ordinal_lo, blobs)) in ready.into_iter().enumerate() {
+    for (index, (layer, level, ordinal_lo, count)) in ready.into_iter().enumerate() {
         // **The layer name never reaches the filename.** It is path-shaped — `clusters/a` — so a
         // name-derived path would escape the directory, or collide after escaping.
         let name = format!("members-000000-{index:03}.tsmb");
-        let count = blobs.len() as u32;
-        let bytes = tessera_store::membership::pack(ordinal_lo, &blobs);
         let path = dir.join(&name);
-        tessera_store::write_and_fsync(&path, &bytes).map_err(BuildError::Store)?;
+        let mut writer = tessera_store::membership::PackWriter::create(&path, ordinal_lo, count)
+            .map_err(BuildError::Store)?;
+        for blob in store.encode_pending(&layer, level, ordinal_lo, count) {
+            // Unreachable: `pending_ranges` reports a level with a hole as skipped above rather
+            // than as a range. A refusal rather than an assertion because the alternative is an
+            // extent one blob short of the range it addresses, which serves every ordinal above
+            // the hole as another artifact's membership.
+            let blob = blob.ok_or_else(|| {
+                BuildError::Invalid(format!(
+                    "{layer} level {level} has no record at an ordinal inside the range it \
+                     reported as ready to pack"
+                ))
+            })?;
+            writer.push(&blob).map_err(BuildError::Store)?;
+        }
+        writer.finish().map_err(BuildError::Store)?;
         published.paths.push(path);
         published.membership_extents.push(MembershipExtent {
             path: format!("partitions/{partition}/members/{name}"),

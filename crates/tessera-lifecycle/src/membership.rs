@@ -75,6 +75,11 @@ fn apply_deletion_policy(record: &mut ArtifactRecord, retired: &Bitmap, withdraw
 /// packer takes them apart again immediately.
 pub type PendingExtent = (String, u32, u32, Vec<Vec<u8>>);
 
+/// One level's not-yet-published **range**: `(layer, level, ordinal_lo, count)` — the same four
+/// things a [`PendingExtent`] names, with the blobs left where they are for a caller that will
+/// encode them one at a time. See [`ArtifactStore::pending_ranges`].
+pub type PendingRange = (String, u32, u32, u32);
+
 /// One artifact's canonical shapes — **one per view of its layer, as bytes this crate stores and
 /// never interprets** (`polygon-membership.md` §4.3, §6.6).
 ///
@@ -1070,6 +1075,30 @@ impl ArtifactStore {
     /// would shift every later artifact's identity by one. A hole here means a publication landed
     /// out of order, which nothing does today.
     pub fn unpublished(&self) -> (Vec<PendingExtent>, Vec<(String, u32)>) {
+        let (ranges, skipped) = self.pending_ranges();
+        let ready = ranges
+            .into_iter()
+            .map(|(layer, level, ordinal_lo, count)| {
+                let blobs: Vec<Vec<u8>> = self
+                    .encode_pending(&layer, level, ordinal_lo, count)
+                    .map(|blob| blob.expect("pending_ranges returned a dense range"))
+                    .collect();
+                (layer, level, ordinal_lo, blobs)
+            })
+            .collect();
+        (ready, skipped)
+    }
+
+    /// The same levels [`Self::unpublished`] answers, as **ranges rather than blobs**:
+    /// `(layer, level, ordinal_lo, count)`, and the levels skipped for a hole.
+    ///
+    /// **What a caller that means to stream them asks instead**, [`Self::encode_at`] being the
+    /// other half. A build publishes every level of a corpus in one pass, so encoding them all
+    /// before the first is written holds the whole corpus's memberships a second time, beside the
+    /// bitmaps they came from; a level's ordinal range is enough to open the extent and take them
+    /// one at a time. The online publication materialises instead, and not from preference: it
+    /// reads this store under a lock it may not hold across an fsync.
+    pub fn pending_ranges(&self) -> (Vec<PendingRange>, Vec<(String, u32)>) {
         let mut ready = Vec::new();
         let mut skipped = Vec::new();
         for ((layer, level), slots) in &self.levels {
@@ -1080,24 +1109,42 @@ impl ArtifactStore {
             if from >= slots.len() {
                 continue;
             }
-            let tail = &slots[from..];
-            if tail.iter().any(Option::is_none) {
+            if slots[from..].iter().any(Option::is_none) {
                 skipped.push((layer.clone(), *level));
                 continue;
             }
-            let blobs: Vec<Vec<u8>> = tail
-                .iter()
-                .enumerate()
-                .map(|(i, slot)| {
-                    encode_record(
-                        slot.as_ref().expect("checked dense just above"),
-                        self.shape_of(layer, *level, (from + i) as u32),
-                    )
-                })
-                .collect();
-            ready.push((layer.clone(), *level, from as u32, blobs));
+            ready.push((
+                layer.clone(),
+                *level,
+                from as u32,
+                (slots.len() - from) as u32,
+            ));
         }
         (ready, skipped)
+    }
+
+    /// The blobs of one pending range, **encoded as they are taken** — the other half of
+    /// [`Self::pending_ranges`].
+    ///
+    /// An item is `None` where the level holds no record at that ordinal. Inside a range
+    /// `pending_ranges` returned that is a bug rather than a hole: it reports a level with a hole
+    /// as skipped and never as a range.
+    ///
+    /// The level is looked up once, not once an artifact: the store is keyed by an owned
+    /// `(String, u32)`, so a lookup per ordinal would be a `String` allocation per artifact on the
+    /// one path that walks every artifact of the corpus.
+    pub fn encode_pending<'a>(
+        &'a self,
+        layer: &'a str,
+        level: u32,
+        ordinal_lo: u32,
+        count: u32,
+    ) -> impl Iterator<Item = Option<Vec<u8>>> + 'a {
+        let slots = self.levels.get(&(layer.to_string(), level));
+        (ordinal_lo..ordinal_lo + count).map(move |ordinal| {
+            let record = slots?.get(ordinal as usize)?.as_ref()?;
+            Some(encode_record(record, self.shape_of(layer, level, ordinal)))
+        })
     }
 
     /// What this fold's deletions took away from every artifact that held one — the sweep behind
@@ -1865,6 +1912,38 @@ mod tests {
             store.cascade_from(&[EntityId::new(100)]).is_empty(),
             "the label is gone, so deleting its cluster cascades into nothing"
         );
+    }
+
+    /// **The streaming route and the materialising one answer the same thing.** A build takes
+    /// ranges and encodes an artifact at a time; the online publication takes the blobs. Two routes
+    /// to one set of bytes is one place for them to drift, so the equality is asserted rather than
+    /// argued — including which levels are skipped for a hole, where the two must agree exactly or
+    /// a build would pack around one.
+    #[test]
+    fn the_ranges_and_the_blobs_describe_the_same_pending_levels() {
+        let mut store = ArtifactStore::new();
+        store.put("clusters/a", 0, 0, record(100, &[1, 2, 3]), None);
+        store.put("clusters/a", 0, 1, record(101, &[4]), None);
+        store.put("clusters/a", 1, 0, record(102, &[]), None);
+        // A level with a hole: reported as skipped by both, and never as a range.
+        store.put("holed/h", 0, 1, record(103, &[7]), None);
+
+        let (ready, skipped) = store.unpublished();
+        let (ranges, skipped_ranges) = store.pending_ranges();
+        assert_eq!(skipped, skipped_ranges);
+        assert_eq!(skipped, vec![("holed/h".to_string(), 0)]);
+        assert_eq!(ready.len(), ranges.len());
+        for ((layer, level, lo, blobs), (r_layer, r_level, r_lo, count)) in
+            ready.iter().zip(ranges.iter())
+        {
+            assert_eq!((layer, level, lo), (r_layer, r_level, r_lo));
+            assert_eq!(blobs.len(), *count as usize);
+            let streamed: Vec<Vec<u8>> = store
+                .encode_pending(r_layer, *r_level, *r_lo, *count)
+                .map(|blob| blob.expect("a range holds a record at every ordinal"))
+                .collect();
+            assert_eq!(*blobs, streamed);
+        }
     }
 
     #[test]
