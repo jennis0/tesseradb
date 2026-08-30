@@ -1146,11 +1146,18 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
         crate::layers::PublishedLayers::default()
     } else {
         {
+            // The oracle build's `.build-tmp/`, for the member spill's runs — its own, because the
+            // filter-postings block above closed the one it opened. `TmpDir::create` deletes a
+            // stale directory rather than adopting it, so the two cannot overlap.
+            let tmp = spill::TmpDir::create(&args.out)?;
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
                 &args.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+                tmp.path(),
+                args.memory_budget
+                    .unwrap_or_else(pipeline::detect_memory_budget),
             )?;
             report_shapes(&plan.shape_reports);
             let by_source: HashMap<u64, u64> = staged
@@ -1158,7 +1165,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                 .enumerate()
                 .map(|(position, item)| (item.source_id, position as u64))
                 .collect();
-            crate::layers::publish(
+            let published = crate::layers::publish(
                 &mut plan,
                 &|source| by_source.get(&source).copied(),
                 n,
@@ -1177,7 +1184,13 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
                         )
                     },
                 )?,
-            )?
+            )?;
+            // The runs and the merged table are dead the moment the publication has read them,
+            // and this is the success path — so the removal is reported rather than left to
+            // `Drop`, which cannot say a file was still busy.
+            drop(plan);
+            tmp.close()?;
+            published
         }
     };
 

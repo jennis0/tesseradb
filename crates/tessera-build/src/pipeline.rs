@@ -1416,6 +1416,11 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
                 &args.layer_inputs,
                 &args.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
+                // The build's own `.build-tmp/`, which the member spill writes its runs into —
+                // still open here, and swept by the `close` below whether this stage succeeds or
+                // not.
+                tmp.path(),
+                args.memory_budget.unwrap_or_else(detect_memory_budget),
             )?;
             crate::report_shapes(&plan.shape_reports);
             // **A contiguous id range makes the search a subtraction**, and whether it is

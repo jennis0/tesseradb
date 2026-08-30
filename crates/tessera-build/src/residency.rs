@@ -19,9 +19,7 @@
 //!
 //! - the **sorted source ids** and the **ordinal→entity map**, 12 bytes an item, because a member
 //!   and an attribute row are both named by source id and both have to resolve;
-//! - the **layer member tables**, whole: one `Vec<u64>` of source ids per artifact as the plan is
-//!   read — rewritten in place to the entities they resolve to, so there is one vector and not two
-//!   — and the published memberships in the store.
+//! - the **published memberships** in the store, as Roaring.
 //!
 //! **None of it is a batch.** The loop's residency shrinks when the stride does; this does not
 //! shrink at all, because a member table is its own size. So the honest answer is not a smaller
@@ -29,6 +27,12 @@
 //! `plan_build` acts on.
 //!
 //! # What moved off the heap, and is still counted
+//!
+//! The **layer member tables** were the third item on that list until 2026-08-30: one `Vec<u64>` of
+//! source ids per artifact as the plan was read, every one of them live from the first member row
+//! to the last level published. They are sorted runs and a merged table under `.build-tmp/` now
+//! (`layers.rs`), read back one artifact at a time, so what the plan holds is a spill budget and
+//! what the disk holds is the corpus.
 //!
 //! Every **declared column in entity order** was the other half of this list and the larger half of
 //! the campaign's kills: a fixed-width type at its own width, a `text`, `keyword` or `utf8` one at a
@@ -43,9 +47,10 @@
 //! carrying a cost model past the thing it modelled.
 //!
 //! **[`Residency::mapped`] is the other half, and the disk pre-flight is its reader.** Those files
-//! are on the disk from the attribute join to the column release, and the text index spills its
-//! runs into the same window — a stretch the pre-flight's three original phase peaks all end
-//! before. Its column phase is this figure, taken from here rather than derived a second time.
+//! are on the disk from the attribute join to the column release, and the text index and the
+//! member spill both write their runs into the same window — a stretch the pre-flight's three
+//! original phase peaks all end before. Its column phase is this figure, taken from here rather
+//! than derived a second time.
 //!
 //! # What the numbers are, and what they are not
 //!
@@ -177,20 +182,36 @@ fn fixed_width(ty: ScalarType) -> u64 {
     }
 }
 
-/// What one layer member row costs, held **twice over** across the publication:
+/// What one layer member row costs the **machine**: about 4 bytes as Roaring — the incoming
+/// bitmap, the durable record's bytes and the store's own decoded copy, at the ~2 bytes an array
+/// container spends on a scattered member and less on a dense one.
 ///
-/// - 8 bytes as the plan's `Vec<u64>` of source ids, read from the member table. The resolution
-///   rewrites that vector in place — a source id and the entity it resolves to are both `u64` — so
-///   the resolved membership *is* the plan's allocation and not a second one beside it. It was two
-///   until 2026-08-29, when the copy was the largest single term in the build's whole peak;
-/// - about 4 more as Roaring — the incoming bitmap, the durable record's bytes and the store's own
-///   decoded copy, at the ~2 bytes an array container spends on a scattered member and less on a
-///   dense one.
+/// It was 12 until 2026-08-30, the other 8 being the plan's `Vec<u64>` of source ids: one vector
+/// per artifact, every one of them live from the first row of the first member source until the
+/// last level was published. Those pairs go to disk now ([`SPILLED_BYTES_PER_MEMBER_ROW`]), so the
+/// plan holds a spill budget rather than the corpus and the term that is left is the published
+/// memberships alone.
 ///
 /// ⊘ **The Roaring figure is the scattered case and is not measured per build.** A dense membership
 /// costs an eighth of it; the model takes the expensive one, because the refusal it feeds is meant
 /// to be wrong in the direction that costs a rerun rather than a kill.
-const BYTES_PER_MEMBER_ROW: u64 = 12;
+const BYTES_PER_MEMBER_ROW: u64 = 4;
+
+/// What one layer member row costs the **disk** while the publication is running: the sorted runs
+/// the member spill writes and the merged member table it reads back, both under `.build-tmp/` and
+/// both alive at once — the runs are deleted only once the whole table is written.
+///
+/// Charged as if a pair cost one raw source id in each file. Both are LEB128 delta encodings over
+/// ascending values, so the true figure is below that wherever a membership is dense in its id
+/// space and at it where the membership is scattered.
+///
+/// ⊘ **Modelled, not measured per build**, and the one corpus with a figure is GeoNames: its two
+/// member files' 26.9×10⁶ Parquet rows carry 68.4×10⁶ `(artifact, source)` pairs, which spilled
+/// 73 MiB of runs beside a 68 MiB table — **140 MiB against the 205 MiB this charges**. Loose in
+/// the direction the whole module is loose in, and loose the other way in its denominator: a
+/// member row's `key` column is a list, so a row is one pair on a flat layer and one per level on
+/// a ladder.
+const SPILLED_BYTES_PER_MEMBER_ROW: u64 = 8;
 
 /// The residency of everything the batch loop's model does not cover.
 ///
@@ -260,12 +281,19 @@ pub(crate) fn entity_order_residency(
     if member_rows > 0 {
         terms.push(Term {
             what: format!(
-                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the plan's \
-                 vector, which the resolution rewrites in place, and the published memberships \
-                 beside it"
+                "{member_rows} layer member row(s) at {BYTES_PER_MEMBER_ROW} B — the published \
+                 memberships, as Roaring"
             ),
             bytes: member_rows.saturating_mul(BYTES_PER_MEMBER_ROW),
             mapped: false,
+        });
+        terms.push(Term {
+            what: format!(
+                "the member spill's runs and the table they merge into, at \
+                 {SPILLED_BYTES_PER_MEMBER_ROW} B a member row, in .build-tmp/"
+            ),
+            bytes: member_rows.saturating_mul(SPILLED_BYTES_PER_MEMBER_ROW),
+            mapped: true,
         });
     }
     terms.push(Term {
@@ -449,16 +477,31 @@ mod tests {
         );
     }
 
-    /// Member rows are charged three times because they are resident three times, and a build's
-    /// member tables can outweigh its whole attribute tail.
+    /// **The published memberships are charged and the spill is reported.** A member row is
+    /// Roaring in the store and a delta in two files under `.build-tmp/`, and only the first is
+    /// memory the machine must have — a model that kept charging the second would refuse builds
+    /// that now fit, which is the failure mode of carrying a cost model past the thing it
+    /// modelled.
     #[test]
-    fn member_rows_are_charged_for_every_copy_that_is_resident() {
+    fn a_member_row_is_charged_where_it_is_resident_and_reported_where_it_is_a_file() {
         let n = 10_000_000;
+        let rows = 64_000_000;
         let without = entity_order_residency(n, &[], 0);
-        let with = entity_order_residency(n, &[], 64_000_000);
+        let with = entity_order_residency(n, &[], rows);
         assert_eq!(
             with.total() - without.total(),
-            64_000_000 * BYTES_PER_MEMBER_ROW
+            rows * BYTES_PER_MEMBER_ROW,
+            "only the Roaring copies are memory"
+        );
+        assert_eq!(
+            with.mapped() - without.mapped(),
+            rows * SPILLED_BYTES_PER_MEMBER_ROW,
+            "the runs and the merged table are disk"
+        );
+        assert!(
+            with.describe().contains("member spill"),
+            "the spill must be a named term of its own: {}",
+            with.describe()
         );
     }
 
