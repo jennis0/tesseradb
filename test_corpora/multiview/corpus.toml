@@ -177,6 +177,19 @@ visibility                = "public"
 artifact_visibility       = { field = "access", default = "inherited" }
 require_member_visibility = "all"
 
+# One supplied content value per artifact — the `contents` column both layer files carry, one
+# entry per rank and one value per supplied kind. `inherited` because the tag is the artifact's
+# own name rather than anything derived from its members (configuration.md,
+# `[[layer.content.supplied]]`).
+[layer.content]
+computed = []
+
+[[layer.content.supplied]]
+name                      = "tag"
+type                      = "text"
+require_member_visibility = "inherited"
+
+
 [[layer]]
 name                      = "quarter_clusters"
 title                     = "Clusters by quarter"
@@ -189,3 +202,16 @@ hierarchy                 = { kind = "flat" }
 visibility                = "public"
 artifact_visibility       = { default = "inherited" }
 require_member_visibility = "any"
+
+# One supplied content value per artifact — the `contents` column both layer files carry, one
+# entry per rank and one value per supplied kind. `inherited` because the tag is the artifact's
+# own name rather than anything derived from its members (configuration.md,
+# `[[layer.content.supplied]]`).
+[layer.content]
+computed = []
+
+[[layer.content.supplied]]
+name                      = "tag"
+type                      = "text"
+require_member_visibility = "inherited"
+

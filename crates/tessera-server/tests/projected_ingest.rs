@@ -140,6 +140,7 @@ fn build_projected(out: &Path, tmp: &Path, points: &[(f64, f64)]) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,

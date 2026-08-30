@@ -182,6 +182,7 @@ fn build_fixture_with_categories(out: &Path, points: &Path, pairs: &Path) {
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,

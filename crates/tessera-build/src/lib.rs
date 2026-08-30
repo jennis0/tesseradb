@@ -151,6 +151,22 @@ pub struct ScopedColumnFamily {
     pub views: Vec<usize>,
 }
 
+/// One layer whose artifacts are a different set per view of a group (`views.md` §3.5).
+///
+/// **A scoped layer's artifact rows say which view each belongs to**, under the layer's own
+/// `fields.view`, and an artifact is drawn only in that view: its membership is projected into
+/// that view's row space and into no other. The keys are the group's, so a row naming one the
+/// roster does not carry is refused, exactly as a points row is.
+#[derive(Debug, Clone)]
+pub struct ScopedLayer {
+    /// The group whose views the artifact sets are per.
+    pub group: String,
+    /// The discriminator column on the artifacts source — the layer's `fields.view`, resolved.
+    pub column: String,
+    /// Every key of that group, sorted.
+    pub keys: Vec<String>,
+}
+
 /// Arguments to [`build`].
 #[derive(Clone)]
 pub struct BuildArgs {
@@ -244,6 +260,10 @@ pub struct BuildArgs {
     ///
     /// **One source per layer**, so no row carries the layer it belongs to.
     pub layer_inputs: Vec<crate::config::LayerSources>,
+    /// Which of [`BuildArgs::layers`] are **scoped to a group** — a different artifact set per
+    /// view of it (`views.md` §3.5) — by layer name. Absent is the default `scope = "entity"`:
+    /// one artifact set, drawn on every view the layer names.
+    pub scoped_layers: BTreeMap<String, ScopedLayer>,
     /// Write `pairs.parquet` (contracts §2.4). On by default; `--no-oracle-pairs` clears it.
     ///
     /// The file is read by nothing on any request path — its consumers are the test-only
@@ -354,6 +374,13 @@ pub struct BuildReport {
     /// what stands between an operator and noticing. An ingest batch reports the same number for
     /// itself in its own 200.
     pub minted_artifacts: u64,
+    /// Every `(view, layer, level)` the post-bundle artifact pass observed, in the order the
+    /// views were built (`crate::artifact_pass`).
+    ///
+    /// **Returned as well as printed, because a scoped layer's per-view separation is only
+    /// visible here** (`views.md` §3.5): an artifact belongs to one view, so the artifact count
+    /// with rows in a view is the layer's own set there and not the level's whole roster.
+    pub artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport>,
     /// What each declared attribute source's join met — the figures
     /// [`report_attribute_coverage`] prints, returned as well as printed.
     ///
@@ -1426,6 +1453,7 @@ pub fn build_in_memory(args: &BuildArgs) -> Result<BuildReport> {
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                &args.scoped_layers,
                 view.projection,
                 &view.extent,
                 tessera_types::layer::DEFAULT_MAX_SHAPE_VERTICES,
@@ -1837,6 +1865,7 @@ fn write_manifests(
         unclustered_member_rows: published_layers.unclustered.iter().map(|u| u.rows).sum(),
         minted_artifacts: published_layers.minted.values().sum(),
         // Filled by the caller: the join happened stages ago and this function digests files.
+        artifact_levels: Vec::new(),
         attribute_coverage: Vec::new(),
     })
 }
@@ -2422,6 +2451,7 @@ mod tests {
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
+            scoped_layers: Default::default(),
             mint_external_ids: true,
             emit_oracle_pairs: true,
             batch_items: None,

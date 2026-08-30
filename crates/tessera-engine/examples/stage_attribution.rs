@@ -88,6 +88,7 @@ fn ensure_bundle() -> PathBuf {
             shard_id: 0,
             layers: Vec::new(),
             layer_inputs: Vec::new(),
+            scoped_layers: Default::default(),
             mint_external_ids: false,
             batch_items: None,
             memory_budget: None,

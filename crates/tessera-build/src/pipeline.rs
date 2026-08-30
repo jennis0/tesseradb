@@ -1504,6 +1504,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             let mut plan = crate::layers::read(
                 &args.layers,
                 &args.layer_inputs,
+                &args.scoped_layers,
                 // ⊘ **One frame for a layer's several views** (`views.md` §2's marker): an
                 // authored shape canonicalises against the anchor view's projection and extent,
                 // which `polygon-membership.md` §4.3 wants per view. A layer's views must share a
@@ -1619,6 +1620,9 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     let mut segments: Vec<tessera_store::manifest::SegmentDescriptor> = Vec::new();
     let mut occupancies: Vec<crate::Occupancy> = Vec::with_capacity(args.views.len());
     let mut artifact_paths: Vec<PathBuf> = Vec::new();
+    // Accumulated across the views, like the extents beside them: what a scoped layer's artifacts
+    // came to in each view is per view or it says nothing (`views.md` §3.5).
+    let mut artifact_levels: Vec<crate::artifact_pass::LevelLayoutReport> = Vec::new();
     for (index, view) in args.views.iter().enumerate() {
         let view_dir = tessera_store::view_path(&partition_dir, &view.view_id);
         let segment_dir = view_dir.join("segments").join(SEG_ID);
@@ -1775,6 +1779,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         );
         published_layers.store = artifact_store;
         crate::artifact_pass::report(&artifact_pass);
+        artifact_levels.extend(artifact_pass.levels.iter().cloned());
         // **Accumulated across views, not replaced.** Every artifact extent is keyed by
         // `(view, layer, level)`, so each view's pass adds its own; assigning would leave the
         // manifest carrying the last view's alone.
@@ -1846,6 +1851,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // so it scales with bundle size rather than with item count.
     timer.end(BuildStage::Manifests, report.bundle_bytes);
     report.attribute_coverage = coverage;
+    report.artifact_levels = artifact_levels;
     Ok(report)
 }
 

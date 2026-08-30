@@ -1586,6 +1586,73 @@ fn main() -> ExitCode {
                         .collect(),
                 })
                 .collect();
+            // **A layer naming a group is drawn on every view of it** (`views.md` §2, §3.5),
+            // and the expansion happens here, against the registry the build just enumerated: a
+            // build materialises the views that exist, and a layer's extents are per row space.
+            // ⊘ *Present and future* is the ingest half — a view created later gets the layer's
+            // artifacts at the fold that writes them, which is spec §3.5's own note.
+            let mut config = config;
+            for layer in &mut config.layers {
+                let mut expanded: Vec<String> = Vec::new();
+                for declared in &layer.views {
+                    let of_group: Vec<String> = registry
+                        .iter()
+                        .filter(|view| {
+                            view.group
+                                .as_ref()
+                                .is_some_and(|group| &group.group == declared)
+                        })
+                        .map(|view| view.id.clone())
+                        .collect();
+                    match of_group.is_empty() {
+                        true => expanded.push(declared.clone()),
+                        false => expanded.extend(of_group),
+                    }
+                }
+                layer.views = expanded;
+            }
+            // **A scoped layer is a different artifact set per view of one group** (§3.5): its
+            // rows say which view each artifact belongs to, under the layer's own `fields.view`,
+            // and the group's keys are what a stray value is refused against.
+            let scoped_layers: std::collections::BTreeMap<String, tessera_build::ScopedLayer> =
+                config
+                    .scopes
+                    .layers
+                    .iter()
+                    .map(|(layer, group)| {
+                        let mut keys: Vec<String> = registry
+                            .iter()
+                            .filter_map(|view| view.group.as_ref())
+                            .filter(|membership| {
+                                &membership.group == group
+                                    || membership.members_of.as_ref() == Some(group)
+                            })
+                            .map(|membership| membership.key.clone())
+                            .collect();
+                        keys.sort();
+                        keys.dedup();
+                        let column = config
+                            .layer_sources
+                            .iter()
+                            .find(|source| &source.name == layer)
+                            .and_then(|source| match &source.artifacts {
+                                Some(tessera_build::config::ArtifactSource::File {
+                                    fields,
+                                    ..
+                                }) => Some(fields.of("view").to_string()),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| "view".to_string());
+                        (
+                            layer.clone(),
+                            tessera_build::ScopedLayer {
+                                group: group.clone(),
+                                column,
+                                keys,
+                            },
+                        )
+                    })
+                    .collect();
             // Read out before the declaration is broken up into build arguments: it is a
             // property of the declaration, and every value in it exists by now.
             let disclosure = tessera_build::disclosure::Disclosure::of(&config);
@@ -1660,6 +1727,7 @@ fn main() -> ExitCode {
                 schema,
                 layers: config.layers,
                 layer_inputs: acquired.layers,
+                scoped_layers,
             };
             let observer = StageTimings;
             let built = if stage_timings {

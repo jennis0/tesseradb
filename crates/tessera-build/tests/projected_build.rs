@@ -428,6 +428,7 @@ fn build_bundle(
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: false,
         emit_oracle_pairs: false,
         batch_items: None,

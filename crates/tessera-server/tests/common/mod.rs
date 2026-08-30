@@ -148,6 +148,7 @@ pub fn build_fixture_n(out: &Path, points_path: &Path, pairs_path: &Path, n: u64
         shard_id: 0,
         layers: Vec::new(),
         layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
         mint_external_ids: true,
         emit_oracle_pairs: true,
         batch_items: None,
