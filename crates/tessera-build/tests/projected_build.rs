@@ -10,7 +10,7 @@
 //! the Python module that placed the built geographic corpora are both held to.
 
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, Float64Array, UInt64Array};
@@ -20,7 +20,10 @@ use parquet::arrow::ArrowWriter;
 
 use tessera_build::config::{frame_view, Extent, Fields, LonLatBox};
 use tessera_build::input::{read_points, PointSurvey};
+use tessera_build::{build, BuildArgs};
 use tessera_spatial::{fixed32, AlignedSquare, Bounds, Projection};
+use tessera_store::read::open_bundle;
+use tessera_types::IdentityKey;
 
 /// A points file with the coordinate columns under the names a projected view reads.
 fn write_points(path: &Path, columns: (&str, &str), xs: &[f64], ys: &[f64]) {
@@ -333,4 +336,272 @@ fn an_unprojected_view_stores_the_files_own_coordinates() {
             "row {i}"
         );
     }
+}
+
+/// A points file in the shape a Morton corpus uses: `entity_id` + `morton`, no coordinates.
+fn write_morton_points(path: &Path, codes: &[u64]) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("morton", DataType::UInt64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(UInt64Array::from((0..codes.len() as u64).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(UInt64Array::from(codes.to_vec())),
+        ],
+    )
+    .expect("the fixture batch is well-formed");
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// A `pairs.parquet` giving every row one term, which is the least a build will accept.
+fn write_pairs(path: &Path, rows: u64) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("term_id", DataType::UInt32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(UInt64Array::from((0..rows).collect::<Vec<_>>())) as ArrayRef,
+            Arc::new(arrow::array::UInt32Array::from(vec![1u32; rows as usize])),
+        ],
+    )
+    .expect("the fixture batch is well-formed");
+    let mut writer = ArrowWriter::try_new(File::create(path).unwrap(), schema, None).unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// Build a one-view bundle from `points` under `projection`, and hand back its root.
+fn build_bundle(
+    tmp: &Path,
+    projection: Projection,
+    points: &Path,
+    fields: Fields,
+    extent: Bounds,
+    rows: u64,
+) -> PathBuf {
+    const KEY_HEX: &str = "000102030405060708090a0b0c0d0e0f";
+    let pairs = tmp.join("pairs.parquet");
+    write_pairs(&pairs, rows);
+    let out = tmp.join("bundle");
+    let args = BuildArgs {
+        projection,
+        point_fields: fields,
+        points: points.to_path_buf(),
+        attribute_sources: Vec::new(),
+        access: tessera_build::config::AccessInput::relation(pairs),
+        out: out.clone(),
+        extent,
+        view_id: "world".to_string(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(KEY_HEX).unwrap(),
+        identity_key_hex: KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        mint_external_ids: false,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    };
+    build(&args).expect("the build succeeds");
+    out
+}
+
+/// `views[0].projection` as `MANIFEST.json` spells it on disk, not as the reader typed it.
+fn manifest_projection_name(out: &Path) -> String {
+    let current: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("CURRENT")).unwrap()).unwrap();
+    let prefix = current["prefix"].as_str().expect("CURRENT names a prefix");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join(prefix).join("MANIFEST.json")).unwrap())
+            .unwrap();
+    manifest["views"][0]["projection"]
+        .as_str()
+        .expect("`views[0].projection` is a string in the manifest")
+        .to_string()
+}
+
+/// **A projected bundle says so** (§3), because the frame it also records does not.
+///
+/// `[0, 1]` on both axes is a legal frame for a view with no projection at all, so a bundle that
+/// cannot name its projection is one the write path, the differential oracle and every later
+/// reader has to be told about out of band — and a degree quantised as though it were a frame
+/// coordinate is a wrong position nothing downstream can see.
+#[test]
+fn a_projected_bundles_manifest_names_its_projection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("world.parquet");
+    let lons = [-0.1276, 151.2093, -58.3816, 139.6917];
+    let lats = [51.5072, -33.8688, -34.6037, 35.6895];
+    write_points(&points, ("lon", "lat"), &lons, &lats);
+
+    let frame = frame_view(
+        "world",
+        Projection::WebMercator,
+        &whole_world(),
+        &points,
+        &geographic(),
+        None,
+    )
+    .expect("the frame resolves");
+    let out = build_bundle(
+        tmp.path(),
+        Projection::WebMercator,
+        &points,
+        geographic(),
+        frame.extent,
+        lons.len() as u64,
+    );
+
+    assert_eq!(manifest_projection_name(&out), "web_mercator");
+    let bundle = open_bundle(&out).expect("the bundle it just wrote opens");
+    assert_eq!(bundle.manifest.views[0].projection, Projection::WebMercator);
+    // The frame alone would not have said it: this one is the unit square either way.
+    assert_eq!(
+        (
+            bundle.manifest.quantisation.x_min,
+            bundle.manifest.quantisation.x_max
+        ),
+        (0.0, 1.0)
+    );
+}
+
+/// **An unprojected bundle says `none` rather than omitting the key.**
+///
+/// The two are indistinguishable under `#[serde(default)]`, and the one that matters — a
+/// projected bundle whose projection went missing — would then open and be read as this.
+#[test]
+fn an_unprojected_bundles_manifest_says_none_rather_than_omitting_the_field() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("plain.parquet");
+    let xs = [-17.0, 0.0, 3.5, 17.75];
+    let ys = [-20.5, 1.25, 0.0, 22.5];
+    write_points(&points, ("x", "y"), &xs, &ys);
+
+    let extent = Bounds {
+        x_min: -25.0,
+        x_max: 25.0,
+        y_min: -25.0,
+        y_max: 25.0,
+    };
+    let out = build_bundle(
+        tmp.path(),
+        Projection::None,
+        &points,
+        Default::default(),
+        extent,
+        xs.len() as u64,
+    );
+
+    assert_eq!(manifest_projection_name(&out), "none");
+    let bundle = open_bundle(&out).expect("the bundle it just wrote opens");
+    assert_eq!(bundle.manifest.views[0].projection, Projection::None);
+}
+
+/// **The report does not claim an empty edge when anything was clipped** (§7).
+///
+/// The sentence is derived from the clamp counter, and a clipped point is deliberately *not*
+/// clamped — it lands exactly where the quantisation rule says nothing is — so the counter alone
+/// would assert the opposite of the thing §7 exists to keep separate. ⊘ The clip line itself, and
+/// the report's projection and snap wording, are not written yet.
+#[test]
+fn the_report_does_not_call_the_edge_empty_when_points_were_clipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let clipped = tmp.path().join("polar.parquet");
+    write_points(&clipped, ("lon", "lat"), &[0.0, -0.1276], &[89.9, 51.5072]);
+    let clean = tmp.path().join("temperate.parquet");
+    write_points(&clean, ("lon", "lat"), &[0.0, -0.1276], &[45.0, 51.5072]);
+
+    let report = |points: &Path| {
+        frame_view(
+            "world",
+            Projection::WebMercator,
+            &whole_world(),
+            points,
+            &geographic(),
+            None,
+        )
+        .expect("the frame resolves")
+        .report()
+    };
+
+    let clipped_report = report(&clipped);
+    assert!(
+        !clipped_report.contains("none on the frame's edge"),
+        "a clipped point is exactly on the edge: {clipped_report}"
+    );
+    assert!(
+        clipped_report.contains("none clamped onto the frame's edge"),
+        "what the clamp counter can actually support: {clipped_report}"
+    );
+    // And the sentence is unchanged where nothing was clipped, which is every corpus built so far.
+    assert!(
+        report(&clean).contains("2 point(s) placed, none on the frame's edge"),
+        "{}",
+        report(&clean)
+    );
+}
+
+/// **A Morton points file under a projected view is refused where it is detected**, naming that a
+/// projected view has no Morton geometry (§3).
+///
+/// The survey answered `Quantised` before it noticed the projection, so the build printed that
+/// the points arrive already placed and nothing is quantised here — legitimising a configuration
+/// this design has no shape for — and the refusal arrived a moment later from the scan, for a
+/// missing `lon` column. Loud either way; from the wrong place with the wrong explanation.
+#[test]
+fn a_morton_points_file_under_a_projected_view_is_refused_by_the_survey() {
+    let tmp = tempfile::tempdir().unwrap();
+    let points = tmp.path().join("coded.parquet");
+    write_morton_points(&points, &[0, 1, 2, 3]);
+
+    let message = format!(
+        "{}",
+        frame_view(
+            "world",
+            Projection::WebMercator,
+            &whole_world(),
+            &points,
+            &geographic(),
+            None,
+        )
+        .expect_err("a projected view has no Morton geometry")
+    );
+    assert!(message.contains("Morton codes"), "{message}");
+    assert!(message.contains("web_mercator"), "{message}");
+    assert!(
+        message.contains("no longitude"),
+        "the refusal must say why a code cannot be projected: {message}"
+    );
+    assert!(
+        !message.contains("`extent = \"auto\"`"),
+        "the `auto` explanation is a different refusal: {message}"
+    );
+
+    // The same file under `projection = "none"` is the shape it has always been.
+    let identity = Bounds {
+        x_min: 0.0,
+        x_max: 65536.0,
+        y_min: 0.0,
+        y_max: 65536.0,
+    };
+    let frame = frame_view(
+        "s0",
+        Projection::None,
+        &Extent::Fixed(identity),
+        &points,
+        &Default::default(),
+        None,
+    )
+    .expect("an unprojected view reads codes against the grid's own frame");
+    assert_eq!(frame.survey, PointSurvey::Quantised);
 }

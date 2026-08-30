@@ -962,10 +962,17 @@ impl Frame {
             data.x_min, data.x_max, data.y_min, data.y_max
         ));
         if survey.clamped == 0 {
-            out.push_str(&format!(
-                "\n        {} point(s) placed, none on the frame's edge",
-                survey.rows
-            ));
+            // **The clamp counter alone cannot say the edge is empty.** A clipped point lands
+            // exactly on the edge and is deliberately *not* clamped (`projections.md` §7), so
+            // where anything was clipped this sentence would otherwise assert the opposite of the
+            // thing that section exists to keep separate. It narrows to the claim the counter can
+            // actually support; ⊘ the clip line itself is not written here.
+            let edge = if survey.clipped == 0 {
+                "none on the frame's edge"
+            } else {
+                "none clamped onto the frame's edge"
+            };
+            out.push_str(&format!("\n        {} point(s) placed, {edge}", survey.rows));
         } else {
             out.push_str(&format!(
                 "\n        {} of {} point(s) ({:.1}%) CLAMP onto the frame's edge — {} on x, {} \

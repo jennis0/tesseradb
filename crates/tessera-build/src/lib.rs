@@ -1492,6 +1492,10 @@ fn write_manifests(
         views: vec![ViewDescriptor {
             id: args.view_id.clone(),
             display_name: args.view_id.clone(),
+            // What placed these positions before `quantisation` did. A bundle that carries
+            // projected positions and cannot say so is one the write path and the differential
+            // oracle both have to be told about out of band (`projections.md` §3).
+            projection: args.projection,
         }],
         partitions: vec![PartitionDescriptor {
             phash: PHASH.to_string(),

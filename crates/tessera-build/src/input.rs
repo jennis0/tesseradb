@@ -915,12 +915,33 @@ pub fn survey_points(
     let schema = builder.schema().clone();
     let (x_name, y_name) = (fields.of("x"), fields.of("y"));
     if schema.column_with_name(x_name).is_none() || schema.column_with_name(y_name).is_none() {
-        if against.is_some() && schema.column_with_name(fields.of("morton")).is_some() {
+        let coded = schema.column_with_name(fields.of("morton")).is_some();
+        // **A projected view has no Morton geometry, and the refusal belongs here** — the same
+        // rule `compile_projected_fields` applies to `fields.morton`, reaching the file that
+        // carries the column rather than the declaration that names it. Without this the survey
+        // answers `Quantised`, the build prints that the points arrive already placed and nothing
+        // is quantised here, and the scan a moment later refuses for a missing `lon` — loud, but
+        // from the wrong place and having first legitimised a shape this design has none of.
+        if coded && projection != Projection::None {
+            return Err(BuildError::Schema {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "{}: this points file stores Morton codes, and this view is projected ({}). \
+                     A code is a position already placed in a frame, so there is no longitude \
+                     left for a projection to transform (projections.md §3). Either declare \
+                     `projection = \"none\"` and read the codes against the grid's own frame, or \
+                     supply '{x_name}'/'{y_name}' columns",
+                    fields.object(),
+                    projection.name()
+                ),
+            });
+        }
+        if against.is_some() && coded {
             return Ok(PointSurvey::Quantised);
         }
         return Err(BuildError::Schema {
             path: path.to_path_buf(),
-            detail: if schema.column_with_name(fields.of("morton")).is_some() {
+            detail: if coded {
                 "`extent = \"auto\"` fits a box around this view\'s coordinates, and this points \
                  file stores Morton codes rather than coordinates. Codes are exact only against \
                  the grid\'s own extent, so write it out: `extent = { min = 0.0, max = 65536.0 }`."
