@@ -123,33 +123,39 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
     }
 }
 
-/// **A log at version 15 — the version before the coordinates widened — is refused.**
+/// **A log at either version whose records a current reader would find plausible is refused.**
 ///
 /// Kept beside [`an_older_version_wal_is_refused`] rather than folded into it, because the two
 /// guard different failures. That one rules out a header from an arbitrary past. This one rules
-/// out the *immediately preceding* version, which is the only one a stale local log is likely to
-/// be at, and whose records a version-16 reader would otherwise find entirely plausible: a field's
-/// type changed rather than a variant being added, so the record length is right, the CRC is right,
-/// and four of the eight bytes a coordinate now takes come out of whatever field follows it. The
-/// row would land somewhere on the grid instead of failing.
+/// out the versions whose records are *silently misreadable*, which is the hazard a bumped number
+/// exists for and the only one a stale local log is likely to be at.
+///
+/// **15** is the version before the coordinates widened: a field's type changed rather than a
+/// variant being added, so the record length is right, the CRC is right, and four of the eight
+/// bytes a coordinate now takes come out of whatever field follows it — the row would land
+/// somewhere on the grid instead of failing. **16** is the version before `WalRow` gained
+/// `scoped` (`views.md` §5, r24): postcard is positional, so a 16 record read at 17 takes the
+/// *next* record's leading bytes for the list it does not carry.
 #[test]
-fn a_log_at_the_version_before_the_coordinates_widened_is_refused() {
+fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     let dir = tempfile::TempDir::new().unwrap();
-    let path = dir.path().join("wal.log");
-    std::fs::write(
-        dir.path().join("wal-000001.log"),
-        header_at_version(15, 1, 0),
-    )
-    .unwrap();
-    assert!(matches!(Wal::open(&path), Err(WalError::BadHeader)));
+    for (index, version) in [15u16, 16].into_iter().enumerate() {
+        let at = dir.path().join(format!("v{index}"));
+        std::fs::create_dir(&at).unwrap();
+        std::fs::write(at.join("wal-000001.log"), header_at_version(version, 1, 0)).unwrap();
+        assert!(matches!(
+            Wal::open(at.join("wal.log")),
+            Err(WalError::BadHeader)
+        ));
+    }
 
-    // The same header at the current version is *accepted*, which is what makes the refusal above
+    // The same header at the current version is *accepted*, which is what makes the refusals above
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
     std::fs::write(
         other.join("wal-000001.log"),
-        header_at_version(16, 1, 0),
+        header_at_version(17, 1, 0),
     )
     .unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
