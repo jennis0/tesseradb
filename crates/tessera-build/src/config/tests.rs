@@ -3295,6 +3295,82 @@ fn a_members_group_takes_the_owners_views_and_declares_no_roster() {
     assert!(message.contains("a roster on a group"), "{message}");
 }
 
+/// **A title is the layout's, not the key set's** (`views.md` §3.3, contracts §3.2 r61). Two
+/// groups over one roster are two layouts, and the group descriptor's `title` is taken from the
+/// group that declared it — so a `members` group with a title of its own publishes that one, and a
+/// `members` group with none publishes **none** rather than inheriting the owner's. The second
+/// half is the one worth pinning: inheriting would put the owner's name on a second layout that a
+/// principal may reach without reaching the owner at all.
+#[test]
+fn a_members_groups_title_is_its_own_and_is_never_the_owners() {
+    let sharing = |title: &str| {
+        format!(
+            "\n[[view_group]]\nname = \"quarter_map\"\nmembers = \"quarter\"\n{title}\
+             extent = \"auto\"\nsource = \"other\"\nfields = {{ view = \"quarter\" }}\n\
+             point_visibility = {{ default = \"public\" }}\n"
+        )
+    };
+
+    let titles = |text: &str| {
+        let config = parse_str(text).expect("both groups parse");
+        let registry = config.build_views().expect("a form A roster needs no file");
+        let resolved = stub_view_args(&registry);
+        config
+            .group_registry(&registry, &resolved)
+            .into_iter()
+            .map(|group| (group.name, group.title))
+            .collect::<Vec<_>>()
+    };
+
+    // The owner declares one (`GROUP`'s own `title`), and the sharing group declares its own.
+    assert_eq!(
+        titles(&with_group(&sharing("title = \"Quarters on the map\"\n"))),
+        [
+            ("quarter".to_string(), Some("By quarter".to_string())),
+            (
+                "quarter_map".to_string(),
+                Some("Quarters on the map".to_string())
+            ),
+        ]
+    );
+
+    // And with none declared it is `None` — served as `null`, not as the owner's title.
+    assert_eq!(
+        titles(&with_group(&sharing(""))),
+        [
+            ("quarter".to_string(), Some("By quarter".to_string())),
+            ("quarter_map".to_string(), None),
+        ]
+    );
+}
+
+/// The two fields [`Config::group_registry`] reads off a resolved view — its id and its frame —
+/// with the rest of [`crate::ViewArgs`] filled in inertly. A test of the registry is a test of the
+/// declaration's own arithmetic, and building the acquisition half would be building a corpus.
+fn stub_view_args(registry: &[BuildView]) -> Vec<crate::ViewArgs> {
+    registry
+        .iter()
+        .map(|view| crate::ViewArgs {
+            view_id: view.id.clone(),
+            projection: view.projection,
+            extent: tessera_spatial::Bounds {
+                x_min: -40.0,
+                x_max: 40.0,
+                y_min: -40.0,
+                y_max: 40.0,
+            },
+            points: PathBuf::new(),
+            point_fields: Fields::default(),
+            select: None,
+            access: AccessInput {
+                source: AccessSource::Default,
+                default: "public".to_string(),
+            },
+            visibility: view.visibility.clone(),
+        })
+        .collect()
+}
+
 #[test]
 fn members_naming_no_group_is_refused() {
     let text = with_group(
