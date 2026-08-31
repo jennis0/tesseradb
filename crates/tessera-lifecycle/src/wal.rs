@@ -171,8 +171,11 @@ pub enum WalScalar {
 /// `x`/`y` are `f64`, the width the whole coordinate path carries (`projections.md` §6) — the wire
 /// reads it, this record stores it and the flush quantises it. Postcard encodes a float at its
 /// declared width, so the width is on-disk format: this field's change from `f32` is what
-/// `WAL_VERSION` 16 exists for, and a log at 15 is refused rather than read eight bytes at a time
-/// out of four.
+/// `WAL_VERSION` 16 existed for, and a log at 15 is refused rather than read eight bytes at a time
+/// out of four. The current version is **17**, for [`WalRow::scoped`] below — postcard is
+/// positional, so a 16 record read at 17 takes the next record's leading bytes for the list it
+/// does not carry — and both older versions are refused for that one reason: their records are
+/// the ones a current reader would find *plausible*.
 ///
 /// **They are the view's frame coordinates, never longitude and latitude** (`projections.md` §3).
 /// A projected view's transform runs once, at the wire boundary, before the record is framed — so

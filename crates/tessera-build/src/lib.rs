@@ -235,10 +235,15 @@ pub struct BuildArgs {
     ///
     /// **`render` on a family reaches each view's row tail** (`views.md` §5): the column is
     /// permuted into the row space of every view of the group, and of any group sharing them, and
-    /// of no other. ⊘ The **write** half is unbuilt and loud at the build: no ingest batch carries
-    /// a scoped value — a buffered row's scalars are positional against `declared_scalars`, which
-    /// a family has no slot in — so a view created after a build has no column of any family
-    /// until a rebuild writes one.
+    /// of no other.
+    ///
+    /// **What a build writes is no longer all there is** (r24). A batch into a view of the owning
+    /// group carries the family's values under their plain names, and a view created while the
+    /// service runs acquires its columns — and the empty bases beneath them — at the first flush
+    /// that covers it. ⊘ The one case that still needs a rebuild is a view of a group declaring
+    /// `members` of this one: it renders the family and may not be written through, the column
+    /// being the owner's and a second writer for one `(entity, view)` column being two layers
+    /// claiming one entity.
     pub scoped_attributes: Vec<ScopedColumnFamily>,
     /// Bundle root to create.
     pub out: PathBuf,

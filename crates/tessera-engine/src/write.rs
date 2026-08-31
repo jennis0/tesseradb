@@ -3734,7 +3734,12 @@ pub(crate) fn scoped_families_by_view(
         }
         for view in &group.views {
             out.insert(
-                format!("{}{}{}", group.name, tessera_store::GROUP_SEPARATOR, view.key),
+                format!(
+                    "{}{}{}",
+                    group.name,
+                    tessera_store::GROUP_SEPARATOR,
+                    view.key
+                ),
                 group.scoped_scalars.clone(),
             );
         }
@@ -7620,13 +7625,17 @@ impl Executor {
                     // **This view's schema, entity-scoped tail then scoped render lanes** — the
                     // same list a merge and a fold of this view take (`view_scalar_schema_of`),
                     // so a segment written by any of the three carries the same columns.
+                    //
+                    // **The two derivations agree only because a `members` group can never own a
+                    // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
+                    // view of the owning group `scoped_render` is that group's rendered families
+                    // in manifest order, which is exactly what `scoped_render_families` yields
+                    // there; under any other view the branch above *is* that function. Change
+                    // either site — or that refusal — and the third has to move with it, or a
+                    // flush writes a tail its own view's rewriters cannot read.
                     scalar_schema: {
                         let mut schema = scalar_schema.clone();
-                        schema.extend(
-                            scoped_render
-                                .iter()
-                                .map(|f| (f.name.clone(), f.arrow_type)),
-                        );
+                        schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
                         schema
                     },
                     render_indices: render_indices.clone(),

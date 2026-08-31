@@ -2231,17 +2231,25 @@ fn write_scoped_columns(
     );
     for family in &args.scoped_attributes {
         let attribute = &family.attribute;
-        // **What `render` buys, and what it still does not.** The build's own views of the group
-        // get the column in their row tails below; a view created after this build has no column
-        // of any family until one is written for it, and no batch can supply one — a buffered
-        // row's scalars are positional against `MANIFEST.declared_scalars`, which a family is
-        // deliberately absent from. Printed once per family, where an operator can act on it.
-        if attribute.render {
+        // **What `render` buys, and the one place it still does not reach.** The build's own
+        // views of the group get the column in their row tails below, and a view created while
+        // the service runs gets one at the first flush that covers it (`views.md` §5, r24) — so
+        // the rebuild this once warned about is no longer owed. What is left is the views of a
+        // group that only *shares* this family's: they render the column and no batch into one
+        // may carry a value, the column being the owner's. Printed once per family, where an
+        // operator can act on it.
+        if attribute.render
+            && args
+                .groups
+                .iter()
+                .any(|g| g.members_of.as_deref() == Some(family.group.as_str()))
+        {
             eprintln!(
                 "attribute '{}': `render` is carried in the hot row tail of every view of group \
-                 '{}' this build writes; ⊘ no ingest batch carries a scoped value, so a view \
-                 created later has none until a rebuild (views §5)",
-                attribute.name, family.group
+                 '{}' and of every group sharing its views; ⊘ a batch into a sharing group's view \
+                 may not carry a value — send it to '{}'s own view of the key, where it is entity \
+                 space and reaches both (views §5)",
+                attribute.name, family.group, family.group
             );
         }
         for &index in &family.views {

@@ -753,7 +753,6 @@ pub(crate) fn scoped_owes_postings(scoped: &tessera_store::manifest::ScopedScala
     scoped.vocabulary.is_some() && scoped_is_filterable(scoped)
 }
 
-
 /// Open one view's column of a group-scoped attribute family (`views.md` §5) — the name it is held
 /// under, its placement, and its layers.
 ///

@@ -929,8 +929,7 @@ impl Manifest {
                     // manifest refuse to load at the next restart. The column's files are left
                     // behind with the prefix, exactly as the view's segments are: §3.4's
                     // reclamation is by omission.
-                    let dropped =
-                        format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, stone.key);
+                    let dropped = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, stone.key);
                     for family in &mut group.scoped_scalars {
                         family.views.retain(|v| *v != dropped);
                     }

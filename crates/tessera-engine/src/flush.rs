@@ -1390,8 +1390,6 @@ fn write_text_layer(
     }))
 }
 
-
-
 /// Where one view's column of a group-scoped family lives, prefix-relative —
 /// `partitions/<p>/attrs/<column>/<group>/<key>/` (`views.md` §5), through the one place a view id
 /// becomes a path so the writer cannot drift from `FilterColumns::open`'s reader.
@@ -1593,12 +1591,9 @@ fn write_empty_scoped_base(
         .map_err(|e| failed("the dictionary", &e))?;
     }
     if spec.category {
-        let empty = tessera_filter::open_extent(
-            &values_path,
-            &presence_path,
-            tessera_filter::Access::Read,
-        )
-        .map_err(|e| failed("reopening the values", &e))?;
+        let empty =
+            tessera_filter::open_extent(&values_path, &presence_path, tessera_filter::Access::Read)
+                .map_err(|e| failed("reopening the values", &e))?;
         tessera_filter_write::write_category_postings(
             &column_dir.join("postings.arrow"),
             &spec.name,
@@ -2122,7 +2117,9 @@ mod tests {
             &[],
         );
         let plan = plan(&generation).expect("the batch flushes");
-        let column = extent_values(&keyword_spec(), entity_scoped_rows(&keyword_spec(), &plan).expect("the rows gather")).expect("the column gathers");
+        let spec = keyword_spec();
+        let rows = entity_scoped_rows(&spec, &plan).expect("the rows gather");
+        let column = extent_values(&spec, rows).expect("the column gathers");
 
         assert_eq!(
             column.dict_keys.as_deref(),
@@ -2161,7 +2158,9 @@ mod tests {
             &[],
         );
         let plan = plan(&generation).expect("the batch flushes");
-        let column = extent_values(&keyword_spec(), entity_scoped_rows(&keyword_spec(), &plan).expect("the rows gather")).expect("the column gathers");
+        let spec = keyword_spec();
+        let rows = entity_scoped_rows(&spec, &plan).expect("the rows gather");
+        let column = extent_values(&spec, rows).expect("the column gathers");
 
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
@@ -2207,7 +2206,9 @@ mod tests {
     fn a_keyword_extent_with_no_values_still_writes_an_empty_dictionary() {
         let generation = generation_with(&[(3, keyword_item(None)), (5, keyword_item(None))], &[]);
         let plan = plan(&generation).expect("the batch flushes");
-        let column = extent_values(&keyword_spec(), entity_scoped_rows(&keyword_spec(), &plan).expect("the rows gather")).expect("the column gathers");
+        let spec = keyword_spec();
+        let rows = entity_scoped_rows(&spec, &plan).expect("the rows gather");
+        let column = extent_values(&spec, rows).expect("the column gathers");
         assert_eq!(column.dict_keys.as_deref(), Some(&[][..]));
 
         let dir = tempfile::TempDir::new().expect("a temp dir");
@@ -2251,8 +2252,10 @@ mod tests {
         .expect("the second batch flushes");
 
         let spec = keyword_spec();
-        let a = extent_values(&spec, entity_scoped_rows(&spec, &first).expect("rows")).expect("gathers");
-        let b = extent_values(&spec, entity_scoped_rows(&spec, &second).expect("rows")).expect("gathers");
+        let a = extent_values(&spec, entity_scoped_rows(&spec, &first).expect("rows"))
+            .expect("gathers");
+        let b = extent_values(&spec, entity_scoped_rows(&spec, &second).expect("rows"))
+            .expect("gathers");
 
         assert_eq!(a.dict_keys.as_deref(), Some(&["alpha", "zeta"][..]));
         assert_eq!(b.dict_keys.as_deref(), Some(&["omega", "zeta"][..]));
