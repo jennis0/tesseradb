@@ -1,7 +1,47 @@
 //! `Permutation`: the **only** legal EntityId→RowId path in the codebase (invariant I4).
-//! Backed by `permutation.bin` (R4): `"TSPM"` ‖ `u16 version` ‖ `u16 reserved` ‖ `u64 bound` ‖
-//! `bound` little-endian `u32` slots, sentinel `0xFFFF_FFFF` for an entity never assigned a row
-//! in this segment.
+//! Backed by `permutation.bin` (R4), the **two-level paged** entity→row map: a directory over
+//! pages of 2¹⁶ consecutive entity ids, an absent page meaning every entity in it has no row in
+//! this segment.
+//!
+//! ## The file
+//!
+//! ```text
+//!   0   "TSPM"                        magic
+//!   4   u16 version = 2
+//!   6   u16 page_shift = 16           recorded, not assumed — any other value is refused
+//!   8   u64 bound                     the entity ids this file covers, [0, bound)
+//!  16   u32 page_count                = ceil(bound / 2^16)
+//!  20   u32 present_count             how many of them carry slots
+//!  24   u32 × page_count              the directory: each page's slot in the payload, or
+//!                                     0xFFFF_FFFF for an absent page
+//!       zero padding                  to the next 4096-byte boundary
+//!  ...  u32 × 2^16 × present_count    the pages, in slot order, which is ascending page order
+//! ```
+//!
+//! A slot is a row id, sentinel `0xFFFF_FFFF` for an entity with no row here — so a *present*
+//! page may still hold holes, and an *absent* page is exactly one that holds nothing but holes.
+//! **A dense view is the degenerate case with every page present** (`views.md` §8): the flat
+//! array of earlier revisions plus an identity directory. A sparse one — a group's quarterly view
+//! holding 8k of 21k entities — stores the pages it occupies and nothing else, which is the whole
+//! reason the level exists: at 10⁹ entities a flat array is 4 GB per view, sentinel-dominated,
+//! multiplied by the views of the group.
+//!
+//! Nothing is compressed and nothing is decoded (contracts §2.6 — mmap and slice). The payload
+//! starts on a 4 KiB boundary and a page is 256 KiB, so every page is page-aligned in the mapping.
+//!
+//! **Canonical, so the bytes are a function of the mapping.** Slots ascend with page index and
+//! number `0..present_count` exactly; the padding is zero; the tail of the last page above `bound`
+//! is sentinel. A file departing from any of these is refused at load rather than read generously,
+//! which is what lets the two producers — the build's planned writer and the fold's scatter
+//! ([`crate::write::PermutationWriter`]) — be held to byte-for-byte agreement.
+//!
+//! **The flat array is gone, and the version number refuses it by construction.** Version 1 was
+//! `bound` slots with no directory and no page count; this is version 2, so a file from the older
+//! producer fails [`Permutation::load`] with an unsupported-version error rather than having its
+//! first slots read as a directory. The artifacts are recreated rather than carried
+//! ([decision 0048](../../../docs/decisions/0048-no-deployments-exist-so-delete-rather-than-support.md)),
+//! and `bundle_format` does not move (owner direction) — the loud refusal a bump would have
+//! supplied is delivered by the version field, which is the field that actually changed.
 //!
 //! ## Row space is that file plus an ordered extent list
 //!
@@ -12,7 +52,8 @@
 //! **The dispatch lives here rather than in the engine, and that is I4 rather than tidiness.**
 //! The claim this module makes about itself — that it is the only legal EntityId→RowId path — is
 //! falsified by an engine that learns to select an extent and index a segment. Every caller still
-//! sees `row_of` and `project`; which segment answered is this module's business.
+//! sees `row_of` and `project`; which segment answered is this module's business, and so is
+//! whether the answer came from a page or from an absent one.
 //!
 //! Two bounds hold by construction and are checked at the one place an extent enters
 //! ([`RowSpace::with_extent`]): total rows per view stay under 2³², and the extent list is
@@ -30,8 +71,48 @@ use tessera_types::{EntityId, RowId, ROW_ABSENT};
 use crate::error::{Result, StoreError};
 
 const PERMUTATION_MAGIC: &[u8; 4] = b"TSPM";
-const PERMUTATION_VERSION: u16 = 1;
-const HEADER_LEN: usize = 4 + 2 + 2 + 8; // magic, version, reserved, bound
+const PERMUTATION_VERSION: u16 = 2;
+
+/// A page covers `2^PAGE_SHIFT` consecutive entity ids.
+///
+/// 16 is the owner's ruling (2026-08-30) and is also the width that makes the two levels cost
+/// what they should: a page is 256 KiB, so a directory entry costs 4 bytes per 256 KiB of covered
+/// entity space (a 65 536-entry directory at the `u32` entity ceiling, 256 KiB in total), while a
+/// view sparse at any coarser granularity than a page still pays only for the pages it lands in.
+/// It is recorded in the header rather than assumed, so a file written at another width is a
+/// refusal and not a misread.
+pub const PAGE_SHIFT: u32 = 16;
+
+/// Entity slots in one page.
+pub const PAGE_ENTRIES: usize = 1 << PAGE_SHIFT;
+
+/// Bytes in one page — `PAGE_ENTRIES` little-endian `u32` row ids.
+pub const PAGE_BYTES: usize = PAGE_ENTRIES * 4;
+
+/// The directory entry for a page that carries no slots: every entity in it is row-absent.
+///
+/// The same bit pattern as [`ROW_ABSENT`], and deliberately so — both mean *no row*, one page at a
+/// time and one entity at a time.
+pub const PAGE_ABSENT: u32 = 0xFFFF_FFFF;
+
+/// magic, version, page_shift, bound, page_count, present_count.
+pub(crate) const HEADER_LEN: usize = 4 + 2 + 2 + 8 + 4 + 4;
+
+/// The payload's alignment. A page is 256 KiB, so aligning the first one aligns them all; 4 KiB is
+/// the mapping granularity every platform this targets shares.
+pub(crate) const PAGE_ALIGN: usize = 4096;
+
+/// Where the pages begin, given the directory's length: the header and directory rounded up to
+/// [`PAGE_ALIGN`]. The one arithmetic both the reader and the writer depend on, so it has one
+/// definition site.
+pub(crate) fn payload_start(page_count: usize) -> usize {
+    (HEADER_LEN + page_count * 4).next_multiple_of(PAGE_ALIGN)
+}
+
+/// How many pages cover `[0, bound)`.
+pub(crate) fn pages_for(bound: u64) -> u64 {
+    bound.div_ceil(PAGE_ENTRIES as u64)
+}
 
 /// Rows per bucket in [`Permutation::project`], as a power of two — the one free parameter in that
 /// pass, and the two constraints that fix it pull in opposite directions.
@@ -77,13 +158,16 @@ pub struct Permutation {
     mmap: Mmap,
     bound: u64,
     bound_usize: usize,
+    page_count: usize,
+    present_count: usize,
+    payload_start: usize,
     path: PathBuf,
 }
 
 impl Permutation {
-    /// Open and validate `path`: magic, version, and that the file is exactly
-    /// `HEADER_LEN + bound * 4` bytes (a truncated or padded file is a corrupt bundle, not a
-    /// partial one to silently accept).
+    /// Open and validate `path`: magic, version, page width, that the directory is canonical, and
+    /// that the file is exactly as long as its own header says (a truncated or padded file is a
+    /// corrupt bundle, not a partial one to silently accept).
     pub fn load(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|source| StoreError::Io {
             path: path.to_path_buf(),
@@ -99,59 +183,138 @@ impl Permutation {
             source,
         })?;
 
+        let invalid = |detail: String| StoreError::InvalidPermutation {
+            path: path.to_path_buf(),
+            detail,
+        };
+
         if mmap.len() < HEADER_LEN {
-            return Err(StoreError::InvalidPermutation {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "file is {} bytes, shorter than the {HEADER_LEN}-byte header",
-                    mmap.len()
-                ),
-            });
+            return Err(invalid(format!(
+                "file is {} bytes, shorter than the {HEADER_LEN}-byte header",
+                mmap.len()
+            )));
         }
         if &mmap[0..4] != PERMUTATION_MAGIC {
-            return Err(StoreError::InvalidPermutation {
-                path: path.to_path_buf(),
-                detail: "bad magic (expected 'TSPM')".to_string(),
-            });
+            return Err(invalid("bad magic (expected 'TSPM')".to_string()));
         }
         let version = u16::from_le_bytes(mmap[4..6].try_into().expect("2-byte view"));
         if version != PERMUTATION_VERSION {
-            return Err(StoreError::InvalidPermutation {
-                path: path.to_path_buf(),
-                detail: format!("unsupported version {version} (expected {PERMUTATION_VERSION})"),
-            });
+            // Version 1 is the flat array this representation replaced; it lands here, which is
+            // the loud refusal that stands in for a `bundle_format` bump.
+            return Err(invalid(format!(
+                "unsupported version {version} (expected {PERMUTATION_VERSION})"
+            )));
+        }
+        let page_shift = u16::from_le_bytes(mmap[6..8].try_into().expect("2-byte view"));
+        if u32::from(page_shift) != PAGE_SHIFT {
+            return Err(invalid(format!(
+                "page shift {page_shift} (expected {PAGE_SHIFT})"
+            )));
         }
         let bound = u64::from_le_bytes(mmap[8..16].try_into().expect("8-byte view"));
         // Checked, not `as usize`: on a 32-bit target (or an adversarial 64-bit `bound` value)
         // a truncating cast would silently shrink `bound` instead of failing closed.
-        let bound_usize = usize::try_from(bound).map_err(|_| StoreError::InvalidPermutation {
-            path: path.to_path_buf(),
-            detail: format!("bound {bound} does not fit in usize on this platform"),
+        let bound_usize = usize::try_from(bound).map_err(|_| {
+            invalid(format!(
+                "bound {bound} does not fit in usize on this platform"
+            ))
         })?;
-
-        let expected_len = bound_usize
-            .checked_mul(4)
-            .and_then(|slots_len| slots_len.checked_add(HEADER_LEN))
-            .ok_or_else(|| StoreError::InvalidPermutation {
-                path: path.to_path_buf(),
-                detail: format!("bound {bound} overflows the expected file length"),
-            })?;
-        if mmap.len() != expected_len {
-            return Err(StoreError::InvalidPermutation {
-                path: path.to_path_buf(),
-                detail: format!(
-                    "file is {} bytes, expected {expected_len} for bound {bound}",
-                    mmap.len()
-                ),
-            });
+        let page_count = u32::from_le_bytes(mmap[16..20].try_into().expect("4-byte view")) as usize;
+        let present_count =
+            u32::from_le_bytes(mmap[20..24].try_into().expect("4-byte view")) as usize;
+        if page_count as u64 != pages_for(bound) {
+            return Err(invalid(format!(
+                "page count {page_count} does not cover bound {bound} (expected {})",
+                pages_for(bound)
+            )));
+        }
+        if present_count > page_count {
+            return Err(invalid(format!(
+                "{present_count} pages present of {page_count} covered"
+            )));
         }
 
-        Ok(Permutation {
+        let payload_start = payload_start(page_count);
+        let expected_len = present_count
+            .checked_mul(PAGE_BYTES)
+            .and_then(|payload| payload.checked_add(payload_start))
+            .ok_or_else(|| {
+                invalid(format!(
+                    "{present_count} pages of {PAGE_BYTES} bytes overflow the expected file length"
+                ))
+            })?;
+        if mmap.len() != expected_len {
+            return Err(invalid(format!(
+                "file is {} bytes, expected {expected_len} for {present_count} present pages of \
+                 {page_count}",
+                mmap.len()
+            )));
+        }
+
+        let permutation = Permutation {
             mmap,
             bound,
             bound_usize,
+            page_count,
+            present_count,
+            payload_start,
             path: path.to_path_buf(),
-        })
+        };
+        permutation.validate_directory()?;
+        Ok(permutation)
+    }
+
+    /// The directory is canonical: slots number `0..present_count` in ascending page order, the
+    /// padding between it and the payload is zero, and the last page holds nothing above `bound`.
+    ///
+    /// **Checked because the encoding claims to be a function of the mapping.** A file whose slots
+    /// were permuted would serve every page under some other page's rows — every lookup wrong, no
+    /// lookup out of range — and two producers of the same mapping could disagree byte for byte
+    /// while both being "valid". `O(page_count)`, which is 65 536 iterations at the entity ceiling.
+    fn validate_directory(&self) -> Result<()> {
+        let invalid = |detail: String| StoreError::InvalidPermutation {
+            path: self.path.clone(),
+            detail,
+        };
+        let mut next_slot: u32 = 0;
+        for (page, &slot) in self.directory().iter().enumerate() {
+            if slot == PAGE_ABSENT {
+                continue;
+            }
+            if slot != next_slot {
+                return Err(invalid(format!(
+                    "page {page} holds slot {slot} where the canonical order gives {next_slot}"
+                )));
+            }
+            next_slot += 1;
+        }
+        if next_slot as usize != self.present_count {
+            return Err(invalid(format!(
+                "the directory names {next_slot} pages, the header {}",
+                self.present_count
+            )));
+        }
+        let padding = &self.mmap[HEADER_LEN + self.page_count * 4..self.payload_start];
+        if padding.iter().any(|&b| b != 0) {
+            return Err(invalid(
+                "the padding before the payload is not zero".to_string(),
+            ));
+        }
+        // The last page runs past `bound` whenever the bound is not a whole number of pages. Those
+        // slots name entities that cannot exist, so they must be sentinel: a row id there would be
+        // reachable through nothing and would break the bijection `validate_rows` checks.
+        let tail = (self.page_count * PAGE_ENTRIES) - self.bound_usize;
+        if tail > 0 {
+            if let Some(page) = self.page_of(self.page_count - 1) {
+                if page[PAGE_ENTRIES - tail..].iter().any(|&r| r != ROW_ABSENT) {
+                    return Err(invalid(format!(
+                        "the last page holds a row above bound {}",
+                        self.bound
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The number of entity-ID slots this permutation covers, `[0, bound)`.
@@ -159,63 +322,96 @@ impl Permutation {
         self.bound
     }
 
-    fn slots(&self) -> &[u32] {
-        let bytes = &self.mmap[HEADER_LEN..];
-        debug_assert_eq!(bytes.len(), self.bound_usize * 4);
-        // SAFETY: `bytes` starts at a fixed offset (HEADER_LEN = 16) into a page-aligned mmap
-        // base, and 16 is a multiple of 4, so `bytes.as_ptr()` is 4-byte aligned regardless of
-        // file content — no adversarial input can misalign this cast. Length is exactly
-        // `bound * 4` bytes, checked once at `load`.
-        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, self.bound_usize) }
+    /// How many pages carry slots — the sparsity of the view, and what the file's size is
+    /// proportional to. For diagnostics and for the tests that assert a sparse view does not pay
+    /// for entity space it does not occupy.
+    pub fn present_pages(&self) -> usize {
+        self.present_count
+    }
+
+    /// How many pages `bound` spans, present or not.
+    pub fn page_count(&self) -> usize {
+        self.page_count
+    }
+
+    fn directory(&self) -> &[u32] {
+        let bytes = &self.mmap[HEADER_LEN..HEADER_LEN + self.page_count * 4];
+        // SAFETY: `bytes` starts at a fixed offset (HEADER_LEN = 24) into a page-aligned mmap
+        // base, and 24 is a multiple of 4, so the cast is aligned regardless of file content — no
+        // adversarial input can misalign it. The length is `page_count * 4` bytes, and `load`
+        // checked that the file holds at least the header, the directory and the payload.
+        unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, self.page_count) }
+    }
+
+    /// The `2^16` slots of `page`, or `None` where the page is absent.
+    #[inline]
+    fn page_of(&self, page: usize) -> Option<&[u32]> {
+        let slot = *self.directory().get(page)?;
+        if slot == PAGE_ABSENT {
+            return None;
+        }
+        let at = self.payload_start + slot as usize * PAGE_BYTES;
+        let bytes = &self.mmap[at..at + PAGE_BYTES];
+        // SAFETY: `payload_start` is a multiple of 4096 and `PAGE_BYTES` a multiple of 4, so the
+        // cast is aligned; `validate_directory` bounded `slot` by `present_count` and `load`
+        // checked the file holds exactly that many pages.
+        Some(unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, PAGE_ENTRIES) })
     }
 
     /// Validate that every non-sentinel slot addresses a row within `row_count`, and that no
     /// two entities claim the same row (a permutation is a bijection onto `[0, row_count)`,
     /// not merely a function into it). Called once per view at bundle open, against the row
     /// count of the single build segment this permutation addresses (R4) — **not** on any
-    /// per-viewport path (this is an `O(bound)` scan, same cost class as [`Self::project`]).
+    /// per-viewport path (this is an `O(present pages)` scan, same cost class as [`Self::project`]).
     /// A corrupt or hand-edited `permutation.bin` that points rows out of range, or that
     /// aliases two entities onto one row, must fail bundle open rather than let `row_of` or
     /// `project` later hand out a `RowId` that indexes `columns.arrow` out of bounds (I4/I11).
     pub fn validate_rows(&self, row_count: u32) -> Result<()> {
         let row_count_usize = row_count as usize;
         let mut seen = vec![false; row_count_usize];
-        for (entity, &slot) in self.slots().iter().enumerate() {
-            if slot == ROW_ABSENT {
+        for page in 0..self.page_count {
+            let Some(slots) = self.page_of(page) else {
                 continue;
+            };
+            for (offset, &slot) in slots.iter().enumerate() {
+                if slot == ROW_ABSENT {
+                    continue;
+                }
+                let entity = page * PAGE_ENTRIES + offset;
+                if slot >= row_count {
+                    return Err(StoreError::InvalidPermutation {
+                        path: self.path.clone(),
+                        detail: format!(
+                            "entity {entity} maps to row {slot}, out of bound for row_count \
+                             {row_count}"
+                        ),
+                    });
+                }
+                let idx = slot as usize;
+                if seen[idx] {
+                    return Err(StoreError::InvalidPermutation {
+                        path: self.path.clone(),
+                        detail: format!(
+                            "row {slot} is claimed by more than one entity (not a bijection)"
+                        ),
+                    });
+                }
+                seen[idx] = true;
             }
-            if slot >= row_count {
-                return Err(StoreError::InvalidPermutation {
-                    path: self.path.clone(),
-                    detail: format!(
-                        "entity {entity} maps to row {slot}, out of bound for row_count \
-                         {row_count}"
-                    ),
-                });
-            }
-            let idx = slot as usize;
-            if seen[idx] {
-                return Err(StoreError::InvalidPermutation {
-                    path: self.path.clone(),
-                    detail: format!(
-                        "row {slot} is claimed by more than one entity (not a bijection)"
-                    ),
-                });
-            }
-            seen[idx] = true;
         }
         Ok(())
     }
 
-    /// Row ID currently occupied by `e` in this segment, or `None` if `e` is out of bound or
-    /// holds the row-absent sentinel (never allocated a row here — including entities that
-    /// exist but live in a different segment, or don't exist at all).
+    /// Row ID currently occupied by `e` in this segment, or `None` if `e` is out of bound, falls
+    /// in an absent page, or holds the row-absent sentinel (never allocated a row here — including
+    /// entities that exist but live in a different segment, or don't exist at all).
     pub fn row_of(&self, e: EntityId) -> Option<RowId> {
         let raw = e.raw();
         if raw >= self.bound {
             return None;
         }
-        let slot = self.slots()[raw as usize];
+        let page = self.page_of((raw >> PAGE_SHIFT) as usize)?;
+        let slot = page[(raw as usize) & (PAGE_ENTRIES - 1)];
         if slot == ROW_ABSENT {
             None
         } else {
@@ -225,14 +421,16 @@ impl Permutation {
 
     /// Project an entity-space bitmap into row space: for every entity ID set in `mask`
     /// (ascending order, as `croaring::Bitmap` iterates), look up its row via this
-    /// permutation, skip entities with no row here (out of bound or sentinel), and return the
-    /// resulting row IDs as a bitmap.
+    /// permutation, skip entities with no row here (out of bound, absent page, or sentinel), and
+    /// return the resulting row IDs as a bitmap.
     ///
     /// **Cost (shared-context constraint 8):** this touches every set bit in `mask` and reads the
-    /// slot array end to end, which is over a second at 10⁹ — **1 277 ms** single-threaded over a
-    /// 25% grant (`probes/2026-08-14-project-decomposition/`). Never call it on the per-viewport
-    /// path; the engine caches the result per `(token, view, pin)` and reuses it across viewports
-    /// within a session.
+    /// pages it lands in end to end, which is over a second at 10⁹ — **1 277 ms** single-threaded
+    /// over a 25% grant (`probes/2026-08-14-project-decomposition/`, measured against the flat
+    /// array this paged form replaces; a dense view's page walk is the same reads plus a directory
+    /// lookup per 2¹⁶ entities, and a sparse view's is strictly less). Never call it on the
+    /// per-viewport path; the engine caches the result per `(token, view, pin)` and reuses it
+    /// across viewports within a session.
     ///
     /// # One pass, and why the shape is not the obvious one
     ///
@@ -269,7 +467,7 @@ impl Permutation {
     ///
     /// **Transient memory** is one `u32` per row of the result — roughly 1 GB at 10⁹ over a 25%
     /// grant, held once in the buckets, against the three simultaneous copies the previous form
-    /// peaked at. The mmap-backed slot array is never copied, only read.
+    /// peaked at. The mmap-backed pages are never copied, only read.
     pub fn project(&self, mask: &croaring::Bitmap) -> croaring::Bitmap {
         self.project_with(mask, &mut ProjectScratch::default())
     }
@@ -290,7 +488,6 @@ impl Permutation {
         mask: &croaring::Bitmap,
         scratch: &mut ProjectScratch,
     ) -> croaring::Bitmap {
-        let slots = self.slots();
         // Every row this permutation can yield is below `bound`: `validate_rows` establishes that
         // it is a bijection *onto* `[0, row_count)`, so each row is claimed by a distinct in-bound
         // entity and `row_count <= bound`. Sizing the buckets from `bound` therefore cannot
@@ -317,6 +514,10 @@ impl Permutation {
             bucket.reserve(expected.saturating_sub(bucket.capacity()));
         }
 
+        // The page the last entity landed in, held across the walk. A mask iterates ascending, so
+        // this resolves the directory once per page rather than once per entity — and an absent
+        // page is skipped as cheaply as a sentinel slot was.
+        let mut current: Option<(usize, &[u32])> = None;
         let mut window = [0u32; DECODE_WINDOW];
         let mut cursor = mask.cursor();
         loop {
@@ -325,13 +526,28 @@ impl Permutation {
                 break;
             }
             for &entity in &window[..decoded] {
-                // `get` rather than an index: an entity at or above `bound` has no row *here* and
-                // is skipped, which is the same answer `row_of` gives and is not an error — it is
-                // ordinarily an entity living in a different segment.
-                if let Some(&row) = slots.get(entity as usize) {
-                    if row != ROW_ABSENT {
-                        buckets[(row >> BUCKET_SHIFT) as usize].push(row);
+                // An entity at or above `bound` has no row *here* and is skipped, which is the
+                // same answer `row_of` gives and is not an error — it is ordinarily an entity
+                // living in a different segment.
+                if u64::from(entity) >= self.bound {
+                    continue;
+                }
+                let page = (entity >> PAGE_SHIFT) as usize;
+                if current.map(|(p, _)| p) != Some(page) {
+                    current = self.page_of(page).map(|slots| (page, slots));
+                    if current.is_none() {
+                        // Absent, and the mask may hold thousands more entities in it. Recording
+                        // the miss is what stops the directory being re-read for each of them.
+                        current = Some((page, &[]));
                     }
+                }
+                let Some((_, slots)) = current else { continue };
+                if slots.is_empty() {
+                    continue;
+                }
+                let row = slots[(entity as usize) & (PAGE_ENTRIES - 1)];
+                if row != ROW_ABSENT {
+                    buckets[(row >> BUCKET_SHIFT) as usize].push(row);
                 }
             }
         }

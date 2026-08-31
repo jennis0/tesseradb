@@ -114,8 +114,9 @@ fn tiler_and_segment_writers_round_trip() {
         assert_eq!(codes[i], cell.raw());
     }
 
-    // (c) permutation.bin: header, then perm[entity_id[i]] == i for every row, and a
-    // never-used entity slot reads the absent sentinel.
+    // (c) permutation.bin: the paged header, then perm[entity_id[i]] == i for every row, and a
+    // never-used entity slot reads the absent sentinel. Read as bytes rather than through
+    // `Permutation` because the point is the layout, not the reader's interpretation of it.
     let mut perm_bytes = Vec::new();
     fs::File::open(&perm_path)
         .expect("open permutation.bin")
@@ -124,21 +125,24 @@ fn tiler_and_segment_writers_round_trip() {
 
     assert_eq!(&perm_bytes[0..4], b"TSPM");
     let version = u16::from_le_bytes(perm_bytes[4..6].try_into().unwrap());
-    let reserved = u16::from_le_bytes(perm_bytes[6..8].try_into().unwrap());
+    let page_shift = u16::from_le_bytes(perm_bytes[6..8].try_into().unwrap());
     let file_bound = u64::from_le_bytes(perm_bytes[8..16].try_into().unwrap());
-    assert_eq!(version, 1);
-    assert_eq!(reserved, 0);
+    let page_count = u32::from_le_bytes(perm_bytes[16..20].try_into().unwrap());
+    let present_count = u32::from_le_bytes(perm_bytes[20..24].try_into().unwrap());
+    assert_eq!(version, 2, "the paged form is version 2");
+    assert_eq!(page_shift, 16);
     assert_eq!(file_bound, bound);
+    // `bound` here is well under one page, and every entity in it has a row.
+    assert_eq!(page_count, 1);
+    assert_eq!(present_count, 1);
 
-    let slots_bytes = &perm_bytes[16..];
-    assert_eq!(slots_bytes.len(), (bound as usize) * 4);
-    let slots: Vec<u32> = slots_bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
-
+    assert_eq!(
+        perm_bytes.len(),
+        paged::PAYLOAD_START + paged::PAGE_BYTES,
+        "one present page, on a 4 KiB boundary"
+    );
     for (row, entity_id) in row_order_entities.iter().enumerate() {
-        assert_eq!(slots[entity_id.raw() as usize], row as u32);
+        assert_eq!(paged::slot(&perm_bytes, entity_id.raw()), row as u32);
     }
 
     // Test with a bound strictly larger than the entity id space to exercise a genuinely
@@ -151,13 +155,39 @@ fn tiler_and_segment_writers_round_trip() {
         .expect("open permutation-wider.bin")
         .read_to_end(&mut perm_bytes2)
         .expect("read permutation-wider.bin");
-    let slots2_bytes = &perm_bytes2[16..];
-    let slots2: Vec<u32> = slots2_bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
-        .collect();
     for unused_id in bound..wider_bound {
-        assert_eq!(slots2[unused_id as usize], 0xFFFF_FFFF);
+        assert_eq!(paged::slot(&perm_bytes2, unused_id), 0xFFFF_FFFF);
+    }
+}
+
+/// Reading `permutation.bin`'s bytes without going through `Permutation`, for the tests whose
+/// subject is the layout itself (contracts §2.6; `tessera_store::permutation` for the diagram).
+///
+/// Only the single-page case, which is every fixture here: a bound under 2¹⁶ gives one page, so
+/// its slot is 0 whenever the page is present at all.
+mod paged {
+    /// magic, version, page shift, bound, page count, present count — then the directory, then
+    /// zero padding to a 4 KiB boundary.
+    pub const HEADER_LEN: usize = 24;
+    pub const PAGE_ENTRIES: usize = 1 << 16;
+    pub const PAGE_BYTES: usize = PAGE_ENTRIES * 4;
+    /// Where the payload starts for a one-page directory.
+    pub const PAYLOAD_START: usize = 4096;
+
+    /// Entity `entity`'s slot, from a file whose bound is under one page.
+    pub fn slot(bytes: &[u8], entity: u64) -> u32 {
+        assert_eq!(
+            u32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            1,
+            "this helper reads one-page permutations only"
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap()),
+            0,
+            "page 0 must be present at slot 0"
+        );
+        let at = PAYLOAD_START + entity as usize * 4;
+        u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
     }
 }
 
@@ -238,8 +268,8 @@ fn write_permutation_rejects_entity_id_at_or_above_bound() {
 /// `bundle_format = 1`), and is refused **before the slot array is allocated**.
 ///
 /// **The file assertion is the test.** The bound was always rejected — but by
-/// `PermutationWriter::set`, after `create` had already sized the file at `bound × 4` and filled
-/// it with the row-absent sentinel. A `2^33` bound therefore wrote 32 GB to the temp volume in
+/// `PermutationWriter::set`, after `create` had already sized the file for `bound` entities and
+/// filled it with the row-absent sentinel. A `2^33` bound therefore wrote 32 GB to the temp volume in
 /// order to return an error, and an interrupted run left it there: four such files, 68 GB, were
 /// recovered from `/tmp` on 2026-08-07. Asserting `is_err()` alone cannot tell the two orderings
 /// apart, which is why the earlier version of this test passed for as long as it did.
@@ -631,8 +661,8 @@ fn a_scattered_permutation_is_byte_identical_to_a_sequential_one() {
 /// has none — a cross-identity disclosure with no error anywhere. The mapped writer fills
 /// `bound × 4` bytes of `0xFF` up front for exactly this reason.
 ///
-/// **Mutation:** delete the `map[HEADER..].fill(0xFF)` in `PermutationWriter::create` and every
-/// gap below resolves to row 0.
+/// **Mutation:** delete the payload's `fill(0xFF)` in `PermutationWriter::open` and every gap
+/// below resolves to row 0.
 #[test]
 fn an_entity_with_no_row_is_absent_rather_than_row_zero() {
     use tessera_store::write::PermutationWriter;

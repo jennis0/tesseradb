@@ -1,7 +1,9 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r10) — **the build is complete for a declaration** (r10, 2026-08-31):
+**Status:** Normative (r11) — **the permutation is paged** (r11, 2026-08-31): spec §8's
+representation ruling is built, for every view, and its marker is discharged; contracts r53 carries
+the encoding. **The build is complete for a declaration** (r10, 2026-08-31):
 every plain view and every view of every group, whichever roster form declared it, over one entity
 space unioned from their sources and ordered by the declared anchor (decision 0112); a group's
 points selected out of a shared file by `fields.view`; one frame per group under `auto`; a
@@ -569,10 +571,14 @@ choices below.
   2¹⁶-entry pages, an absent page meaning all-sentinel — is every view's representation (owner
   ruling 2026-08-30), a flat array being the degenerate case with every page present.
 
-  > **⊘ The flat array is what is written.** A sparse view is correct — every entity the view does
-  > not hold reads the row-absent sentinel — and costs the full `4 × max(entity id)` bytes. The
-  > paged form is a representation change behind `Permutation`, and the multi-view build that
-  > makes it worth having landed first.
+  **Implemented at r11** (2026-08-31; contracts §2.6 carries the encoding). Every view is written
+  paged, dense and sparse alike, and the file version moves to 2 so a flat one is refused at open
+  rather than read as a directory. What a sparse view stores is its pages: measured at 3.9× smaller
+  on a four-page build with one view holding 5 000 of 262 144 entities. **Below 2¹⁶ entities the
+  saving is zero** and a view costs one whole page — the entity space is one page wide, so there is
+  nothing to leave out. The cost being removed is the one at 10⁹, and it is removed per view of the
+  group. What the paging does **not** shrink is the compaction fold's scatter, which still lays out
+  every page before compacting them down (contracts Appendix R, r53).
 - **The projected mask is per `(token, view, segments version)`**, so a session scrubbing through
   a group's views holds one projection per view touched. The filter-result cache
   (`filter-result-cache.md`) is view-independent by construction and is unaffected.
@@ -804,6 +810,13 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r11 (2026-08-31)** — the paged permutation is built, and spec §8's marker is discharged.
+  Every view's `permutation.bin` is a directory over 2¹⁶-entry pages with the payload holding only
+  the pages the view occupies; the representation stayed behind `Permutation`, so no consumer
+  outside `tessera-store` moved. The version field carries the refusal a `bundle_format` bump would
+  have, by owner direction. Two things are recorded rather than assumed: the saving is zero below
+  2¹⁶ entities, where one page covers the whole entity space, and the fold's transient scatter is
+  unchanged. No design content changed in this revision — contracts r53 carries the encoding.
 - **r10 (2026-08-31)** — the build is complete for a declaration, and the markers at spec §1, §5
   and §7 record it. Built since r9: form B's selection (a view's rows picked out of a shared
   points file by `fields.view`, with a stray key refused naming the roster); a roster read from a
@@ -814,7 +827,7 @@ each view under spec §4's rule.
   each refusing or absent by name: a group whose views are minted from a discriminator, a scoped
   attribute with its own `source`, a scoped layer reusing one key in two views (the store keys an
   artifact per `(layer, key)`), every serving surface for a scoped column, and the paged
-  permutation (spec §8). No design content changed in this revision.
+  permutation (spec §8), which r11 then built. No design content changed in this revision.
 - **r9 (2026-08-30)** — spec §7's two passes are implemented for the point half, and the markers
   at spec §1, §7 and §8 record what did and did not move. `tessera build` materialises every
   plain view and every inline-declared view of a group; `[defaults].allocation_view` is read and

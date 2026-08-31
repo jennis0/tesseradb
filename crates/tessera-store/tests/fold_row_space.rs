@@ -253,10 +253,11 @@ fn permutation_maps_survivors_and_marks_dropped_and_unknown_entities_absent() {
 
     // The `0xFF` sentinel, directly: read entity 500's raw slot bytes (never named by any input
     // or tombstone) and confirm the writer's fill, not merely that some reader interprets it as
-    // absent. Format per `write.rs`: 16-byte header (`"TSPM"`, u16 version, u16 reserved, u64
-    // bound), then one little-endian `u32` slot per entity id.
+    // absent. Format per `tessera_store::permutation`: a 24-byte header, a `u32` per page of
+    // directory, zero padding to a 4 KiB boundary, then the present pages of 2¹⁶ slots each. This
+    // fold's bound is 1000, so there is one page and it is present.
     let bytes = fs::read(&perm_path).expect("read permutation.bin");
-    let at = 16 + 500 * 4;
+    let at = 4096 + 500 * 4;
     let slot = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
     assert_eq!(
         slot, 0xFFFF_FFFF,
