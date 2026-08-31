@@ -1388,3 +1388,68 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         "a dropped key is never reused"
     );
 }
+
+/// **The join rule's label arm past its own flush** (`views.md` §4). Until the entity→term
+/// transpose existed the arm compared against the commit window's buffer alone, so a second view's
+/// row naming a *different* label for an already-flushed entity was accepted — inert, the row
+/// carrying no descriptors, but unreported. It is now the `409` the rule always specified.
+///
+/// The order matters and is the whole test: ingest, **flush** (so the buffer no longer holds the
+/// entity's own row), then join. A join before the flush is already refused by the old arm, so a
+/// test that skipped the flush would pass against the code this one exists to check.
+#[tokio::test]
+async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed() {
+    let served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+            .await
+            .status(),
+        201
+    );
+    let id = b"flushed-label".to_vec();
+    assert_eq!(
+        ingest(&served, "first", "world", &[(id.clone(), 10.0, 10.0, "0", Some(7))])
+            .await
+            .status(),
+        200
+    );
+    flush(&served).await;
+
+    let resp = ingest(
+        &served,
+        "relabel-after-flush",
+        "quarter:2026-Q5",
+        &[(id.clone(), 800.0, 300.0, "1", Some(7))],
+    )
+    .await;
+    assert_eq!(
+        resp.status(),
+        409,
+        "a second view's row is not a route to a new access label, buffered or flushed"
+    );
+    let body: Value = resp.json().await.unwrap();
+    let detail = body["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("under a different access label"),
+        "the refusal names the rule it is enforcing: {detail}"
+    );
+    assert!(
+        !detail.contains("'0'") && !detail.contains("'1'"),
+        "and names no descriptor: the refusal names the row, never either label: {detail}"
+    );
+
+    // **The same batch with the entity's own label still joins**, which is what keeps this a
+    // refusal of a re-label rather than a refusal of the join rule itself.
+    assert_eq!(
+        ingest(
+            &served,
+            "join-after-flush",
+            "quarter:2026-Q5",
+            &[(id.clone(), 800.0, 300.0, "0", Some(7))]
+        )
+        .await
+        .status(),
+        200,
+        "the label the entity already carries is not a change, and the join lands"
+    );
+}

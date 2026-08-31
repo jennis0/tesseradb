@@ -841,7 +841,20 @@ export type ViewportResponse = {
  * A category arrives already resolved to its vocabulary key, and a column the item carries no value
  * for is absent from `fields` rather than present as null.
  */
-export type ItemDetail = {fields: Record<string, unknown>; externalId: string | null};
+export type ItemDetail = {
+  fields: Record<string, unknown>;
+  externalId: string | null;
+  /**
+   * **The item's access labels that this session satisfies, and only those** (contracts §3.2,
+   * decision 0114) — as the deployment's authorisation plugin presents them, sorted.
+   *
+   * Never the item's full label set: a viewer is not told about a compartment they do not hold.
+   * So this answers *which of my grants admits me to this item*, and a client must not present it
+   * as *what this item is labelled* — the two differ by exactly what the server withheld. Empty
+   * is a real answer and not a missing field.
+   */
+  labels: string[];
+};
 
 /**
  * One artifact opened by identifier — see {@link TesseraClient.artifact}.

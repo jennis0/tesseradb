@@ -214,6 +214,16 @@ whole carries the one has-row bitmap; the two statements are about different thi
 One block read returns an entity's whole residual record; drill-down assembles the rest from the
 other two homes by array index.
 
+**The drill-down carries the item's satisfied labels beside its record** *(2026-08-31,
+[decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md),
+`architecture.md` §7.4, `contracts.md` §3.2)*. `labels` is the intersection of the item's own term
+set with the asking session's satisfied set, spelled by the authorisation plugin and sorted — never
+the full label set, which would tell a viewer that this item also sits in a compartment they do not
+hold. It is not a **fourth home**: a label is not a declared column, it appears in no schema, and
+no filter reads it. It comes from a fourth artefact, `entities/terms/` — the term postings'
+transpose, addressed by has-row rank exactly as the blob above is, for the same reason (an entity
+with no list costs nothing) — read after the visibility verdict like every other home.
+
 **The blob read is fail-closed against its one new failure class** (review B6). The other two
 homes are positional, so there is no offset to get wrong; the blob's indirection is new, and a
 build or fold defect the digest cannot catch — digests cover bytes, not addressing consistency —

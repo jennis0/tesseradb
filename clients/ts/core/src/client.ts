@@ -631,6 +631,10 @@ export class TesseraClient {
    *
    * Nothing here can be read positionally against `/v1/meta`'s `declared_scalars`: the absent
    * columns are omitted, so index *i* of the response is not column *i* of the schema.
+   *
+   * Beside the record, `labels` names the item's access labels **this session satisfies** and no
+   * others (decision 0114) — the answer to *which of my grants admits me here*, and not to *what
+   * this item is labelled*.
    */
   async item(token: string, tesseraId: bigint): Promise<ItemDetail> {
     const response = await fetch(`${this.opts.viewerUrl}/v1/items/${tesseraId.toString()}`, {
@@ -642,8 +646,16 @@ export class TesseraClient {
     const body = (await response.json()) as {
       fields: Record<string, unknown>;
       external_id?: string;
+      labels?: string[];
     };
-    return {fields: body.fields ?? {}, externalId: body.external_id ?? null};
+    return {
+      fields: body.fields ?? {},
+      externalId: body.external_id ?? null,
+      // The satisfied labels only — see {@link ItemDetail.labels}. Defaulted to empty rather than
+      // to null: a principal satisfying none of the item's labels is a real answer with a real
+      // shape, and a client rendering it should show nothing rather than a distinct "unknown".
+      labels: body.labels ?? []
+    };
   }
 
   /**
