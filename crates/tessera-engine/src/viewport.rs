@@ -1985,6 +1985,99 @@ fn row_field_out(
     Some(flat_families!(out))
 }
 
+/// The hot-column value one already-flushed entity carries for `declared_index`, or `None` where
+/// no view holds a row for it, the column is not in the render tail, or the row's presence bitmap
+/// says the slot is empty — the join rule's attribute arm, home 1 (`views.md` §4, records §6.2).
+///
+/// **This home exists because a rendered column need not have an entity-space one.** `render =
+/// true, index = false` over a non-`derived` vocabulary owes no value column and is not
+/// blob-resident, so the hot column is the value's *only* store; an oracle reading the other two
+/// homes alone would report "no value held" for the most ordinary attribute declaration there is,
+/// and accept every mismatch against it.
+///
+/// **Read from whichever view holds a row, and any of them will do.** The rule this serves is what
+/// keeps an entity-scoped value the same in every view the entity appears in, so two views cannot
+/// disagree unless the rule has already been broken; the first row found is the answer, not a
+/// sample. The scan is the drill-down's own — the permutation is the only entity→row bridge (I4,
+/// §5.1) — at join cadence, never per mark.
+///
+/// **A malformed segment set is `None`, not a wrong answer** — the posture
+/// [`Engine::flushed_terms`] takes for the label arm, for the same reason: the join it guards
+/// changes nothing in entity space either way, so a corrupt artefact loses the *report* rather
+/// than turning a caller's batch into a server error. The warning names the view and never the
+/// entity (**I10**: the byte-scanner sweeps logs as well as payloads).
+pub(crate) fn flushed_row_scalar(
+    generation: &Generation,
+    entity: EntityId,
+    declared_index: usize,
+) -> Option<tessera_filter::RecordValue> {
+    use tessera_filter::RecordValue as RV;
+
+    let manifest = &generation.bundle.manifest;
+    // The slot this declared column occupies in the *render* tail, which is the only tail a
+    // segment carries. A column that is not rendered has no hot-column home at all.
+    let slot = manifest
+        .render_indices()
+        .position(|i| i == declared_index)?;
+    let d = manifest.declared_scalars.get(declared_index)?;
+    let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
+
+    for partition in generation.bundle.partitions.values() {
+        for (view, view_data) in &partition.views {
+            let Some(row) = view_data.row_space.row_of(entity) else {
+                continue;
+            };
+            let segments = match segments_with_row_bases(view, view_data) {
+                Ok(segments) => segments,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        view = %view,
+                        "a view's segment set could not be resolved, so the join rule's attribute \
+                         arm has nothing to compare a render-only column against and this batch's \
+                         joins are accepted unchecked (views §4). The artefact is a build or flush \
+                         defect; a fold rewrites it."
+                    );
+                    return None;
+                }
+            };
+            let (segment, row_base) =
+                *segments.iter().rev().find(|(_, base)| row.raw() >= *base)?;
+            let local = (row.raw() - row_base) as usize;
+            // **Absence is the presence bitmap beside the column, never a zero in it** (decision
+            // 0064). A category needs no bitmap and has none: its absence is the reserved code, in
+            // band, which the comparison reads as absence on both sides.
+            let local_row = u32::try_from(local).ok()?;
+            if d.vocabulary.is_none() && !segment.columns.presence(&d.name).contains(local_row) {
+                return None;
+            }
+            let resolved = resolve_scalars(segment, &render_scalars);
+            let view_slice = resolved.get(slot)?.as_ref()?;
+            return Some(match view_slice {
+                ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => {
+                    RV::Bool(a.value(local))
+                }
+                ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
+                    RV::Utf8(a.value(local).to_string())
+                }
+                ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => return None,
+                ScalarSlice::U8(s) => RV::U8(*s.get(local)?),
+                ScalarSlice::U16(s) => RV::U16(*s.get(local)?),
+                ScalarSlice::U32(s) => RV::U32(*s.get(local)?),
+                ScalarSlice::U64(s) => RV::U64(*s.get(local)?),
+                ScalarSlice::I8(s) => RV::I8(*s.get(local)?),
+                ScalarSlice::I16(s) => RV::I16(*s.get(local)?),
+                ScalarSlice::I32(s) => RV::I32(*s.get(local)?),
+                ScalarSlice::I64(s) => RV::I64(*s.get(local)?),
+                ScalarSlice::F32(s) => RV::F32(*s.get(local)?),
+                ScalarSlice::F64(s) => RV::F64(*s.get(local)?),
+                ScalarSlice::TimestampUs(s) => RV::TimestampUs(*s.get(local)?),
+            });
+        }
+    }
+    None
+}
+
 /// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed
 /// [`tessera_filter::RecordValue`] adapted through the declaration — a category code to its key,
 /// a `bool`'s `u8` storage back to `bool`, a `timestamp_us`'s `i64` back to its unit.

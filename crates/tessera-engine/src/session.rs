@@ -2655,6 +2655,71 @@ impl Engine {
         Some(terms.into_iter().map(TermId::new).collect())
     }
 
+    /// An already-flushed entity's stored value for one declared column, at the shape a batch
+    /// carries it in — the join rule's attribute arm, once the entity's own row has left the
+    /// buffer (`views.md` §4).
+    ///
+    /// **The label arm's shape, over three homes instead of one.** `entities/terms/` answers the
+    /// label question outright; an entity-scoped *value* has no single artefact, so this reads the
+    /// home the declaration puts it in and there are exactly three (records §3, decision 0068):
+    /// the entity-space value column where the column owes one (`index = true`, or a `derived`
+    /// category's floor), the record blob where it is blob-resident (text always; anything neither
+    /// rendered nor value-columned), and the hot column where `render = true` is the value's only
+    /// store. The three are exhaustive and, per column, the first that applies is the cheapest —
+    /// only a render-only column pays a row lookup.
+    ///
+    /// The answer is returned as a [`WalScalar`] so the comparison at the call site is the *same*
+    /// equality the buffered arm makes against a buffered row's scalars: one comparison, two
+    /// sources, and the two arms cannot come to disagree about what "the same value" means.
+    ///
+    /// `None` is *no value held*, and it is also *could not find out* — the two are one answer here
+    /// because the join it guards is inert in entity space either way (a joining row writes no
+    /// postings, no attribute column and no record field), so what an unreadable artefact costs is
+    /// the refusal, not the rule. Corruption is warned, never swallowed, and the warning names the
+    /// artefact rather than the entity (**I10**).
+    ///
+    /// **Server-side and control-plane.** Nothing derived from this reaches a client: the refusal
+    /// names the column, exactly as the buffered arm's does, and never the value on either side.
+    pub fn flushed_scalar(
+        &self,
+        entity: EntityId,
+        declared_index: usize,
+    ) -> Option<tessera_lifecycle::WalScalar> {
+        let generation = self.generation();
+        let manifest = &generation.bundle.manifest;
+        let declared = manifest.declared_scalars.get(declared_index)?;
+        let vocabularies = &manifest.vocabularies;
+        let entity_raw = u32::try_from(entity.raw()).ok()?;
+
+        let stored = if crate::filter::owes_value_column(declared, vocabularies) {
+            generation
+                .filter_columns
+                .stored_value(&declared.name, entity_raw)
+        } else if crate::filter::blob_resident(declared, vocabularies) {
+            // The blob is keyed by entity and its rows are self-describing, so the field wanted is
+            // the one tagged with this column's declared position (records §3). A malformed row
+            // refuses on the drill-down path, which propagates it; here it is a lost report.
+            match generation.filter_columns.records().fields_of(entity_raw) {
+                Ok(fields) => fields?
+                    .into_iter()
+                    .find_map(|f| (f.tag as usize == declared_index).then_some(f.value)),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "the record blob could not answer, so the join rule's attribute arm has \
+                         nothing to compare a blob-resident column against and this batch's joins \
+                         are accepted unchecked (views §4). The artefact is a build or flush \
+                         defect and the error names the file; a fold rewrites it."
+                    );
+                    None
+                }
+            }
+        } else {
+            crate::viewport::flushed_row_scalar(&generation, entity, declared_index)
+        }?;
+        stored_as_wal(stored, declared)
+    }
+
     pub fn resolve_external_ids(
         &self,
         external_ids: &[Vec<u8>],
@@ -3718,6 +3783,77 @@ impl ExternalIdIndex {
     ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
         self.0.external_id_of_checked(entity, high_water)
     }
+}
+
+/// One stored value at the shape an ingest batch carries it in, so the join rule's attribute arm
+/// compares like with like whichever home answered (`views.md` §4).
+///
+/// **Three normalisations, one per family whose storage type is not its wire type**, and each is a
+/// storage fact rather than a presentation choice:
+///
+/// - **A `bool` stores as a byte** in a value column and as an Arrow boolean in the hot column, and
+///   arrives as [`WalScalar::Bool`]; non-zero is `true`.
+/// - **A `timestamp_us` stores as an `i64`** whose unit the declaration fixes, and arrives as
+///   [`WalScalar::TimestampUs`]; the two are the same number.
+/// - **A category stays a code**, and is deliberately *not* resolved to its key. The code is what
+///   the batch carries by the time this comparison runs (`category_scalar` mints nothing and
+///   resolves through the live bindings), the code is what the entity stores, and resolving both
+///   ends through a vocabulary would make a rebinding — which never happens, codes being
+///   never-reused — the only thing the extra work could ever detect. The declared width is the
+///   one both sides are read at, so a `u8` column's code cannot compare unequal to itself because
+///   one home widened it.
+///
+/// Every other family is its own storage type: a number byte-matches a number, and a keyword or a
+/// text field matches on its **bytes** — decoded from this layer's sorted dictionary where the
+/// value column holds an ordinal (**I10**: an ordinal is an index internal and never the unit of
+/// comparison across a flush boundary, because two flushes number the same key differently).
+///
+/// `None` where the stored value cannot be read at the declared type at all, which is a malformed
+/// bundle rather than a caller's error and so loses the report rather than refusing the batch.
+fn stored_as_wal(
+    value: tessera_filter::RecordValue,
+    declared: &tessera_store::manifest::DeclaredScalar,
+) -> Option<tessera_lifecycle::WalScalar> {
+    use tessera_filter::RecordValue as RV;
+    use tessera_lifecycle::WalScalar as WS;
+    use tessera_spatial::tiler::ScalarType;
+
+    if declared.vocabulary.is_some() {
+        let code = match value {
+            RV::U8(c) => u32::from(c),
+            RV::U16(c) => u32::from(c),
+            RV::U32(c) => c,
+            _ => return None,
+        };
+        return Some(match declared.arrow_type {
+            ScalarType::U8 => WS::U8(code as u8),
+            ScalarType::U16 => WS::U16(code as u16),
+            _ => WS::U32(code),
+        });
+    }
+    Some(match (declared.arrow_type, value) {
+        (ScalarType::Bool, RV::U8(x)) => WS::Bool(x != 0),
+        (ScalarType::Bool, RV::Bool(b)) => WS::Bool(b),
+        (ScalarType::TimestampUs, RV::I64(x)) | (ScalarType::TimestampUs, RV::TimestampUs(x)) => {
+            WS::TimestampUs(x)
+        }
+        (_, RV::U8(x)) => WS::U8(x),
+        (_, RV::U16(x)) => WS::U16(x),
+        (_, RV::U32(x)) => WS::U32(x),
+        (_, RV::U64(x)) => WS::U64(x),
+        (_, RV::I8(x)) => WS::I8(x),
+        (_, RV::I16(x)) => WS::I16(x),
+        (_, RV::I32(x)) => WS::I32(x),
+        (_, RV::I64(x)) => WS::I64(x),
+        (_, RV::F32(x)) => WS::F32(x),
+        (_, RV::F64(x)) => WS::F64(x),
+        (_, RV::Bool(b)) => WS::Bool(b),
+        (_, RV::TimestampUs(x)) => WS::TimestampUs(x),
+        (_, RV::Utf8(s)) => WS::Utf8(s),
+        // ⊘ Lists land with epic 3's multi surface; no writer produces one, and a reader that met
+        // one would be looking at a future format — no answer, not a guess.
+        (_, RV::List(_)) => return None,
+    })
 }
 
 #[cfg(test)]

@@ -949,6 +949,35 @@ fn category_code(
     }
 }
 
+/// Is this value **no value at all** for `declared` — the join rule's "or be absent from the
+/// batch" (`views.md` §4), read on the supplied side and the stored side alike?
+///
+/// **Two spellings, because a category's absence is in band.** Every other family says absence
+/// with [`WalScalar::Null`], having no bit pattern to spare; a vocabulary keeps code 0 out of its
+/// value space precisely so a category can say it with a code
+/// ([`ABSENT_CODE`], per-point-attributes §3.4) — `category_scalar`
+/// turns a null cell into that code before this arm ever sees it. Reading only the `Null` spelling
+/// made a joining batch that left a category null a 409 against an entity holding a value, and a
+/// join carrying a value against an entity holding *none* a 409 as well, neither of which the rule
+/// asks for. The two spellings are one question, asked once here so the arm's two sources cannot
+/// answer it differently.
+fn is_absent_value(value: &WalScalar, declared: &DeclaredScalar) -> bool {
+    if matches!(value, WalScalar::Null) {
+        return true;
+    }
+    if declared.vocabulary.is_none() {
+        return false;
+    }
+    match value {
+        WalScalar::U8(c) => u32::from(*c) == ABSENT_CODE,
+        WalScalar::U16(c) => u32::from(*c) == ABSENT_CODE,
+        WalScalar::U32(c) => *c == ABSENT_CODE,
+        // A novel key on a `discovered` vocabulary travels as its key and is minted at the commit
+        // window's close; a key is never absence — the empty string is refused upstream.
+        _ => false,
+    }
+}
+
 /// A code at its column's declared width. `is_category_width` admits `u8`/`u16`/`u32` only, so the
 /// fallthrough is `u32` — the widest, which cannot truncate a code the other two could hold.
 fn code_at(width: ScalarType, code: u32) -> WalScalar {
@@ -1664,40 +1693,48 @@ fn run_ingest(
                 )));
             }
         }
-        // ⊘ **The attribute arm is still buffer-only.** An entity-scoped value's server-side home
-        // is the filter column or the record blob, and reading it back to compare would be a
-        // second value oracle across every declared family — a wider surface than the label arm's
-        // one transpose, and one the fold and the coalesce would each owe a pass. A join naming a
-        // flushed entity with a different attribute value is therefore still accepted, and still
-        // changes nothing: the row carries no filter-column value either
-        // (`FlushPlan::entity_space_items`).
-        let Some(buffered) = buffered else {
-            continue;
-        };
-        // An entity-scoped attribute is one value per entity, so a joining row must carry the
-        // stored value or leave it null. A differing one is refused naming the column — silently
-        // keeping either value would make the answer depend on which view a filter was asked
-        // under, which is exactly what a *scoped* attribute is for and this is not one.
+        // **The attribute arm reads the buffer first and the stored value after it, and both are
+        // exact** (2026-08-31, closing `views.md` §4's last ⊘). An entity-scoped attribute is one
+        // value per entity, so a joining row must carry the stored value or leave it absent. A
+        // differing one is refused naming the column — silently keeping either value would make
+        // the answer depend on which view a filter was asked under, which is exactly what a
+        // *scoped* attribute is for and this is not one.
+        //
+        // Before `Engine::flushed_scalar` existed this arm stopped at the buffer, and a join
+        // naming an already-flushed entity under a different value was accepted. It was inert for
+        // an entity-space column — a joining row writes no attribute column and no record field
+        // (`FlushPlan::entity_space_items`) — but never inert for a **rendered** one, whose value
+        // travels in the row's own tail into the joined view's hot column. What was lost was
+        // therefore the report for two homes and the rule itself for the third.
+        //
+        // The two sources are compared by the *same* equality, on values normalised to the shape a
+        // batch carries (`stored_as_wal`), so the buffered and the flushed arm produce byte-identical
+        // refusals and cannot come to disagree about what "the same value" means.
         for (position, declared) in meta.declared_scalars.iter().enumerate() {
             let Some(supplied) = items[*index].scalars.get(position) else {
                 continue;
             };
-            if matches!(supplied, WalScalar::Null) {
+            if is_absent_value(supplied, declared) {
                 continue;
             }
-            match buffered.scalars.get(position) {
-                Some(WalScalar::Null) | None => continue,
-                Some(held) if held == supplied => continue,
-                Some(_) => {
-                    return Err(ApiError::Conflict(format!(
-                        "row {index} joins an entity this deployment already holds, with a \
-                         different value for column '{}'. An entity-scoped attribute is one value \
-                         per entity, so a joining row byte-matches the stored value or omits it \
-                         (views §4, §5)",
-                        declared.name
-                    )));
-                }
+            let held = match &buffered {
+                Some(buffered) => buffered.scalars.get(position).cloned(),
+                // `None` here is *no value held* and *could not find out* alike; see
+                // `Engine::flushed_scalar` for why one answer serves both.
+                None => state.engine.flushed_scalar(*entity, position),
+            };
+            let Some(held) = held else {
+                continue;
+            };
+            if is_absent_value(&held, declared) || held == *supplied {
+                continue;
             }
+            return Err(ApiError::Conflict(format!(
+                "row {index} joins an entity this deployment already holds, with a different \
+                 value for column '{}'. An entity-scoped attribute is one value per entity, so a \
+                 joining row byte-matches the stored value or omits it (views §4, §5)",
+                declared.name
+            )));
         }
     }
 

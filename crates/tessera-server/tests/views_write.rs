@@ -1718,3 +1718,480 @@ async fn a_join_naming_a_different_label_is_refused_after_the_entity_has_flushed
         "the label the entity already carries is not a change, and the join lands"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// The join rule's **attribute arm past the flush** (`views.md` §4) — its own fixture, because the
+// arm has three storage homes and the fixture above declares one column, which reaches one of
+// them. What is at stake is not that a value is stored but that the *comparison* can still be made
+// once the entity's own row has left the commit-window buffer: before `Engine::flushed_scalar`
+// this arm simply stopped there, so a join naming a flushed entity under a different value was
+// accepted — silently for two homes, and *destructively* for the third, a rendered column's value
+// travelling in the joining row's own tail into the joined view's hot column.
+// ---------------------------------------------------------------------------------------------
+
+/// The five columns, chosen so the three homes and three families are each reached by one
+/// (records §3, decision 0068):
+///
+/// | column | family | home |
+/// |---|---|---|
+/// | `score` | numeric | the **hot column** — `render`, no `index`, so no entity-space column is owed |
+/// | `depth` | numeric | the **value column** — `index` |
+/// | `tag` | keyword | the **value column**, through this layer's sorted dictionary |
+/// | `note` | keyword | the **record blob** — neither flag, so it has no other home |
+/// | `archive` | category | the **hot column**, its code, a `public` vocabulary owing no floor |
+const FAMILIES_SCHEMA: &str = r#"
+[[vocabulary]]
+name       = "archive"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  astro = 11
+  cond = 22
+  hep = 33
+
+[[attribute]]
+name   = "score"
+type   = "i32"
+render = true
+
+[[attribute]]
+name  = "depth"
+type  = "i32"
+index = true
+
+[[attribute]]
+name  = "tag"
+type  = "keyword"
+index = true
+
+[[attribute]]
+name = "note"
+type = "keyword"
+
+[[attribute]]
+name       = "archive"
+type       = "category"
+render     = true
+vocabulary = "archive"
+"#;
+
+fn write_families_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("entity_id", DataType::UInt64, false),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("score", DataType::Int32, true),
+        Field::new("depth", DataType::Int32, true),
+        Field::new("tag", DataType::Utf8, true),
+        Field::new("note", DataType::Utf8, true),
+        Field::new("archive", DataType::Utf8, false),
+    ]));
+    let ids: Vec<u64> = ids.collect();
+    let xs: Vec<f64> = ids.iter().map(|&e| position(view, e).0).collect();
+    let ys: Vec<f64> = ids.iter().map(|&e| position(view, e).1).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(UInt64Array::from(ids.clone())),
+            Arc::new(Float64Array::from(xs)),
+            Arc::new(Float64Array::from(ys)),
+            Arc::new(arrow::array::Int32Array::from_iter(
+                ids.iter().map(|&e| Some(e as i32)),
+            )),
+            Arc::new(arrow::array::Int32Array::from_iter(
+                ids.iter().map(|&e| Some(e as i32)),
+            )),
+            Arc::new(arrow::array::StringArray::from_iter_values(
+                ids.iter().map(|e| format!("t{e}")),
+            )),
+            Arc::new(arrow::array::StringArray::from_iter_values(
+                ids.iter().map(|e| format!("n{e}")),
+            )),
+            Arc::new(arrow::array::StringArray::from_iter_values(
+                ids.iter().map(|e| ["astro", "cond", "hep"][(e % 3) as usize]),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
+    w.write(&batch).unwrap();
+    w.close().unwrap();
+}
+
+/// One plain view and one group, as the fixture above, over [`FAMILIES_SCHEMA`]'s five columns.
+async fn serve_families() -> Served {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+    let pairs = dir.join("pairs.parquet");
+    write_pairs_n(&pairs, ENTITIES);
+    let world_points = dir.join("world.parquet");
+    write_families_points(&world_points, "world", WORLD);
+    let q1_points = dir.join("quarter-q1.parquet");
+    write_families_points(&q1_points, "quarter:2026-Q1", Q1);
+    let schema_path = dir.join("schema.toml");
+    std::fs::write(&schema_path, FAMILIES_SCHEMA).unwrap();
+    let config = tessera_build::config::Config::parse(&schema_path, &Default::default())
+        .expect("the families declaration parses");
+    let out = dir.join("bundle");
+    build(&BuildArgs {
+        views: vec![
+            view_args("world", &world_points, &pairs),
+            view_args("quarter:2026-Q1", &q1_points, &pairs),
+        ],
+        anchor: 0,
+        groups: vec![GroupDescriptor {
+            title: None,
+            visibility: None,
+            scoped_scalars: Vec::new(),
+            name: "quarter".to_string(),
+            members_of: None,
+            quantisation: group_frame(),
+            projection: tessera_spatial::Projection::None,
+            metadata: Vec::new(),
+            views: vec![GroupViewDescriptor {
+                key: "2026-Q1".to_string(),
+                visibility: None,
+                metadata: Default::default(),
+            }],
+        }],
+        scoped_attributes: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            world_points.clone(),
+            &config.schema,
+        ),
+        out: out.clone(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: FIXTURE_IDSET,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    })
+    .expect("the families build succeeds");
+    open(tmp).await
+}
+
+/// One value per declared column, in declaration order, at the shape the wire carries: `None` is a
+/// null cell, which is *absence* for every family but a category, whose absence is its reserved
+/// code and which therefore never travels as null at all.
+#[derive(Clone, Copy)]
+struct Attrs<'a> {
+    score: Option<i32>,
+    depth: Option<i32>,
+    tag: Option<&'a str>,
+    note: Option<&'a str>,
+    archive: Option<&'a str>,
+}
+
+const HELD: Attrs<'static> = Attrs {
+    score: Some(1),
+    depth: Some(2),
+    tag: Some("alpha"),
+    note: Some("nb"),
+    archive: Some("astro"),
+};
+
+fn families_batch(id: &[u8], x: f32, y: f32, a: Attrs<'_>) -> Vec<u8> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+        Field::new("score", DataType::Int32, true),
+        Field::new("depth", DataType::Int32, true),
+        Field::new("tag", DataType::Utf8, true),
+        Field::new("note", DataType::Utf8, true),
+        Field::new("archive", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(arrow::array::BinaryArray::from_iter([Some(id)])),
+            Arc::new(arrow::array::Float32Array::from_iter_values([x])),
+            Arc::new(arrow::array::Float32Array::from_iter_values([y])),
+            Arc::new(arrow::array::StringArray::from_iter_values(["0"])),
+            Arc::new(arrow::array::Int32Array::from_iter([a.score])),
+            Arc::new(arrow::array::Int32Array::from_iter([a.depth])),
+            Arc::new(arrow::array::StringArray::from_iter([a.tag])),
+            Arc::new(arrow::array::StringArray::from_iter([a.note])),
+            Arc::new(arrow::array::StringArray::from_iter([a.archive])),
+        ],
+    )
+    .unwrap();
+    let mut writer = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    writer.write(&batch).unwrap();
+    writer.into_inner().unwrap()
+}
+
+async fn families_ingest(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    id: &[u8],
+    x: f32,
+    y: f32,
+    a: Attrs<'_>,
+) -> reqwest::Response {
+    served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/octet-stream")
+        .body(families_batch(id, x, y, a))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// **The attribute arm is exact past the flush**, over all three homes and all three families
+/// (`views.md` §4): the same values join, a differing one is a 409 naming the column, and an
+/// absent one is not disagreement.
+#[tokio::test]
+async fn a_join_compares_attribute_values_after_the_entity_has_flushed() {
+    let mut served = serve_families().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+
+    let id = b"families".to_vec();
+    assert_eq!(
+        families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD)
+            .await
+            .status(),
+        200
+    );
+    // **The flush is the whole point**: past it the entity's own row is out of the buffer, and
+    // every comparison below is made against the bundle.
+    flush(&served).await;
+    assert_eq!(served.server.state.engine.buffered_items(), 0);
+
+    // (a) The same values, in a view the entity is not in: a join.
+    assert_eq!(
+        families_ingest(&served, "same", "quarter:2026-Q5", &id, 800.0, 300.0, HELD)
+            .await
+            .status(),
+        200,
+        "a joining row that byte-matches every stored value is the join views §4 specifies"
+    );
+
+    // (b) One differing value per home and per family, each a 409 naming its column. Each runs
+    // against `quarter:2026-Q1`, a view the entity is *also* not in, because the join above has
+    // now put it in `2026-Q5` and a second row there would be refused as a duplicate instead.
+    for (column, differing) in [
+        (
+            "score",
+            Attrs {
+                score: Some(9),
+                ..HELD
+            },
+        ),
+        (
+            "depth",
+            Attrs {
+                depth: Some(9),
+                ..HELD
+            },
+        ),
+        (
+            "tag",
+            Attrs {
+                tag: Some("beta"),
+                ..HELD
+            },
+        ),
+        (
+            "note",
+            Attrs {
+                note: Some("other"),
+                ..HELD
+            },
+        ),
+        (
+            "archive",
+            Attrs {
+                archive: Some("hep"),
+                ..HELD
+            },
+        ),
+    ] {
+        let resp = families_ingest(
+            &served,
+            &format!("differ-{column}"),
+            "quarter:2026-Q1",
+            &id,
+            700.0,
+            200.0,
+            differing,
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            409,
+            "a flushed entity's stored '{column}' is read back and compared"
+        );
+        let body: Value = resp.json().await.unwrap();
+        assert!(
+            body["detail"].as_str().unwrap().contains(column),
+            "the refusal names the column: {body}"
+        );
+    }
+
+    // (c) Absent is not disagreement, for every family — a category included, whose absence is its
+    // reserved code rather than a null cell.
+    assert_eq!(
+        families_ingest(
+            &served,
+            "absent",
+            "quarter:2026-Q1",
+            &id,
+            700.0,
+            200.0,
+            Attrs {
+                score: None,
+                depth: None,
+                tag: None,
+                note: None,
+                archive: None,
+            },
+        )
+        .await
+        .status(),
+        200,
+        "a joining row byte-matches the stored value or omits it"
+    );
+}
+
+/// (d) **A value for a column the entity never held is accepted** — the arm the spec does not
+/// state, resolved to the behaviour the buffered arm has always had (a held `None` continues).
+///
+/// The rule `views.md` §4 states is one-directional: a joining row must not *change* a stored
+/// value. An entity holding nothing for a column has nothing to change, and the row writes nothing
+/// into entity space, so there is no value for the two to disagree about. Recorded here so the
+/// choice is a test rather than an accident; if it is ever ruled the other way this is the test
+/// that moves.
+#[tokio::test]
+async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
+    let mut served = serve_families().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+
+    let id = b"never-held".to_vec();
+    let sparse = Attrs {
+        score: None,
+        depth: None,
+        tag: None,
+        note: None,
+        archive: Some("astro"),
+    };
+    assert_eq!(
+        families_ingest(&served, "sparse", "world", &id, 20.0, 20.0, sparse)
+            .await
+            .status(),
+        200
+    );
+    flush(&served).await;
+
+    assert_eq!(
+        families_ingest(
+            &served,
+            "supply",
+            "quarter:2026-Q5",
+            &id,
+            800.0,
+            300.0,
+            Attrs {
+                score: Some(4),
+                depth: Some(5),
+                tag: Some("gamma"),
+                note: Some("later"),
+                ..sparse
+            },
+        )
+        .await
+        .status(),
+        200,
+        "an entity holding no value for a column has none for a joining row to contradict"
+    );
+}
+
+/// **The two arms are one arm**: the refusal a *buffered* entity's mismatch produces is byte for
+/// byte the refusal a *flushed* entity's produces.
+///
+/// This is what stops the fix from being half a fix. Two arms with two messages would let an
+/// operator reading a report tell which side of a flush a batch landed on — a distinction the rule
+/// does not draw and an implementation detail no report should carry — and would be the first
+/// place the two comparisons drifted apart.
+#[tokio::test]
+async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
+    let mut served = serve_families().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+
+    let flushed = b"arm-flushed".to_vec();
+    assert_eq!(
+        families_ingest(&served, "f-first", "world", &flushed, 30.0, 30.0, HELD)
+            .await
+            .status(),
+        200
+    );
+    flush(&served).await;
+
+    // The second entity is ingested *after* the flush, so its own row is still in the buffer.
+    let buffered = b"arm-buffered".to_vec();
+    assert_eq!(
+        families_ingest(&served, "b-first", "world", &buffered, 40.0, 40.0, HELD)
+            .await
+            .status(),
+        200
+    );
+
+    let differing = Attrs {
+        score: Some(9),
+        ..HELD
+    };
+    let mut bodies = Vec::new();
+    for (batch_id, id) in [("f-join", &flushed), ("b-join", &buffered)] {
+        let resp = families_ingest(
+            &served,
+            batch_id,
+            "quarter:2026-Q5",
+            id,
+            800.0,
+            300.0,
+            differing,
+        )
+        .await;
+        assert_eq!(resp.status(), 409);
+        bodies.push(resp.text().await.unwrap());
+    }
+    assert_eq!(
+        bodies[0], bodies[1],
+        "one rule, one message: the flushed arm's refusal is the buffered arm's"
+    );
+}
