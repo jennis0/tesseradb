@@ -920,6 +920,9 @@ async fn the_category_text_and_render_only_families_collapse_at_the_same_site() 
         "mood",
         "tint?view=sealed:s1",
         "tint@s1",
+        // The bare form resolves through the owning group rather than through a pin — a distinct
+        // path, so the render-only category drives it as the indexed one above does.
+        "tint",
     ] {
         assert_eq!(
             list(&outsider, path).await.status().as_u16(),
