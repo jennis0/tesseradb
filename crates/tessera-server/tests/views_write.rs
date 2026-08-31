@@ -400,7 +400,9 @@ async fn flush(served: &Served) {
         while served.server.state.engine.write_executor_stats().flushes == before {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the flush never published"
+                "the flush never published: {} rows buffered, {} flushes",
+                served.server.state.engine.buffered_items(),
+                served.server.state.engine.write_executor_stats().flushes
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
@@ -924,5 +926,159 @@ async fn a_suppressed_holder_joins_a_view_and_stays_hidden_until_it_is_unsuppres
             .iter()
             .any(|p| p.0 == tessera_id),
         "in the joined view too"
+    );
+}
+
+/// **`delete_dangling` is sugar over the ordinary deletion path** (`views.md` §3.4): at the drop,
+/// the entities of the dropped view that hold a row in no other view — the buffer included — are
+/// submitted as ordinary deletions, which enter the overlay and retire at the fold like any
+/// deletion. It is not a second retirement route, and everything asserted below is an ordinary
+/// deletion's observable.
+///
+/// An entity that is *also* somewhere else survives, which is the half that makes the option a
+/// question rather than a shorthand for "delete everything this view could see".
+#[tokio::test]
+async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
+    let served = serve().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", q_record("Q5", 1))
+            .await
+            .status(),
+        201
+    );
+
+    let only_here = b"only-here".to_vec();
+    let also_elsewhere = b"also-elsewhere".to_vec();
+    assert_eq!(
+        ingest(
+            &served,
+            "elsewhere",
+            "world",
+            &[(also_elsewhere.clone(), 10.0, 10.0, "0", Some(1))]
+        )
+        .await
+        .status(),
+        200
+    );
+    assert_eq!(
+        ingest(
+            &served,
+            "into-q5",
+            "quarter:2026-Q5",
+            &[
+                (only_here.clone(), 800.0, 300.0, "0", Some(2)),
+                (also_elsewhere.clone(), 810.0, 310.0, "0", Some(1)),
+            ]
+        )
+        .await
+        .status(),
+        200,
+        "one new entity and one join"
+    );
+    flush(&served).await;
+
+    // A third entity, still in the buffer when the drop runs: the probe counts the buffer as this
+    // view's rows, or it would call an entity dangling that a caller was told had landed.
+    let buffered = b"buffered".to_vec();
+    assert_eq!(
+        ingest(
+            &served,
+            "buffered",
+            "quarter:2026-Q5",
+            &[(buffered.clone(), 820.0, 320.0, "0", Some(3))]
+        )
+        .await
+        .status(),
+        200
+    );
+
+    let body = drop_view(&served, "quarter", "2026-Q5", true).await;
+    assert_eq!(
+        body["deleted"], 2,
+        "the two entities this view alone held — the flushed one and the buffered one — and not \
+         the one that also sits in `world`: {body}"
+    );
+
+    // The ordinary deletion observables. A deleted holder is forgotten at the interchange boundary
+    // (decision 0047), so its external id may be ingested again and allocates fresh; a live one
+    // still collides.
+    assert_eq!(
+        ingest(
+            &served,
+            "reingest-deleted",
+            "world",
+            &[(only_here.clone(), 20.0, 20.0, "0", Some(2))]
+        )
+        .await
+        .status(),
+        200,
+        "a deleted holder is not a duplicate"
+    );
+    assert_eq!(
+        ingest(
+            &served,
+            "reingest-live",
+            "world",
+            &[(also_elsewhere.clone(), 30.0, 30.0, "0", Some(1))]
+        )
+        .await
+        .status(),
+        409,
+        "the entity that was also in `world` was not deleted, and is still in `world`"
+    );
+    assert_eq!(
+        ingest(
+            &served,
+            "reingest-buffered",
+            "world",
+            &[(buffered.clone(), 40.0, 40.0, "0", Some(3))]
+        )
+        .await
+        .status(),
+        200,
+        "the buffered row's entity was deleted with the rest"
+    );
+
+    // And the drop without the option deletes nothing at all, which is the default.
+    assert_eq!(
+        create(&served, "quarter", "2026-Q6", q_record("Q6", 2))
+            .await
+            .status(),
+        201
+    );
+    let solitary = b"solitary".to_vec();
+    let resp = ingest(
+        &served,
+        "q6",
+        "quarter:2026-Q6",
+        &[(solitary.clone(), 800.0, 300.0, "0", Some(4))],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let before: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
+        .as_u64()
+        .unwrap();
+    flush(&served).await;
+    let body = drop_view(&served, "quarter", "2026-Q6", false).await;
+    assert_eq!(body["deleted"], 0);
+
+    // **Dropping a view deletes no entity.** The item still exists — with its label, its
+    // attributes and its identity — in no view at all, and a later batch into another view picks
+    // it up by `external_id` under the join rule, which is the ordinary shape of a corpus whose
+    // items come and go between slices (`views.md` §3.4, §4).
+    let resp = ingest(
+        &served,
+        "reingest-solitary",
+        "world",
+        &[(solitary.clone(), 50.0, 50.0, "0", Some(4))],
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["tessera_ids"][0]
+            .as_u64()
+            .unwrap(),
+        before,
+        "the same identity, joined to a new view — not a fresh entity, which is what a deletion          would have made of it"
     );
 }

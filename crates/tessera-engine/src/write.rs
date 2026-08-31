@@ -11518,7 +11518,27 @@ impl Executor {
 
         let mut manifest = partition_data.manifest.clone();
         let manifest_n = self.allocate_manifest_n();
-        manifest.watermark = completed.watermark;
+        // **The watermark advances at every flush publication, and never regresses** — a
+        // publication coordinate, which is the only reading left of it.
+        //
+        // `entity_hi + 1` of *this view's* flush was the whole definition while a bundle had one
+        // view, and under several it is neither monotone nor sufficient. Not monotone: views flush
+        // one per tick, so a view holding older entities publishes after one holding newer ones
+        // and offers a lower number — which `check_manifest_publishable` refuses, leaving those
+        // rows buffered for ever with nothing but a `warn!` to say so. Not sufficient: fragment
+        // freshness is `fragment.watermark >= generation.watermark` (`Engine::fragment_for`), so a
+        // publication that did not move it would let a session keep a fragment built before this
+        // flush's postings tier — its entities in no fragment and no buffer, invisible until the
+        // session re-authorised.
+        //
+        // The entity-threshold reading is already gone: `compose::verdict` dropped its
+        // `entity < watermark` gate when the buffer became exactly the rows without geometry, and
+        // its own note records that removing it took a silent multi-view hazard with it. What is
+        // left reads this as *has anything been published since* — `check_publishable`,
+        // `check_manifest_publishable`, and the fragment test above — and all three want a
+        // coordinate that strictly advances. Single-view behaviour is unchanged: ids are issued
+        // monotonically, so `entity_hi + 1` was already above the live value there.
+        manifest.watermark = completed.watermark.max(manifest.watermark + 1);
         manifest.entity_id_high_water = manifest
             .entity_id_high_water
             .max(completed.entity_id_high_water);
