@@ -1,8 +1,10 @@
 # The filter index — design
 
 **Date:** 2026-08-08
-**Status:** **Provisional — r7, reviewed under two lenses and dispositioned in one pass** (Appendix
-R). The category case is
+**Status:** **Provisional — r8; §7 gains the one per-view case** (2026-08-31): a group-scoped
+attribute is a family of entity-space columns, one per view of a group, which `views.md` §5 designs
+and this section now records rather than denying. Reviewed under two lenses and dispositioned in one
+pass at r7 (Appendix R). The category case is
 built to this design; see the ⊘ notes for exactly what. The organising rule
 changed at r4: the flat value column is the artefact of record and every accelerator is derived from it
 (Appendix R). To become normative: confirmation of §2's constants at a value
@@ -1115,15 +1117,16 @@ and contracts §2.1's tree gain the coalesce's fourth axis and `coalesced/<id>/a
 
 ## 7. Views
 
-**The filter index is view-invariant.** Nothing about it is per-view, and a view attaching, being
-populated or being dropped touches none of it.
+**The filter index is entity-space, and one exception is per view.** A view attaching, being
+populated or being dropped touches none of it; the exception is a **group-scoped attribute**
+(`views.md` §5), whose column is one per view of a group rather than one for the corpus.
 
 The governing statement is architecture §9: the term index, node memberships and generating sets are
 shared across views in entity space (**I4**), while each view stores its own permutation and derives its
 own tile ranges. per-point-attributes §3.9 draws the same line for attributes — `render` is row-space and
 therefore per-view; `filter` and `inspect` are entity-space, declared once, and apply everywhere.
-`views.md` reaches the same conclusion in more detail, but it is provisional and
-explicitly not approved, so it corroborates this section rather than grounding it.
+`views.md` — **normative since 2026-08-30** — is where the exception is designed, and it is the
+document that governs it.
 
 - **One entity ID globally**, never one per `(view, entity)`. An entity appearing in several views has one
   set of attribute postings and one membership in every value it carries.
@@ -1132,9 +1135,20 @@ explicitly not approved, so it corroborates this section rather than grounding i
   Neither deletes an entity, and neither reads or writes anything under `attrs/`.
 - **The per-view cost is the projection, not the index** — surface §4's subject.
 
-With tier paths view-independent (index §5.3), there is no per-view case anywhere in this document — and
-the two removal rules gain none either, because deletions and suppressions are entity-space mechanisms
-that do not know views exist.
+- **A group-scoped attribute is a family of columns, one per view, and every one of them is still
+  entity space** (`views.md` §5, decision 0109). The column lives at
+  `attrs/<column>/<group>/<key>/` with its own presence bitmap, its values are indexed by entity,
+  and a predicate over it answers a bitmap in entity space that the mask meets before any
+  permutation — which is why the exception costs I2's argument nothing. What the scope decides is
+  **which column file** a leaf reads: the request's own view under a view of the group, or the one
+  a leaf pins. The fold's attribute pass runs per column and needs no new case, and ⊘ the
+  accelerators do not exist per view — no per-view postings are written, so a **category** or
+  **text** family is stored and is on no filter surface, and the scan is the only route the served
+  families take.
+
+With tier paths view-independent (index §5.3), the scoped family is the only per-view case in this
+document — and the two removal rules gain none, because deletions and suppressions are entity-space
+mechanisms that do not know views exist.
 
 ---
 
@@ -1265,6 +1279,14 @@ the dependency one-way and the read crate's codegen a function of its own source
 ---
 
 ## Appendix R — review trail
+
+**r8 (2026-08-31) — §7's one per-view case.** The section opened *"nothing about it is per-view"*,
+which stopped being true when a group-scoped attribute's column family was built and then served
+(`views.md` §5 r13, contracts §2.2/§3.2 r55). The correction is narrow on purpose: the family is
+one column per view and every column is still **entity space**, so nothing else in this document
+moves — not the record formats, not the tier paths, not the two removal rules. The stale note that
+`views.md` is provisional is dropped with it; that document has been normative since 2026-08-30 and
+is what governs the exception.
 
 **2026-08-12 — re-read against the built declaration surface.** The placement key this document
 spelt is gone: a column earns its value column from `index = true`, or from being a `derived`

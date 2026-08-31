@@ -237,7 +237,11 @@ export class TesseraClient {
       filterOperands: (m.filter_operands ?? []).map((f) => ({
         column: f.column,
         family: f.family,
-        operands: f.operands
+        operands: f.operands,
+        // Absent for an entity-scoped column, which is every column of a bundle that declares no
+        // view group — so the field is omitted rather than nulled, and a client that never met a
+        // scoped attribute reads the list exactly as it did before.
+        ...(f.scope ? {scope: {group: f.scope.group}} : {})
       })),
       // Gate-filtered by the server, so this list *is* what this principal may know about — and
       // the empty list is the honest rendering of both "no layers here" and "none you may reach".
@@ -724,7 +728,12 @@ type RawMeta = {
     render: boolean;
     index: boolean;
   }[];
-  filter_operands?: {column: string; family: FilterOperandSet['family']; operands: string[]}[];
+  filter_operands?: {
+    column: string;
+    family: FilterOperandSet['family'];
+    operands: string[];
+    scope?: {group: string};
+  }[];
   /** Absent on a deployment whose server predates layers; empty when this principal reaches none. */
   layers?: {
     name: string;

@@ -468,6 +468,7 @@ fn open_columns(out: &Path) -> tessera_engine::filter::FilterColumns {
         &out.join(current_prefix(out)),
         &phash,
         &bundle.manifest.declared_scalars,
+        &bundle.manifest.scoped_scalars(),
         &bundle.manifest.vocabularies,
         &[],
         &[],

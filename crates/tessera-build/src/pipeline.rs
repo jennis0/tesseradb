@@ -2148,11 +2148,16 @@ fn read_one_attribute_source(
 /// view does not hold, and one whose row carries a null, are the same state — absent, the presence
 /// bitmap's ordinary case (decision 0064).
 ///
-/// ⊘ **Storage only.** The columns are written and digested and are on no serving surface: no
-/// postings, no hot column, no filter operand, no pinned leaf. `MANIFEST.declared_scalars` is one
-/// flat bundle-wide list with no slot for a family, which is `views.md` §11's contracts §2.3
-/// amendment and is scheduled work; `index` and `render` on a scoped attribute have nothing to act
-/// on until it lands.
+/// **The family's record is `MANIFEST.groups[..].scoped_scalars`** (contracts §2.2), written from
+/// [`BuildArgs::scoped_attributes`] beside these files: `MANIFEST.declared_scalars` is one flat
+/// bundle-wide list with no slot for a family, so the group — which is what a pin resolves
+/// against — is where the declaration is recorded. A numeric or keyword family is a filter operand
+/// from there, one column per view, resolved by the request's view or by a pinned leaf.
+///
+/// ⊘ **A category or text family is written and served from nowhere**, its per-view postings being
+/// unwritten, and ⊘ **`render` buys nothing for any scoped family** — the hot column is per row
+/// space and a scoped column is in none of them. Both are printed at the build, where an operator
+/// can still act on them.
 #[allow(clippy::too_many_arguments)]
 fn write_scoped_columns(
     args: &BuildArgs,
@@ -2167,13 +2172,31 @@ fn write_scoped_columns(
     for family in &args.scoped_attributes {
         let attribute = &family.attribute;
         // ⊘ Said at the build rather than left to the design's marker: a declaration that asked
-        // for an index or a hot column and got neither is a gap an operator should hear about
-        // where they can still act on it.
-        if attribute.index || attribute.render {
+        // for a placement and got less than it asked for is a gap an operator should hear about
+        // where they can still act on it. **What `index` buys now depends on the family**: a
+        // numeric or keyword family is on the filter surface, one column per view, resolved by
+        // the request's view or by a pin (`views.md` §5); a category owes per-view postings that
+        // no pass writes, and a text column owes a per-view dictionary and postings, so neither
+        // is published as an operand at all.
+        if attribute.index && !served_scope(attribute) {
             eprintln!(
-                "attribute '{}': ⊘ `scope = {{ group = \"{}\" }}` is stored as one column per \
-                 view and is on no serving surface yet (views §5) — its `index`/`render` are \
-                 recorded by the declaration and have nothing to act on",
+                "attribute '{}': ⊘ `index` on a `{}`-family attribute scoped to group '{}' has \
+                 nothing to act on — the per-view postings a {} column is answered from are not \
+                 written, so the family is stored and is on no filter surface (views §5)",
+                attribute.name,
+                scope_family(attribute),
+                family.group,
+                scope_family(attribute),
+            );
+        }
+        // ⊘ `render` is unbuilt for every scoped family, whatever its type: the hot column is per
+        // row space and a scoped column is in no row's tail, so there is nothing for a rendered
+        // value to occupy. Said every time rather than once, because the declaration is what asked.
+        if attribute.render {
+            eprintln!(
+                "attribute '{}': ⊘ `render` on an attribute scoped to group '{}' has nothing to \
+                 act on — the hot column is per row space and a scoped column is in none of them, \
+                 so the value is rendered in no view (views §5)",
                 attribute.name, family.group
             );
         }
@@ -2228,6 +2251,34 @@ fn write_scoped_columns(
         }
     }
     Ok(paths)
+}
+
+/// Is this scoped attribute's **family** one the filter surface serves — the family half of the
+/// engine's `filter::scoped_is_filterable`, over the build's own types. (The other half is
+/// `index`, which the caller has already read.)
+///
+/// The two must agree: a family this says is served and the engine does not would be a column
+/// written for a surface that never publishes it, and the reverse would be an operand published
+/// over artefacts no pass wrote.
+fn served_scope(attribute: &crate::config::Attribute) -> bool {
+    // Numeric and keyword: a value column, a presence bitmap and — for a keyword — its
+    // dictionary, which is the whole of what the entity route reads. A category owes per-view
+    // postings and `/v1/categories` owes a value list derived from them; a text column owes a
+    // per-view dictionary and postings and no value column at all. Neither is written.
+    attribute.vocabulary.is_none() && attribute.ty != ScalarType::Text
+}
+
+/// The family name the message above uses — the engine's own spellings.
+fn scope_family(attribute: &crate::config::Attribute) -> &'static str {
+    if attribute.vocabulary.is_some() {
+        "category"
+    } else if attribute.ty == ScalarType::Text {
+        "text"
+    } else if attribute.ty == ScalarType::Keyword {
+        "keyword"
+    } else {
+        "numeric"
+    }
 }
 
 /// One view's column of a group-scoped attribute, in entity space ([`write_scoped_columns`]).

@@ -1158,6 +1158,13 @@ pub struct EngineMeta {
     /// answer as "this bundle has no group", there being nothing else empty could mean.
     pub groups: Vec<MetaGroup>,
     pub declared_scalars: Vec<DeclaredScalar>,
+    /// The **group-scoped attribute column families** (`views.md` §5), flattened over the groups
+    /// in manifest order: one entry per family, each naming the group whose views it has a column
+    /// per and the view ids that have one.
+    ///
+    /// Empty is the ordinary case — a corpus whose attributes are all entity-scoped, which needs
+    /// no declaration to say so.
+    pub scoped_scalars: Vec<tessera_store::manifest::ScopedScalar>,
     /// The live category bindings, from the same generation as `declared_scalars`.
     ///
     /// **Ingest resolves keys through this, and never mints.** A declared vocabulary is immutable
@@ -1170,6 +1177,34 @@ pub struct EngineMeta {
     /// caller-supplied `idset` against it. Never the identity **key** — that never leaves the
     /// server, on any plane (design Appendix C, C17; I10).
     pub idset: u32,
+}
+
+/// What a filter leaf's column spelling resolves to under a request's view
+/// ([`EngineMeta::resolve_filter_column`], `views.md` §5).
+///
+/// **Four outcomes, and three of them are refusals a caller can act on.** They are kept apart
+/// here, in the engine, rather than collapsed into one error at the wire, because the codes they
+/// carry differ: an ambiguous leaf is contracts §3.1's `422` — a malformed request, not an empty
+/// answer, since a leaf with no column to read is not a constraint — where a pin naming nothing is
+/// the `404` an unknown view already gets, and must stay indistinguishable from one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeafColumn {
+    /// Not a filterable column under any spelling: the ordinary unknown-column refusal.
+    Unknown,
+    /// The column the engine evaluates — the leaf's own name for an entity-scoped column, and one
+    /// view's resolved name for a group-scoped family — and the family its values are read by.
+    Resolved {
+        column: String,
+        family: crate::filter::Family,
+    },
+    /// A group-scoped attribute named bare under a view that decides no column of its family.
+    Unpinned { group: String },
+    /// A pin naming no view of the attribute's group — an undeclared key, an ordinal no view
+    /// holds, or a view with no column.
+    UnknownPin { group: String, pin: String },
+    /// A pin on a column that has no scope: one column for the corpus, and nothing for a view to
+    /// choose between.
+    PinOnUnscoped { column: String },
 }
 
 impl EngineMeta {
@@ -1213,6 +1248,115 @@ impl EngineMeta {
             });
         }
         self.views.iter().find(|v| v.id == requested)
+    }
+
+    /// Resolve a **filter leaf's column spelling** under the view a request names
+    /// (`views.md` §5) — the one place the `@` forms are read, on both the meta surface's side and
+    /// the parser's.
+    ///
+    /// An entity-scoped column resolves to itself and takes no pin: there is one column for the
+    /// corpus, and a pin on it would name a view that decides nothing. A **group-scoped** family
+    /// resolves to exactly one view's column:
+    ///
+    /// - **under a view of the attribute's group**, or of a group sharing its views
+    ///   (`views.md` §3.3), the request's own view decides and nothing is added to the wire;
+    /// - **under any other view** the leaf must pin — `sentiment@2026-Q3` by key, or
+    ///   `sentiment@#3` by ordinal — resolved through the same `group:key` / `group:#n` namespace
+    ///   [`EngineMeta::resolve_view`] answers a viewer verb's `view` from, so the two cannot come
+    ///   to disagree about what a name means;
+    /// - a **pin under a view of the same group** is allowed and means what it says: Q4's map
+    ///   filtered by Q3's sentiment.
+    ///
+    /// The resolved column is an ordinary entity-space one and evaluates as its family's unscoped
+    /// columns do — the scope decides which file, never how the values are read.
+    ///
+    /// ⊘ **No gate is applied here, because none exists** (`views.md` §6): every view this bundle
+    /// declares is reachable by every principal, so there is nothing to filter a pin against. When
+    /// the gate lands, the session's visible-view set is checked in exactly one place — the
+    /// `resolve_view` call below — and a gate-failed pin becomes [`LeafColumn::UnknownPin`], which
+    /// is already indistinguishable from a key no view holds.
+    pub fn resolve_filter_column(&self, leaf: &str, view: &str) -> LeafColumn {
+        let (name, pin) = match leaf.split_once(crate::filter::PIN) {
+            Some((name, pin)) => (name, Some(pin)),
+            None => (leaf, None),
+        };
+        // **The entity-scoped columns first**, because a name is one or the other and never both:
+        // the build refuses a scoped family that shares a declared column's name.
+        if let Some(declared) = self
+            .declared_scalars
+            .iter()
+            .find(|d| d.name == name && crate::filter::is_filterable(d))
+        {
+            return match pin {
+                None => LeafColumn::Resolved {
+                    column: name.to_string(),
+                    family: crate::filter::Family::of(declared),
+                },
+                Some(_) => LeafColumn::PinOnUnscoped {
+                    column: name.to_string(),
+                },
+            };
+        }
+        let Some(family) = self
+            .scoped_scalars
+            .iter()
+            .find(|f| f.name == name && crate::filter::scoped_is_filterable(f))
+        else {
+            return LeafColumn::Unknown;
+        };
+        let resolved = |view_id: &str| LeafColumn::Resolved {
+            column: crate::filter::scoped_column_name(name, view_id),
+            family: crate::filter::Family::of_scoped(family),
+        };
+        match pin {
+            Some(pin) => {
+                let requested = format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, pin);
+                match self.resolve_view(&requested) {
+                    // A view of the group that has no column — one created since the build — is
+                    // the same answer as a key nobody declared, and for the same reason a
+                    // gate-failed one will be: what a caller learns is only that the pin names
+                    // nothing to read.
+                    Some(view) if family.views.contains(&view.id) => resolved(&view.id),
+                    _ => LeafColumn::UnknownPin {
+                        group: family.group.clone(),
+                        pin: pin.to_string(),
+                    },
+                }
+            }
+            // **The request's own view, where it is one of the family's** — its own group's, or a
+            // group sharing them, whose keys are the owner's by construction (`views.md` §3.3).
+            None => match self.owning_key(view, &family.group) {
+                Some(key) => {
+                    let id = format!("{}{}{}", family.group, tessera_store::GROUP_SEPARATOR, key);
+                    match family.views.contains(&id) {
+                        true => resolved(&id),
+                        false => LeafColumn::Unpinned {
+                            group: family.group.clone(),
+                        },
+                    }
+                }
+                None => LeafColumn::Unpinned {
+                    group: family.group.clone(),
+                },
+            },
+        }
+    }
+
+    /// The key `view` holds in `group`'s roster — its own if it is a view of that group, and the
+    /// key it shares if its group declares `members` of it (`views.md` §3.3). `None` for a plain
+    /// view, or a view of an unrelated group.
+    fn owning_key(&self, view: &str, group: &str) -> Option<&str> {
+        let roster = self.resolve_view(view)?.roster.as_ref()?;
+        if roster.group == group {
+            return Some(&roster.key);
+        }
+        let owner = self
+            .groups
+            .iter()
+            .find(|g| g.name == roster.group)?
+            .members_of
+            .as_deref()?;
+        (owner == group).then_some(roster.key.as_str())
     }
 
     pub fn projection_of(&self, view: &str) -> Option<Projection> {
@@ -1330,6 +1474,7 @@ impl Engine {
             // what a caller may declare and supply on the ingest plane, not what occupies a row.
             // The segment-facing readers narrow to `render_scalars` at their own sites.
             declared_scalars: manifest.declared_scalars.clone(),
+            scoped_scalars: manifest.scoped_scalars(),
             vocabularies: Arc::clone(&generation.vocabularies),
             idset: manifest.identity.idset,
         }

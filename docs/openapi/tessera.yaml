@@ -733,7 +733,7 @@ components:
             $ref: "#/components/schemas/DeclaredScalar"
         filter_operands:
           type: array
-          description: The columns a request may filter on and each one's operator names. `family` is what tells a client which control to draw — a category has a value set `/v1/categories/{column}` fills; a keyword has none.
+          description: The columns a request may filter on and each one's operator names. `family` is what tells a client which control to draw — a category has a value set `/v1/categories/{column}` fills; a keyword has none. `scope` is present only on a **group-scoped** attribute, whose values differ per view of the group it names.
           items:
             type: object
             additionalProperties: false
@@ -749,6 +749,20 @@ components:
                 items:
                   type: string
                   enum: [eq, in, prefix, contains, range, match, phrase]
+              scope:
+                type: object
+                additionalProperties: false
+                required: [group]
+                description: |
+                  The view group whose views this column's values are per. Under a view of that
+                  group — or of a group sharing its views — the request's own view decides which
+                  column the leaf reads and nothing is added to the wire. Under any other view the
+                  leaf must **pin** one: `<column>@<key>` or `<column>@#<ordinal>`, the same key
+                  and ordinal forms `views` publishes. An unpinned leaf there is a `422` naming the
+                  group; a pin naming no view of it is the `404` an unknown view gets.
+                properties:
+                  group:
+                    type: string
         selection:
           $ref: "#/components/schemas/Selection"
         layers:

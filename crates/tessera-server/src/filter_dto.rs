@@ -33,6 +33,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use tessera_engine::filter::{Endpoint, Family, FilterExpr, FilterOperand, RegionLeaf, Scalar};
+use tessera_engine::LeafColumn;
 use tessera_engine::shapes::{Bounds, CanonError, Projection, ShapeF64, ShapeSpace};
 use tessera_types::{AttrLocalId, TesseraId};
 
@@ -57,16 +58,49 @@ pub struct RegionContext {
 
 /// Parse `filters` into an expression, or refuse.
 ///
-/// `family_of` reports a column's family, or `None` for a name that is not a declared filterable
-/// column. `resolve` maps `(column, key)` to a code. `region` is what a `region` leaf's geometry
-/// is quantised against.
+/// `column_of` resolves a leaf's **spelling** — which may pin a group-scoped attribute's view,
+/// `sentiment@2026-Q3` or `sentiment@#3` (`views.md` §5) — to the column the engine evaluates and
+/// its family, or reports why it cannot. `resolve` maps `(column, key)` to a code. `region` is
+/// what a `region` leaf's geometry is quantised against.
 pub fn parse(
     filters: &Value,
-    family_of: &dyn Fn(&str) -> Option<Family>,
+    column_of: &dyn Fn(&str) -> LeafColumn,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
     region: &RegionContext,
 ) -> Result<FilterExpr, ApiError> {
-    parse_node(filters, family_of, resolve, region)
+    parse_node(filters, column_of, resolve, region)
+}
+
+/// The column a leaf's spelling names, or the refusal it earns (`views.md` §5).
+///
+/// **Three refusals, two codes, and the split is contracts §3.1's closed list.** An unknown column
+/// and an ambiguous one are both `422`: the caller wrote something this schema cannot answer, and
+/// can be told so. A **pin naming nothing** is the `404` an unknown view already gets, and is
+/// deliberately the same answer for a key nobody declared, an ordinal no view holds and — when
+/// `views.md` §6's gate lands — a view this principal may not reach: a `422` there would make the
+/// filter surface an existence oracle over a roster the viewer plane refuses to enumerate.
+fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<(String, Family), ApiError> {
+    match column {
+        LeafColumn::Resolved { column, family } => Ok((column, family)),
+        LeafColumn::Unknown => Err(bad(format!(
+            "'{leaf}' is not a filterable column. `/v1/meta`'s `filter_operands` lists \
+             the columns and the operators each accepts"
+        ))),
+        LeafColumn::Unpinned { group } => Err(bad(format!(
+            "'{leaf}' is scoped to view group '{group}' and this request's view is not one of \
+             its views, so the leaf names no column to read. Pin the view it means — \
+             '{leaf}@<key>' or '{leaf}@#<ordinal>' — as `/v1/meta`'s `filter_operands` entry \
+             for it says"
+        ))),
+        LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
+            "unknown view '{pin}' of group '{group}'"
+        ))),
+        LeafColumn::PinOnUnscoped { column } => Err(bad(format!(
+            "'{column}' is not scoped to a view group, so there is nothing for '@{}' to choose \
+             between: it is one column for the corpus and every view reads it",
+            leaf.split_once(tessera_engine::filter::PIN).map_or("", |(_, pin)| pin)
+        ))),
+    }
 }
 
 fn bad(detail: impl Into<String>) -> ApiError {
@@ -75,7 +109,7 @@ fn bad(detail: impl Into<String>) -> ApiError {
 
 fn parse_node(
     node: &Value,
-    family_of: &dyn Fn(&str) -> Option<Family>,
+    column_of: &dyn Fn(&str) -> LeafColumn,
     resolve: &dyn Fn(&str, &str) -> Option<u32>,
     region: &RegionContext,
 ) -> Result<FilterExpr, ApiError> {
@@ -101,7 +135,7 @@ fn parse_node(
             })?;
             let kids = arr
                 .iter()
-                .map(|k| parse_node(k, family_of, resolve, region))
+                .map(|k| parse_node(k, column_of, resolve, region))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(match combinator {
                 "all_of" => FilterExpr::AllOf(kids),
@@ -117,17 +151,18 @@ fn parse_node(
         // **The reserved word, before any column** (selection-operand §2): the build refuses a
         // column of this name, so the key can mean one thing.
         tessera_engine::filter::REGION_COLUMN => Ok(FilterExpr::Region(parse_region(body, region)?)),
-        column => {
+        leaf => {
             // **An unknown column is an error; an unknown value is not.** See the module header.
-            let Some(family) = family_of(column) else {
-                return Err(bad(format!(
-                    "'{column}' is not a filterable column. `/v1/meta`'s `filter_operands` lists \
-                     the columns and the operators each accepts"
-                )));
-            };
+            // A leaf's *spelling* is resolved here too — a group-scoped attribute's pin, and the
+            // refusals a spelling can earn — because both questions are about the name and this is
+            // the boundary where a name becomes a column (`views.md` §5).
+            let (column, family) = resolve_leaf(leaf, column_of(leaf))?;
             Ok(FilterExpr::Leaf {
-                column: column.to_string(),
-                operand: parse_operand(column, family, body, resolve)?,
+                // The **resolved** column, which for a scoped family is one view's of it. The
+                // caller's own spelling stays in the refusals: a message quoting a name the caller
+                // never wrote is one they cannot find in their request.
+                column,
+                operand: parse_operand(leaf, family, body, resolve)?,
             })
         }
     }
@@ -587,17 +622,36 @@ fn text_value(column: &str, op: &str, value: &Value) -> Result<String, ApiError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tessera_engine::filter::PIN;
 
-    fn schema(name: &str) -> impl Fn(&str) -> Option<Family> + '_ {
+    /// A resolver over four columns, standing in for the engine's own: three entity-scoped, and
+    /// `sentiment` scoped to the group `quarter` with the request's view deciding nothing — so the
+    /// bare leaf is the unpinned refusal and `sentiment@2026-Q3` resolves.
+    fn schema(name: &str) -> impl Fn(&str) -> LeafColumn + '_ {
         move |c: &str| {
-            if c == name {
-                Some(Family::Category)
-            } else if c == "title" || c == "submitter" {
-                Some(Family::Keyword)
-            } else if c == "score" {
-                Some(Family::Numeric)
-            } else {
-                None
+            let plain = |family| LeafColumn::Resolved {
+                column: c.to_string(),
+                family,
+            };
+            match c.split_once(PIN) {
+                None if c == name => plain(Family::Category),
+                None if c == "title" || c == "submitter" => plain(Family::Keyword),
+                None if c == "score" => plain(Family::Numeric),
+                None if c == "sentiment" => LeafColumn::Unpinned {
+                    group: "quarter".to_string(),
+                },
+                Some(("sentiment", "2026-Q3")) => LeafColumn::Resolved {
+                    column: "sentiment@quarter:2026-Q3".to_string(),
+                    family: Family::Numeric,
+                },
+                Some(("sentiment", pin)) => LeafColumn::UnknownPin {
+                    group: "quarter".to_string(),
+                    pin: pin.to_string(),
+                },
+                Some(("score", _)) => LeafColumn::PinOnUnscoped {
+                    column: "score".to_string(),
+                },
+                _ => LeafColumn::Unknown,
             }
         }
     }
@@ -1035,5 +1089,46 @@ mod tests {
             "{err:?}"
         );
         assert!(format!("{err:?}").contains("keyword column"), "{err:?}");
+    }
+
+    /// **The pinned leaf's three refusals, each with the code contracts §3.1 gives it**
+    /// (`views.md` §5). The resolution itself is the engine's; what is checked here is that the
+    /// parse carries each outcome to the wire unflattened — an ambiguous leaf and a pin naming
+    /// nothing are different answers, and collapsing them would either publish a roster the
+    /// viewer plane refuses to enumerate or hide a malformed request behind a 404.
+    #[test]
+    fn a_scoped_leaf_resolves_or_refuses_by_its_spelling() {
+        // Pinned: the leaf carries the resolved column, not the caller's spelling of it.
+        let FilterExpr::Leaf { column, .. } =
+            parse_str(r#"{"sentiment@2026-Q3": {"range": {"gte": 0.5}}}"#).unwrap()
+        else {
+            panic!("a leaf");
+        };
+        assert_eq!(column, "sentiment@quarter:2026-Q3");
+
+        // Bare, under a view that decides no column: 422 naming the group and the pin forms.
+        let ApiError::Contract(detail) =
+            parse_str(r#"{"sentiment": {"range": {"gte": 0.5}}}"#).unwrap_err()
+        else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("quarter"), "{detail}");
+        assert!(detail.contains("sentiment@#<ordinal>"), "{detail}");
+
+        // A pin naming no view of the group: the 404 an unknown view gets, and it says no more.
+        let ApiError::Unknown(detail) =
+            parse_str(r#"{"sentiment@2099-Q9": {"range": {"gte": 0.5}}}"#).unwrap_err()
+        else {
+            panic!("expected a 404");
+        };
+        assert!(detail.contains("2099-Q9"), "{detail}");
+
+        // A pin on a column with no scope: one column for the corpus, nothing to choose between.
+        let ApiError::Contract(detail) =
+            parse_str(r#"{"score@2026-Q3": {"range": {"gte": 1}}}"#).unwrap_err()
+        else {
+            panic!("expected a 422");
+        };
+        assert!(detail.contains("not scoped to a view group"), "{detail}");
     }
 }

@@ -160,11 +160,13 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
             GroupDescriptor {
                 name: "quarter".to_string(),
                 members_of: None,
+                scoped_scalars: Vec::new(),
                 views: roster(true),
             },
             GroupDescriptor {
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),
+                scoped_scalars: Vec::new(),
                 views: roster(false),
             },
         ],

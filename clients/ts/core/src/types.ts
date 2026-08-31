@@ -86,6 +86,18 @@ export type FilterOperandSet = {
   family: 'category' | 'keyword' | 'string' | 'text' | 'numeric';
   /** The operator names this column accepts — `eq`, `in`, `prefix`, `contains`, `match`, `phrase`, `range`. */
   operands: string[];
+  /**
+   * Present only on a **group-scoped** attribute: the view group whose views this column's values
+   * are per (`views.md` §5). Absent is entity scope — one value per entity, the same under every
+   * view — which is the ordinary case and says itself.
+   *
+   * Under a view of that group, or of a group sharing its views, the leaf is sent bare and the
+   * request's own view decides which column it reads. Under any other view the leaf must **pin**
+   * one: `column@key`, or `column@#ordinal` against the ordinals {@link Meta.groups} publishes.
+   * An unpinned leaf there is a 422 naming the group, and a pin naming no view of it is the same
+   * 404 an unknown view gets.
+   */
+  scope?: {group: string};
 };
 
 /**

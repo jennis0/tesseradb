@@ -127,6 +127,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         groups: vec![tessera_store::manifest::GroupDescriptor {
             name: "quarter".to_string(),
             members_of: None,
+            scoped_scalars: Vec::new(),
             views: vec![tessera_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
                 ordinal: 0,
@@ -453,6 +454,7 @@ fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
     tessera_store::manifest::GroupDescriptor {
         name: "quarter_alt".to_string(),
         members_of: None,
+        scoped_scalars: Vec::new(),
         views: keys
             .iter()
             .enumerate()
@@ -774,8 +776,6 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
     .expect("a scoped family builds");
 
     let bundle = open_bundle(&out).expect("the bundle opens");
-    // **No serving surface**: the family is stored and digested, and the manifest's flat list of
-    // declared scalars has no slot for it (`views.md` §5, §11).
     assert!(bundle.manifest.declared_scalars.is_empty());
     let attrs = out
         .join("v00000")
@@ -805,6 +805,33 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
             );
         }
     }
+
+    // **The family is recorded on its group, not among the declared scalars** (contracts §2.2):
+    // `declared_scalars` is one flat bundle-wide list addressed positionally, and a column placed
+    // there would take a slot in every row's tail and a whole-corpus `attrs/` directory of its
+    // own — both absent for every entity. The record is what the engine opens the columns from
+    // and what `/v1/meta` publishes the scope from, so its absence would leave the files unread.
+    assert!(
+        !bundle
+            .manifest
+            .declared_scalars
+            .iter()
+            .any(|d| d.name == "sentiment"),
+        "a scoped column is not one of the declared scalars"
+    );
+    let families = bundle.manifest.scoped_scalars();
+    assert_eq!(families.len(), 1, "one family");
+    assert_eq!(families[0].name, "sentiment");
+    assert_eq!(families[0].group, "quarter_alt");
+    assert!(families[0].index);
+    assert_eq!(
+        families[0].views,
+        vec![
+            "quarter_alt:2026-Q2".to_string(),
+            "quarter_alt:2026-Q3".to_string()
+        ],
+        "the views that have a column, in roster order"
+    );
 }
 
 /// **A sparse view stores the pages it occupies, not the entity space it is bounded by**
@@ -873,6 +900,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
         groups: vec![tessera_store::manifest::GroupDescriptor {
             name: "quarter".to_string(),
             members_of: None,
+            scoped_scalars: Vec::new(),
             views: vec![tessera_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
                 ordinal: 0,

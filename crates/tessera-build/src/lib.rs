@@ -212,10 +212,15 @@ pub struct BuildArgs {
     /// `attrs/<column>/<group>/<key>/`.
     ///
     /// **Not part of [`BuildArgs::schema`], and deliberately.** `MANIFEST.declared_scalars` is one
-    /// flat bundle-wide list and a family has no slot in it, so a scoped column is stored and
-    /// digested and is on no serving surface: ⊘ no filter operand, no postings, no hot column —
-    /// `index` and `render` on a scoped attribute are recorded by the declaration and have nothing
-    /// to act on until contracts §2.3 carries the scope (`views.md` §11).
+    /// flat bundle-wide list and a family has no slot in it. The family's record is
+    /// `MANIFEST.groups[..].scoped_scalars` instead (contracts §2.2), derived from this field at
+    /// the manifest write, and it is what the engine opens the columns from and what
+    /// `/v1/meta`'s `filter_operands` publishes the scope from.
+    ///
+    /// ⊘ **Two things remain unbuilt, and each is loud at the build**: a **category** or
+    /// **text** family is stored and on no filter surface — the per-view postings each is
+    /// answered from are not written — and `render` buys nothing for any scoped family, the hot
+    /// column being per row space (`views.md` §5).
     pub scoped_attributes: Vec<ScopedColumnFamily>,
     /// Bundle root to create.
     pub out: PathBuf,
@@ -1804,7 +1809,38 @@ fn write_manifests(
         // **One entry per view, each carrying its own frame** (decision 0040): two views of one
         // bundle may quantise differently, and an embedding and a map cannot share a frame
         // without one of them wasting most of the grid (`views.md` §2).
-        groups: args.groups.clone(),
+        // **The roster, and the column families scoped to it** (`views.md` §5). The families are
+        // derived here from [`BuildArgs::scoped_attributes`] rather than carried on the argument's
+        // own group descriptors: the declaration says which attributes are scoped and to what, and
+        // a second copy on the input would be a second thing to disagree with it.
+        groups: args
+            .groups
+            .iter()
+            .map(|group| tessera_store::manifest::GroupDescriptor {
+                scoped_scalars: args
+                    .scoped_attributes
+                    .iter()
+                    .filter(|family| family.group == group.name)
+                    .map(|family| tessera_store::manifest::ScopedScalar {
+                        name: family.attribute.name.clone(),
+                        group: family.group.clone(),
+                        arrow_type: family.attribute.ty,
+                        vocabulary: family.attribute.vocabulary.clone(),
+                        analyser: family.attribute.analyser.clone(),
+                        index: family.attribute.index,
+                        render: family.attribute.render,
+                        // The views whose columns this build **wrote**, in the order the family
+                        // names them, which is the roster's ordinal order.
+                        views: family
+                            .views
+                            .iter()
+                            .map(|&index| args.views[index].view_id.clone())
+                            .collect(),
+                    })
+                    .collect(),
+                ..group.clone()
+            })
+            .collect(),
         views: args
             .views
             .iter()
