@@ -2624,8 +2624,14 @@ impl Engine {
     /// guards is inert either way (a joining row carries no descriptors), so a corrupt artefact
     /// loses the refusal rather than turning a caller's batch into a server error. That is the
     /// recoverable-and-discloses-nothing side of the line, where the posture is *report loudly and
-    /// let the operator decide* — so the warning below names the artefact and the entity, and the
-    /// same corruption is a hard error on the drill-down path, which propagates it.
+    /// let the operator decide* — so the warning below fires, and the same corruption is a hard
+    /// error on the drill-down path, which propagates it.
+    ///
+    /// **The warning names the artefact and not the entity** (**I10**, contracts §4). The
+    /// byte-scanner sweeps payloads *and logs* for entity ids, and `crate`'s store follows the
+    /// external-ID sidecar's rule at the same standard: the error carries the file and the shape
+    /// of the inconsistency, which is what an operator chasing a systematic build or flush defect
+    /// needs, and naming the slot buys nothing an entity-independent message does not.
     pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
         let entity = u32::try_from(entity.raw()).ok()?;
         let terms = match self
@@ -2636,16 +2642,12 @@ impl Engine {
         {
             Ok(terms) => terms?,
             Err(e) => {
-                // The entity id is an internal here and stays one: this is a server log on the
-                // control plane, not a payload, and contracts §4's byte-scanner sweeps the
-                // *viewer* plane's logs. An operator chasing a corrupt transpose needs the slot.
                 tracing::warn!(
-                    entity,
                     error = %e,
-                    "the entity->term transpose could not answer for this entity, so the join \
-                     rule's label arm has nothing to compare against and the batch is accepted \
-                     unchecked (views §4). The artefact is a build or flush defect; a fold \
-                     rewrites it."
+                    "the entity->term transpose could not answer, so the join rule's label arm \
+                     has nothing to compare against and this batch's joins are accepted \
+                     unchecked (views §4). The artefact is a build or flush defect and the error \
+                     names the file; a fold rewrites it."
                 );
                 return None;
             }

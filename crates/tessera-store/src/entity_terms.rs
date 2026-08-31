@@ -73,6 +73,15 @@
 //!
 //! **No error detail here names a descriptor**, only ordinals, lengths and paths: these strings
 //! reach an operator log, and a descriptor is a compartment name.
+//!
+//! **The reader's details name no entity either** — the external-ID sidecar's rule, at the same
+//! standard and for its reason: a read failure is reachable from a request, contracts §4 has the
+//! byte-scanner sweep logs as well as payloads for entity ids (**I10**), and a corrupt layer is a
+//! systematic build or flush fault whose file and inconsistency shape are what an operator needs.
+//! The **writer's** three refusals do name the entity, and that is the one place it belongs: they
+//! fire only on a caller feeding this type out of order, which no input can reach — both producers
+//! walk entity space ascending — so there is no request behind them and the slot is the whole
+//! diagnostic.
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
