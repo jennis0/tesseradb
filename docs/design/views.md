@@ -1024,10 +1024,15 @@ each view under spec §4's rule.
   distinct values of its discriminator column (owner ruling: implement it). The design content is
   in §3.1's four rules, which are the points the declaration leaves open — order, an unusable
   value, metadata and the gate — and they are marked as recoverable architect's choices rather than
-  as invariants, because none of them is observable to a principal: the roster is a deployment
-  constant, and this changes only where its keys come from. The mint hooks in where the roster
-  table is read, so it produces roster records and forks no downstream path; §7's marker is now a
-  description rather than a gap, and the register gains no row.
+  as invariants. Two of them a principal does observe: roster order **is** served order (§3.2), and
+  the gate decides which principals may reach a view at all. Neither is a **disclosure**. The
+  order is a deployment constant, the same list for every principal, computed from the declaration
+  and its sources rather than from anything inside `M_auth`; and a minted view taking the group's
+  own gate is exactly what a roster record carrying no `visibility` already does, so no view is
+  reachable that a written roster would have closed. They are recoverable because a later ruling
+  costs a rebuild, not because nothing sees them. The mint hooks in where the roster table is read,
+  so it produces roster records and forks no downstream path; §7's marker is now a description
+  rather than a gap, and the register gains no row.
 - **r16 (2026-08-31)** — **ordinals are removed** (owner ruling), and the removal is total rather
   than an address form withdrawn. Gone: `/v1/meta`'s `ordinal` field, the roster record's and the
   `ViewDrop` record's ordinal, the per-group high-water, the manifest's stored number, the

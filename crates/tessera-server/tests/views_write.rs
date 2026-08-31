@@ -49,29 +49,38 @@ fn position(view: &str, e: u64) -> (f64, f64) {
     }
 }
 
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
-    let schema = Arc::new(Schema::new(vec![
+/// One view's points. `key` is the discriminator value every row carries, for the group whose
+/// points are one file behind `fields.view`; `None` is a file that *is* the view.
+fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, key: Option<&str>) {
+    let mut fields = vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         // One declared attribute, so the join rule's entity-scoped arm has a column to disagree
         // about (`views.md` §4).
         Field::new("score", DataType::Int32, true),
-    ]));
+    ];
+    if key.is_some() {
+        fields.push(Field::new("quarter", DataType::Utf8, false));
+    }
+    let schema = Arc::new(Schema::new(fields));
     let ids: Vec<u64> = ids.collect();
     let xs: Vec<f64> = ids.iter().map(|&e| position(view, e).0).collect();
     let ys: Vec<f64> = ids.iter().map(|&e| position(view, e).1).collect();
     let scores: Vec<i32> = ids.iter().map(|&e| e as i32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(arrow::array::Int32Array::from(scores)),
-        ],
-    )
-    .unwrap();
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(UInt64Array::from(ids.clone())),
+        Arc::new(Float64Array::from(xs)),
+        Arc::new(Float64Array::from(ys)),
+        Arc::new(arrow::array::Int32Array::from(scores)),
+    ];
+    if let Some(key) = key {
+        columns.push(Arc::new(arrow::array::StringArray::from(vec![
+            key;
+            ids.len()
+        ])));
+    }
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
@@ -106,12 +115,12 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", WORLD);
+    write_points(&world_points, "world", WORLD, None);
     let mut views = vec![view_args("world", &world_points, &pairs)];
     for group in ["quarter", "quarter_map"] {
         let id = format!("{group}:2026-Q1");
         let points = dir.join(format!("{group}-q1.parquet"));
-        write_points(&points, &id, Q1);
+        write_points(&points, &id, Q1, None);
         views.push(view_args(&id, &points, &pairs));
     }
     let roster = |with_metadata: bool| {
@@ -1193,40 +1202,6 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
 // A group whose roster was minted (`views.md` §3.1's third form)
 // ---------------------------------------------------------------------------------------------
 
-/// The group's points behind a `quarter` column, with no roster anywhere: the keys are the
-/// distinct values of that column, minted at the build.
-fn write_minted_points(path: &Path, key: &str, ids: std::ops::Range<u64>) {
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("entity_id", DataType::UInt64, false),
-        Field::new("quarter", DataType::Utf8, false),
-        Field::new("x", DataType::Float64, false),
-        Field::new("y", DataType::Float64, false),
-        Field::new("score", DataType::Int32, true),
-    ]));
-    let ids: Vec<u64> = ids.collect();
-    let view = format!("quarter:{key}");
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids.clone())),
-            Arc::new(arrow::array::StringArray::from(vec![key; ids.len()])),
-            Arc::new(Float64Array::from(
-                ids.iter().map(|&e| position(&view, e).0).collect::<Vec<_>>(),
-            )),
-            Arc::new(Float64Array::from(
-                ids.iter().map(|&e| position(&view, e).1).collect::<Vec<_>>(),
-            )),
-            Arc::new(arrow::array::Int32Array::from(
-                ids.iter().map(|&e| e as i32).collect::<Vec<_>>(),
-            )),
-        ],
-    )
-    .unwrap();
-    let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
-    w.write(&batch).unwrap();
-    w.close().unwrap();
-}
-
 /// The same fixture as [`build_fixture_bundle`]'s `quarter`, from a declaration that names **no
 /// keys at all** — and built the way the binary builds one, through `build_views` and
 /// `group_registry`, so what the service opens is the mint's own output rather than a descriptor
@@ -1234,8 +1209,13 @@ fn write_minted_points(path: &Path, key: &str, ids: std::ops::Range<u64>) {
 fn build_minted_bundle(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
-    write_points(&dir.join("world.parquet"), "world", WORLD);
-    write_minted_points(&dir.join("quarter.parquet"), "2026-Q1", Q1);
+    write_points(&dir.join("world.parquet"), "world", WORLD, None);
+    write_points(
+        &dir.join("quarter.parquet"),
+        "quarter:2026-Q1",
+        Q1,
+        Some("2026-Q1"),
+    );
     let config_path = dir.join("config.toml");
     std::fs::write(
         &config_path,
@@ -1374,7 +1354,15 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         .unwrap();
     flush(&served).await;
     reauthorise(&mut served).await;
-    assert_eq!(points(&served, "quarter:2026-Q2").await.len(), 1);
+    let in_q2 = points(&served, "quarter:2026-Q2").await;
+    assert_eq!(in_q2.len(), 1, "the joined row, and only it");
+    assert_eq!(in_q2[0].0, joined, "the row is the one the acknowledgement named");
+    let in_world: Vec<u64> = points(&served, "world").await.iter().map(|p| p.0).collect();
+    assert!(
+        in_world.contains(&joined),
+        "the same identity in two views, not a fresh entity in one: {joined} is not in \
+         {in_world:?}"
+    );
     let resp = ingest(
         &served,
         "join-minted-world",
@@ -1395,5 +1383,4 @@ async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
         409,
         "a dropped key is never reused"
     );
-    assert!(joined > 0);
 }

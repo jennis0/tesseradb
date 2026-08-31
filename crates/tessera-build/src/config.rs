@@ -5925,14 +5925,27 @@ fn read_roster(group: &ViewGroup, table: &RosterTable) -> Result<Vec<RosterView>
 ///   value's rows would belong to no view, which is the refusal a stray key already earns.
 /// - **Every minted view takes the group's own gate**, there being no roster record on which a
 ///   narrower one could be written.
-fn mint_roster(group: &ViewGroup) -> Result<Vec<RosterView>> {
+///
+/// **`scanned` is the pass's memo of what each file has already said**, keyed by the file and the
+/// column read from it. The mint is a full pass over a *points* file — the largest input a group
+/// has — and it is asked for once per group whose roster is this one: an owner and every `members`
+/// group naming it resolve to the same owner and would each pay for the same scan.
+fn mint_roster(
+    group: &ViewGroup,
+    scanned: &mut HashMap<(PathBuf, String), BTreeSet<String>>,
+) -> Result<Vec<RosterView>> {
     let object = format!("view group '{}'", group.name);
     let source = group
         .source
         .as_ref()
         .expect("a group declaring no roster declares a source, or the declaration was refused");
     let column = group.fields.of("view");
-    let keys = crate::input::read_discriminator_keys(source, column)?;
+    let keys = match scanned.entry((source.clone(), column.to_string())) {
+        std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+        std::collections::hash_map::Entry::Vacant(empty) => {
+            empty.insert(crate::input::read_discriminator_keys(source, column)?)
+        }
+    };
     if keys.is_empty() {
         return Err(declaration_error(format!(
             "{object}: {} carries no rows, so this group has no views. Its views are the distinct \
@@ -5941,9 +5954,9 @@ fn mint_roster(group: &ViewGroup) -> Result<Vec<RosterView>> {
             source.display()
         )));
     }
-    keys.into_iter()
+    keys.iter()
         .map(|key| {
-            tessera_types::view::check_view_key(&key).map_err(|detail| {
+            tessera_types::view::check_view_key(key).map_err(|detail| {
                 declaration_error(format!(
                     "{object}: the discriminator column '{column}' carries the value '{key}', and \
                      this group declares no roster, so every distinct value of that column is a \
@@ -5953,7 +5966,7 @@ fn mint_roster(group: &ViewGroup) -> Result<Vec<RosterView>> {
                 ))
             })?;
             Ok(RosterView {
-                key,
+                key: key.clone(),
                 // As form B: the points are the group's own file, selected by the discriminator.
                 source: None,
                 // No roster record, so no gate of its own — the group's is the one it takes,
@@ -5973,6 +5986,9 @@ impl Config {
     /// yet enumerate is refused rather than silently dropped: a bundle whose declaration promises
     /// coordinate systems it does not carry is the failure this refusal exists to prevent.
     pub fn build_views(&self) -> Result<Vec<BuildView>> {
+        // What each points file has already said about its discriminator, so a group's source is
+        // scanned once however many groups mint their roster from it ([`mint_roster`]).
+        let mut scanned: HashMap<(PathBuf, String), BTreeSet<String>> = HashMap::new();
         let mut registry: Vec<BuildView> = self
             .views
             .iter()
@@ -6014,7 +6030,7 @@ impl Config {
                 // its own discriminator, read here for the reason the table is: the registry is
                 // what pass two iterates, and a minted key is a coordinate system this build
                 // materialises (`views.md` §3.1, §7).
-                Roster::Discriminator => mint_roster(owner)?,
+                Roster::Discriminator => mint_roster(owner, &mut scanned)?,
             };
             let discriminator_field = group.fields.of("view").to_string();
             // Sorted once per group, not once per view: it is the same roster each of its views

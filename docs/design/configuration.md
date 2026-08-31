@@ -149,10 +149,12 @@ of those arrangements a defaulted file meant is not something a default can deci
 
 **The roster-less form declares no keys at all**, which is its whole surface: name the group's
 `source` and its `fields.view`, write neither `[[view_group.view]]` nor `[view_group.views]`, and
-the build takes one view per distinct value of that column. It is refused in three places, each
-naming what it read (views §3.1): a value outside the key charset, a `metadata` line — there being
-no roster record for a per-view value to sit on — and a source with no rows, which would leave the
-group with no views. The keys are served in **key-byte order**, and every minted view takes the
+the build takes one view per distinct value of that column. Five things are refused, each naming
+what it read (views §3.1): a value outside the key charset; a `metadata` line, there being no
+roster record for a per-view value to sit on; a source with no rows, which would leave the group
+with no views; a null in the discriminator, a row that names no view being in no view; and a
+discriminator column that is not a string, a key read out of another type being a view under a name
+nobody wrote. The keys are served in **key-byte order**, and every minted view takes the
 group's own `visibility`; both are recoverable defaults rather than guarantees.
 
 ```toml
