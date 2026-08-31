@@ -54,9 +54,11 @@
 //!
 //! # Fail-closed
 //!
-//! Every length and offset is checked at open. A short `offsets`, a non-monotone one, or a
-//! `terms` file that does not end where the last offset says are all
-//! [`StoreError::InvalidEntityTerms`] — never a truncated answer. A truncated list here would
+//! A short `offsets`, a `terms` file that does not end where the last offset says, and a
+//! descending or out-of-range offset pair are all [`StoreError::InvalidEntityTerms`] — never a
+//! truncated answer. The two ends are checked at open and each pair at the read that uses it,
+//! which is O(1) both times: walking every offset at open would be a 4 GB sequential read at 10⁹
+//! on the path the external-ID sidecar was deliberately made lazy to keep clear. A truncated list here would
 //! under-report an entity's labels, which on the write path is a **409 that does not fire**: a
 //! re-label accepted through a second view's row, with no overlay entry. On the read path it
 //! would only hide a label the viewer holds, which is the harmless direction — but the two share
@@ -273,41 +275,26 @@ impl EntityTerms {
                 detail: format!("{} bytes is not a whole number of u32", terms.len()),
             });
         }
-        // Monotone, starting at zero and ending at the term file's own length. Checked once here
-        // so `terms_of` can slice without re-deriving the bound per read; the cost is one
-        // sequential pass over 4 bytes per entity at open, which is the same pass the digest
-        // verification already makes over every file in the bundle.
-        let mut previous = 0u32;
-        for index in 0..=card {
-            let at = (index as usize) * 4;
-            let value = u32::from_le_bytes([
-                offsets[at],
-                offsets[at + 1],
-                offsets[at + 2],
-                offsets[at + 3],
-            ]);
-            if index == 0 && value != 0 {
-                return Err(StoreError::InvalidEntityTerms {
-                    path: offsets_path.to_path_buf(),
-                    detail: format!("the first offset is {value}, not 0"),
-                });
-            }
-            if value < previous {
-                return Err(StoreError::InvalidEntityTerms {
-                    path: offsets_path.to_path_buf(),
-                    detail: format!(
-                        "offset {index} is {value}, below its predecessor {previous}; the array \
-                         addresses slices and must not decrease"
-                    ),
-                });
-            }
-            previous = value;
+        // **The ends, not the whole array.** The first offset must be 0 and the last must name
+        // exactly the terms file's length; every offset between them is checked at the read that
+        // uses it (`terms_of`), which is the same fail-closed answer at the point where a bad pair
+        // could produce a wrong one. Walking all of them here would be a sequential read of 4 B per
+        // entity — 4 GB at 10⁹ — at every `Engine::open`, which is the startup cost the external-ID
+        // sidecar was deliberately made lazy to avoid; the check that catches a truncation is the
+        // length equality below, and it is O(1).
+        let first = read_u32(&offsets, 0);
+        if first != 0 {
+            return Err(StoreError::InvalidEntityTerms {
+                path: offsets_path.to_path_buf(),
+                detail: format!("the first offset is {first}, not 0"),
+            });
         }
-        if (previous as usize) * 4 != terms.len() {
+        let last = read_u32(&offsets, card as usize);
+        if (last as usize) * 4 != terms.len() {
             return Err(StoreError::InvalidEntityTerms {
                 path: dir.clone(),
                 detail: format!(
-                    "the last offset names {previous} term ordinals but the terms file holds {}",
+                    "the last offset names {last} term ordinals but the terms file holds {}",
                     terms.len() / 4
                 ),
             });
@@ -345,32 +332,32 @@ impl EntityTerms {
     /// being `u32`-aligned and the host being little-endian; a list is a handful of ordinals read
     /// at drill-down cadence, so the explicit decode costs nothing worth the two unstated
     /// premises.
-    pub fn terms_of(&self, entity: u32) -> Option<Vec<u32>> {
+    pub fn terms_of(&self, entity: u32) -> Result<Option<Vec<u32>>> {
         if !self.hasrow.contains(entity) {
-            return None;
+            return Ok(None);
         }
         let rank = (self.hasrow.rank(entity) - 1) as usize;
-        let start = self.offset_at(rank) as usize;
-        let end = self.offset_at(rank + 1) as usize;
-        // Both bounds were checked monotone and in range at open, so this cannot slice out of the
-        // mapping — an `expect` rather than a silent empty, because the alternative is a shorter
-        // label set than the entity carries and the write path's 409 not firing.
-        Some(
+        let start = read_u32(&self.offsets, rank) as usize;
+        let end = read_u32(&self.offsets, rank + 1) as usize;
+        // **The pair is checked here rather than at open** — see [`EntityTerms::open`] for why the
+        // whole array is not walked. A descending pair or one past the terms file is a refusal and
+        // never a truncated list: a short label set on the write path is a `409` that does not
+        // fire, which is the fail-open direction.
+        if end < start || end * 4 > self.terms.len() {
+            return Err(StoreError::InvalidEntityTerms {
+                path: self.dir.clone(),
+                detail: format!(
+                    "the offsets at rank {rank} name [{start}, {end}) over a terms file of {}                      ordinals",
+                    self.terms.len() / 4
+                ),
+            });
+        }
+        Ok(Some(
             self.terms[start * 4..end * 4]
                 .chunks_exact(4)
                 .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect(),
-        )
-    }
-
-    fn offset_at(&self, index: usize) -> u32 {
-        let at = index * 4;
-        u32::from_le_bytes([
-            self.offsets[at],
-            self.offsets[at + 1],
-            self.offsets[at + 2],
-            self.offsets[at + 3],
-        ])
+        ))
     }
 
     /// This layer's directory, for a caller assembling an error.
@@ -430,8 +417,13 @@ impl EntityTermsStack {
     /// `None` is **not** "this entity carries no terms" — that is `Some(vec![])`. It is "no layer
     /// published one", which for a live entity means the transpose is behind its postings, and
     /// every caller treats it as *unknown* rather than as *empty*.
-    pub fn terms_of(&self, entity: u32) -> Option<Vec<u32>> {
-        self.layers.iter().find_map(|layer| layer.terms_of(entity))
+    pub fn terms_of(&self, entity: u32) -> Result<Option<Vec<u32>>> {
+        for layer in &self.layers {
+            if let Some(terms) = layer.terms_of(entity)? {
+                return Ok(Some(terms));
+            }
+        }
+        Ok(None)
     }
 
     /// Every entity any layer holds a list for, ascending — the fold's walk. The layers are
@@ -455,6 +447,13 @@ impl EntityTermsStack {
     pub fn layers(&self) -> usize {
         self.layers.len()
     }
+}
+
+/// The `index`-th `u32` of a mapped LE array. The caller has already established that the array is
+/// long enough — at open for the two ends, and by the has-row cardinality for a rank.
+fn read_u32(map: &Mmap, index: usize) -> u32 {
+    let at = index * 4;
+    u32::from_le_bytes([map[at], map[at + 1], map[at + 2], map[at + 3]])
 }
 
 fn map(path: &Path) -> Result<Mmap> {
@@ -499,11 +498,11 @@ mod tests {
         ];
         let (_dir, layer) = round_trip(&rows);
         for (entity, terms) in &rows {
-            assert_eq!(layer.terms_of(*entity).as_ref(), Some(terms));
+            assert_eq!(layer.terms_of(*entity).unwrap().as_ref(), Some(terms));
         }
         // An entity the layer never held is unknown, and is not the empty list.
-        assert_eq!(layer.terms_of(1), None);
-        assert_eq!(layer.terms_of(4), None);
+        assert_eq!(layer.terms_of(1).unwrap(), None);
+        assert_eq!(layer.terms_of(4).unwrap(), None);
         assert_eq!(layer.len(), 4);
     }
 
@@ -512,8 +511,8 @@ mod tests {
     #[test]
     fn an_empty_list_is_a_value_and_an_absent_entity_is_not() {
         let (_dir, layer) = round_trip(&[(2u32, vec![])]);
-        assert_eq!(layer.terms_of(2), Some(Vec::new()));
-        assert_eq!(layer.terms_of(3), None);
+        assert_eq!(layer.terms_of(2).unwrap(), Some(Vec::new()));
+        assert_eq!(layer.terms_of(3).unwrap(), None);
     }
 
     #[test]
@@ -585,10 +584,10 @@ mod tests {
             terms: extent.path().join(ENTITY_TERMS_TERMS_FILE),
         };
         let stack = EntityTermsStack::open(Some(base.path()), std::slice::from_ref(&paths)).unwrap();
-        assert_eq!(stack.terms_of(0), Some(vec![1]));
-        assert_eq!(stack.terms_of(1), Some(vec![2, 3]));
-        assert_eq!(stack.terms_of(7), Some(vec![4]));
-        assert_eq!(stack.terms_of(6), None);
+        assert_eq!(stack.terms_of(0).unwrap(), Some(vec![1]));
+        assert_eq!(stack.terms_of(1).unwrap(), Some(vec![2, 3]));
+        assert_eq!(stack.terms_of(7).unwrap(), Some(vec![4]));
+        assert_eq!(stack.terms_of(6).unwrap(), None);
         assert_eq!(stack.layers(), 2);
 
         // The successor generation's stack, after a flush: the base is shared, not reopened.
@@ -596,7 +595,7 @@ mod tests {
             .unwrap()
             .with_extents(std::slice::from_ref(&paths))
             .unwrap();
-        assert_eq!(grown.terms_of(7), Some(vec![4]));
+        assert_eq!(grown.terms_of(7).unwrap(), Some(vec![4]));
     }
 
     /// **A layer holding nothing must still open.** A flush that published only joining rows
@@ -607,11 +606,11 @@ mod tests {
         let (_dir, layer) = round_trip(&[]);
         assert_eq!(layer.len(), 0);
         assert!(layer.is_empty());
-        assert_eq!(layer.terms_of(0), None);
+        assert_eq!(layer.terms_of(0).unwrap(), None);
     }
 
     #[test]
     fn an_empty_stack_answers_nothing_rather_than_failing() {
-        assert_eq!(EntityTermsStack::empty().terms_of(0), None);
+        assert_eq!(EntityTermsStack::empty().terms_of(0).unwrap(), None);
     }
 }

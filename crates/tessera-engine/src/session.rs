@@ -2617,17 +2617,21 @@ impl Engine {
     /// `None` where no layer holds a list for the entity, which is *unknown* rather than *empty*
     /// and leaves the comparison unavailable exactly as an empty buffer does. `Some(vec![])` is a
     /// real answer: an item may legitimately carry no label.
+    ///
+    /// **A malformed layer is `None`, not a wrong answer.** The transpose refuses a bad offset pair
+    /// rather than truncating (`tessera_store::entity_terms`), and this is a *report*, not an
+    /// authorisation: the join it guards is inert either way (a joining row carries no
+    /// descriptors), so a corrupt artefact loses the refusal rather than turning a batch into a
+    /// server error. The corruption surfaces on the drill-down path, which does propagate it.
     pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
         let entity = u32::try_from(entity.raw()).ok()?;
-        Some(
-            self.generation()
-                .filter_columns
-                .entity_terms()
-                .terms_of(entity)?
-                .into_iter()
-                .map(TermId::new)
-                .collect(),
-        )
+        let terms = self
+            .generation()
+            .filter_columns
+            .entity_terms()
+            .terms_of(entity)
+            .ok()??;
+        Some(terms.into_iter().map(TermId::new).collect())
     }
 
     pub fn resolve_external_ids(

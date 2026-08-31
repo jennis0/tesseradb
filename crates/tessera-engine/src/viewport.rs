@@ -1616,7 +1616,12 @@ impl Engine {
         session: &Session,
         entity: u32,
     ) -> Result<Vec<String>> {
-        let Some(terms) = generation.filter_columns.entity_terms().terms_of(entity) else {
+        let Some(terms) = generation
+            .filter_columns
+            .entity_terms()
+            .terms_of(entity)
+            .map_err(EngineError::Store)?
+        else {
             return Ok(Vec::new());
         };
         let descriptors: Vec<Vec<u8>> = terms

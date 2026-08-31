@@ -1449,7 +1449,10 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
             if plan.tombstones.contains(entity) {
                 continue;
             }
-            let Some(terms) = layers.terms_of(entity) else {
+            let Some(terms) = layers
+                .terms_of(entity)
+                .map_err(|e| failed("pass 4c (entity terms: a layer)", &e))?
+            else {
                 continue;
             };
             writer
