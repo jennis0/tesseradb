@@ -149,6 +149,7 @@ fn build_rows_with_signatures(
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             }
         })
         .collect()

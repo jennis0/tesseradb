@@ -331,6 +331,7 @@ fn ingest_with_descriptors(
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(descriptors),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], batch.to_string(), [0u8; 32])
@@ -2037,6 +2038,7 @@ fn term_ordinals_are_stable_across_a_fold() {
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"novel".to_vec()]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![novel_row], "promote-novel".to_string(), [0u8; 32])

@@ -171,8 +171,11 @@ pub enum WalScalar {
 /// `x`/`y` are `f64`, the width the whole coordinate path carries (`projections.md` §6) — the wire
 /// reads it, this record stores it and the flush quantises it. Postcard encodes a float at its
 /// declared width, so the width is on-disk format: this field's change from `f32` is what
-/// `WAL_VERSION` 16 exists for, and a log at 15 is refused rather than read eight bytes at a time
-/// out of four.
+/// `WAL_VERSION` 16 existed for, and a log at 15 is refused rather than read eight bytes at a time
+/// out of four. The current version is **17**, for [`WalRow::scoped`] below — postcard is
+/// positional, so a 16 record read at 17 takes the next record's leading bytes for the list it
+/// does not carry — and both older versions are refused for that one reason: their records are
+/// the ones a current reader would find *plausible*.
 ///
 /// **They are the view's frame coordinates, never longitude and latitude** (`projections.md` §3).
 /// A projected view's transform runs once, at the wire boundary, before the record is framed — so
@@ -200,6 +203,21 @@ pub struct WalRow {
     pub x: f64,
     pub y: f64,
     pub scalars: Vec<WalScalar>,
+    /// This row's values for the **group-scoped** attribute families of the group that owns
+    /// [`Self::view`], positionally against `MANIFEST.groups[..].scoped_scalars` in manifest order
+    /// (`views.md` §5). Empty for a plain view and for a group that owns no family.
+    ///
+    /// **A second list rather than more slots in [`Self::scalars`]**, because the two are indexed
+    /// against different declarations. `scalars` is positional against the one flat, bundle-wide
+    /// `MANIFEST.declared_scalars`, which a family is deliberately absent from — it has no slot
+    /// there, no whole-corpus column and no record-blob field tag. A family's columns are the
+    /// group's, one per view, so the list a row carries them in is the group's too.
+    ///
+    /// **A join row may carry these and only these** (`views.md` §4): the entity, its label and
+    /// its entity-scoped attributes are already decided, and a scoped value belongs to the
+    /// `(entity, view)` the join is creating rather than to the entity — which is what makes it
+    /// the one thing a second view's row legitimately brings with it.
+    pub scoped: Vec<WalScalar>,
 }
 
 /// The disposition change carried by a [`WalRecord::ChangeByEntity`] record. The two removal rules
@@ -637,7 +655,10 @@ const WAL_MAGIC: [u8; 4] = *b"TWAL";
 /// right, and four of the eight bytes it takes for a coordinate come out of whatever field follows.
 /// A row read that way lands somewhere on the grid rather than failing, which is the whole reason
 /// the version is the guard and there is no migration.
-const WAL_VERSION: u16 = 16;
+// **17**: `WalRow` gained `scoped` — a row's values for the group-scoped attribute families of
+// its view's group (`views.md` §5). Postcard is positional, so the field is on-disk format and a
+// log at 16 is refused rather than read one list short.
+const WAL_VERSION: u16 = 17;
 /// Header size in bytes: `WAL_MAGIC` ‖ `WAL_VERSION` LE ‖ member number LE ‖ base position LE.
 /// Every *offset* in this module is a byte offset from the start of its own file, so it already
 /// accounts for the header living at the front; every *position* is sequence-global and counts
@@ -1860,6 +1881,7 @@ mod tests {
                 // The row carries the **code**, resolved once at the close and persisted — a
                 // random draw is precisely what replay cannot re-derive.
                 scalars: vec![WalScalar::U32(31_337)],
+                scoped: Vec::new(),
             }],
         };
 

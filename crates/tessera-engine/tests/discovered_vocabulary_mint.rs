@@ -213,6 +213,7 @@ fn ingest_row(engine: &Engine, external_id: &str, scalar: WalScalar) -> EntityId
                 y: 1.0,
                 scalars: vec![scalar],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             format!("batch-{external_id}"),
             [0u8; 32],
@@ -347,6 +348,7 @@ fn two_rows_in_one_window_with_the_same_novel_key_mint_once() {
         y: 1.0,
         scalars: vec![WalScalar::Utf8("finance".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
 
     let entities = engine
@@ -517,6 +519,7 @@ fn a_minted_code_survives_a_restart_and_is_never_redrawn() {
                 y: 1.0,
                 scalars: vec![WalScalar::Utf8("one-too-many".to_string())],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "batch-one-too-many".to_string(),
             [9u8; 32],

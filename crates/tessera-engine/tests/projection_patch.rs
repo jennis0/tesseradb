@@ -68,6 +68,7 @@ fn ingest(engine: &Engine, external_id: &str, x: f64, y: f64) {
         y,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])

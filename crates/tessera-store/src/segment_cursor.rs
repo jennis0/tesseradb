@@ -85,9 +85,21 @@ impl SegmentCursor {
 /// alternative is why: a `filter_map` here drops the missing one and shifts every later scalar up a
 /// position, so the output segment's columns are silently transposed — every value present, every
 /// value under the wrong name, and no count or digest that would show it.
+///
+/// **`scoped_from` is the one exception, and it is absence rather than malformation**
+/// (`views.md` §5) — the write end's counterpart of `viewport::gather_tile_columns`' own, and the
+/// same index. From that position on the schema names a view's **group-scoped** render lanes, and
+/// a segment of that view may lawfully hold none: a batch into a view of a group that only
+/// *shares* the family's views carries no value, and a view whose family list grew after some of
+/// its segments were flushed has older ones with no lane. Such a column takes the render
+/// placeholder — the type's zero, which is what an absent value is written as anyway (decision
+/// 0064) — and the row keeps its position. A **wrong type** under the name is still malformed,
+/// scoped or not: that is a segment disagreeing with the manifest, not one that predates the
+/// family.
 pub(crate) fn gather_scalars(
     columns: &ColumnsRef,
     schema: &[(String, ScalarType)],
+    scoped_from: usize,
     row: usize,
     seg_id: &str,
     op: &str,
@@ -100,16 +112,20 @@ pub(crate) fn gather_scalars(
     };
     schema
         .iter()
-        .map(|(name, declared)| {
-            let view = columns
-                .scalar(name)
-                .ok_or_else(|| StoreError::MalformedBundle {
+        .enumerate()
+        .map(|(position, (name, declared))| {
+            let Some(view) = columns.scalar(name) else {
+                if position >= scoped_from {
+                    return Ok(ScalarValue::Null.or_render_placeholder(*declared));
+                }
+                return Err(StoreError::MalformedBundle {
                     detail: format!(
                         "{op}: segment '{seg_id}' has no scalar column '{name}', which this \
                          bundle declares; dropping it would shift every later scalar into the \
                          wrong column"
                     ),
-                })?;
+                });
+            };
             // Each arm pairs the *stored* type with the *declared* one and the fallthrough
             // refuses: a narrowing or widening coercion here would let a merge rewrite a column
             // at a width the manifest does not declare, which the next reader opens as garbage

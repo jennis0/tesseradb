@@ -1044,6 +1044,7 @@ fn engine_open_refuses_an_out_of_range_allocator_seed() {
                 x: 0.5,
                 y: 0.5,
                 scalars: Vec::new(),
+                scoped: Vec::new(),
             }],
         })
         .unwrap();

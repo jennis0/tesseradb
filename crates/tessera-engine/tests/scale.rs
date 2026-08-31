@@ -400,6 +400,7 @@ fn ingest_round(engine: &Engine, round: usize, batch: usize) -> (Vec<Planted>, R
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             });
             meta.push((external_id, x, y, i));
         }
@@ -1077,6 +1078,7 @@ fn ingest_rows(engine: &Engine, round: usize, batch: usize) {
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             });
         }
         // A body hash distinct from `ingest_round`'s, so a probe reusing this helper alongside the
@@ -1986,6 +1988,7 @@ fn ingest_returning_ids(engine: &Engine, round: usize, batch: usize, keep: usize
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             });
         }
         let mut key = [0u8; 32];

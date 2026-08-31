@@ -30,6 +30,7 @@ fn row(engine: &Engine, external_id: &[u8]) -> UnallocatedRow {
         y: 0.5,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     }
 }
 

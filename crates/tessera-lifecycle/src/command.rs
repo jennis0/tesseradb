@@ -67,6 +67,9 @@ pub struct UnallocatedRow {
     pub x: f64,
     pub y: f64,
     pub scalars: Vec<WalScalar>,
+    /// This row's group-scoped attribute values ([`WalRow::scoped`], `views.md` §5) — positional
+    /// against the owning group's `scoped_scalars`, and empty for every view outside a scope.
+    pub scoped: Vec<WalScalar>,
     pub terms: Vec<TermId>,
 }
 
@@ -127,6 +130,7 @@ impl UnallocatedRow {
                 x: self.x,
                 y: self.y,
                 scalars: self.scalars,
+                scoped: self.scoped,
             },
             pending.terms,
         )
@@ -667,6 +671,7 @@ mod tests {
             x: 1.5,
             y: -2.5,
             scalars: vec![WalScalar::U64(7), WalScalar::Utf8("s".into())],
+            scoped: Vec::new(),
             terms: vec![TermId::new(9), TermId::new(2)],
         }
     }

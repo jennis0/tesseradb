@@ -183,6 +183,7 @@ fn the_manifest_publish_site_parks_a_flush_with_its_segment_unreferenced() {
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
         descriptors,
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], "seam-batch-1".to_string(), [0u8; 32])

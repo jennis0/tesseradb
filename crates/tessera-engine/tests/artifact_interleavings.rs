@@ -242,6 +242,7 @@ fn row(engine: &Engine, external_id: &str, x: f64, y: f64) -> UnallocatedRow {
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
         descriptors,
+        scoped: Vec::new(),
     }
 }
 

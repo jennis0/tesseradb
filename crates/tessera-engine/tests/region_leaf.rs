@@ -530,6 +530,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<EntityId> {
                     scalars: Vec::new(),
                     terms: engine.resolve_terms(&descriptors),
                     descriptors,
+                    scoped: Vec::new(),
                 }
             })
             .collect();
@@ -560,6 +561,7 @@ fn flush_filler_segment(engine: &Engine, n: usize) {
             scalars: Vec::new(),
             terms: engine.resolve_terms(&[b"0".to_vec()]),
             descriptors: vec![b"0".to_vec()],
+            scoped: Vec::new(),
         })
         .collect();
     engine

@@ -229,6 +229,7 @@ fn flushed_bundle(root: &Path) {
         layers: seg0.layers.clone(),
         layer_tombstones: seg0.layer_tombstones.clone(),
         views: Vec::new(),
+        scoped_columns: Vec::new(),
         view_tombstones: Vec::new(),
         membership_extents: Vec::new(),
         level_versions: Vec::new(),

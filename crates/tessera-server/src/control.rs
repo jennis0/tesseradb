@@ -29,8 +29,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sha2::{Digest, Sha256};
 
 use tessera_engine::{
-    AcceptError, DeclaredScalar, MetaView, Projection, ScalarType, Vocabularies, VocabularyKind,
-    ABSENT_CODE, DENY_WINDOW_MAX_ENTRIES,
+    AcceptError, DeclaredScalar, MetaView, Projection, ScalarType, ScopedScalar, Vocabularies,
+    VocabularyKind, ABSENT_CODE, DENY_WINDOW_MAX_ENTRIES,
 };
 use tessera_lifecycle::{
     BatchArtifacts, BatchEdge, BatchMembership, ChangeOp, UnallocatedRow, WalScalar,
@@ -493,6 +493,10 @@ struct RawIngestItem {
     y: f64,
     access: Vec<u8>,
     scalars: Vec<WalScalar>,
+    /// The group-scoped values this row carries for its view's group, positional against the
+    /// families the batch was parsed with (`views.md` §5). Empty for a plain view and for a group
+    /// that owns no family.
+    scoped: Vec<WalScalar>,
 }
 
 /// The column names this schema gives a meaning of their own whatever the view, plus the
@@ -1024,6 +1028,10 @@ fn parse_ingest_batch(
     body: &[u8],
     projection: Projection,
     declared: &[DeclaredScalar],
+    // The **group-scoped** attribute families this view's batch may carry, under their plain
+    // names — the families of the group that owns the view, in manifest order, and empty for
+    // every view outside a scope (`views.md` §5). See the section on them in this function's doc.
+    scoped: &[ScopedScalar],
     vocabularies: &Vocabularies,
     layer_of: &dyn Fn(&str) -> Option<tessera_types::layer::LayerDeclaration>,
 ) -> Result<ParsedBatch, ApiError> {
@@ -1084,6 +1092,12 @@ fn parse_ingest_batch(
                 || name == x_name
                 || name == y_name
                 || declared.iter().any(|d| d.name == name)
+                // **A group-scoped family, under its plain name** (`views.md` §5): the view is
+                // known from the header, so the column is not qualified and the view decides
+                // which of the family's columns the value lands in. `scoped` is empty for every
+                // view outside a scope, so the refusal below is unchanged there — which is what
+                // keeps a scoped column un-nameable on an entity-space batch.
+                || scoped.iter().any(|f| f.name == name)
             {
                 continue;
             }
@@ -1130,6 +1144,28 @@ fn parse_ingest_batch(
             }
         }
 
+        // **The scoped families' columns, checked on the declared ones' rule** (`views.md` §5) —
+        // but a *missing* column is not an error here, where a missing declared scalar is: a
+        // family has no slot in the positional tail, so its absence misaligns nothing and simply
+        // means every row of the batch is absent in it. What is refused is the same wrong type,
+        // for the same reason: a value decoded against the wrong declaration is a wrong value
+        // stored with no error anywhere.
+        for f in scoped {
+            let Some(col) = batch.column_by_name(&f.name) else {
+                continue;
+            };
+            let expected = scoped_wire_type(f);
+            if batch.num_rows() > 0 && scalar_at(col.as_ref(), 0, expected).is_none() {
+                return Err(ApiError::Contract(format!(
+                    "ingest body: column '{}' is {:?}, but it is a group-scoped attribute \
+                     declared {} (views §5); refused rather than dropped",
+                    f.name,
+                    col.data_type(),
+                    expected.arrow_type_name()
+                )));
+            }
+        }
+
         for i in 0..batch.num_rows() {
             // The artifacts this row names, read before its scalars so a malformed membership
             // column refuses the batch with nothing decoded into `items` — the whole-batch rule
@@ -1166,6 +1202,34 @@ fn parse_ingest_batch(
                 };
                 scalars.push(value);
             }
+            // **The scoped tail, in the families' own order** — a second positional list rather
+            // than more slots in the one above, because the two are indexed against different
+            // declarations (`WalRow::scoped`). Absence takes each family's ordinary route: the
+            // reserved code 0 for a category, `WalScalar::Null` for everything else, which is
+            // decision 0064's presence bitmap.
+            let mut scoped_values = Vec::with_capacity(scoped.len());
+            for f in scoped {
+                let value = match batch.column_by_name(&f.name) {
+                    // A family the batch does not mention: every row is absent in it, which is
+                    // an ordinary state and not the omission a declared scalar's would be. A
+                    // family has no bundle-wide column, so nothing downstream is misaligned by a
+                    // batch that carries none of them.
+                    None => scoped_absent(f),
+                    Some(col) => match f.vocabulary.as_deref() {
+                        Some(vocabulary) => category_code(
+                            col.as_ref(),
+                            i,
+                            &scoped_as_declared(f),
+                            vocabulary,
+                            vocabularies,
+                        )?,
+                        None if col.is_null(i) => WalScalar::Null,
+                        None => scalar_at(col.as_ref(), i, scoped_wire_type(f))
+                            .expect("every scoped column's type was checked above"),
+                    },
+                };
+                scoped_values.push(value);
+            }
             // Contracts §3.4: `external_id` is optional. Neither a missing column nor a null
             // within the column is an error -- both simply mean this item has no caller-supplied
             // external id and is addressable only by its `tessera_id`.
@@ -1193,6 +1257,7 @@ fn parse_ingest_batch(
                 y: y[i],
                 access: access.value(i).as_bytes().to_vec(),
                 scalars,
+                scoped: scoped_values,
             });
         }
     }
@@ -1201,6 +1266,45 @@ fn parse_ingest_batch(
         artifacts: tally.into_artifacts(),
         clipped,
     })
+}
+
+/// A group-scoped family as the declaration the row-level helpers take.
+///
+/// **The declaration is an ordinary attribute's** (`views.md` §5) — same types, same `index` and
+/// `render` — and what the scope changes is only which column file a value lands in. So a
+/// family's key check, wire type and code minting are the entity-scoped ones, asked of a borrowed
+/// declaration built here rather than restated as a second set of rules that could drift from
+/// [`DeclaredScalar`]'s.
+fn scoped_as_declared(family: &ScopedScalar) -> DeclaredScalar {
+    DeclaredScalar {
+        name: family.name.clone(),
+        arrow_type: family.arrow_type,
+        vocabulary: family.vocabulary.clone(),
+        analyser: family.analyser.clone(),
+        index: family.index,
+        render: family.render,
+    }
+}
+
+/// What a batch column of this family carries on the wire — [`DeclaredScalar::wire_type`]'s
+/// answer, so a scoped category arrives as its **key** exactly as an entity-scoped one does and a
+/// caller is never the minting authority for a code (per-point-attributes §3.1, §5).
+fn scoped_wire_type(family: &ScopedScalar) -> ScalarType {
+    scoped_as_declared(family).wire_type()
+}
+
+/// The value a row carries for a family the batch does not mention at all.
+///
+/// A category spends its reserved code 0, which its vocabulary keeps out of the value space;
+/// every other family has no spare bit pattern and travels `Null`, which lands in the column's
+/// presence bitmap (decision 0064). The same split [`parse_ingest_batch`] makes per row, restated
+/// here for the whole-column case — which a family has and a declared scalar does not, a family
+/// having no slot in the positional tail to misalign.
+fn scoped_absent(family: &ScopedScalar) -> WalScalar {
+    match family.vocabulary {
+        Some(_) => code_at(family.arrow_type, ABSENT_CODE),
+        None => WalScalar::Null,
+    }
 }
 
 /// The coordinate columns a batch for this view must *not* carry, each paired with what it should
@@ -1440,6 +1544,26 @@ fn run_ingest(
     // WAL append on the executor, so a column naming a layer registered a moment ago resolves here
     // exactly as the publication that created its artifacts did — and a name nothing registered is
     // refused with the undeclared-column message rather than accepted into nothing.
+    // **The group-scoped families this batch may carry** (`views.md` §5): those of the group that
+    // owns the named view, under their plain names, the view deciding which of each family's
+    // columns a value lands in. A plain view gets none, so a scoped column named on an
+    // entity-space batch takes the undeclared-column refusal exactly as before — which is what
+    // makes such a column un-nameable outside its group's views.
+    //
+    // ⊘ **A view of a group declaring `members` gets none either.** Its rows *render* the owner's
+    // family (the column is entity space and reached through the key it shares), but they may not
+    // write it: the value would land in the owner's `(group, key)` column, where a batch into the
+    // owner's own view of the same key may already have put one — two extents claiming one entity,
+    // which the layer composition refuses. The value is ingested through the owning group's view.
+    let scoped: Vec<ScopedScalar> = match view.split_once(':') {
+        Some((group, _)) => meta
+            .scoped_scalars
+            .iter()
+            .filter(|f| f.group == group)
+            .cloned()
+            .collect(),
+        None => Vec::new(),
+    };
     let ParsedBatch {
         items,
         artifacts,
@@ -1448,6 +1572,7 @@ fn run_ingest(
         body,
         projection,
         &meta.declared_scalars,
+        &scoped,
         &meta.vocabularies,
         &|name| state.engine.registered_layer(name).map(|l| l.declaration),
     )?;
@@ -1770,6 +1895,12 @@ fn run_ingest(
                 x: item.x,
                 y: item.y,
                 scalars: item.scalars,
+                // **A join carries these, and they are the one thing it carries beyond geometry**
+                // (`views.md` §4, §5). A scoped value belongs to the `(entity, view)` the join is
+                // creating rather than to the entity, so it is not a re-statement of anything the
+                // entity already holds — which is what the descriptors and the entity-scoped
+                // scalars above would be, and why those are dropped here and this is not.
+                scoped: item.scoped,
                 terms: if join.is_some() { Vec::new() } else { terms },
             }
         })
@@ -3701,6 +3832,7 @@ mod tests {
                 &body(column, nullable),
                 Projection::None,
                 &declared(),
+                &[],
                 &vocabularies(),
                 &no_layers,
             )
@@ -3792,6 +3924,7 @@ mod tests {
                 &body(Arc::new(StringArray::from(vec!["k9-unit"])), false),
                 Projection::None,
                 &declared(),
+                &[],
                 &vocabularies_of(VocabularyKind::Discovered),
                 &no_layers,
             )
@@ -3812,6 +3945,7 @@ mod tests {
                 &body(Arc::new(StringArray::from(vec!["ops"])), false),
                 Projection::None,
                 &declared(),
+                &[],
                 &vocabularies_of(VocabularyKind::Discovered),
                 &no_layers,
             )

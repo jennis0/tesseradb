@@ -176,10 +176,29 @@ pub(crate) struct CoalescePlan {
     pub(crate) terms: Vec<EntityTermsExtent>,
 }
 
+/// Where a coalesced window's output lives, prefix-relative — `<out>/attrs/<column>/` for an
+/// entity-scoped column and `<out>/attrs/<column>/<group>/<key>/` for one view's column of a
+/// group-scoped family (`views.md` §5), through the one place a view id becomes a path.
+fn coalesced_column_rel(out_rel: &str, column: &str, view: Option<&str>) -> String {
+    let mut rel = format!("{out_rel}/attrs/{column}");
+    if let Some(view) = view {
+        for component in tessera_store::view_path_components(view) {
+            rel.push('/');
+            rel.push_str(component);
+        }
+    }
+    rel
+}
+
 /// One column's contiguous window of its own `attr_extents` subsequence.
 #[derive(Debug, Clone)]
 pub(crate) struct AttrWindow {
     pub(crate) column: String,
+    /// The view whose column of a **group-scoped family** this window belongs to — `None` for an
+    /// ordinary entity-scoped column ([`AttrExtent::view`], `views.md` §5). The unit is
+    /// `(column, view)` rather than the column: a family's columns share one name, and a window
+    /// keyed on the name alone would merge one view's values into another's.
+    pub(crate) view: Option<String>,
     pub(crate) extents: Vec<AttrExtent>,
 }
 
@@ -187,6 +206,8 @@ pub(crate) struct AttrWindow {
 #[derive(Debug, Clone)]
 pub(crate) struct TextWindow {
     pub(crate) column: String,
+    /// [`AttrWindow::view`]'s field, for its reason.
+    pub(crate) view: Option<String>,
     pub(crate) extents: Vec<TextExtent>,
 }
 
@@ -311,14 +332,17 @@ pub(crate) fn plan_coalesce(
     // `MANIFEST.files`, and only a flush or an earlier coalesce writes an extent. So every entry
     // here is already the pass's to take, and a coalesced one is another entry in the same
     // subsequence — which is the whole of what makes the recursion free.
-    let mut by_column: BTreeMap<&str, Vec<&AttrExtent>> = BTreeMap::new();
+    // **Keyed by `(column, view)`** (`views.md` §5): a group-scoped family has one column per
+    // view under one name, and a window over the name alone would coalesce Q3's layers with Q4's
+    // into one file that then claims both views' entities.
+    let mut by_column: BTreeMap<(&str, Option<&str>), Vec<&AttrExtent>> = BTreeMap::new();
     for extent in &manifest.attr_extents {
         by_column
-            .entry(extent.column.as_str())
+            .entry((extent.column.as_str(), extent.view.as_deref()))
             .or_default()
             .push(extent);
     }
-    for (column, extents) in by_column {
+    for ((column, view), extents) in by_column {
         // ⊘ **A column whose layers carry a dictionary is not taken**, and the reason is the
         // *layer's* atomicity rather than the merge's absence:
         // `tessera_filter_write::coalesce_keyword_extents` merges the dictionaries and rewrites the
@@ -360,6 +384,7 @@ pub(crate) fn plan_coalesce(
         if let Some(window) = selected {
             plan.attrs.push(AttrWindow {
                 column: column.to_string(),
+                view: view.map(str::to_string),
                 extents: extents[window].iter().map(|e| (*e).clone()).collect(),
             });
         }
@@ -403,14 +428,14 @@ pub(crate) fn plan_coalesce(
     // per token *per layer* — a read cost that grows linearly in the flush count with nothing
     // reducing it between folds.
     {
-        let mut by_column: BTreeMap<&str, Vec<&TextExtent>> = BTreeMap::new();
+        let mut by_column: BTreeMap<(&str, Option<&str>), Vec<&TextExtent>> = BTreeMap::new();
         for extent in &manifest.text_extents {
             by_column
-                .entry(extent.column.as_str())
+                .entry((extent.column.as_str(), extent.view.as_deref()))
                 .or_default()
                 .push(extent);
         }
-        for (column, extents) in by_column {
+        for ((column, view), extents) in by_column {
             // All three files, for the attribute axis's reason: the merge holds a term's postings
             // from every input at once and streams both dictionaries, so a cap that watched one
             // half would bound the postings while the vocabulary — which for prose is the larger
@@ -430,6 +455,7 @@ pub(crate) fn plan_coalesce(
             if let Some(window) = selected {
                 plan.texts.push(TextWindow {
                     column: column.to_string(),
+                    view: view.map(str::to_string),
                     extents: extents[window].iter().map(|e| (*e).clone()).collect(),
                 });
             }
@@ -672,7 +698,10 @@ pub(crate) fn execute_coalesce(
                 window.column
             )));
         }
-        let column_rel = format!("{}/attrs/{}", ctx.out_rel, window.column);
+        // **Per `(column, view)`, not per column** (`views.md` §5): two views of one scoped family
+        // share the column's name, so a single directory would have the second window truncate the
+        // first's mapped files.
+        let column_rel = coalesced_column_rel(&ctx.out_rel, &window.column, window.view.as_deref());
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
             .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
@@ -711,6 +740,7 @@ pub(crate) fn execute_coalesce(
         attrs.push(CoalescedAttr {
             extent: AttrExtent {
                 column: window.column.clone(),
+                view: window.view.clone(),
                 values: values_rel,
                 presence: presence_rel,
                 dict: None,
@@ -791,7 +821,7 @@ pub(crate) fn execute_coalesce(
     // separates this from the keyword window the attribute axis declines above.
     let mut texts = Vec::with_capacity(plan.texts.len());
     for window in &plan.texts {
-        let column_rel = format!("{}/attrs/{}", ctx.out_rel, window.column);
+        let column_rel = coalesced_column_rel(&ctx.out_rel, &window.column, window.view.as_deref());
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
             .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
@@ -845,6 +875,7 @@ pub(crate) fn execute_coalesce(
 
         let extent = TextExtent {
             column: window.column.clone(),
+            view: window.view.clone(),
             dict: format!("{column_rel}/{}", tessera_filter::DICT_FILE),
             postings: format!("{column_rel}/postings.arrow"),
             presence: format!("{column_rel}/presence.roaring"),
@@ -1283,6 +1314,7 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             views: Vec::new(),
+            scoped_columns: Vec::new(),
             view_tombstones: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -1349,10 +1381,101 @@ mod tests {
     /// The two filterable columns every fixture manifest carries extents for.
     const COLUMNS: [&str; 2] = ["title", "department"];
 
+    /// One flush's extent for one **view's** column of a group-scoped family (`views.md` §5).
+    fn scoped_extent_at(partition: &str, column: &str, view: &str, flush: &str) -> AttrExtent {
+        let (group, key) = view.split_once(':').expect("a view of a group");
+        let dir = format!("partitions/{partition}/attrs/{column}/{group}/{key}/extents");
+        AttrExtent {
+            column: column.to_string(),
+            view: Some(view.to_string()),
+            values: format!("{dir}/{flush}.arrow"),
+            presence: format!("{dir}/{flush}.roaring"),
+            dict: None,
+            postings: None,
+            offsets: None,
+        }
+    }
+
+    /// **A scoped family's window is its `(column, view)`'s, not its column's** (`views.md` §5).
+    ///
+    /// A family has one column per view of its group and they share the column's *name*, so a
+    /// selection keyed on the name alone would put two views' extents in one window — and the
+    /// merge would then write one file claiming both views' entities, under one view's directory.
+    /// Every answer either view gave afterwards would be a plausible wrong one, which is why this
+    /// is asserted on the plan rather than left to the pass.
+    #[test]
+    fn a_scoped_familys_window_is_one_views_own() {
+        let (mut manifest, build_files) = manifest_with(0);
+        // Three extents per view, interleaved exactly as two views flushing in turn leave them, so
+        // a selection reading the list rather than each column's own subsequence would take one of
+        // each.
+        for i in 0..3 {
+            for view in ["quarter:2026-Q1", "quarter:2026-Q3"] {
+                let extent = scoped_extent_at(PARTITION, "mood", view, &format!("flush-{i}-1"));
+                manifest.files.insert(extent.values.clone(), digest(1024));
+                manifest.files.insert(extent.presence.clone(), digest(64));
+                manifest.attr_extents.push(extent);
+            }
+        }
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        assert_eq!(
+            plan.attrs.len(),
+            2,
+            "one window per view, not one per column"
+        );
+        for window in &plan.attrs {
+            assert_eq!(window.column, "mood");
+            let view = window
+                .view
+                .as_deref()
+                .expect("a scoped window names its view");
+            assert!(
+                window
+                    .extents
+                    .iter()
+                    .all(|e| e.view.as_deref() == Some(view)),
+                "{view}'s window holds only {view}'s extents"
+            );
+            let (group, key) = view.split_once(':').unwrap();
+            assert!(
+                window
+                    .extents
+                    .iter()
+                    .all(|e| e.values.contains(&format!("/{group}/{key}/"))),
+                "{view}'s extents live under its own directory"
+            );
+        }
+        let views: BTreeSet<&str> = plan
+            .attrs
+            .iter()
+            .filter_map(|w| w.view.as_deref())
+            .collect();
+        assert_eq!(
+            views,
+            BTreeSet::from(["quarter:2026-Q1", "quarter:2026-Q3"]),
+            "both views' columns are taken"
+        );
+    }
+
+    /// **And an entity-scoped column's window is still keyed on the column alone**, which is what
+    /// makes the pair above the identity rather than the view: a bundle with no family at all
+    /// plans exactly what it planned before the field existed.
+    #[test]
+    fn an_entity_scoped_window_names_no_view() {
+        let (manifest, build_files) = manifest_with(3);
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        assert!(!plan.attrs.is_empty(), "the fixture's own columns qualify");
+        assert!(
+            plan.attrs.iter().all(|w| w.view.is_none()),
+            "a declared column belongs to no view"
+        );
+    }
+
     fn attr_extent_at(partition: &str, column: &str, flush: &str) -> AttrExtent {
         let dir = format!("partitions/{partition}/attrs/{column}/extents");
         AttrExtent {
             column: column.to_string(),
+            view: None,
             values: format!("{dir}/{flush}.arrow"),
             presence: format!("{dir}/{flush}.roaring"),
             dict: None,
@@ -1371,6 +1494,7 @@ mod tests {
             .map(|window| CoalescedAttr {
                 extent: AttrExtent {
                     column: window.column.clone(),
+                    view: window.view.clone(),
                     values: format!("{out_rel}/attrs/{}/values.arrow", window.column),
                     presence: format!("{out_rel}/attrs/{}/presence.roaring", window.column),
                     dict: None,

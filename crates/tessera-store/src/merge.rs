@@ -160,6 +160,11 @@ pub struct MergeSpec<'a> {
     pub identity_key: &'a IdentityKey,
     pub shard_id: u32,
     pub scalar_schema: &'a [(String, ScalarType)],
+    /// Where [`Self::scalar_schema`]'s **group-scoped** render suffix begins (`views.md` §5) — the
+    /// index from which a column the input segment lacks is the ordinary absence rather than a
+    /// malformed bundle. `scalar_schema.len()` for a view outside every scope, which is the
+    /// refuse-everything reading and the one every caller had before families existed.
+    pub scoped_from: usize,
     /// Where the merged extent begins in view row space — the **first consumed extent's**
     /// `row_base`. A merge emits exactly as many rows as it consumed, so no later extent's
     /// `row_base` moves and `RowSpace::collapsing` puts this where the consumed run was.
@@ -311,7 +316,14 @@ pub fn execute_merge(
                 ),
             });
         }
-        let scalars = gather_scalars(&cursor.columns, spec.scalar_schema, row, &cursor.seg_id, OP)?;
+        let scalars = gather_scalars(
+            &cursor.columns,
+            spec.scalar_schema,
+            spec.scoped_from,
+            row,
+            &cursor.seg_id,
+            OP,
+        )?;
         writer
             .append(SegmentRow {
                 tessera_id,
@@ -541,6 +553,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                scoped_from: schema().len(),
                 row_base: 0,
                 watermark: 8,
                 entity_id_high_water: 8,
@@ -595,6 +608,7 @@ mod tests {
                 identity_key: &key,
                 shard_id: 0,
                 scalar_schema: &schema(),
+                scoped_from: schema().len(),
                 row_base: 0,
                 watermark: 2,
                 entity_id_high_water: 2,

@@ -92,7 +92,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
 | `configuration.md` | Normative for the build-time configurati | 28 |
 | `conformance.md` | Normative — r18 | 19 |
-| `contracts.md` | Normative — r63 | 34 |
+| `contracts.md` | Normative — r64 | 34 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
 | `correctness-suite.md` | Provisional — under review | 13 |
 | `deferred-index-ordinal-split.md` | Deferred |  |
@@ -113,5 +113,5 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `streamed-serving.md` | Normative — r2 |  |
 | `system-architecture.md` | Normative — r17 | 28 |
 | `tile-addressed-integration.md` | Provisional — under review |  |
-| `views.md` | Normative — r23 | 16 |
+| `views.md` | Normative — r24 | 18 |
 | `write-path.md` | Normative for the write path. Owner sign | 20 |

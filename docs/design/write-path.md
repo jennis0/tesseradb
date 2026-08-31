@@ -1,6 +1,6 @@
 # The write path — design
 
-**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r13, 2026-08-30
+**Date:** 2026-08-03 · **Promoted:** 2026-08-04 · **Revised:** r15, 2026-08-31
 **Status:** **Normative** for the write path. Owner sign-off 2026-08-04; the adversarial review
 ran the same day across three lenses with every finding dispositioned (Appendix R); §13.4's
 rulings landed as decisions 0044 and 0045; §13.3's corrections and §13.1's supersession edits are
@@ -443,12 +443,26 @@ through files the first attempt has mapped:
 | File | What it is |
 |---|---|
 | `morton.u32` | the segment's sorted codes — every flush segment is internally Morton-sorted against the same view bounds, so a tile resolves to one contiguous range per segment through the same binary search |
-| `columns.arrow` | `(tessera_id, residual, …**render** scalars)` in `(morton, tessera_id)` order (contracts §2.6; no `priority` column — decision 0046). A buffered row carries one value per *declared* column, which is what the commit window indexes a category key by, so the flush selects the render subset **by position** before it writes — the tail must match the build's, and a `filter`-only column has no slot in any row (§10.3) |
+| `columns.arrow` | `(tessera_id, residual, …**render** scalars, …**group-scoped render** scalars)` in `(morton, tessera_id)` order (contracts §2.6; no `priority` column — decision 0046). A buffered row carries one value per *declared* column, which is what the commit window indexes a category key by, so the flush selects the render subset **by position** before it writes — the tail must match the build's, and a `filter`-only column has no slot in any row (§10.3). **A second positional list follows it under a view of a group** (`views.md` §5, r24): the row's `scoped` values, positional against the owning group's `scoped_scalars` rather than the flat `declared_scalars` a family has no slot in, and rendered in that view's tail alone. The whole schema — declared render tail then this view's scoped lanes — is one derivation shared by the flush, the merge and the fold, because a rewriter that took the bundle-wide list dropped the lane and served its values as zeros |
 | *(no `permutation.bin`)* | the segment's entity→row extent is built **in memory** and never written: its bounds ride the manifest's `segments` entry, and its row map is **rebuilt at open from the segment's own `tessera_id` column** by inverting the identity key — nothing on disk carries it, deliberately (a per-segment permutation file sized to the bundle's whole entity space is the wrong shape for a few thousand ids at the top of it). *Contracts §2.6's streamed-segment `permutation.bin` was stale and is corrected at r16 — caught by this document's fidelity review after r2 had laundered it* |
 | `delta.arrow` | the **sparse delta postings tier**: term → entities, only for terms present in the flushed set, tagged records as base postings. *(Contracts §2.4 names this `terms/deltas-<n>.arrow`; the built layout is the per-segment path above, with the manifest's `files` map and segment list carrying the truth — a contract correction is proposed, spec §13.3)* |
 | an external-id **run** | the flushed `(external_id, entity)` pairs, sorted by caller key — a run, not an extent: nothing orders two runs against each other (contracts §2.4) |
 | a **locator extent** | entity→ordinal for the flushed range, run-local ordinals — the drill-down direction for flushed entities, without which `/v1/items` would fail for them once their WAL region is reclaimed |
 | a **dictionary extent** | only when the flush promotes (below) |
+
+A **group-scoped family's** column is written the same way, in the view's own directory:
+`partitions/<phash>/attrs/<column>/<group>/<key>/extents/<seg_id>.{arrow,roaring}`, with the
+family's other artefacts beside it where its declaration owes them (`views.md` §5, r24). Two
+things differ from the entity-scoped pass below and only two. A **join** row is in this pass: a
+scoped value belongs to the `(entity, view)` pair the flush is giving a row, not to the entity, so
+a row joining an entity into a second view of the group is exactly the row that carries that
+view's value; a view of a group that only **shares** the family's views renders it and writes it
+not at all, so its lane is written holding absences — every segment of a view holding the same
+columns is what lets that view's own merge and fold read it. And a view the family has no column
+for — one created since the build — acquires an
+**empty base** at the same flush, so what is on disc is what a build would have written for an
+empty view; the pair enters `SEGMENTS-<n>.json`'s `scoped_columns`, which is what a restart derives
+`scoped_scalars[..].views` through.
 
 Two files per filterable column are written **outside** the segment directory, under
 `partitions/<phash>/attrs/<column>/extents/<seg_id>.{arrow,roaring}`: the values of the entities this
@@ -1417,6 +1431,16 @@ labels — stored and served — are unchanged (exists — `coalesce.rs`); 45 a 
 its term list across a coalesce and retires at the fold that follows it (exists — `coalesce.rs`).
 
 ## Appendix R — Review record
+
+**r15 (2026-08-31) — the flush's two lists, and the scoped column's own directory.** §4.3 states
+what a buffered row carries under a view of a group: a second positional list against the owning
+group's `scoped_scalars`, rendered in that view's row tail and written into the family's per-view
+column, with a join row in the pass and an empty base for a view created since the build
+(`views.md` §5 r25, `contracts.md` §2.1/§2.3 r66). No rule of this document changed; what it now
+says is what the flush does. The one correction worth naming is not this document's: the segment
+rewriters took the *bundle-wide* render list, which dropped the lane from every merged or folded
+segment of a group's view — recorded here because §4.3's table is where a reader looks for what a
+segment's tail holds.
 
 **r14 (2026-08-31) — the coalesce's axis list is current, and the transpose is on it.** §7 named
 four axes where the pass has had six for some time (the record blob and the text columns were

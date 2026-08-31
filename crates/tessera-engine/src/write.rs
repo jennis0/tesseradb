@@ -3710,6 +3710,69 @@ pub(crate) fn scalar_schema_of(
         .collect()
 }
 
+/// Every view's **group-scoped** attribute families, keyed by view id (`views.md` §5).
+///
+/// **The families of the group that owns the view, and of no other.** A family belongs to the
+/// group that owns the keys (a `members` group's list is always empty — §3.3), and a batch into
+/// one of that group's views carries its values under their plain names. A view of a *sharing*
+/// group takes no entry: its rows render the family (the column being entity space, shared through
+/// the key) but they do not write it, which is the one asymmetry between the render rule and this
+/// one — see `views.md` §5's ingest paragraph.
+///
+/// **This is the one derivation, and three callers take it**: the ingest boundary parses a batch's
+/// schema against it, the commit window mints a scoped category's keys against it, and the flush
+/// writes a row's values into the columns it names. A second copy would let a row's positional
+/// tail be built against one list and read against another.
+pub(crate) fn scoped_families_by_view(
+    manifest: &tessera_store::manifest::Manifest,
+) -> FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> {
+    let mut out: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
+        FxHashMap::default();
+    for group in &manifest.groups {
+        if group.scoped_scalars.is_empty() {
+            continue;
+        }
+        for view in &group.views {
+            out.insert(
+                format!(
+                    "{}{}{}",
+                    group.name,
+                    tessera_store::GROUP_SEPARATOR,
+                    view.key
+                ),
+                group.scoped_scalars.clone(),
+            );
+        }
+    }
+    out
+}
+
+/// One view's writer schema: the bundle-wide render tail, then the **group-scoped** render lanes
+/// that view's rows carry (`views.md` §5).
+///
+/// **Every producer of a segment takes this, and taking the bundle-wide list alone was the
+/// defect.** A build writes a scoped family's lane into the row tail of every view of its group;
+/// a merge or a fold that rewrote such a segment from `scalar_schema_of` alone wrote the
+/// entity-scoped tail and nothing per family, so values served correctly before the rewrite came
+/// back as the type's zero afterwards — indistinguishable from absence, with no error anywhere.
+/// The lanes are appended after the declared ones, which is the order the build writes them in.
+///
+/// **No gate here, deliberately.** A writer has no principal; which lanes a row space holds is a
+/// property of the bundle, and narrowing it by a session's sight would drop a lane the build
+/// wrote. `viewport::scoped_render_scalars` is the read half, and it narrows the same list.
+pub(crate) fn view_scalar_schema_of(
+    manifest: &tessera_store::manifest::Manifest,
+    view: &str,
+) -> Vec<(String, ScalarType)> {
+    let mut schema = scalar_schema_of(manifest);
+    schema.extend(
+        crate::viewport::scoped_render_families(manifest, view)
+            .into_iter()
+            .map(|f| (f.name.clone(), f.arrow_type)),
+    );
+    schema
+}
+
 /// The filterable columns, with the position each occupies in a buffered row's scalar list.
 ///
 /// **Positional against the full `declared_scalars`, not against the render tail.** A row's scalars
@@ -3783,6 +3846,29 @@ pub(crate) fn text_schema_of(
         });
     }
     Ok(out)
+}
+
+/// The analyser a group-scoped `text` family's terms were produced by
+/// ([`text_schema_of`]'s resolution, over a family's declaration).
+fn analyser_of(
+    family: &tessera_store::manifest::ScopedScalar,
+) -> Result<tessera_analyse::Analyser, crate::flush::FlushFailed> {
+    let identity = family.analyser.as_deref().ok_or_else(|| {
+        crate::flush::FlushFailed(format!(
+            "the scoped column family '{}' is text but the manifest records no analyser identity",
+            family.name
+        ))
+    })?;
+    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+        .filter(|a| a.identity() == identity)
+        .ok_or_else(|| {
+            crate::flush::FlushFailed(format!(
+                "the scoped column family '{}' was indexed by analyser '{identity}', which this \
+                 binary does not carry — a flush cannot extend an index whose terms it cannot \
+                 reproduce",
+                family.name
+            ))
+        })
 }
 
 /// The blob-resident columns, with each one's position in a buffered row's scalar list — which is
@@ -4012,6 +4098,7 @@ mod vocabulary_extensions_tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             views: Vec::new(),
+            scoped_columns: Vec::new(),
             view_tombstones: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -5305,7 +5392,10 @@ impl Executor {
             return;
         };
         let manifest = &generation.bundle.manifest;
-        let scalar_schema = scalar_schema_of(manifest);
+        // **This view's schema, not the bundle's** — the merged segment must carry the scoped
+        // render lanes its inputs carry, or the rewrite serves them as absence (`views.md` §5).
+        let scalar_schema = view_scalar_schema_of(manifest, &plan.view);
+        let scoped_from = scalar_schema_of(manifest).len();
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -5321,6 +5411,7 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            scoped_from,
             watermark: generation.watermark,
             entity_id_high_water: partition_data.manifest.entity_id_high_water,
         };
@@ -5691,7 +5782,26 @@ impl Executor {
         };
 
         let manifest = &generation.bundle.manifest;
-        let scalar_schema = scalar_schema_of(manifest);
+        // **One schema per view the fold will rewrite** — the bundle-wide render tail plus that
+        // view's group-scoped render lanes. A single bundle-wide list dropped a family's lane from
+        // every rewritten segment of a group's view (`views.md` §5).
+        let scalar_schema: std::collections::BTreeMap<String, Vec<(String, ScalarType)>> = plan
+            .views
+            .iter()
+            .map(|view| {
+                (
+                    view.view.clone(),
+                    view_scalar_schema_of(manifest, &view.view),
+                )
+            })
+            .collect();
+        let scoped_from: std::collections::BTreeMap<String, usize> = {
+            let entity_scoped = scalar_schema_of(manifest).len();
+            plan.views
+                .iter()
+                .map(|view| (view.view.clone(), entity_scoped))
+                .collect()
+        };
         let Some(partition_data) = generation.bundle.partitions.get(&plan.partition) else {
             return;
         };
@@ -5713,6 +5823,7 @@ impl Executor {
             identity_key: self.identity_key,
             shard_id: manifest.identity.shard_id,
             scalar_schema,
+            scoped_from,
             // The same never-reused shape a flush's and a merge's `seg_id` have (contracts §2.1).
             // A fold writes into a fresh prefix, so nothing can collide today; the id is still
             // unique because a `seg_id` naming two different segments across a bundle's life is
@@ -5721,6 +5832,10 @@ impl Executor {
             base_postings: Arc::clone(&generation.postings),
             tiers: generation.delta_postings.clone(),
             declared_scalars: manifest.declared_scalars.clone(),
+            // The scoped families, flattened: the attribute pass folds one column per view of
+            // each, and a fold that omitted them wrote a prefix their directories are absent
+            // from (`views.md` §5).
+            scoped_scalars: manifest.scoped_scalars(),
             vocabularies: manifest.vocabularies.clone(),
         };
 
@@ -6389,6 +6504,12 @@ impl Executor {
             layers: registered_layers,
             layer_tombstones: registered_tombstones,
             views: created_views,
+            // **Emptied, because the fold has just written the list into `MANIFEST.json`.** The
+            // new bundle manifest carries every `(family, view)` the live one had folded into
+            // `scoped_scalars[..].views`, and the fold wrote a column for each — so restating them
+            // here would be a second copy of a fact the prefix's own manifest now states
+            // (`views.md` §5).
+            scoped_columns: Vec::new(),
             view_tombstones,
             // **The pass's own output, not the live list.** The paths are prefix-relative and the
             // fold publishes a *new* prefix, so what step 3a wrote is the only list that names
@@ -7068,7 +7189,10 @@ impl Executor {
             .iter()
             .zip(&completed.plan.attrs)
             .map(|(attr, window)| crate::filter::CoalescedWindow {
-                column: attr.extent.column.clone(),
+                column: crate::filter::extent_column_name(
+                    &attr.extent.column,
+                    attr.extent.view.as_deref(),
+                ),
                 consumed: window.extents.iter().map(|e| e.values.clone()).collect(),
                 values_rel: attr.extent.values.clone(),
                 values: Arc::clone(&attr.values),
@@ -7086,7 +7210,10 @@ impl Executor {
             .map(|(extent, window)| crate::filter::CoalescedTextWindow {
                 consumed: window.extents.iter().map(|e| e.dict.clone()).collect(),
                 paths: crate::filter::TextExtentPaths {
-                    column: extent.column.clone(),
+                    column: crate::filter::extent_column_name(
+                        &extent.column,
+                        extent.view.as_deref(),
+                    ),
                     dict_rel: extent.dict.clone(),
                     dict: prefix_dir.join(&extent.dict),
                     postings: prefix_dir.join(&extent.postings),
@@ -7365,6 +7492,10 @@ impl Executor {
             }
         };
         let render_indices: Vec<usize> = manifest.render_indices().collect();
+        // **The group-scoped families, by view** (`views.md` §5), taken once for the dispatch: the
+        // schema below is per view, because a family's lanes and columns are its group's views'
+        // and no others'.
+        let scoped_by_view = scoped_families_by_view(manifest);
         // **One plan per dispatch.** Every context a dispatch builds takes `next_n` from the same
         // unchanging `partition_data`, so they would all write `SEGMENTS-<next_n>.json` at one
         // path and only one could commit. Dispatching one makes that structurally unreachable and
@@ -7446,6 +7577,77 @@ impl Executor {
             // sequence it was planned against is exactly that: contracts §2.1's never-reused
             // property rests on this plus the attempt counter, as before.
             let planned_at_n = partition_data.segments_n;
+            // **This view's scoped families, and where each one's value sits in a buffered row's
+            // `scoped` list** (`views.md` §5). Positional against the group's own manifest order,
+            // which is the order `/control/ingest` parsed the batch against — one derivation,
+            // `scoped_families_by_view`, so the two cannot come to disagree about which value
+            // belongs to which family.
+            let families = scoped_by_view.get(&view).cloned().unwrap_or_default();
+            let scoped_schema: Vec<crate::flush::ScopedColumnSpec> = match families
+                .iter()
+                .enumerate()
+                .map(|(index, family)| {
+                    let text = family.arrow_type == ScalarType::Text;
+                    let analyser = if text {
+                        Some(std::sync::Arc::new(analyser_of(family)?))
+                    } else {
+                        None
+                    };
+                    Ok(crate::flush::ScopedColumnSpec {
+                        index,
+                        name: family.name.clone(),
+                        ty: family.arrow_type,
+                        category: family.vocabulary.is_some(),
+                        filterable: crate::filter::scoped_is_filterable(family),
+                        render: family.render,
+                        has_base: family.views.contains(&view),
+                        analyser,
+                    })
+                })
+                .collect::<Result<Vec<_>, crate::flush::FlushFailed>>()
+            {
+                Ok(schema) => schema,
+                Err(e) => {
+                    // The same refusal `text_schema_of` makes, for its reason: a flush that
+                    // indexed prose with a pipeline the base was not built by leaves one column
+                    // whose two layers disagree about what a word is.
+                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a group-scoped text family's analyser is not one this binary \
+                         carries; no flush is dispatched, and the buffer is retained"
+                    );
+                    return;
+                }
+            };
+            // **The lanes this view's rows carry.** Two cases, and the split is which side of the
+            // family's `views` list this flush is on.
+            //
+            // Under a view of the family's **own** group, every rendered family of the group gets
+            // a lane whether or not the manifest already lists the view: this flush is what gives
+            // the view its column, and a lane withheld until the manifest agreed would drop the
+            // very batch that acquired it. Publication adds the pair, so every later flush, merge
+            // and fold of this view derives the same list from `view_scalar_schema_of`.
+            //
+            // Under any other view the read side's list is exactly right, and it is wider than the
+            // families above: a view of a group that only *shares* the family's views renders it
+            // and cannot write it, so it owes a lane of absences rather than no lane. A segment
+            // missing one is a segment its own view's rewriters would have to guess about.
+            let scoped_render: Vec<tessera_store::manifest::ScopedScalar> = if families.is_empty() {
+                crate::viewport::scoped_render_families(manifest, &view)
+                    .into_iter()
+                    .cloned()
+                    .collect()
+            } else {
+                families.iter().filter(|f| f.render).cloned().collect()
+            };
+            // Where each lane's value sits in a buffered row's `scoped` list, `None` where this
+            // view writes none of them — a sharing group's, and any family the batch could not
+            // have named.
+            let scoped_render_indices: Vec<Option<usize>> = scoped_render
+                .iter()
+                .map(|lane| families.iter().position(|f| f.name == lane.name))
+                .collect();
             contexts.push((
                 plan,
                 crate::flush::FlushContext {
@@ -7465,8 +7667,25 @@ impl Executor {
                     identity_key: self.identity_key,
                     shard_id: manifest.identity.shard_id,
                     quantisation,
-                    scalar_schema: scalar_schema.clone(),
+                    // **This view's schema, entity-scoped tail then scoped render lanes** — the
+                    // same list a merge and a fold of this view take (`view_scalar_schema_of`),
+                    // so a segment written by any of the three carries the same columns.
+                    //
+                    // **The two derivations agree only because a `members` group can never own a
+                    // family** (`Manifest::validate_groups` refuses one, `views.md` §3.3): under a
+                    // view of the owning group `scoped_render` is that group's rendered families
+                    // in manifest order, which is exactly what `scoped_render_families` yields
+                    // there; under any other view the branch above *is* that function. Change
+                    // either site — or that refusal — and the third has to move with it, or a
+                    // flush writes a tail its own view's rewriters cannot read.
+                    scalar_schema: {
+                        let mut schema = scalar_schema.clone();
+                        schema.extend(scoped_render.iter().map(|f| (f.name.clone(), f.arrow_type)));
+                        schema
+                    },
                     render_indices: render_indices.clone(),
+                    scoped_schema,
+                    scoped_render: scoped_render_indices,
                     filter_schema: filter_schema.clone(),
                     record_schema: record_schema.clone(),
                     text_schema: text_schema.clone(),
@@ -9036,6 +9255,13 @@ impl Executor {
         let generation = self.generation.load_full();
         let mut vocabularies: Vocabularies = (*generation.vocabularies).clone();
         let declared_scalars = generation.bundle.manifest.declared_scalars.clone();
+        // **The group-scoped families, by the view a row names** (`views.md` §5). A row's scoped
+        // tail is positional against the families of the group that owns its view, so the mint
+        // pass below needs the same list the boundary parsed against — derived once for the
+        // window rather than per row, and from the live manifest, which is what the boundary read
+        // too.
+        let scoped_by_view: FxHashMap<String, Vec<tessera_store::manifest::ScopedScalar>> =
+            scoped_families_by_view(&generation.bundle.manifest);
         let mut closed = closed;
         let mut fresh_bindings: Vec<(String, String, u32)> = Vec::new();
         let mut mint_failed: Option<MintError> = None;
@@ -9071,6 +9297,42 @@ impl Executor {
                         }
                         Ok(Minted::Existing(code)) => {
                             row.scalars[index] = code_at_declared_width(declared.arrow_type, code);
+                        }
+                        Err(e) => {
+                            mint_failed = Some(e);
+                            break 'minting;
+                        }
+                    }
+                }
+                // **The same mint, over the row's scoped tail** (`views.md` §5). A scoped category
+                // is a category: its key travels from the boundary exactly as an entity-scoped
+                // one's does, and this is the one place a novel key becomes a code. A row whose
+                // view is in no scope has an empty list here and the loop does nothing.
+                let Some(families) = scoped_by_view.get(row.view.as_str()) else {
+                    continue;
+                };
+                for (index, family) in families.iter().enumerate() {
+                    let Some(vocabulary) = family.vocabulary.as_deref() else {
+                        continue;
+                    };
+                    let Some(WalScalar::Utf8(key)) = row.scoped.get(index) else {
+                        continue;
+                    };
+                    let key = key.clone();
+                    let minter = vocabularies.get_mut(vocabulary).unwrap_or_else(|| {
+                        panic!(
+                            "scoped column family '{}' names vocabulary '{vocabulary}', which \\
+                             the live bindings do not carry",
+                            family.name
+                        )
+                    });
+                    match minter.mint(&key) {
+                        Ok(Minted::Fresh(code)) => {
+                            fresh_bindings.push((vocabulary.to_string(), key, code));
+                            row.scoped[index] = code_at_declared_width(family.arrow_type, code);
+                        }
+                        Ok(Minted::Existing(code)) => {
+                            row.scoped[index] = code_at_declared_width(family.arrow_type, code);
                         }
                         Err(e) => {
                             mint_failed = Some(e);
@@ -11635,7 +11897,10 @@ impl Executor {
             .iter()
             .map(|e| {
                 (
-                    e.column.clone(),
+                    // The resolved name for a group-scoped family's column, the column's own for
+                    // an entity-scoped one — one function, so a flush's layer composes under the
+                    // key a leaf resolves to (`filter::extent_column_name`).
+                    crate::filter::extent_column_name(&e.column, e.view.as_deref()),
                     e.values_rel.clone(),
                     Arc::clone(&e.values),
                     // A keyword extent's dictionary travels with its ordinals or the composition
@@ -11666,14 +11931,43 @@ impl Executor {
             .text_extents
             .iter()
             .map(|e| crate::filter::TextExtentPaths {
-                column: e.column.clone(),
+                column: crate::filter::extent_column_name(&e.column, e.view.as_deref()),
                 dict_rel: e.dict.clone(),
                 dict: record_dir.join(&e.dict),
                 postings: record_dir.join(&e.postings),
                 presence: record_dir.join(&e.presence),
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_extents(
+        // **The new columns first, then the extents that land on them** (`views.md` §5). A flush
+        // of a view a family had no column for wrote its base in the same unit as its extent, and
+        // the extent composes *onto* a column — so the column has to exist before the composition
+        // below can find it. Empty in every steady-state flush, where the base has been on disc
+        // since the build.
+        let live_columns = if completed.scoped_columns.is_empty() {
+            Arc::clone(&live.filter_columns)
+        } else {
+            let partition_dir = record_dir.join("partitions").join(&completed.partition);
+            match live.filter_columns.with_scoped_columns(
+                &partition_dir,
+                &completed.scoped_columns,
+                &live.bundle.manifest.scoped_scalars(),
+                &live.bundle.manifest.vocabularies,
+                true,
+            ) {
+                Ok(columns) => Arc::new(columns),
+                Err(e) => {
+                    self.health.flush_failures.fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a completed flush wrote a group-scoped column this process cannot \
+                         open; discarding it rather than publishing a manifest naming a column no \
+                         request could read. Its files are orphans and the buffer is retained"
+                    );
+                    return;
+                }
+            }
+        };
+        let filter_columns = match live_columns.with_extents(
             &extents,
             &record_paths,
             &entity_terms_paths,
@@ -11731,6 +12025,20 @@ impl Executor {
         let (created_views, view_tombstones) = self.live.roster_for_publication();
         manifest.views = created_views;
         manifest.view_tombstones = view_tombstones;
+        // **And the group-scoped columns this flush gave a view its first of** (`views.md` §5).
+        // Carried forward and appended to, never restated: the list is what a *restart* recovers
+        // `scoped_scalars[..].views` from, and a render-only family writes no extent for the
+        // derivation to find. `manifest` is the live side-manifest cloned, so the earlier pairs
+        // are already here.
+        for (column, view) in &completed.scoped_columns {
+            let entry = tessera_store::manifest::ScopedColumn {
+                column: column.clone(),
+                view: view.clone(),
+            };
+            if !manifest.scoped_columns.contains(&entry) {
+                manifest.scoped_columns.push(entry);
+            }
+        }
         manifest.segments.push(completed.descriptor);
         manifest.deltas.push(completed.tier_path);
         manifest.external_id_runs.push(completed.external_id_run);
@@ -11750,6 +12058,7 @@ impl Executor {
                     .iter()
                     .map(|e| tessera_store::manifest::AttrExtent {
                         column: e.column.clone(),
+                        view: e.view.clone(),
                         values: e.values_rel.clone(),
                         presence: e.presence_rel.clone(),
                         // One record, so the layer's files swap as one: an extent's ordinals are
@@ -11819,6 +12128,7 @@ impl Executor {
         }
 
         let seg_id = completed.segment.seg_id.clone();
+        let scoped_columns = completed.scoped_columns.clone();
         let next_bundle = match live.bundle.with_segment(
             &completed.partition,
             &completed.view,
@@ -11837,6 +12147,17 @@ impl Executor {
                 tracing::warn!(error = %e, "discarding a completed flush that no longer rebases");
                 return;
             }
+        };
+        // **And the family's own list gains the view this flush wrote a base for**
+        // (`views.md` §5). `scoped_scalars[..].views` names the views that *have* a column, so a
+        // view that has just acquired one has to enter it — a client reading the list would
+        // otherwise conclude the column it is being served does not exist, and the next restart's
+        // opener would not open it at all.
+        let next_bundle = if scoped_columns.is_empty() {
+            next_bundle
+        } else {
+            let manifest = next_bundle.manifest.with_scoped_columns(&scoped_columns);
+            next_bundle.with_views(manifest)
         };
 
         // **The segment's shape memberships, installed before the swap** (`polygon-membership.md`
@@ -12566,6 +12887,7 @@ mod dispatch_rules_tests {
             x: 0.5,
             y: 0.5,
             scalars: Vec::new(),
+            scoped: Vec::new(),
             external_id: None,
             wal_pos: None,
         };

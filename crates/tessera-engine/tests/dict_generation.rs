@@ -245,6 +245,7 @@ fn a_credential_re_presented_after_a_promoting_flush_sees_the_promoted_descripto
             y: 10.0 + i as f64,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&[b"novel".to_vec()]),
+            scoped: Vec::new(),
         };
         engine
             .accept_ingest(vec![row], external, [0u8; 32])
@@ -349,6 +350,7 @@ fn a_background_refresh_does_not_poison_a_later_authorise_of_the_same_credential
             y: 10.0 + i as f64,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&[b"novel".to_vec()]),
+            scoped: Vec::new(),
         };
         engine
             .accept_ingest(vec![row], external, [0u8; 32])

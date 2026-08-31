@@ -605,6 +605,19 @@ pub struct ScopedScalar {
     pub views: Vec<String>,
 }
 
+/// One entry of `scoped_columns`: a group-scoped family, and the view whose column of it a flush
+/// wrote (`views.md` §5).
+///
+/// **The pair, because the family's columns share one name.** `column` is the family's own
+/// `ScopedScalar::name` and `view` the joined `group:key` id, which is what
+/// [`Manifest::with_scoped_columns`] adds to the family's list and what
+/// [`crate::view_path_components`] turns into the column's directory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScopedColumn {
+    pub column: String,
+    pub view: String,
+}
+
 /// One view of a group, as the roster records it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupViewDescriptor {
@@ -910,9 +923,52 @@ impl Manifest {
                     || group.members_of.as_deref() == Some(stone.group.as_str())
                 {
                     group.views.retain(|v| v.key != stone.key);
+                    // **And the families' own lists** (`views.md` §5). A family names the views
+                    // that have a column, and [`Self::validate_groups`] holds every one of them to
+                    // being a view of the group — so a list that kept a dropped key would make the
+                    // manifest refuse to load at the next restart. The column's files are left
+                    // behind with the prefix, exactly as the view's segments are: §3.4's
+                    // reclamation is by omission.
+                    let dropped = format!("{}{}{}", group.name, crate::GROUP_SEPARATOR, stone.key);
+                    for family in &mut group.scoped_scalars {
+                        family.views.retain(|v| *v != dropped);
+                    }
                 }
             }
             manifest.views.retain(|v| !ids.contains(&v.id));
+        }
+        manifest
+    }
+
+    /// This manifest with each `(family, view)` pair added to the family's own `views` list —
+    /// what a flush that wrote the **first** column of a family for a view publishes
+    /// (`views.md` §5).
+    ///
+    /// **The list means "the views that have a column", and only a writer can extend it.** A view
+    /// created while the service runs has none until a flush of it carries a value; that flush
+    /// writes the base and the extent, and this is where the manifest starts saying so — which is
+    /// what `/v1/meta`'s `scoped_scalars[..].views` reports and what `FilterColumns::open` walks
+    /// at the next restart. A pair the list already holds is a no-op, and a pair naming a family
+    /// or a view this manifest does not declare is **dropped rather than expanded**, on
+    /// [`Self::with_roster`]'s rule: a rebuild is free to remove either, in which case the column
+    /// is not this bundle's either.
+    pub fn with_scoped_columns(&self, columns: &[(String, String)]) -> Manifest {
+        let mut manifest = self.clone();
+        for (column, view) in columns {
+            let Some((group_name, key)) = view.split_once(crate::GROUP_SEPARATOR) else {
+                continue;
+            };
+            let Some(group) = manifest.groups.iter_mut().find(|g| g.name == group_name) else {
+                continue;
+            };
+            if !group.views.iter().any(|v| v.key == key) {
+                continue;
+            }
+            if let Some(family) = group.scoped_scalars.iter_mut().find(|f| f.name == *column) {
+                if !family.views.contains(view) {
+                    family.views.push(view.clone());
+                }
+            }
         }
         manifest
     }
@@ -1038,8 +1094,22 @@ pub struct DictExtent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttrExtent {
     /// The [`DeclaredScalar::name`] this extends — the column's declared name, never a path
-    /// segment to be parsed back.
+    /// segment to be parsed back. For a **group-scoped** family (`views.md` §5) it is the
+    /// family's name, and [`Self::view`] says which of its columns this extends.
     pub column: String,
+    /// The view whose column of a **group-scoped family** this extends — `None` for the ordinary
+    /// entity-scoped column, which has one column bundle-wide.
+    ///
+    /// **Named rather than parsed out of the values path.** A family has one column per view of
+    /// its group and the column *name* is shared between them, so every consumer that keys on
+    /// `column` alone — the coalesce's window selection, the fold's per-column merge — would
+    /// otherwise treat two views' extents as one column's layers and merge Q3's values into Q4's.
+    /// The pair `(column, view)` is the identity; the path is the artefact.
+    ///
+    /// The `Option`'s absence is the field's own — an entity-scoped column belongs to no view —
+    /// and not tolerance of an older manifest ([`AttrExtent::dict`]'s note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
     /// Prefix-relative path of the values file.
     pub values: String,
     /// Prefix-relative path of the presence bitmap.
@@ -1092,8 +1162,15 @@ pub struct AttrExtent {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TextExtent {
-    /// The column this extent belongs to.
+    /// The column this extent belongs to — a declared column's name, or a **group-scoped**
+    /// family's, in which case [`Self::view`] says which of its columns this extends.
     pub column: String,
+    /// The view whose column of a group-scoped family this extends — `None` for the ordinary
+    /// entity-scoped column. [`AttrExtent::view`]'s field, for its reason: a family's columns
+    /// share one name, so `(column, view)` is the identity and the path is the artefact. The
+    /// `Option`'s absence is the field's own, not tolerance of an older manifest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
     /// Prefix-relative path of the extent's **own** front-coded token dictionary. An extent's
     /// postings are positions in this dictionary and name nothing against another's.
     pub dict: String,
@@ -1451,6 +1528,26 @@ pub struct SegmentsManifest {
     /// serve — an absent list reads as *no view was ever created*, which is what a lost list looks
     /// like, and the roster then serves a group as though nothing had ever been added to it.
     pub views: Vec<CreatedView>,
+    /// Every `(group-scoped family, view)` pair a **flush** has written a column or a render lane
+    /// for, complete current state (`views.md` §5).
+    ///
+    /// **The durable half of `scoped_scalars[..].views`, and the reason it cannot be derived.** A
+    /// family's list in `MANIFEST.json` names the views the *build* wrote a column for; a view
+    /// created while the service runs acquires one at its first flush carrying values, and
+    /// `MANIFEST.json` is rewritten only by a fold. Deriving the pairs from `attr_extents` instead
+    /// would recover a filterable family's — its extents name their view — and lose a
+    /// **render-only** family's, which writes a row lane and no entity-space extent at all: the
+    /// column would come back from a restart as one the manifest does not know exists, and its
+    /// values would be served as the ordinary absence below.
+    ///
+    /// Carried forward for ever and never pruned, exactly as [`Self::views`] is: a view's column
+    /// is on disc until a fold rewrites the prefix, and a fold writes the derived list into the
+    /// new `MANIFEST.json` rather than leaving it here.
+    ///
+    /// No `serde(default)`, on `layers`' argument: a manifest omitting it is malformed, not
+    /// column-free, and the two are indistinguishable under a default while only one is safe to
+    /// serve.
+    pub scoped_columns: Vec<ScopedColumn>,
     /// Every view key that has ever been dropped (`views.md` §3.4).
     ///
     /// **Carried for ever and never pruned**, on `layer_tombstones`' argument: a key that once
@@ -1875,6 +1972,7 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             views: Vec::new(),
+            scoped_columns: Vec::new(),
             view_tombstones: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),

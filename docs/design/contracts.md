@@ -1,7 +1,28 @@
 # Tessera — Contracts Specification
 
-**Status:** Draft r65 — **the join rule's attribute arm is exact past the entity's own flush**
-(r64, 2026-08-31; `views.md` §4 r24). §3.4's `⊘` is discharged: an entity-scoped value whose
+**Status:** Draft r66 — **a batch carries a group-scoped attribute's values, a flush writes the
+column, and every segment rewriter keeps the lane** (r66, 2026-08-31, **owner ruling**;
+`views.md` §5 r25). §3.1's ingest body admits, beside the declared scalar tail, a column named for
+a **group-scoped family of the group that owns the batch's view**, under the family's plain name:
+the view is known from `x-tessera-view`, so the column is not qualified and the view decides which
+of the family's columns the value is for. The same column on an entity-space batch — a plain view,
+or a view of a group that only *shares* the family's views — takes the undeclared-column `422`
+exactly as before, byte-identical, which is what keeps a scoped column un-nameable outside its
+group's own views. Nullability, the wire type and a category's key-not-code rule are the
+entity-scoped ones. §2.1 gains one directory: a flush's per-view extents at
+`attrs/<column>/<group>/<key>/extents/`, beside the build's base, plus the **empty base** a view
+created since the build acquires at its first flush. §2.3 gains `scoped_columns`, the durable
+record of which `(family, view)` pairs a flush has written, which `MANIFEST.groups[..]
+.scoped_scalars[..].views` is derived through at open — so `/v1/meta`'s `scoped_scalars[..].views`
+names a runtime-created view the moment it has a column. `api_version` stays at 1, `bundle_format`
+does not move, and `WAL_VERSION` goes to **17**: `WalRow` gains a second positional list, `scoped`,
+against the owning group's `scoped_scalars` rather than the flat `declared_scalars` a family has no
+slot in. §2.6's segment tail gains the view's scoped render lanes after the declared ones, and a
+lane is the one column a segment may lawfully **not** hold: both ends read a missing one as the
+row's placeholder — the read path already did, and every rewriter now does — while a wrong type
+under the name stays malformed. No leak-register row — a scoped value arrives on the control plane and is served through
+the masked paths its entity-scoped counterpart is. **Status:** Draft r65 — **the join rule's attribute arm is exact past the entity's own flush**
+(r65, 2026-08-31; `views.md` §4 r24). §3.4's `⊘` is discharged: an entity-scoped value whose
 holder has already flushed is read back from the home its declaration gives it — the entity-space
 value column, the record blob, or the hot column — and a joining batch carrying a *different* one
 is the `409` naming the column that the rule always specified, rather than a row accepted and
@@ -187,6 +208,12 @@ bundle/
         values.arrow            #   entity space throughout, therefore view-invariant
         presence.roaring        #   where presence is partial
         extents/<flush_id>.*    #   one values/presence pair per flush, named in `attr_extents`
+      attrs/<column>/<group>/<key>/
+                                # one view's column of a group-scoped family (views 5) — the
+        values.arrow            #   same artefacts the bundle-wide column above holds, per view,
+        presence.roaring        #   written by the build and, for a view created since it, by
+        extents/<flush_id>.*    #   the first flush that carries values; the extents are that
+                                #   view's, `attr_extents` naming both the column and the view
       attrs/record/             # the record blob: every blob-resident field's values (2.4)
         blocks.bin
         hasrow.roaring
@@ -201,6 +228,10 @@ bundle/
         attrs/<column>/         #   one window of that column's attribute extents, merged
           values.arrow          #   (filter-index 5.2); the presence bitmap is never omitted
           presence.roaring      #   here, an extent's entities being a set rather than [0, n)
+        attrs/<column>/<group>/<key>/
+                                #   the same, per view, for a group-scoped family: the window
+                                #   is `(column, view)` and not the column, two views of one
+                                #   family sharing the column's name (views 5)
         attrs/record/           #   one window of the record blob's extents, merged and repacked
           blocks.bin            #   toward the block target; the coalesced triple replaces the
           hasrow.roaring        #   window in `record_extents`, in the window's own position
@@ -278,13 +309,14 @@ Each is **complete** for its partition — full current state, not a diff — so
 | `segments` | array | `[{view, seg_id, row_count, entity_lo, entity_hi}]` in serving order |
 | `deltas` | array | live delta postings tier **paths**, prefix-relative, in serving order *(r18; was the manifest sequence number each tier arrived at, with paths derived from `segments`)*. Every path must be digested in this map's `files` or MANIFEST's, or the reader refuses the bundle rather than serving unverified postings. **A tier need not sit beside a segment**: an entity-space coalesce produces one covering several segments' entities, which the old derivation could not name |
 | `dict_extents` | array | `[{path, records}]` — the bundle-level dictionary extents this partition's term IDs require, ordinal order. Extents are immutable and shared: several partitions listing the same extent carry identical digests, so verification never conflicts. **Positional, in listed order, and never reordered**: a term's ordinal is its position in the concatenation of these files, so the list is append-only and a contiguous run may be coalesced in place but never permuted. **No descriptor may appear twice across the list** — a repeat shifts every ordinal after it, and a reader is entitled to skip it, so the two readings of the same bundle would disagree about what a posting means. Both are format rules, not implementation details; `flush::promote` resolves against the live dictionary before interning to keep the first, and `Dict::load` skips a repeat to keep the second |
-| `attr_extents` | array | `[{column, values, presence}]` — one entry per filterable column per flush, naming that flush's values for the entities it published (`filter-index.md` §2.1, §2.5). **Order carries nothing**: an extent's entities are ids **I9** has just issued, so the layers a reader composes are disjoint in entity space and the union is a set union rather than a precedence rule — which is the whole reason this list needs none of `dict_extents`' append-only machinery. The column is named, never parsed back out of the path. **`presence` is not optional**, where a base column's presence file is: a flush publishes an entity set starting above the build's high-water, so positional addressing would pair every value with the wrong entity. Both paths must be digested in this map's `files`; a named file that is absent refuses the artefact rather than reading as "those entities carry no value" |
+| `attr_extents` | array | `[{column, view?, values, presence}]` — one entry per filterable column per flush, naming that flush's values for the entities it published (`filter-index.md` §2.1, §2.5). **Order carries nothing**: an extent's entities are ids **I9** has just issued, so the layers a reader composes are disjoint in entity space and the union is a set union rather than a precedence rule — which is the whole reason this list needs none of `dict_extents`' append-only machinery. The column is named, never parsed back out of the path. **`presence` is not optional**, where a base column's presence file is: a flush publishes an entity set starting above the build's high-water, so positional addressing would pair every value with the wrong entity. Both paths must be digested in this map's `files`; a named file that is absent refuses the artefact rather than reading as "those entities carry no value". **`view` names one view's column of a group-scoped family** *(r64, `views.md` §5)* and is absent for an entity-scoped column, which has one column bundle-wide: a family's columns share the column's *name*, so `(column, view)` is the identity every consumer keys on — the coalesce's window selection and the fold's per-column merge alike — and a window keyed on the name alone would merge one view's values into another's. `text_extents` carries the same optional field, for the same reason |
 | `record_extents` | array | `[{blocks, hasrow, directory}]` — one entry per flush's record-blob layer, oldest first *(r28)*. **The blob is not a column**, so its extents cannot live in `attr_extents`, which is keyed by a declared column name and from which `record` is reserved out precisely so this namespace cannot collide with a declaration. Order decides only which layer answers first: the layers are disjoint in entity space (**I9**), as `attr_extents`' are. **Required**, empty in a bundle straight out of `tessera build` — whose base blob covers every entity it knows about — and malformed rather than extent-free if omitted. All three paths must be digested in this map's `files`; **a blob file that is missing, short or failing its digest refuses at open**, never "those entities have no record" |
 | `external_id_runs` | array | run paths, oldest first. Each run is internally sorted; runs are **not** ordered against one another *by key* (§2.4). **List position is recency, and that is load-bearing**: §2.4 resolves newest-run-first, so a merge or a coalesce replacing several runs with one must take a **contiguous** window and land the replacement in the window's own position — a run at a recency position it did not earn answers a stale binding |
 | `tombstones` | array | deleted entity IDs, ascending (this partition's only — isolation holds; folded away at compaction, **⊘ unbuilt — today the list only grows**) |
 | `vocabulary_extensions` | array | `[{name, values: [{key, code}]}]` — the category bindings minted since the build or fold that wrote `MANIFEST.vocabularies` *(r24)*. **Carried forward and appended to, never restated**, which is the opposite discipline to `deny` and `tombstones` below and for a reason that decides it: `deny` is re-derived at every write *because it must be able to shrink* — an unsuppress has to reach disc — and a binding must never shrink. Restate-fresh is the one shape that can silently drop one, and a dropped binding leaves every row carrying its code with no key to explain it. The loader seeds the live bindings from `MANIFEST.vocabularies` plus this, before WAL replay, which is what keeps a minted code out of the next draw. The fold folds these into the next prefix's `MANIFEST.vocabularies` **verbatim** and writes an empty set. **⊘ Written by nobody yet** ([#82](https://github.com/jennis0/tessera-index/issues/82)): nothing mints between builds until the commit window does |
 | `deny` | array | `[{entity_id, cause: "suppress"}]` — the current suppression set. **Publication rule:** any accepted deny-disposition change (delete, suppress, unsuppress) triggers publication of a new side-manifest at the close of the deny drain — never deferred to the next flush, with a liveness floor under sustained arrival — because a syncing replica must never reconstruct a state in which a suppressed item is visible (SA §6.2's fail-open, at the interchange layer). `unsuppress` removes the entry in the manifest its own drain publishes |
 | `layers` · `layer_tombstones` | array | the annotation layer registry as of this publication, complete current state — `[{declaration, entity, runs, version, layouts}]` — and every layer name ever dropped *(r59)*. `declaration` is the object `PUT /control/layers` takes, verbatim, so the two entry points record the same thing (decision 0091). **`declaration.scope` is `"entity"` or `{"group": "<name>"}`** *(r59, `views.md` §3.5, [decision 0109](../decisions/0109-scope-binds-an-attribute-or-layer-to-a-groups-views.md))*: one artifact set drawn on every view the layer names, or a different set per view of that group. It was compiled beside the declaration and written nowhere, so a bundle reopened without its build configuration could not tell the two apart — and they answer differently on every view. `#[serde(default)]` is `"entity"`, which is a statement rather than an omission: a layer that names no group has one set. Tombstones are carried for ever and never pruned — bookmarks, edges and suppressions all travel by name |
+| `scoped_columns` | array | `[{column, view}]` — every `(group-scoped family, view)` pair a **flush** has written a column or a render lane for *(r64, `views.md` §5)*. Complete current state, carried forward and never pruned. **The durable half of `MANIFEST.groups[..].scoped_scalars[..].views`**, which names the views the *build* wrote a column for: a view created while the service runs acquires one at its first flush carrying values, and `MANIFEST.json` is rewritten only by a fold. Deriving the pairs from `attr_extents` instead would recover a filterable family's — its extents name their view — and lose a **render-only** family's, which writes a row lane and no entity-space extent at all, so the column would come back from a restart as one the manifest does not know exists and its values would serve as the ordinary absence. A fold empties this list, having just written the derived one into the new `MANIFEST.json` |
 | `views` · `view_tombstones` | array | the **roster's runtime half** *(r55; `views.md` §3.2, §3.4)* — every view created while the service runs, `[{group, key, visibility, metadata}]`, and every key ever dropped, `[{group, key}]`. Complete current state, as every field here is. **This is the roster's durable home and the WAL is not**: the create and drop records are log entries for replay, and rotation reclaims them, so a roster that lived only there is lost at the first rotation — a reused key then silently repoints every client cache keyed on the view ([decision 0029](../decisions/0029-view-key.md)). The views a **build** declared are in `MANIFEST.json` and are not restated here; the served roster is the two together. Tombstones are carried for ever and never pruned, on `layer_tombstones`' rule, and each carries the key it burnt, which is the whole of a view's address *(r58)* |
 | `files` | object | path → `{size, sha256}` for files added since MANIFEST |
 
@@ -725,6 +757,24 @@ The WAL; frozen mirrors, derived tile tables and candidate lists (deviation 3); 
 - `readyz` freshness lag default — and the gate itself, which does not exist (§2.3).
 
 ## Appendix R — Review record
+
+**r66 carries a group-scoped attribute's values through the write path** (2026-08-31, owner ruling;
+`views.md` §5 r25). The scoped half of §5 was specified end to end on the read side and absent on
+the write side, and the absence was not uniform: two thirds of it was unbuilt machinery and one
+third was a defect. Ingest and flush were unbuilt — a batch could not name a scoped column and a
+view created while the service ran had none until a rebuild — and §3.1 and §2.1 now carry both: the
+column is admitted under its plain name on a batch into a view of the group that owns the family,
+refused byte-identically anywhere else, and the flush writes the family's per-view extents beside
+the build's plus the empty base a runtime-created view acquires. §2.3 gains `scoped_columns`, the
+durable record a restart derives `scoped_scalars[..].views` through, and `attr_extents` and
+`text_extents` gain an optional `view` so that `(column, view)` is the identity a coalesce and a
+fold key on rather than the shared column name. The **defect** was the third: a merge or a fold
+took its writer schema from the bundle-wide render list, so a rewritten segment of a group's view
+dropped the family's lane and values already being served came back as the type's zero — silent,
+and indistinguishable from absence. Every rewriter now takes the view's own schema, and the fold's
+attribute pass folds each family's per-view column, which it had not written at all. `WAL_VERSION`
+goes to 17 for `WalRow::scoped`; `api_version` and `bundle_format` do not move; no leak-register
+row.
 
 **r65 makes the join rule's attribute arm exact past a flush** (2026-08-31; `views.md` §4 r24).
 §3.4's `⊘` said the label and attribute arms both stopped at the commit-window buffer; the label

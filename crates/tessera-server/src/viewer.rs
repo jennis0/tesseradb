@@ -377,11 +377,11 @@ async fn meta(
                 // from `views` above and is absent here for the same reason, so a list that named
                 // it would be the one place the document mentioned it.
                 //
-                // Neither is derivable from the roster a client already holds: a view created while
-                // the service runs has no column of any family until a rebuild writes one — no
-                // batch can supply one, a buffered row's scalars being positional against
-                // `declared_scalars` — so this list is what separates *this view renders it* from
-                // *this view is one of the group's*.
+                // Neither is derivable from the roster a client already holds: a view created
+                // while the service runs has no column of any family until a flush covering it
+                // carries values, so this list is what separates *this view renders it* from
+                // *this view is one of the group's* — and what moves the moment that flush
+                // publishes (`views.md` §5, r24).
                 "views": meta
                     .scoped_family_views(f)
                     .into_iter()

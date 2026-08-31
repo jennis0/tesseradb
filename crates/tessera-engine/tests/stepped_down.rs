@@ -76,6 +76,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
                 x: 0.5,
                 y: 0.5,
                 scalars: Vec::new(),
+                scoped: Vec::new(),
             }],
         })
         .unwrap();
@@ -114,6 +115,7 @@ fn a_stepped_down_node_refuses_ingest_flushes_nothing_and_rotates_nothing() {
         y: 0.5,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let err = engine
         .accept_ingest(vec![row], "refused-batch".to_string(), [2u8; 32])

@@ -204,6 +204,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path) -> Vec<EntityId> {
             y: 10.0 + i as f64,
             scalars: vec![WalScalar::Utf8(flushed_prose(i))],
             terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
         };
         out.push(
             engine
@@ -557,6 +558,7 @@ fn a_text_extent_published_after_the_snapshot_is_carried_and_digested() {
             y: 20.0,
             scalars: vec![WalScalar::Utf8("corpus flightword".to_string())],
             terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
         };
         let id = engine
             .accept_ingest(vec![row], external, [0u8; 32])
@@ -630,6 +632,7 @@ fn a_flush_with_no_text_value_publishes_no_text_layer() {
             y: 30.0,
             scalars: vec![value],
             terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
         };
         engine
             .accept_ingest(vec![row], name.to_string(), [0u8; 32])
