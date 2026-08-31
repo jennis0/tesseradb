@@ -866,8 +866,9 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > only thing the scope changes is the directory. A view the family has no column for acquires an
 > **empty base** at the same flush, so what is on disc is what a build would have written for an
 > empty view, and the pair enters `scoped_scalars[..].views` — the durable record being
-> `SEGMENTS-<n>.json`'s `scoped_columns`, since a render-only family writes a row lane and no
-> extent for a derivation to find. A rendered family's lane is written from the row's own value,
+> `SEGMENTS-<n>.json`'s `scoped_columns` — durable rather than derived because it predates r26,
+> under which a render-only family wrote a row lane and no extent for a derivation to find; r26
+> gives every operand family its extents, and the record stays the authority regardless. A rendered family's lane is written from the row's own value,
 > which is why a **join** row carries the scoped values and nothing else: the value belongs to the
 > `(entity, view)` pair the join is creating rather than to the entity.
 >

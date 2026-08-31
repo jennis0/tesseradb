@@ -126,9 +126,9 @@ pub struct CategoryPage {
 /// **The caller has already resolved and gated it.** This function reads a manifest and nothing
 /// else: which spellings a principal may turn into which resolved column — the group's gate, the
 /// pin, the request's own view — is decided at the one site `views.md` §5 puts it, ahead of here.
-/// A scoped family that is on no filter surface is not a value list either: the same `index`
-/// licence decides both, so a name that resolves to nothing here is the `None` an undeclared
-/// column gets.
+/// A scoped family that is on no filter surface is not a value list either: the one
+/// `index`-or-`render` licence (`scoped_is_filterable`) decides both, so a name that resolves to
+/// nothing here is the `None` an undeclared column gets.
 fn vocabulary_of(manifest: &tessera_store::manifest::Manifest, column: &str) -> Option<String> {
     if let Some(scalar) = manifest.declared_scalars.iter().find(|s| s.name == column) {
         return scalar.vocabulary.clone();
