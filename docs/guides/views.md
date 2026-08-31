@@ -262,6 +262,12 @@ each with its own presence bitmap. All four families answer: numeric and categor
 text (a per-view token dictionary) — a scoped `text` column additionally **requires** `index = true`,
 because the record blob has no slot for a family.
 
+`index` **or** `render` puts the family on the filter surface, exactly as it does for an
+entity-scoped column: a family declared `render = true` alone filters and pins like an indexed one,
+because what it filters is the per-view entity-space column and not the row tail. The two flags
+still say different things: `render` puts the value in each view's row tail, where a client draws
+it, and a family you filter but never draw wants `index = true` and `render = false`.
+
 A scoped attribute can read its values from a separate file instead of each view's own points:
 
 ```toml

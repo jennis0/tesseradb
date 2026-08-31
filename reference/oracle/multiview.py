@@ -45,6 +45,12 @@ So the corpus is built so that each half of that sentence has something to disag
   catalogue plants and for the same reason (see its module doc's `fx_key` section): the oracle
   names a served point without a reverse map and with no I10 tension. It is drawn from a seeded
   RNG and is not a function of the entity id.
+* **One group-scoped attribute licensed by `render` alone, `glow`** (§5 r26): declared
+  `render = true` with no `index`, which since 2026-08-31 is a filter operand exactly as `index`
+  is. What answers its leaf is the per-view entity-space column beside the row lane, so the
+  differential asks the pinned-leaf question of the licence that has no `index` behind it — and a
+  reader that answered it from the lane in front of the request would serve the request view's
+  values for a pinned leaf and be caught.
 * **One group-scoped category, `mood`** (§5), over a closed `public` vocabulary: the second family
   a scope can carry, and the one whose per-view artefact is a set of postings rather than a value
   column. An entity's value differs by quarter and about a sixth of each view's entities carry
@@ -292,6 +298,24 @@ def heat_of(source_id: int, key: str) -> float | None:
     return ((h >> 8) % 2001 - 1000) / 1024.0
 
 
+def glow_of(source_id: int, key: str) -> float | None:
+    """The **render-only** family's value for one `(entity, view)`, or `None` where it has none.
+
+    [`sentiment_of`] over the same group with a different hash input, declared `render = true` and
+    `index = false`. Since `views.md` §5 r26 that is the whole licence a family needs to be a
+    filter operand — the per-view entity-space column every build writes is what answers the leaf,
+    the row lane answering none — so this column exists to make the differential ask the same
+    question of the licence that has no `index` behind it. The values differ from `sentiment`'s so
+    that a leaf resolved to the wrong family's column is a different set rather than the same one.
+    """
+    if not in_quarter(source_id, key):
+        return None
+    h = _hash("glow", key, source_id)
+    if h % 5 == 0:
+        return None
+    return ((h >> 8) % 2001 - 1000) / 1024.0
+
+
 #: `mood`'s value set, and the codes the declaration pins them at. Closed and `public`, so the
 #: value list is authored and the differential's subject is the per-view *column* rather than the
 #: per-view list (module doc).
@@ -435,6 +459,15 @@ type  = "f32"
 scope = {{ group = "{GROUP}" }}
 index = true
 
+# **The same scope, licensed by `render` instead of `index`** (`views.md` §5 r26). It is written
+# into each view's row tail *and* into the per-view entity-space column every scoped family has,
+# and it is the second one a leaf is answered from — which is what this family is here to check.
+[[attribute]]
+name   = "glow"
+type   = "f32"
+scope  = {{ group = "{GROUP}" }}
+render = true
+
 # The scoped **category** beside it: the same scope, a different family. Its per-view artefact is
 # a set of postings over the codes below rather than a value column, which is the whole reason it
 # is here — a reader that served the numeric family correctly and this one from another view's
@@ -545,6 +578,9 @@ def write_corpus(work_dir: Path) -> None:
                     "sentiment": pa.array(
                         [sentiment_of(i, key) for i in members], type=pa.float32()
                     ),
+                    # The render-only family's column, planted exactly as the indexed one is:
+                    # what differs is the declaration, not the shape of the data.
+                    "glow": pa.array([glow_of(i, key) for i in members], type=pa.float32()),
                     # The scoped category's own column, keys rather than codes: the build mints
                     # against the declaration's pinning, which is what `MOOD_CODES` records.
                     "mood": pa.array([mood_of(i, key) for i in members], type=pa.string()),
@@ -808,6 +844,22 @@ def heat_columns(bundle: Bundle) -> dict[str, dict[int, float]]:
             if (value := heat_of(i, key)) is not None
         }
         for key in SEALED_KEYS
+    }
+
+
+def glow_columns(bundle: Bundle) -> dict[str, dict[int, float]]:
+    """The **render-only** family as the fixture planted it: `{view id: {entity: value}}`.
+
+    [`sentiment_columns`]'s construction over [`glow_of`], and its reason.
+    """
+    entity_of = bundle.entities_by_source()
+    return {
+        f"{GROUP}:{key}": {
+            entity_of[i]: value
+            for i in range(N_ITEMS)
+            if (value := glow_of(i, key)) is not None
+        }
+        for key in QUARTER_KEYS
     }
 
 

@@ -1252,8 +1252,9 @@ pub(crate) struct ScopedColumnSpec {
     pub(crate) name: String,
     pub(crate) ty: ScalarType,
     pub(crate) category: bool,
-    /// Declared `index = true` — the family is on the filter surface, so its column is opened and
-    /// this flush owes it an extent (`filter::scoped_is_filterable`).
+    /// Declared `index = true`, or `render = true` on a family that has a value column — the
+    /// family is on the filter surface, so its column is opened and this flush owes it an extent
+    /// (`filter::scoped_is_filterable`).
     pub(crate) filterable: bool,
     /// Declared `render = true` — the family occupies a lane in this view's row tail, which is a
     /// column for the purposes of `scoped_scalars[..].views` even where the family is on no filter
@@ -1432,16 +1433,19 @@ fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWr
     let mut created = Vec::new();
     for spec in &ctx.scoped_schema {
         // **The view enters the family's list whatever the family's surface**, because this flush
-        // gives it a column of one kind or the other: an entity-space column below for an indexed
-        // family, a lane in the row tail for a rendered one. `scoped_scalars[..].views` is what
-        // decides both — the opener walks it, and so does the request's render list — so a view
-        // left off it renders nothing and is opened for nothing.
+        // gives it a column of one kind or the other: an entity-space column below for a family on
+        // the filter surface, a lane in the row tail for a rendered one — and a rendered family
+        // takes both. `scoped_scalars[..].views` is what decides them — the opener walks it, and
+        // so does the request's render list — so a view left off it renders nothing and is opened
+        // for nothing.
         if !spec.has_base && (spec.filterable || spec.render) {
             created.push((spec.name.clone(), ctx.view.clone()));
         }
         // A family on no surface has no column any reader opens, so an extent for it would be
         // bytes nothing reads — the predicate is `filter::scoped_is_filterable`'s, the same one
-        // the opener and the fold apply, or the three would disagree about what exists.
+        // the opener and the fold apply, or the three would disagree about what exists. A
+        // **rendered** family is on that surface since 2026-08-31, so it takes the extent below
+        // as an indexed one does; what it does not take is a second route through the lane.
         if !spec.filterable {
             continue;
         }

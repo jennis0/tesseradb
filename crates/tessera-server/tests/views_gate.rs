@@ -125,8 +125,28 @@ fn note(ordinal: usize, e: u64) -> String {
     format!("sealed {} note for {e}", MOODS[ordinal % MOODS.len()])
 }
 
+/// The `glow` value an entity carries there — the **render-only** family, declared `index = false`
+/// and an operand on `render` alone (`views.md` §5 r26). It is here because that licence is a
+/// fourth way into the same collapse: a family the gate must hide from a principal who cannot
+/// reach `sealed`, on a surface the other three do not reach it by.
+fn glow(ordinal: usize, e: u64) -> Option<f32> {
+    match (e + ordinal as u64) % 5 {
+        0 => None,
+        n => Some(n as f32 * 3.0),
+    }
+}
+
+/// The `tint` value an entity carries there — a **category** on the surface by `render` alone,
+/// over the same vocabulary `mood` uses. It is the family where the two admissions could disagree
+/// on disc rather than only on a surface: a category on the filter surface owes per-view keyed
+/// postings, which `/v1/categories` reads too, so a build that wrote none for it would refuse the
+/// open outright.
+fn tint(ordinal: usize, e: u64) -> &'static str {
+    MOODS[((e * 2 + ordinal as u64) % MOODS.len() as u64) as usize]
+}
+
 /// A points file: geometry, the entity's own access label, and — for a view of `sealed` — that
-/// view's own columns of the three scoped families.
+/// view's own columns of the five scoped families.
 fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Option<usize>) {
     let mut fields = vec![
         Field::new("entity_id", DataType::UInt64, false),
@@ -138,6 +158,8 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Opti
         fields.push(Field::new("sentiment", DataType::Float32, true));
         fields.push(Field::new("mood", DataType::Utf8, true));
         fields.push(Field::new("note", DataType::Utf8, true));
+        fields.push(Field::new("glow", DataType::Float32, true));
+        fields.push(Field::new("tint", DataType::Utf8, true));
     }
     let schema = Arc::new(Schema::new(fields));
     let ids: Vec<u64> = ids.collect();
@@ -164,6 +186,12 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, scoped: Opti
         )));
         columns.push(Arc::new(StringArray::from(
             ids.iter().map(|&e| note(ordinal, e)).collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(Float32Array::from(
+            ids.iter().map(|&e| glow(ordinal, e)).collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(StringArray::from(
+            ids.iter().map(|&e| tint(ordinal, e)).collect::<Vec<_>>(),
         )));
     }
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -276,9 +304,11 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                 scoped_scalars: Vec::new(),
             },
         ],
-        // **Three families, one gate.** The collapse is one site ahead of the pin/bare split
+        // **Five families, one gate.** The collapse is one site ahead of the pin/bare split
         // (`views.md` §5), so a second family taking a different answer from the first would be
-        // the defect this fixture exists to catch.
+        // the defect this fixture exists to catch. The last two are licensed by `render` alone
+        // (r26), which is a different admission reaching the same site — and the second of them
+        // is a category, whose per-view postings and value list that admission owes as well.
         scoped_attributes: vec![
             sealed_family(
                 // **Rendered as well as indexed**, so the collapse has a second surface to be
@@ -323,6 +353,38 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                     value_set: None,
                     index: true,
                     render: false,
+                },
+                family_views.clone(),
+            ),
+            sealed_family(
+                // **On the surface by `render` alone** (`views.md` §5 r26): no `index`, and an
+                // operand all the same, so the gate has a fourth family to collapse.
+                Attribute {
+                    name: "glow".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::F32,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: false,
+                    render: true,
+                },
+                family_views.clone(),
+            ),
+            sealed_family(
+                // A **category** on the surface by `render` alone: it owes the keyed postings an
+                // `eq` and `/v1/categories` are both answered from, on the same admission.
+                Attribute {
+                    name: "tint".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::U8,
+                    analyser: None,
+                    vocabulary: Some("mood".to_string()),
+                    value_set: Some(ValueSet::Closed),
+                    index: false,
+                    render: true,
                 },
                 family_views.clone(),
             ),
@@ -796,14 +858,15 @@ async fn a_scoped_attribute_collapses_whole_outside_its_groups_gate() {
 }
 
 /// **The collapse is one site, so a second family cannot take a different answer from the first**
-/// (`views.md` §5). `mood` is a category and `note` is text, and for a principal who cannot reach
-/// `sealed` both are undeclared exactly as `sentiment` is — absent from `filter_operands`, the
+/// (`views.md` §5). `mood` is a category, `note` is text and `glow` is on the surface by `render`
+/// alone (r26), and for a principal who cannot reach `sealed` all three are undeclared exactly as
+/// `sentiment` is — absent from `filter_operands`, the
 /// unknown-column `422` for either spelling, and for the category the same `404`
 /// `/v1/categories` gives a name that is nothing at all. A category is the family where getting
 /// this wrong costs most: its value list is a second surface, and one gated at the filter and not
 /// at the list would publish a gated group's value names to anyone with a session.
 #[tokio::test]
-async fn the_category_and_text_families_collapse_at_the_same_site() {
+async fn the_category_text_and_render_only_families_collapse_at_the_same_site() {
     let served = serve().await;
     let outsider = token(&served, &[]).await;
     let holder = token(&served, &["finance"]).await;
@@ -818,7 +881,7 @@ async fn the_category_and_text_families_collapse_at_the_same_site() {
     };
     let held = operands(&meta(&served, &holder).await);
     let out = operands(&meta(&served, &outsider).await);
-    for column in ["mood", "note"] {
+    for column in ["mood", "note", "glow", "tint"] {
         assert!(held.contains(&column.to_string()), "{column}: {held:?}");
         assert!(!out.contains(&column.to_string()), "{column}: {out:?}");
     }
@@ -828,6 +891,10 @@ async fn the_category_and_text_families_collapse_at_the_same_site() {
         ("mood@s1", json!({"mood@s1": {"eq": "calm"}})),
         ("note", json!({"note": {"match": "calm"}})),
         ("note@s1", json!({"note@s1": {"match": "calm"}})),
+        ("glow", json!({"glow": {"range": {"gte": 1.0}}})),
+        ("glow@s1", json!({"glow@s1": {"range": {"gte": 1.0}}})),
+        ("tint", json!({"tint": {"eq": "calm"}})),
+        ("tint@s1", json!({"tint@s1": {"eq": "calm"}})),
     ] {
         let (status, answer) = viewport(&served, &outsider, "world", Some(body)).await;
         assert_eq!(status, 422, "{spelling}");
@@ -847,17 +914,27 @@ async fn the_category_and_text_families_collapse_at_the_same_site() {
         let token = token.to_string();
         async move { client.get(url).bearer_auth(token).send().await.unwrap() }
     };
-    for path in ["mood?view=sealed:s1", "mood@s1", "mood"] {
+    for path in [
+        "mood?view=sealed:s1",
+        "mood@s1",
+        "mood",
+        "tint?view=sealed:s1",
+        "tint@s1",
+    ] {
         assert_eq!(
             list(&outsider, path).await.status().as_u16(),
             404,
             "{path} must be unknown to a principal outside the group"
         );
     }
-    let resp = list(&holder, "mood?view=sealed:s1").await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(body["values"].as_array().unwrap().len(), MOODS.len());
+    for column in ["mood", "tint"] {
+        // The render-only category's list is owed on the same admission as its operand, so the
+        // holder gets it and the per-view postings behind it exist.
+        let resp = list(&holder, &format!("{column}?view=sealed:s1")).await;
+        assert_eq!(resp.status().as_u16(), 200, "{column}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["values"].as_array().unwrap().len(), MOODS.len());
+    }
 }
 
 /// **A sealed family's rendered column is on no surface a gate-failed principal touches**
