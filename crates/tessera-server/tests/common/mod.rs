@@ -575,19 +575,32 @@ async fn mount_server_with_flush(
     }
 }
 
+/// Authorise a session, **retrying while the admission gate sheds**.
+///
+/// A `429` here is the server behaving as specified under machine load (contracts §3.1) and never
+/// the answer a caller of this helper is asking about — every one of them wants a token. So it is
+/// waited out rather than asserted against, exactly as `views_write.rs`' viewport helper waits out
+/// a shed read. A test that means to observe shedding calls the endpoint itself.
 pub async fn authorise(server: &TestServer, terms: &[&str]) -> serde_json::Value {
     let auth_data = serde_json::json!({ "terms": terms }).to_string();
     let encoded = base64::engine::general_purpose::STANDARD.encode(auth_data);
-    let resp = server
-        .client
-        .post(server.session_url("/session/authorise"))
-        .bearer_auth(SESSION_CREDENTIAL)
-        .json(&serde_json::json!({ "auth_data": encoded }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200, "authorise should succeed");
-    resp.json().await.unwrap()
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let resp = server
+            .client
+            .post(server.session_url("/session/authorise"))
+            .bearer_auth(SESSION_CREDENTIAL)
+            .json(&serde_json::json!({ "auth_data": encoded }))
+            .send()
+            .await
+            .unwrap();
+        if resp.status().as_u16() == 429 && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            continue;
+        }
+        assert_eq!(resp.status(), 200, "authorise should succeed");
+        return resp.json().await.unwrap();
+    }
 }
 
 /// `POST /v1/items/{tessera_id}` with no body fields set (no pin, no idset).
