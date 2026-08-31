@@ -263,6 +263,21 @@ impl ViewRoster {
         // client reading the roster would see a name the group declares and this view does not
         // carry.
         for field in facts.metadata {
+            // ⊘ **A category-typed metadata name has no create that can satisfy it**
+            // (`views.md` §3.2). A category's value is a key resolved to its vocabulary's code,
+            // and nothing on this path resolves one — accepting the integer instead would make
+            // the caller the minting authority for a code space the server owns
+            // (`per-point-attributes.md` §3.1), which is what a category column refuses on every
+            // other surface. Refused by name rather than stored unresolved.
+            if field.ty == ViewMetadataType::Category {
+                return Err(RosterError::Refused(format!(
+                    "view group '{}' declares metadata '{}' as a category, and a view of it \
+                     cannot be created while the service runs: a category's value is a key \
+                     resolved to its vocabulary's code, and codes are the server's to assign. \
+                     Declare the name as a scalar, or add the view at a build",
+                    facts.name, field.name
+                )));
+            }
             let Some(value) = metadata.get(&field.name) else {
                 return Err(RosterError::Refused(format!(
                     "view group '{}' declares metadata '{}' ({}) and this record carries none. \
@@ -513,6 +528,28 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn a_category_metadata_name_has_no_create_that_can_satisfy_it() {
+        let declared = [GroupMetadataField {
+            name: "tier".to_string(),
+            ty: ViewMetadataType::Category,
+            vocabulary: Some("tiers".to_string()),
+        }];
+        let roster = ViewRoster::new();
+        // Not even with the code the manifest would store: a caller supplying one would be the
+        // minting authority for a space the server owns.
+        assert!(roster
+            .prepare_create(
+                facts("quarter", &declared),
+                "k",
+                None,
+                [("tier".to_string(), ViewMetadataValue::Int(3))]
+                    .into_iter()
+                    .collect(),
             )
             .is_err());
     }

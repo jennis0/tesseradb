@@ -95,6 +95,9 @@ impl ViewMetadataType {
                 | (ViewMetadataType::Float, ViewMetadataValue::Float(_))
                 | (ViewMetadataType::Text, ViewMetadataValue::Text(_))
                 | (ViewMetadataType::TimestampUs, ViewMetadataValue::TimestampUs(_))
+                // A category's stored form is its code, which is how a *build* writes one. The
+                // create operation refuses the type outright rather than accepting a code from
+                // the wire — see `ViewRoster::prepare_create`.
                 | (ViewMetadataType::Category, ViewMetadataValue::Int(_))
         )
     }
