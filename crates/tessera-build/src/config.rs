@@ -479,6 +479,14 @@ struct AttributeBlock {
     /// match names them rather than reporting *no variant matched* ([`compile_scope`]).
     #[serde(default)]
     scope: Option<toml::Value>,
+    /// Where this column's own `source` spells the fields it is read by. **One key, `view`**, and
+    /// only a group-scoped column with a `source` of its own has anything to name with it: that
+    /// file carries one row per `(entity, view)`, and the discriminator says which view each row's
+    /// value is for (`views.md` §5). Absent is the column `view`, the same default a scoped
+    /// layer's `fields.view` takes. The entity id is `entity_id_field` beside it rather than a key
+    /// here, which is the spelling every attribute already had.
+    #[serde(default)]
+    fields: Option<BTreeMap<String, String>>,
     /// Which analyser a `text` column's terms are produced by, by name (decision 0070). Absent
     /// means [`tessera_analyse::UNICODE`]; present on a non-`text` column is refused, because an
     /// analyser a column does not use is a setting its author believes is in effect.
@@ -1052,6 +1060,28 @@ pub struct ScopedAttribute {
     /// The group that owns the views this column family is over — always the owner, a scope
     /// naming a `members` group being refused pointing at it.
     pub group: String,
+    /// The column's **own** `source`, where it declares one (`views.md` §5). `None` — the shape
+    /// Appendix A's `sentiment` and the fixture's declare — reads each view's column from that
+    /// view's own points file, under that view's selection where a group's views share one.
+    pub source: Option<ScopedAttributeFile>,
+}
+
+/// A group-scoped attribute's own source file (`views.md` §5): one row per `(entity, view)`, the
+/// view named by a discriminator column.
+///
+/// **The discriminator is what makes a file of its own admissible at all.** A scoped column's
+/// values are one per `(entity, view)`, so reading such a file as entity space would take one
+/// arbitrary view's values as every view's — silently, and with no error anywhere. The
+/// discriminator is the same mechanism a form B roster and a scoped layer's artifacts already use,
+/// and it is applied here by the same [`ViewSelector`].
+#[derive(Debug, Clone)]
+pub struct ScopedAttributeFile {
+    /// The resolved path of the `[sources]` entry the column named.
+    pub path: PathBuf,
+    /// The column that file spells the entity id in — `entity_id_field`, or the default.
+    pub entity_id: String,
+    /// The discriminator column — the attribute's `fields.view`, resolved; `view` by default.
+    pub view_field: String,
 }
 
 /// Which attributes and which layers carry a group scope, by name.
@@ -2136,8 +2166,13 @@ impl Config {
         // The scopes first: which attributes are entity space and which are a family is what
         // decides the schema itself (`views.md` §5).
         let attribute_scopes = compile_attribute_scopes(&file.attribute, &view_groups)?;
-        let (attributes, scoped_attributes) =
-            compile_attributes(&file.attribute, &vocabularies, &attribute_scopes)?;
+        let (attributes, scoped_attributes) = compile_attributes(
+            &file.attribute,
+            &vocabularies,
+            &attribute_scopes,
+            &sources,
+            &defaults,
+        )?;
         let attribute_sources =
             compile_attribute_sources(&file.attribute, &attribute_scopes, &sources, &defaults)?;
         let (layers, layer_sources, label_layers, layer_scopes) =
@@ -4461,6 +4496,8 @@ fn compile_attributes(
     blocks: &[AttributeBlock],
     vocabularies: &HashMap<String, Vocabulary>,
     scopes: &BTreeMap<String, String>,
+    sources: &Sources,
+    defaults: &Defaults,
 ) -> Result<(Vec<Attribute>, Vec<ScopedAttribute>)> {
     let mut attributes = Vec::with_capacity(blocks.len());
     let mut scoped: Vec<ScopedAttribute> = Vec::new();
@@ -4708,32 +4745,120 @@ fn compile_attributes(
         // in every row's hot tail and a whole-corpus `attrs/<column>/` of its own, both of them
         // absent for every entity, and both served as if the attribute were entity-scoped.
         match scopes.get(&decl.name) {
-            None => attributes.push(attribute),
-            Some(group) => {
-                // ⊘ **A scoped attribute's own `source` is not read.** Its values are one per
-                // `(entity, view)`, so a file of its own needs `fields.view` to say which view
-                // each row's value is for (`views.md` §5) — which the build does not yet select
-                // on for an attribute source. Refused by name: taking the file as an entity-space
-                // source would read one arbitrary view's values as every view's.
-                if decl.source.is_some() {
+            None => {
+                // **`fields` names the view discriminator and nothing else**, so an entity-scoped
+                // column has nothing to say with it: its values are one per entity and no column
+                // of its file decides which view they are for. Refused rather than ignored, on
+                // this module's rule for every disclosure-adjacent key — a `fields` map that reads
+                // as a default is a routing its author believes is in effect.
+                if decl.fields.is_some() {
                     return Err(declaration_error(format!(
-                        "attribute '{}': ⊘ a `scope = {{ group = \"{group}\" }}` attribute with \
-                         its own `source` needs `fields.view` on that file to say which view each \
-                         row's value is for (views §5), and the build reads a scoped column from \
-                         each view's own points instead. Drop the `source` to read '{}' from the \
-                         group's views' files meanwhile",
-                        decl.name,
-                        attribute.column()
+                        "attribute '{}': `fields` names the view discriminator on a group-scoped \
+                         column's own source (views §5), and this column is entity scope — one \
+                         value per entity, under every view — so there is nothing for it to \
+                         choose between. The entity id is `entity_id_field`",
+                        decl.name
                     )));
                 }
+                attributes.push(attribute)
+            }
+            Some(group) => {
+                // **A scoped attribute's own `source` carries the discriminator** (`views.md`
+                // §5): one row per `(entity, view)`, `fields.view` saying which view each row's
+                // value is for, and the row routed to that view's column. Without the
+                // discriminator the file would be read as entity space, which would take one
+                // arbitrary view's values as every view's — so the column is resolved here, where
+                // the source name and the field spellings are both in hand.
+                // **A scoped `text` column must be indexed, because the index is its only
+                // home.** An entity-scoped text column has two — a token index answering `match`
+                // and a record-blob row answering `entity → value` — and the blob is bundle-wide,
+                // addressed by a column's position in `declared_scalars`, which a family has none
+                // of. So an unindexed scoped text column would be a declared field stored nowhere
+                // at all: acknowledged and then lost. Refused rather than reported, on the rule
+                // that separates a config a build can honour from one it cannot.
+                if attribute.ty == ScalarType::Text && !attribute.index {
+                    return Err(declaration_error(format!(
+                        "attribute '{}': a `text` column scoped to group '{group}' needs \
+                         `index = true`. Its terms are its only home — the record blob is one \
+                         bundle-wide list with no slot for a column family (views §5) — so \
+                         without the index the prose would be read and stored nowhere",
+                        decl.name
+                    )));
+                }
+                let source = compile_scoped_attribute_source(decl, sources, defaults)?;
                 scoped.push(ScopedAttribute {
                     attribute,
                     group: group.clone(),
+                    source,
                 });
             }
         }
     }
     Ok((attributes, scoped))
+}
+
+/// A group-scoped attribute's own source, where it declares one (`views.md` §5).
+///
+/// **`[defaults].source` does not reach here, and that is deliberate.** The default is a single
+/// whole-corpus file with one row per entity, which is exactly the wrong shape: a scoped column's
+/// values are one per `(entity, view)`. So a scoped column reads from each view's own points file
+/// unless it names a `source` of its own, and naming one is a statement that *this* file carries
+/// the discriminator.
+///
+/// The discriminator column is `fields.view`, defaulting to `view` — the same key and the same
+/// default a scoped layer's artifacts source takes, so one word means one thing across the
+/// declaration. Every other key in the map is refused: `view` is the only field this source
+/// resolves, the entity id being `entity_id_field` beside it.
+fn compile_scoped_attribute_source(
+    decl: &AttributeBlock,
+    sources: &Sources,
+    defaults: &Defaults,
+) -> Result<Option<ScopedAttributeFile>> {
+    let object = format!("attribute '{}'", decl.name);
+    let Some(name) = decl.source.as_deref() else {
+        if decl.fields.is_some() {
+            return Err(declaration_error(format!(
+                "{object}: `fields` names the view discriminator on this column's own `source` \
+                 (views §5), and there is no `source` here — the column is read from each view's \
+                 own points file, where the view is the file rather than a column of it"
+            )));
+        }
+        return Ok(None);
+    };
+    let path = sources.path(&object, name)?;
+    let entity_id = match decl.entity_id_field.as_deref() {
+        None => defaults.entity_id_field.clone(),
+        Some(field) if field.trim().is_empty() => {
+            return Err(declaration_error(format!(
+                "{object}: `entity_id_field` is empty, so it names no column. Omit it to join on \
+                 '{}', which is what this declaration spells the entity id",
+                defaults.entity_id_field
+            )))
+        }
+        Some(field) => field.to_string(),
+    };
+    let mut view_field = "view".to_string();
+    for (key, value) in decl.fields.iter().flatten() {
+        if key != "view" {
+            return Err(declaration_error(format!(
+                "{object}: `fields.{key}` is not a field of a group-scoped attribute's source, \
+                 which resolves `view` alone — the column saying which view each row's value is \
+                 for. The entity id is `entity_id_field`"
+            )));
+        }
+        if value.trim().is_empty() {
+            return Err(declaration_error(format!(
+                "{object}: `fields.view` is empty, so it names no column. Omit it to read the \
+                 discriminator from 'view'"
+            )));
+        }
+        view_field = value.clone();
+    }
+    Ok(Some(ScopedAttributeFile {
+        path,
+        entity_id,
+        view_field,
+    }))
 }
 
 fn declared_names(vocabularies: &HashMap<String, Vocabulary>) -> String {

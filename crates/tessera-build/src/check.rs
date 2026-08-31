@@ -226,6 +226,7 @@ fn open(report: &mut CheckReport, object: &str, path: &Path) -> Option<ArrowSche
 pub fn check(config: &Config) -> CheckReport {
     let mut report = CheckReport::default();
     check_attribute_sources(config, &mut report);
+    check_scoped_attribute_sources(config, &mut report);
     for view in &config.views {
         check_view(view, &mut report);
     }
@@ -318,6 +319,60 @@ fn check_attribute_sources(config: &Config, report: &mut CheckReport) {
     }
 }
 
+/// Every group-scoped attribute that declares a **source of its own** (`views.md` §5), against
+/// that file: the entity id, the value column, and the discriminator that says which view each
+/// row's value is for.
+///
+/// **The discriminator is the one field this check adds**, and it is the reason such a source is
+/// admissible at all: without it the file would be read as entity space and one arbitrary view's
+/// values would be taken as every view's. Whether the keys in it are the roster's is a per-row
+/// question the build answers when it reads them, not one a schema can.
+fn check_scoped_attribute_sources(config: &Config, report: &mut CheckReport) {
+    for scoped in &config.scoped_attributes {
+        let Some(source) = &scoped.source else {
+            continue;
+        };
+        let attribute = &scoped.attribute;
+        let object = format!("attribute '{}'", attribute.name);
+        let Some(schema) = open(report, &object, &source.path) else {
+            continue;
+        };
+        for (what, column) in [
+            ("the entity id", source.entity_id.as_str()),
+            ("the value", attribute.column()),
+            ("the view discriminator", source.view_field.as_str()),
+        ] {
+            let Some((_, field)) = schema.column_with_name(column) else {
+                report.note(
+                    &object,
+                    format!(
+                        "is scoped to view group '{}' and reads {what} from a column named \
+                         '{column}', which its `source` does not carry. Its columns are: {}",
+                        scoped.group,
+                        columns(&schema)
+                    ),
+                );
+                continue;
+            };
+            if column == attribute.column() && !column_carries(attribute, field.data_type()) {
+                report.note(
+                    &object,
+                    format!(
+                        "declared '{}'{}, and the column '{column}' holds {:?}. The width is \
+                         taken from the declaration and the data must match it",
+                        attribute.ty.arrow_type_name(),
+                        match &attribute.vocabulary {
+                            Some(v) => format!(" over vocabulary '{v}', whose keys arrive as utf8"),
+                            None => String::new(),
+                        },
+                        field.data_type()
+                    ),
+                );
+            }
+        }
+    }
+}
+
 fn check_view(view: &crate::config::View, report: &mut CheckReport) {
     let object = format!("view '{}'", view.name);
     // **The frame, before the file** — a projected view's square is a function of its declaration
@@ -400,12 +455,15 @@ fn check_view_group(config: &Config, group: &ViewGroup, report: &mut CheckReport
     // A `members` group's views are its owner's, and so are the files a column family scoped to
     // them is read from — this group's own points carry its geometry and nothing else
     // (`views.md` §3.3, §5).
+    // A family declaring its **own** `source` is not among them: its values live in that file,
+    // routed per view by the discriminator, and are checked against it in
+    // [`check_scoped_attribute_sources`].
     let scoped: Vec<&str> = match group.members.is_some() {
         true => Vec::new(),
         false => config
             .scoped_attributes
             .iter()
-            .filter(|scoped| scoped.group == group.name)
+            .filter(|scoped| scoped.group == group.name && scoped.source.is_none())
             .map(|scoped| scoped.attribute.column())
             .collect(),
     };

@@ -695,24 +695,47 @@ pub fn scoped_column_name(name: &str, view_id: &str) -> String {
 /// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
 /// `filter_operands` and resolvable by a leaf (`views.md` §5)?
 ///
-/// `index = true`, as an entity-scoped column's own licence is, **and** a family whose serving
-/// artefacts a build writes complete:
+/// `index = true`, and nothing else — every one of the four families is served, the build writing
+/// per view exactly what its entity-scoped counterpart writes bundle-wide: a value column and a
+/// presence bitmap for a number, those and a dictionary for a keyword, those and keyed postings for
+/// a category, and a token dictionary with positional postings — no value column at all — for
+/// text.
 ///
-/// - **numeric** and **keyword** are served: the build writes a value column, a presence bitmap
-///   and — for a keyword — its dictionary per view, which is the whole of what the entity route
-///   reads.
-/// - ⊘ a **category** family is stored and not served: the build writes no per-view postings, and
-///   a category is more than a filter route — `/v1/categories/{column}` derives value visibility
-///   from those postings, so publishing the operand without them would offer a client a value
-///   list no endpoint can answer.
-/// - ⊘ a **text** family is stored and not served for the same reason and more: text owes no value
-///   column at all, its route being postings over a token dictionary, and neither exists per view.
-///
-/// Both gaps are absences of an artefact rather than of a rule, and both are loud: the build
-/// prints what a scoped `index` or `render` did not buy, and a leaf naming an unserved family is
-/// the ordinary unknown-column refusal.
+/// **No `render` clause, where [`is_filterable`] has one.** A rendered entity-scoped column is
+/// filterable over the request's own rows whatever its `index`; a scoped column is in no row's
+/// tail, so that route does not exist here and `index` is the whole licence (`views.md` §5).
 pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
-    scoped.index && matches!(Family::of_scoped(scoped), Family::Numeric | Family::Keyword)
+    scoped.index
+}
+
+/// Does this scoped family's per-view column carry keyed postings — the build's
+/// `scoped_postings_are_owed`, on the manifest's own types?
+///
+/// A category's, and only a category's: the postings are what an `eq` or an `in` is answered from
+/// on a `public` vocabulary, and what `/v1/categories` derives value visibility from on a
+/// `derived` one. The two functions must agree, or the open demands a file no pass wrote — a
+/// refusal — or leaves one no reader touches.
+///
+/// **`index` is the whole condition, where an entity-scoped column's is `index` *or* a `derived`
+/// vocabulary.** The difference is that a scoped family has one licence and not two: an unindexed
+/// scoped family is on no surface at all — no operand, and no `/v1/categories` answer, since that
+/// route resolves a scoped column through the same admission the filter parse makes — so postings
+/// written for one would be read by nothing.
+pub(crate) fn scoped_owes_postings(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+    scoped.vocabulary.is_some() && scoped_is_filterable(scoped)
+}
+
+/// The `visibility` of the vocabulary a scoped category's codes index — [`visibility_of`]'s
+/// question over a family's declaration.
+pub(crate) fn scoped_visibility_of(
+    scoped: &tessera_store::manifest::ScopedScalar,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+) -> Option<Visibility> {
+    let name = scoped.vocabulary.as_deref()?;
+    vocabularies
+        .iter()
+        .find(|v| v.name == name)
+        .map(|v| v.visibility)
 }
 
 /// How a category operand is answered on one column — decided at open from the declaration alone.
@@ -1276,6 +1299,42 @@ pub(crate) fn owes_postings(
     scalar.vocabulary.is_some() && owes_value_column(scalar, vocabularies)
 }
 
+/// **The analyser that indexed a text column, not the default** — one resolution for the
+/// entity-scoped column and the group-scoped family alike, so neither can come to open with a
+/// pipeline the other would refuse.
+///
+/// A bundle records the identity its build resolved; opening with anything else would answer
+/// `match` against a token stream the index was not built from. Both failures are refusals rather
+/// than fallbacks: a text column with no recorded identity is a bundle that is not what its
+/// manifest says, and an identity this binary does not carry is terms it cannot reproduce.
+fn resolve_analyser(
+    column: &str,
+    identity: Option<&str>,
+) -> std::io::Result<Arc<tessera_analyse::Analyser>> {
+    let identity = identity.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "column '{column}' is text but the manifest records no analyser identity — the \
+                 build is what resolves one, so this bundle is not what its manifest says"
+            ),
+        )
+    })?;
+    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
+        .filter(|a| a.identity() == identity)
+        .map(Arc::new)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "column '{column}' was indexed by analyser '{identity}', which this binary \
+                     does not carry. Its terms cannot be reproduced, so every `match` over it \
+                     would answer from a different segmentation"
+                ),
+            )
+        })
+}
+
 /// The request path's two modes, and only those: `MappedSequential` is the fold's and is
 /// deliberately unreachable from here (decision 0052).
 fn request_access(mmap: bool) -> tessera_filter::Access {
@@ -1412,35 +1471,7 @@ impl FilterColumns {
                         Some(extent.dict.clone()),
                     )?);
                 }
-                // **The analyser that indexed it, not the default.** A bundle records the identity
-                // its build resolved; opening with anything else would answer `match` against a
-                // token stream the index was not built from.
-                let identity = scalar.analyser.as_deref().ok_or_else(|| {
-                    std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!(
-                            "column '{}' is text but the manifest records no analyser identity — \
-                             the build is what resolves one, so this bundle is not what its \
-                             manifest says",
-                            scalar.name
-                        ),
-                    )
-                })?;
-                let analyser =
-                    tessera_analyse::analyser(identity.split('/').next().unwrap_or_default())
-                        .filter(|a| a.identity() == identity)
-                        .map(Arc::new)
-                        .ok_or_else(|| {
-                            std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                format!(
-                            "column '{}' was indexed by analyser '{identity}', which this binary \
-                             does not carry. Its terms cannot be reproduced, so every `match` over \
-                             it would answer from a different segmentation",
-                            scalar.name
-                        ),
-                            )
-                        })?;
+                let analyser = Some(resolve_analyser(&scalar.name, scalar.analyser.as_deref())?);
                 columns.insert(
                     scalar.name.clone(),
                     Layers {
@@ -1449,7 +1480,7 @@ impl FilterColumns {
                         covered: Bitmap::new(),
                         filterable: true,
                         postings: None,
-                        analyser: Some(analyser),
+                        analyser,
                         text: text_layers,
                         route: Route::Postings,
                         family,
@@ -1523,6 +1554,14 @@ impl FilterColumns {
                 continue;
             }
             let scoped_family = Family::of_scoped(family);
+            // The analyser a text family's terms were produced by, resolved once for the family
+            // rather than per view: every column of a family was indexed by one declaration, and
+            // an analyser this binary does not carry is the same refusal an entity-scoped text
+            // column's is — a `match` answered from a different segmentation is a wrong answer
+            // wearing a correct one's clothes.
+            let analyser = (scoped_family == Family::Text)
+                .then(|| resolve_analyser(&family.name, family.analyser.as_deref()))
+                .transpose()?;
             for view_id in &family.views {
                 // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the
                 // one place a view id becomes a path, so the opener cannot drift from the writer.
@@ -1530,11 +1569,6 @@ impl FilterColumns {
                 for component in tessera_store::view_path_components(view_id) {
                     dir.push(component);
                 }
-                let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
-                let dict = (scoped_family == Family::Keyword)
-                    .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
-                    .transpose()?;
-                let covered = base.present();
                 let name = scoped_column_name(&family.name, view_id);
                 placements.insert(
                     name.clone(),
@@ -1547,16 +1581,68 @@ impl FilterColumns {
                         family: scoped_family,
                     },
                 );
+                // **No position in `declared_scalars`, because it is not one of them.** The tag is
+                // the record blob's field key and a scoped column is never blob-resident — it has
+                // an entity-space home by construction, which is the condition `blob_resident` is
+                // the negation of. The sentinel is what a reader would see if that ever stopped
+                // being true, rather than another column's field.
+                let declared_index = usize::MAX;
+                // **Text opens with no value column at all**, per view exactly as bundle-wide: its
+                // artefacts are the token dictionary and the positional postings over it. One
+                // layer and only one — the base build's — because no flush writes a scoped
+                // extent (`views.md` §5's ingest marker), so there is nothing to append.
+                if scoped_family == Family::Text {
+                    let text = vec![text_layer(
+                        SortedDict::open_dir(&dir, request_access(mmap))?,
+                        ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
+                        &name,
+                        "base",
+                        // The base writes no presence file of its own, here for the same reason
+                        // the entity-scoped base writes none: see `TextLayer::present`.
+                        Bitmap::new(),
+                        None,
+                    )?];
+                    columns.insert(
+                        name,
+                        Layers {
+                            declared_index,
+                            layers: Vec::new(),
+                            covered: Bitmap::new(),
+                            filterable: true,
+                            postings: None,
+                            analyser: analyser.clone(),
+                            text,
+                            route: Route::Postings,
+                            family: scoped_family,
+                        },
+                    );
+                    continue;
+                }
+                let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
+                let dict = (scoped_family == Family::Keyword)
+                    .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
+                    .transpose()?;
+                let covered = base.present();
+                // A category's keyed postings, in this view's own directory — opened on the
+                // declaration rather than probed for, the rule every open here keeps.
+                let postings = scoped_owes_postings(family)
+                    .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
+                    .transpose()?;
+                // The same routing the entity-scoped family takes, and for decision 0063's reason
+                // rather than a tuning one: a `derived` vocabulary's postings answer *membership*
+                // and must not answer the filter, whose work would then be a function of the value
+                // named.
+                let route = if postings.is_some()
+                    && scoped_visibility_of(family, vocabularies) == Some(Visibility::Public)
+                {
+                    Route::Postings
+                } else {
+                    Route::Scan
+                };
                 columns.insert(
                     name,
                     Layers {
-                        // **No position in `declared_scalars`, because it is not one of them.**
-                        // The tag is the record blob's field key and a scoped column is never
-                        // blob-resident — it has an entity-space home by construction, which is
-                        // the condition `blob_resident` is the negation of. The sentinel is what a
-                        // reader would see if that ever stopped being true, rather than another
-                        // column's field.
-                        declared_index: usize::MAX,
+                        declared_index,
                         layers: vec![Layer {
                             values_rel: None,
                             values: base,
@@ -1564,13 +1650,10 @@ impl FilterColumns {
                         }],
                         covered,
                         filterable: true,
-                        // ⊘ No per-view postings are written, so the scan is the only route — which
-                        // is why a category family is not served at all rather than served by
-                        // scan: see [`scoped_is_filterable`].
-                        postings: None,
+                        postings,
                         analyser: None,
                         text: Vec::new(),
-                        route: Route::Scan,
+                        route,
                         family: scoped_family,
                     },
                 );

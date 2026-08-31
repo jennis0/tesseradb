@@ -2151,13 +2151,19 @@ fn read_one_attribute_source(
 /// **The family's record is `MANIFEST.groups[..].scoped_scalars`** (contracts §2.2), written from
 /// [`BuildArgs::scoped_attributes`] beside these files: `MANIFEST.declared_scalars` is one flat
 /// bundle-wide list with no slot for a family, so the group — which is what a pin resolves
-/// against — is where the declaration is recorded. A numeric or keyword family is a filter operand
-/// from there, one column per view, resolved by the request's view or by a pinned leaf.
+/// against — is where the declaration is recorded. Every family is a filter operand from there,
+/// one column per view, resolved by the request's view or by a pinned leaf.
 ///
-/// ⊘ **A category or text family is written and served from nowhere**, its per-view postings being
-/// unwritten, and ⊘ **`render` buys nothing for any scoped family** — the hot column is per row
-/// space and a scoped column is in none of them. Both are printed at the build, where an operator
-/// can still act on them.
+/// **What each family owes per view is what its entity-scoped counterpart owes bundle-wide**: a
+/// numeric or keyword column owes values, presence and — for a keyword — its dictionary; a
+/// **category** owes those and the keyed per-value postings a filter and `/v1/categories`' value
+/// list are both answered from; a **text** column owes no value column at all and owes instead a
+/// token dictionary and the positional postings over it. One writer per family, the same one the
+/// entity-scoped pass calls, pointed at this view's directory.
+///
+/// ⊘ **`render` buys nothing for any scoped family** — the hot column is per row space and a
+/// scoped column is in none of them — and it is printed at the build, where an operator can still
+/// act on it.
 #[allow(clippy::too_many_arguments)]
 fn write_scoped_columns(
     args: &BuildArgs,
@@ -2169,26 +2175,15 @@ fn write_scoped_columns(
     scratch: &crate::column::ColumnScratch,
 ) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
+    // The text pass's budget, derived once for the build rather than per column, exactly as the
+    // entity-scoped pass derives it: the plan bounds the transient a tokenise holds, and it is a
+    // function of the machine and the entity space rather than of which column is being indexed.
+    let text_plan = TextIndexPlan::for_budget(
+        args.memory_budget.unwrap_or_else(detect_memory_budget),
+        n as usize,
+    );
     for family in &args.scoped_attributes {
         let attribute = &family.attribute;
-        // ⊘ Said at the build rather than left to the design's marker: a declaration that asked
-        // for a placement and got less than it asked for is a gap an operator should hear about
-        // where they can still act on it. **What `index` buys now depends on the family**: a
-        // numeric or keyword family is on the filter surface, one column per view, resolved by
-        // the request's view or by a pin (`views.md` §5); a category owes per-view postings that
-        // no pass writes, and a text column owes a per-view dictionary and postings, so neither
-        // is published as an operand at all.
-        if attribute.index && !served_scope(attribute) {
-            eprintln!(
-                "attribute '{}': ⊘ `index` on a `{}`-family attribute scoped to group '{}' has \
-                 nothing to act on — the per-view postings a {} column is answered from are not \
-                 written, so the family is stored and is on no filter surface (views §5)",
-                attribute.name,
-                scope_family(attribute),
-                family.group,
-                scope_family(attribute),
-            );
-        }
         // ⊘ `render` is unbuilt for every scoped family, whatever its type: the hot column is per
         // row space and a scoped column is in no row's tail, so there is nothing for a rendered
         // value to occupy. Said every time rather than once, because the declaration is what asked.
@@ -2204,7 +2199,7 @@ fn write_scoped_columns(
             let view = &args.views[index];
             let column = read_scoped_column(
                 args,
-                attribute,
+                family,
                 view,
                 n,
                 source_ids,
@@ -2219,6 +2214,28 @@ fn write_scoped_columns(
                 column_dir.push(component);
             }
             std::fs::create_dir_all(&column_dir).map_err(|e| BuildError::io(&column_dir, e))?;
+            // **A text column has no value column**, per view exactly as bundle-wide: its
+            // entity-space artefacts are the token dictionary and the postings over it, and there
+            // is no per-entity slot for a scan to read. It leaves before the value column below is
+            // written rather than writing one nothing opens.
+            //
+            // ⊘ Its prose has **no blob row per view**, which is the one thing the entity-scoped
+            // family has that this one does not: the record blob is bundle-wide and addressed by a
+            // column's position in `declared_scalars`, which a family has none of. So a scoped
+            // text column answers `match` and is returned by no drill-down — the same restriction
+            // `render` has here, and for the same reason.
+            if attribute.ty == ScalarType::Text {
+                // `index = false` is refused at the declaration for exactly this reason — with no
+                // blob row and no index the prose would have no home at all — so the guard here is
+                // against a `Schema` built programmatically rather than parsed.
+                if attribute.index {
+                    let written =
+                        write_text_index(&column_dir, attribute, &column.values, text_plan)?;
+                    paths.extend(written.paths);
+                }
+                report_scoped_coverage(attribute, view, column.present, n);
+                continue;
+            }
             let values_path = column_dir.join("values.arrow");
             let presence_path = column_dir.join("presence.roaring");
             let written = write_column_values(
@@ -2238,47 +2255,72 @@ fn write_scoped_columns(
                 fsync_file(&presence_path)?;
                 paths.push(presence_path);
             }
-            // Printed per column of the family, where an entity-scoped column's coverage is
-            // printed: a scoped column covers the view's own rows, so *fewer than the corpus* is
-            // its ordinary state rather than a symptom.
-            eprintln!(
-                "attribute '{}' in view '{}': {} of {} entities have a value",
-                attribute.name,
-                view.view_id,
-                crate::thousands(column.present),
-                crate::thousands(n)
-            );
+            // **A category's postings, per view** — the same keyed file the entity-scoped pass
+            // writes, in this view's own directory, and owed on the same predicate: an indexed
+            // category is answered from them, and a `derived` vocabulary's membership is derived
+            // from them whatever `index` says (`filter-index.md` §2.3). Written after the values,
+            // which are the artefact of record, so a build interrupted between the two leaves the
+            // record without its accelerator rather than the reverse.
+            if scoped_postings_are_owed(attribute) {
+                let path = column_dir.join("postings.arrow");
+                write_category_postings(
+                    &path,
+                    &attribute.name,
+                    &column.values,
+                    POSTINGS_BAND_ROWS,
+                )?;
+                fsync_file(&path)?;
+                paths.push(path);
+            }
+            report_scoped_coverage(attribute, view, column.present, n);
         }
     }
     Ok(paths)
 }
 
-/// Is this scoped attribute's **family** one the filter surface serves — the family half of the
-/// engine's `filter::scoped_is_filterable`, over the build's own types. (The other half is
-/// `index`, which the caller has already read.)
+/// Does this view's column of a scoped **category** family owe its keyed postings?
 ///
-/// The two must agree: a family this says is served and the engine does not would be a column
-/// written for a surface that never publishes it, and the reverse would be an operand published
-/// over artefacts no pass wrote.
-fn served_scope(attribute: &crate::config::Attribute) -> bool {
-    // Numeric and keyword: a value column, a presence bitmap and — for a keyword — its
-    // dictionary, which is the whole of what the entity route reads. A category owes per-view
-    // postings and `/v1/categories` owes a value list derived from them; a text column owes a
-    // per-view dictionary and postings and no value column at all. Neither is written.
-    attribute.vocabulary.is_none() && attribute.ty != ScalarType::Text
+/// [`postings_are_owed`]'s question, asked of a family: the postings are what an `eq` or an `in`
+/// is answered from on a `public` vocabulary, and what `/v1/categories` derives value visibility
+/// from on a `derived` one. Non-categories owe none — a number's values are near-unique and a
+/// keyword's are a dictionary, so for either a posting per value is a second copy of the column
+/// (this module's [`write_filter_postings`]).
+///
+/// **`index` is the whole condition**, where the entity-scoped rule is `index` *or* a `derived`
+/// vocabulary: an unindexed scoped family is on no surface at all, so postings written for one
+/// would be read by nothing. It must agree with the engine's `filter::scoped_owes_postings`, or
+/// the open demands a file no pass wrote.
+fn scoped_postings_are_owed(attribute: &crate::config::Attribute) -> bool {
+    attribute.vocabulary.is_some() && attribute.index
 }
 
-/// The family name the message above uses — the engine's own spellings.
-fn scope_family(attribute: &crate::config::Attribute) -> &'static str {
-    if attribute.vocabulary.is_some() {
-        "category"
-    } else if attribute.ty == ScalarType::Text {
-        "text"
-    } else if attribute.ty == ScalarType::Keyword {
-        "keyword"
-    } else {
-        "numeric"
-    }
+/// Printed per column of the family, where an entity-scoped column's coverage is printed: a scoped
+/// column covers the view's own rows, so *fewer than the corpus* is its ordinary state rather than
+/// a symptom.
+fn report_scoped_coverage(
+    attribute: &crate::config::Attribute,
+    view: &crate::ViewArgs,
+    present: u64,
+    n: u64,
+) {
+    eprintln!(
+        "attribute '{}' in view '{}': {} of {} entities have a value",
+        attribute.name,
+        view.view_id,
+        crate::thousands(present),
+        crate::thousands(n)
+    );
+}
+
+/// The key half of a view id — `2026-Q3` of `quarter:2026-Q3`.
+///
+/// A view of a group always carries the joined form, so the split always finds a separator; a
+/// plain view's id is returned whole, which is the answer that names nothing in a group's roster
+/// and is therefore selected by no row.
+fn key_of(view_id: &str) -> &str {
+    view_id
+        .split_once(tessera_store::GROUP_SEPARATOR)
+        .map_or(view_id, |(_, key)| key)
 }
 
 /// One view's column of a group-scoped attribute, in entity space ([`write_scoped_columns`]).
@@ -2287,7 +2329,15 @@ struct ScopedColumn {
     present: u64,
 }
 
-/// Read one view's values of a group-scoped attribute out of that view's points file.
+/// Read one view's values of a group-scoped attribute — out of that view's points file, or out of
+/// the attribute's own source under that view's key.
+///
+/// **Two files, one selector.** Where the family declares no source of its own the view's points
+/// file is the file, under the view's own selection where a form B group shares one. Where it
+/// declares one, that file carries one row per `(entity, view)` and this view's rows are the ones
+/// whose `fields.view` discriminator is this view's key — the same [`ViewSelector`] a form B
+/// roster and a scoped layer are read through, so a value naming a key the roster does not carry
+/// is the refusal that names both, and a view with no rows in the file simply has no values.
 ///
 /// The same resolution every other attribute pass makes — `source_ids` → ordinal →
 /// `entity_of_ordinal` — because entity ids are assigned in signature-sorted order (§11.1) and a
@@ -2297,7 +2347,7 @@ struct ScopedColumn {
 #[allow(clippy::too_many_arguments)]
 fn read_scoped_column(
     args: &BuildArgs,
-    attribute: &crate::config::Attribute,
+    family: &crate::ScopedColumnFamily,
     view: &crate::ViewArgs,
     n: u64,
     source_ids: &[u64],
@@ -2305,6 +2355,37 @@ fn read_scoped_column(
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
 ) -> Result<ScopedColumn> {
+    let attribute = &family.attribute;
+    // Which file, and which of its rows. The keys a stray discriminator is refused against are the
+    // family's own views' — the group's roster, by construction — derived here rather than carried
+    // beside the source, so the two cannot come to disagree.
+    let own_source = family.source.as_ref().map(|source| {
+        let mut keys: Vec<String> = family
+            .views
+            .iter()
+            .map(|&index| key_of(&args.views[index].view_id).to_string())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        let select = crate::config::ViewSelector {
+            column: source.view_field.clone(),
+            value: key_of(&view.view_id).to_string(),
+            keys,
+            view_id: view.view_id.clone(),
+        };
+        let fields = crate::config::Fields::moved(
+            format!("attribute '{}'", attribute.name),
+            [(
+                crate::config::ENTITY_ID.to_string(),
+                source.entity_id.clone(),
+            )],
+        );
+        (source.path.clone(), fields, select)
+    });
+    let (points, point_fields, select) = match &own_source {
+        Some((path, fields, select)) => (path, fields, Some(select)),
+        None => (&view.points, &view.point_fields, view.select.as_ref()),
+    };
     let mut values = EntityColumn::filled(scratch, attribute.ty, n as usize)?;
     let columns = [attribute];
     let staged_rows = staging_rows(&columns, n).max(input::ATTRIBUTE_BATCH_ROWS);
@@ -2335,12 +2416,12 @@ fn read_scoped_column(
         Ok(())
     };
     input::scan_attributes(
-        &view.points,
-        &view.point_fields,
+        points,
+        point_fields,
         &columns,
         minters,
         args.limit,
-        view.select.as_ref(),
+        select,
         |batch| {
             if !chunk.is_empty() && chunk.len() + batch.rows.len() > staged_rows {
                 flush(&mut chunk, &mut staged, &mut values, &mut present)?;
@@ -3791,6 +3872,14 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
         ScalarValue::U8(c) => Ok(*c as u32),
         ScalarValue::U16(c) => Ok(*c as u32),
         ScalarValue::U32(c) => Ok(*c),
+        // **An entity the column never reached is absent, which for this family is code 0.** The
+        // presence bitmap is what a partially covered column spells absence with, and a category's
+        // absence is the reserved code out of the value space (decision 0064,
+        // `per-point-attributes.md` §3.6) — so the two spellings meet here, and both mean *no
+        // posting and no value*. Reached by every column of a group-scoped family, where covering
+        // fewer than every entity is the ordinary state rather than a symptom: a view holds its own
+        // rows (`views.md` §5).
+        ScalarValue::Null => Ok(tessera_store::vocabulary::ABSENT_CODE),
         other => Err(BuildError::Invalid(format!(
             "attribute '{column}' is declared for filtering but carries {other:?}, which is not a \
              category code"
