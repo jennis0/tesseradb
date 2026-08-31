@@ -2352,13 +2352,20 @@ fn the_dead_bytes_route_dispatches_a_fold_on_a_bundle_with_nothing_deleted() {
             window_min_segments: 0,
             max_segments: None,
             after_deletions: None,
-            // **5%, not compaction §9's default of 1.0, and the number is not the subject.** The
+            // **3%, not compaction §9's default of 1.0, and the number is not the subject.** The
             // default means "paying double for storage", which is the measured no-compaction steady
             // state of a *running* deployment (2.0–2.6×) and takes more churn to reach than a test
             // should spend. What this case asserts is the route: a bundle with orphaned bytes and
             // nothing deleted folds, and one without does not.
+            //
+            // **It was 5% until the permutation was paged.** A present page is 2¹⁶ slots whatever
+            // the view's population, so every view of a fixture this small now carries a 256 KiB
+            // `permutation.bin` — live bytes, in the ratio's denominator, against a few thousand
+            // orphaned by the merge. The measured ratio fell to 0.048 and the route stopped
+            // firing. The floor asserted just below is what the threshold has to clear, and it is
+            // still two orders of magnitude away.
             tombstoned_rows_fraction: None,
-            dead_bytes_ratio: Some(0.05),
+            dead_bytes_ratio: Some(0.03),
         }),
     );
 

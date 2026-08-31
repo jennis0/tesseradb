@@ -848,11 +848,13 @@ fn open_bundle_rejects_a_permutation_slot_pointing_past_row_count() {
         .join("v00000/partitions/default/views/main/permutation.bin");
     let mut bytes = fs::read(&perm_path).expect("read permutation.bin");
 
-    // Header is 16 bytes (magic + version + reserved + bound); slot 0 starts right after.
-    // Overwrite it with a row index far past this segment's row_count (60) — still a
-    // structurally valid `u32`, not the sentinel, just out of range.
+    // The bound is 60, so the file holds one page and the payload starts at the first 4 KiB
+    // boundary past the 24-byte header and its one-entry directory
+    // (`tessera_store::permutation`). Overwrite entity 0's slot with a row index far past this
+    // segment's row_count (60) — still a structurally valid `u32`, not the sentinel, just out of
+    // range.
     let corrupt_slot = 9_999u32.to_le_bytes();
-    bytes[16..20].copy_from_slice(&corrupt_slot);
+    bytes[4096..4100].copy_from_slice(&corrupt_slot);
     fs::write(&perm_path, &bytes).expect("rewrite corrupted permutation.bin");
 
     // Recompute the digest so this reaches content validation (`Permutation::validate_rows`)

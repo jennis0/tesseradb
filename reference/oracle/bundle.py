@@ -25,8 +25,15 @@ from . import identity as identity_mod
 from . import morton as morton_mod
 
 PERMUTATION_MAGIC = b"TSPM"
-PERMUTATION_VERSION = 1
+# Version 2 is the two-level paged form (contracts 2.6); version 1 was the flat array it
+# replaced, and this reader refuses that on the version field alone.
+PERMUTATION_VERSION = 2
 PERMUTATION_ABSENT = 0xFFFF_FFFF
+PERMUTATION_PAGE_SHIFT = 16
+PERMUTATION_PAGE_ENTRIES = 1 << PERMUTATION_PAGE_SHIFT
+PERMUTATION_PAGE_ABSENT = 0xFFFF_FFFF
+PERMUTATION_HEADER_LEN = 24
+PERMUTATION_PAGE_ALIGN = 4096
 
 # Finding 6 (task-5 review): an absent MANIFEST `identity` object is, per the memo, "a
 # typed reader error, not a default... it does not acquire a minted key, a zero key or a
@@ -258,15 +265,71 @@ def _compact64(code: np.ndarray) -> np.ndarray:
 
 @dataclass
 class Permutation:
-    """`permutation.bin`: entity id -> row id (or absent), for one view's single segment."""
+    """`permutation.bin`: entity id -> row id (or absent), for one view's single segment.
+
+    The **two-level paged** form (contracts 2.6): a directory over pages of 2**16 consecutive
+    entity ids, an absent page meaning every entity in it has no row. A dense view has every
+    page present and is the flat array of earlier revisions; a sparse one -- a group's view
+    holding a fraction of entity space -- stores only the pages it lands in.
+
+    This is the second reader of the format, and it is deliberately not a port of the engine's:
+    it decodes the directory itself and refuses a non-canonical one, so a producer that wrote
+    the pages in some other order would fail here rather than round-trip through one reader's
+    assumptions.
+    """
 
     bound: int
-    slots: np.ndarray  # uint32, length == bound; PERMUTATION_ABSENT where entity has no row
+    directory: np.ndarray  # uint32, one entry per page: payload slot or PERMUTATION_PAGE_ABSENT
+    pages: np.ndarray  # uint32, (present_count, 2**16), in slot order
+
+    @classmethod
+    def from_slots(cls, slots: np.ndarray | list[int]) -> "Permutation":
+        """A permutation over `[0, len(slots))` from a flat entity->row array.
+
+        For callers that hold the mapping the flat way -- tests, and anything reasoning about
+        small bounds. The paging is a storage property, so building one this way is not a
+        second encoding: it produces exactly the pages the file would carry.
+        """
+        flat = np.asarray(slots, dtype="<u4")
+        bound = int(len(flat))
+        page_count = -(-bound // PERMUTATION_PAGE_ENTRIES)
+        padded = np.full(page_count * PERMUTATION_PAGE_ENTRIES, PERMUTATION_ABSENT, dtype="<u4")
+        padded[:bound] = flat
+        by_page = padded.reshape(page_count, PERMUTATION_PAGE_ENTRIES)
+        present = [p for p in range(page_count) if (by_page[p] != PERMUTATION_ABSENT).any()]
+        directory = np.full(page_count, PERMUTATION_PAGE_ABSENT, dtype="<u4")
+        for slot, page in enumerate(present):
+            directory[page] = slot
+        pages = (
+            by_page[present]
+            if present
+            else np.zeros((0, PERMUTATION_PAGE_ENTRIES), dtype="<u4")
+        )
+        return cls(bound=bound, directory=directory, pages=pages)
+
+    def page_of(self, page: int) -> np.ndarray | None:
+        """The 2**16 slots of `page`, or None where the page is absent."""
+        if page >= len(self.directory):
+            return None
+        slot = int(self.directory[page])
+        return None if slot == PERMUTATION_PAGE_ABSENT else self.pages[slot]
+
+    def present_pages(self) -> list[tuple[int, np.ndarray]]:
+        """Every present page as `(first entity id, slots)`, ascending."""
+        out = []
+        for page in range(len(self.directory)):
+            slots = self.page_of(page)
+            if slots is not None:
+                out.append((page * PERMUTATION_PAGE_ENTRIES, slots))
+        return out
 
     def row_of(self, entity_id: int) -> int | None:
         if entity_id >= self.bound:
             return None
-        row = int(self.slots[entity_id])
+        slots = self.page_of(entity_id >> PERMUTATION_PAGE_SHIFT)
+        if slots is None:
+            return None
+        row = int(slots[entity_id & (PERMUTATION_PAGE_ENTRIES - 1)])
         return None if row == PERMUTATION_ABSENT else row
 
 
@@ -823,15 +886,47 @@ def row_order_from_geometry(
 
 
 def _read_permutation(path: Path) -> Permutation:
+    """Decode the paged `permutation.bin`, refusing anything non-canonical.
+
+    The canonical encoding is what makes the file a function of the mapping: slots number
+    `0..present_count` in ascending page order. A permuted directory would serve every page
+    under some other page's rows -- every lookup wrong, none out of range -- so it is checked
+    here rather than trusted, exactly as the engine's reader checks it.
+    """
     data = path.read_bytes()
     if data[0:4] != PERMUTATION_MAGIC:
         raise ValueError(f"{path}: bad permutation magic {data[0:4]!r}")
     (version,) = struct.unpack_from("<H", data, 4)
     if version != PERMUTATION_VERSION:
         raise ValueError(f"{path}: unsupported permutation version {version}")
+    (page_shift,) = struct.unpack_from("<H", data, 6)
+    if page_shift != PERMUTATION_PAGE_SHIFT:
+        raise ValueError(f"{path}: page shift {page_shift}, expected {PERMUTATION_PAGE_SHIFT}")
     (bound,) = struct.unpack_from("<Q", data, 8)
-    slots = np.frombuffer(data, dtype="<u4", count=bound, offset=16)
-    return Permutation(bound=bound, slots=slots)
+    (page_count,) = struct.unpack_from("<I", data, 16)
+    (present_count,) = struct.unpack_from("<I", data, 20)
+    if page_count != -(-bound // PERMUTATION_PAGE_ENTRIES):
+        raise ValueError(f"{path}: {page_count} pages do not cover bound {bound}")
+    directory = np.frombuffer(
+        data, dtype="<u4", count=page_count, offset=PERMUTATION_HEADER_LEN
+    )
+    named = [int(s) for s in directory if int(s) != PERMUTATION_PAGE_ABSENT]
+    if named != list(range(present_count)):
+        raise ValueError(
+            f"{path}: the directory is not canonical -- slots must ascend with page index and "
+            f"number 0..{present_count}"
+        )
+    directory_end = PERMUTATION_HEADER_LEN + page_count * 4
+    payload = -(-directory_end // PERMUTATION_PAGE_ALIGN) * PERMUTATION_PAGE_ALIGN
+    if any(data[directory_end:payload]):
+        raise ValueError(f"{path}: the padding before the payload is not zero")
+    expected = payload + present_count * PERMUTATION_PAGE_ENTRIES * 4
+    if len(data) != expected:
+        raise ValueError(f"{path}: file is {len(data)} bytes, expected {expected}")
+    pages = np.frombuffer(
+        data, dtype="<u4", count=present_count * PERMUTATION_PAGE_ENTRIES, offset=payload
+    ).reshape(present_count, PERMUTATION_PAGE_ENTRIES)
+    return Permutation(bound=bound, directory=directory, pages=pages)
 
 
 def _entity_of_rows(perm: Permutation, rows: np.ndarray) -> dict[int, int]:
@@ -840,26 +935,23 @@ def _entity_of_rows(perm: Permutation, rows: np.ndarray) -> dict[int, int]:
     Contracts r6 removed the entity_id column from `columns.arrow`; the permutation is the
     only key-independent artefact relating the two spaces (§5.1, I4). Computed for the rows
     asked about rather than materialised whole: a full inversion at 10^9 needs ~17-20 GB
-    transient (brief), so the scan over `perm.slots` is chunked in views of 2**24 and only
-    entries landing in `rows` are collected.
+    transient (brief), so the scan runs a page at a time -- 2**16 entities, which is the unit
+    the file already stores -- and only entries landing in `rows` are collected. An absent page
+    is not scanned at all, so a sparse view costs its population rather than its bound.
     """
     wanted = np.asarray(rows, dtype=np.uint32)
     remaining = set(int(r) for r in wanted)
     result: dict[int, int] = {}
-    chunk = 1 << 24
-    bound = perm.bound
-    for start in range(0, bound, chunk):
+    for base, window in perm.present_pages():
         if not remaining:
             break
-        end = min(start + chunk, bound)
-        window = perm.slots[start:end]
         matches = np.isin(window, wanted)
         if not matches.any():
             continue
         for offset in np.nonzero(matches)[0]:
             row_val = int(window[offset])
             if row_val in remaining:
-                result[row_val] = start + int(offset)
+                result[row_val] = base + int(offset)
                 remaining.discard(row_val)
     return result
 

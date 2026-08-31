@@ -1,6 +1,6 @@
 # Tessera — Architecture Design
 
-**Status:** Draft for review — revision 51
+**Status:** Draft for review — revision 52
 **Scope:** A service providing per-viewer access-controlled storage, indexing, filtering and level-of-detail retrieval for a large set of 2D-projected points with attached cluster structure and labels. Appendix E gives a reference authorisation plugin; Appendix F sketches a prospective valid-time extension; Appendix H states the general framing and its boundary; revision history is in Appendix G.
 
 **Specified versus implemented.** This document specifies a target, and parts of that target are not built. Every such claim carries a **⊘ Specified, not implemented** marker at the point it is made, saying what exists instead and what a reader must not assume meanwhile; the full set is tabulated in the generated `docs/design/inventory.md`. A marker's absence is a claim that the machinery exists.
@@ -210,7 +210,7 @@ The key must therefore never leave the server on any plane: no API response, no 
 
 Every item has a permanent **entity ID**, stable across temporal views and rebuilds, never reused (**I9**), and never exposed (**I10**). All permission data is expressed in this space. IDs are allocated in append-only batches; the order *within* a batch is a free choice and §11.1 spends it deliberately.
 
-Each temporal view separately assigns **row IDs** by Morton rank (§5.2). A view stores a `u32` permutation array mapping entity ID to row ID, sized by maximum live entity ID rather than item count, with a sentinel for absent entities. With deletions and append-only IDs the gap between maximum live entity ID and item count grows, which is the exhaustion concern in §16.
+Each temporal view separately assigns **row IDs** by Morton rank (§5.2). A view stores a `u32` permutation mapping entity ID to row ID, bounded by maximum live entity ID rather than item count, with a sentinel for absent entities. With deletions and append-only IDs the gap between maximum live entity ID and item count grows, which is the exhaustion concern in §16. **The array is paged** *(r52; `views.md` §8's owner ruling of 2026-08-30, contracts §2.6 for the bytes)*: a directory over pages of 2¹⁶ consecutive entity IDs, an absent page meaning every entity in it has no row, so a view stores the pages it occupies rather than the whole of entity space. That is the representation for **every** view, a dense one being the degenerate case with every page present; it matters because views multiply — a group of forty over one entity space was forty full-width arrays, each mostly sentinel.
 
 **Row→entity is stored as well, and only because one path needs it per row.** It is derivable without a file — it is the inverse of the keyed bijection at the row, a pure function of the `tessera_id` that `columns.arrow` already carries (contracts §2.6, §0.3 deviations 2 and 6) — and for a single item that is what happens, `/v1/items` inverting one identifier and touching nothing else. A **filtered viewport** asks the same question of every row it is about to draw, where the bijection's four rounds cost *measured* ~17.5 ns each and dominate everything around them. `row-entity.u32` answers it in a mapped read instead: a `u32` per row, dense because every row has an entity, 4 bytes per row per *view* and shared across every filter column, since it is a property of the view's geometry rather than of any attribute. [Decision 0065](../decisions/0065-the-inverse-permutation-is-stored-for-the-filtered-viewport.md) records the reversal; `filter-surface.md` §4 carries the measurement and the rule that decides when the file is read at all.
 
@@ -222,7 +222,7 @@ Each temporal view separately assigns **row IDs** by Morton rank (§5.2). A view
 - **The entity ordering is already spent.** §11.1 assigns entity IDs in term-signature order within each batch — measured at 8.9–36.7× on posting storage and up to 130× on union cost (r18). An ordering spent on posting contiguity cannot also be spatial rank.
 - **One index, many row spaces.** Views rank independently, and so do partitions (§12.3), while the term index exists once per partition in entity space. Collapsing the two spaces duplicates the index per view — which is what the next paragraph says this factoring prevents.
 
-Nor is this direction derivable the way the inverse is: entity→row is a function of the item's *geometry*, and no key encodes a rank. What remains genuinely open is the array's **encoding**, not its existence — it is a flat uncompressed `u32` array precisely because entity order and row order are unrelated, making the values maximum-entropy; a signature-major row layout would make it near-monotone within groups and worth compressing (the deferred sketch is [signature-major layout](deferred-signature-major-layout.md)).
+Nor is this direction derivable the way the inverse is: entity→row is a function of the item's *geometry*, and no key encodes a rank. What remains genuinely open is the **compression** of a page's slots, not the array's existence — the values inside a page are uncompressed precisely because entity order and row order are unrelated, making them maximum-entropy; a signature-major row layout would make them near-monotone within groups and worth compressing (the deferred sketch is [signature-major layout](deferred-signature-major-layout.md)). The paging above is orthogonal to that: it removes the entity space a view does not occupy, not the entropy of the slots it does.
 
 This factoring is what stops the term index being duplicated per view. Within a partition there is exactly one index, in entity space, shared across all views; a mask fragment is built once there and permuted into a view's row space on demand.
 
@@ -1259,6 +1259,14 @@ Both were checked exhaustively against explicit quantification over all well-for
 **One consequence of the default to watch.** Under *possible*, an item with very wide uncertainty matches almost every query and becomes noise. Consider styling marks by uncertainty width, or offering the definite form as a secondary control.
 
 ## Appendix G — Revision history
+
+- **r52** — **the permutation is paged** (2026-08-31; the owner's ruling of 2026-08-30 recorded at
+  `views.md` §12, encoding at contracts §2.6 r53). §5.1's array becomes a directory over pages of
+  2¹⁶ entity IDs, an absent page meaning all-sentinel, for every view — a dense one is the
+  degenerate all-pages-present case. No invariant moves and no interface does: I4's entity→row
+  crossing is the same call, and the representation was already behind it. What changes is what a
+  **sparse** view costs, which is the multiplier a group of views introduced and which §8 of
+  `views.md` had recorded as unpaid.
 
 - **r51** — **C7's bound is stated where the fold could remove it** (2026-08-30, **owner ruling**,
   which is what licenses this edit to Appendix C; [decision

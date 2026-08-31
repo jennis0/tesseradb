@@ -277,9 +277,12 @@ made the old merge peak at a measured 4.4–4.9× its inputs. *"A second writer 
 is how two come to disagree"* (write-path §7), so the fold's pass 1 is a third **producer** and not
 a second writer, and the byte-identity of the first two is a test rather than an argument.
 
-Memory: *k* cursors plus the spool buffers. `permutation.bin` is 4 B × (max folded entity + 1) —
-4 GB at 10⁹ — and is *written through a mapping*, so it is page cache rather than RSS, exactly as
-`Permutation::load` already treats it at read.
+Memory: *k* cursors plus the spool buffers. `permutation.bin`'s scatter is 4 B × (max folded entity
++ 1) — 4 GB at 10⁹ — and is *written through a mapping*, so it is page cache rather than RSS,
+exactly as `Permutation::load` already treats it at read. **The paging of the file (contracts §2.6
+r53) does not reduce this figure**: the fold learns its entity→row pairs in Morton order and so
+cannot know which pages it will touch, so pass 1 lays out every page of the bound and compacts the
+touched ones down at the end. What shrinks is the published artifact, not the pass's footprint.
 
 ✔ **The mapped writer is built** — `tessera_store::write::PermutationWriter`, with
 `write_permutation_iter` as its sequential producer and byte-identity between the two under test

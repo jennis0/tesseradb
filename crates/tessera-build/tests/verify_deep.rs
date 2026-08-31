@@ -616,13 +616,15 @@ fn a_permutation_leaving_a_row_unclaimed_is_refused() {
     let rel = "partitions/default/views/s0/permutation.bin";
     let path = root.join("v00000").join(rel);
 
-    // `permutation.bin` is a 16-byte header (magic, version, reserved, bound) then one
-    // little-endian `u32` slot per entity (contracts R4).
-    const HEADER: usize = 16;
+    // `permutation.bin` is a 24-byte header, a `u32` per page of directory, zero padding to a
+    // 4 KiB boundary, then the present pages of 2¹⁶ slots each (contracts R4;
+    // `tessera_store::permutation`). The fixture's bound is well under one page, so entity
+    // `ORPHANED`'s slot sits at the payload's start.
+    const PAYLOAD: usize = 4096;
     const ROW_ABSENT: [u8; 4] = [0xff; 4];
     const ORPHANED: usize = 3;
     let mut bytes = fs::read(&path).unwrap();
-    let slot = HEADER + ORPHANED * 4;
+    let slot = PAYLOAD + ORPHANED * 4;
     assert_eq!(
         u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
         N_ITEMS,

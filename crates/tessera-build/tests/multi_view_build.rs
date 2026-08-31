@@ -806,3 +806,137 @@ fn a_group_scoped_attribute_is_one_column_per_view_of_the_group() {
         }
     }
 }
+
+/// **A sparse view stores the pages it occupies, not the entity space it is bounded by**
+/// (`views.md` §8; the paged `permutation.bin`, `tessera_store::permutation`).
+///
+/// The cost this test is about only exists above 2¹⁶ entities — a page covers that many
+/// consecutive ids, so every other fixture in this repository fits in one page and would show a
+/// saving of zero. So the entity space here is four pages wide and one view holds a slice of it,
+/// which is the shape a group of quarterly views has at any real scale: forty views over one
+/// entity space, each holding a fraction of it, each of them a full flat array today.
+///
+/// **The comparison is computed, not quoted.** The flat form is `16 + 4 × bound` for the same
+/// bound — the header and one `u32` per entity id — and the assertion is against that number
+/// rather than against a figure someone would have to re-derive when the bound moves.
+#[test]
+fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
+    /// A page of entity space, which is the unit the file stores.
+    const PAGE: u64 = 1 << 16;
+    /// Four pages of entity space, so that a one-page view is visibly cheaper than the bound.
+    const WIDE: u64 = 4 * PAGE;
+    /// The sparse view's population — well under a page, and given a term of its own below so
+    /// that the build's signature-sorted allocation keeps its entity ids together.
+    const SPARSE: u64 = 5_000;
+
+    let dir = tempfile::tempdir().unwrap();
+    let world_points = dir.path().join("wide-world.parquet");
+    let sparse_points = dir.path().join("wide-sparse.parquet");
+    let pairs = dir.path().join("wide-pairs.parquet");
+    write_points(&world_points, "world", 0..WIDE);
+    write_points(&sparse_points, "quarter:2026-Q2", 0..SPARSE);
+
+    // One term for the sparse view's members and another for everything else. Entity ids are
+    // assigned in **term-signature** order (architecture §11.1), so this is what makes the view's
+    // entities a contiguous block rather than a scatter across all four pages — and the scatter
+    // is the case the paging cannot help, which the assertions below would catch.
+    {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("entity_id", DataType::UInt64, false),
+            Field::new("term_id", DataType::UInt32, false),
+        ]));
+        let entities: Vec<u64> = (0..WIDE).collect();
+        let terms: Vec<u32> = entities
+            .iter()
+            .map(|&e| if e < SPARSE { 9 } else { 1 })
+            .collect();
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(UInt64Array::from(entities)),
+                Arc::new(UInt32Array::from(terms)),
+            ],
+        )
+        .unwrap();
+        let mut writer = ArrowWriter::try_new(File::create(&pairs).unwrap(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    let out = dir.path().join("bundle");
+    build(&BuildArgs {
+        views: vec![
+            view_args("world", &world_points, &pairs),
+            view_args("quarter:2026-Q2", &sparse_points, &pairs),
+        ],
+        anchor: 0,
+        groups: vec![tessera_store::manifest::GroupDescriptor {
+            name: "quarter".to_string(),
+            members_of: None,
+            views: vec![tessera_store::manifest::GroupViewDescriptor {
+                key: "2026-Q2".to_string(),
+                ordinal: 0,
+                visibility: None,
+                metadata: Default::default(),
+            }],
+        }],
+        scoped_attributes: Vec::new(),
+        attribute_sources: Vec::new(),
+        out: out.clone(),
+        limit: None,
+        identity_key: IdentityKey::from_hex(TEST_KEY_HEX).unwrap(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: 1,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: Default::default(),
+    })
+    .expect("a wide two-view build succeeds");
+
+    let bundle = open_bundle(&out).expect("the bundle opens");
+    let partition = bundle.partitions.get("default").expect("one partition");
+    let sparse = partition
+        .views
+        .get("quarter:2026-Q2")
+        .expect("the group's view");
+    let base = sparse.row_space.base();
+    assert_eq!(base.bound(), WIDE, "every view is bounded by entity space");
+    assert_eq!(base.page_count(), 4);
+    assert!(
+        base.present_pages() <= 2,
+        "5,000 entities of one signature occupy one page, or two when the block straddles a \
+         boundary — {} pages of 4",
+        base.present_pages()
+    );
+
+    let paged = std::fs::metadata(base.path())
+        .expect("stat permutation.bin")
+        .len();
+    // What the flat array this replaced would have cost at the same bound: a 16-byte header and a
+    // `u32` per entity id, present or absent.
+    let flat = 16 + 4 * WIDE;
+    assert!(
+        paged * 2 < flat,
+        "the sparse view's permutation is {paged} bytes against the flat form's {flat} — the \
+         paging must at least halve it at four pages"
+    );
+
+    // The dense view over the same entity space keeps every page, which is the degenerate case:
+    // it pays the directory and its padding and nothing else.
+    let world = partition.views.get("world").expect("the plain view");
+    assert_eq!(world.row_space.base().present_pages(), 4);
+    let dense = std::fs::metadata(world.row_space.base().path())
+        .expect("stat")
+        .len();
+    assert!(
+        dense >= flat && dense < flat + 8192,
+        "a dense view costs the flat form plus a directory: {dense} against {flat}"
+    );
+}

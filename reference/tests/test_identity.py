@@ -303,7 +303,7 @@ def test_entity_of_rows_inverts_permutation_for_touched_rows(canonical_key):
 
     # entity -> row: entity 0 has no row (absent), entities 1..5 map to rows 4,3,2,1,0.
     slots = [PERMUTATION_ABSENT, 4, 3, 2, 1, 0]
-    perm = Permutation(bound=len(slots), slots=__import__("numpy").array(slots, dtype="<u4"))
+    perm = Permutation.from_slots(slots)
 
     rows = __import__("numpy").array([0, 1, 2, 3, 4], dtype=__import__("numpy").uint32)
     got = _entity_of_rows(perm, rows)
