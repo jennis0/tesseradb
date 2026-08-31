@@ -316,23 +316,17 @@ impl EntityTerms {
         })
     }
 
-    /// Does this layer hold a list for `entity`?
-    pub fn holds(&self, entity: u32) -> bool {
-        self.hasrow.contains(entity)
-    }
-
-    /// How many entities this layer holds a list for.
+    /// How many entities this layer holds a list for — what the writer put in it, read back.
+    ///
+    /// The one caller is this module's own round-trip test, which is the point: nothing on a
+    /// request path asks a layer its size, and a method that existed for a *reader* would be an
+    /// affordance for the corpus-sized question this artefact deliberately does not answer.
     pub fn len(&self) -> u64 {
         self.hasrow.cardinality()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
-    }
-
-    /// The entities this layer holds, for a fold's merge.
-    pub fn entities(&self) -> impl Iterator<Item = u32> + '_ {
-        self.hasrow.iter()
     }
 
     /// `entity`'s term ordinals, ascending, or `None` where this layer holds no list for it.
@@ -370,10 +364,6 @@ impl EntityTerms {
         ))
     }
 
-    /// This layer's directory, for a caller assembling an error.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
 }
 
 /// The base layer plus every flush extent, probed as one.

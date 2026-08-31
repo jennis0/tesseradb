@@ -1394,6 +1394,8 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         }
     }
 
+    record("4a attributes", &mut cost, &mut mark);
+
     // ---- pass 4c — the entity→term transpose ---------------------------------------------------
     //
     // The same shape as the record blob's fold and the same retention: base plus every snapshot
@@ -1474,7 +1476,11 @@ pub(crate) fn execute(plan: FoldPlan, ctx: FoldContext) -> Result<CompletedFold,
         }
     }
 
-    record("4a attributes", &mut cost, &mut mark);
+    // **Its own line, because it is its own pass.** The bytes above join `attr_read`/`attr_written`
+    // — the fold's streamed-IO total covers every entity-space artefact it rewrites, and the
+    // transpose is one — but the *time and resident bytes* are the staircase's business, and a
+    // pass folded into its neighbour's row is a pass an operator reading the report cannot see.
+    record("4c entity terms", &mut cost, &mut mark);
 
     // ---- pass 4b — the dictionary --------------------------------------------------------------
     //

@@ -2618,19 +2618,38 @@ impl Engine {
     /// and leaves the comparison unavailable exactly as an empty buffer does. `Some(vec![])` is a
     /// real answer: an item may legitimately carry no label.
     ///
-    /// **A malformed layer is `None`, not a wrong answer.** The transpose refuses a bad offset pair
-    /// rather than truncating (`tessera_store::entity_terms`), and this is a *report*, not an
-    /// authorisation: the join it guards is inert either way (a joining row carries no
-    /// descriptors), so a corrupt artefact loses the refusal rather than turning a batch into a
-    /// server error. The corruption surfaces on the drill-down path, which does propagate it.
+    /// **A malformed layer is `None`, not a wrong answer — and it is logged, not swallowed.** The
+    /// transpose refuses a bad offset pair rather than truncating
+    /// (`tessera_store::entity_terms`), and this is a *report*, not an authorisation: the join it
+    /// guards is inert either way (a joining row carries no descriptors), so a corrupt artefact
+    /// loses the refusal rather than turning a caller's batch into a server error. That is the
+    /// recoverable-and-discloses-nothing side of the line, where the posture is *report loudly and
+    /// let the operator decide* — so the warning below names the artefact and the entity, and the
+    /// same corruption is a hard error on the drill-down path, which propagates it.
     pub fn flushed_terms(&self, entity: EntityId) -> Option<Vec<TermId>> {
         let entity = u32::try_from(entity.raw()).ok()?;
-        let terms = self
+        let terms = match self
             .generation()
             .filter_columns
             .entity_terms()
             .terms_of(entity)
-            .ok()??;
+        {
+            Ok(terms) => terms?,
+            Err(e) => {
+                // The entity id is an internal here and stays one: this is a server log on the
+                // control plane, not a payload, and contracts §4's byte-scanner sweeps the
+                // *viewer* plane's logs. An operator chasing a corrupt transpose needs the slot.
+                tracing::warn!(
+                    entity,
+                    error = %e,
+                    "the entity->term transpose could not answer for this entity, so the join \
+                     rule's label arm has nothing to compare against and the batch is accepted \
+                     unchecked (views §4). The artefact is a build or flush defect; a fold \
+                     rewrites it."
+                );
+                return None;
+            }
+        };
         Some(terms.into_iter().map(TermId::new).collect())
     }
 
