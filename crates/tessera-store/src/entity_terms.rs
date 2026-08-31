@@ -599,6 +599,17 @@ mod tests {
         assert_eq!(grown.terms_of(7), Some(vec![4]));
     }
 
+    /// **A layer holding nothing must still open.** A flush that published only joining rows
+    /// mints no entity and writes an empty layer — three files, one of them zero bytes — and a
+    /// reader that refused it would fail the whole generation's open on a legitimate publication.
+    #[test]
+    fn an_empty_layer_opens_and_answers_nothing() {
+        let (_dir, layer) = round_trip(&[]);
+        assert_eq!(layer.len(), 0);
+        assert!(layer.is_empty());
+        assert_eq!(layer.terms_of(0), None);
+    }
+
     #[test]
     fn an_empty_stack_answers_nothing_rather_than_failing() {
         assert_eq!(EntityTermsStack::empty().terms_of(0), None);
