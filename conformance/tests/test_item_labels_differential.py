@@ -61,12 +61,23 @@ def _terms_by_entity(bundle) -> dict[int, set[int]]:
     return out
 
 
+#: The label every principal holds, added inside the trust boundary at `authorise` and therefore in
+#: every session's satisfied set whatever the credential said (design §6.1). A drill-down on an item
+#: carrying it names it for everyone, so the oracle's satisfied set is the grants **plus this** —
+#: modelled even though the mask catalogue plants it on no item, because a fixture that later does
+#: would otherwise fail this differential against a correct engine.
+PUBLIC_LABEL = "public"
+
+
 def _granted_descriptors(bundle, grants) -> dict[int, str]:
-    """`term id -> descriptor` for the descriptors this principal's credential presents.
+    """`term id -> descriptor` for what this session satisfies: the credential's own descriptors,
+    plus `public`.
 
     Resolved through the bundle's dictionary rather than computed, exactly as
     `MaskCase.dict_term_id` is and for the same reason: the interning rule is checked in one place
-    and used everywhere else.
+    and used everywhere else. `public` is resolved the same way and is **not** asserted present —
+    every build interns it first, but a bundle whose dictionary lacks it grants nobody anything
+    through it, which is the narrow direction and the one the engine takes too.
     """
     resolved = {}
     for descriptor in grants:
@@ -76,6 +87,9 @@ def _granted_descriptors(bundle, grants) -> dict[int, str]:
             "bundle disagree about what was interned"
         )
         resolved[term_id] = descriptor
+    public = bundle.term_id_of(PUBLIC_LABEL.encode("ascii"))
+    if public is not None:
+        resolved[public] = PUBLIC_LABEL
     return resolved
 
 

@@ -13,6 +13,7 @@
 
 mod common;
 
+use base64::Engine as _;
 use tempfile::TempDir;
 
 use common::*;
@@ -223,5 +224,75 @@ async fn an_invisible_item_is_still_the_identical_404() {
     assert!(
         !invisible_body.contains("label") && !invisible_body.contains('0'),
         "and the refusal names no label: {invisible_body}"
+    );
+}
+
+/// **A suppressed item is the same `404` too** — the third arm, and the one that arrives by a
+/// different route from the other two.
+///
+/// The masked arm above is decided by the fragment; this one is decided by the overlay, and the
+/// two meet in `Engine::item`'s single visibility verdict. What makes it worth its own test beside
+/// the mask is the ordering the `labels` array now depends on: the transpose is read *after* that
+/// verdict, so a suppression must take the item off this surface entire and not merely empty its
+/// labels. A response carrying a record with `labels: []` would be a suppression that had become a
+/// disclosure — the item exists, and here is what it says.
+///
+/// Every source is suppressed rather than one guessed at: the sampled ids are opaque (**I10** —
+/// nothing here inverts an identity), so "suppress the item behind *this* id" is not a thing this
+/// test can express, and suppressing all of them makes the assertion exact instead of probable.
+#[tokio::test]
+async fn a_suppressed_item_is_the_identical_404() {
+    let fx = fixture().await;
+    let token = authorise(&fx.server, &["0", "1"]).await;
+    let token = token["token"].as_str().unwrap();
+
+    // The control: visible, and served with labels, before anything is suppressed.
+    let before = post_item(&fx.server, token, fx.two_labels).await;
+    assert_eq!(before.status(), 200);
+    assert!(
+        !before.json::<serde_json::Value>().await.unwrap()["labels"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "the fixture must label this item, or the suppression below proves nothing"
+    );
+
+    let changes: Vec<serde_json::Value> = (0..N_ITEMS)
+        .map(|source| {
+            serde_json::json!({
+                "external_id": base64::engine::general_purpose::STANDARD
+                    .encode(external_id_of(source)),
+                "op": "suppress"
+            })
+        })
+        .collect();
+    let accepted = fx
+        .server
+        .client
+        .post(fx.server.control_url("/control/changes"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&changes)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), 200, "the suppressions are accepted");
+
+    // **The same session, not a fresh one.** A suppression composes in entity space and applies to
+    // every request the moment it is accepted (decision 0041), so the token that read the item a
+    // moment ago must now be refused it.
+    let suppressed = post_item(&fx.server, token, fx.two_labels).await;
+    assert_eq!(
+        suppressed.status(),
+        404,
+        "a suppressed item leaves this surface entire — it is not served with an empty `labels`"
+    );
+    let suppressed_body = suppressed.text().await.unwrap();
+
+    let unknown = post_item(&fx.server, token, 0).await;
+    assert_eq!(unknown.status(), 404);
+    assert_eq!(
+        suppressed_body,
+        unknown.text().await.unwrap(),
+        "and its 404 is byte-identical to an identifier naming nothing"
     );
 }
