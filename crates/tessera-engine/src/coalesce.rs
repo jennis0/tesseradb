@@ -1236,6 +1236,96 @@ mod tests {
     /// The two filterable columns every fixture manifest carries extents for.
     const COLUMNS: [&str; 2] = ["title", "department"];
 
+    /// One flush's extent for one **view's** column of a group-scoped family (`views.md` §5).
+    fn scoped_extent_at(partition: &str, column: &str, view: &str, flush: &str) -> AttrExtent {
+        let (group, key) = view.split_once(':').expect("a view of a group");
+        let dir = format!("partitions/{partition}/attrs/{column}/{group}/{key}/extents");
+        AttrExtent {
+            column: column.to_string(),
+            view: Some(view.to_string()),
+            values: format!("{dir}/{flush}.arrow"),
+            presence: format!("{dir}/{flush}.roaring"),
+            dict: None,
+            postings: None,
+            offsets: None,
+        }
+    }
+
+    /// **A scoped family's window is its `(column, view)`'s, not its column's** (`views.md` §5).
+    ///
+    /// A family has one column per view of its group and they share the column's *name*, so a
+    /// selection keyed on the name alone would put two views' extents in one window — and the
+    /// merge would then write one file claiming both views' entities, under one view's directory.
+    /// Every answer either view gave afterwards would be a plausible wrong one, which is why this
+    /// is asserted on the plan rather than left to the pass.
+    #[test]
+    fn a_scoped_familys_window_is_one_views_own() {
+        let (mut manifest, build_files) = manifest_with(0);
+        // Three extents per view, interleaved exactly as two views flushing in turn leave them, so
+        // a selection reading the list rather than each column's own subsequence would take one of
+        // each.
+        for i in 0..3 {
+            for view in ["quarter:2026-Q1", "quarter:2026-Q3"] {
+                let extent = scoped_extent_at(PARTITION, "mood", view, &format!("flush-{i}-1"));
+                manifest.files.insert(extent.values.clone(), digest(1024));
+                manifest.files.insert(extent.presence.clone(), digest(64));
+                manifest.attr_extents.push(extent);
+            }
+        }
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        assert_eq!(
+            plan.attrs.len(),
+            2,
+            "one window per view, not one per column"
+        );
+        for window in &plan.attrs {
+            assert_eq!(window.column, "mood");
+            let view = window
+                .view
+                .as_deref()
+                .expect("a scoped window names its view");
+            assert!(
+                window
+                    .extents
+                    .iter()
+                    .all(|e| e.view.as_deref() == Some(view)),
+                "{view}'s window holds only {view}'s extents"
+            );
+            let (group, key) = view.split_once(':').unwrap();
+            assert!(
+                window
+                    .extents
+                    .iter()
+                    .all(|e| e.values.contains(&format!("/{group}/{key}/"))),
+                "{view}'s extents live under its own directory"
+            );
+        }
+        let views: BTreeSet<&str> = plan
+            .attrs
+            .iter()
+            .filter_map(|w| w.view.as_deref())
+            .collect();
+        assert_eq!(
+            views,
+            BTreeSet::from(["quarter:2026-Q1", "quarter:2026-Q3"]),
+            "both views' columns are taken"
+        );
+    }
+
+    /// **And an entity-scoped column's window is still keyed on the column alone**, which is what
+    /// makes the pair above the identity rather than the view: a bundle with no family at all
+    /// plans exactly what it planned before the field existed.
+    #[test]
+    fn an_entity_scoped_window_names_no_view() {
+        let (manifest, build_files) = manifest_with(3);
+        let plan = plan_coalesce(PARTITION, &manifest, &build_files, policy()).expect("a plan");
+        assert!(!plan.attrs.is_empty(), "the fixture's own columns qualify");
+        assert!(
+            plan.attrs.iter().all(|w| w.view.is_none()),
+            "a declared column belongs to no view"
+        );
+    }
+
     fn attr_extent_at(partition: &str, column: &str, flush: &str) -> AttrExtent {
         let dir = format!("partitions/{partition}/attrs/{column}/extents");
         AttrExtent {

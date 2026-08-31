@@ -38,6 +38,7 @@ use tessera_build::{
     build, BuildArgs, GroupDescriptor, GroupViewDescriptor, Quantisation, ScopedColumnFamily,
     ViewArgs,
 };
+use tessera_engine::EngineConfig;
 use tessera_spatial::tiler::ScalarType;
 
 /// The analyser identity the manifest records for the text family — the same string the build
@@ -453,25 +454,44 @@ struct Served {
     /// Every term, so the mask is the whole corpus and a count is the view's population rather
     /// than a principal's slice of it.
     token: String,
-    _tmp: TempDir,
+    /// Held rather than dropped, because a restart reopens the same bundle, cache and log
+    /// ([`restart`]).
+    tmp: TempDir,
 }
 
 async fn serve() -> Served {
+    serve_with(default_engine_config()).await
+}
+
+/// The fixture built once and served under a caller-chosen configuration — the write cycle below
+/// narrows `coalesce_width` so the entity-space coalesce is reachable in a test.
+async fn serve_with(config: EngineConfig) -> Served {
     let tmp = TempDir::new().unwrap();
-    let bundle = build_families(tmp.path());
-    let server = spawn_server(
-        &bundle,
+    build_families(tmp.path());
+    open(tmp, config).await
+}
+
+/// Open a server over an existing directory: the same bundle root, cache and WAL. Passing a
+/// directory a previous [`Served`] has released is exactly the restart case.
+async fn open(tmp: TempDir, config: EngineConfig) -> Served {
+    let server = spawn_server_with_config(
+        &tmp.path().join("bundle"),
         &tmp.path().join("cache"),
         &tmp.path().join("wal.log"),
+        config,
     )
     .await;
     let auth = authorise(&server, &["0", "1"]).await;
     let token = auth["token"].as_str().unwrap().to_string();
-    Served {
-        server,
-        token,
-        _tmp: tmp,
-    }
+    Served { server, token, tmp }
+}
+
+/// Reopen the same bundle and the same WAL. The old server is dropped first so its executor
+/// releases the log.
+async fn restart(served: Served, config: EngineConfig) -> Served {
+    let Served { server, tmp, .. } = served;
+    drop(server);
+    open(tmp, config).await
 }
 
 async fn viewport(served: &Served, view: &str, filters: Option<Value>) -> reqwest::Response {
@@ -985,4 +1005,552 @@ async fn meta_publishes_every_family_with_its_scope() {
             .map(|(key, _)| format!("quarter:{key}"))
             .collect::<Vec<_>>()
     );
+}
+
+// =================================================================================================
+// The write cycle
+// =================================================================================================
+//
+// Everything above is served from artefacts the **build** wrote. What follows drives the same four
+// families through the write path end to end — ingest, flush, the entity-space coalesce, the
+// compaction fold and a restart — and asserts the same answers at every stage
+// (`views.md` §5, r24).
+//
+// The families are what make this worth its length: `mood` and `sector` are categories, so their
+// per-view columns owe keyed postings; `note` is text, so its column is a token dictionary and
+// positional postings and no value column at all; `score` is a rendered number read from its own
+// source. Each takes a different branch of the flush's writer, of the empty base a view created at
+// runtime acquires, and of the fold's per-view merge — and every one of those branches serves a
+// **value**, so the failure they have in common is a wrong answer rather than an error.
+
+/// New entities, allocated above the build's high-water, so nothing here collides with the
+/// fixture's own and every assertion below is about rows the write path made.
+const JOINED: u64 = 9_001;
+const Q3_ONLY: u64 = 9_002;
+const IN_MINTED: u64 = 9_003;
+
+/// The key created while the service runs — a view the families have **no column for** until the
+/// flush that covers it writes one.
+const MINTED_KEY: &str = "2026-Q9";
+
+/// What one ingested row carries for each of the four families under one view.
+#[derive(Clone, Copy)]
+struct Written {
+    mood: &'static str,
+    sector: &'static str,
+    word: &'static str,
+    score: f32,
+}
+
+/// `JOINED`'s values under `2026-Q1` and under `2026-Q3`: **one entity, two views, four families,
+/// and every value different**. A column read from the wrong view is then a wrong answer rather
+/// than a missing one, which is the only failure this whole surface has in common.
+const IN_Q1: Written = Written {
+    mood: "calm",
+    sector: "north",
+    word: "alpha",
+    score: 0.9,
+};
+const IN_Q3: Written = Written {
+    mood: "wild",
+    sector: "east",
+    word: "gamma",
+    score: 0.1,
+};
+/// And under the minted view, a third set again.
+const IN_Q9: Written = Written {
+    mood: "tense",
+    sector: "south",
+    word: "delta",
+    score: 0.8,
+};
+/// What the rows written only to make the coalesce eligible carry. **Deliberately inert**: `wild`
+/// is not the value the built-rows check asks `2026-Q1` for, and `zeta` is in no quarter's prose,
+/// so filling a column to its width moves no count this test reads.
+const FILLER: Written = Written {
+    mood: "wild",
+    sector: "east",
+    word: "zeta",
+    score: 0.1,
+};
+
+/// An ingest body carrying the reserved columns and all four scoped families **under their plain
+/// names** (`views.md` §5): the view comes from `x-tessera-view`, so the column is not qualified
+/// and the view decides which of each family's columns the value lands in. A category arrives as
+/// its **key**, never a code.
+fn scoped_batch(rows: &[(u64, f64, f64, Written)]) -> Vec<u8> {
+    use arrow::array::BinaryArray;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float64, false),
+        Field::new("y", DataType::Float64, false),
+        Field::new("access", DataType::Utf8, false),
+        Field::new("mood", DataType::Utf8, true),
+        Field::new("sector", DataType::Utf8, true),
+        Field::new("note", DataType::Utf8, true),
+        Field::new("score", DataType::Float32, true),
+    ]));
+    let ids: Vec<Vec<u8>> = rows.iter().map(|(e, ..)| external_id_of(*e)).collect();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter(
+                ids.iter().map(|id| Some(id.as_slice())),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|(_, x, ..)| *x),
+            )),
+            Arc::new(Float64Array::from_iter_values(
+                rows.iter().map(|(_, _, y, _)| *y),
+            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| "0"))),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(.., w)| w.mood),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(.., w)| w.sector),
+            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(
+                |(e, .., w)| format!("the {} report for entity {e}", w.word),
+            ))),
+            Arc::new(Float32Array::from_iter_values(
+                rows.iter().map(|(.., w)| w.score),
+            )),
+        ],
+    )
+    .unwrap();
+    let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    w.write(&batch).unwrap();
+    w.into_inner().unwrap()
+}
+
+/// One batch into `view`, returning the `tessera_id` of each accepted row in the batch's own order
+/// — an identifier the fold and the restart both preserve, so one handle serves every stage.
+async fn ingest_scoped(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    rows: &[(u64, f64, f64, Written)],
+) -> Vec<u64> {
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/octet-stream")
+        .body(scoped_batch(rows))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "{view} accepts the batch: {body}");
+    body["tessera_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap())
+        .collect()
+}
+
+/// Flush until the buffer is empty — a flush unit is one view, so rows in two views need two
+/// ticks.
+async fn flush(served: &Served) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        let before = served.server.state.engine.write_executor_stats().flushes;
+        let resp = served
+            .server
+            .client
+            .post(served.server.control_url("/control/flush"))
+            .bearer_auth(OPERATOR_CREDENTIAL)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+        while served.server.state.engine.write_executor_stats().flushes == before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the flush never published"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        if served.server.state.engine.buffered_items() == 0 {
+            return;
+        }
+    }
+}
+
+/// Request a compaction fold and block until it has published (`POST /control/compact`).
+async fn fold(served: &Served) {
+    let before = served.server.state.engine.write_executor_stats().folds;
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    loop {
+        let stats = served.server.state.engine.write_executor_stats();
+        assert_eq!(
+            stats.fold_failures, 0,
+            "the fold failed rather than publishing"
+        );
+        if stats.folds > before {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// The newest side-manifest of the live prefix's only partition.
+fn side_manifest(served: &Served) -> Value {
+    let root = served.tmp.path().join("bundle");
+    let current: Value =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    let partition = root
+        .join(current["prefix"].as_str().expect("CURRENT names a prefix"))
+        .join("partitions/default");
+    let newest = std::fs::read_dir(&partition)
+        .expect("the partition directory")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("SEGMENTS-"))
+        })
+        .max_by_key(|p| {
+            p.file_stem()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.trim_start_matches("SEGMENTS-").parse::<u64>().ok())
+                .unwrap_or(0)
+        })
+        .expect("a side-manifest");
+    serde_json::from_slice(&std::fs::read(newest).unwrap()).unwrap()
+}
+
+/// Every answer the write path owes, at one stage of it.
+///
+/// **Positive and negative on the same row, per family.** The row is in three views with a
+/// different value in each, so each family is asked once for a value the view has and once for a
+/// value another view has — and the second answer is what a column read from the wrong view would
+/// get right by accident.
+async fn assert_written_answers(served: &Served, stage: &str, joined: &[u64], minted: u64) {
+    let (q1, q3) = (joined[0], joined[1]);
+    for (view, own, other) in [
+        ("quarter:2026-Q1", (q1, IN_Q1), (q3, IN_Q3)),
+        ("quarter:2026-Q3", (q3, IN_Q3), (q1, IN_Q1)),
+    ] {
+        let (id, mine) = own;
+        let theirs = other.1;
+        for (column, operand, value) in [
+            ("mood", "eq", mine.mood),
+            ("sector", "eq", mine.sector),
+            ("note", "match", mine.word),
+        ] {
+            let matched = ids(served, view, Some(json!({column: {operand: value}}))).await;
+            assert!(
+                matched.contains(&id),
+                "{stage}: {view} must answer {column} {value} with the row that carries it"
+            );
+        }
+        // The other view's value, on the same row, in this view: a wrong column would find it.
+        for (column, operand, value) in [
+            ("mood", "eq", theirs.mood),
+            ("sector", "eq", theirs.sector),
+            ("note", "match", theirs.word),
+        ] {
+            let matched = ids(served, view, Some(json!({column: {operand: value}}))).await;
+            assert!(
+                !matched.contains(&id),
+                "{stage}: {view} answered {column} {value}, which is another view's value for \
+                 that row"
+            );
+        }
+        // The number, both directions of the threshold.
+        let above = ids(
+            served,
+            view,
+            Some(json!({"score": {"range": {"gte": THRESHOLD}}})),
+        )
+        .await;
+        assert_eq!(
+            above.contains(&id),
+            f64::from(mine.score) >= THRESHOLD,
+            "{stage}: {view}'s `score` column decides the range"
+        );
+    }
+
+    // The **minted** view: a key created while the service ran, whose columns exist only because a
+    // flush wrote them and their empty bases.
+    let minted_view = format!("quarter:{MINTED_KEY}");
+    for (column, operand, value) in [
+        ("mood", "eq", IN_Q9.mood),
+        ("sector", "eq", IN_Q9.sector),
+        ("note", "match", IN_Q9.word),
+    ] {
+        let matched = ids(
+            served,
+            &minted_view,
+            Some(json!({column: {operand: value}})),
+        )
+        .await;
+        assert_eq!(
+            matched,
+            BTreeSet::from([minted]),
+            "{stage}: {minted_view} answers {column} from the column its first flush wrote"
+        );
+    }
+    let above = ids(
+        served,
+        &minted_view,
+        Some(json!({"score": {"range": {"gte": THRESHOLD}}})),
+    )
+    .await;
+    assert_eq!(
+        above,
+        BTreeSet::from([minted]),
+        "{stage}: {minted_view}'s `score` column answers"
+    );
+
+    // A **pin** reaches each of those columns from a map that is not the group's, which is the one
+    // route that reads a view's column without being under it.
+    let world = ids(served, "world", None).await;
+    let pinned = ids(
+        served,
+        "world",
+        Some(json!({"mood@2026-Q1": {"eq": IN_Q1.mood}})),
+    )
+    .await;
+    let bare = ids(
+        served,
+        "quarter:2026-Q1",
+        Some(json!({"mood": {"eq": IN_Q1.mood}})),
+    )
+    .await;
+    assert_eq!(
+        pinned,
+        world.intersection(&bare).copied().collect::<BTreeSet<_>>(),
+        "{stage}: a pin is the named view's column met with the asking view's population"
+    );
+
+    // And the **build's** own rows still answer, unchanged by everything the write path did.
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
+        let view = format!("quarter:{key}");
+        let matched = ids(served, &view, Some(json!({"mood": {"eq": "calm"}}))).await;
+        let expected = with_mood(slot, "calm").len() + usize::from(matched.contains(&q1));
+        assert_eq!(
+            matched.len(),
+            expected,
+            "{stage}: {view}'s built rows are untouched"
+        );
+        let prose = ids(served, &view, Some(json!({"note": {"match": WORDS[slot]}}))).await;
+        assert!(
+            prose.len() >= with_word(slot, WORDS[slot]).len(),
+            "{stage}: {view}'s built prose is still indexed"
+        );
+    }
+}
+
+/// **Every filterable family survives the whole write cycle, and answers per view at each stage**
+/// (`views.md` §5, r24).
+///
+/// One test rather than four, because the stages are not independent: what a flush wrote is what
+/// the next flush layers over, what those layers hold is what the fold reads, and what the fold
+/// wrote is what the restart opens. A stage asserted against a fixture the previous one did not
+/// produce would pass while the chain was broken.
+///
+/// The failure this drives out is **silent**: every one of these artefacts is read as *this entity
+/// has no value* when it is absent, so a family the flush skipped, a base a minted view never got,
+/// a layer composed under the wrong name, or a fold that wrote a prefix without the per-view
+/// directories all answer a filter with a smaller set and no error anywhere.
+#[tokio::test]
+async fn every_scoped_family_survives_ingest_flush_layering_fold_and_restart() {
+    // Width two, so the coalesce becomes eligible after a column holds two extents rather than
+    // eight — the pass is the subject here, not its policy.
+    let config = || EngineConfig {
+        coalesce_width: Some(2),
+        ..default_engine_config()
+    };
+    let mut served = serve_with(config()).await;
+
+    // ---- ingest: one entity into two views, with different values in each --------------------
+    let q1 = ingest_scoped(
+        &served,
+        "cycle-q1",
+        "quarter:2026-Q1",
+        &[(JOINED, 250.0, 250.0, IN_Q1)],
+    )
+    .await[0];
+    // The **join**: the entity already exists, and this row carries the second view's own scoped
+    // values — the one thing a joining row brings beyond geometry (`views.md` §4, §5).
+    let q3 = ingest_scoped(
+        &served,
+        "cycle-q3",
+        "quarter:2026-Q3",
+        &[
+            (JOINED, 260.0, 260.0, IN_Q3),
+            (Q3_ONLY, 270.0, 270.0, IN_Q3),
+        ],
+    )
+    .await;
+    assert_eq!(
+        q1, q3[0],
+        "a join lands on the entity it names rather than allocating a second"
+    );
+    flush(&served).await;
+
+    // ---- a view created while the service runs, and its first flush --------------------------
+    let created = served
+        .server
+        .client
+        .put(
+            served
+                .server
+                .control_url(&format!("/control/views/quarter/{MINTED_KEY}")),
+        )
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status().as_u16(), 201, "a free key creates");
+    let minted_view = format!("quarter:{MINTED_KEY}");
+    let minted = ingest_scoped(
+        &served,
+        "cycle-minted",
+        &minted_view,
+        &[(IN_MINTED, 280.0, 280.0, IN_Q9)],
+    )
+    .await[0];
+    flush(&served).await;
+
+    // The visible-view set is fixed per session (`views.md` §6), so reading the new view needs a
+    // new one — exactly as a client would.
+    served.token = token(&served, &["0", "1"]).await;
+    assert_written_answers(&served, "after the first flush", &[q1, q3[0]], minted).await;
+
+    // `/v1/meta` says the minted view now has a column of every family, which is what a client
+    // reads to know the column it is being served exists.
+    let meta: Value = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&served.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for family in meta["scoped_scalars"].as_array().unwrap() {
+        let views = family["views"].as_array().unwrap();
+        assert!(
+            views.contains(&json!(minted_view)),
+            "the flush put the minted view on {}'s list: {views:?}",
+            family["name"]
+        );
+    }
+
+    // ---- a stack of layers on one view's column -----------------------------------------------
+    //
+    // Each flush of a view writes one extent per filterable family of its group, so three more
+    // flushes of `2026-Q1` leave that view's columns four layers deep while every other view's
+    // stays at one. Two things are at stake and both are silent: a read that stopped at the base
+    // answers a smaller set, and a layer composed under the **column's** name rather than
+    // `(column, view)`'s would put these entities into another quarter's answer.
+    //
+    // ⊘ The entity-space **coalesce** over such a stack is not driven from here. It has no trigger
+    // route — it is planned on the executor's own clock and discarded when a flush publishes under
+    // it — so a server test can only wait on it, and the wait is a race rather than an assertion.
+    // Its keying is covered where it is deterministic instead:
+    // `coalesce::tests::a_scoped_familys_window_is_one_views_own` plans over a manifest carrying
+    // two views' extents of one family and asserts one window per view, each holding only its own
+    // view's layers and each under its own view's directory.
+    for round in 0..3 {
+        ingest_scoped(
+            &served,
+            &format!("cycle-fill-{round}"),
+            "quarter:2026-Q1",
+            &[(9_100 + round, 300.0 + round as f64, 300.0, FILLER)],
+        )
+        .await;
+        flush(&served).await;
+    }
+    let manifest = side_manifest(&served);
+    let layers = |column: &str, view: &str| {
+        manifest["attr_extents"]
+            .as_array()
+            .expect("attr_extents")
+            .iter()
+            .filter(|e| e["column"] == column && e["view"] == view)
+            .count()
+    };
+    assert!(
+        layers("mood", "quarter:2026-Q1") >= 3,
+        "the fillers stacked layers on `2026-Q1`'s column: {}",
+        manifest["attr_extents"]
+    );
+    assert_eq!(
+        layers("mood", &format!("quarter:{MINTED_KEY}")),
+        1,
+        "and on no other view's — a layer belongs to the `(column, view)` that wrote it"
+    );
+    assert_written_answers(&served, "over a stack of layers", &[q1, q3[0]], minted).await;
+
+    // ---- the fold -----------------------------------------------------------------------------
+    fold(&served).await;
+    let root = served.tmp.path().join("bundle");
+    let current: Value =
+        serde_json::from_slice(&std::fs::read(root.join("CURRENT")).unwrap()).unwrap();
+    let partition = root
+        .join(current["prefix"].as_str().expect("CURRENT names a prefix"))
+        .join("partitions/default");
+    // The folded prefix carries a directory per `(family, view)`, the minted view included — a
+    // fold that wrote the bundle-wide columns alone would leave a prefix these are simply not in,
+    // and the families would be served as absent from the first read.
+    for family in ["mood", "sector", "score"] {
+        for key in ["2026-Q1", "2026-Q3", MINTED_KEY] {
+            let dir = partition
+                .join("attrs")
+                .join(family)
+                .join("quarter")
+                .join(key);
+            assert!(
+                dir.join("values.arrow").is_file(),
+                "the fold wrote {family}'s column for {key}: {}",
+                dir.display()
+            );
+        }
+    }
+    for key in ["2026-Q1", "2026-Q3", MINTED_KEY] {
+        // Text owes no value column, per view exactly as bundle-wide: a dictionary and postings.
+        let dir = partition
+            .join("attrs")
+            .join("note")
+            .join("quarter")
+            .join(key);
+        assert!(
+            dir.join("postings.arrow").is_file(),
+            "the fold wrote `note`'s index for {key}: {}",
+            dir.display()
+        );
+    }
+    served.token = token(&served, &["0", "1"]).await;
+    assert_written_answers(&served, "after a fold", &[q1, q3[0]], minted).await;
+
+    // ---- and a restart, which opens exactly what the fold wrote ------------------------------
+    let served = restart(served, config()).await;
+    assert_written_answers(&served, "after a restart", &[q1, q3[0]], minted).await;
 }
