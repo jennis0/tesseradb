@@ -277,3 +277,59 @@ fn views_sharing_a_frame_canonicalise_identically() {
         "nothing to warn about where the frames agree"
     );
 }
+
+/// **The caller's geometry is counted once, whatever it is drawn on.** A single-part polygon over
+/// three views is one part and one ring with its own vertex count — the numbers describe the
+/// declaration, and multiplying them by the view count would report three polygons where the
+/// operator wrote one. What a *frame* did — clipped, wholly outside, the decomposition's size —
+/// stays summed over the views, which the out-of-extent test above pins.
+#[test]
+fn the_declarations_own_parts_and_vertices_are_counted_once_over_many_views() {
+    // One ring, five coordinates, closed — a box over Britain written as a polygon.
+    let uk = "POLYGON ((-8 50, 2 50, 2 58, -8 58, -8 50))";
+    let polygon_reader = |views: Vec<ViewFrame>| {
+        ShapeReader::new(
+            "regions/uk",
+            ShapeKind::Polygon,
+            ShapeContext {
+                views,
+                max_vertices: DEFAULT_MAX_SHAPE_VERTICES,
+            },
+            ShapeSpace::Wgs84,
+        )
+    };
+
+    let mut one = polygon_reader(vec![world()]);
+    one.row("uk", Some(ShapeInput::Wkt(uk.to_string())), None)
+        .expect("a `wgs84` polygon canonicalises")
+        .expect("the row carries a shape");
+    let one = one.finish(Vec::new());
+
+    let mut three = polygon_reader(vec![world(), europe(), flat()]);
+    three
+        .row("uk", Some(ShapeInput::Wkt(uk.to_string())), None)
+        .expect("the same polygon over three frames")
+        .expect("the row carries a shape");
+    let three = three.finish(Vec::new());
+
+    assert_eq!(one.parts, 1, "one polygon is one part");
+    assert_eq!(one.rings, 1, "with one ring");
+    assert_eq!(one.vertices_in, 5, "the five coordinates as written");
+    assert_eq!(three.artifacts, 1, "one row, whatever it is drawn on");
+    assert_eq!(three.parts, one.parts, "not once per view");
+    assert_eq!(three.rings, one.rings, "not once per view");
+    assert_eq!(three.vertices_in, one.vertices_in, "not once per view");
+    assert_eq!(three.vertices_out, one.vertices_out, "not once per view");
+
+    // And the per-frame quantities are still summed over the views, which is what the per-view
+    // rows are kept beside.
+    assert_eq!(
+        three.interior_tiles,
+        three.by_view.iter().map(|v| v.interior_tiles).sum::<u64>(),
+        "the decomposition is a property of a frame, and totals over the frames"
+    );
+    assert!(
+        three.interior_tiles > one.interior_tiles,
+        "three frames decompose three times"
+    );
+}

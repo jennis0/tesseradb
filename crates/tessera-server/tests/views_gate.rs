@@ -529,11 +529,20 @@ async fn a_gate_failed_view_answers_exactly_as_a_view_that_never_existed() {
     let cases = [
         // (gate-failed, never declared)
         ("sealed:s1", "sealed:nosuch"),
-        ("quarter:2026-Q3", "quarter:2026-Q9"),
+        // The gated view's own key, in the only form that addresses it (decision 0113), against a
+        // key of the same group that nobody declared: the comparison this case exists to make.
+        (
+            &format!("quarter:{GATED_QUARTER_KEY}"),
+            "quarter:2026-Q9",
+        ),
         ("atlas", "nosuchview"),
-        // The retired `#<ordinal>` form addresses nothing at all now (decision 0113), so both
-        // sides of this pair are keys nobody declared and the answer must not distinguish them.
-        (&format!("quarter:#{GATED_QUARTER_KEY}"), "quarter:#2026-Q9"),
+        // The retired `#`-prefixed form addresses nothing at all now (decision 0113), and one
+        // carrying the **real** gated key must be no more informative than a name nobody
+        // declared — a spelling that resolved would be an existence oracle over the roster.
+        (
+            &format!("quarter:#{GATED_QUARTER_KEY}"),
+            "quarter:2026-Q9",
+        ),
     ];
     for (gated, absent) in cases {
         let (gated_status, gated_body) = viewport(&served, &outsider, gated, None).await;

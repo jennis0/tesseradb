@@ -6094,6 +6094,33 @@ impl Config {
         Ok(registry)
     }
 
+    /// The views a layer is drawn on, expanded against a [`Config::build_views`] registry: a
+    /// plain view under its own name, and **a group under every view of it** (`views.md` §2,
+    /// §3.5).
+    ///
+    /// Naming a group draws the layer on every view of it, which is what lets a layer follow a
+    /// group that grows rather than being redeclared per quarter. A name matching no group is a
+    /// plain view and is kept as written — the declaration refused an unknown one long before
+    /// this.
+    ///
+    /// ⊘ *Present and future* is the ingest half: a view created later gets the layer's artifacts
+    /// at the fold that writes them (spec §3.5).
+    pub fn expand_layer_views(registry: &[BuildView], declared: &[String]) -> Vec<String> {
+        let mut expanded = Vec::with_capacity(declared.len());
+        for name in declared {
+            let of_group: Vec<String> = registry
+                .iter()
+                .filter(|view| view.group.as_ref().is_some_and(|g| &g.group == name))
+                .map(|view| view.id.clone())
+                .collect();
+            match of_group.is_empty() {
+                true => expanded.push(name.clone()),
+                false => expanded.extend(of_group),
+            }
+        }
+        expanded
+    }
+
     /// The group registry the manifest publishes, derived from a [`Config::build_views`]
     /// registry (`views.md` §3.2).
     ///

@@ -56,6 +56,10 @@ pub struct ShapeLayerReport {
     pub artifacts: u64,
     /// Rows with no geometry — published with an empty shape and no members.
     pub no_geometry: u64,
+    /// The four counts below are the **caller's own geometry, counted once per shape** however
+    /// many views the layer is drawn on: a layer over three views holds one polygon, not three
+    /// (decision 0111). `vertices_out` is the first view's canonical count, the frames being able
+    /// to clip differently.
     pub parts: u64,
     pub rings: u64,
     pub vertices_in: u64,
@@ -477,6 +481,19 @@ impl ShapeReader {
                 ))
             })?;
         self.report.artifacts += 1;
+        // **What the caller wrote is counted once; what a frame did is counted per frame.** Parts,
+        // rings and the vertex counts describe the geometry of the declaration, so a layer drawn
+        // on three views holds one polygon and not three; the clip, the out-of-extent count and
+        // the decomposition's size are properties of a frame, and those are summed over the views
+        // with the per-view rows keeping them apart (decision 0111). Where the frames differ the
+        // output vertex count differs too, and the one reported is the first view's.
+        if let Some((_, report, stats)) = canonical.reports.first() {
+            let r = &mut self.report;
+            r.parts += stats.parts;
+            r.rings += stats.rings;
+            r.vertices_in += report.vertices_in;
+            r.vertices_out += report.vertices_out;
+        }
         // **Every view's canonicalisation, not the first's** (decision 0111): where the frames
         // differ the results differ, and the layer's totals are the sum over its views while the
         // per-view rows keep them apart.
@@ -506,11 +523,9 @@ impl ShapeReader {
             per_view.interior_tiles += stats.interior_tiles;
             per_view.boundary_cells += stats.boundary_cells;
         }
+        // Parts, rings and the vertex counts are **not** here: they are the caller's own
+        // geometry, counted once per shape by [`ShapeReader::row`].
         let r = &mut self.report;
-        r.parts += stats.parts;
-        r.rings += stats.rings;
-        r.vertices_in += report.vertices_in;
-        r.vertices_out += report.vertices_out;
         r.clipped += u64::from(report.clipped);
         r.outside += u64::from(report.outside);
         r.rings_dropped += u64::from(report.rings_dropped);
@@ -561,6 +576,22 @@ pub fn shape_declared(declaration: &LayerDeclaration) -> Option<ShapeKind> {
 /// points are read, and such a layer is reported as unsized rather than guessed at.
 pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerReport, String>> {
     let mut out = Vec::new();
+    let shape_layers = || config.layers.iter().any(|d| shape_declared(d).is_some());
+    // **The views a build would materialise, not the `[[view]]` blocks alone.** A layer's `views`
+    // may name a whole group, which is every view of it (`views.md` §2, §3.5) — resolved against
+    // the plain blocks it would match nothing, and the layer would be sized over the rest of its
+    // views with the group's silently dropped, span check included.
+    let registry = match config.build_views() {
+        Ok(registry) => registry,
+        // Nothing here can be sized without the registry. Reported once rather than per layer,
+        // and only where there is a shape layer to size at all.
+        Err(why) => {
+            if shape_layers() {
+                out.push(Err(why.to_string()));
+            }
+            return out;
+        }
+    };
     for sources in &config.layer_sources {
         let Some(declaration) = config.layers.iter().find(|d| d.name == sources.name) else {
             continue;
@@ -572,17 +603,17 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
         // 0111): `tessera check` sizes what the build will store, and where the frames differ so
         // do the decompositions. A view whose extent is `auto` has no frame until the points are
         // read, so the whole layer is reported unsized rather than half-sized.
-        let frames: std::result::Result<Vec<ViewFrame>, String> = declaration
-            .views
+        let drawn_on = Config::expand_layer_views(&registry, &declaration.views);
+        let frames: std::result::Result<Vec<ViewFrame>, String> = drawn_on
             .iter()
-            .filter_map(|name| config.views.iter().find(|v| &v.name == name))
+            .filter_map(|name| registry.iter().find(|v| &v.id == name))
             .map(|view| match &view.extent {
-                Extent::Fixed(bounds) => Ok(ViewFrame::new(&view.name, view.projection, *bounds)),
+                Extent::Fixed(bounds) => Ok(ViewFrame::new(&view.id, view.projection, *bounds)),
                 // A stated longitude/latitude box is a frame without reading anything: the
                 // projection and the snap are both functions of the declaration alone
                 // (`projections.md` §4.2).
                 Extent::LonLat(asked) => Ok(ViewFrame::new(
-                    &view.name,
+                    &view.id,
                     view.projection,
                     crate::config::snap_lon_lat(view.projection, asked)
                         .square
@@ -592,7 +623,7 @@ pub fn check_reports(config: &Config) -> Vec<std::result::Result<ShapeLayerRepor
                     "layer '{}': view '{}''s extent is `auto`, which is fitted to the points at \
                      the build; the shapes cannot be sized before then. Declare the extent to \
                      size them here",
-                    declaration.name, view.name
+                    declaration.name, view.id
                 )),
             })
             .collect();

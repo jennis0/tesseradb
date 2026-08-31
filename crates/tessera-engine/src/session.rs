@@ -1119,8 +1119,8 @@ impl Engine {
             .flat_map(|partition| partition.manifest.layer_tombstones.iter().cloned())
             .collect();
         // **The roster's runtime half, unioned on `manifest_layers`' argument** (`views.md` §3.2):
-        // a view is a deployment-level object — its key and its ordinal are the group's, not a
-        // partition's — so the creations and the tombstones belong to the deployment whichever
+        // a view is a deployment-level object — its key is the group's, not a partition's — so
+        // the creations and the tombstones belong to the deployment whichever
         // partition's manifest published them. With one partition this is that partition's list.
         let manifest_created_views: Vec<tessera_types::view::CreatedView> = bundle
             .partitions

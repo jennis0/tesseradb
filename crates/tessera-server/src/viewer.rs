@@ -1166,7 +1166,7 @@ fn run_viewport_stream(
     // shed log below can say which request it was without extending a borrow across the call.
     // Three coordinates and no principal: a view id, a zoom and the layer names the caller asked
     // for. The view is the **resolved** id rather than the caller's spelling of it, so a log line
-    // about a request naming `quarter:#3` says which view it was actually answered for; the layer
+    // about a request naming `quarter:2026-Q3` says which view it was actually answered for; the
     // names are the caller's own words back.
     let named_view = view_id.clone();
     let named_zoom = req.zoom;

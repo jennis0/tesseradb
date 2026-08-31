@@ -1599,27 +1599,13 @@ fn main() -> ExitCode {
             // **A layer naming a group is drawn on every view of it** (`views.md` §2, §3.5),
             // and the expansion happens here, against the registry the build just enumerated: a
             // build materialises the views that exist, and a layer's extents are per row space.
-            // ⊘ *Present and future* is the ingest half — a view created later gets the layer's
-            // artifacts at the fold that writes them, which is spec §3.5's own note.
+            // The rule itself is [`Config::expand_layer_views`], which `tessera check` sizes its
+            // shape layers through so that the two entry points cannot disagree about which views
+            // a layer is drawn on.
             let mut config = config;
             for layer in &mut config.layers {
-                let mut expanded: Vec<String> = Vec::new();
-                for declared in &layer.views {
-                    let of_group: Vec<String> = registry
-                        .iter()
-                        .filter(|view| {
-                            view.group
-                                .as_ref()
-                                .is_some_and(|group| &group.group == declared)
-                        })
-                        .map(|view| view.id.clone())
-                        .collect();
-                    match of_group.is_empty() {
-                        true => expanded.push(declared.clone()),
-                        false => expanded.extend(of_group),
-                    }
-                }
-                layer.views = expanded;
+                layer.views =
+                    tessera_build::config::Config::expand_layer_views(&registry, &layer.views);
             }
             // **A scoped layer is a different artifact set per view of one group** (§3.5): its
             // rows say which view each artifact belongs to, under the layer's own `fields.view`,
