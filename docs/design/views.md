@@ -1,6 +1,25 @@
 # Views — design
 
-**Date:** 2026-08-31
+**Date:** 2026-09-01
+**Status:** Normative (r27) — **a scoped value's address is `(attribute → its group, key)`, and the
+join rule is decided on the serial writer** (r27, 2026-09-01, owner rulings;
+[decision 0116](../decisions/0116-a-scoped-values-address-is-the-attribute-and-the-key.md);
+`contracts.md` §3.1 r68). Two changes, one section each. §5's write half admitted a scoped family's
+columns only on a batch whose view the **owning** group holds; that one-door rule is withdrawn, and
+with it the "two extents claiming one entity" argument that justified it. A batch whose view's key
+belongs to the attribute's group's key set — through the owner or through any group declaring
+`members` of it — may carry the family's columns, and the value lands in the one
+`(entity, attribute, key)` cell whichever door it came through. A second row naming a cell that
+already holds the same value is deduped, so there is still exactly one claimant; a differing value
+is a 409 naming the column and the key. An unrelated view refuses exactly as before. §4's label and
+attribute arms **move out of the request handler and onto the serial writer**, where
+`established_collisions` settles which rows are joins: one authoritative site instead of two, and
+the race a row promoted to a join between the two sites used to win — skipping both arms — is
+closed. The caller still receives the 409 synchronously, before the WAL append, so a refused batch
+leaves no record.
+
+*(Revision numbering: concurrent branches may renumber this at merge.)*
+
 **Status:** Normative (r26) — **`render` alone makes a group-scoped family a filter operand**
 (r26, 2026-08-31, owner ruling; `contracts.md` §3.2 r67). §5's last standing restriction goes: the
 licence is `index` **or** `render`, which is what an entity-scoped column has, and the asymmetry
@@ -570,8 +589,17 @@ refuses as a duplicate, and its rule is amended:
   with no overlay entry or a narrowing that bypasses the deny lanes.
 - **An entity-scoped attribute** (spec §5) on a known id must byte-match the stored value or be
   absent from the batch; a differing value is a 409 naming the column. A group-scoped attribute
-  is expected, because that is the value this view carries.
+  is expected, because that is the value this view carries — subject to §5's cell rule, which is
+  the same rule asked of the `(entity, attribute, key)` cell rather than of the entity.
 - **A deleted holder is not a duplicate**, as today: the re-ingest allocates fresh.
+
+**Every arm above is decided on the serial writer** (2026-09-01, decision 0116). The duplicate
+answer — the one refusal that may *name* the caller's own ids — is taken in the request handler and
+is advisory; whether a row **is** a join, and what a join may carry, is settled once, beside the
+live map the apply will clone from. The two sites this replaces disagreed by a whole queue drain,
+and a row promoted to a join in between met no arm at all. The refusal reaches the caller
+synchronously and before the WAL append, so a refused batch leaves no record, spends no entity id
+and moves nothing.
 
 The identifier forms are r4's, kept: `external_id` is canonical; `tessera_id` is accepted with a
 **mandatory** idset beside it, a retained idset translating exactly and a revoked or unknown one a
@@ -727,12 +755,19 @@ source is a `[[view_group.view]]` file, `fields.view` says which view each row's
 batch into a plain view may not carry a group-scoped attribute at all: there is no view of the
 group for the value to belong to.
 
-A batch into a view of a group that declares `members` may not carry one either, and for a
-different reason: the column it would land in is the **owner's**, addressed by the key the two
-groups share, so a batch into the sharing view and one into the owner's view of the same key could
-each write a value for one entity into one column — two layers claiming one entity, which the
-composition refuses. The value is ingested through the owning group's view, where it is entity
-space and reaches both.
+A batch into a view of a group that declares `members` **may** carry one (2026-09-01, decision
+0116): the address of a scoped value is `(attribute → its group, key)` and never the view, so the
+key a sharing group's view holds — the owner's by construction (§3.3) — is the same cell the
+owner's own view addresses, and either door writes it. What decides admission is therefore the key,
+not the spelling: a view whose key is in the attribute's group's key set may name the family's
+columns, and one whose key is not takes the undeclared-column refusal whatever it is called.
+
+The rule that keeps one cell single-valued is a **comparison, not a door**. A row naming a cell the
+deployment already holds a value for — put there through either door, in this window or an earlier
+one — is deduped where the value agrees and refused with a 409 naming the column and the key where
+it does not. One claimant per cell, so the extents stay disjoint in entity space; the "two layers
+claiming one entity" argument that carried the old one-door rule is dissolved rather than
+overridden.
 
 **Render.** A `render = true` group-scoped attribute is rendered in the views of its group and
 of any group sharing them, and in no other view — the rule `per-point-attributes.md` §3.9 already
@@ -872,13 +907,21 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > which is why a **join** row carries the scoped values and nothing else: the value belongs to the
 > `(entity, view)` pair the join is creating rather than to the entity.
 >
-> ⊘ **A view of a group that only shares the family's views still carries no value from a batch.**
-> Its rows render the family — the column is entity space, reached through the shared key — but
-> writing it there would put two writers on one column. A segment such a view flushes therefore
-> carries the family's lane holding **absences**: the lane is written, so every segment of the
-> view holds the same columns and its own rewriters can read it, and the rows read as the ordinary
-> absence they would if no batch had mentioned the family. `verify --deep` keeps the build-only
-> exemption for exactly those views and for no others.
+> **A view of a group that only shares the family's views writes it too** (2026-09-01, decision
+> 0116; the ⊘ that stood here is discharged). Its batches carry the family's columns under their
+> plain names, its flush writes the extent into the **owner's** directory —
+> `attrs/<column>/<owner group>/<key>/`, the cell's address — and its own rows carry the value in
+> their lane. The single-claimant property that the old refusal protected is kept by the cell
+> comparison above rather than by the refusal.
+>
+> ⊘ **What a flush cannot do is fill in a row that has already been written.** A cell's value
+> reaches the row tails of the rows that carried it, and the backfill that fills a join's omitted
+> `render` slot from the entity's stored value has no counterpart for a row a previous flush already
+> published. So an entity holding rows in two views of one key, written through one door and joined
+> through the other after that door's flush, renders the value under the writing view and the
+> placeholder under the other; the **filter** answer is the cell's under both, the operand being the
+> entity-space column. A build writes both lanes from the one column and has no such asymmetry.
+> `verify --deep` keeps its build-only exemption for the lane.
 >
 > The lane is the one thing a segment may lawfully **not** hold, and both ends now say so at the
 > same index: `gather_tile_columns` reads a missing scoped column as the row's placeholder, and
@@ -1270,9 +1313,25 @@ At ingest the next quarter is `PUT /control/views/quarter/2026-Q4` with
 `{ "label": "Q4 2026", "starts": …, "ends": … }`, which also creates `quarter_map:2026-Q4`; then
 batches under `x-tessera-view: quarter:2026-Q4` carrying `doc_id, x, y, access, sentiment`, and
 under `quarter_map:2026-Q4` carrying `doc_id, lon, lat, access`. A paper already known joins
-each view under spec §4's rule.
+each view under spec §4's rule. Either batch may carry `sentiment`: the two views share the key
+`2026-Q4`, and the key is the value's address (decision 0116).
 
 ## Appendix R — review trail
+
+- **r27 (2026-09-01)** — **two owner rulings, implemented together.** (1) A scoped value's address
+  is `(attribute → its group, key)`: §5's one-door rule is withdrawn, a batch through any view
+  whose key is in the attribute's group's key set may carry the family's columns, and the value
+  lands in the one cell. The old rule's argument — two views of one key would put two extents over
+  one entity — is dissolved by a comparison rather than answered: an identical second value is
+  deduped so there is one claimant, and a differing one is a 409 naming the column and the key. §5's
+  remaining ⊘ is discharged and a narrower one takes its place, about a row tail a previous flush
+  already published. (2) §4's label and attribute arms move from `/control/ingest`'s handler onto
+  the serial writer, beside `established_collisions`, which is what settles join-ness — one site
+  instead of two, closing the race in which a row promoted to a join between the handler's pass and
+  the apply met no arm. The refusal bodies did not move with the site and are byte-identical. The
+  handler keeps the duplicate answer, which is the one refusal that may name the caller's own ids,
+  and the sidecar half of the join resolution, which cannot go stale. No other design content
+  changed.
 
 - **r26 (2026-08-31)** — **`render` alone makes a scoped family a filter operand** (owner ruling),
   and §5's remaining restriction is withdrawn rather than discharged: it was a hole, not a rule.

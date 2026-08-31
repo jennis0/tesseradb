@@ -131,3 +131,5 @@ prevent.
 | [0111](0111-a-shape-spans-projected-views-through-wgs84.md) | 2026-08-30 | A shape spans projected views through wgs84, and no geometry spans both kinds of space |
 | [0112](0112-the-anchor-view-orders-a-signature-groups-ids.md) | 2026-08-30 | A declared anchor view orders ids within a signature group |
 | [0113](0113-ordinals-are-removed-and-the-key-is-the-only-address.md) | 2026-08-31 | Ordinals are removed; the key is a view's only address (supersedes 0110) |
+| [0114](0114-the-drill-down-serves-the-satisfied-labels-only.md) | 2026-08-31 | The item drill-down serves the labels the asking session satisfies, and no others |
+| [0116](0116-a-scoped-values-address-is-the-attribute-and-the-key.md) | 2026-09-01 | A scoped value's address is (attribute → its group, key), and the join rule is decided on the serial writer |

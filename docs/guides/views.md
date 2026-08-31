@@ -237,11 +237,16 @@ guard the entity from being silently changed by a second view's row:
   `409` naming the column.
 
 A **group-scoped** attribute may not appear on a plain view's batch at all — it is an undeclared
-column there. On a batch into a view of the group that owns it, it may and should: a join carries
-geometry **and this view's scoped values**, and nothing else. It allocates no id, writes no
+column there. On a batch into any view whose key the attribute's group holds — the owner's own
+views, and every view of a group declaring `members` of it — it may and should: a join carries
+geometry **and this key's scoped values**, and nothing else. It allocates no id, writes no
 descriptor and contributes no postings, which is what keeps a label supplied on a joining row inert
-rather than a quiet widening — but a scoped value belongs to the `(entity, view)` pair the join is
-creating, not to the entity, so it is the one thing such a row legitimately brings.
+rather than a quiet widening — but a scoped value belongs to the `(entity, attribute, key)` cell
+the row addresses, not to the entity, so it is the one thing such a row legitimately brings.
+
+All three refusals are decided on the write executor, not in the handler, so a row that becomes a
+join between your request arriving and the write landing meets them too (decision 0116). You still
+get the `409` in the same request, and a refused batch leaves nothing behind.
 
 ## Give an attribute a per-quarter value
 
@@ -324,11 +329,20 @@ columns at the **first flush** that covers it, with no rebuild: from then on it 
 renders and answers `/v1/categories` like any other, and `/v1/meta`'s `scoped_scalars[..].views`
 names it.
 
-⊘ **One case still needs a rebuild**: a group that declares `members` of another. Its views render
-the owner's family — the column is shared through the key — but a batch into one may not carry a
-value, because the column it would land in is the owner's and two writers for one column is two
-layers claiming one entity. Ingest such a value through the owning group's view; it is entity
-space and reaches both.
+**Either door writes the cell.** A group that declares `members` of another shares its keys, and a
+scoped value is addressed by `(attribute → its group, key)` — never by the view — so a batch into
+`quarter_map:2026-Q3` may carry `sentiment` exactly as one into `quarter:2026-Q3` may, and both land
+in the one cell (decision 0116). What is refused is a **disagreement**: a row naming a cell that
+already holds the same value is accepted and its copy dropped, and one naming a different value is a
+`409` naming the column and the key. A view whose key the attribute's group does not hold refuses
+the column as undeclared, exactly as a plain view does.
+
+⊘ **A row already written is not filled in retroactively.** The value reaches the row tails of the
+rows that carried it, so an entity holding rows in both views of a key — written through one door
+and joined through the other after that door's flush — draws with the value under the writing view
+and the placeholder under the other. Filters answer the cell's value under both, the operand being
+the entity-space column, and a build writes both tails from the one column and has no such
+asymmetry.
 
 ## Layers and shapes over groups
 
@@ -460,7 +474,8 @@ quarter — before that a request under it simply has no `sentiment`.
   `quater`; creation is always the explicit `PUT` first.
 - **There are no ordinals.** Sort a group's views by your own metadata (`starts`, a numeric key you
   minted) — creation order is served order and nothing else.
-- **A sharing group's views take no scoped value on ingest.** A group declaring `members` renders
-  the owner's family but cannot be written through: send the value to the owning group's view,
-  where it is entity space and reaches both. A segment flushed under a sharing view carries the
-  family's lane holding absences, so its rows draw at the placeholder there until a rebuild.
+- **A sharing group's views write the owner's cell, not a second one.** A group declaring `members`
+  shares the keys, and the key is the value's address (decision 0116): either door writes the same
+  cell, an identical second write is deduped, and a differing one is a `409` naming the column and
+  the key. What that refusal is telling you is that the key already holds a value — not that you
+  used the wrong door.
