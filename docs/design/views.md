@@ -1,6 +1,16 @@
 # Views — design
 
-**Date:** 2026-08-30
+**Date:** 2026-08-31
+**Status:** Normative (r26) — **`render` alone makes a group-scoped family a filter operand**
+(r26, 2026-08-31, owner ruling; `contracts.md` §3.2 r67). §5's last standing restriction goes: the
+licence is `index` **or** `render`, which is what an entity-scoped column has, and the asymmetry
+between the two was a hole rather than a rule. `render` licences the family's **entity-space**
+per-view column — written by every build whatever the flags — and not the row lane, so a pin reads
+the named view's column exactly as an indexed family's does and no route answers a second question
+under one spelling. A rendered **category** is on `/v1/categories` by the same admission and owes
+its per-view postings; a rendered `text` family does not exist, `render` on one being refused at
+the declaration. The collapse stays one site, evaluation and the masking are unchanged, and no
+artefact format moves — what a rendered family now writes is what an indexed one already wrote.
 **Status:** Normative (r25) — **the write half of §5 is built: ingest carries a scoped value,
 flush writes the column, and merge and fold keep the lane** (r25, 2026-08-31, owner ruling;
 `contracts.md` §2.2/§3.1 r66). §5's three ⊘ markers are discharged. A batch into a view of a group
@@ -745,10 +755,19 @@ has for `render_in`, with the view set decided by the scope instead of listed.
 > checked — a segment named in `MANIFEST.files` — so a bundle that has ingested is not refused for
 > the write half's deliberate absence.
 >
-> ⊘ **A rendered family is still not a filter operand** — `index` is the whole licence
-> (§5's filter paragraph). A leaf resolves to one *entity-space* column, and a pin may make that
-> another view's, which no scan of the rows in front of the request could answer; the two routes
-> would answer different questions under one spelling.
+> **A rendered family is a filter operand, built 2026-08-31** (owner ruling; contracts §3.2 r67).
+> `index` **or** `render` puts a family on the filter surface, which is the licence
+> `filter-index.md` gives an entity-scoped column and the asymmetry between the two is closed. What
+> `render` licences here is the **entity-space column**, not the lane: a family's per-view column is
+> written whatever its flags — the build has always written it — so a rendered family is answered by
+> the ordinary scan over the resolved column, and a **pin** therefore works, reading another view's
+> column where it lives rather than from rows the request does not hold. The lane answers no filter
+> at all; the operators are the family's own, since the route the value column takes is not a
+> surface. The one exclusion is `text`, which owes no value column and whose `render` is refused at
+> the declaration anyway. What a rendered family gains on disc is what an indexed one already pays:
+> the flush's per-view extents and the empty base of a view created since the build, and for a
+> **category** the keyed postings both an `eq` and `/v1/categories` are answered from — one
+> admission decides both surfaces, so a rendered category earns its value list too.
 >
 > **A merge and a fold keep the lane, built 2026-08-31 — and this was a defect, not an absence.**
 > Both took their writer schema from the bundle-wide render list, a family having no row in it, so
@@ -1254,6 +1273,23 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r26 (2026-08-31)** — **`render` alone makes a scoped family a filter operand** (owner ruling),
+  and §5's remaining restriction is withdrawn rather than discharged: it was a hole, not a rule.
+  The licence is now `index` **or** `render` on both sides of the scope, one predicate each side
+  (`filter::scoped_is_filterable`, `filter::is_filterable`), and the leaf resolution, the operand
+  list, `/v1/categories`' admission and the gate collapse follow from the one they already called.
+  What the old marker had right is that a **lane** cannot answer a pin; what it had wrong is that
+  the lane was ever the route. A scoped family's per-view column is entity space and every build
+  has written it whatever the flags — the `index` gate stood at the *opener*, not at the writer —
+  so a rendered family is answered by the same scan an indexed one is, from the same file, and a
+  pin reads the named view's column rather than the rows in front of the request. The cost is
+  therefore only what was previously written and never opened, plus the flush's extents, the empty
+  base of a view created since the build, and a rendered **category**'s per-view postings — the
+  last because one admission decides the filter surface and the value list together, so a rendered
+  category earns `/v1/categories` as well and its postings must exist for it. `text` is excluded at
+  the predicate: it owes no value column, and `render` on a scoped `text` family is refused at the
+  declaration, so the combination would name a token index no pass wrote. No format moves, no
+  version moves, and the gate collapse is the same single site (`viewport::resolve_filter_column`).
 - **r25 (2026-08-31)** — §5's write half is built and its three ⊘ markers are discharged; no
   design content changed. Ingest: a batch into a view of a group carries the group's scoped columns
   under their plain names, in a second positional list against the group's own `scoped_scalars`,
