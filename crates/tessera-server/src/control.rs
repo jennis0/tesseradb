@@ -949,35 +949,6 @@ fn category_code(
     }
 }
 
-/// Is this value **no value at all** for `declared` — the join rule's "or be absent from the
-/// batch" (`views.md` §4), read on the supplied side and the stored side alike?
-///
-/// **Two spellings, because a category's absence is in band.** Every other family says absence
-/// with [`WalScalar::Null`], having no bit pattern to spare; a vocabulary keeps code 0 out of its
-/// value space precisely so a category can say it with a code
-/// ([`ABSENT_CODE`], per-point-attributes §3.4) — `category_scalar`
-/// turns a null cell into that code before this arm ever sees it. Reading only the `Null` spelling
-/// made a joining batch that left a category null a 409 against an entity holding a value, and a
-/// join carrying a value against an entity holding *none* a 409 as well, neither of which the rule
-/// asks for. The two spellings are one question, asked once here so the arm's two sources cannot
-/// answer it differently.
-fn is_absent_value(value: &WalScalar, declared: &DeclaredScalar) -> bool {
-    if matches!(value, WalScalar::Null) {
-        return true;
-    }
-    if declared.vocabulary.is_none() {
-        return false;
-    }
-    match value {
-        WalScalar::U8(c) => u32::from(*c) == ABSENT_CODE,
-        WalScalar::U16(c) => u32::from(*c) == ABSENT_CODE,
-        WalScalar::U32(c) => *c == ABSENT_CODE,
-        // A novel key on a `discovered` vocabulary travels as its key and is minted at the commit
-        // window's close; a key is never absence — the empty string is refused upstream.
-        _ => false,
-    }
-}
-
 /// A code at its column's declared width. `is_category_width` admits `u8`/`u16`/`u32` only, so the
 /// fallthrough is `u32` — the widest, which cannot truncate a code the other two could hold.
 fn code_at(width: ScalarType, code: u32) -> WalScalar {
@@ -1714,9 +1685,6 @@ fn run_ingest(
             let Some(supplied) = items[*index].scalars.get(position) else {
                 continue;
             };
-            if is_absent_value(supplied, declared) {
-                continue;
-            }
             let held = match &buffered {
                 Some(buffered) => buffered.scalars.get(position).cloned(),
                 // `None` here is *no value held* and *could not find out* alike; see
@@ -1726,7 +1694,16 @@ fn run_ingest(
             let Some(held) = held else {
                 continue;
             };
-            if is_absent_value(&held, declared) || held == *supplied {
+            if tessera_engine::scalar_is_absent(&held, declared) {
+                continue;
+            }
+            // **An omitted value is not a disagreement**, and is not written through as an
+            // absence either: the write executor backfills a `render` column's omitted slot from
+            // the entity's stored value once join-ness is settled (`views.md` §4, owner ruling;
+            // `WriteExecutor::admit`). Doing it there rather than here is what keeps a row that
+            // *stops* being a join — its holder deleted between this check and the apply — from
+            // carrying a value it took from an entity it turned out not to be joining.
+            if tessera_engine::scalar_is_absent(supplied, declared) || held == *supplied {
                 continue;
             }
             return Err(ApiError::Conflict(format!(

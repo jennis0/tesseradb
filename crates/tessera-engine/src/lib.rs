@@ -60,8 +60,8 @@ pub use compose::{compose, denied_rows_of, visible_to, EffectiveMask, RowProject
 pub use gate::VisibleViews;
 pub use geometry::{GeometryPublication, GeometryRefused, GeometryRefusedReason};
 pub use session::{
-    default_compute_threads, Engine, EngineConfig, EngineError, PartitionStatus, Session,
-    ViewSegments,
+    default_compute_threads, scalar_is_absent, Engine, EngineConfig, EngineError, PartitionStatus,
+    Session, ViewSegments,
 };
 // The row-projection cache's gauges. `single_flight` itself stays private — the cache, its slot
 // state machine and its four eviction rules are engine-internal — but the numbers

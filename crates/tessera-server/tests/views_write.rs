@@ -2097,12 +2097,16 @@ async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
     reauthorise(&mut served).await;
 
     let id = b"never-held".to_vec();
+    // **`archive` is absent too, and a category says that with its reserved code** rather than a
+    // null cell (per-point-attributes §3.4) — so this row also pins `is_absent_value` on the
+    // *flushed* side: the code read back out of the hot column is absence, not a value `hep` could
+    // contradict. Reading absence only in its `null` spelling made this arm a 409.
     let sparse = Attrs {
         score: None,
         depth: None,
         tag: None,
         note: None,
-        archive: Some("astro"),
+        archive: None,
     };
     assert_eq!(
         families_ingest(&served, "sparse", "world", &id, 20.0, 20.0, sparse)
@@ -2125,7 +2129,7 @@ async fn a_join_may_carry_a_value_for_a_column_the_entity_never_held() {
                 depth: Some(5),
                 tag: Some("gamma"),
                 note: Some("later"),
-                ..sparse
+                archive: Some("hep"),
             },
         )
         .await
@@ -2194,4 +2198,190 @@ async fn the_buffered_and_flushed_attribute_arms_refuse_identically() {
         bodies[0], bodies[1],
         "one rule, one message: the flushed arm's refusal is the buffered arm's"
     );
+}
+
+/// One view's points under a filter, so a test can ask what a **view's own tail** carries rather
+/// than what the drill-down reports. The drill-down answers from the first view holding a row and
+/// is therefore blind to a disagreement between two of them, which is exactly the property under
+/// test here; a `render` column is filterable through the row route (decision 0068), and a filter
+/// evaluated against one view's rows is that view's tail and no other's.
+async fn filtered_points(served: &Served, view: &str, filter: Value) -> Vec<PointRow> {
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(&served.token)
+        .json(&json!({
+            "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+            "filters": filter
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "a filtered view answers: {view}"
+    );
+    decode_viewport(&resp.bytes().await.unwrap()).1
+}
+
+/// **An omitted render value is backfilled into the joined view's tail** (`views.md` §4, owner
+/// ruling 2026-08-31), not written there as an absence.
+///
+/// A joining row is geometry-only in *entity* space, but a `render` column's value travels in its
+/// own row tail — so a batch that lawfully omitted one would leave the joined view rendering
+/// nothing for a point every other view renders a value for. An entity-scoped attribute is one
+/// value per entity (§5); a value that reads differently under two views is not one.
+#[tokio::test]
+async fn an_omitted_render_value_is_backfilled_into_the_joined_views_tail() {
+    let mut served = serve_families().await;
+    assert_eq!(
+        create(&served, "quarter", "2026-Q5", json!({ "metadata": {} }))
+            .await
+            .status(),
+        201
+    );
+    reauthorise(&mut served).await;
+
+    let id = b"backfill".to_vec();
+    let resp = families_ingest(&served, "first", "world", &id, 10.0, 10.0, HELD).await;
+    assert_eq!(resp.status(), 200);
+    let tessera_id: u64 = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
+        .as_u64()
+        .unwrap();
+    flush(&served).await;
+
+    // The join omits every value, which the rule permits — and which is what would otherwise put
+    // an absence in this view's tail.
+    assert_eq!(
+        families_ingest(
+            &served,
+            "omit",
+            "quarter:2026-Q5",
+            &id,
+            800.0,
+            300.0,
+            Attrs {
+                score: None,
+                depth: None,
+                tag: None,
+                note: None,
+                archive: None,
+            },
+        )
+        .await
+        .status(),
+        200
+    );
+    flush(&served).await;
+
+    let score_is_one = json!({ "score": { "eq": 1 } });
+    for view in ["world", "quarter:2026-Q5"] {
+        let matched = filtered_points(&served, view, score_is_one.clone()).await;
+        assert!(
+            matched.iter().any(|(id, _)| *id == tessera_id),
+            "the entity renders its one stored score under '{view}': {matched:?}"
+        );
+    }
+}
+
+/// **The oracle scans every view, and an absence in one does not answer for a value in another**
+/// (r24 review F1).
+///
+/// The scan used to stop at the first view whose permutation held a row, over a `HashMap` of
+/// partitions and a `HashMap` of views, and to read that row's clear presence bit as *no value
+/// held*. Two views can hold different tails lawfully — this test builds the case the backfill
+/// does not close, an entity holding **no** value in the view it was ingested into and being
+/// joined into a second view *with* one — and under first-view-wins the third view's join then
+/// answered `200` or `409` by hash order.
+///
+/// **Each repetition takes a fresh server**, which is what varies the order: a `HashMap`'s
+/// iteration order is fixed for the life of one map, so a loop inside one process re-reads the
+/// same order however many times it runs. The in-process loop below is there for the cheaper
+/// half — that one process answers one way every time — and the outer repetitions for the half
+/// that actually flips.
+#[tokio::test]
+async fn the_value_oracle_does_not_let_one_views_absence_answer_for_anothers_value() {
+    for attempt in 0..5 {
+        let mut served = serve_families().await;
+        for key in ["2026-Q5", "2026-Q6"] {
+            assert_eq!(
+                create(&served, "quarter", key, json!({ "metadata": {} }))
+                    .await
+                    .status(),
+                201
+            );
+        }
+        reauthorise(&mut served).await;
+
+        // Held in no view: `score` is absent where the entity was first ingested.
+        let id = b"divergent".to_vec();
+        let sparse = Attrs {
+            score: None,
+            depth: None,
+            tag: None,
+            note: None,
+            archive: Some("astro"),
+        };
+        assert_eq!(
+            families_ingest(&served, "first", "world", &id, 15.0, 15.0, sparse)
+                .await
+                .status(),
+            200
+        );
+        flush(&served).await;
+
+        // Accepted: an entity holding nothing for a column has nothing a joining row contradicts.
+        // The joined view's tail now carries `4` where `world`'s carries an absence — the one
+        // lawful disagreement the backfill does not close, because there was no stored value to
+        // backfill from.
+        assert_eq!(
+            families_ingest(
+                &served,
+                "supply",
+                "quarter:2026-Q5",
+                &id,
+                800.0,
+                300.0,
+                Attrs {
+                    score: Some(4),
+                    ..sparse
+                },
+            )
+            .await
+            .status(),
+            200
+        );
+        flush(&served).await;
+
+        // A third view, a differing value: `409`, every time, whichever view the scan reaches
+        // first. Reading `world`'s absence as the answer would accept it.
+        for round in 0..10 {
+            let resp = families_ingest(
+                &served,
+                &format!("third-{attempt}-{round}"),
+                "quarter:2026-Q6",
+                &id,
+                700.0,
+                200.0,
+                Attrs {
+                    score: Some(7),
+                    ..sparse
+                },
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                409,
+                "attempt {attempt}, round {round}: one view's absence must not answer for \
+                 another's value"
+            );
+            let body: Value = resp.json().await.unwrap();
+            assert!(
+                body["detail"].as_str().unwrap().contains("score"),
+                "the refusal names the column: {body}"
+            );
+        }
+    }
 }

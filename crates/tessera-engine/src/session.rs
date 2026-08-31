@@ -2685,39 +2685,7 @@ impl Engine {
         entity: EntityId,
         declared_index: usize,
     ) -> Option<tessera_lifecycle::WalScalar> {
-        let generation = self.generation();
-        let manifest = &generation.bundle.manifest;
-        let declared = manifest.declared_scalars.get(declared_index)?;
-        let vocabularies = &manifest.vocabularies;
-        let entity_raw = u32::try_from(entity.raw()).ok()?;
-
-        let stored = if crate::filter::owes_value_column(declared, vocabularies) {
-            generation
-                .filter_columns
-                .stored_value(&declared.name, entity_raw)
-        } else if crate::filter::blob_resident(declared, vocabularies) {
-            // The blob is keyed by entity and its rows are self-describing, so the field wanted is
-            // the one tagged with this column's declared position (records §3). A malformed row
-            // refuses on the drill-down path, which propagates it; here it is a lost report.
-            match generation.filter_columns.records().fields_of(entity_raw) {
-                Ok(fields) => fields?
-                    .into_iter()
-                    .find_map(|f| (f.tag as usize == declared_index).then_some(f.value)),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "the record blob could not answer, so the join rule's attribute arm has \
-                         nothing to compare a blob-resident column against and this batch's joins \
-                         are accepted unchecked (views §4). The artefact is a build or flush \
-                         defect and the error names the file; a fold rewrites it."
-                    );
-                    None
-                }
-            }
-        } else {
-            crate::viewport::flushed_row_scalar(&generation, entity, declared_index)
-        }?;
-        stored_as_wal(stored, declared)
+        flushed_scalar_of(&self.generation(), entity, declared_index)
     }
 
     pub fn resolve_external_ids(
@@ -3782,6 +3750,105 @@ impl ExternalIdIndex {
         high_water: u64,
     ) -> std::result::Result<Option<Vec<u8>>, StoreError> {
         self.0.external_id_of_checked(entity, high_water)
+    }
+}
+
+/// [`Engine::flushed_scalar`]'s body, over a generation the caller already holds.
+///
+/// **The write executor needs this form, and that is why it is not a method.** The handler
+/// *compares* a joining batch against these values; the executor *backfills* an omitted render
+/// value from them (`views.md` §4), and it must read the same generation its apply will clone
+/// from rather than re-loading the pointer under itself. One body, so the comparison and the
+/// backfill cannot come to read a value differently.
+pub(crate) fn flushed_scalar_of(
+    generation: &Generation,
+    entity: EntityId,
+    declared_index: usize,
+) -> Option<tessera_lifecycle::WalScalar> {
+    let manifest = &generation.bundle.manifest;
+    let declared = manifest.declared_scalars.get(declared_index)?;
+    let vocabularies = &manifest.vocabularies;
+    // I9 caps entity ids at `u32::MAX`, and the same `expect` guards the drill-down's read. A
+    // violated invariant is loud rather than a `None` the caller would read as "no value held"
+    // and accept a mismatch under.
+    let entity_raw = u32::try_from(entity.raw()).expect("entity ids are capped at u32::MAX by I9");
+
+    let stored = if crate::filter::owes_value_column(declared, vocabularies) {
+        generation
+            .filter_columns
+            .stored_value(&declared.name, entity_raw)
+    } else if crate::filter::blob_resident(declared, vocabularies) {
+        // The blob is keyed by entity and its rows are self-describing, so the field wanted is the
+        // one tagged with this column's declared position (records §3). A malformed row refuses on
+        // the drill-down path, which propagates it; here it is a lost report.
+        match generation.filter_columns.records().fields_of(entity_raw) {
+            Ok(fields) => fields?
+                .into_iter()
+                .find_map(|f| (f.tag as usize == declared_index).then_some(f.value)),
+            // **The error's *kind*, never its `Display`** (**I10**). `RecordError::Malformed`
+            // carries a detail string, and the blob's detail strings name the entity in six
+            // spellings — its addressing checks are about *which* entity's row was found. The
+            // byte-scanner sweeps logs as well as payloads, so this warning carries the artefact
+            // and the class of defect, which is what an operator chasing a systematic build or
+            // flush fault needs; the row that tripped it buys nothing an entity-independent
+            // message does not. The drill-down propagates the same error as a refusal, and that
+            // path may carry the detail: it reaches an operator's error surface rather than the
+            // log the scanner reads.
+            Err(e) => {
+                let kind = match &e {
+                    tessera_filter::RecordError::Io(io) => io.kind().to_string(),
+                    tessera_filter::RecordError::Malformed(_) => "malformed".to_string(),
+                };
+                tracing::warn!(
+                    artefact = "attrs/record",
+                    kind = %kind,
+                    "the record blob could not answer, so the join rule's attribute arm has \
+                     nothing to compare a blob-resident column against and this batch's joins are \
+                     accepted unchecked (views §4). The artefact is a build or flush defect; a \
+                     fold rewrites it."
+                );
+                None
+            }
+        }
+    } else {
+        crate::viewport::flushed_row_scalar(generation, entity, declared_index)
+    }?;
+    stored_as_wal(stored, declared)
+}
+
+/// Is this value **no value at all** for `declared` — the join rule's "or be absent from the
+/// batch" (`views.md` §4), asked of a supplied value and a stored one alike?
+///
+/// **Two spellings, because a category's absence is in band.** Every other family says absence
+/// with [`tessera_lifecycle::WalScalar::Null`], having no bit pattern to spare; a vocabulary keeps
+/// code 0 out of its value space precisely so a category can say it with a code
+/// ([`tessera_store::vocabulary::ABSENT_CODE`], per-point-attributes §3.4), and the ingest parse
+/// turns a null category cell into that code before either arm sees it. Reading only the `Null`
+/// spelling made a joining batch that left a category null a `409` against an entity holding a
+/// value, and a join carrying a value against an entity holding *none* a `409` as well, neither of
+/// which the rule asks for.
+///
+/// One definition, because three callers ask it: the handler's comparison, on both sides, and the
+/// executor's backfill.
+pub fn scalar_is_absent(
+    value: &tessera_lifecycle::WalScalar,
+    declared: &tessera_store::manifest::DeclaredScalar,
+) -> bool {
+    use tessera_lifecycle::WalScalar as WS;
+    if matches!(value, WS::Null) {
+        return true;
+    }
+    if declared.vocabulary.is_none() {
+        return false;
+    }
+    let absent = tessera_store::vocabulary::ABSENT_CODE;
+    match value {
+        WS::U8(c) => u32::from(*c) == absent,
+        WS::U16(c) => u32::from(*c) == absent,
+        WS::U32(c) => *c == absent,
+        // A novel key on a `discovered` vocabulary travels as its key and is minted at the commit
+        // window's close; a key is never absence — the empty string is refused upstream.
+        _ => false,
     }
 }
 

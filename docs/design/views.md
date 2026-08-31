@@ -8,8 +8,11 @@ entity-space value column, the record blob, or the hot column — and a joining 
 different one is the `409` naming the column that the rule always specified. Two things the marker
 had wrong are recorded at the claim: the read is one per column rather than an oracle per family,
 and the accepted row was *not* inert for a rendered column, whose value travels in the joining
-row's own tail. One refusal is withdrawn as well — a joining batch that leaves a **category** null
-is a join, absence being the reserved code rather than a null cell. No other design content moves.
+row's own tail. That second point carries a **new rule** (owner ruling): a join that omits a
+`render` column's value takes the entity's stored one rather than writing an absence into the
+joined view's tail, so an entity-scoped attribute reads identically in every view that shows it.
+One refusal is withdrawn as well — a joining batch that leaves a **category** null is a join,
+absence being the reserved code rather than a null cell. No other design content moves.
 **Status:** Normative (r23) — **§4's join rule refuses a re-label past the entity's own flush**
 (r23, 2026-08-31; `contracts.md` §2.4 r63,
 [decision 0114](../decisions/0114-the-drill-down-serves-the-satisfied-labels-only.md)). The label
@@ -601,6 +604,22 @@ indistinguishable from its invisibility there (C4's closure).
 > tail, so a rendered column's differing value was being written into the joined view's hot column
 > and read back there. For that home the marker was losing the rule, not only the report.
 >
+> **An omitted value is backfilled into the joined view's tail, not written there as an absence**
+> (owner ruling, 2026-08-31). A joining row is geometry-only in *entity* space, and its scalars
+> still travel in its own row tail — so a batch that lawfully omitted a `render` column's value
+> would leave the joined view rendering nothing for a point every other view renders a value for,
+> and an entity-scoped attribute that reads differently under two views is not the one value per
+> entity §5 says it is. The row takes the entity's stored value instead, read by the same oracle
+> the comparison uses (the buffer where the entity's own row is still there, the stored homes
+> after). A column the entity genuinely holds **nothing** for is untouched, and its absence stays
+> an absence in every view.
+>
+> It is applied on the **write executor**, where join-ness is settled — the apply-adjacent backstop
+> is what finally decides which rows join and which allocate fresh, and a row that stops being a
+> join must not carry a value taken from an entity it turned out not to be joining. That is also
+> before the log append, so the value the log carries is the value the flush writes and replay
+> reproduces it rather than re-deriving it against whatever the bundle holds by then.
+>
 > **Absence is one question, asked of both sides.** A joining row that omits a value never
 > disagrees with a stored one, and a stored *absence* is never something a supplied value can
 > contradict — the arm is one-directional, guarding against a *change*. It is asked in two
@@ -614,7 +633,12 @@ indistinguishable from its invisibility there (C4's closure).
 > record blob or segment set is warned — naming the artefact and never the entity (**I10**) — and
 > the join is then accepted exactly as it was before either oracle existed. That is the
 > recoverable-and-discloses-nothing side of the line: a corrupt artefact must not turn a caller's
-> write into a server error.
+> write into a server error. A view whose segment set will not resolve is *skipped*, not taken as
+> an answer: the hot-column read scans every view the entity has a row in and returns the first
+> **present** value it finds, absence never pre-empting a value. One lawful disagreement survives
+> the backfill — an entity holding nothing for a column in the view it was ingested into, joined
+> into a second view *with* a value, there having been nothing to backfill from — and reading the
+> first view's absence as the answer made the third view's join accept or refuse by hash order.
 >
 > A **group-scoped** attribute is refused on every batch by construction rather than by this rule:
 > a scoped column is deliberately absent from `MANIFEST.declared_scalars` (spec §5), so a column
@@ -1190,7 +1214,15 @@ each view under spec §4's rule.
   differing value was reaching the joined view's hot column. A refusal is withdrawn in the same
   change: a batch leaving a **category** null was a `409` against an entity holding a value,
   because the arm read absence only in its `null` spelling and a category says it with the reserved
-  code. That was the buffered arm's behaviour, so the correction moves both. *(Revision number: if
+  code. That was the buffered arm's behaviour, so the correction moves both. Two findings from the
+  review of the change itself are folded in. The **backfill** is the owner's ruling on the
+  divergence the third home exposed: an accepted join that omitted a `render` value must not write
+  an absence into the joined view's tail while another view renders a value, so it takes the stored
+  one. And the hot-column read scanned views out of a `HashMap` and stopped at the first that held
+  a *row*, reading a clear presence bit as "no value held" — so the one disagreement the backfill
+  cannot close, an entity holding nothing where it was ingested and a value where it was joined,
+  answered a later join by hash order. It now scans every view and absence never pre-empts a value.
+  *(Revision number: if
   another branch has taken r24 by the time this merges, this is the later of the two and renumbers
   itself — nothing here depends on r23 having been the immediate predecessor.)*
 - **r23 (2026-08-31)** — §4's label arm is exact past a flush and its ⊘ is discharged; the
