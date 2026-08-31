@@ -1726,6 +1726,7 @@ fn write_manifests(
         // a running node, and a build produces a bundle rather than editing one.
         layer_tombstones: Vec::new(),
         views: Vec::new(),
+        scoped_columns: Vec::new(),
         view_tombstones: Vec::new(),
         membership_extents: published_layers.membership_extents.clone(),
         level_versions: published_layers.level_versions.clone(),

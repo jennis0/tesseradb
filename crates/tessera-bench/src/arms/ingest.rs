@@ -382,6 +382,7 @@ pub(crate) fn synth_rows(
                 y: ((n * 53) % 65536) as f64,
                 scalars: Vec::new(),
                 terms: terms.to_vec(),
+                scoped: Vec::new(),
             }
         })
         .collect()
@@ -1102,6 +1103,7 @@ fn rate_rows(
                 y: ((n * 53) % 65536) as f64,
                 scalars: Vec::new(),
                 terms: picks.iter().map(|&k| pool_terms[k]).collect(),
+                scoped: Vec::new(),
             }
         })
         .collect()

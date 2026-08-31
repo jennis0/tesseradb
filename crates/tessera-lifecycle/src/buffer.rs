@@ -169,6 +169,16 @@ pub struct BufferedItem {
     pub x: f64,
     pub y: f64,
     pub scalars: Vec<WalScalar>,
+    /// This row's values for the **group-scoped** attribute families of its view's group
+    /// ([`WalRow::scoped`], `views.md` §5) — positional against
+    /// `MANIFEST.groups[..].scoped_scalars` in manifest order, and empty everywhere no family is
+    /// in scope.
+    ///
+    /// **Held per `(entity, view)`, which this buffer already is.** A scoped value belongs to the
+    /// pair and not to the entity, so an entity buffered in two views of one group carries each
+    /// view's own value here — including on a **join** row, the one thing a second view's row
+    /// brings with it beyond geometry (`views.md` §4).
+    pub scoped: Vec<WalScalar>,
     /// The caller-supplied external id, or `None` for an item ingested without one (contracts
     /// §3.4 r6) — carried because the **flush** is what writes it into the bundle's external-id
     /// extent and locator, and the flush reads the buffer rather than the WAL.
@@ -261,6 +271,7 @@ impl IngestBuffer {
             x: row.x,
             y: row.y,
             scalars: row.scalars.clone(),
+            scoped: row.scoped.clone(),
             wal_pos: None,
         });
         let rows = self.items.entry(row.entity_id).or_default();

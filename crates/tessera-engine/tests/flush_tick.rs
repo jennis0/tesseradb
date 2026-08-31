@@ -107,6 +107,7 @@ fn a_requested_flush_executes_promptly_through_the_tick_path() {
         y: 0.5,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], "prompt-flush-batch".to_string(), [7u8; 32])

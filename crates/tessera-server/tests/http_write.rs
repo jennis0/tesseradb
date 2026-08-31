@@ -751,6 +751,7 @@ fn concurrent_ingest_and_change_both_survive() {
             y: 5.0,
             scalars: Vec::new(),
             terms: engine_b.resolve_terms(std::slice::from_ref(&b"0".to_vec())),
+            scoped: Vec::new(),
         };
         barrier_b.wait();
         engine_b

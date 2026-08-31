@@ -461,6 +461,7 @@ fn insert_buffered(buffer: &mut IngestBuffer, entity: u64, terms: Vec<TermId>) {
         x: 0.0,
         y: 0.0,
         scalars: Vec::new(),
+        scoped: Vec::new(),
     };
     buffer.insert_row_with_terms(&row, terms);
 }
@@ -500,6 +501,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                     x: 0.0,
                     y: 0.0,
                     scalars: Vec::new(),
+                    scoped: Vec::new(),
                 },
                 WalRow {
                     external_id: Some(ext_y.clone()),
@@ -510,6 +512,7 @@ fn step3_restart_replay_survives_cross_cause_sequences() {
                     x: 0.0,
                     y: 0.0,
                     scalars: Vec::new(),
+                    scoped: Vec::new(),
                 },
             ],
         })

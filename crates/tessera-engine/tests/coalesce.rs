@@ -72,6 +72,7 @@ fn ingest_novel(engine: &Engine, i: usize) -> EntityId {
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[descriptor]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], format!("batch-{i}"), [i as u8; 32])

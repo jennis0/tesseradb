@@ -943,6 +943,7 @@ fn tiered_decode_matches_the_per_value_path_on_all_tiers_routes_and_branches() {
                             x: 0.0,
                             y: 0.0,
                             scalars: Vec::new(),
+                            scoped: Vec::new(),
                         },
                         vec![TermId::new(0)],
                     );

@@ -1273,10 +1273,26 @@ impl Engine {
         // reads the manifest — the deny mask over every view, `/v1/meta`, view resolution on both
         // planes — and a created view absent from it comes back from a restart as a 404.
         let (created_views, view_tombstones) = write_state.roster.snapshot();
-        let bundle = if created_views.is_empty() && view_tombstones.is_empty() {
+        // **And the group-scoped columns a flush wrote** (`views.md` §5).
+        // `scoped_scalars[..].views` names the views that have a column; a flush of a view created
+        // since the build wrote one, and `SegmentsManifest::scoped_columns` is where that survives
+        // a restart — `MANIFEST.json` being rewritten only by a fold.
+        let scoped_columns: Vec<(String, String)> = bundle
+            .partitions
+            .values()
+            .flat_map(|p| p.manifest.scoped_columns.iter())
+            .map(|c| (c.column.clone(), c.view.clone()))
+            .collect();
+        let bundle = if created_views.is_empty()
+            && view_tombstones.is_empty()
+            && scoped_columns.is_empty()
+        {
             Arc::new(bundle)
         } else {
-            let manifest = bundle.manifest.with_roster(&created_views, &view_tombstones);
+            let manifest = bundle
+                .manifest
+                .with_roster(&created_views, &view_tombstones)
+                .with_scoped_columns(&scoped_columns);
             Arc::new(bundle).with_views(manifest)
         };
         let denied = Arc::new(crate::compose::derive_denied(&overlay, &bundle));

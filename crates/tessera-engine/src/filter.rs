@@ -702,6 +702,20 @@ pub fn scoped_column_name(name: &str, view_id: &str) -> String {
     format!("{name}{PIN}{view_id}")
 }
 
+/// The name a manifest extent entry composes onto — the column's own for an entity-scoped one, and
+/// [`scoped_column_name`]'s resolved form where the entry names a view (`views.md` §5).
+///
+/// **One function, so every producer and every reader of an extent agree.** A flush, a coalesce,
+/// a restart's `open` and the live composition each turn an `(column, view)` pair into the key the
+/// column map answers on; two spellings of that rule would compose a flush's layer under a name no
+/// leaf resolves to, and the values would be served as the absence below with no error anywhere.
+pub fn extent_column_name(column: &str, view: Option<&str>) -> String {
+    match view {
+        Some(view) => scoped_column_name(column, view),
+        None => column.to_string(),
+    }
+}
+
 /// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
 /// `filter_operands` and resolvable by a leaf (`views.md` §5)?
 ///
@@ -737,6 +751,129 @@ pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> b
 /// written for one would be read by nothing.
 pub(crate) fn scoped_owes_postings(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
     scoped.vocabulary.is_some() && scoped_is_filterable(scoped)
+}
+
+
+/// Open one view's column of a group-scoped attribute family (`views.md` §5) — the name it is held
+/// under, its placement, and its layers.
+///
+/// **One column per view, opened under its resolved name**, so a scoped leaf evaluates through
+/// exactly the machinery an unscoped one of its family does: the same `ValueColumn`, the same
+/// scan, the same presence rules for absence. The only thing the scope decides is which file —
+/// which is what keeps the attribute inside I2's argument unchanged, every value being indexed by
+/// entity and every predicate answering a bitmap in entity space that the mask meets before any
+/// permutation.
+///
+/// **Two callers, one body.** [`FilterColumns::open`] walks every family's `views` at startup; a
+/// flush that wrote the *first* column of a family for a view created since the build composes it
+/// onto the live generation through [`FilterColumns::with_scoped_columns`]. The two must produce
+/// the same reader, or a running process and the same bundle reopened would disagree about what a
+/// pin resolves to.
+fn open_scoped_column(
+    partition_dir: &Path,
+    family: &tessera_store::manifest::ScopedScalar,
+    view_id: &str,
+    vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+    mmap: bool,
+) -> std::io::Result<(String, Placement, Layers)> {
+    let scoped_family = Family::of_scoped(family);
+    // The analyser a text family's terms were produced by: an analyser this binary does not carry
+    // is the same refusal an entity-scoped text column's is — a `match` answered from a different
+    // segmentation is a wrong answer wearing a correct one's clothes.
+    let analyser = (scoped_family == Family::Text)
+        .then(|| resolve_analyser(&family.name, family.analyser.as_deref()))
+        .transpose()?;
+    // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the one place a
+    // view id becomes a path, so the opener cannot drift from the writer.
+    let mut dir = partition_dir.join("attrs").join(&family.name);
+    for component in tessera_store::view_path_components(view_id) {
+        dir.push(component);
+    }
+    let name = scoped_column_name(&family.name, view_id);
+    let placement = Placement {
+        entity: true,
+        // **Never the row route**, though a rendered family does occupy a row tail
+        // (`views.md` §5): a leaf resolves to one entity-space column and a pin may make that
+        // another view's, which no scan of *these* rows can answer. The entity route is the whole
+        // filter surface — see [`scoped_is_filterable`].
+        row: false,
+        family: scoped_family,
+    };
+    // **No position in `declared_scalars`, because it is not one of them.** The tag is the record
+    // blob's field key and a scoped column is never blob-resident — it has an entity-space home by
+    // construction, which is the condition `blob_resident` is the negation of. The sentinel is what
+    // a reader would see if that ever stopped being true, rather than another column's field.
+    let declared_index = usize::MAX;
+    // **Text opens with no value column at all**, per view exactly as bundle-wide: its artefacts
+    // are the token dictionary and the positional postings over it. The base's layer is opened
+    // here; a flush's layers are appended by the composition, which is where every text extent
+    // enters whatever its scope.
+    if scoped_family == Family::Text {
+        let text = vec![text_layer(
+            SortedDict::open_dir(&dir, request_access(mmap))?,
+            ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
+            &name,
+            "base",
+            // The base writes no presence file of its own, here for the same reason the
+            // entity-scoped base writes none: see `TextLayer::present`.
+            Bitmap::new(),
+            None,
+        )?];
+        return Ok((
+            name,
+            placement,
+            Layers {
+                declared_index,
+                layers: Vec::new(),
+                covered: Bitmap::new(),
+                filterable: true,
+                postings: None,
+                analyser,
+                text,
+                route: Route::Postings,
+                family: scoped_family,
+            },
+        ));
+    }
+    let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
+    let dict = (scoped_family == Family::Keyword)
+        .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
+        .transpose()?;
+    let covered = base.present();
+    // A category's keyed postings, in this view's own directory — opened on the declaration rather
+    // than probed for, the rule every open here keeps.
+    let postings = scoped_owes_postings(family)
+        .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
+        .transpose()?;
+    // The same routing the entity-scoped family takes, and for decision 0063's reason rather than
+    // a tuning one: a `derived` vocabulary's postings answer *membership* and must not answer the
+    // filter, whose work would then be a function of the value named.
+    let route = if postings.is_some()
+        && scoped_visibility_of(family, vocabularies) == Some(Visibility::Public)
+    {
+        Route::Postings
+    } else {
+        Route::Scan
+    };
+    Ok((
+        name,
+        placement,
+        Layers {
+            declared_index,
+            layers: vec![Layer {
+                values_rel: None,
+                values: base,
+                dict,
+            }],
+            covered,
+            filterable: true,
+            postings,
+            analyser: None,
+            text: Vec::new(),
+            route,
+            family: scoped_family,
+        },
+    ))
 }
 
 /// The `visibility` of the vocabulary a scoped category's codes index — [`visibility_of`]'s
@@ -1474,7 +1611,10 @@ impl FilterColumns {
                     Bitmap::new(),
                     None,
                 )?];
-                for extent in text_extents.iter().filter(|e| e.column == scalar.name) {
+                for extent in text_extents
+                    .iter()
+                    .filter(|e| e.column == scalar.name && e.view.is_none())
+                {
                     text_layers.push(text_layer(
                         SortedDict::open(&prefix_dir.join(&extent.dict), request_access(mmap))?,
                         ColumnPostings::open(&prefix_dir.join(&extent.postings), mmap)?,
@@ -1568,115 +1708,13 @@ impl FilterColumns {
             if !scoped_is_filterable(family) {
                 continue;
             }
-            let scoped_family = Family::of_scoped(family);
-            // The analyser a text family's terms were produced by, resolved once for the family
-            // rather than per view: every column of a family was indexed by one declaration, and
-            // an analyser this binary does not carry is the same refusal an entity-scoped text
-            // column's is — a `match` answered from a different segmentation is a wrong answer
-            // wearing a correct one's clothes.
-            let analyser = (scoped_family == Family::Text)
-                .then(|| resolve_analyser(&family.name, family.analyser.as_deref()))
-                .transpose()?;
             for view_id in &family.views {
-                // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the
-                // one place a view id becomes a path, so the opener cannot drift from the writer.
-                let mut dir = partition_dir.join("attrs").join(&family.name);
-                for component in tessera_store::view_path_components(view_id) {
-                    dir.push(component);
-                }
-                let name = scoped_column_name(&family.name, view_id);
-                placements.insert(
-                    name.clone(),
-                    Placement {
-                        entity: true,
-                        // **Never the row route**, though a rendered family does occupy a row
-                        // tail (`views.md` §5): a leaf resolves to one entity-space column and a
-                        // pin may make that another view's, which no scan of *these* rows can
-                        // answer. The entity route is the whole filter surface — see
-                        // [`scoped_is_filterable`].
-                        row: false,
-                        family: scoped_family,
-                    },
-                );
-                // **No position in `declared_scalars`, because it is not one of them.** The tag is
-                // the record blob's field key and a scoped column is never blob-resident — it has
-                // an entity-space home by construction, which is the condition `blob_resident` is
-                // the negation of. The sentinel is what a reader would see if that ever stopped
-                // being true, rather than another column's field.
-                let declared_index = usize::MAX;
-                // **Text opens with no value column at all**, per view exactly as bundle-wide: its
-                // artefacts are the token dictionary and the positional postings over it. One
-                // layer and only one — the base build's — because no flush writes a scoped
-                // extent (`views.md` §5's ingest marker), so there is nothing to append.
-                if scoped_family == Family::Text {
-                    let text = vec![text_layer(
-                        SortedDict::open_dir(&dir, request_access(mmap))?,
-                        ColumnPostings::open(&dir.join("postings.arrow"), mmap)?,
-                        &name,
-                        "base",
-                        // The base writes no presence file of its own, here for the same reason
-                        // the entity-scoped base writes none: see `TextLayer::present`.
-                        Bitmap::new(),
-                        None,
-                    )?];
-                    columns.insert(
-                        name,
-                        Layers {
-                            declared_index,
-                            layers: Vec::new(),
-                            covered: Bitmap::new(),
-                            filterable: true,
-                            postings: None,
-                            analyser: analyser.clone(),
-                            text,
-                            route: Route::Postings,
-                            family: scoped_family,
-                        },
-                    );
-                    continue;
-                }
-                let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
-                let dict = (scoped_family == Family::Keyword)
-                    .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
-                    .transpose()?;
-                let covered = base.present();
-                // A category's keyed postings, in this view's own directory — opened on the
-                // declaration rather than probed for, the rule every open here keeps.
-                let postings = scoped_owes_postings(family)
-                    .then(|| ColumnPostings::open_keyed(&dir.join("postings.arrow")).map(Arc::new))
-                    .transpose()?;
-                // The same routing the entity-scoped family takes, and for decision 0063's reason
-                // rather than a tuning one: a `derived` vocabulary's postings answer *membership*
-                // and must not answer the filter, whose work would then be a function of the value
-                // named.
-                let route = if postings.is_some()
-                    && scoped_visibility_of(family, vocabularies) == Some(Visibility::Public)
-                {
-                    Route::Postings
-                } else {
-                    Route::Scan
-                };
-                columns.insert(
-                    name,
-                    Layers {
-                        declared_index,
-                        layers: vec![Layer {
-                            values_rel: None,
-                            values: base,
-                            dict,
-                        }],
-                        covered,
-                        filterable: true,
-                        postings,
-                        analyser: None,
-                        text: Vec::new(),
-                        route,
-                        family: scoped_family,
-                    },
-                );
+                let (name, placement, layers) =
+                    open_scoped_column(&partition_dir, family, view_id, vocabularies, mmap)?;
+                placements.insert(name.clone(), placement);
+                columns.insert(name, layers);
             }
         }
-
         // The record blob's base is owed exactly when the compiled schema has a blob-resident
         // column — one with no other home ([`blob_resident`], records §3). Derived from the schema
         // rather than probed for on disk, so a missing base is a refusal at open, never "those
@@ -1742,7 +1780,12 @@ impl FilterColumns {
                     SortedDict::open(&prefix_dir.join(rel), request_access(mmap)).map(Arc::new)
                 })
                 .transpose()?;
-            open.compose(&extent.column, &extent.values, Arc::new(column), dict)?;
+            open.compose(
+                &extent_column_name(&extent.column, extent.view.as_deref()),
+                &extent.values,
+                Arc::new(column),
+                dict,
+            )?;
         }
         Ok(open)
     }
@@ -1894,6 +1937,53 @@ impl FilterColumns {
         Ok(())
     }
 
+    /// This generation's columns with a **newly based** group-scoped column opened onto them —
+    /// the first flush of a view a family had no column for (`views.md` §5).
+    ///
+    /// **Applied before the extents compose, and that order is the whole of it.** A flush of a
+    /// view created since the build writes the family's base and its own extent in one unit; the
+    /// extent composes onto a column, so the column has to exist first. A `(column, view)` pair
+    /// this generation already holds is a no-op rather than a refusal — a re-publication reaching
+    /// the same state — because the base is written once and named by its files, not by a counter.
+    pub fn with_scoped_columns(
+        &self,
+        partition_dir: &Path,
+        columns: &[(String, String)],
+        scoped: &[tessera_store::manifest::ScopedScalar],
+        vocabularies: &[tessera_store::manifest::ManifestVocabulary],
+        mmap: bool,
+    ) -> std::io::Result<FilterColumns> {
+        let mut next = FilterColumns {
+            columns: self.columns.clone(),
+            placements: self.placements.clone(),
+            access: self.access,
+            records: Arc::clone(&self.records),
+            entity_terms: Arc::clone(&self.entity_terms),
+        };
+        for (column, view) in columns {
+            let Some(family) = scoped.iter().find(|f| f.name == *column) else {
+                return std::io::Result::Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "a flush wrote a base for the group-scoped column family '{column}' under \
+                         view '{view}', which this bundle does not declare"
+                    ),
+                ));
+            };
+            if !scoped_is_filterable(family) {
+                continue;
+            }
+            if next.columns.contains_key(&scoped_column_name(column, view)) {
+                continue;
+            }
+            let (name, placement, layers) =
+                open_scoped_column(partition_dir, family, view, vocabularies, mmap)?;
+            next.placements.insert(name.clone(), placement);
+            next.columns.insert(name, layers);
+        }
+        Ok(next)
+    }
+
     /// This generation's columns with one flush's extents added — the successor generation's.
     ///
     /// Cheap by construction: the base columns are `Arc`s, so a flush that published one entity
@@ -1951,7 +2041,7 @@ impl FilterColumns {
         // covers. Composed here for the same reason a filter extent is — a published layer the live
         // generation does not hold answers no `match` until the next fold.
         for text in texts {
-            let Some(layers) = next.columns.get_mut(&text.column) else {
+            let Some(layers) = next.columns.get_mut(text.column.as_str()) else {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!(

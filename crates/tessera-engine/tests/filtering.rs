@@ -651,6 +651,7 @@ fn ingest_and_flush_with(
             bonus,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let allocated = engine
         .accept_ingest(vec![row], external.to_string(), [0u8; 32])
@@ -1246,6 +1247,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
         // The schema declares five columns.
         scalars: vec![WalScalar::Utf8("eng".to_string())],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let err = engine
         .accept_ingest(vec![short], "batch-short".to_string(), [1u8; 32])
@@ -1274,6 +1276,7 @@ fn a_row_with_the_wrong_scalar_count_is_refused_rather_than_panicking() {
             WalScalar::Null,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     assert!(engine
         .accept_ingest(vec![good], "batch-good".to_string(), [2u8; 32])
@@ -1766,6 +1769,7 @@ fn an_entity_whose_value_is_not_yet_reachable_matches_no_negation() {
             WalScalar::Null,
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let buffered = engine
         .accept_ingest(vec![row], "batch-buffered".to_string(), [9u8; 32])

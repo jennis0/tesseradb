@@ -419,6 +419,7 @@ fn ingest_point(engine: &Engine, external_id: &str, term: u32, x: f64, y: f64) {
                 y,
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
+                scoped: Vec::new(),
             }],
             external_id.to_string(),
             hash,

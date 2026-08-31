@@ -291,6 +291,7 @@ fn ingest_point_into(
                 y,
                 scalars: scalars_with_partition(value, columns, at),
                 terms: engine.resolve_terms(&descriptors),
+                scoped: Vec::new(),
             }],
             external_id.to_string(),
             hash,

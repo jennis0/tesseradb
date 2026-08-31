@@ -6403,6 +6403,33 @@ fn scoped_render_scalars(
     view: &str,
     visible: &crate::gate::VisibleViews,
 ) -> Vec<DeclaredScalar> {
+    scoped_render_families(manifest, view)
+        .into_iter()
+        .filter(|f| visible.contains_group(&f.group))
+        .map(|f| DeclaredScalar {
+            name: f.name.clone(),
+            arrow_type: f.arrow_type,
+            vocabulary: f.vocabulary.clone(),
+            analyser: f.analyser.clone(),
+            index: f.index,
+            render: true,
+        })
+        .collect()
+}
+
+/// The **group-scoped** render families whose column `view`'s row tail carries — the gate-free
+/// half of [`scoped_render_scalars`], and the one statement of which lanes a view's rows hold.
+///
+/// **The write path asks this and the read path asks the wrapper above.** A writer has no
+/// principal and must produce the lane whatever any session may see; a request narrows the same
+/// list by the session's visible-view set. Splitting them here is what stops the two rules — which
+/// row spaces carry a lane, and which of those a principal is told about — from being restated in
+/// a second place and coming to disagree: a merge or a fold taking a *narrower* list would drop a
+/// lane the build wrote, and the rows would read as the ordinary absence below.
+pub(crate) fn scoped_render_families<'a>(
+    manifest: &'a tessera_store::manifest::Manifest,
+    view: &str,
+) -> Vec<&'a tessera_store::manifest::ScopedScalar> {
     // This view's roster record — the group it belongs to and the key it holds there. Matched
     // against the roster rather than parsed out of the id: a view id is `<group>:<key>` by
     // construction, and the roster is what decides which group and which key that is.
@@ -6429,7 +6456,7 @@ fn scoped_render_scalars(
         .groups
         .iter()
         .flat_map(|g| g.scoped_scalars.iter())
-        .filter(|f| f.render && visible.contains_group(&f.group))
+        .filter(|f| f.render)
         .filter(|f| {
             // §3.3's rule, stated once in `owning_key_of`, and then the family's own list: a view
             // of the group that has no column — one created since the build — renders nothing.
@@ -6437,14 +6464,6 @@ fn scoped_render_scalars(
                 f.views
                     .contains(&format!("{}{}{key}", f.group, tessera_store::GROUP_SEPARATOR))
             })
-        })
-        .map(|f| DeclaredScalar {
-            name: f.name.clone(),
-            arrow_type: f.arrow_type,
-            vocabulary: f.vocabulary.clone(),
-            analyser: f.analyser.clone(),
-            index: f.index,
-            render: true,
         })
         .collect()
 }

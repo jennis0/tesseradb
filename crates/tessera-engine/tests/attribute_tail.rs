@@ -469,6 +469,7 @@ fn an_ingested_row_carries_the_declared_tail_through_a_flush() {
                     WalScalar::F32(12.5),
                 ],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "batch-1".to_string(),
             [0u8; 32],
@@ -532,6 +533,7 @@ fn a_merge_carries_every_inputs_tail_forward_against_the_right_identities() {
                         WalScalar::F32(batch as f32 * 3.25),
                     ],
                     terms: engine.resolve_terms(&[b"0".to_vec()]),
+                    scoped: Vec::new(),
                 }],
                 format!("batch-{batch}"),
                 [batch as u8; 32],
@@ -615,6 +617,7 @@ fn a_fold_rewrites_the_whole_corpus_without_losing_the_tail() {
                     WalScalar::F32(99.75),
                 ],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "pre-fold".to_string(),
             [7u8; 32],
@@ -714,6 +717,7 @@ fn a_served_point_carries_its_own_tail_across_segments_and_tiles() {
                     WalScalar::F32(99.5),
                 ],
                 terms: engine.resolve_terms(&[b"0".to_vec()]),
+                scoped: Vec::new(),
             }],
             "batch-read-path".to_string(),
             [0u8; 32],
@@ -932,6 +936,7 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
             WalScalar::F32(score),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+    scoped: Vec::new(),
     }
 }
 
@@ -1375,6 +1380,7 @@ fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> Una
             WalScalar::U8(3),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+    scoped: Vec::new(),
     }
 }
 

@@ -206,6 +206,23 @@ pub(crate) struct FlushContext {
     /// (records §4.2) — and where each one's value sits in a buffered row's positional scalar
     /// list. The third home's schema, beside the other two's.
     pub(crate) record_schema: Vec<RecordColumnSpec>,
+    /// This view's **group-scoped** attribute families (`views.md` §5), in the owning group's
+    /// manifest order — which is the order a buffered row's `scoped` list is positional against.
+    /// Empty for a plain view, for a view of a group that owns no family, and for a view of a
+    /// group that only *shares* another's (§3.3: a family belongs to the group that owns the keys,
+    /// and only that group's views carry values at ingest).
+    pub(crate) scoped_schema: Vec<ScopedColumnSpec>,
+    /// One entry per lane in [`FlushContext::scalar_schema`]'s **scoped suffix**, giving where
+    /// that lane's value sits in a buffered row's `scoped` list — `None` for a lane this view
+    /// renders and does not write, which is a view of a group that only *shares* the family's
+    /// views (`views.md` §3.3, §5).
+    ///
+    /// **Positional against the schema's suffix, exactly as `render_indices` is against its
+    /// prefix.** A writer pairs each buffer with the next column's name, so a list built on a
+    /// different predicate from the one that produced the schema would caption a family's values
+    /// with another's name — and the schema is `write::view_scalar_schema_of`'s, the same one a
+    /// merge and a fold of this view take.
+    pub(crate) scoped_render: Vec<Option<usize>>,
     /// The indexed `text` columns, each with the analyser its declaration resolved. Separate from
     /// [`FlushContext::filter_schema`] because a text column has no value column for that pass to
     /// write — its extent is a dictionary, postings and presence, and nothing per entity.
@@ -284,6 +301,17 @@ pub(crate) struct CompletedFlush {
     /// an empty layer rather than none, so the manifest's list stays a complete history of what
     /// each flush minted.
     pub(crate) entity_terms_extent: tessera_store::manifest::EntityTermsExtent,
+    /// The `(family, view)` pairs this flush gave a column — a view of a group the family had no
+    /// column for, which is every view created since the build (`views.md` §5). "A column" is an
+    /// entity-space one for an indexed family, whose empty base this flush also wrote, and a lane
+    /// in the row tail for a rendered one, which has no base to write.
+    ///
+    /// **Published into `MANIFEST.groups[..].scoped_scalars[..].views`** and into the
+    /// side-manifest's `scoped_columns`, which is what a restart derives that list back from:
+    /// `/v1/meta`'s `scoped_scalars[..].views` reports it, the opener walks it, and a request's
+    /// render list is decided by it, so a view left off renders nothing and is opened for
+    /// nothing.
+    pub(crate) scoped_columns: Vec<(String, String)>,
     /// This flush's text layers, one per indexed `text` column. Composed onto the live generation
     /// at publication, exactly as a filter extent is: a `match` over a batch flushed since the
     /// build must see it without waiting for a fold.
@@ -349,11 +377,11 @@ pub(crate) fn execute_flush(
     // catches that only where the two types happen to differ.
     let mut rows: Vec<FlushRow> = Vec::with_capacity(plan.items.len());
     for (entity, item) in &plan.items {
-        let mut scalars = Vec::with_capacity(ctx.render_indices.len());
-        // `scalar_schema` is positionally parallel to `render_indices` — both are the render subset
-        // in declaration order — so this zip takes exactly the render subset's values, in the
-        // order the writer's own schema names them.
-        for (&index, _) in ctx.render_indices.iter().zip(&ctx.scalar_schema) {
+        let mut scalars = Vec::with_capacity(ctx.render_indices.len() + ctx.scoped_render.len());
+        // `scalar_schema`'s prefix is positionally parallel to `render_indices` — both are the
+        // render subset in declaration order — so this takes exactly that subset's values, in the
+        // order the writer's own schema names them; its suffix is `scoped_render`'s, below.
+        for &index in &ctx.render_indices {
             let value = item.scalars.get(index).ok_or_else(|| {
                 FlushFailed(format!(
                     "a buffered row carries {} scalars, but a render column is declared at \
@@ -367,6 +395,21 @@ pub(crate) fn execute_flush(
             // is over rows and the sort that decides them happens inside that call. Substituting
             // the zero here would leave the writer nothing to tell "scores zero" from "has no
             // score".
+            scalars.push(to_scalar_value(value));
+        }
+        // **The group-scoped render lanes, after the declared ones** (`views.md` §5) — the order
+        // the build writes them in, and the order `scalar_schema`'s suffix names them. A row that
+        // carried no value for a family takes the absence the entity-scoped lanes take: it travels
+        // as `WalScalar::Null` and `write_flush_segment` records it in the lane's presence bitmap
+        // before writing the type's zero (decision 0064).
+        for index in &ctx.scoped_render {
+            // `None` is a lane this view renders and does not write — a view of a group that only
+            // shares the family's views (`views.md` §5). It takes the absence every other absence
+            // takes, and the lane is written so that every segment of the view holds the same
+            // columns.
+            let value = index
+                .and_then(|index| item.scoped.get(index))
+                .unwrap_or(&WalScalar::Null);
             scalars.push(to_scalar_value(value));
         }
         rows.push(FlushRow {
@@ -467,9 +510,61 @@ pub(crate) fn execute_flush(
         );
     }
 
+    // ---- the group-scoped column families' extents (`views.md` §5) --------------------------
+    //
+    // Beside the entity-scoped extents above and composed at publication exactly as they are —
+    // the only thing the scope changes is which directory the files land in.
+    let ScopedWrite {
+        extents: scoped_extents,
+        texts: scoped_texts,
+        created: scoped_columns,
+    } = write_scoped_extents(&plan, &ctx)?;
+    for extent in &scoped_extents {
+        for rel in [&extent.values_rel, &extent.presence_rel]
+            .into_iter()
+            .chain(extent.dict_rel.as_ref())
+        {
+            files.insert(
+                rel.clone(),
+                digest_of(&ctx.prefix_dir.join(rel)).map_err(FlushFailed)?,
+            );
+        }
+    }
+    // **The base a view acquired at this flush is digested too.** It is named by
+    // `MANIFEST.files` nowhere — the build wrote no such view — so the side-manifest is where it
+    // enters the bundle's file set, and a base outside it is a file `ensure_verified` finds
+    // unaccounted for.
+    for (column, view) in &scoped_columns {
+        let mut rel = format!("partitions/{}/attrs/{column}", ctx.partition);
+        for component in tessera_store::view_path_components(view) {
+            rel.push('/');
+            rel.push_str(component);
+        }
+        for name in [
+            tessera_filter::VALUES_FILE,
+            tessera_filter::PRESENCE_FILE,
+            tessera_filter::DICT_FILE,
+            "postings.arrow",
+        ] {
+            let path = ctx.prefix_dir.join(&rel).join(name);
+            if path.exists() {
+                files.insert(
+                    format!("{rel}/{name}"),
+                    digest_of(&path).map_err(FlushFailed)?,
+                );
+            }
+        }
+    }
+    let filter_extents = {
+        let mut all = filter_extents;
+        all.extend(scoped_extents);
+        all
+    };
+
     // ---- the record-blob extent (records §7) ------------------------------------------------
     let record_extent = write_record_extent(&plan, &ctx)?;
-    let text_extents = write_text_extents(&plan, &ctx)?;
+    let mut text_extents = write_text_extents(&plan, &ctx)?;
+    text_extents.extend(scoped_texts);
     if let Some(extent) = &record_extent {
         for rel in [&extent.blocks, &extent.hasrow, &extent.directory] {
             files.insert(
@@ -552,6 +647,7 @@ pub(crate) fn execute_flush(
         record_extent,
         entity_terms_extent,
         text_extents,
+        scoped_columns,
         files,
         tier,
         tier_path: tier_rel,
@@ -764,6 +860,9 @@ pub(crate) struct FilterColumnSpec {
 /// a path convention — is what puts all three in one manifest record.
 pub(crate) struct FlushedExtent {
     pub(crate) column: String,
+    /// The view whose column of a **group-scoped family** this extends, or `None` for an ordinary
+    /// entity-scoped column ([`tessera_store::manifest::AttrExtent::view`], `views.md` §5).
+    pub(crate) view: Option<String>,
     pub(crate) values_rel: String,
     pub(crate) presence_rel: String,
     /// The extent's own sorted dictionary — keyword columns only, `None` for every family whose
@@ -801,7 +900,7 @@ fn write_filter_extents(
 ) -> Result<Vec<FlushedExtent>, FlushFailed> {
     let mut out = Vec::with_capacity(ctx.filter_schema.len());
     for spec in &ctx.filter_schema {
-        let column = extent_values(spec, plan)?;
+        let column = extent_values(spec, entity_scoped_rows(spec, plan)?)?;
         let column_rel = format!("partitions/{}/attrs/{}", ctx.partition, spec.name);
         let column_dir = ctx.prefix_dir.join(&column_rel);
         let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
@@ -844,6 +943,7 @@ fn write_filter_extents(
             .transpose()?;
         out.push(FlushedExtent {
             column: spec.name.clone(),
+            view: None,
             values_rel: rel(&values_path)?,
             presence_rel: rel(&presence_path)?,
             dict_rel: dict_path.as_ref().map(rel).transpose()?,
@@ -872,29 +972,11 @@ fn write_filter_extents(
 /// on a value this code invented is worse than not flushing.
 fn extent_values<'a>(
     spec: &FilterColumnSpec,
-    plan: &'a FlushPlan,
+    entities: Vec<(u32, &'a WalScalar)>,
 ) -> Result<ExtentColumn<'a>, FlushFailed> {
     use tessera_filter::Codes;
 
     let mut presence = croaring::Bitmap::new();
-    let mut entities = Vec::with_capacity(plan.items.len());
-    for (entity, item) in plan.entity_space_items() {
-        let entity = u32::try_from(entity.raw()).map_err(|_| {
-            FlushFailed(format!(
-                "entity {} does not fit the u32 entity space (I9's ceiling)",
-                entity.raw()
-            ))
-        })?;
-        let value = item.scalars.get(spec.index).ok_or_else(|| {
-            FlushFailed(format!(
-                "a buffered row carries {} scalars, but column '{}' is declared at position {}",
-                item.scalars.len(),
-                spec.name,
-                spec.index
-            ))
-        })?;
-        entities.push((entity, value));
-    }
 
     let wrong = |value: &WalScalar| {
         FlushFailed(format!(
@@ -1031,6 +1113,65 @@ fn extent_values<'a>(
     Ok(ExtentColumn::flat(codes, presence))
 }
 
+/// The `(entity, value)` pairs one **entity-scoped** column's extent covers: the plan's own rows,
+/// joins excluded, each row's value at the column's position in the declared tail.
+///
+/// **Joins are excluded because a join row carries no entity-scoped value** (`views.md` §4): it
+/// arrives with its entity already decided and writes nothing in entity space, so a slot for it
+/// here would claim an entity an earlier layer already holds a value for.
+fn entity_scoped_rows<'a>(
+    spec: &FilterColumnSpec,
+    plan: &'a FlushPlan,
+) -> Result<Vec<(u32, &'a WalScalar)>, FlushFailed> {
+    let mut out = Vec::with_capacity(plan.items.len());
+    for (entity, item) in plan.entity_space_items() {
+        let entity = u32::try_from(entity.raw()).map_err(|_| {
+            FlushFailed(format!(
+                "entity {} does not fit the u32 entity space (I9's ceiling)",
+                entity.raw()
+            ))
+        })?;
+        let value = item.scalars.get(spec.index).ok_or_else(|| {
+            FlushFailed(format!(
+                "a buffered row carries {} scalars, but column '{}' is declared at position {}",
+                item.scalars.len(),
+                spec.name,
+                spec.index
+            ))
+        })?;
+        out.push((entity, value));
+    }
+    Ok(out)
+}
+
+/// The `(entity, value)` pairs one view's column of a **group-scoped** family covers
+/// (`views.md` §5) — **every** row this flush publishes, a join included.
+///
+/// **That is the whole difference from the entity-scoped gather above**, and it is the rule rather
+/// than an oversight: a scoped value belongs to the `(entity, view)` pair this flush is giving a
+/// row, not to the entity, so a join into a second view of the group is exactly the row that
+/// carries this view's value. Disjointness still holds — the entity has at most one row per view
+/// (§4's 409), so at most one layer of this view's column ever claims it.
+fn scoped_rows<'a>(
+    spec: &ScopedColumnSpec,
+    plan: &'a FlushPlan,
+) -> Result<Vec<(u32, &'a WalScalar)>, FlushFailed> {
+    let mut out = Vec::with_capacity(plan.items.len());
+    for (entity, item) in &plan.items {
+        let entity = u32::try_from(entity.raw()).map_err(|_| {
+            FlushFailed(format!(
+                "entity {} does not fit the u32 entity space (I9's ceiling)",
+                entity.raw()
+            ))
+        })?;
+        // A row buffered before the family was declared, or one whose view named a group with a
+        // shorter list, has nothing here — absence, and the ordinary reading of it.
+        let value = item.scoped.get(spec.index).unwrap_or(&WalScalar::Null);
+        out.push((entity, value));
+    }
+    Ok(out)
+}
+
 /// One column's extent content: the values, the entities that carry one, and the dictionary those
 /// values are ordinals into where the family has one.
 ///
@@ -1097,6 +1238,34 @@ pub(crate) struct TextColumnSpec {
     pub(crate) analyser: std::sync::Arc<tessera_analyse::Analyser>,
 }
 
+/// One view's column of a **group-scoped** attribute family, and where its value sits in a
+/// buffered row's `scoped` list (`views.md` §5).
+///
+/// **The counterpart of [`FilterColumnSpec`], and the fields it adds are the two the scope
+/// decides**: which directory the extent goes in — `attrs/<column>/<group>/<key>/`, derived from
+/// the flush's own view — and whether the bundle already holds a base there. Everything else is
+/// the entity-scoped family's, because a scoped column *is* one: same types, same absence rules,
+/// same writer.
+pub(crate) struct ScopedColumnSpec {
+    /// Position in a buffered row's `scoped` list.
+    pub(crate) index: usize,
+    pub(crate) name: String,
+    pub(crate) ty: ScalarType,
+    pub(crate) category: bool,
+    /// Declared `index = true` — the family is on the filter surface, so its column is opened and
+    /// this flush owes it an extent (`filter::scoped_is_filterable`).
+    pub(crate) filterable: bool,
+    /// Declared `render = true` — the family occupies a lane in this view's row tail, which is a
+    /// column for the purposes of `scoped_scalars[..].views` even where the family is on no filter
+    /// surface at all.
+    pub(crate) render: bool,
+    /// The manifest already names this view in the family's `views`, so a base column is on disc.
+    /// `false` for a view created since the build, whose base this flush writes empty.
+    pub(crate) has_base: bool,
+    /// The analyser a `text` family's terms are produced by — `Some` exactly for that family.
+    pub(crate) analyser: Option<std::sync::Arc<tessera_analyse::Analyser>>,
+}
+
 /// This flush's text layers: per indexed `text` column, its own dictionary over the terms this
 /// batch produced, postings against that dictionary, and the entities it holds a value for.
 ///
@@ -1121,78 +1290,353 @@ fn write_text_extents(
     }
     let mut out = Vec::with_capacity(ctx.text_schema.len());
     for spec in &ctx.text_schema {
-        let rel_dir = format!("partitions/{}/attrs/{}/extents", ctx.partition, spec.name);
-        let dir = ctx.prefix_dir.join(&rel_dir);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
-
-        let mut terms: std::collections::BTreeMap<String, Vec<u32>> =
-            std::collections::BTreeMap::new();
-        let mut presence = croaring::Bitmap::new();
+        let mut rows = Vec::with_capacity(plan.items.len());
         for (entity, row) in plan.entity_space_items() {
-            let entity = entity.raw() as u32;
-            let value = row.scalars.get(spec.index);
-            let prose = match value {
-                Some(WalScalar::Utf8(s)) => s.as_str(),
-                // Absence carries no value and no terms; anything else is a buffered row whose
-                // shape disagrees with the declaration, which the flush refuses rather than guesses
-                // at.
-                Some(WalScalar::Null) | None => continue,
-                Some(other) => {
-                    return Err(FlushFailed(format!(
-                        "column '{}' is text but a buffered row carries {other:?}",
-                        spec.name
-                    )))
-                }
-            };
-            presence.add(entity);
-            for token in spec.analyser.tokens(prose) {
-                let postings = terms.entry(token).or_default();
-                if postings.last() != Some(&entity) {
-                    postings.push(entity);
-                }
+            let entity = u32::try_from(entity.raw()).map_err(|_| {
+                FlushFailed(format!(
+                    "entity {} does not fit the u32 entity space (I9's ceiling)",
+                    entity.raw()
+                ))
+            })?;
+            rows.push((
+                entity,
+                row.scalars.get(spec.index).unwrap_or(&WalScalar::Null),
+            ));
+        }
+        let rel_dir = format!("partitions/{}/attrs/{}/extents", ctx.partition, spec.name);
+        if let Some(extent) =
+            write_text_layer(&rel_dir, &spec.name, None, &spec.analyser, rows, ctx)?
+        {
+            out.push(extent);
+        }
+    }
+    Ok(out)
+}
+
+/// One text layer: its own dictionary over this batch's terms, the postings against it, and the
+/// entities that carried prose — written under `rel_dir` and named for the flush.
+///
+/// **One body for both scopes** (`views.md` §5). An entity-scoped column's layer goes under
+/// `attrs/<column>/extents/` and a group-scoped family's under
+/// `attrs/<column>/<group>/<key>/extents/`, and `view` is what the manifest entry carries to say
+/// which — the difference between them being the directory and nothing about how prose becomes an
+/// index.
+///
+/// `None` where no row carried a value, for the reason [`write_text_extents`] gives.
+fn write_text_layer(
+    rel_dir: &str,
+    column: &str,
+    view: Option<String>,
+    analyser: &tessera_analyse::Analyser,
+    rows: Vec<(u32, &WalScalar)>,
+    ctx: &FlushContext,
+) -> Result<Option<tessera_store::manifest::TextExtent>, FlushFailed> {
+    let dir = ctx.prefix_dir.join(rel_dir);
+    std::fs::create_dir_all(&dir).map_err(|e| FlushFailed(format!("{}: {e}", dir.display())))?;
+
+    let mut terms: std::collections::BTreeMap<String, Vec<u32>> = std::collections::BTreeMap::new();
+    let mut presence = croaring::Bitmap::new();
+    for (entity, value) in rows {
+        let prose = match value {
+            WalScalar::Utf8(s) => s.as_str(),
+            // Absence carries no value and no terms; anything else is a buffered row whose shape
+            // disagrees with the declaration, which the flush refuses rather than guesses at.
+            WalScalar::Null => continue,
+            other => {
+                return Err(FlushFailed(format!(
+                    "column '{column}' is text but a buffered row carries {other:?}"
+                )))
+            }
+        };
+        presence.add(entity);
+        for token in analyser.tokens(prose) {
+            let postings = terms.entry(token).or_default();
+            if postings.last() != Some(&entity) {
+                postings.push(entity);
             }
         }
+    }
+    if presence.is_empty() {
+        return Ok(None);
+    }
 
-        // **A batch that carried no value for this column publishes no layer at all.** An empty
-        // extent is not free: nothing coalesces text layers, so every one of them survives until
-        // the next fold and every `match` pays a dictionary resolve and a posting read per token
-        // against it — a per-query cost, permanent until compaction, buying an answer that is
-        // always the empty set. Presence is checked rather than the term map, because an entity
-        // whose prose analysed to no terms still carries a value and a layer is owed for it.
-        if presence.is_empty() {
+    let dict_rel = format!("{rel_dir}/{}-dict.bin", ctx.seg_id);
+    let postings_rel = format!("{rel_dir}/{}-postings.arrow", ctx.seg_id);
+    let presence_rel = format!("{rel_dir}/{}-presence.roaring", ctx.seg_id);
+    tessera_filter::write_sorted_dict(
+        &ctx.prefix_dir.join(&dict_rel),
+        terms.keys().map(String::as_str),
+    )
+    .map_err(|e| FlushFailed(format!("{dict_rel}: {e}")))?;
+    let per_term: Vec<Vec<u32>> = terms.into_values().collect();
+    tessera_authz::postings::write_postings(
+        &ctx.prefix_dir.join(&postings_rel),
+        &per_term,
+        tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+    )
+    .map_err(|e| FlushFailed(format!("{postings_rel}: {e}")))?;
+    std::fs::write(
+        ctx.prefix_dir.join(&presence_rel),
+        presence.serialize::<croaring::Portable>(),
+    )
+    .map_err(|e| FlushFailed(format!("{presence_rel}: {e}")))?;
+
+    Ok(Some(tessera_store::manifest::TextExtent {
+        column: column.to_string(),
+        view,
+        dict: dict_rel,
+        postings: postings_rel,
+        presence: presence_rel,
+    }))
+}
+
+
+
+/// Where one view's column of a group-scoped family lives, prefix-relative —
+/// `partitions/<p>/attrs/<column>/<group>/<key>/` (`views.md` §5), through the one place a view id
+/// becomes a path so the writer cannot drift from `FilterColumns::open`'s reader.
+fn scoped_column_rel(ctx: &FlushContext, column: &str) -> String {
+    let mut rel = format!("partitions/{}/attrs/{column}", ctx.partition);
+    for component in tessera_store::view_path_components(&ctx.view) {
+        rel.push('/');
+        rel.push_str(component);
+    }
+    rel
+}
+
+/// Write this flush's extent for every **group-scoped** family of its view's group, and the empty
+/// base a view created since the build has none of (`views.md` §5).
+///
+/// # What a flush owes a family, and why the base is written here
+///
+/// A family's column for one view is what its entity-scoped counterpart is bundle-wide — values
+/// and presence, plus a dictionary for a keyword and keyed postings for a category, or, for text,
+/// a token dictionary and positional postings and no value column at all. The build writes one per
+/// view it declares. A view created while the service runs has none, and every reader of a family
+/// opens a column per view it names: so the first flush of such a view writes the **base** as well
+/// as its extent, empty, and publication puts the view on the family's list.
+///
+/// Writing an empty base rather than teaching every reader to tolerate a missing one is the same
+/// choice `FilterColumns::open` makes everywhere else: a declared artefact that is absent is a
+/// bundle that is not what its manifest says, and a reader that treated absence as "no entity
+/// carries a value" would answer a filter wrongly while looking right. An empty base costs a few
+/// hundred bytes and composes to nothing.
+///
+/// # A join row is in this pass and in no other
+///
+/// `plan.items` rather than `plan.entity_space_items()`, and that is the rule rather than an
+/// oversight (`scoped_rows`): a scoped value belongs to the `(entity, view)` pair this flush is
+/// giving a row, so a row joining an entity into a second view of the group is exactly the row
+/// that carries that view's value.
+fn write_scoped_extents(plan: &FlushPlan, ctx: &FlushContext) -> Result<ScopedWrite, FlushFailed> {
+    let mut extents = Vec::new();
+    let mut texts = Vec::new();
+    let mut created = Vec::new();
+    for spec in &ctx.scoped_schema {
+        // **The view enters the family's list whatever the family's surface**, because this flush
+        // gives it a column of one kind or the other: an entity-space column below for an indexed
+        // family, a lane in the row tail for a rendered one. `scoped_scalars[..].views` is what
+        // decides both — the opener walks it, and so does the request's render list — so a view
+        // left off it renders nothing and is opened for nothing.
+        if !spec.has_base && (spec.filterable || spec.render) {
+            created.push((spec.name.clone(), ctx.view.clone()));
+        }
+        // A family on no surface has no column any reader opens, so an extent for it would be
+        // bytes nothing reads — the predicate is `filter::scoped_is_filterable`'s, the same one
+        // the opener and the fold apply, or the three would disagree about what exists.
+        if !spec.filterable {
+            continue;
+        }
+        let column_rel = scoped_column_rel(ctx, &spec.name);
+        let column_dir = ctx.prefix_dir.join(&column_rel);
+        std::fs::create_dir_all(&column_dir)
+            .map_err(|e| FlushFailed(format!("scoped column dir '{column_rel}': {e}")))?;
+        let rel_of = |path: &std::path::Path| -> Result<String, FlushFailed> {
+            path.strip_prefix(&ctx.prefix_dir)
+                .ok()
+                .and_then(|p| p.to_str())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    FlushFailed(format!(
+                        "scoped extent path {} is not under the prefix",
+                        path.display()
+                    ))
+                })
+        };
+
+        if !spec.has_base {
+            write_empty_scoped_base(&column_dir, spec)?;
+        }
+
+        if let Some(analyser) = &spec.analyser {
+            // Text: a dictionary, postings over it and the entities that carry prose — the same
+            // three files `write_text_extents` writes bundle-wide, in this view's own directory.
+            if let Some(extent) = write_text_layer(
+                &format!("{column_rel}/{}", tessera_filter::EXTENTS_DIR),
+                &spec.name,
+                Some(ctx.view.clone()),
+                analyser,
+                scoped_rows(spec, plan)?,
+                ctx,
+            )? {
+                texts.push(extent);
+            }
             continue;
         }
 
-        let dict_rel = format!("{rel_dir}/{}-dict.bin", ctx.seg_id);
-        let postings_rel = format!("{rel_dir}/{}-postings.arrow", ctx.seg_id);
-        let presence_rel = format!("{rel_dir}/{}-presence.roaring", ctx.seg_id);
-        tessera_filter::write_sorted_dict(
-            &ctx.prefix_dir.join(&dict_rel),
-            terms.keys().map(String::as_str),
+        let column = extent_values(
+            &FilterColumnSpec {
+                // Unused by `extent_values`, which is handed its rows: the position a scoped value
+                // sits at is `ScopedColumnSpec::index`, into a different list.
+                index: spec.index,
+                name: spec.name.clone(),
+                ty: spec.ty,
+                category: spec.category,
+            },
+            scoped_rows(spec, plan)?,
+        )?;
+        let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
+            &column_dir,
+            &ctx.seg_id,
+            &column.codes,
+            &column.presence,
+            column.dict_keys.as_deref(),
         )
-        .map_err(|e| FlushFailed(format!("{dict_rel}: {e}")))?;
-        let per_term: Vec<Vec<u32>> = terms.into_values().collect();
-        tessera_authz::postings::write_postings(
-            &ctx.prefix_dir.join(&postings_rel),
-            &per_term,
-            tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+        .map_err(|e| FlushFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
+        let values = tessera_filter::open_extent(
+            &values_path,
+            &presence_path,
+            tessera_filter::Access::Mapped,
         )
-        .map_err(|e| FlushFailed(format!("{postings_rel}: {e}")))?;
-        std::fs::write(
-            ctx.prefix_dir.join(&presence_rel),
-            presence.serialize::<croaring::Portable>(),
-        )
-        .map_err(|e| FlushFailed(format!("{presence_rel}: {e}")))?;
-
-        out.push(tessera_store::manifest::TextExtent {
+        .map_err(|e| FlushFailed(format!("scoped extent for '{}': {e}", spec.name)))?;
+        let dict = dict_path
+            .as_ref()
+            .map(|path| {
+                tessera_filter::SortedDict::open(path, tessera_filter::Access::Mapped)
+                    .map(Arc::new)
+                    .map_err(|e| {
+                        FlushFailed(format!("scoped keyword dictionary '{}': {e}", spec.name))
+                    })
+            })
+            .transpose()?;
+        extents.push(FlushedExtent {
             column: spec.name.clone(),
-            dict: dict_rel,
-            postings: postings_rel,
-            presence: presence_rel,
+            view: Some(ctx.view.clone()),
+            values_rel: rel_of(&values_path)?,
+            presence_rel: rel_of(&presence_path)?,
+            dict_rel: dict_path.as_ref().map(|p| rel_of(p)).transpose()?,
+            values: Arc::new(values),
+            dict,
         });
     }
-    Ok(out)
+    Ok(ScopedWrite {
+        extents,
+        texts,
+        created,
+    })
+}
+
+/// What [`write_scoped_extents`] produced: this flush's extents for the families of its view's
+/// group, their text layers, and the `(family, view)` pairs whose base it had to write.
+pub(crate) struct ScopedWrite {
+    pub(crate) extents: Vec<FlushedExtent>,
+    pub(crate) texts: Vec<tessera_store::manifest::TextExtent>,
+    pub(crate) created: Vec<(String, String)>,
+}
+
+/// The base a view of a group acquires at its first flush carrying values — every artefact the
+/// family's declaration owes, holding nothing (`views.md` §5).
+///
+/// **The file set is a function of the declaration**, exactly as the build's is and as a flush
+/// extent's is: what is written here is what `FilterColumns::open` will demand of this directory,
+/// so the two are one predicate rather than a convention and a hope.
+fn write_empty_scoped_base(
+    column_dir: &std::path::Path,
+    spec: &ScopedColumnSpec,
+) -> Result<(), FlushFailed> {
+    let failed = |what: &str, e: &dyn std::fmt::Display| {
+        FlushFailed(format!("scoped base for '{}' ({what}): {e}", spec.name))
+    };
+    if spec.analyser.is_some() {
+        // Text: a dictionary of no terms and postings over it, and no value column at all.
+        tessera_filter::write_sorted_dict(
+            &column_dir.join(tessera_filter::DICT_FILE),
+            std::iter::empty::<&str>(),
+        )
+        .map_err(|e| failed("the token dictionary", &e))?;
+        tessera_authz::postings::write_postings(
+            &column_dir.join("postings.arrow"),
+            &[],
+            tessera_types::SMALL_TERM_THRESHOLD_DEFAULT,
+        )
+        .map_err(|e| failed("the token postings", &e))?;
+        return Ok(());
+    }
+    let codes = empty_codes(spec.ty, spec.category);
+    let values_path = column_dir.join(tessera_filter::VALUES_FILE);
+    let presence_path = column_dir.join(tessera_filter::PRESENCE_FILE);
+    // **The presence bitmap is written, empty, and its presence is what says so.** A value column
+    // with no presence file means "the entity id is the array index" — every entity present —
+    // which for a column of no values would report the whole corpus as carrying one.
+    tessera_filter::write_value_column(
+        &values_path,
+        &presence_path,
+        &codes,
+        Some(&croaring::Bitmap::new()),
+    )
+    .map_err(|e| failed("the values", &e))?;
+    if spec.ty == ScalarType::Keyword {
+        tessera_filter::write_sorted_dict(
+            &column_dir.join(tessera_filter::DICT_FILE),
+            std::iter::empty::<&str>(),
+        )
+        .map_err(|e| failed("the dictionary", &e))?;
+    }
+    if spec.category {
+        let empty = tessera_filter::open_extent(
+            &values_path,
+            &presence_path,
+            tessera_filter::Access::Read,
+        )
+        .map_err(|e| failed("reopening the values", &e))?;
+        tessera_filter_write::write_category_postings(
+            &column_dir.join("postings.arrow"),
+            &spec.name,
+            &empty,
+            tessera_filter_write::POSTINGS_BAND_ROWS,
+        )
+        .map_err(|e| failed("the postings", &e))?;
+    }
+    Ok(())
+}
+
+/// An empty `Codes` at a column's storage width — the base's values file, which must be the width
+/// the extents beside it are or a fold that concatenates them would disagree about what the column
+/// is.
+fn empty_codes(ty: ScalarType, category: bool) -> tessera_filter::Codes {
+    use tessera_filter::Codes;
+    if category || ty == ScalarType::Keyword {
+        return match ty {
+            ScalarType::U8 => Codes::U8(Vec::new().into()),
+            ScalarType::U16 => Codes::U16(Vec::new().into()),
+            _ => Codes::U32(Vec::new().into()),
+        };
+    }
+    match ty {
+        ScalarType::Bool | ScalarType::U8 => Codes::U8(Vec::new().into()),
+        ScalarType::U16 => Codes::U16(Vec::new().into()),
+        ScalarType::U32 => Codes::U32(Vec::new().into()),
+        ScalarType::U64 => Codes::U64(Vec::new().into()),
+        ScalarType::I8 => Codes::I8(Vec::new().into()),
+        ScalarType::I16 => Codes::I16(Vec::new().into()),
+        ScalarType::I32 => Codes::I32(Vec::new().into()),
+        ScalarType::I64 | ScalarType::TimestampUs => Codes::I64(Vec::new().into()),
+        ScalarType::F32 => Codes::F32(Vec::new().into()),
+        ScalarType::F64 => Codes::F64(Vec::new().into()),
+        // Neither reaches here: text takes its own branch above and `utf8` is not a declarable
+        // storage type (`DeclaredScalar::wire_type`).
+        ScalarType::Keyword | ScalarType::Text | ScalarType::Utf8 => Codes::U32(Vec::new().into()),
+    }
 }
 
 /// This flush's slice of `entities/terms/` — the term lists of the entities it minted, in the
@@ -1454,6 +1898,7 @@ mod tests {
             x: 0.5,
             y: 0.5,
             scalars: vec![WalScalar::U64(1)],
+            scoped: Vec::new(),
             external_id: None,
             wal_pos: None,
         }
@@ -1471,6 +1916,7 @@ mod tests {
                 x: item.x,
                 y: item.y,
                 scalars: item.scalars.clone(),
+                scoped: Vec::new(),
             };
             buffer.insert_row_with_terms(&row, item.terms.clone());
         }
@@ -1676,7 +2122,7 @@ mod tests {
             &[],
         );
         let plan = plan(&generation).expect("the batch flushes");
-        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+        let column = extent_values(&keyword_spec(), entity_scoped_rows(&keyword_spec(), &plan).expect("the rows gather")).expect("the column gathers");
 
         assert_eq!(
             column.dict_keys.as_deref(),
@@ -1715,7 +2161,7 @@ mod tests {
             &[],
         );
         let plan = plan(&generation).expect("the batch flushes");
-        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+        let column = extent_values(&keyword_spec(), entity_scoped_rows(&keyword_spec(), &plan).expect("the rows gather")).expect("the column gathers");
 
         let dir = tempfile::TempDir::new().expect("a temp dir");
         let (values_path, presence_path, dict_path) = tessera_filter::write_extent(
@@ -1761,7 +2207,7 @@ mod tests {
     fn a_keyword_extent_with_no_values_still_writes_an_empty_dictionary() {
         let generation = generation_with(&[(3, keyword_item(None)), (5, keyword_item(None))], &[]);
         let plan = plan(&generation).expect("the batch flushes");
-        let column = extent_values(&keyword_spec(), &plan).expect("the column gathers");
+        let column = extent_values(&keyword_spec(), entity_scoped_rows(&keyword_spec(), &plan).expect("the rows gather")).expect("the column gathers");
         assert_eq!(column.dict_keys.as_deref(), Some(&[][..]));
 
         let dir = tempfile::TempDir::new().expect("a temp dir");
@@ -1805,8 +2251,8 @@ mod tests {
         .expect("the second batch flushes");
 
         let spec = keyword_spec();
-        let a = extent_values(&spec, &first).expect("gathers");
-        let b = extent_values(&spec, &second).expect("gathers");
+        let a = extent_values(&spec, entity_scoped_rows(&spec, &first).expect("rows")).expect("gathers");
+        let b = extent_values(&spec, entity_scoped_rows(&spec, &second).expect("rows")).expect("gathers");
 
         assert_eq!(a.dict_keys.as_deref(), Some(&["alpha", "zeta"][..]));
         assert_eq!(b.dict_keys.as_deref(), Some(&["omega", "zeta"][..]));

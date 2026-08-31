@@ -643,6 +643,7 @@ fn ingest(engine: &Engine, external_id: &[u8]) -> EntityId {
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(

@@ -162,10 +162,29 @@ pub(crate) struct CoalescePlan {
     pub(crate) texts: Vec<TextWindow>,
 }
 
+/// Where a coalesced window's output lives, prefix-relative — `<out>/attrs/<column>/` for an
+/// entity-scoped column and `<out>/attrs/<column>/<group>/<key>/` for one view's column of a
+/// group-scoped family (`views.md` §5), through the one place a view id becomes a path.
+fn coalesced_column_rel(out_rel: &str, column: &str, view: Option<&str>) -> String {
+    let mut rel = format!("{out_rel}/attrs/{column}");
+    if let Some(view) = view {
+        for component in tessera_store::view_path_components(view) {
+            rel.push('/');
+            rel.push_str(component);
+        }
+    }
+    rel
+}
+
 /// One column's contiguous window of its own `attr_extents` subsequence.
 #[derive(Debug, Clone)]
 pub(crate) struct AttrWindow {
     pub(crate) column: String,
+    /// The view whose column of a **group-scoped family** this window belongs to — `None` for an
+    /// ordinary entity-scoped column ([`AttrExtent::view`], `views.md` §5). The unit is
+    /// `(column, view)` rather than the column: a family's columns share one name, and a window
+    /// keyed on the name alone would merge one view's values into another's.
+    pub(crate) view: Option<String>,
     pub(crate) extents: Vec<AttrExtent>,
 }
 
@@ -173,6 +192,8 @@ pub(crate) struct AttrWindow {
 #[derive(Debug, Clone)]
 pub(crate) struct TextWindow {
     pub(crate) column: String,
+    /// [`AttrWindow::view`]'s field, for its reason.
+    pub(crate) view: Option<String>,
     pub(crate) extents: Vec<TextExtent>,
 }
 
@@ -296,14 +317,17 @@ pub(crate) fn plan_coalesce(
     // `MANIFEST.files`, and only a flush or an earlier coalesce writes an extent. So every entry
     // here is already the pass's to take, and a coalesced one is another entry in the same
     // subsequence — which is the whole of what makes the recursion free.
-    let mut by_column: BTreeMap<&str, Vec<&AttrExtent>> = BTreeMap::new();
+    // **Keyed by `(column, view)`** (`views.md` §5): a group-scoped family has one column per
+    // view under one name, and a window over the name alone would coalesce Q3's layers with Q4's
+    // into one file that then claims both views' entities.
+    let mut by_column: BTreeMap<(&str, Option<&str>), Vec<&AttrExtent>> = BTreeMap::new();
     for extent in &manifest.attr_extents {
         by_column
-            .entry(extent.column.as_str())
+            .entry((extent.column.as_str(), extent.view.as_deref()))
             .or_default()
             .push(extent);
     }
-    for (column, extents) in by_column {
+    for ((column, view), extents) in by_column {
         // ⊘ **A column whose layers carry a dictionary is not taken**, and the reason is the
         // *layer's* atomicity rather than the merge's absence:
         // `tessera_filter_write::coalesce_keyword_extents` merges the dictionaries and rewrites the
@@ -345,6 +369,7 @@ pub(crate) fn plan_coalesce(
         if let Some(window) = selected {
             plan.attrs.push(AttrWindow {
                 column: column.to_string(),
+                view: view.map(str::to_string),
                 extents: extents[window].iter().map(|e| (*e).clone()).collect(),
             });
         }
@@ -388,14 +413,14 @@ pub(crate) fn plan_coalesce(
     // per token *per layer* — a read cost that grows linearly in the flush count with nothing
     // reducing it between folds.
     {
-        let mut by_column: BTreeMap<&str, Vec<&TextExtent>> = BTreeMap::new();
+        let mut by_column: BTreeMap<(&str, Option<&str>), Vec<&TextExtent>> = BTreeMap::new();
         for extent in &manifest.text_extents {
             by_column
-                .entry(extent.column.as_str())
+                .entry((extent.column.as_str(), extent.view.as_deref()))
                 .or_default()
                 .push(extent);
         }
-        for (column, extents) in by_column {
+        for ((column, view), extents) in by_column {
             // All three files, for the attribute axis's reason: the merge holds a term's postings
             // from every input at once and streams both dictionaries, so a cap that watched one
             // half would bound the postings while the vocabulary — which for prose is the larger
@@ -415,6 +440,7 @@ pub(crate) fn plan_coalesce(
             if let Some(window) = selected {
                 plan.texts.push(TextWindow {
                     column: column.to_string(),
+                    view: view.map(str::to_string),
                     extents: extents[window].iter().map(|e| (*e).clone()).collect(),
                 });
             }
@@ -624,7 +650,10 @@ pub(crate) fn execute_coalesce(
                 window.column
             )));
         }
-        let column_rel = format!("{}/attrs/{}", ctx.out_rel, window.column);
+        // **Per `(column, view)`, not per column** (`views.md` §5): two views of one scoped family
+        // share the column's name, so a single directory would have the second window truncate the
+        // first's mapped files.
+        let column_rel = coalesced_column_rel(&ctx.out_rel, &window.column, window.view.as_deref());
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
             .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
@@ -663,6 +692,7 @@ pub(crate) fn execute_coalesce(
         attrs.push(CoalescedAttr {
             extent: AttrExtent {
                 column: window.column.clone(),
+                view: window.view.clone(),
                 values: values_rel,
                 presence: presence_rel,
                 dict: None,
@@ -743,7 +773,7 @@ pub(crate) fn execute_coalesce(
     // separates this from the keyword window the attribute axis declines above.
     let mut texts = Vec::with_capacity(plan.texts.len());
     for window in &plan.texts {
-        let column_rel = format!("{}/attrs/{}", ctx.out_rel, window.column);
+        let column_rel = coalesced_column_rel(&ctx.out_rel, &window.column, window.view.as_deref());
         let column_dir = ctx.prefix_dir.join(&column_rel);
         std::fs::create_dir_all(&column_dir)
             .map_err(|e| CoalesceFailed(format!("coalesce dir for '{}': {e}", window.column)))?;
@@ -797,6 +827,7 @@ pub(crate) fn execute_coalesce(
 
         let extent = TextExtent {
             column: window.column.clone(),
+            view: window.view.clone(),
             dict: format!("{column_rel}/{}", tessera_filter::DICT_FILE),
             postings: format!("{column_rel}/postings.arrow"),
             presence: format!("{column_rel}/presence.roaring"),
@@ -1138,6 +1169,7 @@ mod tests {
             layers: Vec::new(),
             layer_tombstones: Vec::new(),
             views: Vec::new(),
+            scoped_columns: Vec::new(),
             view_tombstones: Vec::new(),
             membership_extents: Vec::new(),
             level_versions: Vec::new(),
@@ -1208,6 +1240,7 @@ mod tests {
         let dir = format!("partitions/{partition}/attrs/{column}/extents");
         AttrExtent {
             column: column.to_string(),
+            view: None,
             values: format!("{dir}/{flush}.arrow"),
             presence: format!("{dir}/{flush}.roaring"),
             dict: None,
@@ -1226,6 +1259,7 @@ mod tests {
             .map(|window| CoalescedAttr {
                 extent: AttrExtent {
                     column: window.column.clone(),
+                    view: window.view.clone(),
                     values: format!("{out_rel}/attrs/{}/values.arrow", window.column),
                     presence: format!("{out_rel}/attrs/{}/presence.roaring", window.column),
                     dict: None,

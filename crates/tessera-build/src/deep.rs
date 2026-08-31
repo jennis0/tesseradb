@@ -160,13 +160,20 @@ pub fn verify_deep(root: &Path, opts: &VerifyOpts) -> Result<VerifyDeepReport> {
 /// (the lane changes `columns.arrow`, which is digested as a whole), the row space is a bijection
 /// either way, and the identity column is untouched.
 ///
-/// **Only the build's own segments are checked, and that is not a hedge.** The write half is
-/// deliberately absent: a batch's scalars are positional against `MANIFEST.declared_scalars`,
-/// which a family has no slot in, so a flush writes the bundle-wide tail and nothing per family.
-/// Requiring the lane there would refuse every bundle that has ingested — the false-refusal shape
-/// §18 obligation 10 names. A build segment is one whose `columns.arrow` is named in
-/// `MANIFEST.files`, which is contracts §2.2's own division: that map covers what existed at build
-/// time and `SEGMENTS-<n>.files` covers what has appeared since.
+/// **Every segment of a view of the family's own group is checked, the build's and the write
+/// path's alike.** A flush of such a view writes the lane from the row's own scoped values, and a
+/// merge and a fold take the view's schema rather than the bundle's — so a missing lane there is
+/// the same silent defect it is at a build, not the write half's deliberate absence it once was.
+///
+/// ⊘ **A view of a group that declares `members` keeps the build-only exemption.** Its rows render
+/// the owner's family, but no batch into it may carry a value: the column is the owner's, and a
+/// second writer for one `(entity, view)` column is two layers claiming one entity (`views.md`
+/// §5's ingest paragraph). A flush of such a view writes the lane holding absences once the family
+/// lists the key — and cannot before, the owner's own first flush being what puts it there — so a
+/// segment of a sharing group's view may legitimately hold no lane and requiring one would refuse
+/// a bundle that has ingested in that order. A build segment is one whose `columns.arrow` is named
+/// in `MANIFEST.files`, which is contracts §2.2's own division: that map covers what existed at
+/// build time and `SEGMENTS-<n>.files` covers what has appeared since.
 fn check_scoped_render_lanes(
     manifest: &tessera_store::manifest::Manifest,
     phash: &str,
@@ -222,7 +229,7 @@ fn check_scoped_render_lanes(
                 tessera_store::view_rel(view_id),
                 segment.seg_id
             );
-            if !manifest.files.contains_key(&rel) {
+            if owner != group && !manifest.files.contains_key(&rel) {
                 continue;
             }
             for family in &owed {

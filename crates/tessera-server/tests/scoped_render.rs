@@ -302,16 +302,29 @@ async fn viewport_bytes(served: &Served, token: &str, view: &str) -> (u16, Vec<u
     (status, resp.bytes().await.unwrap().to_vec())
 }
 
-/// One ingest batch into `view` — the fixture declares no entity-scoped attribute, so a row is its
-/// external id, its position and its access label, and carries **no scoped value**: a family has no
-/// slot in `declared_scalars`, which is what a batch's scalars are positional against.
-async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(Vec<u8>, f32, f32, &str)]) {
-    let body = build_ingest_batch_optional(
-        &rows
-            .iter()
-            .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
-            .collect::<Vec<_>>(),
-    );
+/// One ingest batch into `view`. The fixture declares no entity-scoped attribute, so a row is its
+/// external id, its position, its access label — and, where `heat` is non-empty, the group-scoped
+/// family's value **under its plain name** (`views.md` §5): the view is known from the header, so
+/// the column is not qualified and the view decides which of the family's columns the value is
+/// for. An empty `heat` is a batch that names no such column at all, which is a family every row
+/// is absent in rather than a malformed batch.
+async fn ingest_with_heat(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    rows: &[(Vec<u8>, f32, f32, &str)],
+    heat: &[Option<f32>],
+) {
+    let body = if heat.is_empty() {
+        build_ingest_batch_optional(
+            &rows
+                .iter()
+                .map(|(id, x, y, access)| (Some(id.as_slice()), *x, *y, *access))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        batch_with_heat(rows, heat)
+    };
     let resp = served
         .server
         .client
@@ -325,6 +338,65 @@ async fn ingest(served: &Served, batch_id: &str, view: &str, rows: &[(Vec<u8>, f
         .await
         .unwrap();
     assert_eq!(resp.status().as_u16(), 200, "the batch is accepted");
+}
+
+/// The same batch, refused or not, with its status and body returned — for the cases where the
+/// refusal *is* the assertion.
+async fn try_ingest_with_heat(
+    served: &Served,
+    batch_id: &str,
+    view: &str,
+    rows: &[(Vec<u8>, f32, f32, &str)],
+    heat: &[Option<f32>],
+) -> (u16, String) {
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/ingest"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .header("x-tessera-batch-id", batch_id)
+        .header("x-tessera-view", view)
+        .header("content-type", "application/octet-stream")
+        .body(batch_with_heat(rows, heat))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.text().await.unwrap())
+}
+
+/// An Arrow ingest body carrying the reserved columns and a nullable `heat`.
+fn batch_with_heat(rows: &[(Vec<u8>, f32, f32, &str)], heat: &[Option<f32>]) -> Vec<u8> {
+    use arrow::array::{BinaryArray, StringArray};
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("external_id", DataType::Binary, true),
+        Field::new("x", DataType::Float32, false),
+        Field::new("y", DataType::Float32, false),
+        Field::new("access", DataType::Utf8, false),
+        Field::new("heat", DataType::Float32, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(BinaryArray::from_iter(
+                rows.iter().map(|(id, _, _, _)| Some(id.as_slice())),
+            )),
+            Arc::new(Float32Array::from_iter_values(
+                rows.iter().map(|(_, x, _, _)| *x),
+            )),
+            Arc::new(Float32Array::from_iter_values(
+                rows.iter().map(|(_, _, y, _)| *y),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|(_, _, _, a)| *a),
+            )),
+            Arc::new(Float32Array::from(heat.to_vec())),
+        ],
+    )
+    .unwrap();
+    let mut w = arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &schema).unwrap();
+    w.write(&batch).unwrap();
+    w.into_inner().unwrap()
 }
 
 /// Flush until the buffer is empty — a flush unit is one view, so a batch that landed in two needs
@@ -668,13 +740,16 @@ async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() 
     );
 }
 
-/// **A view created while the service runs has no column of the family, and serving says so by
-/// omission** (`views.md` §5): no batch can carry a scoped value — a buffered row's scalars are
-/// positional against `declared_scalars`, which a family is deliberately absent from — so the
-/// column is written by a build or not at all, and the new view's response simply does not name
-/// it. Ordinary absence, not a refusal and not a column of zeros.
+/// **A view created while the service runs starts with no column of the family and acquires one
+/// at its first flush** (`views.md` §5).
+///
+/// Before the flush the response simply does not name the column and the family's own `views` list
+/// does not name the view — ordinary absence, not a refusal and not a column of zeros. After a
+/// batch carrying `heat` has flushed, both say the opposite, and the values served are the ones
+/// the batch carried. That transition is the whole of what the write half buys: a view minted
+/// today draws with its own numbers without a rebuild.
 #[tokio::test]
-async fn a_view_created_at_runtime_renders_no_scoped_column() {
+async fn a_view_created_at_runtime_gains_its_scoped_column_at_the_first_flush() {
     let served = serve().await;
     let resp = served
         .server
@@ -719,54 +794,114 @@ async fn a_view_created_at_runtime_renders_no_scoped_column() {
             "quarter_map:2026-Q1",
             "quarter_map:2026-Q2"
         ]),
-        "the created view is on the roster and not on the family's list"
+        "the created view is on the roster and not yet on the family's list"
     );
-}
 
-/// **A segment the write path produced carries no lane, and its rows read as absence** — the one
-/// path that turns [`gather_tile_columns`]'s `Malformed` into silence, driven here.
-///
-/// The write half is deliberately absent (`views.md` §5): a batch's scalars are positional against
-/// `declared_scalars`, which a family has no slot in, so a flush writes the bundle-wide tail and
-/// nothing per family. A view of the group therefore ends up holding **two** kinds of segment at
-/// once, and one response gathers across both: the build's rows keep their values, and the flushed
-/// row takes the type's zero, which is what an entity with no value in that view already takes.
-/// Nothing about the response's schema changes — the column is the manifest's, not the segment's.
-#[tokio::test]
-async fn a_flushed_segment_of_a_group_view_serves_the_scoped_column_as_absence() {
-    let served = serve().await;
-    // An entity the corpus has never seen, ingested into a view of the group.
-    const NEW: u64 = 9_001;
-    ingest(
+    // ---- and now a batch into it, carrying the family's value under its plain name ----------
+    const MINTED: [u64; 2] = [9_101, 9_102];
+    ingest_with_heat(
         &served,
-        "heat-flush",
-        "quarter:2026-Q1",
-        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        "heat-runtime",
+        "quarter:2026-Q3",
+        &[
+            (external_id_of(MINTED[0]), 250.0, 250.0, "0"),
+            (external_id_of(MINTED[1]), 350.0, 350.0, "0"),
+        ],
+        &[Some(7.5), None],
     )
     .await;
     flush(&served).await;
 
-    // The flush's publication and a session's sight of what it minted are two events, the second
-    // following the first by an asynchronous refresh with no wire signal — so wait for the settled
-    // count rather than asserting the first response.
-    let expected = members(0).count() + 1;
+    let token = authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (names, values) = settled_points(&served, &token, "quarter:2026-Q3", 2).await;
+    assert!(
+        names.contains(&"heat".to_string()),
+        "the view now has a column of the family: {names:?}"
+    );
+    let by_entity = by_entity(&served, &token, &values).await;
+    assert_eq!(
+        by_entity[&MINTED[0]], 7.5,
+        "the value the batch carried is the value the row renders"
+    );
+    assert_eq!(
+        by_entity[&MINTED[1]], 0.0,
+        "a row with no value takes the render placeholder, as an absence always has"
+    );
+
+    let meta: Value = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let views = meta["scoped_scalars"][0]["views"].as_array().unwrap();
+    assert!(
+        views.contains(&json!("quarter:2026-Q3")),
+        "the flush put the view on the family's list: {views:?}"
+    );
+}
+
+/// The settled points frames for `view`, once the response holds `expected` rows.
+///
+/// A flush's publication and a session's sight of what it minted are two events, the second
+/// following the first by an asynchronous refresh with no wire signal — so every test here waits
+/// for the settled count rather than asserting the first response.
+async fn settled_points(
+    served: &Served,
+    token: &str,
+    view: &str,
+    expected: usize,
+) -> (Vec<String>, BTreeMap<u64, f32>) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    let (mut names, mut values) = (Vec::new(), BTreeMap::new());
     while std::time::Instant::now() < deadline {
         // A `429` is the admission gate shedding under machine load (contracts §3.1) and is not
         // the answer under test — ask again, as every other polling test here does.
-        let (status, body) = viewport_bytes(&served, &served.token, "quarter:2026-Q1").await;
+        let (status, body) = viewport_bytes(served, token, view).await;
         if status == 200 {
             let read = points_columns(&body);
             if read.1.len() == expected {
-                (names, values) = read;
-                break;
+                return read;
             }
         } else {
             assert_eq!(status, 429, "a served view answers or sheds");
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
+    panic!("{view} never settled at {expected} rows");
+}
+
+/// **A segment the write path produced carries the lane, and its rows carry the values the batch
+/// supplied** (`views.md` §5) — the inverse of what this test asserted while the write half was
+/// absent.
+///
+/// A view of the group ends up holding **two** kinds of segment at once and one response gathers
+/// across both: the build's rows keep their values and the flushed row carries its own. Nothing
+/// about the response's schema changes — the column is the manifest's, not the segment's.
+#[tokio::test]
+async fn a_flushed_segment_of_a_group_view_serves_the_scoped_value_the_batch_carried() {
+    let served = serve().await;
+    // An entity the corpus has never seen, ingested into a view of the group.
+    const NEW: u64 = 9_001;
+    ingest_with_heat(
+        &served,
+        "heat-flush",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[Some(42.25)],
+    )
+    .await;
+    flush(&served).await;
+
+    let expected = members(0).count() + 1;
+    let (names, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
     assert_eq!(values.len(), expected, "the flushed row is served");
     assert!(
         names.contains(&"heat".to_string()),
@@ -776,8 +911,8 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_column_as_absence()
 
     let by_entity = by_entity(&served, &served.token, &values).await;
     assert_eq!(
-        by_entity[&NEW], 0.0,
-        "a row no build wrote a lane for carries the render placeholder"
+        by_entity[&NEW], 42.25,
+        "the flush wrote the lane, and the value in it is the one the batch carried"
     );
     for entity in members(0) {
         assert_eq!(
@@ -785,6 +920,157 @@ async fn a_flushed_segment_of_a_group_view_serves_the_scoped_column_as_absence()
             heat_on_the_wire(0, entity),
             "the build's own rows are untouched by the segment beside them, entity {entity}"
         );
+    }
+}
+
+/// **The same column on an entity-space batch is still refused, and with the same message**
+/// (`views.md` §5).
+///
+/// That refusal is what makes a scoped column un-nameable outside its group's views: `heat` has no
+/// slot in `MANIFEST.declared_scalars` and names no registered layer, so on a plain view it is an
+/// undeclared column and nothing else. The admission above is scoped to the families of the group
+/// that owns the named view; a plain view has none, so this path is the one it always was.
+#[tokio::test]
+async fn a_scoped_column_on_an_entity_space_batch_is_still_refused() {
+    let served = serve().await;
+    let (status, body) = try_ingest_with_heat(
+        &served,
+        "heat-plain",
+        "world",
+        &[(external_id_of(9_201), 250.0, 250.0, "0")],
+        &[Some(1.0)],
+    )
+    .await;
+    assert_eq!(status, 422, "an undeclared column is a malformed request");
+    assert!(
+        body.contains("column 'heat' is neither in MANIFEST.declared_scalars nor the name of a \
+                       registered layer"),
+        "the refusal is the undeclared-column one, unchanged: {body}"
+    );
+}
+
+/// **A join row carries that view's scoped value, and it is the one thing it carries beyond
+/// geometry** (`views.md` §4, §5).
+///
+/// The entity is already in `2026-Q1`; a second batch puts it in `2026-Q2` with a different
+/// number, and each view then draws it with its own. A join's exclusion from every entity-space
+/// pass is what makes a *label* on such a row inert — and a scoped value is not entity-space: it
+/// belongs to the `(entity, view)` pair the join is creating.
+#[tokio::test]
+async fn a_join_row_carries_this_views_scoped_value() {
+    let served = serve().await;
+    const NEW: u64 = 9_301;
+    ingest_with_heat(
+        &served,
+        "join-first",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[Some(11.0)],
+    )
+    .await;
+    flush(&served).await;
+    ingest_with_heat(
+        &served,
+        "join-second",
+        "quarter:2026-Q2",
+        &[(external_id_of(NEW), 260.0, 260.0, "0")],
+        &[Some(22.0)],
+    )
+    .await;
+    flush(&served).await;
+
+    for (slot, value) in [(0usize, 11.0f32), (1, 22.0)] {
+        let view = format!("quarter:{}", QUARTERS[slot].0);
+        let expected = members(slot).count() + 1;
+        let (_, values) = settled_points(&served, &served.token, &view, expected).await;
+        let by_entity = by_entity(&served, &served.token, &values).await;
+        assert_eq!(
+            by_entity[&NEW], value,
+            "{view} draws the joined entity with its own scoped value"
+        );
+    }
+}
+
+/// **A fold of a group's view keeps the family's lane, and the values survive it** — the defect
+/// this file's `render` work left behind (`views.md` §5, r24).
+///
+/// A merge and a fold took their writer schema from the bundle-wide render list, which a family
+/// has no row in, so a rewritten segment of a group's view carried the entity-scoped tail alone.
+/// Values served correctly before the rewrite came back as the type's zero afterwards, which is
+/// exactly what an absence looks like — no error anywhere, and nothing in a functional test to
+/// notice. The schema is the **view's** now, and this drives it end to end: the build's rows and a
+/// flushed row are read before the fold and again after, and both must be unchanged.
+#[tokio::test]
+async fn a_fold_of_a_group_view_keeps_the_scoped_render_lane() {
+    let served = serve().await;
+    const NEW: u64 = 9_401;
+    ingest_with_heat(
+        &served,
+        "heat-fold",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        &[Some(33.5)],
+    )
+    .await;
+    flush(&served).await;
+
+    let expected = members(0).count() + 1;
+    let (_, values) = settled_points(&served, &served.token, "quarter:2026-Q1", expected).await;
+    let before = by_entity(&served, &served.token, &values).await;
+    assert_eq!(before[&NEW], 33.5, "the flushed row's value is served");
+
+    fold(&served).await;
+
+    // A fold rewrites the whole prefix, so a session that authorised against the old one is asking
+    // about a bundle that has gone; a fresh session is what a client would have.
+    let token = authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (names, values) = settled_points(&served, &token, "quarter:2026-Q1", expected).await;
+    assert!(
+        names.contains(&"heat".to_string()),
+        "the folded segment still carries the family's lane: {names:?}"
+    );
+    let after = by_entity(&served, &token, &values).await;
+    assert_eq!(
+        after, before,
+        "every value survives the rewrite — the build's rows and the flushed one alike"
+    );
+}
+
+/// Request a compaction fold and block until it has published (`POST /control/compact`,
+/// contracts §3.4). The counter is the only "done" there is: the fold runs on its own thread and
+/// publishes at the executor's next loop iteration, so the acceptance code says nothing about
+/// completion.
+async fn fold(served: &Served) {
+    let before = served.server.state.engine.write_executor_stats().folds;
+    let resp = served
+        .server
+        .client
+        .post(served.server.control_url("/control/compact"))
+        .bearer_auth(OPERATOR_CREDENTIAL)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202, "a fold is accepted at any time");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let stats = served.server.state.engine.write_executor_stats();
+        assert_eq!(
+            stats.fold_failures, 0,
+            "the fold failed rather than publishing"
+        );
+        if stats.folds > before {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fold never published: {} folds, {} discarded",
+            stats.folds,
+            stats.fold_failures
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 

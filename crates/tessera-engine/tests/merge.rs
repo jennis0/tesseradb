@@ -223,6 +223,7 @@ fn flush_interleaved_segments(engine: &Engine) -> Vec<Vec<(EntityId, String)>> {
                 scalars: Vec::new(),
                 terms: engine.resolve_terms(&descriptors),
                 descriptors,
+                scoped: Vec::new(),
             });
             items.push(external_id);
         }
@@ -826,6 +827,7 @@ fn a_reboot_after_a_merge_reads_back_the_watermark_the_process_served() {
                     scalars: Vec::new(),
                     terms: engine.resolve_terms(&descriptors),
                     descriptors,
+                    scoped: Vec::new(),
                 }
             })
             .collect();
@@ -948,6 +950,7 @@ fn flush_one_segment(engine: &Engine, tag: usize, rows: usize) -> Vec<EntityId> 
             scalars: Vec::new(),
             terms: engine.resolve_terms(&descriptors),
             descriptors,
+            scoped: Vec::new(),
         });
     }
     let entities = engine

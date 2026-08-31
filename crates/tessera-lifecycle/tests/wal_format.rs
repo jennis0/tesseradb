@@ -22,6 +22,7 @@ fn a_wal_row_round_trips_its_view() {
         x: 1.0,
         y: 2.0,
         scalars: vec![],
+        scoped: Vec::new(),
     };
     {
         let (mut wal, _) = Wal::open(&path).unwrap();
@@ -100,6 +101,7 @@ fn a_wal_row_round_trips_a_coordinate_no_f32_holds() {
         x,
         y,
         scalars: vec![],
+        scoped: Vec::new(),
     };
     {
         let (mut wal, _) = Wal::open(&path).unwrap();

@@ -224,6 +224,7 @@ fn a_build_and_an_ingest_place_one_coordinate_in_one_cell() {
             y: *y,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&[ALL_TERM.to_string().into_bytes()]),
+            scoped: Vec::new(),
         })
         .collect();
     let ingested: Vec<EntityId> = engine

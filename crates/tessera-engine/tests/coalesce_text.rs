@@ -199,6 +199,7 @@ fn ingest_and_flush(engine: &Engine, root: &Path, tag: &str, prose: String) -> u
         y: 10.0,
         scalars: vec![WalScalar::Utf8(prose)],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     let entity = engine
         .accept_ingest(vec![row], tag.to_string(), [0u8; 32])

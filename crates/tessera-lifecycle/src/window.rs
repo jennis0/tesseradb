@@ -737,6 +737,7 @@ mod tests {
             x: 1.0,
             y: 2.0,
             scalars: vec![WalScalar::U64(7)],
+            scoped: Vec::new(),
             terms: terms.iter().map(|t| TermId::new(*t)).collect(),
         }
     }

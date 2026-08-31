@@ -67,6 +67,7 @@ fn ingest(engine: &Engine, external_id: &str) -> EntityId {
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&[b"0".to_vec()]),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])
@@ -140,6 +141,7 @@ fn an_item_with_no_external_id_answers_none_after_rotation_rather_than_erroring(
             y: 5.0,
             scalars: Vec::new(),
             terms: engine.resolve_terms(&[b"0".to_vec()]),
+            scoped: Vec::new(),
         };
         let id = engine
             .accept_ingest(vec![row], "anon".to_string(), [0u8; 32])

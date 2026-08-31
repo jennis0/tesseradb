@@ -718,6 +718,7 @@ fn ingest_naming(engine: &Engine, batch: &str, layer: &str, key: &str) -> u64 {
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
     };
     let (_, minted) = engine
         .accept_ingest_joining(
@@ -835,6 +836,7 @@ fn a_closed_layers_unknown_key_refuses_the_batch() {
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
     };
     let refused = engine
         .accept_ingest_joining(

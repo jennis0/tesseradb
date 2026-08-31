@@ -124,6 +124,7 @@ fn ingest_with(engine: &Engine, external_id: &str, descriptors: &[&[u8]]) -> Ent
         y: 5.0,
         scalars: Vec::new(),
         terms: engine.resolve_terms(&descriptors),
+        scoped: Vec::new(),
     };
     engine
         .accept_ingest(vec![row], external_id.to_string(), [0u8; 32])

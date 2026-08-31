@@ -72,6 +72,7 @@ fn merge(root: &Path, inputs: &[MergeInput]) -> tessera_store::flush::FlushOutpu
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            scoped_from: usize::MAX,
             row_base: 0,
             // The live values a publication would carry — deliberately *above* the inputs' own
             // range, so a merge that derived them from `entity_hi` would show up as a regression.
@@ -261,6 +262,7 @@ fn out_of_order_inputs_are_refused() {
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            scoped_from: usize::MAX,
             row_base: 0,
             watermark: 10_000,
             entity_id_high_water: 10_000,
@@ -295,6 +297,7 @@ fn a_missing_scalar_column_fails_the_merge_rather_than_shifting_the_rest() {
             identity_key: &key(),
             shard_id: 0,
             scalar_schema: &schema,
+            scoped_from: usize::MAX,
             row_base: 0,
             watermark: 10_000,
             entity_id_high_water: 10_000,
