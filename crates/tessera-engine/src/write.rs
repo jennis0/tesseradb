@@ -8496,6 +8496,52 @@ impl Executor {
                 }) || generation.buffer.contains_in_view(entity, view)
             },
         );
+        // **An accepted join's omitted `render` values are backfilled here** (`views.md` §4, owner
+        // ruling 2026-08-31), and here rather than in the handler because this is where join-ness
+        // is *settled*: `established_collisions` above is what finally decides which rows join and
+        // which allocate fresh, and a row that stops being a join must not carry a value it took
+        // from an entity it turned out not to be joining.
+        //
+        // A joining row is geometry-only in entity space — no descriptors, no postings, no
+        // attribute column, no record field — but its scalars still travel in its own row tail, so
+        // an omitted `render` value would put an **absence** in the joined view's hot column while
+        // every other view of the same entity rendered a value. An entity-scoped attribute is one
+        // value per entity (`views.md` §5); one that renders under one view and not another is not.
+        //
+        // Before the WAL append, so the log carries the value the flush will write and replay
+        // reproduces it rather than re-deriving it against whatever the bundle holds by then.
+        let declared = &generation.bundle.manifest.declared_scalars;
+        for row in rows.iter_mut() {
+            let Some(entity) = row.join else {
+                continue;
+            };
+            let buffered = generation.buffer.get(entity);
+            for (position, d) in declared.iter().enumerate() {
+                if !d.render {
+                    continue;
+                }
+                let Some(supplied) = row.scalars.get(position) else {
+                    continue;
+                };
+                if !crate::session::scalar_is_absent(supplied, d) {
+                    continue;
+                }
+                // The entity's own row where it is still buffered, the stored homes after it. A
+                // column the entity genuinely holds nothing for is `None` here and its absence
+                // stays an absence in every view.
+                let held = match &buffered {
+                    Some(item) => item.scalars.get(position).cloned(),
+                    None => crate::session::flushed_scalar_of(&generation, entity, position),
+                };
+                let Some(held) = held else {
+                    continue;
+                };
+                if crate::session::scalar_is_absent(&held, d) {
+                    continue;
+                }
+                row.scalars[position] = held;
+            }
+        }
         drop(generation);
         if collisions > 0 {
             self.ack_failed(

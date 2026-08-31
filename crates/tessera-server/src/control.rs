@@ -1664,40 +1664,54 @@ fn run_ingest(
                 )));
             }
         }
-        // ⊘ **The attribute arm is still buffer-only.** An entity-scoped value's server-side home
-        // is the filter column or the record blob, and reading it back to compare would be a
-        // second value oracle across every declared family — a wider surface than the label arm's
-        // one transpose, and one the fold and the coalesce would each owe a pass. A join naming a
-        // flushed entity with a different attribute value is therefore still accepted, and still
-        // changes nothing: the row carries no filter-column value either
-        // (`FlushPlan::entity_space_items`).
-        let Some(buffered) = buffered else {
-            continue;
-        };
-        // An entity-scoped attribute is one value per entity, so a joining row must carry the
-        // stored value or leave it null. A differing one is refused naming the column — silently
-        // keeping either value would make the answer depend on which view a filter was asked
-        // under, which is exactly what a *scoped* attribute is for and this is not one.
+        // **The attribute arm reads the buffer first and the stored value after it, and both are
+        // exact** (2026-08-31, closing `views.md` §4's last ⊘). An entity-scoped attribute is one
+        // value per entity, so a joining row must carry the stored value or leave it absent. A
+        // differing one is refused naming the column — silently keeping either value would make
+        // the answer depend on which view a filter was asked under, which is exactly what a
+        // *scoped* attribute is for and this is not one.
+        //
+        // Before `Engine::flushed_scalar` existed this arm stopped at the buffer, and a join
+        // naming an already-flushed entity under a different value was accepted. It was inert for
+        // an entity-space column — a joining row writes no attribute column and no record field
+        // (`FlushPlan::entity_space_items`) — but never inert for a **rendered** one, whose value
+        // travels in the row's own tail into the joined view's hot column. What was lost was
+        // therefore the report for two homes and the rule itself for the third.
+        //
+        // The two sources are compared by the *same* equality, on values normalised to the shape a
+        // batch carries (`stored_as_wal`), so the buffered and the flushed arm produce byte-identical
+        // refusals and cannot come to disagree about what "the same value" means.
         for (position, declared) in meta.declared_scalars.iter().enumerate() {
             let Some(supplied) = items[*index].scalars.get(position) else {
                 continue;
             };
-            if matches!(supplied, WalScalar::Null) {
+            let held = match &buffered {
+                Some(buffered) => buffered.scalars.get(position).cloned(),
+                // `None` here is *no value held* and *could not find out* alike; see
+                // `Engine::flushed_scalar` for why one answer serves both.
+                None => state.engine.flushed_scalar(*entity, position),
+            };
+            let Some(held) = held else {
+                continue;
+            };
+            if tessera_engine::scalar_is_absent(&held, declared) {
                 continue;
             }
-            match buffered.scalars.get(position) {
-                Some(WalScalar::Null) | None => continue,
-                Some(held) if held == supplied => continue,
-                Some(_) => {
-                    return Err(ApiError::Conflict(format!(
-                        "row {index} joins an entity this deployment already holds, with a \
-                         different value for column '{}'. An entity-scoped attribute is one value \
-                         per entity, so a joining row byte-matches the stored value or omits it \
-                         (views §4, §5)",
-                        declared.name
-                    )));
-                }
+            // **An omitted value is not a disagreement**, and is not written through as an
+            // absence either: the write executor backfills a `render` column's omitted slot from
+            // the entity's stored value once join-ness is settled (`views.md` §4, owner ruling;
+            // `WriteExecutor::admit`). Doing it there rather than here is what keeps a row that
+            // *stops* being a join — its holder deleted between this check and the apply — from
+            // carrying a value it took from an entity it turned out not to be joining.
+            if tessera_engine::scalar_is_absent(supplied, declared) || held == *supplied {
+                continue;
             }
+            return Err(ApiError::Conflict(format!(
+                "row {index} joins an entity this deployment already holds, with a different \
+                 value for column '{}'. An entity-scoped attribute is one value per entity, so a \
+                 joining row byte-matches the stored value or omits it (views §4, §5)",
+                declared.name
+            )));
         }
     }
 

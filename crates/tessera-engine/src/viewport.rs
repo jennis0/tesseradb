@@ -1842,19 +1842,11 @@ impl Engine {
         for partition in generation.bundle.partitions.values() {
             for (view, view_data) in &partition.views {
                 // The permutation is the only entity→row bridge (I4, §5.1) — an O(1)
-                // bounds-checked slot read, not a scan.
-                let Some(row) = view_data.row_space.row_of(entity) else {
-                    continue;
-                };
-                // **A view holds more than one segment once anything has flushed**, and `row` is
-                // a *view*-space row: it must be resolved to the segment that owns it and to that
-                // segment's local index before anything is read. Taking the first segment and
-                // indexing it with a view row read past the build segment's end for every
-                // flushed item.
-                let segments = segments_with_row_bases(view, view_data)?;
-                let Some(&(segment, row_base)) =
-                    segments.iter().rev().find(|(_, base)| row.raw() >= *base)
-                else {
+                // bounds-checked slot read, not a scan — and a view holds more than one segment
+                // once anything has flushed, so the *view*-space row must be resolved to the
+                // segment that owns it and to that segment's local index before anything is read
+                // ([`segment_row_of`], which is that resolution's one definition).
+                let Some((segment, local)) = segment_row_of(view, view_data, entity)? else {
                     continue;
                 };
 
@@ -1866,7 +1858,6 @@ impl Engine {
                 // Home 1: the row. The same `resolve_scalars` the viewport gather uses, so the
                 // two read paths cannot disagree about what a stored type decodes to.
                 let resolved = resolve_scalars(segment, &render_scalars);
-                let local = (row.raw() - row_base) as usize;
                 for (slot, declared_index) in manifest.render_indices().enumerate() {
                     let Some(view) = &resolved[slot] else {
                         continue;
@@ -1983,6 +1974,109 @@ fn row_field_out(
         };
     }
     Some(flat_families!(out))
+}
+
+/// The hot-column value one already-flushed entity carries for `declared_index`, or `None` where
+/// no view holds a row for it, the column is not in the render tail, or the row's presence bitmap
+/// says the slot is empty — the join rule's attribute arm, home 1 (`views.md` §4, records §6.2).
+///
+/// **This home exists because a rendered column need not have an entity-space one.** `render =
+/// true, index = false` over a non-`derived` vocabulary owes no value column and is not
+/// blob-resident, so the hot column is the value's *only* store; an oracle reading the other two
+/// homes alone would report "no value held" for the most ordinary attribute declaration there is,
+/// and accept every mismatch against it.
+///
+/// **Every view is scanned, and a view holding no value is skipped rather than answering.** The
+/// first version stopped at the first view whose permutation held a row and returned `None` if
+/// *that* row's presence bit was clear — first-view-wins over a `HashMap` of partitions and views,
+/// so an entity holding a value in one view and an absence in another answered `200` or `409` by
+/// hash order (r24 review F1). Views can hold different tails lawfully: a join whose batch omitted
+/// a render-home value writes an absent slot, and until the backfill below fills it that view is a
+/// genuine absence beside another view's value. Absence is the *weaker* answer — the comparison
+/// reads it as "nothing held", which accepts — so it must never pre-empt a view that holds
+/// something. `None` here means no view holds a present value, which is the only reading of it
+/// the caller is entitled to.
+///
+/// **A malformed segment set skips that view too**, and does not abandon the scan — the drill-down
+/// skips a view it cannot resolve for the same reason. Where *no* view answers, the caller gets
+/// `None` and the join is accepted unchecked, which is the posture [`Engine::flushed_terms`] takes
+/// for the label arm: the join changes nothing in entity space either way, so a corrupt artefact
+/// loses the *report* rather than turning a caller's batch into a server error. The warning names
+/// the view and never the entity (**I10**: the byte-scanner sweeps logs as well as payloads).
+pub(crate) fn flushed_row_scalar(
+    generation: &Generation,
+    entity: EntityId,
+    declared_index: usize,
+) -> Option<tessera_filter::RecordValue> {
+    use tessera_filter::RecordValue as RV;
+
+    let manifest = &generation.bundle.manifest;
+    // The slot this declared column occupies in the *render* tail, which is the only tail a
+    // segment carries. A column that is not rendered has no hot-column home at all.
+    let slot = manifest
+        .render_indices()
+        .position(|i| i == declared_index)?;
+    let d = manifest.declared_scalars.get(declared_index)?;
+    let render_scalars: Vec<_> = manifest.render_scalars().cloned().collect();
+
+    for partition in generation.bundle.partitions.values() {
+        for (view, view_data) in &partition.views {
+            let resolved_row = match segment_row_of(view, view_data, entity) {
+                Ok(resolved) => resolved,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        view = %view,
+                        "a view's segment set could not be resolved, so the join rule's attribute \
+                         arm cannot read a render-only column from this view (views §4). The scan \
+                         continues; if no view answers, the batch's joins are accepted unchecked. \
+                         The artefact is a build or flush defect; a fold rewrites it."
+                    );
+                    continue;
+                }
+            };
+            let Some((segment, local)) = resolved_row else {
+                continue;
+            };
+            // **Absence is the presence bitmap beside the column, never a zero in it** (decision
+            // 0064). A category needs no bitmap and has none: its absence is the reserved code, in
+            // band, which the comparison reads as absence on both sides.
+            let Ok(local_row) = u32::try_from(local) else {
+                continue;
+            };
+            if d.vocabulary.is_none() && !segment.columns.presence(&d.name).contains(local_row) {
+                continue;
+            }
+            let resolved = resolve_scalars(segment, &render_scalars);
+            let Some(Some(view_slice)) = resolved.get(slot) else {
+                continue;
+            };
+            let read = match view_slice {
+                ScalarSlice::Bool(a) if local < arrow::array::Array::len(*a) => {
+                    Some(RV::Bool(a.value(local)))
+                }
+                ScalarSlice::Utf8(a) if local < arrow::array::Array::len(*a) => {
+                    Some(RV::Utf8(a.value(local).to_string()))
+                }
+                ScalarSlice::Bool(_) | ScalarSlice::Utf8(_) => None,
+                ScalarSlice::U8(s) => s.get(local).copied().map(RV::U8),
+                ScalarSlice::U16(s) => s.get(local).copied().map(RV::U16),
+                ScalarSlice::U32(s) => s.get(local).copied().map(RV::U32),
+                ScalarSlice::U64(s) => s.get(local).copied().map(RV::U64),
+                ScalarSlice::I8(s) => s.get(local).copied().map(RV::I8),
+                ScalarSlice::I16(s) => s.get(local).copied().map(RV::I16),
+                ScalarSlice::I32(s) => s.get(local).copied().map(RV::I32),
+                ScalarSlice::I64(s) => s.get(local).copied().map(RV::I64),
+                ScalarSlice::F32(s) => s.get(local).copied().map(RV::F32),
+                ScalarSlice::F64(s) => s.get(local).copied().map(RV::F64),
+                ScalarSlice::TimestampUs(s) => s.get(local).copied().map(RV::TimestampUs),
+            };
+            if read.is_some() {
+                return read;
+            }
+        }
+    }
+    None
 }
 
 /// One stored value's drill-down form, for the entity-space and blob homes: the storage-typed
@@ -6304,6 +6398,35 @@ struct TileSweepOut<'a> {
     parts: Vec<SelectionPart<'a>>,
     sub_cells: Vec<SubCellCount>,
     stats: TileStats,
+}
+
+/// One entity's row in one view, resolved to the **segment that owns it and that segment's local
+/// index** — the step every entity→row-tail read takes, and the one that must not be written twice.
+///
+/// `Ok(None)` where the view's permutation holds no row for the entity, and where no segment's
+/// `row_base` covers the row it does hold; `Err` where the view's segment set cannot be resolved
+/// at all, which is a malformed bundle and is the caller's to interpret — the drill-down refuses
+/// on it, the join rule's oracle warns and moves on.
+///
+/// **One definition, because three read paths need it.** `Engine::item` had its own copy, and
+/// `flushed_row_scalar` was written as a fourth variation on it; the three lines that differed
+/// between them were exactly where a false accept got in (`views.md` §4, r24 review F1). Row is
+/// *view*-space and a segment is indexed locally, so getting the subtraction or the `rev()` wrong
+/// reads a neighbour's value under this entity's identity.
+pub(crate) fn segment_row_of<'a>(
+    view: &str,
+    view_data: &'a tessera_store::read::ViewData,
+    entity: EntityId,
+) -> Result<Option<(&'a SegmentData, usize)>> {
+    let Some(row) = view_data.row_space.row_of(entity) else {
+        return Ok(None);
+    };
+    let segments = segments_with_row_bases(view, view_data)?;
+    let Some(&(segment, row_base)) = segments.iter().rev().find(|(_, base)| row.raw() >= *base)
+    else {
+        return Ok(None);
+    };
+    Ok(Some((segment, (row.raw() - row_base) as usize)))
 }
 
 /// A view's segments paired with their `row_base` in view row space, ascending.
