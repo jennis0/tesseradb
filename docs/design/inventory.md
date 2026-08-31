@@ -31,7 +31,7 @@ the other.
 | **I13b** | a partition not consulted fails closed |
 | **I13c** | a partition unreachable through outage is an error, never an empty contribution |
 
-## Leak register (29 rows)
+## Leak register (30 rows)
 
 Exhaustive by construction: a disclosure not in this table is a bug, not an omission.
 
@@ -63,6 +63,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | **C24** | Filter execution time on a public category column | Low | Accepted — condition of decision 0063 |
 | **C25** | Filter execution time on a text column's match | Low | Accepted — condition of decision 0067 |
 | **C26** | Drill-down decompression time over the record blob | Low | Accepted — named at the record blob's design |
+| **C27** | Roster ordinal gaps under a gated view | Low | Accepted |
 | **C27** | An artifact layer's member-label declaration — artifact_visibility = { field, … } | Medium | Accepted — caller's control (⊘ not built) |
 | **C28** | A caller's membership requirement on supplied content — require_member_visibility | High if mis-declared | Accepted — caller's control (⊘ not built) |
 | **C29** | An artifact's parent identifier on the wire | Low | Accepted — bounded to the response's own membership |
@@ -89,7 +90,7 @@ Exhaustive by construction: a disclosure not in this table is a bug, not an omis
 | `client-obligations.md` | Provisional — under review |  |
 | `compaction.md` | Normative — r12 | 9 |
 | `concurrency-lifecycle.md` | Normative — r11 | 13 |
-| `configuration.md` | Normative for the build-time configurati | 28 |
+| `configuration.md` | Normative for the build-time configurati | 27 |
 | `conformance.md` | Normative — r16 | 19 |
 | `contracts.md` | Normative — r57 | 33 |
 | `core-access-expressions.md` | Provisional — under review | 1 |
