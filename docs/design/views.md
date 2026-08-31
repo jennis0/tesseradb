@@ -1,7 +1,15 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r15) — **the gate is built** (r15, 2026-08-31): spec §6 is end to end.
+**Status:** Normative (r16) — **ordinals are removed** (r16, 2026-08-31, owner ruling): a view of a
+group is addressed `<group>:<key>` and by nothing else. There is no ordinal on the wire, in a
+roster record, in a WAL record or in the manifest, and the `#` form addresses nothing; a caller
+wanting a numeric ordering mints numeric keys. Views of a group are served in **creation order**,
+which is roster-record order, so the ordering a client walks survives without a stored number. Key
+tombstones are unchanged — a dropped key is refused for ever. Appendix C's C27 (the ordinal gap) is
+deleted and [decision 0110](../decisions/0110-the-ordinal-gap-is-accepted.md) is superseded by
+[0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md): with no ordinal
+served there is no gap to observe. **the gate is built** (r15, 2026-08-31): spec §6 is end to end.
 `visibility` is accepted on a view, a group and a roster record, checked at acceptance against the
 plugin that will evaluate it, and stored on the manifest; a session's **visible-view set** is
 resolved once at authorise — every view of every group, whatever the outcome, by intersection of
@@ -13,9 +21,10 @@ collapses to the unknown-column `422` (spec §5); and both viewer verbs that nam
 gate-failed name is the *same* 404 a never-declared one gets, from the same site, at the same cost
 — one set-membership lookup, made on both outcomes. The control plane is not gated. Two things
 the gate deliberately does not do, both ruled: a view created after a session authorised is a 404
-to it until re-authorisation, and ordinal gaps stay visible (spec §9, decision 0110). **a group grows while the service runs** (r14, 2026-08-31):
+to it until re-authorisation, and a filtered roster is a shorter list with nothing to count the
+withheld views by (spec §9, decision 0113). **a group grows while the service runs** (r14, 2026-08-31):
 `PUT /control/views/{group}/{key}` creates a view of a declared group and `DELETE` drops it,
-burning the key and its ordinal; the roster's durable home is the segments manifest, carried
+burning the key; the roster's durable home is the segments manifest, carried
 forward for ever as `layer_tombstones` is; a created view answers a viewer verb empty and takes
 its first row space at the next flush; and a known `external_id` naming a view the entity is not
 in is a **join** (spec §4), the row landing in that view with the entity, its label and its
@@ -23,12 +32,12 @@ attributes untouched. `delete_dangling` is built, as sugar over the deny lane. S
 §4's markers say what remains inside what is built. **a group-scoped attribute answers filters** (r13, 2026-08-31):
 spec §5's evaluation rule is built end to end — the family is recorded in the manifest beside the
 roster, `/v1/meta`'s `filter_operands` carries its scope, and a leaf resolves to one view's column
-by the request's own view or by a pin, `name@key` or `name@#n`, with a `422` naming the group where
+by the request's own view or by a pin, `name@key`, with a `422` naming the group where
 nothing decides and the unknown-view `404` for a pin naming no view of it (contracts §2.2, §3.2
 r55). ⊘ Two named gaps remain at that claim: a category or text family, and `render`.
 **the roster is served** (r12, 2026-08-31): `/v1/meta` publishes
-every view of every group with its key, ordinal and typed metadata, in ordinal order, beside the
-groups' own orderings; every one of them answers a viewer verb, by key or by ordinal
+every view of every group with its key and typed metadata, in creation order, beside the
+groups' own orderings; every one of them answers a viewer verb, by its key
 (contracts §3.2 r54). What is still unbuilt above the build is creation and drop while the service
 runs, and the gate. **the permutation is paged** (r11, 2026-08-31): spec §8's
 representation ruling is built, for every view, and its marker is discharged; contracts r53 carries
@@ -105,7 +114,7 @@ non-sentinel, never a stored set.
 > layer names a group or is scoped to one (spec §3.5). The roster is published in the manifest,
 > validated at open, and — since 2026-08-31 — **served**: `/v1/meta` publishes every view with its
 > roster record and the groups with their orderings, and every one of them answers a viewer verb,
-> by key or by ordinal (spec §3.2, contracts §3.2 r53).
+> by its key (spec §3.2, contracts §3.2 r53).
 >
 > **The write half is built too** (2026-08-31): a view of a group is created and dropped while
 > the service runs (spec §3.2, §3.4), the roster's durable home is the segments manifest, a
@@ -240,22 +249,24 @@ A group is not a view: it cannot be named on a viewer verb, has no row space and
 Its views are views in every respect below the declaration — each with its own Morton order,
 permutation, segments, extents and θ — and they are what a request names.
 
-### 3.2 Keys and ordinals
+### 3.2 Keys
 
-A view of a group is addressed as **`<group>:<key>`**, or **`<group>:#<ordinal>`**. The key is
-the caller's, **required at creation**, under the column-name charset (ASCII letters, digits,
-`_`, `-`); the ordinal is assigned monotonically at creation, never reused, and is an alias —
-`#` is what keeps a numeric-looking key from being read as one. Either form is a view id
-wherever a view id goes: the request body, `x-tessera-view`, `/v1/meta`, the manifest. On disc
+A view of a group is addressed as **`<group>:<key>`**, and by nothing else (owner ruling
+2026-08-31, [decision 0113](../decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md)).
+The key is the caller's, **required at creation**, under the column-name charset (ASCII letters,
+digits, `_`, `-`); a caller who wants a numeric ordering mints numeric keys. That form is the view
+id wherever a view id goes: the request body, `x-tessera-view`, `/v1/meta`, the manifest. On disc
 the view lives at `views/<group>/<key>/`, nested rather than the joined id because `:` is not a
 path character everywhere; `SegmentDescriptor.view` and `WalRow.view` hold the joined
 `group:key` form, one named function derives the two-component path from it, and the manifest's
-`files` map is keyed by the derived path. `:`, `#` and `@` are reserved out of plain view names
-and keys, refused at the configuration parser and again at manifest load.
+`files` map is keyed by the derived path. `:` and `@` are reserved out of plain view names and
+keys, refused at the configuration parser and again at manifest load.
 
-Views are served in ordinal order: `/v1/meta` lists a group with its views, each
-`{ key, ordinal, metadata }`, so a client can offer previous-and-next without interpreting keys.
-The ordinal is creation order and nothing else; a caller ingesting quarters out of order gets
+Views are served in **creation order**: `/v1/meta` lists a group with its views, each
+`{ key, metadata }`, in the order the roster records are in, so a client can offer
+previous-and-next without interpreting keys and without a number to sort by. Roster records are
+append-ordered and never rewritten, so the order is the records' own and nothing stores it twice.
+Creation order is arrival order and nothing else; a caller ingesting quarters out of order gets
 them in arrival order and sorts by `starts` if it wants time order.
 
 **A view is created ahead of the rows that name it**, by `PUT /control/views/{group}/{key}`
@@ -272,11 +283,11 @@ default and gate are the group's, already reviewed.
 
 **The roster's durable home is the segments manifest, not the WAL.** The create and drop
 records are WAL entries for replay, and the served roster is the manifest's plus the WAL
-overlay — but WAL rotation reclaims records, so the roster, the ordinal high-water and the
-tombstoned keys are published into the segments manifest at every flush and carried forward
-for ever, exactly as `entity_id_low_water` and `layer_tombstones` are and for the same reason:
-a mark that lives only in the log is lost at the first rotation, and a reused ordinal or key
-silently repoints every client cache keyed on the view (decision 0029).
+overlay — but WAL rotation reclaims records, so the roster and the tombstoned keys are published
+into the segments manifest at every flush and carried forward for ever, exactly as
+`entity_id_low_water` and `layer_tombstones` are and for the same reason: a mark that lives only
+in the log is lost at the first rotation, and a reused key silently repoints every client cache
+keyed on the view (decision 0029).
 
 **Metadata names are bounded by the roster's own keys**: `key`, `source`, `visibility` and, on
 a form B group, the discriminator's field name are refused as metadata names — the inline block
@@ -289,8 +300,7 @@ refused — is preserved by checking against the declared set.
 > roster record — `visibility` and the declared metadata, typed — and creates the view: the key's
 > charset is checked, an existing or tombstoned key is a `409`, an unknown group and a group that
 > takes another's views are a `404` and a `422`, and a `visibility` that is not `public` is
-> refused for spec §6's reason. The ordinal is assigned from a high-water that counts the build's
-> roster, every create and every drop. The record is a WAL entry (`ViewCreate`) replayed before
+> refused for spec §6's reason. The record is a WAL entry (`ViewCreate`) replayed before
 > any row referencing it, and **the roster's durable home is the segments manifest**:
 > `SegmentsManifest.views` and `view_tombstones` are published at every flush and every deny
 > publication and carried forward for ever, exactly as `layer_tombstones` is; the served roster is
@@ -327,7 +337,7 @@ fields           = { view = "quarter" }
 point_visibility = { field = "access", default = "public" }
 ```
 
-Keys, ordinals, metadata and each view's own gate belong to the group that owns them, and a
+Keys, metadata and each view's own gate belong to the group that owns them, and a
 group naming `members` declares none of those: `metadata` and both roster forms are refused on
 it, and its own `visibility` is the one gate it may still declare, because a second layout may
 be narrower than the first. Its points come from its own `source` in form B's shape — a
@@ -367,11 +377,9 @@ other view per row of the view, paid once at the drop and reported in its acknow
 with the count.
 
 > **Implemented 2026-08-31** (contracts §3.4 r55). `DELETE /control/views/{group}/{key}` appends a
-> `ViewDrop` record carrying the key **and its ordinal**, and the view leaves `/v1/meta` and every
-> group sharing it at the acknowledgement; a request naming it is the same 404 as one that never
-> existed, and both the key and the ordinal are refused for ever — the ordinal travels in the
-> tombstone because a high-water recovered from the live views alone would reissue the newest one
-> the moment it was the one dropped. Any view of a group may be dropped, a declared one included.
+> `ViewDrop` record carrying the key, and the view leaves `/v1/meta` and every group sharing it at
+> the acknowledgement; a request naming it is the same 404 as one that never existed, and the key
+> is refused for ever. Any view of a group may be dropped, a declared one included.
 > The rows the buffer held for it are discarded with it: they name a coordinate system that no
 > longer exists, so nothing would ever give them geometry, and a row left in the buffer for a view
 > no flush will plan pins the WAL's reclaim bound for the life of the process. Their **entities**
@@ -519,7 +527,7 @@ one of two ways:
   decides: `sentiment` under `quarter:2026-Q3` reads that quarter's column. Nothing is added to
   the wire.
 - **Under any other view** — a plain view, or a view of an unrelated group — the leaf must
-  **pin** a view: `sentiment@2026-Q3`, or `sentiment@#3` by ordinal. That is an ordinary
+  **pin** a view: `sentiment@2026-Q3`, by key. That is an ordinary
   entity-space bitmap and it composes with everything else, so "the documents that were negative in Q3, on the whole-corpus map" is a
   filter like any other. An unpinned leaf there is a 422 naming the group, not an empty answer,
   because a leaf with no column to read is a malformed request rather than a constraint.
@@ -562,11 +570,11 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > presence bitmap, at `attrs/<column>/<group>/<key>/`, read from that view's own points — under the
 > view's own selection where a group's views share one file — and every file is digested, so
 > `tessera verify` walks them. The family's record is `MANIFEST.groups[..].scoped_scalars`, beside
-> the ordinals a pin resolves against, and deliberately **not** `MANIFEST.declared_scalars`, which
+> the keys a pin resolves against, and deliberately **not** `MANIFEST.declared_scalars`, which
 > is one flat bundle-wide list with no slot for a family. From there the engine opens one column
 > per view; `/v1/meta`'s `filter_operands` entry carries the scope; and a leaf resolves exactly as
 > this section says — the request's own view under a view of the group or of a group sharing them,
-> a pin by key or ordinal anywhere else, a `422` naming the group where nothing decides, and the
+> a pin by key anywhere else, a `422` naming the group where nothing decides, and the
 > unknown-view `404` for a pin naming no view of it. Evaluation is the family's ordinary one over
 > the resolved column: a value scan under the candidate, the presence bitmap for absence, an entity
 > bitmap the mask meets before any count.
@@ -756,17 +764,15 @@ position — and has never been a leak because row ids never cross the trust bou
 row spaces, not channels. What has to be checked is what a viewer learns *from* the set of views.
 
 - **View existence** is governed by the gate (spec §6), and a gate-failed view is
-  indistinguishable in outcome and in work from an absent one — by name. **Ordinals are the
-  exception, and it is accepted** (owner ruling 2026-08-30, a new Appendix C row): ordinals are
-  monotone per group and a gate-failed view is omitted from the roster, so a principal seeing
-  ordinals 0, 1, 3 learns *a* view exists at #2, and a moving high-water counts hidden
-  creations. The row's argument is C15's — knowing something was created is not knowing whose
-  or what; a gap and a dropped key are indistinguishable; and a deployment whose roster shape
-  is itself sensitive gates the *group*, which hides the whole roster, gaps included. The
-  alternatives — per-principal-dense ordinals, or none — re-open the per-session handle
-  machinery decision 0006 retired, for a channel of one bit per creation.
-- An ungated group's roster — keys, ordinals, metadata — is public to every principal that
-  authorises, by declaration.
+  indistinguishable in outcome and in work from an absent one — by name, and now by the roster
+  too. A filtered roster is a **shorter list and nothing else**: a view carries no position of its
+  own, so nothing a principal reads counts what was withheld from them. That closes the ordinal
+  gap the r6 review found rather than accepting it: ordinals are removed (owner ruling
+  2026-08-31, decision 0113), which supersedes decision 0110 and deletes its register row C27.
+  What remains observable is a group's *served* size, which is a fact about what this principal
+  may reach.
+- An ungated group's roster — keys and metadata — is public to every principal that authorises,
+  by declaration.
 - **Cross-view linkage.** `tessera_id` is the same for an entity in every view — the view is not
   an input to the keyed bijection — so a viewer can join a visible item to itself across views.
   That is the point, and C17's acceptance of the identifier as a stable handle covers it.
@@ -785,7 +791,8 @@ row spaces, not channels. What has to be checked is what a viewer learns *from* 
   from response times. It is the same class as C15 (tile-level timing over the corpus) and is
   noted there rather than given a new row.
 
-No new verb; one new accepted register row (the ordinal gap), and the C15/C17 notes.
+No new verb, and no new register row: the ordinal gap that would have been one is gone with the
+ordinal (decision 0113). The C15/C17 notes stand.
 
 ## 10. What this design deliberately does not do
 
@@ -802,30 +809,39 @@ No new verb; one new accepted register row (the ordinal gap), and the C15/C17 no
 | Document | Change |
 |---|---|
 | Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and shared views; the paged permutation as the representation |
-| Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` and `group:#n` id forms; the roster, ordinal high-water and key tombstones in the segments manifest, carried for ever |
+| Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` id form; the roster and the key tombstones in the segments manifest, carried for ever |
 | Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor — first, ahead of any multi-view build |
 | Contracts §2.2 | **Done at contracts r55** for the attribute: a `groups` row carrying the roster and each group's `scoped_scalars`, with the column families under `attrs/<column>/<group>/<key>/`. ⊘ A layer's `scope` still has no manifest field — it is compiled beside the declaration and never written |
-| Contracts §3.2 | `/v1/meta`: per-view `extent` (r52), groups with their rosters and typed metadata (r53–r54), `filter_operands` carrying the scope and the pinned leaf `name@key` / `name@#n` in the filter grammar (r55), and every one of them gate-filtered per principal (r56) — all done |
+| Contracts §3.2 | `/v1/meta`: per-view `extent` (r52), groups with their rosters and typed metadata (r53–r54), `filter_operands` carrying the scope and the pinned leaf `name@key` in the filter grammar (r55), and every one of them gate-filtered per principal (r56) — all done |
 | Contracts §3.4 | The duplicate rule amended per spec §4; `PUT /control/views/{group}/{key}` and its drop with `delete_dangling`, the create taking a gate label checked against the plugin (r57); identifier forms with mandatory idset on the `tessera_id` form; `--view` withdrawn |
 | Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata` and per-view `visibility` on the roster; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]` |
 | Write-path §2, §4, §5 | The create record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
 | Compaction | Reclamation of a dropped view; the attribute pass over a family |
-| Appendix C | **Made 2026-08-31**: C27 (the ordinal gap, decision 0110), the C15 and C17 annotations, and the gate's enforcement under C4's closure — nothing of this row remains owed |
+| Appendix C | **Made 2026-08-31**: the C15 and C17 annotations, and the gate's enforcement under C4's closure. C27 (the ordinal gap) was added the same day and **deleted at r16**, ordinals having been removed — nothing of this row remains owed |
 | Conformance | A two-view differential: the oracle answers per view; the pinned-leaf cases, the gate-failed pin among them; the gate's work-indistinguishability |
-| Decisions | ~~The allocation key~~ — ruled, decision 0112 |
+| Decisions | ~~The allocation key~~ — ruled, decision 0112. Ordinals removed, decision 0113, superseding 0110 |
 
 ## 12. Rulings
 
-Made 2026-08-30 (owner), first pass: the `group:key` and `group:#ordinal` forms; the paged
+Made 2026-08-31 (owner): **ordinal addressing is removed.** A view of a group is addressed by
+key only; a caller wanting a numeric ordering mints numeric keys. The architect's consequence,
+taken with the ruling: the ordinal goes entirely rather than only as an address — no field on
+`/v1/meta`, no roster or WAL record, no high-water, and no `@#n` pinned leaf — and a group's views
+are served in creation order, which is roster-record order. Key tombstones are untouched. Recorded
+as decision 0113, superseding 0110; Appendix C's C27 is deleted with it.
+
+Made 2026-08-30 (owner), first pass: the `group:key` form (and a `group:#ordinal` alias, removed
+2026-08-31 above); the paged
 permutation as every view's representation; no plain view after the build; `visibility` as the
 one gate key, defaulting to `public`, the per-view gate on the roster; `delete_dangling` kept;
 typed metadata; the create operation ahead of the first batch; the two roster forms; the extent
 move taken first.
 
 Made 2026-08-30 (owner), dispositioning the review: the scoped-attribute surface is inside the
-gate (spec §5); the ordinal gap is accepted as an Appendix C row (spec §9); the visible-view
-set is fixed for the session's life and a new view waits for re-authorisation (spec §6); the
-key is required and the ordinal is an alias; roster records are immutable.
+gate (spec §5); the ordinal gap is accepted as an Appendix C row (spec §9) — **superseded
+2026-08-31**, the ordinal being removed; the visible-view set is fixed for the session's life and
+a new view waits for re-authorisation (spec §6); the key is required; roster records are
+immutable.
 
 Made 2026-08-30 (owner): the allocation key — a declared anchor view's Morton code then
 `external_id` bytes, within the signature group (decision 0112). Nothing is open.
@@ -966,6 +982,21 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r16 (2026-08-31)** — **ordinals are removed** (owner ruling), and the removal is total rather
+  than an address form withdrawn. Gone: `/v1/meta`'s `ordinal` field, the roster record's and the
+  `ViewDrop` record's ordinal, the per-group high-water, the manifest's stored number, the
+  `<group>:#<ordinal>` id and the `@#n` pinned leaf. What replaces it is the order the records are
+  already in: roster records are appended and never rewritten, so a group's views are served in
+  creation order without a number to sort by, which is what a client walking `groups[..].views`
+  was already doing. `#` is no longer reserved out of a key by name — the column-name charset
+  refuses it, as it refuses every other punctuation — and an id in the old form now names a key
+  nobody declared, which is the ordinary unknown-view `404`. **Key tombstones are unchanged**: a
+  dropped key is refused for ever, and it was always the key rather than the number that repointed
+  a client cache (decision 0029). The disclosure this closes is spec §9's own: with no position
+  served, a gate-filtered roster is a shorter list and nothing else, so Appendix C's **C27 is
+  deleted** and decision 0110 is superseded by 0113 — the register does not carry a row for a
+  channel that no longer exists. Design content did change in this revision, which is what the
+  ruling was; nothing else of §3.2 moved.
 - **r15 (2026-08-31)** — the gate is built, and spec §5's and §6's markers record it. `visibility`
   is accepted on every surface that declares one and evaluated at authorise into a per-session
   visible-view set, by the intersection semantics this document has specified since r1 — *not* the

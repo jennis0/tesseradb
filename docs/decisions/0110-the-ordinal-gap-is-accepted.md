@@ -1,6 +1,6 @@
 # 0110 — The ordinal gap is accepted as a register row
 
-**Date:** 2026-08-30 · **Status:** Settled (owner ruling, 2026-08-30)
+**Date:** 2026-08-30 · **Status:** Superseded by [0113](0113-ordinals-are-removed-and-the-key-is-the-only-address.md) (2026-08-31) — ordinals are removed entirely, so the gap this accepted cannot be observed and its register row C27 is deleted
 
 ## Context
 
