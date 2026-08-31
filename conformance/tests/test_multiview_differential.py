@@ -31,9 +31,9 @@ its own frame and its own layout.
   one layout.
 - **The cross-view leak check** — the epic's own sentence, and what it does and does not prove is
   set out at the case.
-- **Pinned leaves** (§5) — a scoped filter under its own view, pinned from another view, pinned by
-  ordinal, and pinned across views of one group; per-view presence; and the two refusals the
-  section names.
+- **Pinned leaves** (§5) — a scoped filter under its own view, pinned from another view by key,
+  and pinned across views of one group; per-view presence; and the two refusals the section
+  names.
 - **Ordering per view** — contracts §2.6's ascending `tessera_id` within each tile, in every view.
 
 ## The oracle's independence, and where it is not independent
@@ -458,8 +458,6 @@ def test_every_view_together_yields_exactly_what_the_mask_licenses(
     - **the gate** (§6), which does not exist: every view here is reachable by every principal, so
       "a view a principal may not see" is not a state this corpus can be in;
     - **timing**, which §9 accepts as a C15-class channel and which no equality can observe;
-    - **the ordinal gap** (§9's accepted register row), which is a fact about a roster rather than
-      about served data;
     - **`/v1/meta`**, whose per-principal `views` entry is specified and ungated today.
 
     The union being *equal* to the mask, rather than merely contained in it, is a property of this
@@ -514,10 +512,9 @@ RANGE = {"range": {"gte": 0.0}}
     [
         # Under a view of the group, the request's own view decides and nothing is pinned.
         (f"{mv.GROUP}:2026-Q2", "sentiment", f"{mv.GROUP}:2026-Q2"),
-        # Under a plain view, the leaf must pin — by key, and by ordinal. Ordinal 2 is the third
-        # view of the group, which is neither the first nor the last: an off-by-one shows up.
+        # Under a plain view the leaf must pin, by key — a view's only address (decision 0113).
+        # Q3 is the third of three, neither the first nor the last, so an off-by-one shows up.
         (mv.WORLD_VIEW, "sentiment@2026-Q3", f"{mv.GROUP}:2026-Q3"),
-        (mv.WORLD_VIEW, "sentiment@#2", f"{mv.GROUP}:2026-Q3"),
         # A pinned leaf under a view of the same group — Q3's map filtered by Q1's sentiment,
         # which §5 allows and says means what it says.
         (f"{mv.GROUP}:2026-Q3", "sentiment@2026-Q1", f"{mv.GROUP}:2026-Q1"),
@@ -644,8 +641,10 @@ def test_a_pin_naming_no_view_of_the_group_is_the_unknown_view_refusal(
     multiview_server, tokens
 ):
     """A pin resolves through the same view resolution every verb uses, so an unknown key is its
-    404 — the same answer an absent key, an ordinal no view holds and a misspelt id all get."""
-    for leaf in ("sentiment@2099-Q9", "sentiment@#9"):
+    404 — the same answer an absent key and a misspelt id get. The retired `#<ordinal>` form is
+    one of the misspellings now (decision 0113): it addresses nothing and is refused as any other
+    unknown key is."""
+    for leaf in ("sentiment@2099-Q9", "sentiment@#2"):
         resp = multiview_server.viewport_request(
             tokens["wide"],
             mv.WORLD_VIEW,

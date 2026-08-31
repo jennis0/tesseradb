@@ -693,13 +693,16 @@ def check_roster(canon: Json, reasons: list[str]) -> None:
     The fixture declares plain views alone, so what this asserts on it is that *nothing* claims a
     group — which is the case the shape could get wrong in the quiet direction, a served view
     carrying a key no group lists. The other direction is checked too, and both bite the moment a
-    grouped fixture exists: a view a client can see and cannot address, or an ordinal that
+    grouped fixture exists: a view a client can see and cannot address, or a roster entry that
     resolves to nothing, is a picker that offers a view the server will 404.
+
+    **A view is addressed by its key and by nothing else** (decision 0113), so there is no number
+    to check here: what orders a group is the order its `views` list is in, and a served record
+    carrying an `ordinal` field would be the removed machinery come back.
     """
     views = {view["id"]: view for view in canon.payload["views"]}
     rostered: set[str] = set()
     for group in canon.payload["groups"]:
-        ordinals = []
         for view_id in group["views"]:
             rostered.add(view_id)
             view = views.get(view_id)
@@ -717,14 +720,13 @@ def check_roster(canon: Json, reasons: list[str]) -> None:
                 reasons.append(
                     f"/v1/meta view {view_id!r} is not the join of its group and its key"
                 )
-            ordinals.append(view["ordinal"])
-        if ordinals != sorted(ordinals) or len(set(ordinals)) != len(ordinals):
-            reasons.append(
-                f"/v1/meta group {group['name']!r} serves ordinals {ordinals}, which are not "
-                f"ascending and distinct — a client cannot offer previous-and-next over them"
-            )
     for view_id, view in views.items():
-        record = [view["group"], view["key"], view["ordinal"], view["metadata"]]
+        if "ordinal" in view:
+            reasons.append(
+                f"/v1/meta view {view_id!r} carries an `ordinal`; a view is addressed by its key "
+                f"alone and a group's order is its list's order (decision 0113)"
+            )
+        record = [view["group"], view["key"], view["metadata"]]
         if view_id in rostered:
             if any(field is None for field in record):
                 reasons.append(f"/v1/meta view {view_id!r} is on a roster with a partial record")

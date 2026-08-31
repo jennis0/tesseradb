@@ -112,8 +112,8 @@ BLOCK = N_ITEMS // COMPARTMENTS
 WORLD_VIEW = "world"
 WORLD_EXTENT = (0.0, 65536.0, 0.0, 65536.0)
 
-#: The group and its views. Three, so that a `@#n` pin has an ordinal that is neither the first
-#: nor the last — an off-by-one in ordinal resolution is invisible against two.
+#: The group and its views. Three, so that a pin can name a view that is neither the first nor
+#: the last — an off-by-one in pin resolution is invisible against two.
 GROUP = "quarter"
 QUARTER_KEYS = ("2026-Q1", "2026-Q2", "2026-Q3")
 GROUP_EXTENT = (-40.0, 40.0, -40.0, 40.0)
