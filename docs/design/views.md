@@ -1,7 +1,10 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r18) — **a group with no roster mints its views** (r18, 2026-08-31, owner
+**Status:** Normative (r19) — **first-batch-creates is withdrawn** (r19, 2026-08-31, owner
+ruling): a batch naming an unknown key is a 404 for **every** group, record-less ones included;
+creation is `PUT /control/views/{group}/{key}` and nothing else. **a group with no roster mints
+its views** (r18, 2026-08-31, owner
 ruling: implement it): a `[[view_group]]` declaring neither roster form takes the distinct values
 of its discriminator column as its keys, one view per value, sorted by key bytes. The minted
 records are ordinary roster records, so nothing above the mint can tell them from written ones;
@@ -318,11 +321,10 @@ carrying the roster record — `visibility` and the metadata — which is the in
 wrong metadata is a drop and a recreate under a new key, never an update — the alternative is a
 narrowed gate that does not bite live sessions, a staleness the deny lane is not allowed and
 the roster is not either. A batch naming a view that does not exist is a 404, as for any
-unknown view — with one exception: a group whose views carry nothing (no metadata, no roster
-`visibility` field) has nothing to put in the record, and there the first batch naming a new
-key creates it. That is the one place a view comes into being without a declaration, and it is
-safe because the view has nothing of its own to declare: its frame, projection, visibility
-default and gate are the group's, already reviewed.
+unknown view, **for every group — a record-less one included** (owner ruling 2026-08-31, r19).
+An earlier revision excepted the group whose views carry nothing, letting the first batch naming
+a new key create it; that route is withdrawn. Creation stays explicit because the cost runs one
+way: a typo in a key must be a refusal, never a freshly minted view collecting the mistyped rows.
 
 **The roster's durable home is the segments manifest, not the WAL.** The create and drop
 records are WAL entries for replay, and the served roster is the manifest's plus the WAL
@@ -356,9 +358,7 @@ refused — is preserved by checking against the declared set.
 > to be made of — and its first flush gives it a row space, every segment of it an extent over
 > that empty base.
 >
-> ⊘ **Two things this does not do.** A group whose views carry nothing has no
-> *first-batch-creates* route: a batch naming an unknown key is a 404, and the view is created by
-> the operation above like any other. And a group declaring a **category**-typed metadata name has
+> ⊘ **One thing this does not do.** A group declaring a **category**-typed metadata name has
 > no create that can satisfy it: the wire carries a key and nothing resolves it to a code here, so
 > such a create is refused by the type check rather than accepted with an unresolved value — no
 > declaration in the corpus uses one.
@@ -1031,6 +1031,10 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r19 (2026-08-31)** — first-batch-creates is withdrawn (owner ruling): §3.2's exception for a
+  record-less group is deleted, a batch naming an unknown key being a 404 for every group, and the
+  §3.2 marker keeps only its category-metadata item. Creation is the explicit operation, so a
+  mistyped key refuses instead of minting a view around the mistake.
 - **r18 (2026-08-31)** — the last roster form is built: a group declaring neither
   `[[view_group.view]]` blocks nor a `[view_group.views]` table has its keys minted from the
   distinct values of its discriminator column (owner ruling: implement it). The design content is
