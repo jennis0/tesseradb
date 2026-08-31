@@ -57,12 +57,19 @@
 //! A short `offsets`, a `terms` file that does not end where the last offset says, and a
 //! descending or out-of-range offset pair are all [`StoreError::InvalidEntityTerms`] — never a
 //! truncated answer. The two ends are checked at open and each pair at the read that uses it,
-//! which is O(1) both times: walking every offset at open would be a 4 GB sequential read at 10⁹
-//! on the path the external-ID sidecar was deliberately made lazy to keep clear. A truncated list here would
-//! under-report an entity's labels, which on the write path is a **409 that does not fire**: a
-//! re-label accepted through a second view's row, with no overlay entry. On the read path it
-//! would only hide a label the viewer holds, which is the harmless direction — but the two share
-//! this reader, so it is held to the write path's standard.
+//! which is O(1) both times: walking every offset at open would be a 4 GB sequential read at 10⁹,
+//! on the path the external-ID sidecar was deliberately made lazy to keep clear.
+//!
+//! A truncated list would under-report an entity's labels, which on the write path is a **409 that
+//! does not fire**: a re-label accepted through a second view's row, with no overlay entry. On the
+//! read path it would only hide a label the viewer holds, which is the harmless direction — but
+//! the two share this reader, so it is held to the write path's standard.
+//!
+//! ⊘ **An entity-space coalesce does not merge these extents**, so layers accumulate one per flush
+//! until the next fold. The cost is file handles and a linear probe over small layers rather than
+//! answer time — every read is base-first, and a layer's per-read work is a rank and a slice — and
+//! the fold collapses them all. A coalesce pass here would be a fourth window policy for a family
+//! whose ordinals, unlike a keyword column's, need no remap.
 //!
 //! **No error detail here names a descriptor**, only ordinals, lengths and paths: these strings
 //! reach an operator log, and a descriptor is a compartment name.
@@ -197,7 +204,9 @@ impl EntityTermsWriter {
 
     /// Flush and close, returning the three paths written, in `(hasrow, offsets, terms)` order.
     pub fn finish(mut self) -> Result<Vec<PathBuf>> {
-        self.offsets.flush().map_err(|e| io(&self.offsets_path, e))?;
+        self.offsets
+            .flush()
+            .map_err(|e| io(&self.offsets_path, e))?;
         self.terms.flush().map_err(|e| io(&self.terms_path, e))?;
         // `run_optimize` before serialising, as the corpus's other Roaring writers do: a layer's
         // entities are an ascending, usually contiguous, run of ids.
@@ -347,7 +356,8 @@ impl EntityTerms {
             return Err(StoreError::InvalidEntityTerms {
                 path: self.dir.clone(),
                 detail: format!(
-                    "the offsets at rank {rank} name [{start}, {end}) over a terms file of {}                      ordinals",
+                    "the offsets at rank {rank} name [{start}, {end}) over a terms file of \
+                     {} ordinals",
                     self.terms.len() / 4
                 ),
             });
@@ -583,7 +593,8 @@ mod tests {
             offsets: extent.path().join(ENTITY_TERMS_OFFSETS_FILE),
             terms: extent.path().join(ENTITY_TERMS_TERMS_FILE),
         };
-        let stack = EntityTermsStack::open(Some(base.path()), std::slice::from_ref(&paths)).unwrap();
+        let stack =
+            EntityTermsStack::open(Some(base.path()), std::slice::from_ref(&paths)).unwrap();
         assert_eq!(stack.terms_of(0).unwrap(), Some(vec![1]));
         assert_eq!(stack.terms_of(1).unwrap(), Some(vec![2, 3]));
         assert_eq!(stack.terms_of(7).unwrap(), Some(vec![4]));
