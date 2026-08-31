@@ -88,6 +88,18 @@ fn sentiment(slot: usize, entity: u64) -> Option<f32> {
     Some(phase as f32 / 10.0)
 }
 
+/// **`heat`, per view and per entity** — the second family, declared `render = true` and
+/// `index = false`, whose whole licence to be an operand is `render` (`views.md` §5 r26). Its
+/// values are deliberately *not* `sentiment`'s: a leaf resolved to the wrong family's column would
+/// otherwise answer the right set by accident.
+fn heat(slot: usize, entity: u64) -> Option<f32> {
+    if (entity + slot as u64).is_multiple_of(4) {
+        return None;
+    }
+    let phase = (entity * 3 + slot as u64 * 5) % 10;
+    Some(phase as f32 / 10.0)
+}
+
 /// How many entities a quarter's view holds.
 fn population(slot: usize) -> usize {
     (QUARTERS[slot].1.end - QUARTERS[slot].1.start) as usize
@@ -100,6 +112,15 @@ fn matching(slot: usize) -> BTreeSet<u64> {
         .1
         .clone()
         .filter(|&e| sentiment(slot, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
+        .collect()
+}
+
+/// The entities of a quarter whose **`heat`** clears the threshold.
+fn matching_heat(slot: usize) -> BTreeSet<u64> {
+    QUARTERS[slot]
+        .1
+        .clone()
+        .filter(|&e| heat(slot, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
         .collect()
 }
 
@@ -125,6 +146,7 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
     if slot.is_some() {
         // Nullable: a null and a row this view does not carry are the same state, absent.
         fields.push(Field::new("sentiment", DataType::Float32, true));
+        fields.push(Field::new("heat", DataType::Float32, true));
     }
     let schema = Arc::new(Schema::new(fields));
     let ids: Vec<u64> = ids.collect();
@@ -140,6 +162,9 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option
     if let Some(slot) = slot {
         columns.push(Arc::new(Float32Array::from(
             ids.iter().map(|&e| sentiment(slot, e)).collect::<Vec<_>>(),
+        )));
+        columns.push(Arc::new(Float32Array::from(
+            ids.iter().map(|&e| heat(slot, e)).collect::<Vec<_>>(),
         )));
     }
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -225,24 +250,45 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 scoped_scalars: Vec::new(),
             },
         ],
-        scoped_attributes: vec![ScopedColumnFamily {
-            attribute: Attribute {
-                name: "sentiment".to_string(),
-                title: None,
-                field: None,
-                ty: ScalarType::F32,
-                analyser: None,
-                vocabulary: None,
-                value_set: None,
-                index: true,
-                render: false,
+        scoped_attributes: vec![
+            ScopedColumnFamily {
+                attribute: Attribute {
+                    name: "sentiment".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::F32,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: true,
+                    render: false,
+                },
+                group: "quarter".to_string(),
+                views: family_views.clone(),
+                // No `source` of its own: each view's column is read from that view's own points
+                // file, which is the shape most declarations want (`views.md` §5).
+                source: None,
             },
-            group: "quarter".to_string(),
-            views: family_views,
-            // No `source` of its own: each view's column is read from that view's own points file,
-            // which is the shape most declarations want (`views.md` §5).
-            source: None,
-        }],
+            // **The same family, licensed by `render` instead of `index`** (`views.md` §5 r26).
+            // It is declared beside the indexed one so that every resolution case below can be
+            // asked of both, the two being one rule since the asymmetry closed.
+            ScopedColumnFamily {
+                attribute: Attribute {
+                    name: "heat".to_string(),
+                    title: None,
+                    field: None,
+                    ty: ScalarType::F32,
+                    analyser: None,
+                    vocabulary: None,
+                    value_set: None,
+                    index: false,
+                    render: true,
+                },
+                group: "quarter".to_string(),
+                views: family_views,
+                source: None,
+            },
+        ],
         attribute_sources: Vec::new(),
         out: out.clone(),
         limit: None,
@@ -544,4 +590,113 @@ async fn the_operand_list_carries_the_scope() {
     assert_eq!(sentiment["family"], "numeric");
     assert_eq!(sentiment["operands"], json!(["eq", "in", "range"]));
     assert_eq!(sentiment["scope"], json!({"group": "quarter"}));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The same rule, licensed by `render` (`views.md` §5 r26)
+// ---------------------------------------------------------------------------------------------
+
+/// **A family declared `render = true` and `index = false` resolves exactly as the indexed one
+/// does** — bare under a view of the group, pinned anywhere else — because the licence is now
+/// `index` *or* `render` and the column both spellings read is the same per-view entity-space one.
+///
+/// `heat`'s values are not `sentiment`'s, so an answer that came from the wrong family's column
+/// would be a different set rather than the same one.
+#[tokio::test]
+async fn a_render_only_family_resolves_exactly_as_the_indexed_one_does() {
+    let served = serve().await;
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
+        let view = format!("quarter:{key}");
+        let rendered = ids(&served, &view, Some(range("heat"))).await;
+        assert_eq!(
+            rendered.len(),
+            matching_heat(slot).len(),
+            "{view} filters by its own column of the rendered family: expected {} of {} rows",
+            matching_heat(slot).len(),
+            population(slot)
+        );
+        let indexed = ids(&served, &view, Some(range("sentiment"))).await;
+        assert_ne!(
+            rendered, indexed,
+            "{view}: and it is `heat`'s column, not the indexed family's"
+        );
+    }
+}
+
+/// **A pin of a render-only family projects into a view that holds no lane for it** — the
+/// property route (a) buys. `world` is outside the group, so its rows carry no `heat` at all, and
+/// `heat@2026-Q3` there is exactly the entities `world` and Q3's own filtered answer share.
+/// Asserted as a set identity between two served answers, so nothing depends on a second reading
+/// of the fixture.
+#[tokio::test]
+async fn a_pin_of_a_render_only_family_projects_into_a_view_with_no_lane() {
+    let served = serve().await;
+    let projected = ids(&served, "world", Some(range("heat@2026-Q3"))).await;
+    let world_rows = ids(&served, "world", None).await;
+    let q3 = ids(&served, "quarter:2026-Q3", Some(range("heat"))).await;
+    assert_eq!(
+        projected,
+        world_rows
+            .intersection(&q3)
+            .copied()
+            .collect::<BTreeSet<_>>()
+    );
+    assert!(
+        !projected.is_empty() && projected.len() < world_rows.len(),
+        "a proper, non-empty subset, or the assertion above holds vacuously"
+    );
+}
+
+/// **The refusals are the same two**, since the resolution is one site: a bare leaf where nothing
+/// decides the view names the group, and a pin naming no view of it is the unknown-view `404`.
+#[tokio::test]
+async fn a_render_only_familys_refusals_are_the_indexed_ones() {
+    let served = serve().await;
+    let resp = viewport(&served, &served.token, "world", Some(range("heat"))).await;
+    assert_eq!(resp.status().as_u16(), 422);
+    let body: Value = resp.json().await.unwrap();
+    let detail = body["detail"].as_str().unwrap();
+    assert!(detail.contains("quarter"), "it names the group: {detail}");
+    assert!(detail.contains("heat@"), "it says how to pin one: {detail}");
+
+    let resp = viewport(&served, &served.token, "world", Some(range("heat@2099-Q9"))).await;
+    assert_eq!(resp.status().as_u16(), 404);
+}
+
+/// **`/v1/meta` publishes it as an operand, with its family's operators and its scope** — the
+/// discovery half of the same rule. A client cannot tell the two families apart by their entries,
+/// which is the point: `index` decides where the value is stored, not whether it is filterable.
+#[tokio::test]
+async fn meta_publishes_the_render_only_family_as_an_operand() {
+    let served = serve().await;
+    let body: Value = served
+        .server
+        .client
+        .get(served.server.viewer_url("/v1/meta"))
+        .bearer_auth(&served.token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let operands = body["filter_operands"].as_array().unwrap();
+    let entry = |column: &str| -> Value {
+        operands
+            .iter()
+            .find(|e| e["column"] == column)
+            .unwrap_or_else(|| panic!("{column} is an operand: {operands:?}"))
+            .clone()
+    };
+    let mut indexed = entry("sentiment");
+    let mut rendered = entry("heat");
+    assert_eq!(rendered["family"], "numeric");
+    assert_eq!(rendered["operands"], json!(["eq", "in", "range"]));
+    assert_eq!(rendered["scope"]["group"], "quarter");
+    indexed["column"] = json!(null);
+    rendered["column"] = json!(null);
+    assert_eq!(
+        indexed, rendered,
+        "the two entries differ only in the column's name"
+    );
 }

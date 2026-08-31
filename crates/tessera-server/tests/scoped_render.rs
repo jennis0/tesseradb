@@ -17,10 +17,18 @@
 //! - **Absence is ordinary.** An entity with no value in a quarter takes the type's zero, exactly
 //!   as an entity-scoped render column's absence does (decision 0064), and a view created while
 //!   the service runs — which no batch can write a scoped column for — simply carries none.
+//!
+//! Since 2026-08-31 the family is also a **filter operand** on `render` alone (`views.md` §5 r26),
+//! which is why the filter cases below live in this file rather than beside the indexed family's:
+//! `heat` is declared `index = false`, so what answers a leaf here is the licence `render` gives
+//! and nothing else. What they check is that the operand is the **entity-space column** and not
+//! the lane — a pin from a view outside the group answers over rows that hold no lane at all —
+//! and that the answer follows the write path, an ingested value being filterable once flushed and
+//! after a fold.
 
 mod common;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -217,8 +225,10 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
             },
         ],
         scoped_attributes: match declared {
-            // **`render` without `index`**: the family is on no filter surface at all and has one
-            // home, the hot tail, which is exactly the placement this file is about.
+            // **`render` without `index`**: the placement this file is about, and — since
+            // `views.md` §5 r26 — the whole of the licence the filter cases below are answered
+            // by. The family has two homes, the hot tail of each view of the group and the
+            // entity-space column beside it that every build writes whatever the flags.
             true => vec![ScopedColumnFamily {
                 attribute: Attribute {
                     name: "heat".to_string(),
@@ -716,7 +726,8 @@ async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() 
     assert_eq!(heat["arrow_type"], "f32");
     assert_eq!(heat["scope"]["group"], "quarter");
     assert_eq!(heat["render"], true);
-    // Render-only: on no filter surface, so it is on this list and on no other.
+    // Render-only, and an operand on that alone since `views.md` §5 r26 — the flag says where the
+    // value is drawn, not whether it can be filtered.
     assert_eq!(heat["index"], false);
     // **Every view whose rows carry the column**, the owning group's and the sharing group's
     // alike: a client under `quarter_map:2026-Q1` receives the column and must find that id here.
@@ -730,14 +741,19 @@ async fn meta_publishes_the_render_placement_and_the_views_that_have_a_column() 
         ]),
         "the ids of every view that renders the family, this principal reaching them all"
     );
-    assert!(
-        !body["filter_operands"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["column"] == "heat"),
-        "`render` alone is not an operand for a scoped family — a scoped column has no row route"
-    );
+    // **`render` alone is the operand licence** (`views.md` §5 r26): the entry is the one an
+    // indexed family gets — the family's own operator names, and the scope that says a bare leaf
+    // needs a view of the group behind it.
+    let operand = body["filter_operands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["column"] == "heat")
+        .expect("a rendered family is a filter operand")
+        .clone();
+    assert_eq!(operand["family"], "numeric");
+    assert_eq!(operand["operands"], json!(["eq", "in", "range"]));
+    assert_eq!(operand["scope"]["group"], "quarter");
 }
 
 /// **A view created while the service runs starts with no column of the family and acquires one
@@ -1131,4 +1147,200 @@ async fn a_sharing_groups_view_is_listed_where_the_owners_gated_one_is_not() {
     // The owner's own view stays unreachable, and its 404 is the one an unknown name gets.
     let (status, _) = viewport_bytes(&served, &outsider, "quarter:2026-Q2").await;
     assert_eq!(status, 404);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The filter surface `render` alone licences (`views.md` §5 r26)
+// ---------------------------------------------------------------------------------------------
+
+/// The threshold every `range` below uses. Chosen so each quarter's matching set is a proper,
+/// non-empty subset of its population — a filter holding everything or nothing would pass against
+/// the wrong column as readily as the right one.
+const THRESHOLD: f64 = 30.0;
+
+/// The entities of a quarter whose `heat` clears the threshold — the expected answer, from the
+/// same function the parquet was written from rather than from a second reading of the rule.
+fn matching(slot: usize) -> BTreeSet<u64> {
+    members(slot)
+        .filter(|&e| heat(slot, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
+        .collect()
+}
+
+/// A `range` over `heat`, spelt as a client would: bare, or pinned to a view by key.
+fn range(leaf: &str) -> Value {
+    json!({ leaf: {"range": {"gte": THRESHOLD}} })
+}
+
+/// One filtered viewport, with its status — the refusal cases are assertions too.
+async fn filtered_bytes(
+    served: &Served,
+    token: &str,
+    view: &str,
+    filters: Value,
+) -> (u16, Vec<u8>) {
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200,
+            "filters": filters
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.bytes().await.unwrap().to_vec())
+}
+
+/// The **entities** a filtered view answers with. An identifier is the entity's wherever it
+/// appears (`views.md` §1), so two views' answers compare directly.
+async fn filtered_entities(
+    served: &Served,
+    token: &str,
+    view: &str,
+    filters: Value,
+) -> BTreeSet<u64> {
+    let (status, body) = filtered_bytes(served, token, view, filters).await;
+    assert_eq!(status, 200, "{view} answers under a filter");
+    let (_, values) = points_columns(&body);
+    let mut out = BTreeSet::new();
+    for &id in values.keys() {
+        out.insert(entity_of(served, token, id).await);
+    }
+    out
+}
+
+/// **A bare leaf under a view of the group answers from that view's column, on `render` alone.**
+///
+/// `heat` is declared `index = false`, so the operand exists because the family is rendered and
+/// for no other reason (`views.md` §5 r26). Both quarters are checked against their own expected
+/// sets, and the two sets are checked to differ — reading the family's first column wherever the
+/// leaf resolves would pass one assertion and fail the other.
+#[tokio::test]
+async fn a_render_only_family_answers_a_bare_leaf_under_a_view_of_its_group() {
+    let served = serve().await;
+    let mut answers = Vec::new();
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
+        // The gated quarter is reachable: this session holds both terms.
+        let view = format!("quarter:{key}");
+        let answer = filtered_entities(&served, &served.token, &view, range("heat")).await;
+        assert_eq!(answer, matching(slot), "{view} answers its own column");
+        assert!(
+            answer.len() < members(slot).count(),
+            "{view}: the threshold must exclude something, or the column is not being read"
+        );
+        answers.push(answer);
+    }
+    assert_ne!(
+        answers[0], answers[1],
+        "the two quarters disagree, which is what makes reading the right column observable"
+    );
+}
+
+/// **A pin reads the named view's column and not the lane in front of the request.**
+///
+/// Under `quarter:2026-Q2`, whose rows carry Q2's `heat` in their tail, `heat@2026-Q1` answers
+/// Q1's column: the entities Q2 holds that clear the threshold **in Q1**. That is route (a)'s
+/// property — the operand is the family's per-view entity-space column, so a leaf naming another
+/// view is read where that view's values live rather than from the rows in front of the request,
+/// which hold different numbers. The answer is asserted to differ from Q2's own, which is what a
+/// route through the lane would have returned.
+///
+/// (The pin from a view outside the group entirely is `scoped_filter.rs`'s
+/// `a_pin_projects_one_views_column_into_another_views_rows`, which this file's plain view cannot
+/// carry: `world` serves no points in this fixture.)
+#[tokio::test]
+async fn a_pin_of_a_render_only_family_reads_the_named_views_column() {
+    let served = serve().await;
+    let answer = filtered_entities(
+        &served,
+        &served.token,
+        "quarter:2026-Q2",
+        range("heat@2026-Q1"),
+    )
+    .await;
+    let expected: BTreeSet<u64> = matching(0)
+        .intersection(&members(1).collect())
+        .copied()
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "the fixture's quarters must overlap above the threshold, or this says nothing"
+    );
+    assert_eq!(answer, expected, "the pinned column is Q1's");
+    let own = filtered_entities(&served, &served.token, "quarter:2026-Q2", range("heat")).await;
+    assert_ne!(
+        answer, own,
+        "and it is not Q2's own answer, which the row tail in front of the request holds"
+    );
+}
+
+/// **A bare leaf where nothing decides the view is the `422` naming the group**, and a pin naming
+/// no view of it is the unknown-view `404` — the same two answers an indexed family gives, since
+/// the resolution is one site and the licence is all that changed.
+#[tokio::test]
+async fn a_render_only_familys_leaf_takes_the_same_refusals_an_indexed_ones_does() {
+    let served = serve().await;
+    let (status, body) = filtered_bytes(&served, &served.token, "world", range("heat")).await;
+    assert_eq!(status, 422, "a bare leaf on a plain view decides nothing");
+    let detail = String::from_utf8_lossy(&body).to_string();
+    assert!(
+        detail.contains("quarter"),
+        "the refusal names the group: {detail}"
+    );
+    let (status, _) = filtered_bytes(&served, &served.token, "world", range("heat@2029-Q9")).await;
+    assert_eq!(
+        status, 404,
+        "a pin naming no view of the group is the unknown-view 404"
+    );
+}
+
+/// **An ingested value is filterable once flushed, and stays so across a fold** (`views.md` §5).
+///
+/// The write half writes the family's per-view extent for a rendered family exactly as for an
+/// indexed one — the same predicate gates the opener, the flush and the fold — so a row that
+/// arrived by ingest answers the leaf that the build's rows answer, before and after the rewrite.
+#[tokio::test]
+async fn an_ingested_value_of_a_render_only_family_filters_after_a_flush_and_a_fold() {
+    let served = serve().await;
+    const NEW: u64 = 9_501;
+    ingest_with_heat(
+        &served,
+        "heat-filter",
+        "quarter:2026-Q1",
+        &[(external_id_of(NEW), 250.0, 250.0, "0")],
+        // Above the threshold, so the answer changes by exactly this entity.
+        &[Some(90.0)],
+    )
+    .await;
+    flush(&served).await;
+    // Let the flushed row settle into the served generation before the set is compared.
+    settled_points(
+        &served,
+        &served.token,
+        "quarter:2026-Q1",
+        members(0).count() + 1,
+    )
+    .await;
+
+    let mut expected = matching(0);
+    expected.insert(NEW);
+    let answer = filtered_entities(&served, &served.token, "quarter:2026-Q1", range("heat")).await;
+    assert_eq!(answer, expected, "the flushed extent answers the leaf");
+
+    fold(&served).await;
+    // A fold rewrites the whole prefix, so a session authorised against the old one is asking
+    // about a bundle that has gone.
+    let token = authorise(&served.server, &["0", "1"]).await["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    settled_points(&served, &token, "quarter:2026-Q1", members(0).count() + 1).await;
+    let after = filtered_entities(&served, &token, "quarter:2026-Q1", range("heat")).await;
+    assert_eq!(
+        after, expected,
+        "and the fold's rewritten column answers it too"
+    );
 }
