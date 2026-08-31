@@ -1,6 +1,14 @@
 # Views — design
 
 **Date:** 2026-08-30
+**Status:** Normative (r21) — **`render` on a group-scoped attribute reaches the row tail of each
+view of its group** (r21, 2026-08-31, owner ruling; contracts r61): the value is carried in the
+points batch of every view of the group, and of any group sharing those views via `members`, and
+of no other view — the rule `per-point-attributes.md` §3.9 has for `render_in`, with the view set
+decided by the scope. `/v1/meta` gains `scoped_scalars`, a family's counterpart to
+`declared_scalars`, and the vocabulary and analyser move onto it from the operand entry. §5's
+`render` marker is discharged; the **ingest** half stays marked, and a view created while the
+service runs has no column of any family until a rebuild. No design changes.
 **Status:** Normative (r20) — **every family of a group-scoped attribute answers, and such an
 attribute may declare its own `source`** (r20, 2026-08-31, owner ruling; contracts r60): §5's two
 ⊘ markers are discharged. A scoped **category** carries per-view keyed postings — the filter route,
@@ -56,8 +64,10 @@ nothing decides and the unknown-view `404` for a pin naming no view of it (contr
 r55). **All four families answer, and a scoped attribute may declare its own `source`** (r20,
 2026-08-31, owner ruling; contracts r60): a category's per-view postings and a text column's
 per-view dictionary and postings are written and opened, `/v1/categories` is view-addressed for a
-scoped category, and a source of the attribute's own is routed per view by `fields.view`. ⊘ What
-remains at that claim is `render`, and the ingest half.
+scoped category, and a source of the attribute's own is routed per view by `fields.view`.
+**`render` reaches the row tail of each view of the group** (r21, 2026-08-31, owner ruling;
+contracts r61), and `/v1/meta`'s `scoped_scalars` publishes the placement. ⊘ What remains at that
+claim is the ingest half.
 **the roster is served** (r12, 2026-08-31): `/v1/meta` publishes
 every view of every group with its key and typed metadata, in creation order, beside the
 groups' own orderings; every one of them answers a viewer verb, by its key
@@ -610,11 +620,23 @@ group for the value to belong to.
 of any group sharing them, and in no other view — the rule `per-point-attributes.md` §3.9 already
 has for `render_in`, with the view set decided by the scope instead of listed.
 
-> **⊘ Specified, not implemented.** No scoped column reaches any row's hot tail, so a scoped
-> attribute is rendered in **no** view whatever it declares; `render = true` on one is recorded by
-> the declaration and printed at the build as buying nothing. A client reading a viewport response
-> must not expect the value, and a reader must not count `render` here as an available means of
-> getting it into a row.
+> **Implemented 2026-08-31** (contracts §3.2 r61). The build permutes each view's column into that
+> view's row space beside the entity-scoped render columns, with its own presence bitmap, so the
+> value arrives in the points batch under a view of the group and the column is not in the schema
+> anywhere else — a view outside every scope writes the bytes it wrote before the family was
+> declared. A request's render list is therefore per view, and `/v1/meta`'s `scoped_scalars` entry
+> publishes the family's `render` flag and the view ids that have a column, which is what tells a
+> client where to expect it. The gate is inside this as it is inside the filter surface: a family
+> whose group this principal cannot reach is named in no response they receive.
+>
+> ⊘ **A rendered family is still not a filter operand** — `index` is the whole licence
+> (§5's filter paragraph). A leaf resolves to one *entity-space* column, and a pin may make that
+> another view's, which no scan of the rows in front of the request could answer; the two routes
+> would answer different questions under one spelling.
+>
+> ⊘ **A merge or a fold drops the column until the next build.** Both take their writer schema from
+> the bundle-wide render list, a family having no row in it, so a rewritten segment of a group's
+> view carries the entity-scoped tail alone and its rows read as the ordinary absence below.
 
 **View metadata is not an attribute.** A view's `label` or `starts` is one value per view, lives
 on the roster, filters nothing and is served typed on `/v1/meta`. A per-(entity, view) value is
@@ -677,14 +699,25 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > Declaring no source — Appendix A's `sentiment`, and the fixture's — reads each view's own points
 > file and remains the shape most declarations want.
 >
-> ⊘ **`render` on a scoped attribute renders nothing**, in any view: the hot column is per row space
-> and a scoped column is in none of them, so the `Render` paragraph above is specification and not
-> behaviour; the build prints that where an operator can read it. The **ingest** rule is
-> unimplemented with the rest of the write half — a buffered row's scalars are positional against
-> `MANIFEST.declared_scalars`, which a family is deliberately absent from, so a batch naming a
-> scoped column is refused as an unknown column by construction and every column of a family is
-> the build's. A view created after the build therefore has no column of any family until one is
-> written for it, which is what `scoped_scalars[..].views` naming the views that *have* one records.
+> **`render` reaches the row tail, built 2026-08-31** (contracts §3.2 r61). Each view's column is
+> permuted into that view's row space at the build, beside the entity-scoped render columns and
+> with the same presence bitmap (decision 0064), so a viewport response under a view of the group
+> carries the value and one under any other view does not carry the column at all. Serving narrows
+> the render list per view and per principal at one site — the same site the head's column names
+> come from, so the names and the buffers cannot diverge — and a family whose group's gate this
+> principal fails is absent from it, as it is absent from `filter_operands`. `/v1/meta`'s
+> `scoped_scalars` is where a client reads the placement: the family's `render` and `index` flags,
+> its type, its vocabulary or analyser, and the view ids that have a column.
+>
+> ⊘ The **ingest** rule is unimplemented with the rest of the write half — a buffered row's scalars
+> are positional against `MANIFEST.declared_scalars`, which a family is deliberately absent from,
+> so a batch naming a scoped column is refused as an unknown column by construction and every
+> column of a family is the build's. A view created after the build therefore has no column of any
+> family until one is written for it, which is what `scoped_scalars[..].views` naming the views
+> that *have* one records — and what a request under such a view sees is the ordinary absence: the
+> column is in no response's schema. The same absence covers a segment a flush wrote under a view
+> that *does* have a column: its rows carry the type's zero, which is what a row with no value
+> carries anyway.
 
 ## 6. The gate
 
@@ -1074,6 +1107,18 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r21 (2026-08-31)** — spec §5's `render` marker is discharged and no design content changed.
+  Built: each view's column of a rendered family permuted into that view's row space at the build,
+  with its presence bitmap; a per-view, per-principal render list at the one site the head's names
+  and the gather's buffers both come from; and `/v1/meta`'s `scoped_scalars`, a family's
+  counterpart to `declared_scalars`, carrying the type, the vocabulary, the analyser, the two
+  placement flags and the view ids that have a column — the vocabulary and the analyser moving
+  there from the operand entry, which is the operand surface and carries neither for an
+  entity-scoped column either. What stays marked: the **ingest** half, so a view created while the
+  service runs has no column until a rebuild; a merge or fold, which takes its writer schema from
+  the bundle-wide list and so drops the column from a segment it rewrites; and the filter surface,
+  where `index` remains the whole licence — a leaf resolves to one entity-space column and a pin
+  may make that another view's, which a scan of the request's own rows cannot answer.
 - **r20 (2026-08-31)** — spec §5's two ⊘ markers are discharged and no design content changed.
   Built: a scoped **category**'s per-view keyed postings, which are both the filter route on a
   `public` vocabulary and what `/v1/categories` derives a value list from on a `derived` one; a

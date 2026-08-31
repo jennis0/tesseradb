@@ -655,7 +655,7 @@ components:
     Meta:
       type: object
       additionalProperties: false
-      required: [api_version, bundle_format, idset, views, groups, declared_scalars, filter_operands, selection, layers]
+      required: [api_version, bundle_format, idset, views, groups, declared_scalars, scoped_scalars, filter_operands, selection, layers]
       properties:
         api_version:
           type: integer
@@ -747,9 +747,14 @@ components:
                 items: { type: string }
         declared_scalars:
           type: array
-          description: The column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column.
+          description: The entity-scoped column schema in full, in declaration order. `render = true` columns arrive in the points frame after `tessera_id` and `code`, in this order, each named by its column — followed, under a view of a group, by that group's `render = true` scoped families (`scoped_scalars`). Readers take the columns by name.
           items:
             $ref: "#/components/schemas/DeclaredScalar"
+        scoped_scalars:
+          type: array
+          description: "The **group-scoped** column families (`views.md` §5) — the same schema `declared_scalars` publishes, plus the scope that says which views each column arrives under. **Per-principal**: a family whose group this principal cannot reach is omitted, exactly as its `filter_operands` entry is."
+          items:
+            $ref: "#/components/schemas/ScopedScalar"
         filter_operands:
           type: array
           description: "The columns a request may filter on and each one's operator names. `family` is what tells a client which control to draw — a category has a value set `/v1/categories/{column}` fills; a keyword has none. `scope` is present only on a **group-scoped** attribute, whose values differ per view of the group it names. **Per-principal in its scoped entries**: a family whose group this principal cannot reach is omitted, and a leaf naming it — bare or pinned — is the ordinary unknown-column `422` (`views.md` §5, §6)."
@@ -768,25 +773,6 @@ components:
                 items:
                   type: string
                   enum: [eq, in, prefix, contains, range, match, phrase]
-              category:
-                description: For a group-scoped **category** family, the vocabulary its codes index — the same three facts `DeclaredScalar.category` carries, which a family has no row there to publish. `null` for every other family and absent on an entity-scoped column, whose `declared_scalars` entry already carries it.
-                oneOf:
-                  - type: "null"
-                  - type: object
-                    additionalProperties: false
-                    required: [vocabulary, kind, visibility]
-                    properties:
-                      vocabulary:
-                        type: string
-                      kind:
-                        type: string
-                        enum: [declared, discovered]
-                      visibility:
-                        type: string
-                        enum: [public, derived]
-              analyser:
-                description: For a group-scoped **text** family, the `<name>/<version>` analyser identity that segmented its per-view indexes. `null` for every other family; absent on an entity-scoped column.
-                type: [string, "null"]
               scope:
                 type: object
                 additionalProperties: false
@@ -846,6 +832,57 @@ components:
         index:
           type: boolean
           description: The column has an entity-space search structure. Neither flag set means blob-resident — returned at drill-down, never an operand.
+
+    ScopedScalar:
+      type: object
+      additionalProperties: false
+      required: [name, arrow_type, scope, category, analyser, render, index, views]
+      description: One group-scoped attribute's column family — one entity-space column per view of the group it names, and the same declaration an entity-scoped column carries.
+      properties:
+        name:
+          type: string
+          pattern: "^[A-Za-z0-9_-]+$"
+          description: The column's identifier, as a filter leaf spells it before any pin. Unique bundle-wide across the entity-scoped columns and the families alike.
+        arrow_type:
+          type: string
+          description: The storage type's name, spelt exactly as `DeclaredScalar.arrow_type` is.
+        scope:
+          type: object
+          additionalProperties: false
+          required: [group]
+          description: The view group whose views this family has a column per.
+          properties:
+            group:
+              type: string
+        category:
+          description: Present for a category family; `null` otherwise — `DeclaredScalar.category`'s three facts, for the same reason.
+          oneOf:
+            - type: "null"
+            - type: object
+              additionalProperties: false
+              required: [vocabulary, kind, visibility]
+              properties:
+                vocabulary:
+                  type: string
+                kind:
+                  type: string
+                  enum: [declared, discovered]
+                visibility:
+                  type: string
+                  enum: [public, derived]
+        analyser:
+          description: For a `text` family, the `<name>/<version>` analyser identity that segmented its per-view indexes. `null` for every other family.
+          type: [string, "null"]
+        render:
+          type: boolean
+          description: The column arrives in the points frame **under a view of this group**, or of a group sharing its views via `members`, and under no other view. Under those views it follows the entity-scoped render columns; a row with no value carries the type's zero, as every render column does.
+        index:
+          type: boolean
+          description: The family's columns carry an entity-space value column a filter may be answered from — which is the whole of whether it is an operand, a scoped column having no row route.
+        views:
+          type: array
+          description: The view ids that have a column, in the owning group's own `group:key` form, filtered by the view gate. A view created while the service runs has none until a rebuild, so this is not the group's roster.
+          items: { type: string }
 
     Selection:
       type: object

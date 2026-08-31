@@ -392,6 +392,9 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                 None,
             ),
             scoped(
+                // **The render family** (`views.md` §5): its per-view values reach the hot row
+                // tail of each quarter and of no other view, which is what
+                // `scoped_render.rs` asserts on the wire.
                 Attribute {
                     name: "score".to_string(),
                     title: None,
@@ -401,7 +404,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
                     vocabulary: None,
                     value_set: None,
                     index: true,
-                    render: false,
+                    render: true,
                 },
                 family_views.clone(),
                 Some(ScopedAttributeFile {
@@ -910,8 +913,11 @@ async fn a_text_family_has_no_value_list() {
     assert_eq!(resp.status().as_u16(), 404);
 }
 
-/// **`/v1/meta` publishes each family with its scope, its operators and — for a category — its
-/// vocabulary**, so a client can draw the control and fill it without inferring anything.
+/// **`/v1/meta` publishes each family twice over, and each list answers its own question**: the
+/// operand entry says which operators a leaf may carry and which group decides its view, and the
+/// `scoped_scalars` entry is the family's `declared_scalars` row — type, vocabulary, analyser and
+/// the two placement flags — so a client can draw the control, fill it, and know which views the
+/// column arrives under, without inferring anything.
 #[tokio::test]
 async fn meta_publishes_every_family_with_its_scope() {
     let served = serve().await;
@@ -942,9 +948,40 @@ async fn meta_publishes_every_family_with_its_scope() {
         assert_eq!(entry["family"], family);
         assert_eq!(entry["scope"]["group"], "quarter");
     }
-    assert_eq!(operands["mood"]["category"]["vocabulary"], "mood");
-    assert_eq!(operands["mood"]["category"]["visibility"], "public");
-    assert_eq!(operands["sector"]["category"]["visibility"], "derived");
-    assert!(operands["note"]["analyser"].is_string());
-    assert!(operands["score"]["category"].is_null());
+    let families: HashMap<String, Value> = body["scoped_scalars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| (entry["name"].as_str().unwrap().to_string(), entry.clone()))
+        .collect();
+    assert_eq!(families["mood"]["category"]["vocabulary"], "mood");
+    assert_eq!(families["mood"]["category"]["visibility"], "public");
+    assert_eq!(families["sector"]["category"]["visibility"], "derived");
+    assert!(families["note"]["analyser"].is_string());
+    assert!(families["score"]["category"].is_null());
+    for name in ["mood", "sector", "note", "score"] {
+        assert_eq!(families[name]["scope"]["group"], "quarter");
+        assert_eq!(families[name]["index"], true, "{name}");
+    }
+    // The placement flags say which of the two homes a family has: `score` is the one declaring
+    // `render`, so it is the one a points batch under a quarter carries.
+    assert_eq!(families["score"]["render"], true);
+    for name in ["mood", "sector", "note"] {
+        assert_eq!(families[name]["render"], false, "{name}");
+    }
+    // The views that have a column, in the owning group's ids — the whole roster here, every
+    // family having been written at the build.
+    let views: Vec<&str> = families["score"]["views"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(
+        views,
+        QUARTERS
+            .iter()
+            .map(|(key, _)| format!("quarter:{key}"))
+            .collect::<Vec<_>>()
+    );
 }

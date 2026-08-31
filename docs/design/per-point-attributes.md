@@ -427,12 +427,20 @@ and postings*, not that every entity has every attribute.
 
 **`render` is per-view; `index` and the blob are not.** They are entity-space, declared once,
 applying everywhere. `render` is row-space, so an attribute declared for a document corpus would
-otherwise materialise a column of 10⁸ `absent` codes in an unrelated sensor view — views §53
+otherwise materialise a column of 10⁸ `absent` codes in an unrelated sensor view — views §5
 already permits per-view columns. ⊘ **`render_in` is refused at parse**: `MANIFEST.declared_scalars`
 is one flat bundle-wide list, so accepting it would put the column in every view anyway and
 silently, which is the opposite of what it asks for. Omitting it *is* every view — the expensive
-default, and the one the plan step warns about (§2.3). Per-view enumeration needs contracts §2.6
-and belongs with the views epic (§6).
+default, and the one the plan step warns about (§2.3).
+
+**A `scope` says which views render it, where `render_in` would have listed them** (`views.md` §5,
+built 2026-08-31). A group-scoped attribute declaring `render = true` occupies a slot in the row
+tail of every view of its group, and of any group sharing those views, and of no other — this
+paragraph's rule, with the view set derived from the scope rather than enumerated. It is not
+`render_in` arriving by another door: the column is a *family*, one per view, recorded on the
+group rather than in the flat `declared_scalars` list, and its values are that view's own. What
+`render_in` asked for — one bundle-wide column materialised in some views and not others — is
+still refused, and still needs contracts §2.6's per-view enumeration.
 
 **Codes are shared across views**, being vocabulary-scoped and entity-space, so the same code means
 the same key in every view that renders the attribute. A legend built for one view is correct for

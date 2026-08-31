@@ -314,6 +314,67 @@ async fn meta(
                 "index": s.index,
             })
         }).collect::<Vec<_>>(),
+        // **The group-scoped column families, published exactly as `declared_scalars` publishes
+        // an entity-scoped column** (`views.md` §5, contracts §3.2): name, storage type, the
+        // `category` block a code needs to be read at all, the `analyser` a `text` family's terms
+        // were produced by, and the two placement flags. The one field an entity-scoped entry has
+        // no use for is `scope`, and it is the whole difference: the family is one column per view
+        // of that group, so what this entry says is *which* views the column arrives under.
+        //
+        // **`render` here is a per-view promise, which is what the scope makes it**: a family
+        // declaring it occupies a slot in the row tail of every view of its group, and of any
+        // group sharing those views via `members`, and of no other view — so a client reading this
+        // knows to expect the column in a points batch under those views and nowhere else. Where
+        // the entity-scoped flag says *this column arrives in the points batch*, this one says
+        // *under these views it does*.
+        //
+        // **A list of its own rather than rows in `declared_scalars`**, which is the flat
+        // bundle-wide schema the record blob addresses positionally and a family has no slot in
+        // (contracts §2.2); and rather than fields on the operand entry below, which is the
+        // operand surface and carries no placement for an entity-scoped column either. A
+        // render-only family is on this list and on no other, having no operand at all.
+        //
+        // **Gate-filtered on the same test the operand list uses** (`views.md` §5, §6): a family
+        // whose group this principal cannot reach is undeclared for them, so it is absent here
+        // exactly as it is absent below — this list would otherwise name the group the other one
+        // withholds.
+        "scoped_scalars": meta.scoped_scalars.iter().filter(|f| visible.contains_group(&f.group)).map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "arrow_type": f.arrow_type.arrow_type_name(),
+                "scope": {"group": f.group},
+                // The vocabulary a scoped category's codes index, with that vocabulary's kind and
+                // visibility — the three facts an entity-scoped category's entry gives, for the
+                // same reason: the hot column and the postings both carry a bare code, and a
+                // client with no block cannot tell a `u8` category from a `u8` number.
+                "category": f.vocabulary.as_deref().and_then(|name| {
+                    let vocabulary = meta.vocabularies.get(name)?;
+                    Some(serde_json::json!({
+                        "vocabulary": name,
+                        "kind": match vocabulary.kind() {
+                            tessera_engine::VocabularyKind::Declared => "declared",
+                            tessera_engine::VocabularyKind::Discovered => "discovered",
+                        },
+                        "visibility": vocabulary.visibility().as_str(),
+                    }))
+                }),
+                // The analyser a scoped `text` family's terms were produced by, for the reason
+                // `declared_scalars` publishes one: an empty `match` is otherwise
+                // indistinguishable from a query that segmented differently from the index.
+                "analyser": f.analyser,
+                "render": f.render,
+                "index": f.index,
+                // **The views that have a column**, in the owning group's own ids and filtered
+                // through this principal's visible set. Not derivable from the roster: a view
+                // created while the service runs has no column of any family until a rebuild
+                // writes one — no batch can supply one, a buffered row's scalars being positional
+                // against `declared_scalars` — so this list is what separates *this view renders
+                // it* from *this view is one of the group's*. A view of a group declaring
+                // `members` of this one renders the column under its **own** id where the key it
+                // shares is named here (`views.md` §3.3).
+                "views": f.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
+            })
+        }).collect::<Vec<_>>(),
         // Reference Sheet R5: **which columns a client may filter on, and with which operators**
         // (contracts §3.2, decision 0062). Empty when the schema declares nothing filterable.
         //
@@ -384,29 +445,12 @@ async fn meta(
                     "family": family.as_str(),
                     "operands": family.operands(),
                     "scope": {"group": f.group},
-                    // **A scoped category's vocabulary, here and not in `declared_scalars`**,
-                    // which is the entity-scoped list and has no slot for a family (contracts
-                    // §2.2). A client draws a dropdown from `/v1/categories/{column}` and needs
-                    // the same three facts an entity-scoped category's entry gives it: which value
-                    // set the codes index, whether it is closed or discovered, and whether the
-                    // list is authored or derived per principal. Deployment schema, identical for
-                    // every principal who can reach the group at all — the same class as `family`
-                    // beside it. `null` for every other family, which has no value set.
-                    "category": f.vocabulary.as_deref().and_then(|name| {
-                        let vocabulary = meta.vocabularies.get(name)?;
-                        Some(serde_json::json!({
-                            "vocabulary": name,
-                            "kind": match vocabulary.kind() {
-                                tessera_engine::VocabularyKind::Declared => "declared",
-                                tessera_engine::VocabularyKind::Discovered => "discovered",
-                            },
-                            "visibility": vocabulary.visibility().as_str(),
-                        }))
-                    }),
-                    // The analyser a scoped `text` family's terms were produced by, for the reason
-                    // `declared_scalars` publishes one: an empty `match` is otherwise
-                    // indistinguishable from a query that segmented differently from the index.
-                    "analyser": f.analyser,
+                    // **The vocabulary and the analyser are on `scoped_scalars` above**, which is
+                    // this family's `declared_scalars` row and carries every fact about the column
+                    // that is not about filtering it. They were carried here at r59, when a family
+                    // had no such row; putting them in both places would be two copies of one
+                    // fact, which is what an entity-scoped operand entry avoids by carrying
+                    // neither.
                 })
             })
         ).collect::<Vec<_>>(),

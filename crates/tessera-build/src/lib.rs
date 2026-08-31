@@ -233,10 +233,12 @@ pub struct BuildArgs {
     /// the manifest write, and it is what the engine opens the columns from and what
     /// `/v1/meta`'s `filter_operands` publishes the scope from.
     ///
-    /// ⊘ **Two things remain unbuilt, and each is loud at the build**: a **category** or
-    /// **text** family is stored and on no filter surface — the per-view postings each is
-    /// answered from are not written — and `render` buys nothing for any scoped family, the hot
-    /// column being per row space (`views.md` §5).
+    /// **`render` on a family reaches each view's row tail** (`views.md` §5): the column is
+    /// permuted into the row space of every view of the group, and of any group sharing them, and
+    /// of no other. ⊘ The **write** half is unbuilt and loud at the build: no ingest batch carries
+    /// a scoped value — a buffered row's scalars are positional against `declared_scalars`, which
+    /// a family has no slot in — so a view created after a build has no column of any family
+    /// until a rebuild writes one.
     pub scoped_attributes: Vec<ScopedColumnFamily>,
     /// Bundle root to create.
     pub out: PathBuf,

@@ -1475,7 +1475,7 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
     // Here, beside the attribute tail, because it wants exactly what the tail wants: `source_ids`
     // and `entity_of_ordinal`, both alive, and entity ids final under I9. One column per view of
     // the group, in entity space; nothing per row space.
-    let scoped_paths = write_scoped_columns(
+    let (scoped_paths, scoped_render) = write_scoped_columns(
         args,
         &partition_dir,
         n,
@@ -1484,6 +1484,10 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
         &mut minters,
         &scratch,
     )?;
+    // Which of those columns each view's row space carries (`views.md` §5) — resolved once, here,
+    // rather than per view inside the loop below, so the rule that decides it is stated in one
+    // place and the loop is an index.
+    let scoped_render_targets = scoped_render_targets(args, &scoped_render);
 
     timer.end(BuildStage::AttributeTail, n);
 
@@ -1742,8 +1746,16 @@ pub(crate) fn build(args: &BuildArgs, observer: &dyn BuildObserver) -> Result<Bu
             // The declared attribute tail, permuted into this view's row order. Gathered per
             // entity and then permuted — the values are entity space and are shared by every
             // view, which is the whole of `views.md` §1's factoring.
-            let tail =
-                permute_attribute_tail(&args.schema, &attributes_by_entity, &entity_row, &scratch)?;
+            let tail = permute_attribute_tail(
+                &args.schema,
+                &attributes_by_entity,
+                &scoped_render_targets[index]
+                    .iter()
+                    .map(|&c| &scoped_render[c])
+                    .collect::<Vec<_>>(),
+                &entity_row,
+                &scratch,
+            )?;
             for (column, rows) in tail.presence {
                 if let Some(path) = tessera_store::flush::write_render_presence(
                     &segment_dir,
@@ -2164,9 +2176,13 @@ fn read_one_attribute_source(
 /// token dictionary and the positional postings over it. One writer per family, the same one the
 /// entity-scoped pass calls, pointed at this view's directory.
 ///
-/// ⊘ **`render` buys nothing for any scoped family** — the hot column is per row space and a
-/// scoped column is in none of them — and it is printed at the build, where an operator can still
-/// act on it.
+/// **`render = true` is carried into the hot tail of each view of the group** (`views.md` §5,
+/// built 2026-08-31), and of any group sharing those views via `members`. The values are entity
+/// space like every other column here; what the scope decides is *which* row spaces they are
+/// permuted into, which is the rule `per-point-attributes.md` §3.9 gives `render_in` with the view
+/// set derived from the scope instead of listed. So a render family's columns are **retained** rather than
+/// written and dropped — returned to pass two, exactly as the entity-scoped render columns are
+/// held across it — and every other family's are released with the file they wrote.
 #[allow(clippy::too_many_arguments)]
 fn write_scoped_columns(
     args: &BuildArgs,
@@ -2176,8 +2192,9 @@ fn write_scoped_columns(
     entity_of_ordinal: &[u32],
     minters: &mut std::collections::HashMap<String, tessera_store::vocabulary::VocabularyMinter>,
     scratch: &crate::column::ColumnScratch,
-) -> Result<Vec<PathBuf>> {
+) -> Result<(Vec<PathBuf>, Vec<ScopedRenderColumn>)> {
     let mut paths = Vec::new();
+    let mut render_columns: Vec<ScopedRenderColumn> = Vec::new();
     // The text pass's budget, derived once for the build rather than per column, exactly as the
     // entity-scoped pass derives it: the plan bounds the transient a tokenise holds, and it is a
     // function of the machine and the entity space rather than of which column is being indexed.
@@ -2187,14 +2204,16 @@ fn write_scoped_columns(
     );
     for family in &args.scoped_attributes {
         let attribute = &family.attribute;
-        // ⊘ `render` is unbuilt for every scoped family, whatever its type: the hot column is per
-        // row space and a scoped column is in no row's tail, so there is nothing for a rendered
-        // value to occupy. Said every time rather than once, because the declaration is what asked.
+        // **What `render` buys, and what it still does not.** The build's own views of the group
+        // get the column in their row tails below; a view created after this build has no column
+        // of any family until one is written for it, and no batch can supply one — a buffered
+        // row's scalars are positional against `MANIFEST.declared_scalars`, which a family is
+        // deliberately absent from. Printed once per family, where an operator can act on it.
         if attribute.render {
             eprintln!(
-                "attribute '{}': ⊘ `render` on an attribute scoped to group '{}' has nothing to \
-                 act on — the hot column is per row space and a scoped column is in none of them, \
-                 so the value is rendered in no view (views §5)",
+                "attribute '{}': `render` is carried in the hot row tail of every view of group \
+                 '{}' this build writes; ⊘ no ingest batch carries a scoped value, so a view \
+                 created later has none until a rebuild (views §5)",
                 attribute.name, family.group
             );
         }
@@ -2276,9 +2295,69 @@ fn write_scoped_columns(
                 paths.push(path);
             }
             report_scoped_coverage(attribute, view, column.present, n);
+            // **Retained for pass two, and only for a render family.** Everything else is on disc
+            // and the values are dead — releasing here is what the entity-scoped pass does to its
+            // own non-render columns before the row spaces are written.
+            match attribute.render {
+                true => render_columns.push(ScopedRenderColumn {
+                    name: attribute.name.clone(),
+                    ty: attribute.ty,
+                    group: family.group.clone(),
+                    key: key_of(&view.view_id).to_string(),
+                    values: column.values,
+                }),
+                false => drop(column.values),
+            }
         }
     }
-    Ok(paths)
+    Ok((paths, render_columns))
+}
+
+/// One view's column of a **rendered** group-scoped attribute, held from the pass that read it
+/// until the row space that renders it is written (`views.md` §5).
+///
+/// Addressed by `(group, key)` rather than by a view index because the row spaces it reaches are
+/// not only the owning group's: a group declaring `members` of it shares the same keys under its
+/// own view ids, and its views render the family too.
+struct ScopedRenderColumn {
+    name: String,
+    ty: ScalarType,
+    group: String,
+    key: String,
+    values: EntityColumn,
+}
+
+/// Which retained scoped render columns each view's row space carries — one entry per
+/// [`BuildArgs::views`], holding indices into `columns` (`views.md` §5).
+///
+/// **The view set is the scope's**, which is the whole of what `render` on a scoped attribute
+/// means: a view of the family's own group renders it, so does a view of a group declaring
+/// `members` of that group — the keys being the owner's by construction (`views.md` §3.3) — and
+/// no other view gets a slot for it at all. This is `EngineMeta::owning_key`'s rule, asked of the
+/// build's own arguments; the two must agree, or a column is written into a row space no request
+/// reads it from.
+fn scoped_render_targets(args: &BuildArgs, columns: &[ScopedRenderColumn]) -> Vec<Vec<usize>> {
+    args.views
+        .iter()
+        .map(|view| {
+            let Some((group, key)) = view.view_id.split_once(tessera_store::GROUP_SEPARATOR) else {
+                // A plain view is in no group, so no scope reaches it.
+                return Vec::new();
+            };
+            let owner = args
+                .groups
+                .iter()
+                .find(|g| g.name == group)
+                .and_then(|g| g.members_of.as_deref())
+                .unwrap_or(group);
+            columns
+                .iter()
+                .enumerate()
+                .filter(|(_, column)| column.group == owner && column.key == key)
+                .map(|(index, _)| index)
+                .collect()
+        })
+        .collect()
 }
 
 /// Does this view's column of a scoped **category** family owe its keyed postings?
@@ -3899,6 +3978,7 @@ fn category_code(value: &ScalarValue, column: &str) -> Result<u32> {
 fn permute_attribute_tail(
     schema: &crate::config::Schema,
     by_entity: &[EntityColumn],
+    scoped: &[&ScopedRenderColumn],
     entity_row: &[u32],
     scratch: &crate::column::ColumnScratch,
 ) -> Result<AttributeTail> {
@@ -3922,29 +4002,28 @@ fn permute_attribute_tail(
             if !attribute.render {
                 return Ok(None);
             }
-            let mut column = EntityColumn::filled(scratch, attribute.ty, entity_row.len())?;
-            for (row, &entity) in entity_row.iter().enumerate() {
-                column.set(row, values.value_at(entity as usize), &attribute.name)?;
-            }
-            // **The absent slot is left as the mapping's zero, which *is* the render
-            // placeholder.** The column is non-nullable on the wire (contracts R4), so an absent
-            // value has to be written as something; `ScalarValue::or_render_placeholder` gives the
-            // type's zero for every renderable type, and a fresh mapping reads as zeros. Writing
-            // the placeholder explicitly would store the same bytes and lose the presence bit that
-            // says the zero means nothing — which is the bitmap below.
-            // `the_render_placeholder_is_the_zero_a_mapping_reads_as` holds the two together.
-            let presence =
-                render_presence_of((0..entity_row.len()).map(|row| column.is_present(row)));
-            Ok(Some(Lane {
-                name: attribute.name.clone(),
-                presence,
-                values: column.into_values(scratch, &attribute.name)?,
-            }))
+            render_lane(&attribute.name, attribute.ty, values, entity_row, scratch).map(Some)
+        })
+        .collect();
+    // **The scoped render columns, after the declared ones** (`views.md` §5). Their order in the
+    // file decides nothing — every reader resolves a tail column by name — but appending keeps a
+    // view outside every scope writing byte-identical bytes to the build that declared no family.
+    let scoped_lanes: Vec<Result<Option<Lane>>> = scoped
+        .par_iter()
+        .map(|column| {
+            render_lane(
+                &column.name,
+                column.ty,
+                &column.values,
+                entity_row,
+                scratch,
+            )
+            .map(Some)
         })
         .collect();
     let mut presence = Vec::new();
-    let mut out = Vec::with_capacity(schema.attributes.len());
-    for lane in lanes {
+    let mut out = Vec::with_capacity(schema.attributes.len() + scoped.len());
+    for lane in lanes.into_iter().chain(scoped_lanes) {
         let Some(lane) = lane? else { continue };
         if let Some(rows) = lane.presence {
             presence.push((lane.name.clone(), rows));
@@ -3954,6 +4033,38 @@ fn permute_attribute_tail(
     Ok(AttributeTail {
         columns: out,
         presence,
+    })
+}
+
+/// One render column's lane: an entity-space column permuted into this view's row order, with the
+/// bitmap that says which of those rows carry a value.
+///
+/// **One body for both kinds of render column** — a declared entity-scoped one and a group-scoped
+/// family's column for this view — because the difference between them is which file the values
+/// were read from and nothing about how a row's slot is filled.
+///
+/// **The absent slot is left as the mapping's zero, which *is* the render placeholder.** The
+/// column is non-nullable on the wire (contracts R4), so an absent value has to be written as
+/// something; `ScalarValue::or_render_placeholder` gives the type's zero for every renderable
+/// type, and a fresh mapping reads as zeros. Writing the placeholder explicitly would store the
+/// same bytes and lose the presence bit that says the zero means nothing — which is the bitmap
+/// beside it. `the_render_placeholder_is_the_zero_a_mapping_reads_as` holds the two together.
+fn render_lane(
+    name: &str,
+    ty: ScalarType,
+    values: &EntityColumn,
+    entity_row: &[u32],
+    scratch: &crate::column::ColumnScratch,
+) -> Result<Lane> {
+    let mut column = EntityColumn::filled(scratch, ty, entity_row.len())?;
+    for (row, &entity) in entity_row.iter().enumerate() {
+        column.set(row, values.value_at(entity as usize), name)?;
+    }
+    let presence = render_presence_of((0..entity_row.len()).map(|row| column.is_present(row)));
+    Ok(Lane {
+        name: name.to_string(),
+        presence,
+        values: column.into_values(scratch, name)?,
     })
 }
 
