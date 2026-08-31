@@ -494,8 +494,11 @@ an attribute. The two are kept apart so that neither grows the other's surface.
 > column is per row space and a scoped column is in none of them, so the paragraph below is
 > specification and not behaviour; the build prints that too. And the **gate** is unbuilt (spec
 > §6), so no pin is filtered against a visible-view set today — the check has one site when it
-> lands, the view resolution a pin goes through, where a gate-failed pin becomes the same 404 an
-> absent key already gets. The ingest rule is unimplemented with the rest of the write half.
+> lands, the view resolution a pin goes through. What it must produce there is the normative
+> paragraph above, not the absent-key 404: for a gate-failed principal the whole attribute is
+> undeclared, so every use — bare or pinned — takes the unknown-column refusal, and neither the
+> group's name nor the key space is ever confirmed. The ingest rule is unimplemented with the
+> rest of the write half.
 >
 > ⊘ **A scoped attribute declaring its own `source` is refused by name**: that file needs
 > `fields.view` to say which view each row's value is for, and reading it as entity space would
