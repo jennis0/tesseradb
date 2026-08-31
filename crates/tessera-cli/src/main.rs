@@ -993,7 +993,7 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
         println!("\nattributes (in declaration order, which is the stored column order)");
         for attribute in &disclosure.attributes {
             println!(
-                "  {:<26} {}{}, {}, from column '{}'",
+                "  {:<26} {}{}, {}, from column '{}'{}",
                 attribute.name,
                 attribute.ty,
                 match &attribute.vocabulary {
@@ -1001,7 +1001,13 @@ fn print_disclosure(disclosure: &tessera_build::disclosure::Disclosure) {
                     None => String::new(),
                 },
                 attribute.placement,
-                attribute.field
+                attribute.field,
+                // A family is one column per view of the group, read from those views' own
+                // points and stored under `attrs/<column>/<group>/<key>/` (`views.md` §5).
+                match &attribute.scope {
+                    Some(group) => format!(", one column per view of '{group}'"),
+                    None => String::new(),
+                }
             );
         }
     }
@@ -2002,7 +2008,10 @@ fn main() -> ExitCode {
                     .map(|g| g.declared_keys().len())
                     .sum::<usize>(),
                 config.schema.vocabularies.len(),
-                config.schema.attributes.len(),
+                // Every declared column, the group-scoped families included: they are held apart
+                // from the schema because a family has no slot in the manifest's flat list
+                // (`views.md` §5), not because they are fewer columns.
+                config.schema.attributes.len() + config.scoped_attributes.len(),
                 config.layers.len()
             );
             ExitCode::SUCCESS

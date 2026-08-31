@@ -90,6 +90,14 @@ pub struct AttributeDisclosure {
     pub placement: &'static str,
     /// The value set this column draws on, for a category.
     pub vocabulary: Option<String>,
+    /// The group whose views this column is one value per (`views.md` §5); `None` is the
+    /// entity-scoped default, one value per entity under every view.
+    ///
+    /// **A family is disclosed as a column and not as a schema entry**, which is the same
+    /// distinction the manifest makes: `MANIFEST.declared_scalars` carries the entity-scoped ones
+    /// and a family has no slot there, but a reviewer reading this report is owed every declared
+    /// column and what it is bound to.
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -211,11 +219,11 @@ impl Disclosure {
             })
             .collect();
 
-        let attributes = config
-            .schema
-            .attributes
-            .iter()
-            .map(|attribute| AttributeDisclosure {
+        // The entity-scoped columns in declaration order — which is the stored column order —
+        // then the group-scoped families, which have no place in that order because they are not
+        // stored in it (`views.md` §5).
+        let disclose = |attribute: &crate::config::Attribute, scope: Option<String>| {
+            AttributeDisclosure {
                 name: attribute.name.clone(),
                 field: attribute.column().to_string(),
                 ty: attribute.ty.arrow_type_name(),
@@ -226,7 +234,20 @@ impl Disclosure {
                     (false, false) => "blob",
                 },
                 vocabulary: attribute.vocabulary.clone(),
-            })
+                scope,
+            }
+        };
+        let attributes: Vec<AttributeDisclosure> = config
+            .schema
+            .attributes
+            .iter()
+            .map(|attribute| disclose(attribute, None))
+            .chain(
+                config
+                    .scoped_attributes
+                    .iter()
+                    .map(|scoped| disclose(&scoped.attribute, Some(scoped.group.clone()))),
+            )
             .collect();
 
         let layers = config

@@ -2166,6 +2166,17 @@ fn write_scoped_columns(
     let mut paths = Vec::new();
     for family in &args.scoped_attributes {
         let attribute = &family.attribute;
+        // ⊘ Said at the build rather than left to the design's marker: a declaration that asked
+        // for an index or a hot column and got neither is a gap an operator should hear about
+        // where they can still act on it.
+        if attribute.index || attribute.render {
+            eprintln!(
+                "attribute '{}': ⊘ `scope = {{ group = \"{}\" }}` is stored as one column per \
+                 view and is on no serving surface yet (views §5) — its `index`/`render` are \
+                 recorded by the declaration and have nothing to act on",
+                attribute.name, family.group
+            );
+        }
         for &index in &family.views {
             let view = &args.views[index];
             let column = read_scoped_column(
