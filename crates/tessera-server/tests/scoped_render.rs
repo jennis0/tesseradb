@@ -192,6 +192,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
         anchor: 0,
         groups: vec![
             GroupDescriptor {
+                title: None,
                 visibility: None,
                 name: "quarter".to_string(),
                 members_of: None,
@@ -202,6 +203,7 @@ fn build_bundle(dir: &Path, declared: bool) -> std::path::PathBuf {
                 scoped_scalars: Vec::new(),
             },
             GroupDescriptor {
+                title: None,
                 visibility: None,
                 name: "quarter_map".to_string(),
                 // The same keys, a second layout: a family over these views belongs to the group

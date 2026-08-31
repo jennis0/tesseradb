@@ -779,6 +779,7 @@ fn a_missing_scoped_render_lane_is_refused_and_an_intact_one_is_counted() {
         views: vec![view("2026-Q1"), view("2026-Q2")],
         anchor: 0,
         groups: vec![tessera_build::GroupDescriptor {
+            title: None,
             visibility: None,
             name: "quarter".to_string(),
             members_of: None,
