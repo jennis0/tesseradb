@@ -341,9 +341,14 @@ def counts(
     zoom: int,
     bbox: tuple[float, float, float, float],
 ) -> dict[int, int]:
-    """`{tile: count of mask-visible rows}` for every depth-`zoom` tile overlapping `bbox`."""
+    """`{tile: count of mask-visible rows}` for every depth-`zoom` tile overlapping `bbox`.
+
+    The frame is the **view's** (decision 0040), asked for by id: a bbox decoded against another
+    view's extent names different ground, and on a multi-view bundle `bundle.extent` has no answer
+    to give at all.
+    """
     selection = Selection(bundle, mask, view_id, zoom)
-    return selection.counts_for(morton.tiles_for_bbox(bbox, zoom, bundle.extent))
+    return selection.counts_for(morton.tiles_for_bbox(bbox, zoom, bundle.extent_of(view_id)))
 
 
 # (There is deliberately no single-tile `served()` here. It existed, had no call site, and was a

@@ -24,6 +24,11 @@ from pyroaring import BitMap
 from . import identity as identity_mod
 from . import morton as morton_mod
 
+#: The separator between a group's name and a view's key in a view id — `quarter:2026-Q3`
+#: (`views.md` §3.2). Transcribed from the design rather than imported from the Rust, like
+#: everything else here; `Bundle.view_dir` is the one place it is split on.
+GROUP_SEPARATOR = ":"
+
 PERMUTATION_MAGIC = b"TSPM"
 # Version 2 is the two-level paged form (contracts 2.6); version 1 was the flat array it
 # replaced, and this reader refuses that on the version field alone.
@@ -421,6 +426,11 @@ class Bundle:
         # columns: a fallback is exactly the tautology this input exists to prevent, and one
         # that only fires when the harness forgot to wire it up would be invisible.
         self.source_geometry: SourceGeometry | None = None
+        # Per-view source geometry, for a multi-view bundle. A view owns everything downstream of
+        # the permutation (`views.md` §1), positions included, so the same entity has a different
+        # position in each view and there is no one points file to attach. A bundle with one view
+        # attaches one source and never touches this map.
+        self._view_geometry: dict[str, SourceGeometry] = {}
         self._position_cache: dict[str, list[int]] = {}
 
     def _verify_files(self, files: dict) -> None:
@@ -464,16 +474,25 @@ class Bundle:
             )
         return self.extent_of(next(iter(self.views)))
 
+    def view_dir(self, view_id: str) -> Path:
+        """`views/<view>/`, or `views/<group>/<key>/` — the one place a view id becomes a path.
+
+        **Nested rather than joined**, because `:` is not a path character everywhere: the id a
+        request names and the manifest carries is `group:key`, and the directory is two components
+        (`views.md` §3.2; `tessera_store::view_path`). A single joined component was what this
+        oracle laid down while every bundle had one plain view, and it named a directory no
+        multi-view build writes — so the failure would have been a missing file rather than a
+        wrong answer, which is the safe direction and still the wrong path.
+        """
+        path = self._partition_dir / "views"
+        for component in view_id.split(GROUP_SEPARATOR, 1):
+            path = path / component
+        return path
+
     def segment_dir(self, view_id: str) -> Path:
         for seg in self.segments_manifest["segments"]:
             if seg["view"] == view_id:
-                return (
-                    self._partition_dir
-                    / "views"
-                    / view_id
-                    / "segments"
-                    / seg["seg_id"]
-                )
+                return self.view_dir(view_id) / "segments" / seg["seg_id"]
         raise KeyError(f"no segment for view '{view_id}'")
 
     def segment(self, view_id: str) -> Segment:
@@ -483,27 +502,43 @@ class Bundle:
             self._segment_cache[view_id] = _read_segment(seg_dir, perm_path)
         return self._segment_cache[view_id]
 
-    def attach_source_geometry(self, source: SourceGeometry) -> None:
+    def attach_source_geometry(
+        self, source: SourceGeometry, *, view_id: str | None = None
+    ) -> None:
         """Hand the oracle the points file this bundle was built from (see [`SourceGeometry`]).
 
         A method rather than a constructor argument because `conformance.md` §1's layering rule is
         that the definitional modules never *find* an input; a driver supplies it. Attaching a
         second, different source after codes have been derived would silently mix two geometries,
         so the derived caches are dropped here.
+
+        `view_id` names the view the file is the geometry **of**. A multi-view corpus has one
+        points file per view — a view owns its positions and its frame, and the same entity sits
+        somewhere different in each (`views.md` §1) — so a driver calls this once per view and the
+        oracle answers each view from its own. Omitting it attaches the source for every view that
+        has none of its own, which is what a single-view bundle's driver has always done.
         """
-        self.source_geometry = source
+        if view_id is None:
+            self.source_geometry = source
+        else:
+            self._view_geometry[view_id] = source
         self._morton_cache.clear()
         self._position_cache.clear()
 
-    def _require_source(self) -> SourceGeometry:
-        if self.source_geometry is None:
+    def _require_source(self, view_id: str | None = None) -> SourceGeometry:
+        source = self._view_geometry.get(view_id) if view_id is not None else None
+        if source is None:
+            source = self.source_geometry
+        if source is None:
             raise ValueError(
-                "this Bundle has no source geometry attached: `columns.arrow` stores a residual, "
+                "this Bundle has no source geometry attached"
+                + (f" for view '{view_id}'" if view_id is not None else "")
+                + ": `columns.arrow` stores a residual, "
                 "not coordinates, so a geometry re-derivation would only be reading the build's "
                 "own answer back. Call `attach_source_geometry(read_source_geometry(points, "
-                "bundle.extent))` from the driver."
+                "bundle.extent_of(view)), view_id=view)` from the driver."
             )
-        return self.source_geometry
+        return source
 
     def row_source_ids(self, view_id: str) -> list[int]:
         """Every row's **source-corpus** id — the join the source geometry is keyed by.
@@ -537,7 +572,7 @@ class Bundle:
         purpose.
         """
         if view_id not in self._morton_cache:
-            source = self._require_source()
+            source = self._require_source(view_id)
             codes = []
             for source_id in self.row_source_ids(view_id):
                 qx, qy = source.position(source_id)
@@ -630,7 +665,7 @@ class Bundle:
 
     def permutation(self, view_id: str) -> Permutation:
         if view_id not in self._permutation_cache:
-            path = self._partition_dir / "views" / view_id / "permutation.bin"
+            path = self.view_dir(view_id) / "permutation.bin"
             self._permutation_cache[view_id] = _read_permutation(path)
         return self._permutation_cache[view_id]
 

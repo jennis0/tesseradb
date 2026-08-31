@@ -38,7 +38,7 @@ DEFINITIONAL = (
     "text",
 )
 DRIVERS = ("harness", "journal")
-FIXTURE_BUILDERS = ("catalogue", "canary_fixture", "label_fixture")
+FIXTURE_BUILDERS = ("catalogue", "canary_fixture", "label_fixture", "multiview")
 CLASSIFIED = set(DEFINITIONAL) | set(DRIVERS) | set(FIXTURE_BUILDERS)
 
 # Distribution name -> the name it is imported as, where they differ.

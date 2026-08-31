@@ -30,8 +30,9 @@ echo is declared at its own module doc, which is the condition on which it stays
 
 **Fixture builders — they synthesise a corpus and shell out to the CLI.** ``catalogue``,
 ``canary_fixture``, ``label_fixture`` (I3's containment corpus, built backwards from the property's
-edge). They produce inputs; they assert nothing about the system. Their failure mode is a fixture
-that has quietly stopped being the shape it claims, which is why the first two carry a
+edge), ``multiview`` (four views over one entity space, built backwards from ``views.md`` §1's
+factoring). They produce inputs; they assert nothing about the system. Their failure mode is a
+fixture that has quietly stopped being the shape it claims, which is why three of the four carry a
 ``verify()``-shaped re-derivation and why reuse is decided by a stamped recipe. ``label_fixture``
 carries none: its one property — the two principals being exactly one entity apart — is asserted
 from the engine's own masked counts in the test that uses it, before anything rests on it.

@@ -26,8 +26,11 @@ CI runs it on every pull request and every push to `main`, alongside the rest of
 (`.github/workflows/ci.yml`). That is conformance §6's per-PR tier; the nightly and release tiers
 it also specifies do not exist.
 
-**432 of 432 pass (2026-08-20).** They had not, for the weeks between the configuration rework and
-that date: `tessera serve` took `--deployment` in place of `-c` and `harness.spawn_server` still
+**673 pass and 4 skip, over 677 cases (2026-08-31)** — `conformance/tests` and
+`conformance/suite` together, the split CI's own case-count step compares against `conformance.md`
+§0's marker line. The 39 that arrived on that date are the multi-view differential.
+
+They had not passed at all, for the weeks between the configuration rework and 2026-08-20: `tessera serve` took `--deployment` in place of `-c` and `harness.spawn_server` still
 passed the old spelling, so every server-backed module died at startup and nothing noticed. With
 that fixed, 27 failed for **two causes, both the mask catalogue's own assumptions and neither a
 defect** — `public` interned at term `0`, which makes a block's dictionary id one higher than the
@@ -40,8 +43,9 @@ permutation preserves a set — so the check whose comment said it re-derived th
 tested it. `verify()` now compares the two spaces item by item (check 3b), and every planted column
 is keyed by entity through `Bundle.source_of_entity` rather than by source id under an equality.
 
-⊘ `conformance/suite` needs Python 3.11+ for `tomllib`; it is the correctness suite's shared battery
-rather than a row of the invariant matrix, and it is not covered by that count.
+`conformance/suite` is the correctness suite's shared battery rather than a row of the invariant
+matrix. It was excluded from the 2026-08-20 count on a `tomllib`/Python 3.11 caveat that no longer
+holds — the venv is 3.12 — and both directories are counted together above.
 
 
 (`reference/.venv/bin/pytest reference/tests -v` must also stay green. It is **not** run in CI:
@@ -76,6 +80,7 @@ deliberately *not* selected and why.
 | `tests/test_record_blob.py` | records §3/§10 (the blob's addressing) | The one artefact-level check the design licenses (review B7): the record blob's addressing self-consistency — blocks tile `blocks.bin`, ranks tile the rank space, rows tile their blocks, discriminants agree with has-row's rank order, fields frame exactly, tags are blob-resident columns only — walked by `oracle.record_blob` (structure only, never values; its module doc holds the licence). Plus has-row against the generation functions' presence, and the oversized-row rule on the planted > 256 KiB note. Value equality is **deliberately elsewhere**: at build level in Rust (`crates/tessera-build/tests/record_blob.rs`), and at the served surface when drill-down lands (`oracle.catalogue.record_of` is the waiting expectation). |
 | `tests/test_label_containment.py` | I3 | **Containment, both halves of conformance §4.4's row.** Over `oracle/label_fixture.py`, whose two principals are **one entity apart**: that entity is planted inside the widest generating set and nowhere else, so "one member short" is a fact about the corpus rather than a hope. Three labels of one layer over one membership, differing only in which generating sets their ranked contents were drawn from — so the same response carries an absence *and* its control. The one whose only content spans the split entity is **absent whole** for the narrower principal (no identity, no count, no stripped description — decision 0076); the ranked one falls back to the content they do contain; the third is served to both. The layer is `public` with an `inherited` artifact gate and no existence criterion, so containment is the only conjunct that can fail. Checked at four zoom tiers. The **cache half behaviourally**: warm every tier on one token, suppress that single generating-set member, re-ask on the **same token** — the label is withheld at the ack and the answer is byte-for-byte the narrower principal's, because containment is a function of the mask and not of how an entity left it. The pin is not re-presented: decision 0041 made it advisory, so it could not hold a suppression out either way. |
 | `tests/test_overlay_journal.py` | I1, I7, I2 | The overlay-heavy catalogue state: acked control operations — deletes and suppressions, which since decision 0047 withdrew the `predicate` op are the whole of what a Phase 1 overlay can hold — composed in entity space by `oracle.journal.AckedJournal` and in row space by the engine. Counts **and served points**, the latter against a **θ-live** server — the combination that catches an engine sampling from the pre-overlay mask (which serves denied items as marks while every count stays right) and one anchoring θ on the pre-overlay projection (§7.2's own I2 leak). Its negative control builds both of those engines out of the oracle and shows the comparison rejects them. Plus the journal's rules: a refused operation enters no composition and moves nothing, and an acked ingest is not an applied one. And the withdrawn `predicate` op: refused with a typed 422 in both directions, composing nothing — the pin on the novel-descriptor silent hide the withdrawal dissolved. |
+| `tests/test_multiview_differential.py` | I1, I2, I7 (order), I10/C17, I12 (scoped operand); `views.md` §1, §4, §5, §9 | **The multi-view differential**, over `oracle/multiview.py`'s corpus: four views on one entity space of 6,144 items in six compartments, the plain view holding all of them and a group of three holding different subsets, each with its own frame and its own independently drawn layout. Masked tile counts per view against the oracle answering through that view's permutation, Morton order and frame; `served(view) == mask ∩ members(view)` as an **equality** on one token across every view, with the union over all of them equal to the mask; the same entity's `tessera_id` identical in every view and its position different in each; contracts §2.6's within-tile order in every view; and `views.md` §5's pinned leaf — bare under its own view, pinned by key, by ordinal and across views of one group, with per-view presence and the two refusals. A negative control fails if any two views serve the same per-tile counts. ⊘ No gate: every view is `public`, the gate being unbuilt |
 
 ## Fixtures
 
