@@ -65,11 +65,24 @@
 //! read path it would only hide a label the viewer holds, which is the harmless direction — but
 //! the two share this reader, so it is held to the write path's standard.
 //!
-//! ⊘ **An entity-space coalesce does not merge these extents**, so layers accumulate one per flush
-//! until the next fold. The cost is file handles and a linear probe over small layers rather than
-//! answer time — every read is base-first, and a layer's per-read work is a rank and a slice — and
-//! the fold collapses them all. A coalesce pass here would be a fourth window policy for a family
-//! whose ordinals, unlike a keyword column's, need no remap.
+//! # The coalesce merges the extents, and it is a concatenation
+//!
+//! An entity-space coalesce takes a contiguous window of `entity_terms_extents` and replaces it
+//! with one extent ([`coalesce_entity_terms_extents`]) — the **record blob's** axis exactly: three
+//! files, has-row addressed, disjoint in entity space, one window of one list spliced back at the
+//! window's position. Without it the layers accumulate one per flush until the next fold, and the
+//! reader pays file handles and a base-plus-linear probe per lookup.
+//!
+//! **A merge here needs no remap and no dictionary**, which is what makes it a concatenation
+//! rather than the keyword axis's renumbering: the ordinals are dictionary positions, preserved by
+//! every rewrite for the reason above, and the layers are disjoint by **I9**. So the merge walks
+//! the inputs' entity sets in ascending order and copies each list verbatim — the same bytes in
+//! the same order, one file set instead of *k*.
+//!
+//! **It retires nothing.** There is no tombstone parameter to pass and no route to a deletion:
+//! Rule S and Rule F are the fold's (write-path §5.4), and an entity awaiting a deletion keeps
+//! its term list across a coalesce, hidden by the read gate and retired at the fold that executes
+//! it.
 //!
 //! **No error detail here names a descriptor**, only ordinals, lengths and paths: these strings
 //! reach an operator log, and a descriptor is a compartment name.
@@ -372,7 +385,78 @@ impl EntityTerms {
                 .collect(),
         ))
     }
+}
 
+/// Merge `inputs` — a coalesce's window of extents — into one layer at the three given paths,
+/// returning how many entities it holds.
+///
+/// **A concatenation with bookkeeping, not a merge with a resolution rule.** The layers are
+/// disjoint in entity space (**I9**: an entity id is allocated once, and the flush that minted it
+/// wrote the only layer that holds its list), so no entity appears twice and no input can
+/// contradict another — the output is each entity's own list, byte-for-byte, gathered in ascending
+/// entity order. Term ordinals are positions in the concatenated dictionary extents and are
+/// preserved by every rewrite of the corpus (see this module's doc), so nothing is remapped.
+///
+/// **Byte-deterministic for a given input set**: the output is a pure function of the entity sets
+/// and the lists, and the order of the walk is the ascending entity order the format already
+/// requires. Two merges of the same inputs produce the same three files.
+///
+/// A repeated entity is a **refusal**, not a resolution. Disjointness is a property of the
+/// writers, and this is the one place a violation of it could be silently collapsed into a layer
+/// that answered one flush's labels for another's entity — so it fails the pass instead.
+///
+/// **Nothing is retired here** (Rule S / Rule F, write-path §5.4): there is no tombstone
+/// parameter, and an entity awaiting a deletion keeps its list until the fold executes it.
+pub fn coalesce_entity_terms_extents(
+    inputs: &[&EntityTerms],
+    hasrow_path: &Path,
+    offsets_path: &Path,
+    terms_path: &Path,
+) -> Result<u64> {
+    if let Some(parent) = hasrow_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| io(parent, e))?;
+    }
+    let mut writer = EntityTermsWriter::create_at(hasrow_path, offsets_path, terms_path)?;
+    let mut cursors: Vec<std::iter::Peekable<croaring::bitmap::BitmapIterator<'_>>> = inputs
+        .iter()
+        .map(|layer| layer.hasrow.iter().peekable())
+        .collect();
+    let mut written = 0u64;
+    loop {
+        // The least unconsumed entity across the inputs, and the layer holding it. `k` is a
+        // coalesce window — eight by default — so a scan per entity is cheaper than a heap and
+        // carries the duplicate check for nothing.
+        let mut least: Option<(usize, u32)> = None;
+        for (index, cursor) in cursors.iter_mut().enumerate() {
+            let Some(&entity) = cursor.peek() else {
+                continue;
+            };
+            match least {
+                Some((held, at)) if entity == at => {
+                    return Err(StoreError::InvalidEntityTerms {
+                        path: terms_path.to_path_buf(),
+                        detail: format!(
+                            "inputs {held} and {index} both hold a term list for one entity; the \
+                             layers of this family are disjoint (I9) and merging them would \
+                             publish one flush's labels under another's"
+                        ),
+                    });
+                }
+                Some((_, at)) if entity > at => {}
+                _ => least = Some((index, entity)),
+            }
+        }
+        let Some((index, entity)) = least else { break };
+        cursors[index].next();
+        let terms = inputs[index]
+            .terms_of(entity)?
+            .expect("the layer's own has-row bitmap named this entity");
+        writer.push(entity, &terms)?;
+        written += 1;
+    }
+    drop(cursors);
+    writer.finish()?;
+    Ok(written)
 }
 
 /// The base layer plus every flush extent, probed as one.
@@ -622,5 +706,183 @@ mod tests {
     #[test]
     fn an_empty_stack_answers_nothing_rather_than_failing() {
         assert_eq!(EntityTermsStack::empty().terms_of(0).unwrap(), None);
+    }
+
+    /// A generated set of disjoint layers, written as a coalesce window would find them: each
+    /// layer's entities strictly above the last's, lists of varying length, empty lists included.
+    struct Built {
+        dir: tempfile::TempDir,
+        rows: Vec<(u32, Vec<u32>)>,
+    }
+
+    fn disjoint_layers(count: usize) -> Vec<Built> {
+        let mut out = Vec::new();
+        let mut next_entity = 0u32;
+        for layer in 0..count {
+            let dir = tempfile::tempdir().unwrap();
+            let mut rows: Vec<(u32, Vec<u32>)> = Vec::new();
+            // A deliberately irregular shape per layer: a gap, a run, an empty list, a long one.
+            for i in 0..(3 + layer % 4) {
+                next_entity += 1 + (i as u32 % 3);
+                let len = (layer * 7 + i * 3) % 5;
+                let terms: Vec<u32> = (0..len).map(|t| (t as u32) * 2 + layer as u32).collect();
+                rows.push((next_entity, terms));
+            }
+            next_entity += 17;
+            let mut writer = EntityTermsWriter::create(dir.path()).unwrap();
+            for (entity, terms) in &rows {
+                writer.push(*entity, terms).unwrap();
+            }
+            writer.finish().unwrap();
+            out.push(Built { dir, rows });
+        }
+        out
+    }
+
+    fn paths_of(dir: &Path) -> EntityTermsExtentPaths {
+        EntityTermsExtentPaths {
+            hasrow: dir.join(ENTITY_TERMS_HASROW_FILE),
+            offsets: dir.join(ENTITY_TERMS_OFFSETS_FILE),
+            terms: dir.join(ENTITY_TERMS_TERMS_FILE),
+        }
+    }
+
+    fn merge_into(dir: &Path, layers: &[&EntityTerms]) -> u64 {
+        coalesce_entity_terms_extents(
+            layers,
+            &dir.join(ENTITY_TERMS_HASROW_FILE),
+            &dir.join(ENTITY_TERMS_OFFSETS_FILE),
+            &dir.join(ENTITY_TERMS_TERMS_FILE),
+        )
+        .unwrap()
+    }
+
+    /// **The merge answers what the stack answered**, entity for entity, and it is the only claim
+    /// the coalesce makes: fewer layers, identical answers. Over a generated set of layers rather
+    /// than one hand-written pair, because the bookkeeping the merge does — ranks, offsets, the
+    /// empty list that is a value — is exactly what a single tidy example would not exercise.
+    #[test]
+    fn a_merge_of_disjoint_extents_answers_what_the_layered_read_answered() {
+        let built = disjoint_layers(6);
+        let opened: Vec<EntityTerms> = built
+            .iter()
+            .map(|built| EntityTerms::open_dir(built.dir.path()).unwrap())
+            .collect();
+        let extents: Vec<EntityTermsExtentPaths> =
+            built.iter().map(|b| paths_of(b.dir.path())).collect();
+        let stack = EntityTermsStack::open(None, &extents).unwrap();
+
+        let out = tempfile::tempdir().unwrap();
+        let refs: Vec<&EntityTerms> = opened.iter().collect();
+        let written = merge_into(out.path(), &refs);
+        let merged = EntityTermsStack::open(None, &[paths_of(out.path())]).unwrap();
+
+        let expected: u64 = built.iter().map(|b| b.rows.len() as u64).sum();
+        assert_eq!(written, expected, "every entity of every input is carried");
+        assert_eq!(merged.layers(), 1, "six layers became one");
+        assert_eq!(merged.entity_set(), stack.entity_set());
+
+        // Every entity the inputs hold, and a band of ids around them that they do not: an
+        // absence must stay an absence, or a coalesce would turn "unknown" into "no labels".
+        let highest = stack.entity_set().maximum().unwrap();
+        for entity in 0..=highest + 8 {
+            assert_eq!(
+                merged.terms_of(entity).unwrap(),
+                stack.terms_of(entity).unwrap(),
+                "entity {entity} answers differently after the merge"
+            );
+        }
+    }
+
+    /// **Two merges of the same inputs are byte-equal.** The bundle's identity is its files'
+    /// digests, and a merge whose output depended on iteration order or on a hash seed would give
+    /// two nodes coalescing the same window two different bundles.
+    #[test]
+    fn a_merge_is_byte_deterministic_for_its_input_set() {
+        let built = disjoint_layers(4);
+        let opened: Vec<EntityTerms> = built
+            .iter()
+            .map(|built| EntityTerms::open_dir(built.dir.path()).unwrap())
+            .collect();
+        let refs: Vec<&EntityTerms> = opened.iter().collect();
+
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        assert_eq!(
+            merge_into(first.path(), &refs),
+            merge_into(second.path(), &refs)
+        );
+        for name in [
+            ENTITY_TERMS_HASROW_FILE,
+            ENTITY_TERMS_OFFSETS_FILE,
+            ENTITY_TERMS_TERMS_FILE,
+        ] {
+            assert_eq!(
+                std::fs::read(first.path().join(name)).unwrap(),
+                std::fs::read(second.path().join(name)).unwrap(),
+                "{name} differs between two merges of one input set"
+            );
+        }
+    }
+
+    /// **A repeated entity is refused, not resolved.** Disjointness is a property of the writers
+    /// (I9), and this is the one place a violation could be collapsed into a layer answering one
+    /// flush's labels for another flush's entity.
+    #[test]
+    fn a_merge_refuses_inputs_that_share_an_entity() {
+        let (_a, first) = round_trip(&[(3u32, vec![1])]);
+        let (_b, second) = round_trip(&[(3u32, vec![2])]);
+        let out = tempfile::tempdir().unwrap();
+        assert!(matches!(
+            coalesce_entity_terms_extents(
+                &[&first, &second],
+                &out.path().join(ENTITY_TERMS_HASROW_FILE),
+                &out.path().join(ENTITY_TERMS_OFFSETS_FILE),
+                &out.path().join(ENTITY_TERMS_TERMS_FILE),
+            ),
+            Err(StoreError::InvalidEntityTerms { .. })
+        ));
+    }
+
+    /// The fail-closed opens hold for the merged artefact exactly as for a flush's — the reader
+    /// cannot tell the two apart, and this pins that a coalesce has not produced a shape the
+    /// truncation checks read as whole.
+    #[test]
+    fn a_truncated_merged_extent_refuses_the_open() {
+        let built = disjoint_layers(3);
+        let opened: Vec<EntityTerms> = built
+            .iter()
+            .map(|built| EntityTerms::open_dir(built.dir.path()).unwrap())
+            .collect();
+        let out = tempfile::tempdir().unwrap();
+        merge_into(out.path(), &opened.iter().collect::<Vec<_>>());
+        assert!(EntityTerms::open_dir(out.path()).is_ok(), "whole, it opens");
+
+        for name in [ENTITY_TERMS_TERMS_FILE, ENTITY_TERMS_OFFSETS_FILE] {
+            let path = out.path().join(name);
+            let whole = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &whole[..whole.len() - 4]).unwrap();
+            assert!(
+                matches!(
+                    EntityTerms::open_dir(out.path()),
+                    Err(StoreError::InvalidEntityTerms { .. })
+                ),
+                "a truncated {name} must refuse the open"
+            );
+            std::fs::write(&path, &whole).unwrap();
+        }
+    }
+
+    /// A window of empty layers — a run of flushes that minted nothing — merges to an empty layer
+    /// rather than refusing. The pass fires on the entry count, not on the bytes.
+    #[test]
+    fn a_merge_of_empty_layers_is_an_empty_layer() {
+        let (_a, first) = round_trip(&[]);
+        let (_b, second) = round_trip(&[]);
+        let out = tempfile::tempdir().unwrap();
+        assert_eq!(merge_into(out.path(), &[&first, &second]), 0);
+        let merged = EntityTerms::open_dir(out.path()).unwrap();
+        assert!(merged.is_empty());
+        assert_eq!(merged.terms_of(0).unwrap(), None);
     }
 }

@@ -2005,21 +2005,47 @@ impl FilterColumns {
     /// nothing outside the three files ever held one. `texts` carries those windows; the coverage
     /// equality above is checked for them too, against `TextLayer::present`, which is exactly what
     /// a flush extent stores and what makes the check expressible for this family.
+    /// **The transpose is replaced whole rather than patched**, and `entity_terms` is the stack
+    /// the caller re-derived from the rebased manifest — `None` where the axis did not run, in
+    /// which case the live stack rides through unchanged. Its ordinals need no attention either
+    /// way: they are dictionary positions, which `coalesce_dict_extents` preserves by construction
+    /// (it replaces a contiguous window with the same records in the same order), so unlike a
+    /// keyword column's they name the same terms after every coalesce.
+    ///
+    /// The coverage rule above holds for it too, and is checked the same way: the replacement's
+    /// entity set must **equal** the live one's. A merge that lost a layer would leave the
+    /// drill-down answering *unknown* for entities that carry labels, and the join rule's arm
+    /// comparing against nothing — which is a `409` that does not fire.
     pub fn with_coalesced(
         &self,
         windows: &[CoalescedWindow],
         texts: &[CoalescedTextWindow],
+        entity_terms: Option<Arc<tessera_store::EntityTermsStack>>,
     ) -> std::io::Result<FilterColumns> {
+        let entity_terms = match entity_terms {
+            None => Arc::clone(&self.entity_terms),
+            Some(next) => {
+                let held = self.entity_terms.entity_set();
+                let replacement = next.entity_set();
+                if held != replacement {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "a coalesce's entity→term stack holds lists for {} entities where the                              one it replaces holds {}; replacing on that would answer 'unknown'                              for an entity that carries labels, which on the write path is a 409                              that does not fire",
+                            replacement.cardinality(),
+                            held.cardinality()
+                        ),
+                    ));
+                }
+                next
+            }
+        };
         let mut next = FilterColumns {
             columns: self.columns.clone(),
             placements: self.placements.clone(),
             access: self.access,
             records: Arc::clone(&self.records),
-            // **A coalesce does not touch the transpose**, and nothing here has to. Its ordinals
-            // are dictionary positions, which `coalesce_dict_extents` preserves by construction
-            // (it replaces a contiguous window with the same records in the same order), so unlike
-            // a keyword column's ordinals they name the same terms after every coalesce.
-            entity_terms: Arc::clone(&self.entity_terms),
+            entity_terms,
         };
         for window in windows {
             let Some(layers) = next.columns.get_mut(&window.column) else {

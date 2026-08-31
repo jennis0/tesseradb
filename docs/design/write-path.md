@@ -1066,14 +1066,15 @@ provided run 0 stays listed first — an invariant with an assertion, not a rewr
 **Merge splits, and only one half publishes** (decision 0044's D2).
 
 **The entity-space half is built and published** (`tessera_engine::coalesce`). It coalesces delta
-tiers, external-id runs with their locator extents, dictionary extents, and **attribute extents**
-— each on its own axis, selected the same way `MergePolicy::select` selects segments: the first
+tiers, external-id runs with their locator extents, dictionary extents, **attribute extents**,
+**record-blob extents**, **text extents** and the **entity→term transpose's extents** — each on
+its own axis, selected the same way `MergePolicy::select` selects segments: the first
 window of `width` (`coalesce_width`, default 8) consecutive entries in one power-of-two size
 class, within an input cap. Size tiering
 is not decoration on any of them: without it the pass re-reads what it produced last round for
 ever, where one size class makes a byte move only as its artefact doubles. It publishes as a
-manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents`, `attr_extents`
-and `files`,
+manifest edit over `deltas`, `external_id_runs`, `locator_extents`, `dict_extents`,
+`attr_extents`, `record_extents`, `text_extents`, `entity_terms_extents` and `files`,
 with `n` from the executor's counter and refuse-to-replace standing, **and it bumps no
 `segments_version`** — no row moves, so no projection is stale, no fragment is stale and no cache
 key rotates. Two pieces of live state swap with it, or the bound is only realised at the next
@@ -1082,9 +1083,13 @@ content-preserving, so a request holding the old and one holding the new agree o
 The attribute axis swaps a third: the generation's `FilterColumns`, whose consumed layers are
 **replaced** by the coalesced one — and replacing is not appending, so its correctness condition is
 that the coalesced layer's presence *equals* the union of the layers it replaces (filter-index
-§5.2), where appending's is that the new layer is disjoint from them.
+§5.2), where appending's is that the new layer is disjoint from them. So does the transpose axis:
+its stack is **re-derived from the rebased manifest** at publication rather than patched — the
+form that cannot drift from what a restart would open — and the same equality is checked over it,
+the replacement's entity set against the live one's. Without that swap the manifest names one
+extent while the process keeps probing `width` layers until it restarts.
 
-Four rules make the axes safe, and they are different rules. Tiers are unioned, so their order
+Each axis is safe for a different reason. Tiers are unioned, so their order
 and their division into files are immaterial; what may not change is the set of `(term, entity)`
 pairs. Runs are searched newest-first and a key may sit in several of them (0047's re-binding),
 so the window must be contiguous — a coalesced run at a recency position it did not earn answers
@@ -1095,8 +1100,14 @@ or a session evaluates a term it was not granted. Attribute extents take the tie
 layers are unioned, so their division into files is immaterial — but the selection unit is the
 **column**, over that column's own subsequence of `attr_extents`, and the merge carries its own
 duplicate-entity refusal: once a window collapses into one file an overlap among its inputs is
-internal to a single layer and invisible to the between-layer disjointness check for ever. Across
-all four, **the build's own artefacts are never taken** — rewriting one means a new prefix, and
+internal to a single layer and invisible to the between-layer disjointness check for ever. The
+record blob and the entity→term transpose take that argument in its simplest form — layers
+disjoint in entity space by **I9**, probed by has-row, so their division into files is immaterial
+and the merge is a concatenation with bookkeeping; the transpose's ordinals are dictionary
+positions the dictionary axis already preserves, so nothing is renumbered. **No axis retires
+anything**: none of these merges has a tombstone parameter, and a pending deletion's artefacts are
+carried whole until the fold executes it (Rule S / Rule F, §5.4). Across
+every axis, **the build's own artefacts are never taken** — rewriting one means a new prefix, and
 the base locator's ordinals are positions in the build's runs. **How a build's own artefact is
 recognised differs by axis, and reading it as "whatever `MANIFEST.json` digests" is what let this
 axis grow without bound.** A fold digest-names every file it *carries* into the new prefix, for
@@ -1400,9 +1411,23 @@ rebuilding, the flushed item is not yet drawn, and the staleness ages out within
 (exists — `projection_patch.rs`); 41 a racer inside a **merge's** refresh window is shed 429
 rather than paying the rebuild (exists — `merge.rs`); 42 a merge collapses segments, loses no
 item, moves no point and keeps every binding (exists — `merge.rs`); 43 a merged manifest reopens
-with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`).
+with every item **and every consumed segment's delta tier still listed** (exists — `merge.rs`);
+44 a coalesce collapses the entity→term extents, the live stack included, and every entity's
+labels — stored and served — are unchanged (exists — `coalesce.rs`); 45 a pending deletion keeps
+its term list across a coalesce and retires at the fold that follows it (exists — `coalesce.rs`).
 
 ## Appendix R — Review record
+
+**r14 (2026-08-31) — the coalesce's axis list is current, and the transpose is on it.** §7 named
+four axes where the pass has had six for some time (the record blob and the text columns were
+added without the section following), and this revision adds the seventh: the entity→term
+transpose, on the record blob's policy and in its shape. The rule that makes it safe is the record
+blob's — layers disjoint in entity space, probed by has-row, so a merge is a concatenation — with
+one thing less to worry about, its ordinals being dictionary positions the dictionary axis already
+preserves. Two claims are new rather than restated. The transpose's **live** stack is re-derived
+from the rebased manifest at publication, so the bound is a reader's rather than a restart's; and
+**no axis retires anything**, which was true and unwritten, and is the sentence that keeps a
+coalesce from acquiring Rule F's job.
 
 **r13 (2026-08-30) — mutual exclusion between the maintenance passes is stated once, at the
 boundary that holds.** §6 gains the interleaving: the passes exclude one another on *publication*,

@@ -7094,7 +7094,52 @@ impl Executor {
                 },
             })
             .collect();
-        let filter_columns = match live.filter_columns.with_coalesced(&windows, &text_windows) {
+        // **The transpose's stack is re-derived from the rebased manifest**, not patched — the
+        // form `delta_postings` below takes, and for its reason: re-deriving is the one shape that
+        // cannot drift from what a restart would open. It is affordable here where it would not be
+        // per flush: the base's `hasrow` is a run-container bitmap and its other two files are
+        // mapped rather than read, and a coalesce fires once per `width` ticks. `None` where the
+        // axis did not run, in which case the live stack rides through untouched.
+        let entity_terms = if completed.terms.is_none() {
+            None
+        } else {
+            let partition_dir = prefix_dir
+                .join("partitions")
+                .join(&completed.plan.partition);
+            let extents: Vec<tessera_store::EntityTermsExtentPaths> = manifest
+                .entity_terms_extents
+                .iter()
+                .map(|e| tessera_store::EntityTermsExtentPaths {
+                    hasrow: prefix_dir.join(&e.hasrow),
+                    offsets: prefix_dir.join(&e.offsets),
+                    terms: prefix_dir.join(&e.terms),
+                })
+                .collect();
+            match tessera_store::EntityTermsStack::open(
+                Some(&partition_dir.join(tessera_store::ENTITY_TERMS_DIR)),
+                &extents,
+            ) {
+                Ok(stack) => Some(Arc::new(stack)),
+                Err(e) => {
+                    self.health
+                        .coalesce_failures
+                        .fetch_add(1, Ordering::Relaxed);
+                    tracing::error!(
+                        error = %e,
+                        "ALARM: a completed coalesce's entity→term extent would not compose into \
+                         a stack; discarding it rather than publishing a manifest naming a layer \
+                         this process cannot serve. Its files are orphans and every consumed \
+                         entry still stands"
+                    );
+                    return;
+                }
+            }
+        };
+        let filter_columns = match live.filter_columns.with_coalesced(
+            &windows,
+            &text_windows,
+            entity_terms,
+        ) {
             Ok(columns) => Arc::new(columns),
             Err(e) => {
                 self.health
