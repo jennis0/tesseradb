@@ -936,7 +936,7 @@ fn non_prefix_row(engine: &Engine, audit: i64, band_code: u8, score: f32) -> Una
             WalScalar::F32(score),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
-    scoped: Vec::new(),
+        scoped: Vec::new(),
     }
 }
 
@@ -1380,7 +1380,7 @@ fn record_row(engine: &Engine, external: &str, note: &str, revision: i64) -> Una
             WalScalar::U8(3),
         ],
         terms: engine.resolve_terms(&[b"0".to_vec()]),
-    scoped: Vec::new(),
+        scoped: Vec::new(),
     }
 }
 

@@ -26,7 +26,7 @@ fn row(key: &str, terms: &[u32]) -> UnallocatedRow {
         y: 0.0,
         scalars: Vec::new(),
         terms: terms.iter().map(|t| TermId::new(*t)).collect(),
-    scoped: Vec::new(),
+        scoped: Vec::new(),
     }
 }
 

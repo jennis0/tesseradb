@@ -79,7 +79,7 @@ fn row(key: &str) -> UnallocatedRow {
         y: 0.0,
         scalars: Vec::new(),
         terms: Vec::new(),
-    scoped: Vec::new(),
+        scoped: Vec::new(),
     }
 }
 

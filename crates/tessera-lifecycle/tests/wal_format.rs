@@ -153,11 +153,7 @@ fn a_log_at_a_version_whose_records_would_be_misread_is_refused() {
     // a statement about the version rather than about the rest of the header.
     let other = dir.path().join("current");
     std::fs::create_dir(&other).unwrap();
-    std::fs::write(
-        other.join("wal-000001.log"),
-        header_at_version(17, 1, 0),
-    )
-    .unwrap();
+    std::fs::write(other.join("wal-000001.log"), header_at_version(17, 1, 0)).unwrap();
     assert!(Wal::open(other.join("wal.log")).is_ok());
 }
 
