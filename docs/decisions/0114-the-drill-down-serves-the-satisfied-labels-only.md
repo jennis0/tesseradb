@@ -39,11 +39,19 @@ to look up, and serving the descriptors verbatim is what identity means.
 ## Why the intersection is structural rather than a filter
 
 A filter can be forgotten; this one cannot be, because the serving path holds no name for a term
-outside the grant. A session keeps the descriptors its own credential presented, resolved once at
-authorise, and that map is the **only** ordinal→descriptor route the request path has — the bundle
-carries no reverse dictionary, and at the plugin's declared 2×10⁸ terms it would be gigabytes of
-one for a surface that can only ever name terms the caller already handed in. So a bug in the
-intersection can drop a label the viewer holds; it cannot invent one they do not.
+outside the grant. A session keeps the descriptors its own credential presented, **plus `public`**
+— the one label every principal holds, added inside the trust boundary at authorise and so in
+every session's satisfied set whatever the credential said. That map is the **only**
+ordinal→descriptor route the request path has: the bundle carries no reverse dictionary, and at the
+plugin's declared 2×10⁸ terms it would be gigabytes of one for a surface that can only ever name
+terms already inside the session's own authority. So a bug in the intersection can drop a label the
+viewer holds; it cannot invent one they do not.
+
+**The one function that could is the plugin's, and its count is checked.** `present_terms` maps
+descriptors to strings positionally, and a plugin returning *more* strings than it was handed would
+put on the wire a label answering to no term this session satisfies — the disclosure this section
+otherwise rules out, arriving through the seam the argument does not itself constrain. The
+serving path refuses a count that does not match, in either direction.
 
 ## What it costs
 

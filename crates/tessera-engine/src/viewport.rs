@@ -1640,6 +1640,23 @@ impl Engine {
             .plugin
             .present_terms(&descriptors)
             .map_err(EngineError::Plugin)?;
+        // **One string per descriptor, and the count is the enforcement of it.** A plugin
+        // returning MORE strings than it was handed would put on the wire strings that answer to
+        // no term this session satisfies — which is exactly the disclosure C30's structural claim
+        // rules out, arriving through the one function the claim does not itself constrain. Fewer
+        // is a lost label rather than an invented one, and is refused with it: positional is the
+        // contract, so a short list means the caller cannot say which label it failed to present.
+        if labels.len() != descriptors.len() {
+            return Err(EngineError::Plugin(tessera_plugin::PluginError::Malformed(
+                format!(
+                    "present_terms returned {} strings for {} descriptors; the mapping is \
+                     positional, and a longer list would serve a label answering to no term this \
+                     session satisfies",
+                    labels.len(),
+                    descriptors.len()
+                ),
+            )));
+        }
         labels.sort_unstable();
         labels.dedup();
         Ok(labels)

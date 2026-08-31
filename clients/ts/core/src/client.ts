@@ -646,15 +646,16 @@ export class TesseraClient {
     const body = (await response.json()) as {
       fields: Record<string, unknown>;
       external_id?: string;
-      labels?: string[];
+      labels: string[];
     };
     return {
       fields: body.fields ?? {},
       externalId: body.external_id ?? null,
-      // The satisfied labels only — see {@link ItemDetail.labels}. Defaulted to empty rather than
-      // to null: a principal satisfying none of the item's labels is a real answer with a real
-      // shape, and a client rendering it should show nothing rather than a distinct "unknown".
-      labels: body.labels ?? []
+      // **Not defaulted.** `labels` is required by the response schema and is always present,
+      // empty included — a principal satisfying none of the item's labels is a real answer with a
+      // real shape. A `?? []` here would give a server that omitted the field the same reading as
+      // one that answered "none", which is a nonconforming server made to look correct.
+      labels: body.labels
     };
   }
 

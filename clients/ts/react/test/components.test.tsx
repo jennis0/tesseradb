@@ -40,7 +40,7 @@ describe('@tesseradb/react/components', () => {
       root.render(
         createElement(TesseraItemCard, {
           ref,
-          item: {id: 7n, detail: {fields: {title: 'x'}, externalId: null}},
+          item: {id: 7n, detail: {fields: {title: 'x'}, externalId: null, labels: []}},
           onOpen: (e) => seen.push(e.detail.id)
         })
       )

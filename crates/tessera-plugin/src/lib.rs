@@ -205,7 +205,8 @@ impl Plugin for Passthrough {
             .map(|d| {
                 String::from_utf8(d.clone()).map_err(|e| {
                     PluginError::Malformed(format!(
-                        "a descriptor is not valid UTF-8 and this plugin presents descriptors                          verbatim: {e}"
+                        "a descriptor is not valid UTF-8 and this plugin presents descriptors \
+                         verbatim: {e}"
                     ))
                 })
             })
