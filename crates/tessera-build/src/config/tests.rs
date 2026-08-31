@@ -3672,3 +3672,108 @@ fn write_keys(path: &Path, keys: &[&str]) {
     writer.write(&batch).expect("write");
     writer.close().expect("close");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The roster minted from the discriminator (`views.md` §3.1's third form)
+// ---------------------------------------------------------------------------------------------
+
+/// A points file behind a discriminator: `entity_id`, `quarter`, and nothing else this parse
+/// reads. The keys are written in the order given, so a case can assert the mint does **not**
+/// take file order.
+fn write_discriminated(path: &Path, keys: &[&str]) {
+    let schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("entity_id", arrow::datatypes::DataType::UInt64, false),
+        arrow::datatypes::Field::new("quarter", arrow::datatypes::DataType::Utf8, false),
+    ]));
+    let ids: Vec<u64> = (0..keys.len() as u64).collect();
+    let batch = arrow::record_batch::RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            std::sync::Arc::new(arrow::array::UInt64Array::from(ids)),
+            std::sync::Arc::new(arrow::array::StringArray::from(keys.to_vec())),
+        ],
+    )
+    .expect("two columns");
+    let file = std::fs::File::create(path).expect("create the points file");
+    let mut writer =
+        parquet::arrow::ArrowWriter::try_new(file, schema, None).expect("open the writer");
+    writer.write(&batch).expect("write");
+    writer.close().expect("close");
+}
+
+/// A group declaring neither roster form, its points behind `fields.view` — the third form of
+/// `views.md` §3.1.
+const MINTED: &str = r#"
+[[view_group]]
+name             = "quarter"
+extent           = { min = -40.0, max = 40.0 }
+source           = "topics"
+fields           = { view = "quarter" }
+point_visibility = { field = "categories", default = "public" }
+"#;
+
+/// Parse `SEVERITY` plus `MINTED` against a `topics.parquet` carrying `keys`, and return the
+/// registry — or the refusal the mint made.
+fn minted_registry(keys: &[&str]) -> Result<Vec<BuildView>> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_discriminated(&dir.path().join("topics.parquet"), keys);
+    let text = format!("{SEVERITY}{MINTED}");
+    let config = parse_at(dir.path(), &text, &HashMap::new()).expect("the declaration parses");
+    config.build_views()
+}
+
+/// **A group with no roster mints one view per distinct discriminator value, in key-byte order**
+/// (`views.md` §3.1). The file's own order is `2026-Q3, 2026-Q1, 2026-Q3, 2026-Q2` and the roster
+/// is not: roster order is served order (decision 0113), so a mint that took appearance order
+/// would make the served order a property of how the source's rows happen to be arranged.
+#[test]
+fn a_group_with_no_roster_mints_its_views_from_the_discriminator() {
+    let registry =
+        minted_registry(&["2026-Q3", "2026-Q1", "2026-Q3", "2026-Q2"]).expect("the mint succeeds");
+    let minted: Vec<&str> = registry
+        .iter()
+        .filter(|v| v.group.is_some())
+        .map(|v| v.id.as_str())
+        .collect();
+    assert_eq!(
+        minted,
+        ["quarter:2026-Q1", "quarter:2026-Q2", "quarter:2026-Q3"]
+    );
+    // Every minted view is an ordinary roster record: the group's own source selected by the
+    // discriminator, no metadata, and the group's own gate.
+    for view in registry.iter().filter(|v| v.group.is_some()) {
+        let membership = view.group.as_ref().expect("a minted view is a group's");
+        assert_eq!(membership.group, "quarter");
+        assert!(membership.metadata.is_empty(), "a minted view carries none");
+        assert_eq!(view.visibility, None, "the group's own gate, which is public");
+        let select = view.select.as_ref().expect("selected by the discriminator");
+        assert_eq!(select.column, "quarter");
+        assert_eq!(select.value, membership.key);
+        assert_eq!(select.keys, ["2026-Q1", "2026-Q2", "2026-Q3"]);
+    }
+}
+
+/// **A distinct value that cannot be a key is a refusal naming the value and the column**, not a
+/// skip and not a mangling: a value no view was minted for is one whose rows belong to no view.
+#[test]
+fn a_minted_key_outside_the_charset_is_refused() {
+    let message = format!(
+        "{}",
+        minted_registry(&["2026-Q1", "2026 Q2"]).expect_err("expected a refusal")
+    );
+    assert!(message.contains("'2026 Q2'"), "{message}");
+    assert!(message.contains("column 'quarter'"), "{message}");
+    assert!(message.contains("ASCII letters"), "{message}");
+}
+
+/// **A source with no rows mints no views**, and a group with none is a declaration promising
+/// coordinate systems the bundle would not carry — the refusal a roster table with no rows earns.
+#[test]
+fn a_group_with_no_roster_and_no_rows_is_refused() {
+    let message = format!(
+        "{}",
+        minted_registry(&[]).expect_err("expected a refusal")
+    );
+    assert!(message.contains("carries no rows"), "{message}");
+    assert!(message.contains("view group 'quarter'"), "{message}");
+}
