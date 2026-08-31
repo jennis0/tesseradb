@@ -8,20 +8,20 @@
 //! what each is measured against: a layer against its own declaration, a view against the group's.
 //!
 //! **What lives here is the runtime half.** The views a build declared are in `MANIFEST.json` and
-//! are seeded in ([`ViewRoster::seed_declared`]) so that ordinals continue rather than restart;
-//! what this structure *owns* is the creations and the tombstones, which is exactly what a
-//! publication writes and a replay reads back.
+//! are seeded in ([`ViewRoster::seed_declared`]) so that their keys are taken; what this structure
+//! *owns* is the creations and the tombstones, which is exactly what a publication writes and a
+//! replay reads back.
 //!
 //! **Three rules the operations here exist to hold:**
 //!
 //! - **A roster record is immutable.** There is no update: an existing key is refused, and a wrong
 //!   record is a drop and a recreate under a new key. The alternative is a narrowed gate that does
 //!   not bite live sessions, a staleness the deny lane is not allowed and the roster is not either.
-//! - **An ordinal is never reused, and neither is a key.** Both are burnt by a drop and the
-//!   tombstone carries the ordinal, because a high-water recovered from the *live* views alone
-//!   would reissue the newest one the moment it was the one dropped — and a reissued ordinal
-//!   silently repoints every client cache keyed on the view (decision 0029).
-//! - **Keys and ordinals belong to the group that owns them.** A group declaring `members` takes
+//! - **A key is never reused.** It is burnt by a drop and the tombstone carries it for ever,
+//!   because a recreated key with different contents silently repoints every client cache keyed
+//!   on the view (decision 0029). The key is a view's only address (decision 0113), so this is
+//!   the whole of what a drop burns.
+//! - **A key belongs to the group that owns it.** A group declaring `members` takes
 //!   another group's (`views.md` §3.3), so a create names the owner and the sharing groups' copies
 //!   are derived from that one record. Two records would be two places for them to disagree.
 
@@ -84,8 +84,8 @@ impl std::error::Error for RosterError {}
 #[derive(Debug, Clone, Copy)]
 pub struct GroupFacts<'a> {
     pub name: &'a str,
-    /// The group whose keys and ordinals these are, where this group declares `members`; `None`
-    /// where it owns them.
+    /// The group whose keys these are, where this group declares `members`; `None` where it owns
+    /// them.
     pub members_of: Option<&'a str>,
     /// The per-view metadata names and types this group declared.
     pub metadata: &'a [GroupMetadataField],
@@ -96,13 +96,11 @@ pub struct GroupFacts<'a> {
 pub struct ViewRoster {
     /// The creations, in creation order — what a publication writes and a replay reads back.
     created: Vec<CreatedView>,
-    /// Every key ever dropped, with the ordinal it burnt.
+    /// Every key ever dropped.
     tombstones: Vec<TombstonedView>,
     /// `(group, key)` of every view that exists right now, the build's included, so an existing
     /// key is one lookup rather than a walk of two lists and a subtraction.
     live: BTreeSet<(String, String)>,
-    /// Per owning group, one past the highest ordinal ever issued — live, dropped or declared.
-    next_ordinal: BTreeMap<String, u32>,
 }
 
 impl ViewRoster {
@@ -110,16 +108,13 @@ impl ViewRoster {
         ViewRoster::default()
     }
 
-    /// Seed the views a **build** declared: their keys are taken and their ordinals are spent.
+    /// Seed the views a **build** declared: their keys are taken.
     ///
-    /// Called before [`Self::seed`] and before any WAL record, because ordinals are one sequence
-    /// per group and the build's are its first members. A group's declared views are read off
-    /// `MANIFEST.json`, which is the roster's other half and the half that never changes.
-    pub fn seed_declared(&mut self, views: impl IntoIterator<Item = (String, String, u32)>) {
-        for (group, key, ordinal) in views {
-            self.live.insert((group.clone(), key));
-            let next = self.next_ordinal.entry(group).or_insert(0);
-            *next = (*next).max(ordinal + 1);
+    /// Called before [`Self::seed`] and before any WAL record. A group's declared views are read
+    /// off `MANIFEST.json`, which is the roster's other half and the half that never changes.
+    pub fn seed_declared(&mut self, views: impl IntoIterator<Item = (String, String)>) {
+        for (group, key) in views {
+            self.live.insert((group, key));
         }
     }
 
@@ -139,8 +134,6 @@ impl ViewRoster {
     }
 
     fn admit(&mut self, view: CreatedView) {
-        let next = self.next_ordinal.entry(view.group.clone()).or_insert(0);
-        *next = (*next).max(view.ordinal + 1);
         self.live.insert((view.group.clone(), view.key.clone()));
         if !self
             .created
@@ -152,8 +145,6 @@ impl ViewRoster {
     }
 
     fn retire(&mut self, stone: TombstonedView) {
-        let next = self.next_ordinal.entry(stone.group.clone()).or_insert(0);
-        *next = (*next).max(stone.ordinal + 1);
         self.live.remove(&(stone.group.clone(), stone.key.clone()));
         self.created
             .retain(|v| !(v.group == stone.group && v.key == stone.key));
@@ -209,8 +200,8 @@ impl ViewRoster {
         if let Some(owner) = facts.members_of {
             return Err(RosterError::Refused(format!(
                 "view group '{}' takes its views from group '{owner}' (views §3.3), so a key is \
-                 created on '{owner}' and appears here at the same moment. Keys, ordinals and \
-                 metadata belong to the group that owns them",
+                 created on '{owner}' and appears here at the same moment. Keys and metadata \
+                 belong to the group that owns them",
                 facts.name
             )));
         }
@@ -315,28 +306,14 @@ impl ViewRoster {
             view: CreatedView {
                 group: facts.name.to_string(),
                 key: key.to_string(),
-                ordinal: self.next_ordinal(facts.name),
                 visibility,
                 metadata,
             },
         })
     }
 
-    /// The ordinal the next view of `group` takes — one past the highest ever issued there.
-    fn next_ordinal(&self, group: &str) -> u32 {
-        self.next_ordinal.get(group).copied().unwrap_or(0)
-    }
-
     /// The record a `DELETE /control/views/{group}/{key}` appends, or the refusal.
-    ///
-    /// The ordinal travels in the record because it is burnt with the key: replay applies what was
-    /// decided rather than re-deriving a number whose sequence has since moved.
-    pub fn prepare_drop(
-        &self,
-        group: &str,
-        key: &str,
-        declared_ordinal: Option<u32>,
-    ) -> Result<WalRecord, RosterError> {
+    pub fn prepare_drop(&self, group: &str, key: &str) -> Result<WalRecord, RosterError> {
         if !self.is_live(group, key) {
             // A tombstoned key and a key that never existed are the same answer, and deliberately:
             // the drop's own 404 is what a request naming the view gets from then on.
@@ -345,23 +322,10 @@ impl ViewRoster {
                 key: key.to_string(),
             });
         }
-        let ordinal = self
-            .created
-            .iter()
-            .find(|v| v.group == group && v.key == key)
-            .map(|v| v.ordinal)
-            .or(declared_ordinal)
-            .ok_or_else(|| {
-                RosterError::Refused(format!(
-                    "view '{group}:{key}' holds no ordinal, so dropping it would burn nothing and \
-                     the next create would reissue it"
-                ))
-            })?;
         Ok(WalRecord::ViewDrop {
             view: TombstonedView {
                 group: group.to_string(),
                 key: key.to_string(),
-                ordinal,
             },
         })
     }
@@ -392,27 +356,26 @@ mod tests {
         }
     }
 
-    fn create(roster: &mut ViewRoster, group: &str, key: &str) -> Result<u32, RosterError> {
+    fn create(roster: &mut ViewRoster, group: &str, key: &str) -> Result<(), RosterError> {
         let record = roster.prepare_create(facts(group, &[]), key, None, BTreeMap::new())?;
-        let ordinal = match &record {
-            WalRecord::ViewCreate { view } => view.ordinal,
-            _ => unreachable!("prepare_create builds one variant"),
-        };
         roster.apply(&record);
-        Ok(ordinal)
+        Ok(())
     }
 
     #[test]
-    fn ordinals_continue_past_the_build_and_past_a_drop() {
+    fn creations_are_kept_in_creation_order_past_the_build_and_past_a_drop() {
         let mut roster = ViewRoster::new();
-        roster.seed_declared([("quarter".to_string(), "2026-Q1".to_string(), 0)]);
-        assert_eq!(create(&mut roster, "quarter", "2026-Q2"), Ok(1));
+        roster.seed_declared([("quarter".to_string(), "2026-Q1".to_string())]);
+        create(&mut roster, "quarter", "2026-Q2").unwrap();
+        create(&mut roster, "quarter", "2026-Q3").unwrap();
 
-        // Dropping the newest view must not hand its ordinal to the next create: the tombstone
-        // carries it, which is why the high-water survives the removal.
-        let drop = roster.prepare_drop("quarter", "2026-Q2", None).unwrap();
+        // A drop removes its own record and leaves the rest in the order they were made: creation
+        // order is what `/v1/meta` serves, and there is no number to re-derive (decision 0113).
+        let drop = roster.prepare_drop("quarter", "2026-Q2").unwrap();
         roster.apply(&drop);
-        assert_eq!(create(&mut roster, "quarter", "2026-Q3"), Ok(2));
+        create(&mut roster, "quarter", "2026-Q4").unwrap();
+        let order: Vec<&str> = roster.created().iter().map(|v| v.key.as_str()).collect();
+        assert_eq!(order, ["2026-Q3", "2026-Q4"]);
     }
 
     #[test]
@@ -423,14 +386,14 @@ mod tests {
             create(&mut roster, "quarter", "2026-Q2"),
             Err(RosterError::Exists { .. })
         ));
-        let drop = roster.prepare_drop("quarter", "2026-Q2", None).unwrap();
+        let drop = roster.prepare_drop("quarter", "2026-Q2").unwrap();
         roster.apply(&drop);
         assert!(matches!(
             create(&mut roster, "quarter", "2026-Q2"),
             Err(RosterError::Tombstoned { .. })
         ));
         assert!(matches!(
-            roster.prepare_drop("quarter", "2026-Q2", None),
+            roster.prepare_drop("quarter", "2026-Q2"),
             Err(RosterError::Unknown { .. })
         ));
     }
@@ -439,12 +402,11 @@ mod tests {
     fn a_drop_replays_without_its_own_create() {
         // The rotation case: the create's record is gone and the tombstone must still bite.
         let mut roster = ViewRoster::new();
-        roster.seed_declared([("quarter".to_string(), "2026-Q1".to_string(), 0)]);
+        roster.seed_declared([("quarter".to_string(), "2026-Q1".to_string())]);
         roster.apply(&WalRecord::ViewDrop {
             view: TombstonedView {
                 group: "quarter".to_string(),
                 key: "2026-Q1".to_string(),
-                ordinal: 0,
             },
         });
         assert!(!roster.is_live("quarter", "2026-Q1"));

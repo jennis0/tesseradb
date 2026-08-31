@@ -765,9 +765,9 @@ pub struct Config {
     /// The declared view groups, in declaration order (`views.md` §3).
     ///
     /// A build materialises every view of every one of them ([`Config::build_views`]). ⊘ What
-    /// has no build behind it is the *running* half of spec §3.2 — the roster object, the create
-    /// operation, the ordinal high-water — so a group's views are the ones the declaration
-    /// enumerates and no key comes into being after the build.
+    /// has no build behind it is the *running* half of spec §3.2 — the roster object and the
+    /// create operation — so a group's views are the ones the declaration enumerates and no key
+    /// comes into being after the build.
     pub view_groups: Vec<ViewGroup>,
     /// Which attributes and which layers are bound to a group's views (`views.md` §5, §3.5).
     pub scopes: Scopes,
@@ -3171,9 +3171,9 @@ fn check_label(object: &str, key: &str, label: &str) -> Result<()> {
 /// **The same charset a column name takes**, and for the same reason: a view id addresses a
 /// directory in the bundle (`views/<group>/<key>/`), the `view` in a request body, the
 /// `x-tessera-view` header and the manifest's `files` map, so it has to survive being a path
-/// segment. Three characters are refused ahead of the charset because they are *reserved* rather
-/// than merely outside it: `:` joins a group to its key, `#` marks an ordinal so a numeric-looking
-/// key is not read as one, and `@` pins a group-scoped attribute to a view (`views.md` §5). Each
+/// segment. Two characters are refused ahead of the charset because they are *reserved* rather
+/// than merely outside it: `:` joins a group to its key, and `@` pins a group-scoped attribute to
+/// a view (`views.md` §5). Each
 /// is refused here and again at manifest load, which are the two halves decision 0108 asks for.
 fn check_view_name(object: &str, name: &str) -> Result<()> {
     // **The charset lives with the roster records** (`tessera_types::view::check_view_key`), so
@@ -3309,7 +3309,7 @@ fn compile_view_group(
     }
 
     // **`members` first**, because it decides which of the keys below this group may declare at
-    // all: keys, ordinals, metadata and each view's own gate belong to the group that owns them.
+    // all: keys, metadata and each view's own gate belong to the group that owns them.
     let members = match &block.members {
         None => None,
         Some(target) => {
@@ -3341,8 +3341,8 @@ fn compile_view_group(
             }
             if block.metadata.is_some() {
                 return Err(declaration_error(format!(
-                    "{object}: `metadata` on a group declaring `members = \"{target}\"`. Keys, \
-                     ordinals and metadata belong to the group that owns the views, and these are \
+                    "{object}: `metadata` on a group declaring `members = \"{target}\"`. Keys \
+                     and metadata belong to the group that owns the views, and these are \
                      '{target}'s (views §3.3) — a second typed value under one key would be a \
                      second roster for one key set. Declare it on '{target}'"
                 )));
@@ -3756,8 +3756,7 @@ fn compile_roster_view(
             declaration_error(format!(
                 "{group}: a `[[view_group.view]]` block declares no `key`. The key is the caller's \
                  own name for the view and is required at creation — `<group>:<key>` is the id \
-                 every request names, and the ordinal is an alias for it rather than a substitute \
-                 (views §3.2)"
+                 every request names and a view's only address (views §3.2)"
             ))
         })?;
     let object = format!("{group}, view '{key}'");
@@ -5814,10 +5813,7 @@ pub struct GroupMembership {
     /// The group this view belongs to. `<group>:<key>` is the view id.
     pub group: String,
     pub key: String,
-    /// Creation order within the group, which at a build is roster order — monotone, never
-    /// reused, and an alias for the key (`views.md` §3.2).
-    pub ordinal: u32,
-    /// The group whose keys and ordinals these are, where this group declares `members`
+    /// The group whose keys these are, where this group declares `members`
     /// (`views.md` §3.3); `None` where it owns them. Metadata and each view's own gate belong to
     /// the owner, so a `members` group's views carry none of their own.
     pub members_of: Option<String>,
@@ -5848,8 +5844,8 @@ pub struct ViewSelector {
 /// One coordinate system a build materialises (`views.md` §7).
 ///
 /// **The registry is ordered, and the order is a contract**: it decides which view's Morton code
-/// an item absent from the anchor is tie-broken on (decision 0112), and a group's view's ordinal
-/// is its position within its group. The order is the plain `[[view]]` blocks in declaration
+/// an item absent from the anchor is tie-broken on (decision 0112), and a group's views keep
+/// their roster order within it. The order is the plain `[[view]]` blocks in declaration
 /// order, then each `[[view_group]]` in declaration order with its views in roster order —
 /// `Config` holds the two block kinds in separate lists, so their interleaving in the document is
 /// not recoverable and is deliberately not part of the order.
@@ -5976,7 +5972,7 @@ impl Config {
             // checks a stray key against.
             let mut keys: Vec<String> = roster.iter().map(|v| v.key.clone()).collect();
             keys.sort();
-            for (ordinal, view) in roster.iter().enumerate() {
+            for view in roster.iter() {
                 // Form A gives each view its own file, so there is nothing to select on; a group
                 // carrying its own `source` — form B, and every `members` group — holds every
                 // view's points in one file and selects by key.
@@ -5998,7 +5994,6 @@ impl Config {
                     group: Some(GroupMembership {
                         group: group.name.clone(),
                         key: view.key.clone(),
-                        ordinal: ordinal as u32,
                         members_of: group.members.clone(),
                         metadata: if group.members.is_some() {
                             BTreeMap::new()
@@ -6092,7 +6087,7 @@ impl Config {
                     // one key set are two layouts, and which principals may see each layout is a
                     // fact about the layout (`views.md` §3.3).
                     visibility: declared.visibility.clone(),
-                    // A `members` group declares none: keys, ordinals and metadata belong to the
+                    // A `members` group declares none: keys and metadata belong to the
                     // group that owns the views (`views.md` §3.3), so a create against the owner
                     // is what supplies them and this group's copies carry none.
                     metadata: if declared.members.is_some() {
@@ -6140,7 +6135,6 @@ impl Config {
                 .expect("just inserted");
             group.views.push(GroupViewDescriptor {
                 key: membership.key.clone(),
-                ordinal: membership.ordinal,
                 visibility: view.visibility.clone(),
                 metadata: membership
                     .metadata

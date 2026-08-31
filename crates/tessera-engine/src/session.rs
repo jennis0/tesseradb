@@ -1132,8 +1132,8 @@ impl Engine {
             .values()
             .flat_map(|partition| partition.manifest.view_tombstones.iter().cloned())
             .collect();
-        // The views the *build* declared, whose ordinals a create continues.
-        let declared_views: Vec<(String, String, u32)> = bundle
+        // The views the *build* declared, whose keys a create must not reissue.
+        let declared_views: Vec<(String, String)> = bundle
             .manifest
             .groups
             .iter()
@@ -1141,7 +1141,7 @@ impl Engine {
                 group
                     .views
                     .iter()
-                    .map(|view| (group.name.clone(), view.key.clone(), view.ordinal))
+                    .map(|view| (group.name.clone(), view.key.clone()))
             })
             .collect();
         // **The union across partitions, on `manifest_layers`' argument**: an artifact is a
@@ -3128,12 +3128,11 @@ impl Engine {
         self.write.drop_layer(name)
     }
 
-    /// Create a view of a view group while the service runs, returning its ordinal
-    /// (`views.md` §3.2, decision 0108).
+    /// Create a view of a view group while the service runs (`views.md` §3.2, decision 0108).
     ///
-    /// **Almost nothing is validated here**, on `register_layer`'s rule: whether the key is free,
-    /// and the ordinal that follows, are state only the write executor may read — a handler that
-    /// checked first could be overtaken between its check and the enqueue.
+    /// **Almost nothing is validated here**, on `register_layer`'s rule: whether the key is free
+    /// is state only the write executor may read — a handler that checked first could be
+    /// overtaken between its check and the enqueue.
     ///
     /// The **gate label** is the exception, and it is here because only the engine holds the
     /// plugin. A view's gate is satisfied by exactly the item-visibility predicate
@@ -3149,7 +3148,7 @@ impl Engine {
         key: String,
         visibility: Option<String>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
-    ) -> std::result::Result<u32, crate::write::AcceptError> {
+    ) -> std::result::Result<(), crate::write::AcceptError> {
         if let Some(label) = visibility.as_deref().filter(|l| {
             *l != std::str::from_utf8(tessera_authz::PUBLIC_LABEL).expect("the label is ASCII")
         }) {

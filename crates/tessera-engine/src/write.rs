@@ -2062,12 +2062,11 @@ pub(crate) struct ManifestSeed<'a> {
     pub tombstones: &'a [String],
     /// Every view created since the build, across every partition's manifest (`views.md` §3.2),
     /// and every key ever dropped. The build's own roster is not here: it is in `MANIFEST.json`
-    /// and is seeded separately, because its ordinals are the sequence these continue.
+    /// and is seeded separately.
     pub created_views: &'a [tessera_types::view::CreatedView],
     pub view_tombstones: &'a [tessera_types::view::TombstonedView],
-    /// The views a build declared, as `(group, key, ordinal)` — what makes a created view's
-    /// ordinal the *next* one rather than a second `0`.
-    pub declared_views: Vec<(String, String, u32)>,
+    /// The views a build declared, as `(group, key)` — the keys a create must not reissue.
+    pub declared_views: Vec<(String, String)>,
     /// Every published membership extent, across every partition's manifest, with the prefix
     /// directory their paths are relative to.
     pub membership_extents: &'a [tessera_store::manifest::MembershipExtent],
@@ -2295,8 +2294,8 @@ impl WritePath {
         // **The roster, on the registry's ordering rule and for the same reason**: the manifests
         // are the starting point and every WAL record postdates them, so seeding afterwards would
         // resurrect a view that was dropped since the last publication. The build's declared views
-        // are seeded first because their ordinals are the sequence a create continues — a roster
-        // that forgot them would hand the next create an ordinal a declared view already holds.
+        // are seeded first because their keys are taken — a roster that forgot them would let a
+        // create reissue a key a declared view already holds.
         let mut roster = tessera_lifecycle::ViewRoster::new();
         roster.seed_declared(seed.declared_views.iter().cloned());
         roster.seed(seed.created_views, seed.view_tombstones);
@@ -2913,15 +2912,14 @@ impl WritePath {
         }
     }
 
-    /// Create a view of a view group while the service runs (`views.md` §3.2), returning the
-    /// ordinal it was given.
+    /// Create a view of a view group while the service runs (`views.md` §3.2).
     pub(crate) fn create_view(
         &self,
         group: String,
         key: String,
         visibility: Option<String>,
         metadata: std::collections::BTreeMap<String, tessera_types::view::ViewMetadataValue>,
-    ) -> Result<u32, AcceptError> {
+    ) -> Result<(), AcceptError> {
         let receipt = self.handle()?.submit(Command::CreateView {
             group,
             key,
@@ -2929,7 +2927,7 @@ impl WritePath {
             metadata,
         })?;
         match receipt.outcome {
-            Ok(Ack::ViewCreated { ordinal }) => Ok(ordinal),
+            Ok(Ack::ViewCreated) => Ok(()),
             Ok(other) => unreachable!("a CreateView command answers ViewCreated, not {other:?}"),
             Err(e) => Err(AcceptError::Exec(e)),
         }
@@ -9649,16 +9647,11 @@ impl Executor {
                 return;
             }
         };
-        let ordinal = match &record {
-            WalRecord::ViewCreate { view } => view.ordinal,
-            _ => unreachable!("prepare_create returns a ViewCreate"),
-        };
         if let Err(e) = self.wal.append(&record).and_then(|()| self.wal.fsync()) {
             tracing::error!(
                 error = %e,
                 view = %format!("{group}:{key}"),
-                "ALARM: a view creation could not be made durable; the view does not exist and \
-                 its ordinal is spent"
+                "ALARM: a view creation could not be made durable; the view does not exist"
             );
             respond.fail(ExecError::Wal(e));
             return;
@@ -9669,7 +9662,7 @@ impl Executor {
         // roster reaches `SEGMENTS-<n>.json` on the mechanism a deny already uses (`views.md`
         // §3.2: the durable home is the segments manifest).
         self.deny_dirty = true;
-        respond.ack(Ack::ViewCreated { ordinal }, &published);
+        respond.ack(Ack::ViewCreated, &published);
     }
 
     /// `DELETE /control/views/{group}/{key}` — drop a view, tombstoning its key for ever
@@ -9697,8 +9690,8 @@ impl Executor {
         let started = std::time::Instant::now();
         let generation = self.generation.load_full();
         let id = format!("{group}{}{key}", tessera_store::GROUP_SEPARATOR);
-        // The owner's key, whatever group the request named: keys and ordinals belong to the group
-        // that owns the views, and dropping the key takes the view out of every group sharing them
+        // The owner's key, whatever group the request named: a key belongs to the group that owns
+        // the views, and dropping the key takes the view out of every group sharing them
         // (`views.md` §3.3).
         let owner = generation
             .bundle
@@ -9708,17 +9701,9 @@ impl Executor {
             .find(|g| g.name == group)
             .and_then(|g| g.members_of.clone())
             .unwrap_or_else(|| group.clone());
-        let declared_ordinal = generation
-            .bundle
-            .manifest
-            .groups
-            .iter()
-            .find(|g| g.name == owner)
-            .and_then(|g| g.views.iter().find(|v| v.key == key))
-            .map(|v| v.ordinal);
         let prepared = self
             .live
-            .with_roster(|roster| roster.prepare_drop(&owner, &key, declared_ordinal));
+            .with_roster(|roster| roster.prepare_drop(&owner, &key));
         let record = match prepared {
             Ok(record) => record,
             Err(e) => {

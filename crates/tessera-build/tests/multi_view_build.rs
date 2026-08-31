@@ -147,7 +147,6 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
             metadata: Vec::new(),
             views: vec![tessera_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
-                ordinal: 0,
                 visibility: None,
                 metadata: Default::default(),
             }],
@@ -479,10 +478,8 @@ fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
         metadata: Vec::new(),
         views: keys
             .iter()
-            .enumerate()
-            .map(|(ordinal, key)| tessera_store::manifest::GroupViewDescriptor {
+            .map(|key| tessera_store::manifest::GroupViewDescriptor {
                 key: (*key).to_string(),
-                ordinal: ordinal as u32,
                 visibility: None,
                 metadata: Default::default(),
             })
@@ -565,8 +562,8 @@ fn an_auto_frame_over_a_group_fits_every_views_source() {
 }
 
 /// **The roster as a table** (`views.md` §3.1's form B): the keys are rows of a file, read before
-/// pass two, and each becomes a view of the group with its ordinal, its typed metadata and its
-/// own selection out of the shared points file.
+/// pass two, and each becomes a view of the group with its typed metadata and its own selection
+/// out of the shared points file, in the order the table lists them.
 #[test]
 fn a_roster_table_enumerates_the_groups_views() {
     use arrow::array::{Int64Array, StringArray};
@@ -632,7 +629,7 @@ fields = { key = "quarter" }
         ["quarter:2026-Q2", "quarter:2026-Q3"]
     );
     let group = registry[1].group.as_ref().expect("a group's view");
-    assert_eq!(group.ordinal, 1, "the ordinal is the roster's own order");
+    assert_eq!(group.key, "2026-Q3", "the roster's own order is the registry's");
     assert_eq!(
         group.metadata.get("label"),
         Some(&tessera_build::config::MetadataValue::Text(
@@ -929,7 +926,6 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
             metadata: Vec::new(),
             views: vec![tessera_store::manifest::GroupViewDescriptor {
                 key: "2026-Q2".to_string(),
-                ordinal: 0,
                 visibility: None,
                 metadata: Default::default(),
             }],

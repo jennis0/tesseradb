@@ -164,7 +164,6 @@ fn view_create_and_drop_round_trip() {
     let created = CreatedView {
         group: "quarter".to_string(),
         key: "2026-Q5".to_string(),
-        ordinal: 4,
         visibility: None,
         metadata: [(
             "label".to_string(),
@@ -176,7 +175,6 @@ fn view_create_and_drop_round_trip() {
     let dropped = TombstonedView {
         group: "quarter".to_string(),
         key: "2026-Q4".to_string(),
-        ordinal: 3,
     };
     {
         let (mut wal, _) = Wal::open(&path).unwrap();

@@ -1090,30 +1090,29 @@ pub struct MetaView {
     pub tile: Option<TileAddress>,
     /// Where this view sits in its group's roster (`views.md` §3.2), or `None` for a plain view.
     ///
-    /// **A plain view has no roster entry, and that is a fact rather than an omission**: keys and
-    /// ordinals are a group's, so a plain view carrying an empty one would invite a client to
-    /// order a set of one.
+    /// **A plain view has no roster entry, and that is a fact rather than an omission**: a key is
+    /// a group's, so a plain view carrying an empty one would invite a client to order a set of
+    /// one.
     pub roster: Option<MetaRoster>,
 }
 
 /// One view's roster record, as `GET /v1/meta` publishes it beside the view (`views.md` §3.2).
 ///
-/// The key is the caller's own and the ordinal is creation order — an alias, never reused — and
-/// the metadata is the group's declared names with this view's typed values. Together they are
-/// what lets a client order a group's views and offer previous-and-next **without interpreting a
-/// key**, which is the whole reason the ordinal is published beside the key rather than left
-/// implicit in the list's order.
+/// The key is the caller's own and is a view's only address
+/// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md));
+/// the metadata is the group's declared names with this view's typed values. **Order is the list's
+/// order** — creation order, which is roster-record order — so a client offers previous-and-next
+/// by walking the group's `views` array rather than by interpreting a key or a number.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetaRoster {
     pub group: String,
     pub key: String,
-    pub ordinal: u32,
     /// Typed, one entry per name the owning group declared. Empty on a `members` group's views,
     /// whose metadata belongs to the owner (`views.md` §3.3).
     pub metadata: BTreeMap<String, ViewMetadataValue>,
 }
 
-/// One view group, as `GET /v1/meta` publishes it: the name and its views in ordinal order.
+/// One view group, as `GET /v1/meta` publishes it: the name and its views in creation order.
 ///
 /// **A group is not a view** — it cannot be named on a viewer verb and has no row space — so what
 /// is published here is the ordering and nothing else: every setting a group holds is already on
@@ -1122,10 +1121,10 @@ pub struct MetaRoster {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetaGroup {
     pub name: String,
-    /// The group whose keys and ordinals these are, where this group declares `members`
+    /// The group whose keys these are, where this group declares `members`
     /// (`views.md` §3.3); `None` where it owns them.
     pub members_of: Option<String>,
-    /// This group's view ids — the joined `group:key` form a request names — in ordinal order.
+    /// This group's view ids — the joined `group:key` form a request names — in creation order.
     pub views: Vec<String>,
 }
 
@@ -1147,12 +1146,12 @@ pub struct EngineMeta {
     pub api_version: u32,
     pub bundle_format: u32,
     /// The declared views, **in serving order** (`views.md` §3.2): the plain views in manifest
-    /// order, then each group's views in ordinal order. Each carries its own frame (decision
+    /// order, then each group's views in creation order. Each carries its own frame (decision
     /// 0040) and, for a group's view, its roster record. There is no bundle-level extent:
     /// [`EngineMeta::quantisation_of`] answers for a named view, and a caller with no view id is
     /// asking a question the bundle cannot answer.
     pub views: Vec<MetaView>,
-    /// The view groups, in manifest order, each listing its views in ordinal order.
+    /// The view groups, in manifest order, each listing its views in creation order.
     ///
     /// Empty is the ordinary case — a declaration of plain views alone — and it is the same
     /// answer as "this bundle has no group", there being nothing else empty could mean.
@@ -1199,8 +1198,8 @@ pub enum LeafColumn {
     },
     /// A group-scoped attribute named bare under a view that decides no column of its family.
     Unpinned { group: String },
-    /// A pin naming no view of the attribute's group — an undeclared key, an ordinal no view
-    /// holds, or a view with no column.
+    /// A pin naming no view of the attribute's group — an undeclared key, or a view with no
+    /// column.
     UnknownPin { group: String, pin: String },
     /// A pin on a column that has no scope: one column for the corpus, and nothing for a view to
     /// choose between.
@@ -1221,32 +1220,15 @@ impl EngineMeta {
     ///
     /// An unknown name is `None` and the caller refuses. Defaulting it to [`Projection::None`]
     /// would put a degree through the identity transform and quantise it as a frame coordinate.
-    /// The view a request's id names — the declared id itself, or a group's `<group>:#<ordinal>`
-    /// alias resolved to the view holding that ordinal (`views.md` §3.2).
+    /// The view a request's id names — a plain view's name, or a group's `<group>:<key>`
+    /// (`views.md` §3.2).
     ///
     /// **One resolution for both planes.** A viewer verb's `view`, `x-tessera-view` and this
     /// document's own `views` are one namespace, and two resolutions of it would eventually
     /// disagree about what a `404` is — which contracts §3.1's closed code list does not allow.
-    /// `#` is what keeps a numeric-looking key from being read as an ordinal, so `quarter:#3` is
-    /// the ordinal and `quarter:3` is the key `3`; a key that is not declared and an ordinal no
-    /// view holds are the same `None`, and the caller's 404 says no more than "unknown view".
-    ///
-    /// Everything downstream takes [`MetaView::id`] — the canonical joined form — so no alias
-    /// reaches a row space, a WAL row or a manifest lookup.
+    /// **The key is the only address a view has** (decision 0113): an id nothing declares is
+    /// `None` whatever shape it has, and the caller's 404 says no more than "unknown view".
     pub fn resolve_view(&self, requested: &str) -> Option<&MetaView> {
-        if let Some((group, ordinal)) = requested
-            .split_once(':')
-            .and_then(|(group, rest)| Some((group, rest.strip_prefix('#')?)))
-        {
-            // A non-numeric tail after `#` names no ordinal, and `#` is reserved out of keys, so
-            // there is nothing else it could be: `None`, not a fallback to the literal id.
-            let ordinal: u32 = ordinal.parse().ok()?;
-            return self.views.iter().find(|v| {
-                v.roster
-                    .as_ref()
-                    .is_some_and(|r| r.group == group && r.ordinal == ordinal)
-            });
-        }
         self.views.iter().find(|v| v.id == requested)
     }
 
@@ -1287,10 +1269,9 @@ impl EngineMeta {
     ///
     /// - **under a view of the attribute's group**, or of a group sharing its views
     ///   (`views.md` §3.3), the request's own view decides and nothing is added to the wire;
-    /// - **under any other view** the leaf must pin — `sentiment@2026-Q3` by key, or
-    ///   `sentiment@#3` by ordinal — resolved through the same `group:key` / `group:#n` namespace
-    ///   [`EngineMeta::resolve_view`] answers a viewer verb's `view` from, so the two cannot come
-    ///   to disagree about what a name means;
+    /// - **under any other view** the leaf must pin — `sentiment@2026-Q3`, by key and only by key
+    ///   — resolved through the same `group:key` namespace [`EngineMeta::resolve_view`] answers a
+    ///   viewer verb's `view` from, so the two cannot come to disagree about what a name means;
     /// - a **pin under a view of the same group** is allowed and means what it says: Q4's map
     ///   filtered by Q3's sentiment.
     ///
@@ -1464,10 +1445,10 @@ impl Engine {
             }
         };
         // **Serving order is the roster's order** (`views.md` §3.2): the plain views in manifest
-        // order, then each group's views by ordinal. Ordered here rather than left to the
-        // manifest's own sequence because the ordinal is what a client offers previous-and-next
-        // over, and a build's declaration order is not the ordinal order the moment a view is
-        // created at ingest.
+        // order, then each group's views in creation order — which is the order the roster
+        // records themselves are in, a build's declarations first and each create appended after
+        // (decision 0113). Nothing is sorted here: the record order *is* the order, and a sort
+        // would need a key nothing stores.
         let rostered: std::collections::HashSet<String> = manifest
             .groups
             .iter()
@@ -1481,11 +1462,8 @@ impl Engine {
             .collect();
         let mut groups: Vec<MetaGroup> = Vec::with_capacity(manifest.groups.len());
         for group in &manifest.groups {
-            let mut roster: Vec<&tessera_store::manifest::GroupViewDescriptor> =
-                group.views.iter().collect();
-            roster.sort_by_key(|v| v.ordinal);
-            let mut ids = Vec::with_capacity(roster.len());
-            for entry in roster {
+            let mut ids = Vec::with_capacity(group.views.len());
+            for entry in &group.views {
                 let id = format!("{}:{}", group.name, entry.key);
                 // A roster entry with no declared view is refused at open
                 // (`Manifest::validate_groups`), so this cannot silently drop one.
@@ -1498,7 +1476,6 @@ impl Engine {
                     Some(MetaRoster {
                         group: group.name.clone(),
                         key: entry.key.clone(),
-                        ordinal: entry.ordinal,
                         metadata: entry.metadata.clone(),
                     }),
                 ));

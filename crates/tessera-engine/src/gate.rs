@@ -60,8 +60,8 @@ pub struct VisibleViews {
 pub(crate) const NO_SUCH_VIEW: &str = "";
 
 impl VisibleViews {
-    /// Is this **canonical** view id (`ViewDescriptor::id`, never an ordinal alias) one this
-    /// session may reach? One set-membership lookup, and the only question the request path asks
+    /// Is this view id (`ViewDescriptor::id` — a plain view's name or `<group>:<key>`, a view's
+    /// only address) one this session may reach? One set-membership lookup, and the only question the request path asks
     /// of the gate.
     pub fn contains_view(&self, id: &str) -> bool {
         self.views.contains(id)

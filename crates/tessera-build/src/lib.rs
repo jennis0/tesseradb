@@ -1843,7 +1843,7 @@ fn write_manifests(
                         index: family.attribute.index,
                         render: family.attribute.render,
                         // The views whose columns this build **wrote**, in the order the family
-                        // names them, which is the roster's ordinal order.
+                        // names them, which is the roster's own order.
                         views: family
                             .views
                             .iter()
