@@ -26,7 +26,7 @@ CI runs it on every pull request and every push to `main`, alongside the rest of
 (`.github/workflows/ci.yml`). That is conformance §6's per-PR tier; the nightly and release tiers
 it also specifies do not exist.
 
-**675 pass, 4 skip and 2 fail, over 681 cases (2026-08-31, measured serially)** —
+**677 pass, 4 skip and 0 fail, over 681 cases (2026-08-31, measured serially on a quiet box)** —
 `conformance/tests` and `conformance/suite` together, the split CI's own case-count step compares
 against `conformance.md` §0's marker line. The 39 that arrived on that date are the multi-view
 differential; six more are the scoped category added to it, and two of the marker's cases were
