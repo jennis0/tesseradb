@@ -9,8 +9,8 @@
 //!   those views it decides the same column — `quarter_alt:2026-Q3` filters by `quarter`'s Q3
 //!   values, because the two groups are two layouts over one key set (`views.md` §3.3). Nothing is
 //!   added to the wire in either case.
-//! - **Under any other view the leaf must pin one**, by key or by ordinal, and the pinned bitmap is
-//!   an ordinary entity-space one that composes with everything else: *the documents that were
+//! - **Under any other view the leaf must pin one**, by key — a view's only address — and the
+//!   pinned bitmap is an ordinary entity-space one that composes with everything else: *the documents that were
 //!   negative in Q3, on the whole-corpus map*.
 //! - **An unpinned leaf there is a `422` naming the group**, not an empty answer — a leaf with no
 //!   column to read is a malformed request rather than a constraint — and a pin naming no view of
@@ -78,28 +78,28 @@ fn group_frame() -> Quantisation {
     }
 }
 
-fn sentiment(ordinal: usize, entity: u64) -> Option<f32> {
-    if (entity + ordinal as u64).is_multiple_of(3) {
+fn sentiment(slot: usize, entity: u64) -> Option<f32> {
+    if (entity + slot as u64).is_multiple_of(3) {
         return None;
     }
     // A different phase per quarter: the same entity is above the threshold in one and below it in
     // another, so the two columns disagree about almost every entity that has both.
-    let phase = (entity * 7 + ordinal as u64 * 11) % 10;
+    let phase = (entity * 7 + slot as u64 * 11) % 10;
     Some(phase as f32 / 10.0)
 }
 
 /// How many entities a quarter's view holds.
-fn population(ordinal: usize) -> usize {
-    (QUARTERS[ordinal].1.end - QUARTERS[ordinal].1.start) as usize
+fn population(slot: usize) -> usize {
+    (QUARTERS[slot].1.end - QUARTERS[slot].1.start) as usize
 }
 
 /// The entities of a quarter whose value clears the threshold — the expected answer, from the same
 /// arrays the parquet carries.
-fn matching(ordinal: usize) -> BTreeSet<u64> {
-    QUARTERS[ordinal]
+fn matching(slot: usize) -> BTreeSet<u64> {
+    QUARTERS[slot]
         .1
         .clone()
-        .filter(|&e| sentiment(ordinal, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
+        .filter(|&e| sentiment(slot, e).is_some_and(|v| f64::from(v) >= THRESHOLD))
         .collect()
 }
 
@@ -116,13 +116,13 @@ fn position(view: &str, e: u64) -> (f64, f64) {
 }
 
 /// A points file, with this view's own `sentiment` column where the family reads one from it.
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, ordinal: Option<usize>) {
+fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, slot: Option<usize>) {
     let mut fields = vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
     ];
-    if ordinal.is_some() {
+    if slot.is_some() {
         // Nullable: a null and a row this view does not carry are the same state, absent.
         fields.push(Field::new("sentiment", DataType::Float32, true));
     }
@@ -137,11 +137,9 @@ fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, ordinal: Opt
             ids.iter().map(|&e| position(view, e).1).collect::<Vec<_>>(),
         )),
     ];
-    if let Some(ordinal) = ordinal {
+    if let Some(slot) = slot {
         columns.push(Arc::new(Float32Array::from(
-            ids.iter()
-                .map(|&e| sentiment(ordinal, e))
-                .collect::<Vec<_>>(),
+            ids.iter().map(|&e| sentiment(slot, e)).collect::<Vec<_>>(),
         )));
     }
     let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
@@ -174,12 +172,12 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
     let mut views = vec![view_args("world", &world_points, &pairs)];
     let mut family_views = Vec::new();
     for group in ["quarter", "quarter_alt"] {
-        for (ordinal, (key, members)) in QUARTERS.iter().enumerate() {
+        for (slot, (key, members)) in QUARTERS.iter().enumerate() {
             let id = format!("{group}:{key}");
             let points = dir.join(format!("{group}-{key}.parquet"));
             // Only the owning group's files carry the values; `quarter_alt` is a second geometry
             // over the same keys and has no column family of its own.
-            let carries = (group == "quarter").then_some(ordinal);
+            let carries = (group == "quarter").then_some(slot);
             write_points(&points, &id, members.clone(), carries);
             if carries.is_some() {
                 family_views.push(views.len());
@@ -190,10 +188,8 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
     let roster = || {
         QUARTERS
             .iter()
-            .enumerate()
-            .map(|(ordinal, (key, _))| GroupViewDescriptor {
+            .map(|(key, _)| GroupViewDescriptor {
                 key: key.to_string(),
-                ordinal: ordinal as u32,
                 visibility: None,
                 metadata: Default::default(),
             })
@@ -338,18 +334,18 @@ fn range(leaf: &str) -> Value {
 #[tokio::test]
 async fn a_bare_leaf_under_a_view_of_the_group_reads_that_views_column() {
     let served = serve().await;
-    for (ordinal, (key, _)) in QUARTERS.iter().enumerate() {
+    for (slot, (key, _)) in QUARTERS.iter().enumerate() {
         let view = format!("quarter:{key}");
         let matched = ids(&served, &view, Some(range("sentiment"))).await;
         assert_eq!(
             matched.len(),
-            matching(ordinal).len(),
+            matching(slot).len(),
             "{view} filters by its own column: expected {} of {} rows",
-            matching(ordinal).len(),
-            population(ordinal)
+            matching(slot).len(),
+            population(slot)
         );
         assert!(
-            !matched.is_empty() && matched.len() < population(ordinal),
+            !matched.is_empty() && matched.len() < population(slot),
             "{view}'s predicate is a proper subset, or this test proves nothing"
         );
     }
@@ -415,23 +411,6 @@ async fn a_pin_under_a_sibling_view_reads_the_pinned_column() {
     );
 }
 
-/// **The ordinal is an alias for the key, in a pin as on a request's `view`** (`views.md` §3.2):
-/// `sentiment@#3` is the fourth view of the group, which is `2026-Q4`. One namespace, resolved
-/// once — two resolutions would eventually disagree about what a name means.
-#[tokio::test]
-async fn a_pin_by_ordinal_is_the_pin_by_its_key() {
-    let served = serve().await;
-    assert_eq!(
-        ids(&served, "world", Some(range("sentiment@#3"))).await,
-        ids(&served, "world", Some(range("sentiment@2026-Q4"))).await,
-    );
-    // And it is not another view's, which a resolution that ignored the ordinal would make it.
-    assert_ne!(
-        ids(&served, "world", Some(range("sentiment@#3"))).await,
-        ids(&served, "world", Some(range("sentiment@2026-Q1"))).await,
-    );
-}
-
 /// **An unpinned leaf under a view that decides nothing is a `422` naming the group** — a leaf with
 /// no column to read is a malformed request rather than a constraint, so it must not be answered
 /// as an empty filter or ignored as an absent one.
@@ -450,14 +429,15 @@ async fn a_bare_leaf_under_an_unrelated_view_is_a_422_naming_the_group() {
     );
 }
 
-/// **A pin naming no view of the group is the `404` an unknown view gets** — an undeclared key and
-/// an ordinal no view holds alike, and the detail says no more than that. The gate is unbuilt
+/// **A pin naming no view of the group is the `404` an unknown view gets** — an undeclared key,
+/// and an id in the retired `#<ordinal>` form, which now names a key nobody declared and is
+/// nothing else (decision 0113). The detail says no more than that. The gate is unbuilt
 /// (`views.md` §6), so nothing is filtered out of the roster today; when it lands, a gate-failed
-/// pin joins these two here rather than earning a code of its own.
+/// pin joins these here rather than earning a code of its own.
 #[tokio::test]
 async fn a_pin_naming_nothing_is_the_unknown_view_404() {
     let served = serve().await;
-    for pin in ["2099-Q9", "#99"] {
+    for pin in ["2099-Q9", "#3"] {
         let leaf = format!("sentiment@{pin}");
         let resp = viewport(&served, &served.token, "world", Some(range(&leaf))).await;
         assert_eq!(resp.status().as_u16(), 404, "{leaf}");

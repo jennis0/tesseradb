@@ -2502,10 +2502,9 @@ fn metadata_value(name: &str, value: &serde_json::Value) -> Result<ViewMetadataV
 /// `PUT /control/views/{group}/{key}` — create a view of a group while the service runs
 /// (`views.md` §3.2, decision 0108).
 ///
-/// **Nothing is checked here.** Whether the group exists, whether the key is free or burnt, and
-/// what ordinal it takes are all state only the write executor may read — a handler that checked
-/// first could be overtaken between its check and the enqueue, and would then have acked two views
-/// onto one key. The one thing this function does is turn JSON into the typed record the roster
+/// **Nothing is checked here.** Whether the group exists and whether the key is free or burnt are
+/// both state only the write executor may read — a handler that checked first could be overtaken
+/// between its check and the enqueue, and would then have acked two views onto one key. The one thing this function does is turn JSON into the typed record the roster
 /// stores, and refuse a shape that is not a scalar.
 ///
 /// The three answers are the executor's: **404** for a group or key this deployment does not
@@ -2527,7 +2526,7 @@ async fn create_view(
     // The **shared** blocking pool, not the deny runtime beside it, on `register_layer`'s rule: a
     // creation is not a deny, and delaying one under ingest load is backpressure working rather
     // than a security operation refused.
-    let ordinal = tokio::task::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         state
             .engine
             .create_view(group_name, view_key, visibility, metadata)
@@ -2541,9 +2540,6 @@ async fn create_view(
             "view": format!("{group}:{key}"),
             "group": group,
             "key": key,
-            // The view's second address, `<group>:#<ordinal>`, which the caller cannot derive:
-            // it is creation order across every create this deployment has taken, drops included.
-            "ordinal": ordinal,
         })),
     ))
 }
@@ -2553,7 +2549,7 @@ async fn create_view(
 ///
 /// **The key never comes back**, and that is the operation rather than a side effect of it: a
 /// recreated `2026-Q3` with different contents would silently repoint every bookmark, every cached
-/// θ and every client cache keyed on the view (decision 0029). The ordinal is burnt with it.
+/// θ and every client cache keyed on the view (decision 0029).
 ///
 /// **Dropping a view deletes no entity.** `?delete_dangling=true` is for the caller who did mean
 /// "and the items that were only here": the entities of this view that hold a row in no other one

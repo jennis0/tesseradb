@@ -200,13 +200,9 @@ async fn meta(
         //
         // **Gate-filtered** (`views.md` §6): a view whose own label — or whose group's — this
         // principal does not satisfy is absent, and a request naming it is the same 404 a name
-        // nobody declared gets. **Ordinals are not densified and the gaps are not hidden**
-        // (`views.md` §9, decision 0110): a principal seeing ordinals 0, 1, 3 learns that *a* view
-        // exists at #2. That is accepted on C15's argument — knowing something was created is not
-        // knowing whose or what, a gap and a dropped key are indistinguishable, and a deployment
-        // whose roster shape is itself sensitive gates the *group*, which hides the whole roster,
-        // gaps included. The alternatives — per-principal-dense ordinals, or none — re-open the
-        // per-session handle machinery decision 0006 retired, for one bit per creation.
+        // nobody declared gets. A filtered roster is a **shorter list and nothing else**: views
+        // are served in creation order and carry no position, so a principal reading one cannot
+        // count what was withheld from it (decision 0113).
         "views": meta.views.iter().filter(|v| visible.contains_view(&v.id)).map(|v| serde_json::json!({
             "id": v.id,
             "display_name": v.display_name,
@@ -229,25 +225,23 @@ async fn meta(
             "tile_scheme": v.tile.map(|t| t.scheme),
             "tile": v.tile.map(|t| serde_json::json!({"z": t.z, "x": t.x, "y": t.y})),
             // **The roster record, on the view it belongs to** (`views.md` §3.2), and `null` on
-            // a plain view, which has no group, no key and no ordinal — `null` rather than absent
-            // because that is what `tile` and `world_aspect` beside it do, and one document should
-            // not spell "this view has none" two ways. The four keys travel together because they
-            // are one record: a key without its ordinal cannot be ordered, and an ordinal without
-            // its group names nothing.
+            // a plain view, which has no group and no key — `null` rather than absent because
+            // that is what `tile` and `world_aspect` beside it do, and one document should not
+            // spell "this view has none" two ways. The three keys travel together because they
+            // are one record: a key without its group names nothing.
             //
             // `metadata` is **typed**, one entry per name the group declared, each
             // `{type, value}`. A bare value would leave a client guessing whether a large integer
             // is a count or an instant, and the declaration already knows which.
             "group": v.roster.as_ref().map(|r| &r.group),
             "key": v.roster.as_ref().map(|r| &r.key),
-            "ordinal": v.roster.as_ref().map(|r| r.ordinal),
             "metadata": v.roster.as_ref().map(|r| r.metadata.iter().map(|(name, value)| {
                 (name.clone(), metadata_value(value))
             }).collect::<serde_json::Map<_, _>>()),
         })).collect::<Vec<_>>(),
-        // **The groups, in manifest order, each its views by ordinal** (`views.md` §3.2) — what
-        // lets a client offer previous-and-next **without interpreting a key**, which is the one
-        // thing this structure exists for. The ids are the joined `group:key` form a request
+        // **The groups, in manifest order, each its views in creation order** (`views.md` §3.2)
+        // — what lets a client offer previous-and-next **without interpreting a key**, which is
+        // the one thing this structure exists for. The ids are the joined `group:key` form a request
         // names, so a client steps from one view to the next by taking the id beside its own.
         //
         // **Nothing else of the group is here.** Every setting a group holds — its frame, its
@@ -1068,12 +1062,11 @@ fn run_viewport_stream(
     // the view the request was answered for.
     let meta = state.engine.meta();
     // **The one resolution of a caller's view id** (`views.md` §3.2), through this session's
-    // visible-view set (`views.md` §6): a declared id, or a group's `<group>:#<ordinal>` alias.
-    // Everything below takes the canonical id, so no alias reaches a row space. Unknown is the 404
-    // the engine would have given for an unknown id — the same answer, from the same construction
-    // site, for an absent key, an ordinal no view holds, a name that was never declared and a view
+    // visible-view set (`views.md` §6): a plain view's name, or a group's `<group>:<key>`.
+    // Unknown is the 404 the engine would have given for an unknown id — the same answer, from
+    // the same construction site, for an absent key, a name that was never declared and a view
     // this principal's gate fails. `resolve_visible_view` makes the same one set-membership probe
-    // on all of them, so the four cost the same work as well as reading the same.
+    // on all of them, so the three cost the same work as well as reading the same.
     let Some(view) = meta.resolve_visible_view(&req.view, &session.visible_views) else {
         if let Some(tx) = sink.first_tx.take() {
             let _ = tx.send(Err(ApiError::Unknown(format!("unknown view '{}'", req.view))));
@@ -1844,7 +1837,7 @@ struct ArtifactResp {
     #[serde(skip_serializing_if = "Option::is_none")]
     key: Option<String>,
     /// **How many of this artifact's members the asking principal can see** — never how many it
-    /// has. There is deliberately no ordinal, no membership and no declared size here; see
+    /// has. There is deliberately no membership and no declared size here; see
     /// `tessera_engine::ArtifactOut`.
     masked_count: u64,
     /// The layer's declared derived geometry, recomputed for this principal, in the grid units the
@@ -1902,9 +1895,9 @@ async fn artifact(
 
     let served = tokio::task::spawn_blocking(move || {
         let _gate_permits = gate_permits;
-        // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included, so
-        // a client that addressed a view by ordinal on one verb may address it that way on all of
-        // them and a view its gate fails is the same 404 on all of them. The engine call below
+        // **The same view resolution the viewport takes** (`views.md` §3.2, §6), gate included,
+        // so one id means one view on every verb and a view its gate fails is the same 404 on all
+        // of them. The engine call below
         // loads its own generation; a view that went away between the two is the 404 an unknown
         // view already is, which is the answer either order produces.
         let view = state

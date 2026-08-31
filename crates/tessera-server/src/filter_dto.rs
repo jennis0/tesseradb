@@ -76,8 +76,8 @@ pub fn parse(
 /// **Three refusals, two codes, and the split is contracts §3.1's closed list.** An unknown column
 /// and an ambiguous one are both `422`: the caller wrote something this schema cannot answer, and
 /// can be told so. A **pin naming nothing** is the `404` an unknown view already gets, and is
-/// deliberately the same answer for a key nobody declared, an ordinal no view holds and a view
-/// this principal's gate fails (`views.md` §6): a `422` there would make the filter surface an
+/// deliberately the same answer for a key nobody declared and a view this principal's gate fails
+/// (`views.md` §6): a `422` there would make the filter surface an
 /// existence oracle over a roster the viewer plane refuses to enumerate.
 ///
 /// **A principal who cannot reach the attribute's group at all reaches none of the three**: the
@@ -94,8 +94,7 @@ fn resolve_leaf(leaf: &str, column: LeafColumn) -> Result<(String, Family), ApiE
         LeafColumn::Unpinned { group } => Err(bad(format!(
             "'{leaf}' is scoped to view group '{group}' and this request's view is not one of \
              its views, so the leaf names no column to read. Pin the view it means — \
-             '{leaf}@<key>' or '{leaf}@#<ordinal>' — as `/v1/meta`'s `filter_operands` entry \
-             for it says"
+             '{leaf}@<key>' — as `/v1/meta`'s `filter_operands` entry for it says"
         ))),
         LeafColumn::UnknownPin { group, pin } => Err(ApiError::Unknown(format!(
             "unknown view '{pin}' of group '{group}'"
@@ -1111,14 +1110,14 @@ mod tests {
         };
         assert_eq!(column, "sentiment@quarter:2026-Q3");
 
-        // Bare, under a view that decides no column: 422 naming the group and the pin forms.
+        // Bare, under a view that decides no column: 422 naming the group and the pin form.
         let ApiError::Contract(detail) =
             parse_str(r#"{"sentiment": {"range": {"gte": 0.5}}}"#).unwrap_err()
         else {
             panic!("expected a 422");
         };
         assert!(detail.contains("quarter"), "{detail}");
-        assert!(detail.contains("sentiment@#<ordinal>"), "{detail}");
+        assert!(detail.contains("sentiment@<key>"), "{detail}");
 
         // A pin naming no view of the group: the 404 an unknown view gets, and it says no more.
         let ApiError::Unknown(detail) =

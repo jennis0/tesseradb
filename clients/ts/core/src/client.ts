@@ -195,9 +195,9 @@ export class TesseraClient {
         worldAspect: s.world_aspect,
         tileScheme: s.tile_scheme,
         tile: s.tile,
-        // The four roster fields are one record on the wire and one object here — a plain view
-        // has all four null, and `group` alone decides which case this is (`views.md` §3.2).
-        roster: s.group === null ? null : {group: s.group, key: s.key!, ordinal: s.ordinal!, metadata: s.metadata ?? {}}
+        // The three roster fields are one record on the wire and one object here — a plain view
+        // has all three null, and `group` alone decides which case this is (`views.md` §3.2).
+        roster: s.group === null ? null : {group: s.group, key: s.key!, metadata: s.metadata ?? {}}
       })),
       // The orderings, so a client can offer previous-and-next without interpreting a key. Empty
       // is what a deployment of plain views alone publishes, and it wants the same rendering as
@@ -713,13 +713,12 @@ type RawMeta = {
     world_aspect: number | null;
     tile_scheme: TileScheme | null;
     tile: {z: number; x: number; y: number} | null;
-    /** The roster record (`views.md` §3.2); all four null together on a plain view. */
+    /** The roster record (`views.md` §3.2); all three null together on a plain view. */
     group: string | null;
     key: string | null;
-    ordinal: number | null;
     metadata: Record<string, ViewMetadataValue> | null;
   }[];
-  /** The view groups, each its view ids in ordinal order. Empty where there are none. */
+  /** The view groups, each its view ids in creation order. Empty where there are none. */
   groups: {name: string; members_of: string | null; views: string[]}[];
   declared_scalars: {
     name: string;
