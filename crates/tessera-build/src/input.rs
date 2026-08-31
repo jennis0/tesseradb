@@ -2610,3 +2610,87 @@ pub fn read_roster_table(
     }
     Ok(rows)
 }
+
+// ---------------------------------------------------------------------------------------------
+// The roster minted from the discriminator (`views.md` §3.1's third form)
+// ---------------------------------------------------------------------------------------------
+
+/// The distinct values of a group's discriminator column — the keys of a group that declares no
+/// roster at all (`views.md` §3.1).
+///
+/// **Sorted by key bytes, because the set is a [`BTreeSet`] and not the file's order.** Roster
+/// order is served order (decision 0113), so a mint that took appearance order would make the
+/// order of a rebuild depend on how the source's row groups happen to be arranged — two builds of
+/// one corpus serving one group's views in two orders.
+///
+/// A null is refused here for the reason [`selected_rows`] refuses one below: a row that names no
+/// view is in no view, and the mint is the first reader to see it.
+pub fn read_discriminator_keys(path: &Path, column: &str) -> Result<BTreeSet<String>> {
+    use arrow::array::{LargeStringArray, StringArray};
+
+    let file = File::open(path).map_err(|e| BuildError::io(path, e))?;
+    let builder =
+        ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| BuildError::parquet(path, e))?;
+    let schema = builder.schema().clone();
+    let root = schema
+        .column_with_name(column)
+        .map(|(i, _)| i)
+        .ok_or_else(|| BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "`fields.view = \"{column}\"` names the column whose distinct values are this \
+                 group's views, and this file has no column of that name. Its columns are: {}",
+                column_names(&schema)
+            ),
+        })?;
+    let projection = parquet::arrow::ProjectionMask::roots(builder.parquet_schema(), vec![root]);
+    let reader = builder
+        .with_projection(projection)
+        .with_batch_size(65_536)
+        .build()
+        .map_err(|e| BuildError::parquet(path, e))?;
+    let projected = arrow::array::RecordBatchReader::schema(&reader);
+    let idx = column_index(path, &projected, column)?;
+
+    let mut keys: BTreeSet<String> = BTreeSet::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| BuildError::arrow(path, e))?;
+        let values = batch.column(idx);
+        let null = || BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "the discriminator column '{column}' has a null in it, and a row that names no \
+                 view is in no view (views §3.1). This group's views are the distinct values of \
+                 that column, so a null is neither a view nor a row of one"
+            ),
+        };
+        if let Some(strings) = values.as_any().downcast_ref::<StringArray>() {
+            for i in 0..strings.len() {
+                if strings.is_null(i) {
+                    return Err(null());
+                }
+                keys.insert(strings.value(i).to_string());
+            }
+            continue;
+        }
+        if let Some(strings) = values.as_any().downcast_ref::<LargeStringArray>() {
+            for i in 0..strings.len() {
+                if strings.is_null(i) {
+                    return Err(null());
+                }
+                keys.insert(strings.value(i).to_string());
+            }
+            continue;
+        }
+        return Err(BuildError::Schema {
+            path: path.to_path_buf(),
+            detail: format!(
+                "the discriminator column '{column}' has type {:?}, and a view key is a string \
+                 (views §3.2's charset). Refused rather than coerced: a key read out of another \
+                 type would mint a view under a name nobody wrote",
+                values.data_type()
+            ),
+        });
+    }
+    Ok(keys)
+}

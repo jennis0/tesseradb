@@ -5912,6 +5912,76 @@ fn read_roster(group: &ViewGroup, table: &RosterTable) -> Result<Vec<RosterView>
     Ok(roster)
 }
 
+/// Mint a roster from the distinct values of a group's discriminator (`views.md` §3.1's third
+/// form): one view per distinct value, carrying no metadata and no gate of its own.
+///
+/// **The mint produces ordinary roster records**, which is the whole of the design: everything
+/// below this point — the registry, the manifest's `GroupDescriptor`, the create and drop verbs,
+/// the join rule — sees a roster it cannot tell from a written one. A minted group is a group
+/// whose keys were read from the data rather than typed.
+///
+/// Three rules the declaration does not decide, chosen here as recoverable defaults (architect's
+/// choices, 2026-08-31; `views.md` §3.1 records them):
+///
+/// - **Key-byte sorted order**, so the served order — roster order, since decision 0113 — is a
+///   property of the key set rather than of how the source's rows happen to be arranged.
+/// - **A value that cannot be a key is a refusal**, not a skip and not a mangling: a skipped
+///   value's rows would belong to no view, which is the refusal a stray key already earns.
+/// - **Every minted view takes the group's own gate**, there being no roster record on which a
+///   narrower one could be written.
+///
+/// **`scanned` is the pass's memo of what each file has already said**, keyed by the file and the
+/// column read from it. The mint is a full pass over a *points* file — the largest input a group
+/// has — and it is asked for once per group whose roster is this one: an owner and every `members`
+/// group naming it resolve to the same owner and would each pay for the same scan.
+fn mint_roster(
+    group: &ViewGroup,
+    scanned: &mut HashMap<(PathBuf, String), BTreeSet<String>>,
+) -> Result<Vec<RosterView>> {
+    let object = format!("view group '{}'", group.name);
+    let source = group
+        .source
+        .as_ref()
+        .expect("a group declaring no roster declares a source, or the declaration was refused");
+    let column = group.fields.of("view");
+    let keys = match scanned.entry((source.clone(), column.to_string())) {
+        std::collections::hash_map::Entry::Occupied(held) => held.into_mut(),
+        std::collections::hash_map::Entry::Vacant(empty) => {
+            empty.insert(crate::input::read_discriminator_keys(source, column)?)
+        }
+    };
+    if keys.is_empty() {
+        return Err(declaration_error(format!(
+            "{object}: {} carries no rows, so this group has no views. Its views are the distinct \
+             values of the discriminator column '{column}', and a group with no views is a \
+             declaration promising coordinate systems the bundle would not carry (views §3.1)",
+            source.display()
+        )));
+    }
+    keys.iter()
+        .map(|key| {
+            tessera_types::view::check_view_key(key).map_err(|detail| {
+                declaration_error(format!(
+                    "{object}: the discriminator column '{column}' carries the value '{key}', and \
+                     this group declares no roster, so every distinct value of that column is a \
+                     view key — {detail}. Refused rather than skipped or rewritten: a value this \
+                     build did not mint a view for is one whose rows belong to no view (views \
+                     §3.1, §3.2). Write `[view_group.views]` to name the views instead"
+                ))
+            })?;
+            Ok(RosterView {
+                key: key.clone(),
+                // As form B: the points are the group's own file, selected by the discriminator.
+                source: None,
+                // No roster record, so no gate of its own — the group's is the one it takes,
+                // applied by the registry below.
+                visibility: None,
+                metadata: BTreeMap::new(),
+            })
+        })
+        .collect()
+}
+
 impl Config {
     /// Every coordinate system a build materialises, in the registry's order
     /// ([`BuildView`], `views.md` §7).
@@ -5920,6 +5990,9 @@ impl Config {
     /// yet enumerate is refused rather than silently dropped: a bundle whose declaration promises
     /// coordinate systems it does not carry is the failure this refusal exists to prevent.
     pub fn build_views(&self) -> Result<Vec<BuildView>> {
+        // What each points file has already said about its discriminator, so a group's source is
+        // scanned once however many groups mint their roster from it ([`mint_roster`]).
+        let mut scanned: HashMap<(PathBuf, String), BTreeSet<String>> = HashMap::new();
         let mut registry: Vec<BuildView> = self
             .views
             .iter()
@@ -5957,19 +6030,11 @@ impl Config {
             let roster: Vec<RosterView> = match &owner.roster {
                 Roster::Inline(views) => views.clone(),
                 Roster::Table(table) => read_roster(owner, table)?,
-                // ⊘ A discriminator group's keys are the distinct values of a column, discovered
-                // as the points are read. Refused rather than built empty — a group with no views
-                // is a declaration promising coordinate systems the bundle would not carry.
-                Roster::Discriminator => {
-                    return Err(declaration_error(format!(
-                        "view group '{}': ⊘ its roster is {} and the build enumerates a roster it \
-                         can read — `[[view_group.view]]` blocks, or a `[view_group.views]` table \
-                         — rather than discovering keys from the points (views §3.1, §7). Write \
-                         the views out meanwhile",
-                        owner.name,
-                        owner.form()
-                    )))
-                }
+                // A group declaring no roster has its keys minted from the distinct values of
+                // its own discriminator, read here for the reason the table is: the registry is
+                // what pass two iterates, and a minted key is a coordinate system this build
+                // materialises (`views.md` §3.1, §7).
+                Roster::Discriminator => mint_roster(owner, &mut scanned)?,
             };
             let discriminator_field = group.fields.of("view").to_string();
             // Sorted once per group, not once per view: it is the same roster each of its views

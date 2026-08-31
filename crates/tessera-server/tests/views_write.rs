@@ -49,29 +49,38 @@ fn position(view: &str, e: u64) -> (f64, f64) {
     }
 }
 
-fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>) {
-    let schema = Arc::new(Schema::new(vec![
+/// One view's points. `key` is the discriminator value every row carries, for the group whose
+/// points are one file behind `fields.view`; `None` is a file that *is* the view.
+fn write_points(path: &Path, view: &str, ids: std::ops::Range<u64>, key: Option<&str>) {
+    let mut fields = vec![
         Field::new("entity_id", DataType::UInt64, false),
         Field::new("x", DataType::Float64, false),
         Field::new("y", DataType::Float64, false),
         // One declared attribute, so the join rule's entity-scoped arm has a column to disagree
         // about (`views.md` §4).
         Field::new("score", DataType::Int32, true),
-    ]));
+    ];
+    if key.is_some() {
+        fields.push(Field::new("quarter", DataType::Utf8, false));
+    }
+    let schema = Arc::new(Schema::new(fields));
     let ids: Vec<u64> = ids.collect();
     let xs: Vec<f64> = ids.iter().map(|&e| position(view, e).0).collect();
     let ys: Vec<f64> = ids.iter().map(|&e| position(view, e).1).collect();
     let scores: Vec<i32> = ids.iter().map(|&e| e as i32).collect();
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(UInt64Array::from(ids)),
-            Arc::new(Float64Array::from(xs)),
-            Arc::new(Float64Array::from(ys)),
-            Arc::new(arrow::array::Int32Array::from(scores)),
-        ],
-    )
-    .unwrap();
+    let mut columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(UInt64Array::from(ids.clone())),
+        Arc::new(Float64Array::from(xs)),
+        Arc::new(Float64Array::from(ys)),
+        Arc::new(arrow::array::Int32Array::from(scores)),
+    ];
+    if let Some(key) = key {
+        columns.push(Arc::new(arrow::array::StringArray::from(vec![
+            key;
+            ids.len()
+        ])));
+    }
+    let batch = RecordBatch::try_new(schema.clone(), columns).unwrap();
     let mut w = ArrowWriter::try_new(std::fs::File::create(path).unwrap(), schema, None).unwrap();
     w.write(&batch).unwrap();
     w.close().unwrap();
@@ -106,12 +115,12 @@ fn build_fixture_bundle(dir: &Path) -> std::path::PathBuf {
     let pairs = dir.join("pairs.parquet");
     write_pairs_n(&pairs, ENTITIES);
     let world_points = dir.join("world.parquet");
-    write_points(&world_points, "world", WORLD);
+    write_points(&world_points, "world", WORLD, None);
     let mut views = vec![view_args("world", &world_points, &pairs)];
     for group in ["quarter", "quarter_map"] {
         let id = format!("{group}:2026-Q1");
         let points = dir.join(format!("{group}-q1.parquet"));
-        write_points(&points, &id, Q1);
+        write_points(&points, &id, Q1, None);
         views.push(view_args(&id, &points, &pairs));
     }
     let roster = |with_metadata: bool| {
@@ -1186,5 +1195,192 @@ async fn delete_dangling_deletes_only_the_entities_this_view_alone_held() {
             .unwrap(),
         before,
         "the same identity, joined to a new view — not a fresh entity, which is what a deletion          would have made of it"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// A group whose roster was minted (`views.md` §3.1's third form)
+// ---------------------------------------------------------------------------------------------
+
+/// The same fixture as [`build_fixture_bundle`]'s `quarter`, from a declaration that names **no
+/// keys at all** — and built the way the binary builds one, through `build_views` and
+/// `group_registry`, so what the service opens is the mint's own output rather than a descriptor
+/// written here (`views.md` §3.1, §7).
+fn build_minted_bundle(dir: &Path) -> std::path::PathBuf {
+    let pairs = dir.join("pairs.parquet");
+    write_pairs_n(&pairs, ENTITIES);
+    write_points(&dir.join("world.parquet"), "world", WORLD, None);
+    write_points(
+        &dir.join("quarter.parquet"),
+        "quarter:2026-Q1",
+        Q1,
+        Some("2026-Q1"),
+    );
+    let config_path = dir.join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"
+[sources]
+world   = "world.parquet"
+quarter = "quarter.parquet"
+
+[defaults]
+allocation_view = "world"
+
+[[view]]
+name             = "world"
+source           = "world"
+extent           = { min = 0.0, max = 1000.0 }
+point_visibility = { default = "public" }
+
+[[view_group]]
+name             = "quarter"
+extent           = { min = 0.0, max = 1000.0 }
+source           = "quarter"
+fields           = { view = "quarter" }
+point_visibility = { default = "public" }
+
+[[attribute]]
+name   = "score"
+type   = "i32"
+render = true
+"#,
+    )
+    .unwrap();
+    let config = tessera_build::config::Config::parse(&config_path, &Default::default())
+        .expect("the declaration parses");
+    let registry = config.build_views().expect("the roster is minted");
+    let anchor = config.anchor_view(&registry).expect("the anchor is declared");
+    let views: Vec<ViewArgs> = registry
+        .iter()
+        .map(|view| ViewArgs {
+            visibility: view.visibility.clone(),
+            view_id: view.id.clone(),
+            projection: view.projection,
+            extent: extent(),
+            points: view.source.clone().expect("every view names its points"),
+            point_fields: view.fields.clone(),
+            select: view.select.clone(),
+            access: tessera_build::config::AccessInput::relation(pairs.clone()),
+        })
+        .collect();
+    let groups = config.group_registry(&registry, &views);
+    let out = dir.join("bundle");
+    build(&BuildArgs {
+        views,
+        anchor,
+        groups,
+        scoped_attributes: Vec::new(),
+        attribute_sources: tessera_build::config::AttributeSource::over(
+            dir.join("world.parquet"),
+            &config.schema,
+        ),
+        out: out.clone(),
+        limit: None,
+        identity_key: test_key(),
+        identity_key_hex: TEST_KEY_HEX.to_string(),
+        idset: FIXTURE_IDSET,
+        shard_id: 0,
+        layers: Vec::new(),
+        layer_inputs: Vec::new(),
+        scoped_layers: Default::default(),
+        mint_external_ids: true,
+        emit_oracle_pairs: false,
+        batch_items: None,
+        memory_budget: None,
+        band_rows: None,
+        schema: config.schema,
+    })
+    .expect("the minted build succeeds");
+    out
+}
+
+/// **A minted group is a group** (decision 0091: a build is ingest into an empty database). Its
+/// roster records were read off the data rather than written into the declaration, and nothing
+/// above the mint may be able to tell: the create verb, the drop and the join rule work on it
+/// exactly as they do on a declared roster, and an unknown key is the same 404 — there is no
+/// first-batch-creates route here, the view coming into being through the create operation like
+/// any other (`views.md` §3.2).
+#[tokio::test]
+async fn a_minted_group_takes_a_create_a_drop_and_a_join() {
+    let tmp = TempDir::new().unwrap();
+    build_minted_bundle(tmp.path());
+    let mut served = open(tmp).await;
+
+    // The minted key is served like a declared one, carrying no record of its own.
+    let document = meta(&served).await;
+    assert_eq!(
+        roster_of(&document, "quarter:2026-Q1")
+            .expect("the minted view is served")["metadata"],
+        json!({})
+    );
+
+    // **A batch naming a key the roster does not carry is a 404**, minted group or not.
+    assert_eq!(
+        ingest(
+            &served,
+            "unknown-key",
+            "quarter:2026-Q9",
+            &[(b"nobody".to_vec(), 10.0, 10.0, "0", Some(1))]
+        )
+        .await
+        .status(),
+        404
+    );
+
+    // **Create.** The group declares no metadata, so the record is empty — and the view is a view
+    // from the acknowledgement.
+    assert_eq!(
+        create(&served, "quarter", "2026-Q2", json!({})).await.status(),
+        201
+    );
+    reauthorise(&mut served).await;
+    assert!(view_ids(&meta(&served).await).contains(&"quarter:2026-Q2".to_string()));
+    assert_eq!(viewport(&served, "quarter:2026-Q2").await.status(), 200);
+
+    // **Join.** An entity the build already knows joins the new view by its external id, and is
+    // placed there with its own geometry — the same identity, a second row space.
+    let known = external_id_of(3);
+    let resp = ingest(
+        &served,
+        "join-minted",
+        "quarter:2026-Q2",
+        &[(known.clone(), 400.0, 400.0, "0", Some(3))],
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "a join into a minted group's view");
+    let joined = resp.json::<Value>().await.unwrap()["tessera_ids"][0]
+        .as_u64()
+        .unwrap();
+    flush(&served).await;
+    reauthorise(&mut served).await;
+    let in_q2 = points(&served, "quarter:2026-Q2").await;
+    assert_eq!(in_q2.len(), 1, "the joined row, and only it");
+    assert_eq!(in_q2[0].0, joined, "the row is the one the acknowledgement named");
+    let in_world: Vec<u64> = points(&served, "world").await.iter().map(|p| p.0).collect();
+    assert!(
+        in_world.contains(&joined),
+        "the same identity in two views, not a fresh entity in one: {joined} is not in \
+         {in_world:?}"
+    );
+    let resp = ingest(
+        &served,
+        "join-minted-world",
+        "world",
+        &[(known, 60.0, 60.0, "0", Some(3))],
+    )
+    .await;
+    assert_eq!(resp.status(), 409, "the entity is alive in `world` already");
+
+    // **Drop**, and the key is burnt — on a minted view exactly as on a declared one.
+    let body = drop_view(&served, "quarter", "2026-Q1", false).await;
+    assert_eq!(body["deleted"], 0);
+    reauthorise(&mut served).await;
+    assert!(!view_ids(&meta(&served).await).contains(&"quarter:2026-Q1".to_string()));
+    assert_eq!(viewport(&served, "quarter:2026-Q1").await.status(), 404);
+    assert_eq!(
+        create(&served, "quarter", "2026-Q1", json!({})).await.status(),
+        409,
+        "a dropped key is never reused"
     );
 }

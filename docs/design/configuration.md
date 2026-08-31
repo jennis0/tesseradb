@@ -37,9 +37,8 @@ each naming what is absent per
   is checked at parse against the plugin that will evaluate it, and gates the view for every
   principal whose satisfied terms it does not meet.
 - **A `[[view_group]]` builds** (`views.md` §7): every plain view and every view of every group is
-  materialised over one entity space, whichever roster form declared it. What still refuses by
-  name is a group with no roster at all, whose keys would be minted from the discriminator's
-  distinct values.
+  materialised over one entity space, whichever roster form declared it — the roster-less form
+  included, since 2026-08-31, its keys minted from the discriminator's distinct values.
 
 ⊘ A `title` on a view, an attribute or a vocabulary is compiled and **not yet published** — the
 manifest carries no slot for one, and adding three is a contracts change; a level's title and a
@@ -147,6 +146,25 @@ beside inline `artifacts` is. A group declaring **neither** has its views minted
 discriminator's distinct values and carries no metadata; it needs the group-level `source` that the
 other two spellings of that arrangement need. **`[defaults].source` does not reach a group**: which
 of those arrangements a defaulted file meant is not something a default can decide.
+
+**The roster-less form declares no keys at all**, which is its whole surface: name the group's
+`source` and its `fields.view`, write neither `[[view_group.view]]` nor `[view_group.views]`, and
+the build takes one view per distinct value of that column. Five things are refused, each naming
+what it read (views §3.1): a value outside the key charset; a `metadata` line, there being no
+roster record for a per-view value to sit on; a source with no rows, which would leave the group
+with no views; a null in the discriminator, a row that names no view being in no view; and a
+discriminator column that is not a string, a key read out of another type being a view under a name
+nobody wrote. The keys are served in **key-byte order**, and every minted view takes the
+group's own `visibility`; both are recoverable defaults rather than guarantees.
+
+```toml
+[[view_group]]                      # the roster-less form: the data names the views
+name             = "quarter"
+extent           = { x = [-40.0, 40.0], y = [-40.0, 40.0] }
+source           = "quarter_papers"
+fields           = { view = "quarter" }
+point_visibility = { field = "access", default = "public" }
+```
 
 A view's `name` and a group's `name` and keys take the **column-name charset**, and `:`, `#` and
 `@` are reserved out of them (views §3.2): the first two build a view id and the third pins a
@@ -1327,6 +1345,13 @@ disclosing nothing.
 
 
 ## Appendix R — review trail
+
+**2026-08-31 — a `[[view_group]]` may declare no roster at all.** The third arrangement this
+surface already described — the group's own `source` behind `fields.view`, with neither roster form
+— builds, its keys minted from the discriminator's distinct values (owner ruling; `views.md` §3.1,
+§7). No key is added and none changes meaning: what moves is a refusal becoming a build, and three
+narrower refusals taking its place — an unusable key value, a `metadata` line with no record to sit
+on, and a source with no rows.
 
 **2026-08-31 — a view's `visibility` is a gate, not a refusal.** `views.md` §6 is built, so the two
 places this document said a label was refused at parse now say what a label does: it is resolved

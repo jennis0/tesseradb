@@ -1,8 +1,13 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r17) — **a shape layer canonicalises per view** (r17, 2026-08-31; spec §2's
-marker, [decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)): the
+**Status:** Normative (r18) — **a group with no roster mints its views** (r18, 2026-08-31, owner
+ruling: implement it): a `[[view_group]]` declaring neither roster form takes the distinct values
+of its discriminator column as its keys, one view per value, sorted by key bytes. The minted
+records are ordinary roster records, so nothing above the mint can tell them from written ones;
+§3.1 carries the four rules the declaration does not settle. **a shape layer canonicalises per
+view** (r17, 2026-08-31; spec §2's marker,
+[decision 0111](../decisions/0111-a-shape-spans-projected-views-through-wgs84.md)): the
 three consumers that read one frame for a layer's several views each take a frame per view, the two
 spans 0111 refuses are refused, and `test_corpora/multiview` carries a layer over two frames.
 **Ordinals are removed** (r16, 2026-08-31, owner ruling): a view of a
@@ -126,8 +131,9 @@ non-sentinel, never a stored set.
 > join at ingest is the rule spec §4 states — its arms refusing, its joining row carrying geometry
 > and nothing else.
 >
-> What remains is a group whose views are **minted from a discriminator** with no roster at all
-> (spec §3.1), and the serving surfaces a scoped **layer** would need. A
+> **A group with no roster at all builds too** (2026-08-31): its keys are minted from the distinct
+> values of the discriminator, and everything above the mint sees the roster a table would have
+> given it (spec §3.1, §7). What remains is the serving surfaces a scoped **layer** would need. A
 > scoped **attribute** is served: since 2026-08-31 a numeric or keyword family is a filter operand
 > carrying its scope, and a leaf reads the view the request names or the one it pins (spec §5,
 > contracts §3.2 r55) — what remains of it is a category or text family, and `render`, which spec
@@ -250,6 +256,31 @@ the views; a row naming a key the table does not carry is refused, and a listed 
 is an empty view. A group declaring neither has views minted from the discriminator's distinct
 values and carries no metadata. Declaring both is refused, as `source` beside inline `artifacts`
 is.
+
+**A group declaring neither form mints its views from the data**: the keys are the distinct values
+of `fields.view` in the group's own source, one view per value. A group whose views carry no
+metadata and no gate of their own is exactly the group with nothing to write a roster about. Four
+rules the declaration does not settle are architect's choices (2026-08-31), and they are
+**recoverable defaults** rather than invariants — each may be reruled without a migration, the
+artifacts being rebuilt:
+
+- **The order is the keys' own bytes**, sorted, rather than the order the values appear in the
+  source. Roster order is served order (§3.2, decision 0113), so appearance order would make what a
+  client walks a property of how the source's row groups happen to be arranged, and two builds of
+  one corpus could serve one group's views in two orders.
+- **A distinct value outside the key charset refuses the build**, naming the value and the column.
+  Not skipped: a value no view was minted for is one whose rows belong to no view, which is the
+  refusal a stray key already earns under form B. Not rewritten into a legal key either, which
+  would serve a view under a name nobody wrote.
+- **`metadata` is refused at parse**, because there is no roster record for a per-view value to sit
+  on and nothing else could supply one. A group wanting metadata writes a roster.
+- **Every minted view takes the group's own `visibility`.** A narrower per-view gate is a roster
+  record's field, and there are no roster records to carry one.
+
+**A source with no rows mints no views and is refused, naming the group** — what an empty roster
+table earns and for the same reason: a group with no views is a declaration promising coordinate
+systems the bundle would not carry. A null in the discriminator is refused on the same read, a row
+that names no view being in no view.
 
 `source` and `fields` keep `configuration.md` §8's rule: the map says where, never whether.
 Under form B the located fields are the view's own — `entity_id`, the coordinates,
@@ -725,9 +756,15 @@ need arrives the design is in git.
 > empty view. A group's `auto` frame is surveyed over every view's source and fitted once, per
 > spec §3.1's one-frame rule.
 >
-> **⊘ What a build still cannot enumerate is a group with no roster at all** — its keys minted
-> from the discriminator's distinct values — which refuses by name. Populating a view at ingest —
-> spec §4's join rule — is built (2026-08-31), §4's own markers saying what remains inside it.
+> **A group with no roster at all is built** (2026-08-31, owner ruling): its keys are minted from
+> the distinct values of the discriminator, read before pass two by the route a roster table takes
+> and sorted by key bytes. What the mint produces is **ordinary roster records**, so the registry,
+> the manifest's group descriptor and every verb above them cannot tell a minted roster from a
+> written one — a minted group takes a create, a drop and a join at ingest exactly as a declared
+> one does (decision 0091), and a batch naming a key it does not carry is the same 404 any unknown
+> key gets. Spec §3.1 states the four rules the declaration does not settle. Populating a view at
+> ingest — spec §4's join rule — is built (2026-08-31), §4's own markers saying what remains inside
+> it.
 >
 > **The registry's order is the declaration's, block kind by block kind**: the plain `[[view]]`
 > blocks in declaration order, then each `[[view_group]]` in declaration order with its views in
@@ -994,6 +1031,20 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r18 (2026-08-31)** — the last roster form is built: a group declaring neither
+  `[[view_group.view]]` blocks nor a `[view_group.views]` table has its keys minted from the
+  distinct values of its discriminator column (owner ruling: implement it). The design content is
+  in §3.1's four rules, which are the points the declaration leaves open — order, an unusable
+  value, metadata and the gate — and they are marked as recoverable architect's choices rather than
+  as invariants. Two of them a principal does observe: roster order **is** served order (§3.2), and
+  the gate decides which principals may reach a view at all. Neither is a **disclosure**. The
+  order is a deployment constant, the same list for every principal, computed from the declaration
+  and its sources rather than from anything inside `M_auth`; and a minted view taking the group's
+  own gate is exactly what a roster record carrying no `visibility` already does, so no view is
+  reachable that a written roster would have closed. They are recoverable because a later ruling
+  costs a rebuild, not because nothing sees them. The mint hooks in where the roster table is read,
+  so it produces roster records and forks no downstream path; §7's marker is now a description
+  rather than a gap, and the register gains no row.
 - **r17 (2026-08-31)** — **a shape layer is canonicalised per view, in each view's own frame**
   (decision 0111), and spec §2's marker and §11's contracts row record it. `canonical_shapes` takes
   a frame per view rather than one projection and one extent for every view of a layer;
