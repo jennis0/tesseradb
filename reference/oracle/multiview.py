@@ -50,11 +50,29 @@ So the corpus is built so that each half of that sentence has something to disag
   column. An entity's value differs by quarter and about a sixth of each view's entities carry
   none, so reading the wrong view's column is observable in both directions.
 
-## What it deliberately does not carry
+* **A gated group, `sealed`** (§6): two more views over the same entity space, behind a group
+  gate whose label is a **real access label** — the compartment term `cc4`, which some principals
+  hold and others do not. The gate is the corpus's own vocabulary rather than a term invented for
+  it, because a gate resolves through the *dictionary*: a label naming a descriptor no item
+  carries is a label no principal could ever satisfy, so a fixture that invented one would test
+  the fail-closed path and nothing else. Its own scoped attribute, `heat`, is what makes "the
+  whole family is undeclared" (§5) a case rather than a sentence.
 
-**No gate.** Every `visibility` here is `public`, because the gate is unbuilt (`views.md` §6) and
-the visible-view set is another track's. A fixture carrying a gated view would be a corpus whose
-expected answers no implementation can produce.
+## What the gate is designed to make assertable
+
+A gate decides **which views exist for a principal**, and nothing about which items they hold. The
+two are only distinguishable where they disagree, so the gate term is one compartment and the
+principal who passes it holds three: inside `sealed` that principal sees every entity its mask
+admits, from all three compartments, and not the gate's own. An implementation that treated the
+gate as a second row filter serves a strict subset here and is caught by the same equality the
+public views are held to.
+
+The other half is that a principal who fails it can find no trace of the group: it is absent from
+`/v1/meta`'s roster whole, a viewer verb naming one of its views answers exactly as it answers a
+name nobody declared, and both spellings of a leaf over its scoped attribute take the ordinary
+unknown-column refusal that names no group.
+
+## What it deliberately does not carry
 
 **No layers, no keyword or text column, and no `derived` vocabulary.** Each is covered against the
 catalogue, in entity space, where views change nothing about them. A **`derived`** value set would
@@ -124,8 +142,26 @@ GROUP = "quarter"
 QUARTER_KEYS = ("2026-Q1", "2026-Q2", "2026-Q3")
 GROUP_EXTENT = (-40.0, 40.0, -40.0, 40.0)
 
-#: Every view's id, in manifest order.
+#: The **gated** group (§6), its keys and its frame. Two views, so that "the group's whole roster
+#: goes with it" is a claim about a set rather than about one view.
+SEALED_GROUP = "sealed"
+SEALED_KEYS = ("2026-H1", "2026-H2")
+SEALED_EXTENT = (-100.0, 100.0, -100.0, 100.0)
+
+#: The group's gate, and it is one of the corpus's own compartment terms. A gate resolves through
+#: the **dictionary** — the plugin turns the label into descriptors and those into term ids — so a
+#: label naming a descriptor no item carries is satisfied by nobody, whatever a principal was
+#: granted. Using a real compartment is also what keeps the gate distinguishable from a mask: the
+#: principal who passes it holds three compartments and must see all three inside the group.
+GATE_LABEL = "cc4"
+
+#: The ungated views, in manifest order — what every case that predates the gate iterates.
 VIEW_IDS = (WORLD_VIEW, *(f"{GROUP}:{key}" for key in QUARTER_KEYS))
+
+#: The gated group's views, and every view of the corpus. `ALL_VIEW_IDS` is what a principal who
+#: passes the gate reaches, and `VIEW_IDS` is what one who fails it reaches.
+SEALED_VIEW_IDS = tuple(f"{SEALED_GROUP}:{key}" for key in SEALED_KEYS)
+ALL_VIEW_IDS = (*VIEW_IDS, *SEALED_VIEW_IDS)
 
 SEED = 20260831
 _FX_SEED = SEED + 1
@@ -143,6 +179,10 @@ DEPLOYMENT_NAME = "multiview-tessera.toml"
 
 def quarter_points_name(key: str) -> str:
     return f"multiview-{key}.parquet"
+
+
+def sealed_points_name(key: str) -> str:
+    return f"multiview-sealed-{key}.parquet"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -179,6 +219,41 @@ def quarter_members(key: str) -> list[int]:
     return [i for i in range(N_ITEMS) if in_quarter(i, key)]
 
 
+#: The gated group's memberships, residues again and for [`_MEMBERSHIP`]'s reason: a compartment
+#: is a contiguous block, so a residue meets every one of them and the gate's views are as
+#: decorrelated from the mask as the public ones are.
+_SEALED_MEMBERSHIP = {
+    "2026-H1": lambda i: i % 4 != 0,
+    "2026-H2": lambda i: i % 7 != 0,
+}
+
+
+def in_sealed(source_id: int, key: str) -> bool:
+    return _SEALED_MEMBERSHIP[key](source_id)
+
+
+def sealed_members(key: str) -> list[int]:
+    """The source ids in one view of the gated group, ascending."""
+    return [i for i in range(N_ITEMS) if in_sealed(i, key)]
+
+
+def members_of_view(view_id: str) -> list[int]:
+    """The source ids one view holds — the corpus's own answer, for any view of either group.
+
+    `world` holds every entity; each group's view holds its own residue. Used by [`verify`] so
+    that a view added to one of the groups is checked by construction rather than by remembering
+    to extend a list.
+    """
+    if view_id == WORLD_VIEW:
+        return list(range(N_ITEMS))
+    group, _, key = view_id.partition(":")
+    if group == GROUP:
+        return quarter_members(key)
+    if group == SEALED_GROUP:
+        return sealed_members(key)
+    raise KeyError(f"this corpus declares no view '{view_id}'")
+
+
 def _hash(*parts: object) -> int:
     return int(hashlib.sha256(":".join(str(p) for p in parts).encode()).hexdigest()[:16], 16)
 
@@ -196,6 +271,22 @@ def sentiment_of(source_id: int, key: str) -> float | None:
     if not in_quarter(source_id, key):
         return None
     h = _hash("sentiment", key, source_id)
+    if h % 5 == 0:
+        return None
+    return ((h >> 8) % 2001 - 1000) / 1024.0
+
+
+def heat_of(source_id: int, key: str) -> float | None:
+    """The **gated** group's scoped value for one `(entity, view)`, or `None` where it has none.
+
+    [`sentiment_of`] over the other group, with a different hash input so the two families cannot
+    agree by accident. It exists so that "for a principal who fails the gate the whole family is
+    undeclared" (§5) is a case with a real column behind it: a refusal over an attribute that was
+    never built would prove nothing about the collapse.
+    """
+    if not in_sealed(source_id, key):
+        return None
+    h = _hash("heat", key, source_id)
     if h % 5 == 0:
         return None
     return ((h >> 8) % 2001 - 1000) / 1024.0
@@ -243,9 +334,7 @@ def _geometry(view_id: str) -> list[tuple[float, float]]:
     push a point onto or across the frame's boundary — the build reports edge placements and the
     fixture would rather have none than reason about them.
     """
-    x_min, x_max, y_min, y_max = (
-        WORLD_EXTENT if view_id == WORLD_VIEW else GROUP_EXTENT
-    )
+    x_min, x_max, y_min, y_max = extent_of(view_id)
     mx = (x_max - x_min) / 65536.0
     my = (y_max - y_min) / 65536.0
     rng = random.Random(_hash(_GEOMETRY_SEED, view_id) & 0xFFFF_FFFF)
@@ -270,6 +359,8 @@ def _schema_toml() -> str:
     sources = [f'{WORLD_VIEW:<16}= "{POINTS_NAME}"']
     for key in QUARTER_KEYS:
         sources.append(f'{_source_name(key):<16}= "{quarter_points_name(key)}"')
+    for key in SEALED_KEYS:
+        sources.append(f'{_source_name(key):<16}= "{sealed_points_name(key)}"')
 
     quarters = "".join(
         f"""
@@ -279,6 +370,15 @@ source = "{_source_name(key)}"
 label  = "{key}"
 """
         for key in QUARTER_KEYS
+    )
+
+    sealed_views = "".join(
+        f"""
+[[view_group.view]]
+key    = "{key}"
+source = "{_source_name(key)}"
+"""
+        for key in SEALED_KEYS
     )
 
     mood_values = "".join(f"  {key} = {code}\n" for key, code in sorted(MOOD_CODES.items()))
@@ -352,6 +452,25 @@ type       = "category"
 vocabulary = "mood"
 scope      = {{ group = "{GROUP}" }}
 index      = true
+
+# The gated group (`views.md` §6). Its `visibility` is a real access label — a compartment term
+# some principals hold and others do not — because a gate resolves through the dictionary and a
+# label naming a descriptor no item carries is satisfied by nobody. A third frame again, so a
+# reader that took one group's extent for the other is caught here as it is between the first two.
+[[view_group]]
+name             = "{SEALED_GROUP}"
+extent           = {{ x = [{SEALED_EXTENT[0]}, {SEALED_EXTENT[1]}], \
+y = [{SEALED_EXTENT[2]}, {SEALED_EXTENT[3]}] }}
+visibility       = "{GATE_LABEL}"
+point_visibility = {{ field = "access", default = "public" }}
+{sealed_views}
+# The gated group's own scoped attribute: what a principal who fails the gate must find
+# undeclared, bare and pinned alike (`views.md` §5).
+[[attribute]]
+name  = "heat"
+type  = "f32"
+scope = {{ group = "{SEALED_GROUP}" }}
+index = true
 """
 
 
@@ -392,6 +511,22 @@ def write_corpus(work_dir: Path) -> None:
         work_dir / POINTS_NAME,
     )
 
+    for key in SEALED_KEYS:
+        members = sealed_members(key)
+        positions = _geometry(f"{SEALED_GROUP}:{key}")
+        pq.write_table(
+            pa.table(
+                {
+                    "entity_id": pa.array(members, type=pa.uint64()),
+                    "x": pa.array([positions[i][0] for i in members], type=pa.float32()),
+                    "y": pa.array([positions[i][1] for i in members], type=pa.float32()),
+                    "access": pa.array([access[i] for i in members], type=pa.string()),
+                    "heat": pa.array([heat_of(i, key) for i in members], type=pa.float32()),
+                }
+            ),
+            work_dir / sealed_points_name(key),
+        )
+
     for key in QUARTER_KEYS:
         members = quarter_members(key)
         positions = _geometry(f"{GROUP}:{key}")
@@ -430,9 +565,11 @@ def points_path(view_id: str, work_dir: Path | None = None) -> Path:
     if view_id == WORLD_VIEW:
         return work_dir / POINTS_NAME
     group, _, key = view_id.partition(":")
-    if group != GROUP or key not in QUARTER_KEYS:
-        raise KeyError(f"this corpus declares no view '{view_id}'")
-    return work_dir / quarter_points_name(key)
+    if group == GROUP and key in QUARTER_KEYS:
+        return work_dir / quarter_points_name(key)
+    if group == SEALED_GROUP and key in SEALED_KEYS:
+        return work_dir / sealed_points_name(key)
+    raise KeyError(f"this corpus declares no view '{view_id}'")
 
 
 def extent_of(view_id: str) -> tuple[float, float, float, float]:
@@ -442,7 +579,9 @@ def extent_of(view_id: str) -> tuple[float, float, float, float]:
     to decode the file the bundle was built from would be asking the artefact under test what its
     own inputs meant.
     """
-    return WORLD_EXTENT if view_id == WORLD_VIEW else GROUP_EXTENT
+    if view_id == WORLD_VIEW:
+        return WORLD_EXTENT
+    return SEALED_EXTENT if view_id.startswith(f"{SEALED_GROUP}:") else GROUP_EXTENT
 
 
 def _build_argv(work_dir: Path, bundle_root: Path) -> list[str]:
@@ -474,10 +613,14 @@ def recipe(work_dir: Path, bundle_root: Path) -> dict:
         "recipe_version": 1,
         "n_items": N_ITEMS,
         "compartments": COMPARTMENTS,
-        "views": list(VIEW_IDS),
+        "views": list(ALL_VIEW_IDS),
         "world_extent": list(WORLD_EXTENT),
         "group_extent": list(GROUP_EXTENT),
-        "membership": {key: len(quarter_members(key)) for key in QUARTER_KEYS},
+        "sealed_extent": list(SEALED_EXTENT),
+        "gate_label": GATE_LABEL,
+        "membership": {
+            view: len(members_of_view(view)) for view in ALL_VIEW_IDS if view != WORLD_VIEW
+        },
         "seed": SEED,
         "fx_seed": _FX_SEED,
         "geometry_seed": _GEOMETRY_SEED,
@@ -570,15 +713,16 @@ def verify(bundle: Bundle) -> VerificationReport:
         raise ValueError(f"the bundle holds {len(entity_of)} items, not {N_ITEMS}")
 
     views = {}
-    for view_id in VIEW_IDS:
+    for view_id in ALL_VIEW_IDS:
         views[view_id] = len(bundle.row_entity_ids(view_id))
     if views[WORLD_VIEW] != N_ITEMS:
         raise ValueError(f"'{WORLD_VIEW}' holds {views[WORLD_VIEW]} rows, not every entity")
-    for key in QUARTER_KEYS:
-        expected = len(quarter_members(key))
-        got = views[f"{GROUP}:{key}"]
-        if got != expected:
-            raise ValueError(f"view '{GROUP}:{key}' holds {got} rows, not {expected}")
+    # Every view of either group, the gated one included: a gate decides who may reach a view and
+    # changes nothing about what it holds, so the bundle's rows are the corpus's either way.
+    for view_id in ALL_VIEW_IDS:
+        expected = len(members_of_view(view_id))
+        if views[view_id] != expected:
+            raise ValueError(f"view '{view_id}' holds {views[view_id]} rows, not {expected}")
 
     # The compartments, as the *bundle's* postings hold them, joined back to the planted labels.
     compartments: dict[str, set[int]] = {}
@@ -597,19 +741,22 @@ def verify(bundle: Bundle) -> VerificationReport:
     # for a reason the test did not intend.
     decorrelation: dict[tuple[str, str], tuple[int, int]] = {}
     for name in compartments:
-        for key in QUARTER_KEYS:
+        for view_id in ALL_VIEW_IDS:
+            if view_id == WORLD_VIEW:
+                continue
+            held = set(members_of_view(view_id))
             inside = sum(
-                1 for i in range(N_ITEMS) if compartment_of(i) == name and in_quarter(i, key)
+                1 for i in range(N_ITEMS) if compartment_of(i) == name and i in held
             )
             outside = sum(
-                1 for i in range(N_ITEMS) if compartment_of(i) == name and not in_quarter(i, key)
+                1 for i in range(N_ITEMS) if compartment_of(i) == name and i not in held
             )
             if inside == 0 or outside == 0:
                 raise ValueError(
-                    f"compartment '{name}' and view '{GROUP}:{key}' are not decorrelated "
+                    f"compartment '{name}' and view '{view_id}' are not decorrelated "
                     f"({inside} in, {outside} out) — an assertion over them would pass vacuously"
                 )
-            decorrelation[(name, key)] = (inside, outside)
+            decorrelation[(name, view_id)] = (inside, outside)
 
     return VerificationReport(
         views=views, compartment_entities=compartments, decorrelation=decorrelation
@@ -643,6 +790,24 @@ def mood_columns(bundle: Bundle) -> dict[str, dict[int, str]]:
             if (value := mood_of(i, key)) is not None
         }
         for key in QUARTER_KEYS
+    }
+
+
+def heat_columns(bundle: Bundle) -> dict[str, dict[int, float]]:
+    """The **gated** group's scoped family as the fixture planted it: `{view id: {entity: value}}`.
+
+    [`sentiment_columns`]'s construction over `sealed`, and its reason: planted rather than read
+    back, so the pinned-leaf comparison behind the gate is a differential like the ones in front
+    of it.
+    """
+    entity_of = bundle.entities_by_source()
+    return {
+        f"{SEALED_GROUP}:{key}": {
+            entity_of[i]: value
+            for i in range(N_ITEMS)
+            if (value := heat_of(i, key)) is not None
+        }
+        for key in SEALED_KEYS
     }
 
 

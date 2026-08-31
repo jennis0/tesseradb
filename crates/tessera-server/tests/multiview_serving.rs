@@ -172,6 +172,8 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
         anchor: 0,
         groups: vec![
             GroupDescriptor {
+                // Declared on one group and not the other, so `/v1/meta` is asked both questions.
+                title: Some("Quarters".to_string()),
                 visibility: None,
                 name: "quarter".to_string(),
                 members_of: None,
@@ -195,6 +197,7 @@ fn build_multiview(dir: &Path) -> std::path::PathBuf {
                 views: roster(true),
             },
             GroupDescriptor {
+                title: None,
                 visibility: None,
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),
@@ -384,6 +387,8 @@ async fn meta_publishes_every_view_and_its_roster_in_creation_order() {
         json!([
             {
                 "name": "quarter",
+                // The declared title, served; `null` on the group that declared none.
+                "title": "Quarters",
                 "members_of": Value::Null,
                 "views": [
                     "quarter:2026-Q1", "quarter:2026-Q2", "quarter:2026-Q3", "quarter:2026-Q4"
@@ -391,6 +396,7 @@ async fn meta_publishes_every_view_and_its_roster_in_creation_order() {
             },
             {
                 "name": "quarter_alt",
+                "title": Value::Null,
                 "members_of": "quarter",
                 "views": [
                     "quarter_alt:2026-Q1", "quarter_alt:2026-Q2", "quarter_alt:2026-Q3",

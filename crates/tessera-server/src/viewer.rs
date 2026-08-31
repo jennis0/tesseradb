@@ -258,6 +258,10 @@ async fn meta(
         // `views` entries above are one filtered set rather than two.
         "groups": meta.groups.iter().filter(|g| visible.contains_group(&g.name)).map(|g| serde_json::json!({
             "name": g.name,
+            // The declared title, `null` where the group declared none — a deployment constant,
+            // presentation metadata on an object whose visibility this roster has already
+            // decided, so it discloses nothing the name beside it does not.
+            "title": g.title,
             "members_of": g.members_of,
             "views": g.views.iter().filter(|id| visible.contains_view(id)).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),

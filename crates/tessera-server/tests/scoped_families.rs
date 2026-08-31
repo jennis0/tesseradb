@@ -355,6 +355,7 @@ fn build_families(dir: &Path) -> std::path::PathBuf {
         views,
         anchor: 0,
         groups: vec![GroupDescriptor {
+            title: None,
             visibility: None,
             name: "quarter".to_string(),
             members_of: None,

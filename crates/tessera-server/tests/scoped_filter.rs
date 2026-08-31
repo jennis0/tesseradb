@@ -201,6 +201,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
         anchor: 0,
         groups: vec![
             GroupDescriptor {
+                title: None,
                 visibility: None,
                 name: "quarter".to_string(),
                 members_of: None,
@@ -213,6 +214,7 @@ fn build_scoped(dir: &Path) -> std::path::PathBuf {
                 scoped_scalars: Vec::new(),
             },
             GroupDescriptor {
+                title: None,
                 visibility: None,
                 name: "quarter_alt".to_string(),
                 members_of: Some("quarter".to_string()),

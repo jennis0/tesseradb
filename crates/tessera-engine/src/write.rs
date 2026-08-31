@@ -5965,10 +5965,46 @@ impl Executor {
         // Listed order is preserved in every one of these: for segments it is entity order, which
         // `RowSpace::with_extent` requires; for runs it is recency, which decision 0047's
         // newest-first resolution reads.
+        //
+        // **A dropped view's segments are carried by nothing** (`views.md` §3.4): the drop retains
+        // the view out of the bundle, so the plan has no base for it and never consumed its
+        // segments — and carrying them would name a view the new manifest does not declare. This
+        // filter is the whole of "reclamation by omission": the descriptors are left behind with
+        // the superseded prefix's files, which the reclaim then deletes. Without it every fold
+        // after a drop of a view that held rows is *discarded* by the base check below, so
+        // compaction stops for the life of the bundle and nothing ever retires.
+        //
+        // **The `MANIFEST.json` roster decides, not the partition's view map.** Both answer *is
+        // this view still declared* — the map is retained against the same roster at
+        // `Bundle::with_views` — but only one of them is that question: the map is a cache of open
+        // row spaces, and a later change to how it is built would move this predicate without
+        // anyone reading this line. The roster read here is the same snapshot the new manifest is
+        // written from, so what is carried and what is declared cannot disagree.
+        let declared_views: FxHashSet<&str> = live
+            .bundle
+            .manifest
+            .views
+            .iter()
+            .map(|v| v.id.as_str())
+            .collect();
+        // **Owned, because the log that reports them outlives this borrow**: the generation is
+        // moved into `pending_reclaim` at step 8, a few lines before the publication is logged.
+        let mut omitted_views: Vec<String> = Vec::new();
+        let mut omitted_segments = 0usize;
         let carried_segments: Vec<&tessera_store::manifest::SegmentDescriptor> = live_manifest
             .segments
             .iter()
             .filter(|d| !consumed_segments.contains(&(d.view.as_str(), d.seg_id.as_str())))
+            .filter(|d| {
+                let declared = declared_views.contains(d.view.as_str());
+                if !declared {
+                    omitted_segments += 1;
+                    if !omitted_views.iter().any(|v| v == &d.view) {
+                        omitted_views.push(d.view.clone());
+                    }
+                }
+                declared
+            })
             .collect();
         let carried_tiers: Vec<String> = live_manifest
             .deltas
@@ -6048,7 +6084,17 @@ impl Executor {
         // cleared the live row space's own floor; this refuses to be the place it is assumed.
         for descriptor in &carried_segments {
             let Some(view) = plan.views.iter().find(|s| s.view == descriptor.view) else {
-                discard("a carried-forward segment names a view the fold has no base for");
+                // **A view that arrived during the flight**, and the only way to reach this now:
+                // a view created and flushed since the plan was taken has a segment and no base
+                // in it. That is transient and self-healing — the next fold plans over a bundle
+                // that holds the view, and nothing is lost meanwhile but this fold's work — which
+                // is why it is said here rather than left under the sentence below. The other
+                // reader of this line was a **dropped** view, whose segments the carry-forward
+                // now omits (`views.md` §3.4), and that one did not self-heal: it discarded every
+                // fold of the bundle for ever.
+                discard(
+                    "a carried-forward segment names a view created since the plan was taken, so                      the fold has no base for it; the next fold plans over a bundle that has it",
+                );
                 return;
             };
             if descriptor.entity_lo < view.permutation_bound {
@@ -6789,6 +6835,17 @@ impl Executor {
             staircase_rss,
             attr_bytes_read = completed.attr_bytes_read,
             attr_bytes_written = completed.attr_bytes_written,
+            // **What the fold reclaimed by leaving it behind** (`views.md` §3.4). A dropped view's
+            // row space goes with the superseded prefix and nothing else records that it did: the
+            // mechanism is a deliberate omission, so an operator who cannot see it here cannot see
+            // it at all. Zero on every fold of a bundle nothing was dropped from, which is nearly
+            // all of them.
+            dropped_views = %if omitted_views.is_empty() {
+                "none".to_string()
+            } else {
+                omitted_views.join(",")
+            },
+            dropped_view_segments = omitted_segments,
             "a compaction fold published: the bundle is one base segment per partition-view, one \
              base postings tier, one external-id run and one locator, plus whatever landed during \
              its flight"

@@ -734,10 +734,13 @@ components:
           items:
             type: object
             additionalProperties: false
-            required: [name, members_of, views]
+            required: [name, title, members_of, views]
             properties:
               name:
                 type: string
+              title:
+                description: "The group's human-readable title, or `null` where it declared none. Presentation metadata on an object whose visibility this roster has already decided, so it is a deployment constant rather than a per-principal field."
+                type: [string, "null"]
               members_of:
                 description: "The group whose keys these are, where this group is a second layout over another's views (`views.md` §3.3); `null` where it owns them."
                 type: [string, "null"]

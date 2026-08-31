@@ -899,7 +899,7 @@ pub struct View {
     /// visibility is already decided, so serving it discloses nothing a name does not — but
     /// `MANIFEST.json` carries no slot for one on a view, an attribute or a vocabulary, and adding
     /// three is a contracts change rather than a declaration one. A **level's** title is published
-    /// today, and a **layer's** is.
+    /// today, a **layer's** is, and a **view group's** is (contracts §3.2 r61).
     pub title: Option<String>,
     /// What turns this view's input coordinates into positions in its frame
     /// (`projections.md` §5). [`Projection::None`] — the default — transforms nothing, and the
@@ -938,7 +938,8 @@ pub struct View {
 #[derive(Debug, Clone)]
 pub struct ViewGroup {
     pub name: String,
-    /// ⊘ Recorded and not yet published — see [`View::title`].
+    /// The group's human-readable title, published as `MANIFEST.groups[..].title` and served on
+    /// `/v1/meta` as `groups[..].title` (contracts §3.2 r61). Absent is served as `null`.
     pub title: Option<String>,
     pub projection: Projection,
     /// Form B's points file, one row per `(entity, view)`, with [`ViewGroup::fields`]'s `view`
@@ -6290,6 +6291,10 @@ impl Config {
                     .expect("every view in the registry is materialised by this build");
                 groups.push(GroupDescriptor {
                     name: membership.group.clone(),
+                    // The **declared** group's title, not the owner's, for the reason its gate is
+                    // its own: two groups over one key set are two layouts, and how a layout is
+                    // presented is a fact about the layout (`views.md` §3.3).
+                    title: declared.title.clone(),
                     members_of: membership.members_of.clone(),
                     // **The frame as resolved, not as declared**: a group's `auto` extent is
                     // fitted over every view of it, so the declaration may say `auto` where the

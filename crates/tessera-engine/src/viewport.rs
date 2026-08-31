@@ -1121,6 +1121,10 @@ pub struct MetaRoster {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetaGroup {
     pub name: String,
+    /// The group's declared title, `None` where it declared none. Presentation metadata on an
+    /// object whose visibility is already decided, so it is a deployment constant and not a
+    /// per-principal field: a principal who sees the group sees its title.
+    pub title: Option<String>,
     /// The group whose keys these are, where this group declares `members`
     /// (`views.md` §3.3); `None` where it owns them.
     pub members_of: Option<String>,
@@ -1527,6 +1531,7 @@ impl Engine {
             }
             groups.push(MetaGroup {
                 name: group.name.clone(),
+                title: group.title.clone(),
                 members_of: group.members_of.clone(),
                 views: ids,
             });

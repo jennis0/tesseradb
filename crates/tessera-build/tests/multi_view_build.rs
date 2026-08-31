@@ -138,6 +138,7 @@ fn two_views_are_two_row_spaces_over_one_entity_space() {
         // code an item holds *there* (decision 0112).
         anchor: 0,
         groups: vec![tessera_store::manifest::GroupDescriptor {
+            title: None,
             name: "quarter".to_string(),
             members_of: None,
             visibility: None,
@@ -469,6 +470,7 @@ fn write_discriminated(path: &Path, blocks: &[(&str, std::ops::Range<u64>)]) {
 /// The roster the manifest publishes for the form B group these tests build.
 fn alt_group(keys: &[&str]) -> tessera_store::manifest::GroupDescriptor {
     tessera_store::manifest::GroupDescriptor {
+        title: None,
         name: "quarter_alt".to_string(),
         members_of: None,
         visibility: None,
@@ -918,6 +920,7 @@ fn a_sparse_views_permutation_costs_its_pages_and_not_its_bound() {
         ],
         anchor: 0,
         groups: vec![tessera_store::manifest::GroupDescriptor {
+            title: None,
             name: "quarter".to_string(),
             members_of: None,
             visibility: None,
