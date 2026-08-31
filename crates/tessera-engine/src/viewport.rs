@@ -1182,6 +1182,28 @@ pub struct EngineMeta {
     pub idset: u32,
 }
 
+/// **The one statement of §3.3's ownership rule**: the key `view` holds in `group`'s roster,
+/// given the roster record `view` carries — `(its own group, its key)` — and a lookup for what a
+/// group declares `members` of.
+///
+/// A view of `group` holds its own key; a view of a group declaring `members` of `group` holds the
+/// same key, the keys being the owner's by construction; anything else holds none. Two callers ask
+/// it of different data — [`EngineMeta::owning_key`] of the meta document's roster records,
+/// [`scoped_render_scalars`] of the manifest's — and the rule itself lives here so it cannot come
+/// to mean two things. The build asks the same question of its own arguments
+/// (`pipeline::scoped_render_targets`), across a crate boundary, and says so at that site.
+pub(crate) fn owning_key_of<'a>(
+    roster: (&'a str, &'a str),
+    members_of: impl FnOnce(&str) -> Option<&'a str>,
+    group: &str,
+) -> Option<&'a str> {
+    let (own_group, key) = roster;
+    if own_group == group {
+        return Some(key);
+    }
+    (members_of(own_group)? == group).then_some(key)
+}
+
 /// What a filter leaf's column spelling resolves to under a request's view
 /// ([`EngineMeta::resolve_filter_column`], `views.md` §5).
 ///
@@ -1421,16 +1443,60 @@ impl EngineMeta {
     /// view, or a view of an unrelated group.
     fn owning_key(&self, view: &str, group: &str) -> Option<&str> {
         let roster = self.resolve_view(view)?.roster.as_ref()?;
-        if roster.group == group {
-            return Some(&roster.key);
-        }
-        let owner = self
+        owning_key_of(
+            (&roster.group, &roster.key),
+            |name| {
+                self.groups
+                    .iter()
+                    .find(|g| g.name == name)?
+                    .members_of
+                    .as_deref()
+            },
+            group,
+        )
+    }
+
+    /// Every view id whose row space carries one column of `family` — the owning group's own
+    /// ids, and the same keys under every group declaring `members` of it (`views.md` §3.3, §5).
+    ///
+    /// **`ScopedScalar::views` is the owner's list and is not the answer a client needs.** A
+    /// request names a view, and under `quarter_map:2026-Q1` the column arrives though only
+    /// `quarter:2026-Q1` is named there — so publishing the stored list alone would tell a client
+    /// reading a sharing group's map that the column it is receiving does not exist. This is the
+    /// same expansion [`scoped_render_scalars`] makes at the request; there it resolves one view,
+    /// here it enumerates them.
+    ///
+    /// Unfiltered: the caller applies the gate, `/v1/meta`'s per-principal narrowing being the
+    /// server's own (`views.md` §6).
+    pub fn scoped_family_views(
+        &self,
+        family: &tessera_store::manifest::ScopedScalar,
+    ) -> Vec<String> {
+        let keys: Vec<&str> = family
+            .views
+            .iter()
+            .filter_map(|id| {
+                id.strip_prefix(family.group.as_str())?
+                    .strip_prefix(tessera_store::GROUP_SEPARATOR)
+            })
+            .collect();
+        let mut out = family.views.clone();
+        for group in self
             .groups
             .iter()
-            .find(|g| g.name == roster.group)?
-            .members_of
-            .as_deref()?;
-        (owner == group).then_some(roster.key.as_str())
+            .filter(|g| g.members_of.as_deref() == Some(family.group.as_str()))
+        {
+            for id in &group.views {
+                let holds = id
+                    .strip_prefix(group.name.as_str())
+                    .and_then(|rest| rest.strip_prefix(tessera_store::GROUP_SEPARATOR))
+                    .is_some_and(|key| keys.contains(&key));
+                if holds {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
     }
 
     pub fn projection_of(&self, view: &str) -> Option<Projection> {
@@ -2257,12 +2323,24 @@ impl Engine {
         // the head's names are zipped positionally with the gathered buffers — caption a render
         // column's values with a non-render column's name wherever the two lists diverge. One
         // construction site is what keeps the names and the buffers the same list.
-        let render_scalars: Vec<_> = generation
+        let mut render_scalars: Vec<_> = generation
             .bundle
             .manifest
             .render_scalars()
             .cloned()
             .collect();
+        // **Then this view's scoped render columns, and only this view's** (`views.md` §5). A
+        // group-scoped attribute declaring `render` occupies a slot in the row tail of every view
+        // of its group — and of any group sharing those views — and in no other, so the list is
+        // per view where the bundle-wide half above is not. Appended rather than interleaved: the
+        // suffix is what `gather_tile_columns` reads to know which columns a segment may lawfully
+        // not hold (a view created since the build, or any segment a flush wrote).
+        let entity_scoped = render_scalars.len();
+        render_scalars.extend(scoped_render_scalars(
+            &generation.bundle.manifest,
+            view,
+            &session.visible_views,
+        ));
 
         // The head is delivered below, after the filter is evaluated and before the sweep: its
         // region verdict is settled by the decomposition, which needs the tile ranges the filter
@@ -2818,7 +2896,8 @@ impl Engine {
             check_cancelled(&cancel)?;
             let mut stats = TileProbe::new();
             let parts = SelectionParts::new(&ts.parts);
-            let mut tile_points = gather_tile_columns(&parts, &ts.rows, render_scalars)?;
+            let mut tile_points =
+                gather_tile_columns(&parts, &ts.rows, render_scalars, entity_scoped)?;
             if let Some(membership) = &membership {
                 tile_points.membership = membership.columns_for(&ts.rows);
             }
@@ -6211,6 +6290,75 @@ pub(crate) fn segments_with_row_bases<'a>(
 /// every later column left, which is the failure `gather_scalars` refuses at the write end.
 type ResolvedScalars<'a> = Vec<Option<ScalarSlice<'a>>>;
 
+/// The **group-scoped** render columns a request under `view` carries in its row tail
+/// (`views.md` §5), in manifest order, as the declared scalars they are indistinguishable from
+/// once resolved.
+///
+/// **The view set is the scope's, and the gate is inside it.** A family renders under a view of
+/// its own group, and under a view of a group declaring `members` of that group — the keys being
+/// the owner's by construction (§3.3) — and under nothing else: that is the rule
+/// `per-point-attributes.md` §3.9 gives `render_in`, with the view set decided by the scope
+/// instead of listed. A principal whose group gate fails takes the answer an undeclared attribute
+/// takes, here as at every other surface (§5, §6): the column is absent from the response's
+/// schema, so the sealed group is named in no response such a principal receives.
+///
+/// **A family with no column for this view is not in the list**, which is what a view created
+/// after the build has: `scoped_scalars[..].views` names the views that *have* a column, and no
+/// batch can write one (a buffered row's scalars are positional against `declared_scalars`, which
+/// a family is deliberately absent from). Absence there is decided by the manifest; absence in a
+/// *segment* of a view that does have one — anything a flush wrote — is
+/// [`gather_tile_columns`]'s, and comes out as the row's placeholder.
+fn scoped_render_scalars(
+    manifest: &tessera_store::manifest::Manifest,
+    view: &str,
+    visible: &crate::gate::VisibleViews,
+) -> Vec<DeclaredScalar> {
+    // This view's roster record — the group it belongs to and the key it holds there. Matched
+    // against the roster rather than parsed out of the id: a view id is `<group>:<key>` by
+    // construction, and the roster is what decides which group and which key that is.
+    let Some(roster) = manifest.groups.iter().find_map(|g| {
+        let key = view
+            .strip_prefix(g.name.as_str())?
+            .strip_prefix(tessera_store::GROUP_SEPARATOR)?;
+        g.views
+            .iter()
+            .any(|v| v.key == key)
+            .then_some((g.name.as_str(), key))
+    }) else {
+        return Vec::new();
+    };
+    let members_of = |name: &str| {
+        manifest
+            .groups
+            .iter()
+            .find(|g| g.name == name)?
+            .members_of
+            .as_deref()
+    };
+    manifest
+        .groups
+        .iter()
+        .flat_map(|g| g.scoped_scalars.iter())
+        .filter(|f| f.render && visible.contains_group(&f.group))
+        .filter(|f| {
+            // §3.3's rule, stated once in `owning_key_of`, and then the family's own list: a view
+            // of the group that has no column — one created since the build — renders nothing.
+            owning_key_of(roster, members_of, &f.group).is_some_and(|key| {
+                f.views
+                    .contains(&format!("{}{}{key}", f.group, tessera_store::GROUP_SEPARATOR))
+            })
+        })
+        .map(|f| DeclaredScalar {
+            name: f.name.clone(),
+            arrow_type: f.arrow_type,
+            vocabulary: f.vocabulary.clone(),
+            analyser: f.analyser.clone(),
+            index: f.index,
+            render: true,
+        })
+        .collect()
+}
+
 /// Resolve `declared` against one segment's columns, once.
 fn resolve_scalars<'a>(
     segment: &'a SegmentData,
@@ -6242,10 +6390,21 @@ fn resolve_scalars<'a>(
 /// rather than a silently skipped column. That cannot arise from a bundle this codebase wrote —
 /// `gather_scalars` refuses it at the write end for every producer — and the alternative is to
 /// append a short or wrongly-typed buffer under a name that does not describe it.
+///
+/// **`scoped_from` is the one exception, and it is absence rather than malformation**
+/// (`views.md` §5). From that index on, the columns are a group-scoped family's
+/// ([`scoped_render_scalars`]), and only the *build* writes one: a segment a flush produced
+/// carries the bundle-wide tail and nothing per family, because a batch's scalars are positional
+/// against `declared_scalars` and a family has no slot there. Such a segment's rows take the
+/// column's placeholder — the type's zero, exactly what the build writes into the slot of an
+/// entity that has no value, decision 0064's absence for the tail. A
+/// *wrong type* under the name is still malformed, scoped or not: that is a segment disagreeing
+/// with the manifest, not a segment that predates the family.
 fn gather_tile_columns(
     parts: &SelectionParts<'_>,
     rows: &[u32],
     declared: &[DeclaredScalar],
+    scoped_from: usize,
 ) -> Result<PointColumns> {
     let placed: Vec<(u32, u32)> = rows
         .iter()
@@ -6287,20 +6446,26 @@ fn gather_tile_columns(
         // The typed slice per part is resolved BEFORE the row loop, so the loop below carries no
         // `match` at all — that hoist is the whole reason this shape is cheaper than the
         // row-major one it replaced.
+        // A segment that may lawfully not hold this column — see `scoped_from` on this function.
+        let absent_is_ok = ci >= scoped_from;
         macro_rules! build {
             ($(($v:ident, $t:ty)),* $(,)?) => {
                 match d.arrow_type {
                     $(ScalarType::$v => {
-                        let mut per_part: Vec<&[$t]> = Vec::with_capacity(resolved.len());
+                        let mut per_part: Vec<Option<&[$t]>> = Vec::with_capacity(resolved.len());
                         for r in &resolved {
                             match r[ci] {
-                                Some(ScalarSlice::$v(s)) => per_part.push(s),
+                                Some(ScalarSlice::$v(s)) => per_part.push(Some(s)),
+                                None if absent_is_ok => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
                         let mut out = Vec::with_capacity(rows.len());
                         for &(part, local) in &placed {
-                            out.push(per_part[part as usize][local as usize]);
+                            out.push(match per_part[part as usize] {
+                                Some(s) => s[local as usize],
+                                None => <$t>::default(),
+                            });
                         }
                         ColumnBuf::$v(out)
                     })*
@@ -6308,13 +6473,17 @@ fn gather_tile_columns(
                         let mut per_part = Vec::with_capacity(resolved.len());
                         for r in &resolved {
                             match r[ci] {
-                                Some(ScalarSlice::Bool(a)) => per_part.push(a),
+                                Some(ScalarSlice::Bool(a)) => per_part.push(Some(a)),
+                                None if absent_is_ok => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
                         let mut out = Vec::with_capacity(rows.len());
                         for &(part, local) in &placed {
-                            out.push(per_part[part as usize].value(local as usize));
+                            out.push(match per_part[part as usize] {
+                                Some(a) => a.value(local as usize),
+                                None => false,
+                            });
                         }
                         ColumnBuf::Bool(out)
                     }
@@ -6325,13 +6494,17 @@ fn gather_tile_columns(
                         let mut per_part = Vec::with_capacity(resolved.len());
                         for r in &resolved {
                             match r[ci] {
-                                Some(ScalarSlice::Utf8(a)) => per_part.push(a),
+                                Some(ScalarSlice::Utf8(a)) => per_part.push(Some(a)),
+                                None if absent_is_ok => per_part.push(None),
                                 _ => return Err(malformed(d)),
                             }
                         }
                         let mut out = Vec::with_capacity(rows.len());
                         for &(part, local) in &placed {
-                            out.push(per_part[part as usize].value(local as usize).to_string());
+                            out.push(match per_part[part as usize] {
+                                Some(a) => a.value(local as usize).to_string(),
+                                None => String::new(),
+                            });
                         }
                         ColumnBuf::Utf8(out)
                     }

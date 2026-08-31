@@ -586,12 +586,15 @@ pub struct ScopedScalar {
     /// Declared `index = true` — this family's columns carry an entity-space value column a
     /// filter may be answered from.
     pub index: bool,
-    /// Declared `render = true`.
+    /// Declared `render = true` — this family's column occupies a slot in every row of
+    /// `columns.arrow` **in each view of its group**, and of any group sharing those views via
+    /// `members`, and in no other view (`views.md` §5).
     ///
-    /// ⊘ **Recorded and acted on by nothing** (`views.md` §5): the hot column is per row space and
-    /// a scoped column is not in any row's tail, so a scoped attribute is rendered nowhere. The
-    /// build says so where an operator can read it; this field is what the declaration asked for,
-    /// not a placement that exists.
+    /// **The per-view counterpart of [`DeclaredScalar::render`]**, and the whole difference is the
+    /// view set: an entity-scoped column's slot is in every row space the bundle has, a family's
+    /// is in the row spaces its scope names. A view the family has no column for — one created
+    /// after the build, [`Self::views`] naming those that have one — carries no slot at all, which
+    /// a reader sees as the column's absence rather than as a row of placeholders.
     pub render: bool,
     /// The view ids that have a column, in roster order — the joined `group:key`
     /// form, which is what [`crate::view_path_components`] turns into the column's directory.

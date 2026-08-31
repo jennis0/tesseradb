@@ -281,6 +281,10 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
         // the defect this fixture exists to catch.
         scoped_attributes: vec![
             sealed_family(
+                // **Rendered as well as indexed**, so the collapse has a second surface to be
+                // checked on: the value reaches the hot row tail of `sealed`'s views, and a
+                // principal who fails the group's gate must not see the column named in any
+                // response at all (`views.md` §5, §6).
                 Attribute {
                     name: "sentiment".to_string(),
                     title: None,
@@ -290,7 +294,7 @@ fn build_gated(dir: &Path) -> std::path::PathBuf {
                     vocabulary: None,
                     value_set: None,
                     index: true,
-                    render: false,
+                    render: true,
                 },
                 family_views.clone(),
             ),
@@ -854,6 +858,91 @@ async fn the_category_and_text_families_collapse_at_the_same_site() {
     assert_eq!(resp.status().as_u16(), 200);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["values"].as_array().unwrap().len(), MOODS.len());
+}
+
+/// **A sealed family's rendered column is on no surface a gate-failed principal touches**
+/// (`views.md` §5, §6). The collapse is about *naming*: `sentiment` renders in the row tail of
+/// `sealed`'s views, so the two things to check are that a holder gets it there and that an
+/// outsider — who reaches those views not at all — finds the column named nowhere: not in a
+/// viewport response's schema under any view they can reach, and not in `/v1/meta`'s family list,
+/// which is the only place the document would name the group.
+#[tokio::test]
+async fn a_sealed_familys_render_column_is_named_in_no_response_outside_the_gate() {
+    let served = serve().await;
+    let holder = token(&served, &["finance"]).await;
+    let outsider = token(&served, &[]).await;
+
+    // The holder: the column is in the tail of the group's views, and in no other view's.
+    assert!(points_schema(&served, &holder, "sealed:s1")
+        .await
+        .contains(&"sentiment".to_string()));
+    assert!(!points_schema(&served, &holder, "world")
+        .await
+        .contains(&"sentiment".to_string()));
+
+    // The outsider: `sealed:s1` is a 404 (asserted next door), so every view they *can* reach is
+    // checked instead — none names the column.
+    for view in ["world", "quarter:2026-Q1", "quarter:2026-Q4"] {
+        let names = points_schema(&served, &outsider, view).await;
+        assert!(
+            !names.contains(&"sentiment".to_string()),
+            "{view}: {names:?}"
+        );
+    }
+    let document = meta(&served, &outsider).await;
+    assert!(
+        document["scoped_scalars"].as_array().unwrap().is_empty(),
+        "the sealed family is undeclared for a principal outside its gate: {}",
+        document["scoped_scalars"]
+    );
+    // And the holder does see it, so the assertion above is about the gate rather than about a
+    // list nobody fills.
+    let holder_families = meta(&served, &holder).await;
+    assert!(holder_families["scoped_scalars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|f| f["name"] == "sentiment" && f["render"] == true));
+}
+
+/// The column names a `/v1/viewport` response's points frames carry, or an empty list where the
+/// response has no points frame. Read by name, as contracts §3.2 requires of a client.
+async fn points_schema(served: &Served, token: &str, view: &str) -> Vec<String> {
+    let resp = served
+        .server
+        .client
+        .post(served.server.viewer_url("/v1/viewport"))
+        .bearer_auth(token)
+        .json(&json!({
+            "view": view, "zoom": 8, "bbox": [0.0, 0.0, 1000.0, 1000.0], "k": 200
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 200, "{view}");
+    let bytes = resp.bytes().await.unwrap();
+    let frames = tessera_wire::split_frames(&bytes).expect("well-formed frames");
+    let mut names = Vec::new();
+    for (kind, payload) in frames {
+        if kind != tessera_wire::FRAME_POINTS {
+            continue;
+        }
+        let reader = arrow::ipc::reader::StreamReader::try_new(
+            std::io::Cursor::new(payload.to_vec()),
+            None,
+        )
+        .unwrap();
+        for batch in reader {
+            names = batch
+                .unwrap()
+                .schema()
+                .fields()
+                .iter()
+                .map(|f| f.name().clone())
+                .collect();
+        }
+    }
+    names
 }
 
 // ---------------------------------------------------------------------------------------------

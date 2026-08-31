@@ -704,8 +704,12 @@ pub fn scoped_column_name(name: &str, view_id: &str) -> String {
 /// text.
 ///
 /// **No `render` clause, where [`is_filterable`] has one.** A rendered entity-scoped column is
-/// filterable over the request's own rows whatever its `index`; a scoped column is in no row's
-/// tail, so that route does not exist here and `index` is the whole licence (`views.md` §5).
+/// filterable over the request's own rows whatever its `index` — the row route decision 0068
+/// gives it. A rendered *scoped* column has a row tail too, in each view of its group
+/// (`views.md` §5), and is deliberately not filterable through it: the leaf a request writes
+/// resolves to one **entity-space** column, which a pin may make some other view's, and a row
+/// scan can only ever answer over the rows in front of it. So the two routes would answer
+/// different questions under the same spelling, and `index` stays the whole licence.
 pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
     scoped.index
 }
@@ -1576,9 +1580,11 @@ impl FilterColumns {
                     name.clone(),
                     Placement {
                         entity: true,
-                        // ⊘ **Never the row route.** The hot column is per row space and a scoped
-                        // column is in no row's tail, so `render` on a scoped attribute buys
-                        // nothing (`views.md` §5); the entity route is the whole surface.
+                        // **Never the row route**, though a rendered family does occupy a row
+                        // tail (`views.md` §5): a leaf resolves to one entity-space column and a
+                        // pin may make that another view's, which no scan of *these* rows can
+                        // answer. The entity route is the whole filter surface — see
+                        // [`scoped_is_filterable`].
                         row: false,
                         family: scoped_family,
                     },
