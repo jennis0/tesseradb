@@ -30,9 +30,9 @@ it also specifies do not exist.
 `conformance/tests` and `conformance/suite` together, the split CI's own case-count step compares
 against `conformance.md` §0's marker line. The 39 that arrived on that date are the multi-view
 differential; six more are the scoped category added to it, eleven more are the gate, and six more
-are the family licensed by `render` alone (`views.md` §5 r26). Nine arrived between r18's
-measurement and this one without the marker moving, which is why the total is fifteen higher rather
-than six.
+are the family licensed by `render` alone (`views.md` §5 r26). Nine of the fifteen this total
+moved by are a prose figure catching up with the suite: `conformance.md` §0's *checked* marker
+already read 701 while its prose said 692.
 
 **The two failures are the machine, not the suite.** Both are
 `test_text_differential.py::…[phrase on … -full_100pct]`, and both are a 30-second HTTP **read
