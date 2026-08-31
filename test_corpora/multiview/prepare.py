@@ -3,7 +3,9 @@
 Not a rung on the dataset ladder: it measures nothing and is not part of the ingest campaign.
 Its only job is to be the `corpus.toml` a multi-view build is pointed at — one
 plain view, two view groups (one sharing the other's views, in each of the two roster forms), a
-constant and a group-scoped attribute, and an unscoped and a scoped layer — small enough to
+constant attribute, four group-scoped families (a number read from each view's own points, a
+category, a text column, and a number read from a source of its own through `fields.view`), and an
+unscoped and a scoped layer — small enough to
 prepare and validate in seconds, at a default of about 100,000 rows total across every file.
 
 **Positions are a mix of real-derived and synthetic, and this is the whole of what "real" means
@@ -55,6 +57,14 @@ N_TOTAL_DEFAULT = 21_300
 SEED = 20260830
 
 QUARTERS = ["2026-Q1", "2026-Q2", "2026-Q3", "2026-Q4"]
+
+#: `mood`'s value set — the group-scoped **category** family. Closed and `derived`, so which values
+#: `/v1/categories` offers is a per-view answer over that view's own postings (views §5).
+MOODS = ["calm", "tense", "wild", "still"]
+
+#: The word each quarter's prose carries, for the group-scoped **text** family: a `match` that read
+#: another view's index answers the empty set rather than a plausible one.
+NOTE_WORDS = ["alpha", "beta", "gamma", "delta"]
 
 #: GeoNames' own nine feature classes (`featureCodes_en.txt`'s readme, restated in
 #: `test_corpora/geonames/prepare.py`) — reused here as `kind`'s vocabulary because the sampled
@@ -244,6 +254,24 @@ def main() -> None:
             [float(sentiment_vals[i]) if has_sentiment[i] else None for i in range(len(ids))],
             type=pa.float32(),
         )
+        # mood: the scoped category. A quarter draws from three of the four values and which three
+        # rotates, so the value list derived under one quarter differs from another's — the whole
+        # point of a category's value set being resolved per view. ~10% carry none.
+        mood_pick = (hashed_unit(ids, 0x11D0 + q) * 3.0).astype(np.int64).clip(0, 2)
+        has_mood = hashed_unit(ids, 0x11E0 + q) < 0.90
+        mood = pa.array(
+            [MOODS[(int(mood_pick[i]) + q) % len(MOODS)] if has_mood[i] else None for i in range(len(ids))],
+            type=pa.string(),
+        )
+        # note: the scoped text column, carrying this quarter's own word, for ~60% of its rows.
+        has_note = hashed_unit(ids, 0x1207 + q) < 0.60
+        note = pa.array(
+            [
+                f"the {NOTE_WORDS[q]} report for entity {int(ids[i])}" if has_note[i] else None
+                for i in range(len(ids))
+            ],
+            type=pa.string(),
+        )
         table = pa.table(
             {
                 "entity_id": pa.array(ids),
@@ -251,6 +279,8 @@ def main() -> None:
                 "y": pa.array(y),
                 "access": pa.array([access[i] for i in np.flatnonzero(mask)], type=pa.string()),
                 "sentiment": sentiment,
+                "mood": mood,
+                "note": note,
             }
         )
         pq.write_table(table, out / f"quarter-{QUARTERS[q]}.parquet")
@@ -283,6 +313,32 @@ def main() -> None:
         }
     )
     pq.write_table(alt_table, out / "quarter-alt.parquet")
+
+    # === attrs-scoped.parquet — a scoped attribute's OWN source (views §5) ============
+    # One row per (entity, view), the view named by a `quarter` discriminator: the second way a
+    # scoped family's values can arrive, and the one that needs `fields.view` to say which view
+    # each row is for. Rows are written quarter by quarter, and the reader selects on the column
+    # rather than on the order.
+    scoped_rows = {"entity_id": [], "quarter": [], "coverage": []}
+    for q in range(4):
+        ids = entity_id[in_quarter[q]]
+        has_coverage = hashed_unit(ids, 0xC0F0 + q) < 0.80
+        values = np.clip(hashed_unit(ids, 0xC0FF + q), 0.0, 1.0).astype(np.float32)
+        scoped_rows["entity_id"].extend(ids.tolist())
+        scoped_rows["quarter"].extend([QUARTERS[q]] * len(ids))
+        scoped_rows["coverage"].extend(
+            float(values[i]) if has_coverage[i] else None for i in range(len(ids))
+        )
+    pq.write_table(
+        pa.table(
+            {
+                "entity_id": pa.array(scoped_rows["entity_id"]),
+                "quarter": pa.array(scoped_rows["quarter"], type=pa.string()),
+                "coverage": pa.array(scoped_rows["coverage"], type=pa.float32()),
+            }
+        ),
+        out / "attrs-scoped.parquet",
+    )
 
     # === vocab-kind.parquet, attrs-constant.parquet ===================================
     classes_present = sorted(set(c for c in feature_class if c))
