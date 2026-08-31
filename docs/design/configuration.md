@@ -36,10 +36,10 @@ each naming what is absent per
   `visibility` **is built and no longer refused** (2026-08-31, `views.md` §6): a label compiles,
   is checked at parse against the plugin that will evaluate it, and gates the view for every
   principal whose satisfied terms it does not meet.
-- **A `[[view_group]]`, at the *build*** (`views.md` §7): the whole declaration parses, is checked
-  and is reported by `tessera check`, and `tessera build` against a declaration carrying one
-  refuses — there is no multi-view build, so a group is a set of coordinate systems with nothing
-  to materialise them.
+- **A `[[view_group]]` builds** (`views.md` §7): every plain view and every view of every group is
+  materialised over one entity space, whichever roster form declared it. What still refuses by
+  name is a group with no roster at all, whose keys would be minted from the discriminator's
+  distinct values.
 
 ⊘ A `title` on a view, an attribute or a vocabulary is compiled and **not yet published** — the
 manifest carries no slot for one, and adding three is a contracts change; a level's title and a
@@ -733,7 +733,7 @@ arbitrary.**
 |---|---|
 | Artifacts, layers | **Yes, today.** That is the control plane's whole job; the build plane exists only so a 10⁷-artifact level need not ride the trickle path (`annotation-write-cycle.md` §6.1) |
 | Vocabulary values | **By design, no endpoint.** Appending a value and retiring one are both safe — a new code is assigned, a retired one moves to `reserved` and is never reassigned (`per-point-attributes.md` §2.2) — but ⊘ `/control/categories` is still owed, so today the route exists on paper only |
-| Views | ⊘ **Specified, not implemented.** Creation is a control verb carrying `{name, gate, projection provenance}`, WAL'd and materialised at the next flush (views §6); a bundle has one coordinate system, so nothing evaluates it yet |
+| Views | **A group's view: yes, since 2026-08-31.** `PUT /control/views/{group}/{key}` creates it — WAL'd, the roster's durable home the segments manifest, serving empty until its first flush (views §3.2) — and `DELETE` drops it, the key and ordinal burnt. A plain view or a new group is a rebuild, deliberately (decision 0108) |
 | Attributes | **Deliberately not online.** Adding `index` is a build pass with no row rewrite; adding `render` rewrites every segment; changing a width or a type is refused outright. The convention is Elasticsearch's, and stolen on purpose: *mappings are immutable; you reindex* |
 
 ⊘ **Declaring a wholly new attribute after a build is not specified**, as distinct from altering an
