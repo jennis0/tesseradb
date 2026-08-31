@@ -676,16 +676,18 @@ pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
 /// (`views.md` §5).
 ///
 /// Reserved out of a column name at the build, which is what makes the split unambiguous: a leaf
-/// carries at most one `@`, everything before it is a column and everything after it is a key or a
-/// `#`-prefixed ordinal.
+/// carries at most one `@`, everything before it is a column and everything after it is a view's
+/// key within the attribute's own group.
 pub const PIN: char = '@';
 
 /// The internal name one view's column of a group-scoped family is held under —
 /// `sentiment@quarter:2026-Q3`.
 ///
 /// **Not a spelling any caller writes.** A request pins by *key* within the attribute's own group
-/// (`sentiment@2026-Q3`) or by ordinal (`sentiment@#3`); resolution turns either into the view's
-/// id and this function into the key the column map answers on. Holding the resolved form here is
+/// (`sentiment@2026-Q3`), which is a view's only address
+/// ([decision 0113](../../../docs/decisions/0113-ordinals-are-removed-and-the-key-is-the-only-address.md));
+/// resolution turns that into the view's id and this function into the key the column map answers
+/// on. Holding the resolved form here is
 /// what lets a scoped column evaluate as an unscoped one of its family does — one map, one
 /// `evaluate`, and no second route for a leaf to take.
 pub fn scoped_column_name(name: &str, view_id: &str) -> String {

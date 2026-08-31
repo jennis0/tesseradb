@@ -1602,7 +1602,8 @@ pub const HONOURED_STATE: &[&str] = &[
     "layer_tombstones",
     // The roster's runtime half, on the same argument: a reader carrying created views and
     // ignoring them would serve a bundle as though the views did not exist — every request naming
-    // one a 404 — and, worse, would hand the next create an ordinal a live view already holds.
+    // one a 404 — and, worse, would admit a create on a key a live or tombstoned view already
+    // holds, when a key is a view's only address and is never reused (`views.md` §3.2, §3.4).
     "views",
     "view_tombstones",
 ];
@@ -1976,8 +1977,8 @@ mod tests {
              with what it holds, before replaying the WAL over the top — which is what makes a \
              view created while the service ran survive the rotation that reclaims its \
              `ViewCreate` record; a reader carrying them and ignoring them would 404 every \
-             request naming such a view and would hand the next create an ordinal a live view \
-             already holds"
+             request naming such a view and would admit a create on a key a live or tombstoned \
+             view already holds"
         );
     }
 

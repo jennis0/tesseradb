@@ -1287,9 +1287,9 @@ fn project_columns(projection: Projection, x: &mut [f64], y: &mut [f64]) -> Resu
 /// all has no row space to ingest into, so it is refused here rather than accepted into nothing.
 ///
 /// **A named view is resolved by [`tessera_engine::EngineMeta::resolve_view`]**, the one
-/// resolution both planes take, so `x-tessera-view: quarter:#3` names the same view a viewport
-/// request naming it does — and an unknown id, an absent key and an ordinal no view holds are one
-/// 404 here as they are there.
+/// resolution both planes take, so `x-tessera-view: quarter:2026-Q3` names the same view a
+/// viewport request naming it does — and an unknown id and an absent key are one 404 here as they
+/// are there.
 fn resolve_view<'a>(
     view: Option<&str>,
     meta: &'a tessera_engine::EngineMeta,
@@ -2724,11 +2724,11 @@ fn canonical_authored_content(
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
     let meta = state.engine.meta();
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-    // **The frame of the layer's own views**, not the bundle's first — and the bundle has no
-    // frame of its own to read (decision 0040). A shape layer spanning views with different
-    // projections is refused at the declaration, so the views agree and the first is the answer
-    // for all of them; it must be *this layer's* first and not the bundle's, or a shape is placed
-    // by a projection no view of it declares.
+    // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
+    // its own to read (decision 0040), and a layer's views need share neither projection nor
+    // extent (decision 0111). The shape goes through each view's own transform and is quantised
+    // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
+    // resolved are refused instead.
     let frames = layer_frames(&meta, &views)?;
     let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
         .map_err(|e| refuse(e.to_string()))?;
@@ -2841,11 +2841,11 @@ fn canonical_row_shape(
     let shape = shape_input(kind, input).map_err(|e| refuse(e.to_string()))?;
     let meta = state.engine.meta();
     let views: Vec<&str> = declaration.views.iter().map(String::as_str).collect();
-    // **The frame of the layer's own views**, not the bundle's first — and the bundle has no
-    // frame of its own to read (decision 0040). A shape layer spanning views with different
-    // projections is refused at the declaration, so the views agree and the first is the answer
-    // for all of them; it must be *this layer's* first and not the bundle's, or a shape is placed
-    // by a projection no view of it declares.
+    // **One frame per view of the layer**, and never the bundle's — the bundle has no frame of
+    // its own to read (decision 0040), and a layer's views need share neither projection nor
+    // extent (decision 0111). The shape goes through each view's own transform and is quantised
+    // against each view's own extent; [`layer_frames`] is where the two spans that cannot be
+    // resolved are refused instead.
     let frames = layer_frames(&meta, &views)?;
     let canonical = canonical_shapes(&shape, &frames, space, state.max_shape_vertices)
         .map_err(|e| refuse(e.to_string()))?;
