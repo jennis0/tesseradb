@@ -241,8 +241,9 @@ async fn meta(
         })).collect::<Vec<_>>(),
         // **The groups, in manifest order, each its views in creation order** (`views.md` §3.2)
         // — what lets a client offer previous-and-next **without interpreting a key**, which is
-        // the one thing this structure exists for. The ids are the joined `group:key` form a request
-        // names, so a client steps from one view to the next by taking the id beside its own.
+        // the one thing this structure exists for. The ids are the joined `group:key` form a
+        // request names, so a client steps from one view to the next by taking the id beside its
+        // own.
         //
         // **Nothing else of the group is here.** Every setting a group holds — its frame, its
         // projection, its point visibility — is already on each of its views, and a second copy
