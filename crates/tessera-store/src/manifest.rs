@@ -486,6 +486,68 @@ pub struct GroupDescriptor {
     pub members_of: Option<String>,
     /// The roster, in ordinal order.
     pub views: Vec<GroupViewDescriptor>,
+    /// The **group-scoped attribute column families** this group owns (`views.md` §5): one
+    /// entity-space column per view of the roster above, under
+    /// `attrs/<column>/<group>/<key>/`.
+    ///
+    /// **Here rather than in [`Manifest::declared_scalars`]**, which is one flat bundle-wide list
+    /// addressed positionally by the record blob's field tags and by every segment's scalar tail:
+    /// a family has no slot in it, and a scoped column placed there would take a slot in every
+    /// row and a whole-corpus `attrs/<column>/` of its own, both absent for every entity. The
+    /// group is where it belongs instead, beside the ordinals a pinned leaf's `@#n` resolves
+    /// against.
+    ///
+    /// Empty is the ordinary case — a group with no attribute scoped to it — and a `members`
+    /// group's is always empty: its views are the owner's, so a family over them is the owner's
+    /// (`views.md` §3.3).
+    pub scoped_scalars: Vec<ScopedScalar>,
+}
+
+/// `groups[..].scoped_scalars` entry: one group-scoped attribute's column family (`views.md` §5).
+///
+/// The declaration is an ordinary attribute's — same types, same `index` and `render` — and what
+/// the scope changes is only **which column file** a predicate reads: one per view of the owning
+/// group instead of one for the corpus. Evaluation stays in entity space, which is what keeps a
+/// scoped attribute inside I2's argument: every value is indexed by entity, a predicate answers a
+/// bitmap in entity space, and the mask meets it there before any permutation is applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScopedScalar {
+    /// The column's name, as a filter leaf spells it before any pin — unique bundle-wide across
+    /// the entity-scoped columns and the scoped families alike, so a leaf naming it is never
+    /// ambiguous about which of the two it means.
+    pub name: String,
+    /// The group that owns the views this family has a column per — [`GroupDescriptor::name`],
+    /// repeated here so the flattened list [`Manifest::scoped_scalars`] hands a reader is
+    /// self-contained: a refusal names the group, and a bare leaf resolves against it. Checked
+    /// against the descriptor it hangs off at [`Manifest::validate_groups`], so the two cannot
+    /// come to disagree.
+    pub group: String,
+    /// The column's storage type, spelt exactly as [`DeclaredScalar::arrow_type`] is.
+    #[serde(with = "scalar_type_name")]
+    pub arrow_type: ScalarType,
+    /// For a category column, the [`ManifestVocabulary::name`] its codes index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocabulary: Option<String>,
+    /// For a `text` column, the analyser identity that produced its terms (decision 0070).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analyser: Option<String>,
+    /// Declared `index = true` — this family's columns carry an entity-space value column a
+    /// filter may be answered from.
+    pub index: bool,
+    /// Declared `render = true`.
+    ///
+    /// ⊘ **Recorded and acted on by nothing** (`views.md` §5): the hot column is per row space and
+    /// a scoped column is not in any row's tail, so a scoped attribute is rendered nowhere. The
+    /// build says so where an operator can read it; this field is what the declaration asked for,
+    /// not a placement that exists.
+    pub render: bool,
+    /// The view ids that have a column, in the roster's ordinal order — the joined `group:key`
+    /// form, which is what [`crate::view_path_components`] turns into the column's directory.
+    ///
+    /// **Named rather than derived from the roster**, because the two can differ: a view created
+    /// after the build has no column until one is written for it, and reading the roster instead
+    /// would make an absent file a missing artefact rather than a view with no values yet.
+    pub views: Vec<String>,
 }
 
 /// One view of a group, as the roster records it.
@@ -646,6 +708,38 @@ impl Manifest {
                 }
                 rostered.push(id);
             }
+            // **A family's columns are its group's views.** A named view the roster does not
+            // carry would send the opener at a directory outside the group's own, and a family on
+            // a `members` group would duplicate the owner's columns under a second name.
+            for family in &group.scoped_scalars {
+                if group.members_of.is_some() {
+                    return Err(format!(
+                        "group '{}' declares `members` and carries the scoped column family \
+                         '{}'; a family over shared views belongs to the group that owns them \
+                         (views §3.3, §5)",
+                        group.name, family.name
+                    ));
+                }
+                if family.group != group.name {
+                    return Err(format!(
+                        "the scoped column family '{}' of group '{}' records the group '{}'",
+                        family.name, group.name, family.group
+                    ));
+                }
+                for view in &family.views {
+                    let key = view
+                        .split_once(crate::GROUP_SEPARATOR)
+                        .filter(|(g, _)| *g == group.name)
+                        .map(|(_, key)| key);
+                    if !key.is_some_and(|key| group.views.iter().any(|v| v.key == key)) {
+                        return Err(format!(
+                            "the scoped column family '{}' of group '{}' names view '{view}', \
+                             which is not a view of that group (views §5)",
+                            family.name, group.name
+                        ));
+                    }
+                }
+            }
         }
         for view in &self.views {
             if view.id.contains(crate::GROUP_SEPARATOR) && !rostered.contains(&view.id) {
@@ -657,6 +751,19 @@ impl Manifest {
             }
         }
         Ok(())
+    }
+
+    /// Every group's scoped column families, in manifest order (`views.md` §5).
+    ///
+    /// **Flattened, because the group is already inside each family's view ids**: a reader that
+    /// opens or publishes a family needs the family, not the roster it hangs off, and the
+    /// `<group>:<key>` id carries the group's own name. Cloned rather than borrowed so a caller
+    /// can hold the list across a generation swap, which is what both openers do.
+    pub fn scoped_scalars(&self) -> Vec<ScopedScalar> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.scoped_scalars.iter().cloned())
+            .collect()
     }
 
     pub fn quantisation_of(&self, view: &str) -> Option<Quantisation> {

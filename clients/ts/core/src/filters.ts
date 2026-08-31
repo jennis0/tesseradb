@@ -125,6 +125,13 @@ export function activeCount(draft: FilterDraft): number {
  * A column whose published operator set contains none this draft has a shape for is skipped
  * rather than given a control that cannot be sent; silently drawing a box whose operator the
  * column refuses would produce a 422 on the first keystroke.
+ *
+ * **A key is a leaf's name, verbatim** — which is what makes a group-scoped attribute's pin
+ * (`views.md` §5) need no machinery here: a draft keyed `sentiment@2026-Q3` composes that leaf.
+ * What this function cannot decide is *when* to pin, because that depends on the view the request
+ * will name: a column whose operand entry carries a `scope` is answerable bare only under a view
+ * of that group, or of a group sharing its views. The bare key is what is seeded, and a caller
+ * that draws the control on an unrelated view re-keys it with the view it means.
  */
 export function emptyDraft(operands: FilterOperandSet[]): FilterDraft {
   const draft: FilterDraft = {};

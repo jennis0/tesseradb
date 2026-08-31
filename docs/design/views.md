@@ -1,7 +1,13 @@
 # Views — design
 
 **Date:** 2026-08-30
-**Status:** Normative (r12) — **the roster is served** (r12, 2026-08-31): `/v1/meta` publishes
+**Status:** Normative (r13) — **a group-scoped attribute answers filters** (r13, 2026-08-31):
+spec §5's evaluation rule is built end to end — the family is recorded in the manifest beside the
+roster, `/v1/meta`'s `filter_operands` carries its scope, and a leaf resolves to one view's column
+by the request's own view or by a pin, `name@key` or `name@#n`, with a `422` naming the group where
+nothing decides and the unknown-view `404` for a pin naming no view of it (contracts §2.2, §3.2
+r55). ⊘ Three named gaps remain at that claim: a category or text family, `render`, and the gate.
+**the roster is served** (r12, 2026-08-31): `/v1/meta` publishes
 every view of every group with its key, ordinal and typed metadata, in ordinal order, beside the
 groups' own orderings; every one of them answers a viewer verb, by key or by ordinal
 (contracts §3.2 r54). What is still unbuilt above the build is creation and drop while the service
@@ -84,9 +90,11 @@ non-sentinel, never a stored set.
 >
 > What remains is above the build, and each refuses or is absent by name: a group whose views are
 > **minted from a discriminator** with no roster at all (spec §3.1), the second-view join at
-> ingest (spec §4), the gate (spec §6), and every *serving* surface a scoped column or a scoped
-> layer would need — a scoped attribute is stored and is on no filter surface, which spec §5's
-> marker states.
+> ingest (spec §4), the gate (spec §6), and the serving surfaces a scoped **layer** would need. A
+> scoped **attribute** is served: since 2026-08-31 a numeric or keyword family is a filter operand
+> carrying its scope, and a leaf reads the view the request names or the one it pins (spec §5,
+> contracts §3.2 r55) — what remains of it is a category or text family, and `render`, which spec
+> §5's marker states.
 
 ## 2. A view
 
@@ -455,19 +463,39 @@ group for the value to belong to.
 of any group sharing them, and in no other view — the rule `per-point-attributes.md` §3.9 already
 has for `render_in`, with the view set decided by the scope instead of listed.
 
+> **⊘ Specified, not implemented.** No scoped column reaches any row's hot tail, so a scoped
+> attribute is rendered in **no** view whatever it declares; `render = true` on one is recorded by
+> the declaration and printed at the build as buying nothing. A client reading a viewport response
+> must not expect the value, and a reader must not count `render` here as an available means of
+> getting it into a row.
+
 **View metadata is not an attribute.** A view's `label` or `starts` is one value per view, lives
 on the roster, filters nothing and is served typed on `/v1/meta`. A per-(entity, view) value is
 an attribute. The two are kept apart so that neither grows the other's surface.
 
-> **⊘ Partially implemented — the column family is written and is on no serving surface**
-> (2026-08-31). `scope` parses; a build writes one entity-space column per view of the group, each
-> with its own presence bitmap, at `attrs/<column>/<group>/<key>/`, read from that view's own
-> points — under the view's own selection where a group's views share one file — and every file is
-> digested, so `tessera verify` walks them. A scoped column is deliberately **not** in
-> `MANIFEST.declared_scalars`, which is one flat bundle-wide list with no slot for a family: so
-> there is no filter operand, no postings, no hot column and no pinned leaf, and `index` and
-> `render` on a scoped attribute have nothing to act on until contracts §2.3 carries the scope
-> (spec §11). The ingest rule is unimplemented with the rest of the write half.
+> **Implemented 2026-08-31 — the filter surface, end to end** (contracts §2.2, §3.2 r55).
+> `scope` parses; a build writes one entity-space column per view of the group, each with its own
+> presence bitmap, at `attrs/<column>/<group>/<key>/`, read from that view's own points — under the
+> view's own selection where a group's views share one file — and every file is digested, so
+> `tessera verify` walks them. The family's record is `MANIFEST.groups[..].scoped_scalars`, beside
+> the ordinals a pin resolves against, and deliberately **not** `MANIFEST.declared_scalars`, which
+> is one flat bundle-wide list with no slot for a family. From there the engine opens one column
+> per view; `/v1/meta`'s `filter_operands` entry carries the scope; and a leaf resolves exactly as
+> this section says — the request's own view under a view of the group or of a group sharing them,
+> a pin by key or ordinal anywhere else, a `422` naming the group where nothing decides, and the
+> unknown-view `404` for a pin naming no view of it. Evaluation is the family's ordinary one over
+> the resolved column: a value scan under the candidate, the presence bitmap for absence, an entity
+> bitmap the mask meets before any count.
+>
+> ⊘ **Three things remain unbuilt, each named here.** A **category** or **text** scoped family is stored
+> and on no filter surface: the per-view postings each is answered from are not written, and a
+> category's value list is `/v1/categories`' own surface besides — the build prints what the
+> declaration did not buy. **`render` on a scoped attribute renders nothing**, in any view: the hot
+> column is per row space and a scoped column is in none of them, so the paragraph below is
+> specification and not behaviour; the build prints that too. And the **gate** is unbuilt (spec
+> §6), so no pin is filtered against a visible-view set today — the check has one site when it
+> lands, the view resolution a pin goes through, where a gate-failed pin becomes the same 404 an
+> absent key already gets. The ingest rule is unimplemented with the rest of the write half.
 >
 > ⊘ **A scoped attribute declaring its own `source` is refused by name**: that file needs
 > `fields.view` to say which view each row's value is for, and reading it as entity space would
@@ -665,8 +693,8 @@ No new verb; one new accepted register row (the ordinal gap), and the C15/C17 no
 | Architecture §5.1, §9 | View generalised from the temporal case to a named coordinate system; groups and shared views; the paged permutation as the representation |
 | Contracts §2.1 | A bundle carries several views, `views/<view>/` and `views/<group>/<key>/`; the `group:key` and `group:#n` id forms; the roster, ordinal high-water and key tombstones in the segments manifest, carried for ever |
 | Contracts §2.2, §2.5 | The quantisation extent moves onto the view descriptor — first, ahead of any multi-view build |
-| Contracts §2.3 | Attribute `scope` and layer `scope` in the manifest; group-scoped column families under `attrs/<column>/<group>/<key>/` |
-| Contracts §3.2 | `/v1/meta`: per-view `extent`, groups with their rosters and typed metadata, gate-filtered; `filter_operands` carries the scope; the pinned leaf `name@key` / `name@#n` in the filter grammar |
+| Contracts §2.2 | **Done at contracts r55** for the attribute: a `groups` row carrying the roster and each group's `scoped_scalars`, with the column families under `attrs/<column>/<group>/<key>/`. ⊘ A layer's `scope` still has no manifest field — it is compiled beside the declaration and never written |
+| Contracts §3.2 | `/v1/meta`: per-view `extent` (r52), groups with their rosters and typed metadata (r53–r54), `filter_operands` carrying the scope and the pinned leaf `name@key` / `name@#n` in the filter grammar (r55) — all done, ⊘ none of it gate-filtered, the gate being unbuilt |
 | Contracts §3.4 | The duplicate rule amended per spec §4; `PUT /control/views/{group}/{key}` and its drop with `delete_dangling`; identifier forms with mandatory idset on the `tessera_id` form; `--view` withdrawn |
 | Configuration §1, §8 | `[[view_group]]` with `[[view_group.view]]`, `[view_group.views]`, `members`, `metadata` and per-view `visibility` on the roster; `fields.view` on a group source, a scoped attribute and a scoped layer; `scope` on `[[attribute]]` and `[[layer]]` |
 | Write-path §2, §4, §5 | The create record; the join rule at admission; one pending segment per view touched restated for several views; `delete_dangling` as submitted deletions |
@@ -827,6 +855,24 @@ each view under spec §4's rule.
 
 ## Appendix R — review trail
 
+- **r13 (2026-08-31)** — a group-scoped attribute answers filters, and spec §5's marker moves
+  from *on no serving surface* to *served, with three named gaps*. Built since r12: the family's
+  record in `MANIFEST.groups[..].scoped_scalars` — the group is where it belongs, beside the
+  ordinals a pin resolves against, `declared_scalars` being positional and having no slot for a
+  family; one column opened per view; `filter_operands` carrying the scope; and the resolution
+  this section specifies, in one place, over the same view namespace a request's own `view` goes
+  through. Evaluation is unchanged and that is the point: the scope decides which column file, and
+  a scoped leaf is answered by the family's ordinary scan under the candidate, its presence bitmap
+  for absence, and an entity bitmap the mask meets before any count — I2's argument untouched.
+  **Two refusals, deliberately different codes** (contracts §3.1's closed list): a bare leaf where
+  nothing decides is a `422` naming the group, since a leaf with no column to read is malformed
+  rather than a constraint; a pin naming no view of the group is the `404` an unknown view gets,
+  in the same detail shape, because that is the answer a gate-failed pin must take when spec §6
+  lands and the two must already be indistinguishable. Not moved: a **category** or **text** scoped
+  family, whose per-view postings nothing writes; **`render`**, which reaches no row's hot tail in
+  any view; and the **gate**, so no pin is filtered against a visible-view set — the site it will
+  be is named at the claim. No design content changed in this revision; the wire shape is contracts
+  §2.2/§3.2 r55.
 - **r12 (2026-08-31)** — the roster is served, and spec §1's and §3.2's markers record it. Built
   since r10: `/v1/meta` publishes every view in roster order with its `group`, `key`, `ordinal` and
   typed `metadata`, and a `groups` array giving each group's view ids in ordinal order; every view

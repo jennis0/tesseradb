@@ -344,6 +344,19 @@ async fn meta(
         // included: the hot column cannot express absence, so decision 0064 puts it in a presence
         // bitmap beside the column that the row scan reads. A client cannot tell which route
         // answered — that is 0068's whole licence to have two.
+        //
+        // **A group-scoped attribute's entry carries its `scope`** (`views.md` §5, §11): the group
+        // whose views its columns are per. That is what tells a client the leaf is not always
+        // answerable bare — under a view of that group, or of a group sharing its views, the
+        // request's own view decides; anywhere else the leaf must pin one, `sentiment@2026-Q3` or
+        // `sentiment@#3`, and an unpinned leaf there is a `422` rather than an empty answer. An
+        // absent `scope` is entity scope, which is the ordinary case and needs no key to say so.
+        //
+        // ⊘ **Not gate-filtered, because there is no gate** (`views.md` §6): every view this
+        // bundle declares is reachable by every principal, so the roster this list is keyed to is
+        // deployment-constant. The day spec §6 lands, a family whose group a principal cannot
+        // reach is omitted here — the entry is the only place this document names a group — and
+        // the omission has one site because the list has one.
         "filter_operands": meta.declared_scalars.iter().filter(|d| tessera_engine::filter::is_filterable(d)).map(|d| {
             let family = family_of(d);
             serde_json::json!({
@@ -351,7 +364,17 @@ async fn meta(
                 "family": family.as_str(),
                 "operands": family.operands(),
             })
-        }).collect::<Vec<_>>(),
+        }).chain(
+            meta.scoped_scalars.iter().filter(|f| tessera_engine::filter::scoped_is_filterable(f)).map(|f| {
+                let family = tessera_engine::filter::Family::of_scoped(f);
+                serde_json::json!({
+                    "column": f.name,
+                    "family": family.as_str(),
+                    "operands": family.operands(),
+                    "scope": {"group": f.group},
+                })
+            })
+        ).collect::<Vec<_>>(),
         // §7.2's selection constants. A client cannot read mark count as density without knowing
         // where the floor and the cap sit, so these are a genuine client need rather than test
         // convenience -- and the reference oracle cannot reproduce the definition without them.
@@ -1076,15 +1099,6 @@ fn run_viewport_stream(
     let filter = match &req.filters {
         None => None,
         Some(value) => {
-            // The same predicate `/v1/meta`'s operand list publishes — the engine's
-            // `filter::is_filterable` — so a column a client was told about parses and a column
-            // it was not stays the unknown-column 422.
-            let filterable: std::collections::HashMap<&str, tessera_engine::filter::Family> = meta
-                .declared_scalars
-                .iter()
-                .filter(|d| tessera_engine::filter::is_filterable(d))
-                .map(|d| (d.name.as_str(), family_of(d)))
-                .collect();
             let vocab_of: std::collections::HashMap<&str, &str> = meta
                 .declared_scalars
                 .iter()
@@ -1106,7 +1120,12 @@ fn run_viewport_stream(
             };
             match crate::filter_dto::parse(
                 value,
-                &|column| filterable.get(column).copied(),
+                // **The engine resolves the leaf's spelling**, against the same operand predicate
+                // `/v1/meta` publishes and the same view namespace a request's `view` is resolved
+                // through — so a column a client was told about parses, a column it was not stays
+                // the unknown-column 422, and a pinned leaf cannot mean one thing here and another
+                // on the discovery document (`views.md` §5).
+                &|leaf| meta.resolve_filter_column(leaf, &view_id),
                 &|column, key| {
                     let vocabulary = vocab_of.get(column)?;
                     meta.vocabularies.get(vocabulary)?.code_of(key)

@@ -1058,8 +1058,10 @@ pub struct ScopedAttribute {
 /// **Beside the declarations rather than inside them**, on `Config::layer_sources`' precedent and
 /// for a sharper reason: a [`LayerDeclaration`] is exactly what `PUT /control/layers` takes and an
 /// [`Attribute`] is exactly what `MANIFEST.declared_scalars` carries, and neither contract has a
-/// slot for a scope yet — that is `views.md` §11's contracts §2.3 amendment, scheduled work. A
-/// scope written into either would be a wire field no reader knows. Entity scope — the default —
+/// slot for a scope: a scoped attribute's record is `MANIFEST.groups[..].scoped_scalars`
+/// (contracts §2.2) and ⊘ a scoped layer's has no home on the wire at all yet
+/// (`views.md` §11). A scope written into either declaration would be a field no reader knows.
+/// Entity scope — the default —
 /// is absence from these maps rather than an entry, so nothing has to be written to say *the
 /// ordinary thing*.
 #[derive(Debug, Clone, Default)]
@@ -6047,6 +6049,9 @@ impl Config {
                     name: membership.group.clone(),
                     members_of: membership.members_of.clone(),
                     views: Vec::new(),
+                    // Filled at the manifest write from the declaration's scoped attributes
+                    // (`tessera_build::build`), so the family list has one origin.
+                    scoped_scalars: Vec::new(),
                 });
             }
             let group = groups

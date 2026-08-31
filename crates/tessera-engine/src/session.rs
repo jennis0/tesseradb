@@ -1240,6 +1240,10 @@ impl Engine {
                     &prefix_dir,
                     &partition,
                     &bundle.manifest.declared_scalars,
+                    // The scoped column families of every group, flattened: the group is already
+                    // the first component of each family's view ids, so what the opener needs is
+                    // the families and not the rosters (`views.md` §5).
+                    &bundle.manifest.scoped_scalars(),
                     &bundle.manifest.vocabularies,
                     &extents,
                     &record_extents,
@@ -3354,6 +3358,7 @@ pub(crate) fn open_rotation(
             &prefix_dir,
             &phash,
             &bundle.manifest.declared_scalars,
+            &bundle.manifest.scoped_scalars(),
             &bundle.manifest.vocabularies,
             &partition.manifest.attr_extents,
             // The record blob rotates with the prefix for the reason the value columns do: the

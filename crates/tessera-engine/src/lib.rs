@@ -80,7 +80,7 @@ pub use tessera_authz::fragment::CacheStats as FragmentCacheStats;
 pub use timing::{Probe, StageTimings};
 pub use viewport::{
     ArtifactOut, ArtifactRows, ColumnBuf, ComputedSelection, EngineMeta, ItemOut, LayerSelection,
-    LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, ScalarOut, SinkClosed,
+    LeafColumn, LevelSelection, MetaGroup, MetaRoster, MetaView, PointColumns, ScalarOut, SinkClosed,
     SinkResult, SubCellCount, TileAddress, TileCount, ViewCoordinates, ViewportHead, ViewportOut,
     ViewportRequest, ViewportSink,
 };
@@ -100,6 +100,10 @@ pub use tessera_store::vocabulary::{Vocabularies, VocabularyMinter, ABSENT_CODE}
 // (`views.md` §3.2), so the server has to name the variants to write the wire's `type` tag —
 // re-exported for the same layering reason `DeclaredScalar` is.
 pub use tessera_store::manifest::ViewMetadataValue;
+// `EngineMeta::scoped_scalars`' element type. `/v1/meta` publishes a scoped family's operand entry
+// with the group it is scoped to (`views.md` §5), so the server has to name it — re-exported for
+// the same layering reason `DeclaredScalar` is.
+pub use tessera_store::manifest::ScopedScalar;
 // `DeclaredScalar::arrow_type`'s type, and `wire_type`'s. The server names it to widen a code to
 // its column's storage width, and reaches it here rather than transcribing the table again.
 pub use tessera_spatial::tiler::ScalarType;

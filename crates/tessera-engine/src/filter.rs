@@ -234,6 +234,23 @@ impl Family {
         Family::Keyword
     }
 
+    /// One **group-scoped** column family's family (`views.md` §5) — the same derivation as
+    /// [`Family::of`], over the declaration a scoped family records instead of a declared
+    /// scalar's. The two read the same two fields, and a scope changes only which column file a
+    /// predicate reads, never how its values are read.
+    pub fn of_scoped(scoped: &tessera_store::manifest::ScopedScalar) -> Family {
+        if scoped.vocabulary.is_some() {
+            return Family::Category;
+        }
+        if is_numeric(scoped.arrow_type) {
+            return Family::Numeric;
+        }
+        if scoped.arrow_type == tessera_spatial::tiler::ScalarType::Text {
+            return Family::Text;
+        }
+        Family::Keyword
+    }
+
     /// The operator names this family accepts, in the order `/v1/meta` publishes them.
     pub fn operands(self) -> &'static [&'static str] {
         match self {
@@ -653,6 +670,49 @@ pub struct Placement {
 /// column the row scan cannot read.
 pub fn is_filterable(scalar: &tessera_store::manifest::DeclaredScalar) -> bool {
     scalar.index || (scalar.render && Family::of(scalar).reaches_hot_column())
+}
+
+/// The character a filter leaf **pins** a group-scoped attribute's view with — `sentiment@2026-Q3`
+/// (`views.md` §5).
+///
+/// Reserved out of a column name at the build, which is what makes the split unambiguous: a leaf
+/// carries at most one `@`, everything before it is a column and everything after it is a key or a
+/// `#`-prefixed ordinal.
+pub const PIN: char = '@';
+
+/// The internal name one view's column of a group-scoped family is held under —
+/// `sentiment@quarter:2026-Q3`.
+///
+/// **Not a spelling any caller writes.** A request pins by *key* within the attribute's own group
+/// (`sentiment@2026-Q3`) or by ordinal (`sentiment@#3`); resolution turns either into the view's
+/// id and this function into the key the column map answers on. Holding the resolved form here is
+/// what lets a scoped column evaluate as an unscoped one of its family does — one map, one
+/// `evaluate`, and no second route for a leaf to take.
+pub fn scoped_column_name(name: &str, view_id: &str) -> String {
+    format!("{name}{PIN}{view_id}")
+}
+
+/// Is this group-scoped family on the filter surface — published by `/v1/meta`'s
+/// `filter_operands` and resolvable by a leaf (`views.md` §5)?
+///
+/// `index = true`, as an entity-scoped column's own licence is, **and** a family whose serving
+/// artefacts a build writes complete:
+///
+/// - **numeric** and **keyword** are served: the build writes a value column, a presence bitmap
+///   and — for a keyword — its dictionary per view, which is the whole of what the entity route
+///   reads.
+/// - ⊘ a **category** family is stored and not served: the build writes no per-view postings, and
+///   a category is more than a filter route — `/v1/categories/{column}` derives value visibility
+///   from those postings, so publishing the operand without them would offer a client a value
+///   list no endpoint can answer.
+/// - ⊘ a **text** family is stored and not served for the same reason and more: text owes no value
+///   column at all, its route being postings over a token dictionary, and neither exists per view.
+///
+/// Both gaps are absences of an artefact rather than of a rule, and both are loud: the build
+/// prints what a scoped `index` or `render` did not buy, and a leaf naming an unserved family is
+/// the ordinary unknown-column refusal.
+pub fn scoped_is_filterable(scoped: &tessera_store::manifest::ScopedScalar) -> bool {
+    scoped.index && matches!(Family::of_scoped(scoped), Family::Numeric | Family::Keyword)
 }
 
 /// How a category operand is answered on one column — decided at open from the declaration alone.
@@ -1276,6 +1336,8 @@ impl FilterColumns {
         prefix_dir: &Path,
         partition: &str,
         declared: &[tessera_store::manifest::DeclaredScalar],
+        // Every group's scoped column families, in manifest order (`views.md` §5).
+        scoped: &[tessera_store::manifest::ScopedScalar],
         vocabularies: &[tessera_store::manifest::ManifestVocabulary],
         extents: &[tessera_store::manifest::AttrExtent],
         record_extents: &[tessera_store::manifest::RecordExtent],
@@ -1444,6 +1506,77 @@ impl FilterColumns {
                 },
             );
         }
+        // ---- the group-scoped column families (`views.md` §5) ------------------------------
+        //
+        // **One column per view, opened under its resolved name**, so a scoped leaf evaluates
+        // through exactly the machinery an unscoped one of its family does: the same
+        // `ValueColumn`, the same scan, the same presence rules for absence. The only thing the
+        // scope decides is which file — which is what keeps the attribute inside I2's argument
+        // unchanged, every value being indexed by entity and every predicate answering a bitmap
+        // in entity space that the mask meets before any permutation.
+        //
+        // A family this build serves no route for is skipped rather than half-opened
+        // ([`scoped_is_filterable`]): its columns are on disc and on no surface, and a leaf
+        // naming it is refused as an undeclared column is.
+        for family in scoped {
+            if !scoped_is_filterable(family) {
+                continue;
+            }
+            let scoped_family = Family::of_scoped(family);
+            for view_id in &family.views {
+                // `attrs/<column>/<group>/<key>/` — the view id's own path components, through the
+                // one place a view id becomes a path, so the opener cannot drift from the writer.
+                let mut dir = partition_dir.join("attrs").join(&family.name);
+                for component in tessera_store::view_path_components(view_id) {
+                    dir.push(component);
+                }
+                let base = Arc::new(ValueColumn::open_dir(&dir, request_access(mmap))?);
+                let dict = (scoped_family == Family::Keyword)
+                    .then(|| SortedDict::open_dir(&dir, request_access(mmap)).map(Arc::new))
+                    .transpose()?;
+                let covered = base.present();
+                let name = scoped_column_name(&family.name, view_id);
+                placements.insert(
+                    name.clone(),
+                    Placement {
+                        entity: true,
+                        // ⊘ **Never the row route.** The hot column is per row space and a scoped
+                        // column is in no row's tail, so `render` on a scoped attribute buys
+                        // nothing (`views.md` §5); the entity route is the whole surface.
+                        row: false,
+                        family: scoped_family,
+                    },
+                );
+                columns.insert(
+                    name,
+                    Layers {
+                        // **No position in `declared_scalars`, because it is not one of them.**
+                        // The tag is the record blob's field key and a scoped column is never
+                        // blob-resident — it has an entity-space home by construction, which is
+                        // the condition `blob_resident` is the negation of. The sentinel is what a
+                        // reader would see if that ever stopped being true, rather than another
+                        // column's field.
+                        declared_index: usize::MAX,
+                        layers: vec![Layer {
+                            values_rel: None,
+                            values: base,
+                            dict,
+                        }],
+                        covered,
+                        filterable: true,
+                        // ⊘ No per-view postings are written, so the scan is the only route — which
+                        // is why a category family is not served at all rather than served by
+                        // scan: see [`scoped_is_filterable`].
+                        postings: None,
+                        analyser: None,
+                        text: Vec::new(),
+                        route: Route::Scan,
+                        family: scoped_family,
+                    },
+                );
+            }
+        }
+
         // The record blob's base is owed exactly when the compiled schema has a blob-resident
         // column — one with no other home ([`blob_resident`], records §3). Derived from the schema
         // rather than probed for on disk, so a missing base is a refusal at open, never "those

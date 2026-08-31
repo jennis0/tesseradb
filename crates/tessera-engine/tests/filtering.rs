@@ -314,6 +314,7 @@ fn fixture() -> Fixture {
         &bundle.join(&prefix),
         &phash,
         &opened.manifest.declared_scalars,
+        &opened.manifest.scoped_scalars(),
         &opened.manifest.vocabularies,
         // A freshly built bundle has flushed nothing, so its columns are the base layer alone.
         &opened.partitions[&phash].manifest.attr_extents,
@@ -1106,6 +1107,7 @@ fn an_extent_file_the_manifest_names_but_that_is_absent_refuses_to_open() {
             &prefix,
             &phash,
             &opened.manifest.declared_scalars,
+            &opened.manifest.scoped_scalars(),
             &opened.manifest.vocabularies,
             extents,
             &[],
@@ -2241,6 +2243,8 @@ fn reopen(fx: &Fixture) -> std::io::Result<FilterColumns> {
         &fx.bundle.join(&fx.prefix),
         &fx.phash,
         &fx.declared,
+        // No group-scoped family: this fixture declares no view group (`views.md` §5).
+        &[],
         &fx.vocabularies,
         &fx.extents,
         &[],
