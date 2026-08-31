@@ -574,8 +574,13 @@ async fn categories(
     // **The column, resolved the way a filter leaf naming it is resolved** (`views.md` §5): an
     // entity-scoped column is its own name and takes no view; a group-scoped family resolves to
     // one view's column, by the request's own view or by a pin, `sentiment@2026-Q3`. One site and
-    // one gate for both surfaces — a value list served for a group whose gate this principal fails
-    // would be the discovery half of exactly what the filter parse refuses.
+    // one gate for the scoped half of both surfaces — a value list served for a group whose gate
+    // this principal fails would be the discovery half of exactly what the filter parse refuses.
+    //
+    // `resolve_category_column` and not the filter's own: a category has a value list whether or
+    // not it is an *operand*, and a blob-resident one — neither `render` nor `index`, the default
+    // placement — is exactly that. It resolves the entity-scoped names by declaration, ahead of
+    // the filter admission, and hands everything scoped to the one site unchanged.
     //
     // The request's view is itself resolved through the visible-view set first, so a principal who
     // may reach the *group* but not one of its views cannot name that view here and read its
@@ -590,7 +595,7 @@ async fn categories(
             None => return Err(ApiError::Unknown(format!("unknown view '{requested}'"))),
         },
     };
-    let resolved = match meta.resolve_filter_column(&column, view, visible) {
+    let resolved = match meta.resolve_category_column(&column, view, visible) {
         // A non-category column is the same `404` a name that is nothing at all gets, which is
         // this route's own rule and the reason it cannot be used to probe which columns are
         // categories beyond what `/v1/meta` already says.

@@ -87,6 +87,27 @@ vocabulary = "department"
 name     = "score"
 type     = "f32"
 render = true
+
+# **Neither `render` nor `index`** — the default placement, and the one a category may take
+# without losing its value list. It is blob-resident (records §3): no hot column, no entity-space
+# structure, no `filter_operands` entry — and `/v1/meta` still publishes its `category` block and
+# drill-down still returns its code, so the code still needs a key. Every other category here is
+# rendered, which is why this column exists: it is the only one whose value list is asked for over
+# a column the *filter* surface does not carry.
+[[vocabulary]]
+name       = "origin"
+width      = "u8"
+value_set  = "closed"
+visibility = "public"
+  [vocabulary.values]
+  born = 7
+  found = 8
+  given = 9
+
+[[attribute]]
+name       = "origin"
+type       = "category"
+vocabulary = "origin"
 "#;
 
 /// The rendered number, **with absences** — every seventh item carries none.
@@ -107,6 +128,11 @@ fn archive_of(entity: u64) -> &'static str {
     ["astro", "cond", "hep", "math", "quant"][(entity % 5) as usize]
 }
 
+/// The blob-resident category's three values, so none of them is the only one present.
+fn origin_of(entity: u64) -> &'static str {
+    ["born", "found", "given"][(entity % 3) as usize]
+}
+
 /// Odd-numbered departments on the items the narrow principal can see, even-numbered ones on the
 /// rest — see [`SCHEMA_TOML`]. `d00` is carried by nothing.
 fn department_of(entity: u64) -> String {
@@ -124,6 +150,7 @@ fn write_points(path: &Path, n: u64) {
         Field::new("y", DataType::Float64, false),
         Field::new("archive", DataType::Utf8, false),
         Field::new("department", DataType::Utf8, false),
+        Field::new("origin", DataType::Utf8, false),
         Field::new("score", DataType::Float32, true),
     ]));
     let ids: Vec<u64> = (0..n).collect();
@@ -131,6 +158,7 @@ fn write_points(path: &Path, n: u64) {
     let ys: Vec<f64> = ids.iter().map(|e| ((e * 53) % 1000) as f64).collect();
     let archives: Vec<&str> = ids.iter().map(|&e| archive_of(e)).collect();
     let departments: Vec<String> = ids.iter().map(|&e| department_of(e)).collect();
+    let origins: Vec<&str> = ids.iter().map(|&e| origin_of(e)).collect();
     let scores: Vec<Option<f32>> = ids.iter().map(|&e| score_of(e)).collect();
     let batch = RecordBatch::try_new(
         schema.clone(),
@@ -140,6 +168,7 @@ fn write_points(path: &Path, n: u64) {
             Arc::new(Float64Array::from(ys)),
             Arc::new(StringArray::from(archives)),
             Arc::new(StringArray::from(departments)),
+            Arc::new(StringArray::from(origins)),
             Arc::new(arrow::array::Float32Array::from(scores)),
         ],
     )
@@ -579,6 +608,66 @@ async fn a_principal_who_can_see_nothing_is_offered_an_empty_set() {
     let (status, body) = get(&server, &none, "/v1/categories/archive").await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(body["values"].as_array().unwrap().len(), 4, "{body}");
+}
+
+/// **A category has a value list whether or not it is an operand.** `origin` is declared with
+/// neither `render` nor `index` — the default placement, blob-resident (records §3) — so it has no
+/// hot column, no entity-space structure and no `filter_operands` entry, and `/v1/meta` still
+/// publishes its `category` block and drill-down still returns its code.
+///
+/// Regression: `/v1/categories` resolves a column spelling through the same site the *filter* leaf
+/// does, because a group-scoped family's gate must collapse identically on both surfaces
+/// (`views.md` §5). Resolving the entity-scoped names through the filter's own *admission* as well
+/// would 404 exactly this column — declared, published, and answered on every earlier revision.
+/// Every other category in this fixture is `render = true`, which is why nothing here caught it.
+#[tokio::test]
+async fn a_category_that_is_not_an_operand_still_has_a_value_list() {
+    let tmp = TempDir::new().unwrap();
+    let (server, token) = serve(&tmp).await;
+
+    let (status, body) = get(&server, &token, "/v1/categories/origin").await;
+    assert_eq!(status, 200, "{body}");
+    let keys: Vec<&str> = body["values"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["key"].as_str().unwrap())
+        .collect();
+    assert_eq!(keys, ["born", "found", "given"], "{body}");
+
+    // The bulk form takes the same route and the same admission.
+    let (status, body) = get(&server, &token, "/v1/categories/origin?codes=8").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["values"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["values"][0]["key"], "found", "{body}");
+
+    // It is genuinely not an operand: `/v1/meta` publishes the column and its category block, and
+    // does not offer it in `filter_operands`. If that ever changes this case stops testing the
+    // placement it is named for.
+    let (status, meta) = get(&server, &token, "/v1/meta").await;
+    assert_eq!(status, 200, "{meta}");
+    let declared = meta["declared_scalars"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "origin")
+        .unwrap_or_else(|| panic!("origin is declared: {meta}"));
+    assert_eq!(declared["category"]["vocabulary"], "origin", "{meta}");
+    assert!(!declared["render"].as_bool().unwrap(), "{meta}");
+    assert!(!declared["index"].as_bool().unwrap(), "{meta}");
+    assert!(
+        !meta["filter_operands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["column"] == "origin"),
+        "a blob-resident column is not an operand: {meta}"
+    );
+
+    // A pin on it is a `422` and not a `404`: it is one value set for the corpus, so there is
+    // nothing for `@` to choose between — the same answer a pin on any entity-scoped column gets.
+    let (status, body) = get(&server, &token, "/v1/categories/origin@2026-Q3").await;
+    assert_eq!(status, 422, "{body}");
 }
 
 /// 404 covers "no such column" and "a column that is not a category" identically. `/v1/meta` is
