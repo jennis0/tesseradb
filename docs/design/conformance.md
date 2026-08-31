@@ -40,7 +40,7 @@ collects, by a step in CI's `conformance` job; a hand-edit that disagrees with t
 there. Edit it when the suite's size changes and the step tells you the number, not to make a
 sentence read better — and read it as a size, never as a coverage claim, which is §4.6's business.
 
-    conformance-cases = 681
+    conformance-cases = 690
 
 The invariant-by-invariant position is §4.6, and it is this document's most important output.
 
